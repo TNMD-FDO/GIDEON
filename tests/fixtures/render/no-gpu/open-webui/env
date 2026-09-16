@@ -1,0 +1,3 @@
+LDAP_APP_PASSWORD=bind-$-'"#password
+DATABASE_URL=postgresql://openwebui:postgres-openwebui-password@postgres:5432/openwebui
+WEBUI_ADMIN_PASSWORD=gideon-admin-password

@@ -1,0 +1,81 @@
+{
+  "annotations": {"list": []},
+  "editable": false,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "datasource": {"type": "postgres", "uid": "gideon-rows"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 0},
+      "targets": [{"format": "time_series", "rawSql": "SELECT at AS time, (detail->>'duration_s')::double precision AS duration_s FROM audit_log WHERE kind = 'backup_run' AND detail->>'phase' = 'applied' ORDER BY at", "refId": "A"}],
+      "title": "Backup run duration",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "postgres", "uid": "gideon-rows"},
+      "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []},
+      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 0},
+      "targets": [{"format": "time_series", "rawSql": "SELECT at AS time, (detail->>'set_bytes')::double precision AS set_bytes FROM audit_log WHERE kind = 'backup_run' AND detail->>'phase' = 'applied' ORDER BY at", "refId": "A"}],
+      "title": "Backup set bytes",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "postgres", "uid": "gideon-rows"},
+      "fieldConfig": {"defaults": {"unit": "percentunit"}, "overrides": []},
+      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 0},
+      "targets": [{"format": "time_series", "rawSql": "SELECT at AS time, CASE WHEN jsonb_typeof(detail->'hard_links') = 'object' THEN (detail->'hard_links'->>'linked')::double precision / NULLIF((detail->'hard_links'->>'sampled')::double precision, 0) ELSE (detail->>'hard_links')::double precision END AS hard_link_ratio FROM audit_log WHERE kind = 'backup_run' AND detail->>'phase' = 'applied' ORDER BY at", "refId": "A"}],
+      "title": "Hard-link ratio",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "postgres", "uid": "gideon-rows"},
+      "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []},
+      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 7},
+      "targets": [{"format": "time_series", "rawSql": "SELECT at AS time, (detail->>'transferred_bytes')::double precision AS transferred_bytes, (detail->>'total_bytes')::double precision AS total_bytes FROM audit_log WHERE kind = 'backup_push' ORDER BY at", "refId": "A"}],
+      "title": "Push transferred versus total bytes",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "postgres", "uid": "gideon-rows"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 7, "w": 12, "x": 12, "y": 7},
+      "targets": [{"format": "time_series", "rawSql": "SELECT at AS time, (detail->>'verified')::double precision AS verified, (detail->>'pruned')::double precision AS pruned FROM audit_log WHERE kind = 'backup_push' ORDER BY at", "refId": "A"}],
+      "title": "Verified and pruned counts",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "postgres", "uid": "gideon-rows"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 14},
+      "targets": [{"format": "time_series", "rawSql": "SELECT at AS time, (detail->>'duration_s')::double precision AS duration_s FROM audit_log WHERE kind = 'backup_drill' ORDER BY at", "refId": "A"}],
+      "title": "Restore drill duration",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "postgres", "uid": "gideon-rows"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 14},
+      "targets": [{"format": "table", "rawSql": "SELECT at AS time, detail->>'result' AS result FROM audit_log WHERE kind = 'backup_drill' ORDER BY at DESC", "refId": "A"}],
+      "title": "Restore drill result",
+      "type": "table"
+    },
+    {
+      "datasource": {"type": "postgres", "uid": "gideon-rows"},
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 21},
+      "options": {"cellHeight": "sm", "footer": {"show": false}, "showHeader": true},
+      "targets": [{"format": "table", "rawSql": "SELECT at, kind, detail->>'duration_s' AS duration_s, detail->>'result' AS result, detail->>'set_bytes' AS set_bytes, detail->'hard_links' AS hard_links, detail->>'transferred_bytes' AS transferred_bytes, detail->>'total_bytes' AS total_bytes, detail->>'verified' AS verified, detail->>'pruned' AS pruned FROM audit_log WHERE kind IN ('backup_run', 'backup_push', 'backup_drill', 'restore') AND (kind <> 'backup_run' OR detail->>'phase' = 'applied') ORDER BY at DESC LIMIT 10", "refId": "A"}],
+      "title": "Last ten backup and restore runs",
+      "type": "table"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 41,
+  "tags": ["GIDEON", "backup"],
+  "templating": {"list": []},
+  "time": {"from": "now-1y", "to": "now"},
+  "timezone": "browser",
+  "title": "GIDEON Backup",
+  "uid": "gideon-backup",
+  "version": 1
+}

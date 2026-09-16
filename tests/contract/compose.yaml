@@ -1,0 +1,57 @@
+# The frontend contract stack (spec §1.8's gideon-ci sibling, first cut):
+# Postgres and Open WebUI only, on loopback ports, from the release registry's
+# mirrored digests. Substituted by tests/contract/owui_apply_manifest.py —
+# never started by hand, never part of the product's rendered set.
+name: gideon-ci-contract
+services:
+  postgres:
+    image: "${POSTGRES_IMAGE}"
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_superuser_password
+    secrets: [postgres_superuser_password]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-h", "127.0.0.1"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 20s
+  open-webui:
+    image: "${OPEN_WEBUI_IMAGE}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports: ["127.0.0.1:${CONTRACT_PORT}:8080"]
+    env_file:
+      - path: ./open-webui.env
+        format: raw
+    environment:
+      WEBUI_NAME: GIDEON
+      WEBUI_URL: "http://127.0.0.1:${CONTRACT_PORT}"
+      ENABLE_PERSISTENT_CONFIG: "false"
+      ENABLE_SIGNUP: "false"
+      ENABLE_LOGIN_FORM: "true"
+      DEFAULT_USER_ROLE: user
+      DEFAULT_MODELS: "${DEFAULT_MODELS}"
+      ENABLE_EVALUATION_ARENA_MODELS: "false"
+      WEBUI_ADMIN_EMAIL: gideon-admin@gideon.invalid
+      WEBUI_ADMIN_NAME: gideon-admin
+      WEBUI_SECRET_KEY_FILE: /run/secrets/webui_secret_key
+      ENABLE_API_KEYS: "true"
+      ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS: "true"
+      API_KEYS_ALLOWED_ENDPOINTS: "${ALLOWED_ENDPOINTS}"
+      USER_PERMISSIONS_FEATURES_API_KEYS: "false"
+      BYPASS_EMBEDDING_AND_RETRIEVAL: "true"
+      ENABLE_OLLAMA_API: "false"
+      ENABLE_OPENAI_API: "false"
+    secrets: [webui_secret_key]
+    healthcheck:
+      test: ["CMD-SHELL", "curl --silent --fail http://localhost:8080/health | jq -ne 'input.status == true'"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 120s
+secrets:
+  postgres_superuser_password:
+    file: ./secrets/postgres_superuser_password
+  webui_secret_key:
+    file: ./secrets/webui_secret_key

@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily GIDEON backup and off-box push
+
+[Timer]
+OnCalendar=$calendar
+Persistent=true
+
+[Install]
+WantedBy=timers.target

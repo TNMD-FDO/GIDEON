@@ -1,0 +1,6 @@
+LDAP_APP_PASSWORD=bind-$-'"#password
+DATABASE_URL=postgresql://openwebui:postgres-openwebui-password@postgres:5432/openwebui
+WEBUI_ADMIN_PASSWORD=gideon-admin-password
+OPENAI_API_KEYS=engine-api-key
+HTTP_PROXY=http://proxy-user:p%40%24%24-%27%22%23password@proxy.exd.example.internal:3128
+HTTPS_PROXY=http://proxy-user:p%40%24%24-%27%22%23password@proxy.exd.example.internal:3128

@@ -1,0 +1,17 @@
+apiVersion: 1
+policies:
+  - orgId: 1
+    receiver: page
+    group_by:
+      - alertname
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 24h
+    routes:
+      - receiver: page
+        object_matchers:
+          - [heartbeat, "=", "true"]
+        repeat_interval: 6d
+        active_time_intervals:
+          - saturday-morning
+        continue: false

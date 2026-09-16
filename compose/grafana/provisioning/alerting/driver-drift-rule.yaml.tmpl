@@ -1,0 +1,53 @@
+      - uid: gideon-driver-drift
+        title: Driver drift
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 60
+              to: 0
+            datasourceUid: prometheus
+            model:
+              datasource:
+                type: prometheus
+                uid: prometheus
+              expr: 'count(DCGM_FI_DEV_GPU_UTIL{DCGM_FI_DRIVER_VERSION!="$driver"})'
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params: [0]
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params: [A, 5m, now]
+                  reducer:
+                    params: []
+                    type: avg
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+              type: threshold
+        for: 0s
+        noDataState: OK
+        execErrState: OK
+        annotations:
+          summary: A tested driver version is not running
+          runbook: docs/runbooks/observability.md §4
+        labels:
+          class: page
+        isPaused: false

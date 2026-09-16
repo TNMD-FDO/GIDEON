@@ -1,0 +1,79 @@
+name: Bug report
+description: Report a reproducible problem with GIDEON.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report a vulnerability here. Report it privately as
+        [SECURITY.md](https://github.com/TNMD-FDO/GIDEON/security/policy)
+        says. Bugs are triaged by the CSAs into the development repository's
+        private tracker, and the outcome is reported on the issue.
+
+        Do not paste any site-file value, secret, chat, matter, or client text.
+        Use placeholders and synthetic text throughout this report.
+  - type: input
+    id: gideon-version
+    attributes:
+      label: GIDEON tag
+      description: Run python3 -m gideon --version and enter the reported tag.
+      placeholder: The tag printed by the command
+    validations:
+      required: true
+  - type: input
+    id: corpus-version
+    attributes:
+      label: Corpus lockfile
+      description: The corpus lockfile the box runs (corpus-YYYY-MM-DD), or none when no corpus is installed.
+      placeholder: corpus-YYYY-MM-DD, or none
+    validations:
+      required: true
+  - type: input
+    id: eval-version
+    attributes:
+      label: Eval set version
+      description: The eval set version (eval-vN), or none when no eval set exists.
+      placeholder: eval-vN, or none
+    validations:
+      required: true
+  - type: input
+    id: hardware-profile
+    attributes:
+      label: Hardware profile
+      description: Enter the hardware profile or the no-GPU declaration.
+      placeholder: Profile name or no-GPU declaration
+    validations:
+      required: true
+  - type: textarea
+    id: command-output
+    attributes:
+      label: Command and rows
+      description: Include the command and its sanitized rows.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened?
+    validations:
+      required: true
+  - type: checkboxes
+    id: report-requirements
+    attributes:
+      label: Report requirements
+      options:
+        - label: I replaced every hostname, address, directory name, and mailbox with a placeholder.
+          required: true
+        - label: This is not a vulnerability report; a vulnerability goes through SECURITY.md, never an issue.
+          required: true
+        - label: I dedicate this report and any patch in it to the public domain under the CC0 1.0 Universal dedication, waiving all copyright and related rights I hold in it, worldwide (CONTRIBUTING.md).
+          required: true

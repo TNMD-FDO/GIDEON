@@ -1,0 +1,37 @@
+{
+  "blockdevices": [
+    {
+      "name": "sda",
+      "type": "disk",
+      "size": 1600000000000,
+      "wwn": "0x600062b221a41ac030cee36cbb44e0f5",
+      "fstype": null,
+      "mountpoint": null,
+      "pkname": null,
+      "children": [
+        {"name": "sda1", "type": "part", "size": 1073741824, "wwn": null, "fstype": "vfat", "mountpoint": "/boot/efi", "pkname": "sda"},
+        {"name": "sda2", "type": "part", "size": 2147483648, "wwn": null, "fstype": "ext4", "mountpoint": "/boot", "pkname": "sda"},
+        {
+          "name": "sda3", "type": "part", "size": 1590000000000, "wwn": null, "fstype": "LVM2_member", "mountpoint": null, "pkname": "sda",
+          "children": [
+            {"name": "ubuntu-vg-root", "type": "lvm", "size": 200000000000, "wwn": null, "fstype": "ext4", "mountpoint": "/", "pkname": "sda3"},
+            {"name": "ubuntu-vg-docker", "type": "lvm", "size": 600000000000, "wwn": null, "fstype": "ext4", "mountpoint": "/var/lib/docker", "pkname": "sda3"},
+            {"name": "ubuntu-vg-swap", "type": "lvm", "size": 32000000000, "wwn": null, "fstype": "swap", "mountpoint": "[SWAP]", "pkname": "sda3"}
+          ]
+        }
+      ]
+    },
+    {
+      "name": "sdb",
+      "type": "disk",
+      "size": 8730000000000,
+      "wwn": "0x600062b221a41ac032289343b59cf03a",
+      "fstype": "LVM2_member",
+      "mountpoint": null,
+      "pkname": null,
+      "children": [
+        {"name": "vg_data-data", "type": "lvm", "size": 7600000000000, "wwn": null, "fstype": "xfs", "mountpoint": "/data", "pkname": "sdb"}
+      ]
+    }
+  ]
+}

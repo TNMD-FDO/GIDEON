@@ -1,0 +1,30 @@
+# Rendered by gideon render — never hand-edit (spec §3.5). Re-run gideon apply after editing /etc/gideon/site.yaml.
+use_default_settings:
+  engines:
+    keep_only:
+      - "brave"
+      - "bing"
+      - "startpage"
+      - "wikipedia"
+engines:
+  - name: "brave"
+    disabled: false
+  - name: "bing"
+    disabled: false
+  - name: "startpage"
+    disabled: false
+  - name: "wikipedia"
+    disabled: false
+general:
+  debug: false
+search:
+  formats:
+    - "html"
+    - "json"
+  autocomplete: ""
+  favicon_resolver: ""
+server:
+  limiter: false
+  public_instance: false
+  image_proxy: false
+  method: "GET"

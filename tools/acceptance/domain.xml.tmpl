@@ -1,0 +1,55 @@
+<domain type="kvm">
+  <name>$name</name>
+  <memory unit="MiB">$memory_mib</memory>
+  <currentMemory unit="MiB">$memory_mib</currentMemory>
+  <vcpu placement="static">$vcpus</vcpu>
+  <os>
+    <type arch="x86_64" machine="$machine">hvm</type>
+    <boot dev="hd"/>
+  </os>
+  <features>
+    <acpi/>
+  </features>
+  <cpu mode="host-model"/>
+  <clock offset="utc"/>
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>destroy</on_crash>
+  <devices>
+    <emulator>$emulator</emulator>
+    <controller type="scsi" index="0" model="virtio-scsi"/>
+    <disk type="file" device="disk">
+      <driver name="qemu" type="qcow2"/>
+      <source file="$os_path"/>
+      <target dev="sda" bus="scsi"/>
+      <wwn>$os_wwn</wwn>
+    </disk>
+    <disk type="file" device="disk">
+      <driver name="qemu" type="qcow2"/>
+      <source file="$data_path"/>
+      <target dev="sdb" bus="scsi"/>
+      <wwn>$data_wwn</wwn>
+    </disk>
+    <disk type="file" device="cdrom">
+      <driver name="qemu" type="raw"/>
+      <source file="$seed_path"/>
+      <target dev="sdc" bus="scsi"/>
+      <readonly/>
+    </disk>
+    <interface type="network">
+      <source network="$network"/>
+      <model type="virtio"/>
+    </interface>
+    <serial type="file">
+      <source path="$console_path"/>
+      <target type="isa-serial" port="0"/>
+    </serial>
+    <console type="file">
+      <source path="$console_path"/>
+      <target type="serial" port="0"/>
+    </console>
+  </devices>
+  <metadata xmlns:gideon="https://gideon.invalid/acceptance">
+    <gideon:run id="$run_id"/>
+  </metadata>
+</domain>

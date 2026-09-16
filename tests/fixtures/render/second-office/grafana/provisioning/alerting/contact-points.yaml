@@ -1,0 +1,11 @@
+apiVersion: 1
+contactPoints:
+  - orgId: 1
+    name: page
+    receivers:
+      - uid: page-email
+        type: email
+        settings:
+          addresses: "ops@exd.example.org"
+          singleEmail: true
+          subject: "[GIDEON EXD-FDO] {{ .Status | toUpper }}: {{ .CommonLabels.alertname }}"

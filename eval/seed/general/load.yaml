@@ -1,0 +1,31 @@
+# Slice-1 ticket 62's load set: General under concurrent load (M27).  An
+# instrument for timing, not a grading — every case `expect: recorded`, so a
+# row fails only on a leak or a turn error.  Four short unsearched answers, so
+# a turn's elapsed is the load's and not the thinking's length, and one
+# searched turn (`search: true`), the heavier path.  Every prompt is invented
+# and carries no date, figure, case name, matter, or client.  Never edited in
+# place: a correction is a new id.
+#
+#   sudo python3 -B -m tools.turns eval/seed/general/load.yaml --concurrent <N> --repeat <R> --out <dir>
+cases:
+  - id: rewrite-01
+    prompt: "Rewrite these two sentences in a formal register, in no more than two sentences: The meeting got moved because the room was double booked. Everyone should bring their notes."
+    expect: recorded
+    block: any
+  - id: define-01
+    prompt: In one sentence, define the procedural term motion in limine.
+    expect: recorded
+    block: any
+  - id: doctrine-01
+    prompt: In one short paragraph, explain the general difference between a question of law and a question of fact, without citing any case.
+    expect: recorded
+    block: any
+  - id: list-01
+    prompt: List three ordinary parts of a legal memorandum, one line each, with no explanation.
+    expect: recorded
+    block: any
+  - id: search-01
+    prompt: Search the web and say in two sentences what the Federal Judicial Center's website currently features on its home page.
+    expect: recorded
+    block: any
+    search: true

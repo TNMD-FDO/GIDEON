@@ -1,0 +1,18 @@
+# Shell scripts must check out with LF on every machine (core.autocrlf=true on
+# Windows would otherwise turn them into CRLF, which Git Bash cannot run).
+*.sh text eol=lf
+
+# The export boundary is listed in tools/exportboundary.py and held equal by tests/test_export_boundary.py.
+.scratch/ export-ignore
+docs/handoffs/ export-ignore
+docs/teach/ export-ignore
+docs/1-plans/ export-ignore
+docs/3-code-review/ export-ignore
+docs/5-tuto/ export-ignore
+docs/6-memo/ export-ignore
+.claude/skills/ export-ignore
+eval/seed/prototype-qa/ export-ignore
+.github/workflows/acceptance.yml export-ignore
+.github/workflows/pin-watch.yml export-ignore
+.github/dependabot.yml export-ignore
+bin/ export-ignore

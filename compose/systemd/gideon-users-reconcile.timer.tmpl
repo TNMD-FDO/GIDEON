@@ -1,0 +1,9 @@
+[Unit]
+Description=Nightly GIDEON LDAP user reconciliation
+
+[Timer]
+OnCalendar=$calendar
+Persistent=true
+
+[Install]
+WantedBy=timers.target

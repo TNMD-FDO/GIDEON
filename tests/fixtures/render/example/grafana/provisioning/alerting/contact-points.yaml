@@ -1,0 +1,11 @@
+apiVersion: 1
+contactPoints:
+  - orgId: 1
+    name: page
+    receivers:
+      - uid: page-email
+        type: email
+        settings:
+          addresses: "csa1@example.org;csa2@example.org"
+          singleEmail: true
+          subject: "[GIDEON TNMD-FDO] {{ .Status | toUpper }}: {{ .CommonLabels.alertname }}"

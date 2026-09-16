@@ -1,0 +1,351 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "alerts": {
+      "additionalProperties": false,
+      "properties": {
+        "recipients": {
+          "description": "Recipients for page-class alerts.",
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "smtp": {
+          "additionalProperties": false,
+          "properties": {
+            "from": {
+              "description": "The sender address for GIDEON alerts.",
+              "minLength": 1,
+              "type": "string"
+            },
+            "host": {
+              "description": "The office SMTP relay host.",
+              "minLength": 1,
+              "type": "string"
+            },
+            "port": {
+              "default": 25,
+              "description": "The SMTP service port.",
+              "type": "integer"
+            },
+            "user": {
+              "default": "",
+              "description": "SMTP relay AUTH identity; used with secrets/smtp_password.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "host",
+            "from"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "smtp",
+        "recipients"
+      ],
+      "type": "object"
+    },
+    "auth": {
+      "additionalProperties": false,
+      "properties": {
+        "ldap": {
+          "additionalProperties": false,
+          "properties": {
+            "admins_group": {
+              "default": "GIDEON-Admins",
+              "description": "Group CN, or its full DN when the group is outside AD's default Users container; direct membership grants administrator status.",
+              "minLength": 1,
+              "type": "string"
+            },
+            "bind_user": {
+              "default": "svc-gideon-ldap",
+              "description": "The LDAP service account name; its password is a secret file.",
+              "minLength": 1,
+              "type": "string"
+            },
+            "host": {
+              "description": "The AD domain name resolved to the office's domain controllers.",
+              "minLength": 1,
+              "type": "string"
+            },
+            "mirror_groups": {
+              "default": [],
+              "description": "Group CNs, or their full DNs when groups are outside AD's default Users container; direct memberships are mirrored as sharing targets.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "port": {
+              "default": 636,
+              "description": "The LDAP service port.",
+              "type": "integer"
+            },
+            "search_base": {
+              "description": "LDAP search base, derived from auth.ldap.host when omitted.",
+              "minLength": 1,
+              "type": "string"
+            },
+            "users_group": {
+              "default": "GIDEON-Users",
+              "description": "Group CN, or its full DN when the group is outside AD's default Users container; direct membership permits login.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "host"
+          ],
+          "type": "object"
+        },
+        "session_hours": {
+          "default": 12,
+          "description": "The session lifetime in hours.",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "ldap"
+      ],
+      "type": "object"
+    },
+    "backup": {
+      "additionalProperties": false,
+      "properties": {
+        "drill_interval": {
+          "default": "1m",
+          "description": "Restore-drill cadence.",
+          "enum": [
+            "1w",
+            "2w",
+            "1m",
+            "3m",
+            "6m",
+            "1y"
+          ],
+          "type": "string"
+        },
+        "local_days": {
+          "default": 7,
+          "description": "Number of nightly backup sets retained on the server.",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "remote_days": {
+          "default": 30,
+          "description": "Number of dated backup snapshots retained on the target.",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "target": {
+          "additionalProperties": false,
+          "properties": {
+            "host": {
+              "description": "SSH host receiving dated backup snapshots.",
+              "minLength": 1,
+              "type": "string"
+            },
+            "path": {
+              "description": "The single target path under which dated snapshots live.",
+              "minLength": 1,
+              "type": "string"
+            },
+            "user": {
+              "default": "gideon-backup",
+              "description": "SSH account name on the backup target.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "host",
+            "path"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "target"
+      ],
+      "type": "object"
+    },
+    "egress_proxy": {
+      "default": "",
+      "description": "Optional proxy applied to package, image, and web egress.",
+      "type": "string"
+    },
+    "hardware_profile": {
+      "default": "2x96v-256d",
+      "description": "The hardware profile name from models.lock.",
+      "minLength": 1,
+      "type": "string"
+    },
+    "hostname": {
+      "description": "Caddy, WEBUI_URL, and certificate subject.",
+      "minLength": 1,
+      "type": "string"
+    },
+    "jurisdiction": {
+      "additionalProperties": false,
+      "properties": {
+        "circuit": {
+          "description": "The office's CourtListener circuit identifier.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "districts": {
+          "description": "District identifiers used for ranking and labels.",
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "states": {
+          "description": "State identifiers used to expand appellate courts.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "circuit",
+        "districts",
+        "states"
+      ],
+      "type": "object"
+    },
+    "lan_cidrs": {
+      "description": "CIDRs allowed to reach HTTPS and SSH.",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "office": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "General preset text and release notes.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "short_name": {
+          "description": "Alert subjects and the Grafana title.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "timezone": {
+          "description": "IANA timezone used by the host, containers, and schedules.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "short_name",
+        "timezone"
+      ],
+      "type": "object"
+    },
+    "prompt_logging": {
+      "default": "metadata_only",
+      "description": "Whether prompt logging stores metadata only or full prompts.",
+      "enum": [
+        "metadata_only",
+        "full"
+      ],
+      "type": "string"
+    },
+    "registry": {
+      "default": "ghcr.io/tnmd-fdo",
+      "description": "Image-reference prefix for images in images.lock.",
+      "minLength": 1,
+      "type": "string"
+    },
+    "retention": {
+      "additionalProperties": false,
+      "properties": {
+        "chats": {
+          "default": "90d",
+          "description": "Chat retention duration from last activity.",
+          "enum": [
+            "1d",
+            "7d",
+            "30d",
+            "60d",
+            "90d",
+            "180d",
+            "1y"
+          ],
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "web": {
+      "additionalProperties": false,
+      "properties": {
+        "domain_filter": {
+          "default": [],
+          "description": "Allow-list of domains for web-search results.",
+          "items": {
+            "pattern": "^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\\.)+(?=[a-z0-9-]*[a-z])[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "engines": {
+          "default": [
+            "brave",
+            "bing",
+            "startpage",
+            "wikipedia"
+          ],
+          "description": "Search engines made available to SearXNG.",
+          "items": {
+            "enum": [
+              "duckduckgo",
+              "brave",
+              "bing",
+              "startpage",
+              "wikipedia",
+              "google"
+            ],
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "search": {
+          "default": "on",
+          "description": "Whether web search is enabled through SearXNG.",
+          "enum": [
+            "on",
+            "off"
+          ],
+          "type": "string"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "required": [
+    "office",
+    "hostname",
+    "lan_cidrs",
+    "jurisdiction",
+    "auth",
+    "backup",
+    "alerts"
+  ],
+  "title": "GIDEON site file",
+  "type": "object"
+}

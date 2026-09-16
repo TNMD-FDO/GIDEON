@@ -1,0 +1,4 @@
+# Baseline's already-mounted data LV.
+# GIDEON BEGIN provision:disk-layout
+UUID=baseline-data /data xfs defaults,nofail 0 2
+# GIDEON END provision:disk-layout

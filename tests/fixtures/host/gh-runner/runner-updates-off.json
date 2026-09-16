@@ -1,0 +1,12 @@
+﻿{
+  "agentId": 6,
+  "agentName": "gideon",
+  "poolId": 1,
+  "poolName": "Default",
+  "disableUpdate": true,
+  "serverUrl": "https://pipelinesghubeus13.actions.githubusercontent.com/REDACTED-TENANT-PATH/",
+  "gitHubUrl": "https://github.com/TNMD-FDO",
+  "workFolder": "_work",
+  "useV2Flow": true,
+  "serverUrlV2": "https://broker.actions.githubusercontent.com/"
+}

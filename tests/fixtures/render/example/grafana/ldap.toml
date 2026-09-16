@@ -1,0 +1,21 @@
+[[servers]]
+host = "example.org"
+port = 636
+use_ssl = true
+start_tls = false
+ssl_skip_verify = false
+root_ca_cert = "/etc/gideon/ca.pem"
+bind_dn = "svc-gideon-ldap@example.org"
+bind_password = '$__file{/run/secrets/ldap_bind_password}'
+search_filter = "(sAMAccountName=%s)"
+search_base_dns = ["DC=example,DC=org"]
+
+[servers.attributes]
+username = "sAMAccountName"
+email = "userPrincipalName"
+member_of = "memberOf"
+
+[[servers.group_mappings]]
+group_dn = "CN=GIDEON-Admins,CN=Users,DC=example,DC=org"
+org_role = "Admin"
+grafana_admin = true

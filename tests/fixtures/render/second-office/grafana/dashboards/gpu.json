@@ -1,0 +1,72 @@
+{
+  "annotations": {"list": []},
+  "editable": false,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "percent"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "targets": [{"expr": "DCGM_FI_DEV_GPU_UTIL", "legendFormat": "GPU {{gpu}}", "refId": "A"}],
+      "title": "GPU utilisation",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "targets": [{"expr": "DCGM_FI_DEV_FB_USED", "legendFormat": "GPU {{gpu}}", "refId": "A"}, {"expr": "DCGM_FI_DEV_FB_FREE", "legendFormat": "GPU {{gpu}} free", "refId": "B"}],
+      "title": "GPU memory",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "celsius"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 8},
+      "targets": [{"expr": "DCGM_FI_DEV_GPU_TEMP", "legendFormat": "GPU {{gpu}}", "refId": "A"}],
+      "title": "GPU temperature",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "watt"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 8},
+      "targets": [{"expr": "DCGM_FI_DEV_POWER_USAGE", "legendFormat": "GPU {{gpu}}", "refId": "A"}],
+      "title": "GPU power",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 8},
+      "targets": [{"expr": "count by (DCGM_FI_DRIVER_VERSION) (DCGM_FI_DEV_GPU_UTIL)", "legendFormat": "{{DCGM_FI_DRIVER_VERSION}}", "refId": "A"}],
+      "title": "Driver version",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"min": 0, "max": 1, "unit": "percentunit"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "prometheus"}, "expr": "vllm:kv_cache_usage_perc", "legendFormat": "{{model_name}}", "refId": "A"}],
+      "title": "KV-cache usage",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"decimals": 0, "min": 0, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "prometheus"}, "expr": "vllm:num_requests_waiting", "legendFormat": "{{model_name}} waiting", "refId": "A"}, {"datasource": {"type": "prometheus", "uid": "prometheus"}, "expr": "vllm:num_requests_running", "legendFormat": "{{model_name}} running", "refId": "B"}],
+      "title": "Queue depth",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 41,
+  "tags": ["GIDEON", "gpu"],
+  "templating": {"list": []},
+  "time": {"from": "now-6h", "to": "now"},
+  "timezone": "browser",
+  "title": "GIDEON GPU",
+  "uid": "gideon-gpu",
+  "version": 1
+}

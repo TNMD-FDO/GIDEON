@@ -1,0 +1,98 @@
+# Changelog
+
+The files under `docs/2-changelog/` are the engineering record of each release,
+named `w<N>_v<x.y.z>.md`. A major release file carries a `## Breaking` section
+stating the site-file or `/etc/gideon` contract change and what the office must
+do; `gideon upgrade <tag>` prints that section before refusing a major cross
+without `--acknowledge-breaking`. A hotfix tag has a file like any tag; the ten
+hotfix tags up to `v0.1.1` that had a table row instead are in the repository's
+history at commit f06e83f. User-facing notes for every tag from `v0.2.0` live under
+`docs/release-notes/`, and `tests/test_release_records.py` holds this index
+complete, ordered, and dated from the release files.
+
+- [v0.1.70](docs/2-changelog/w3_v0.1.70.md) — 2026-09-16 — the public repository and its export (ticket 57)
+- [v0.1.69](docs/2-changelog/w3_v0.1.69.md) — 2026-09-16 — General's smoke set (ticket 39)
+- [v0.1.68](docs/2-changelog/w3_v0.1.68.md) — 2026-09-16 — three roles on the declared build box (ticket 21)
+- [v0.1.67](docs/2-changelog/w3_v0.1.67.md) — 2026-09-16 — the turn tests' fake mints fresh chat ids under N
+- [v0.1.66](docs/2-changelog/w3_v0.1.66.md) — 2026-09-16 — General measured under concurrent load (ticket 62)
+- [v0.1.65](docs/2-changelog/w3_v0.1.65.md) — 2026-09-16 — sets are sealed to the box's own key too (ticket 23)
+- [v0.1.64](docs/2-changelog/w3_v0.1.64.md) — 2026-09-16 — a turn finds its chat by the ids it mints (ticket 68)
+- [v0.1.63](docs/2-changelog/w3_v0.1.63.md) — 2026-09-16 — the sentinel stub logs before it answers (ticket 77)
+- [v0.1.62](docs/2-changelog/w3_v0.1.62.md) — 2026-09-15 — the host filesystems page when low (ticket 74)
+- [v0.1.61](docs/2-changelog/w2_v0.1.61.md) — 2026-09-12 — the image store on the Docker volume: containerd's root a `docker-engine` setting, the box's store moved in its window
+- [v0.1.60](docs/2-changelog/w2_v0.1.60.md) — 2026-09-11 — the guard's git as one command: `bin/release-git` and `bin/worktree-claim` under the guard, the tracker's `--check`, the Frontier trimmed
+- [v0.1.59](docs/2-changelog/w2_v0.1.59.md) — 2026-09-11 — one home per workflow fact: the block table, the tools leaf, the two pages, and the Step 7 block point at each fact's home
+- [v0.1.58](docs/2-changelog/w2_v0.1.58.md) — 2026-09-11 — the brief is the ticket's one contract: a triage writes each fact once, the body as opened, the brief's one criteria list
+- [v0.1.57](docs/2-changelog/w2_v0.1.57.md) — 2026-09-11 — the rung and account switch: two optional words before the phase select the account and the pairing row for every phase of a cycle
+- [v0.1.56](docs/2-changelog/w2_v0.1.56.md) — 2026-09-11 — a model and an effort per phase: `bin/trip` runs each phase in its own session, the pairing held once, the cycles record split per phase
+- [v0.1.55](docs/2-changelog/w2_v0.1.55.md) — 2026-09-10 — the arithmetic guardrail's sentence-credit family: a release date, a credit count, or a time to serve the model computed is refused
+- [v0.1.54](docs/2-changelog/w2_v0.1.54.md) — 2026-09-10 — the second CSA learns the method: `docs/agents/onboarding.md`, proven by two fresh sessions; the selection rule's one home
+- [v0.1.53](docs/2-changelog/w2_v0.1.53.md) — 2026-09-10 — the export boundary: one list mirrored in `.gitattributes`, held by a tripwire; the runbooks under `docs/runbooks/`; the box jobs fenced
+- [v0.1.52](docs/2-changelog/w2_v0.1.52.md) — 2026-09-10 — office values redacted at capture: a registry marker, one function, the harness and an on-box command
+- [v0.1.51](docs/2-changelog/w2_v0.1.51.md) — 2026-09-10 — the README as the export's first page: a badge, a two-line status, install and quickstart, a tripwire holding its shape
+- [v0.1.50](docs/2-changelog/w2_v0.1.50.md) — 2026-09-10 — the citation favicons held to the box: the frontend's rendered image policy keeps a source's link on the workstation
+- [v0.1.49](docs/2-changelog/w2_v0.1.49.md) — 2026-09-10 — turns beside the peak in the cycles record and the sizing rule; a session past 150 turns ends at its next seam
+- [v0.1.48](docs/2-changelog/w2_v0.1.48.md) — 2026-09-10 — the render-apply leaf split by what grew into the host tree and the engine and the frontend's runtime, both halves under the warning
+- [v0.1.47](docs/2-changelog/w2_v0.1.47.md) — 2026-09-10 — the release renumbers by one command when `main` took its number; the cycles record reads the version a release took
+- [v0.1.46](docs/2-changelog/w2_v0.1.46.md) — 2026-09-10 — a budget for CLAUDE.md and the agent documents, the four classes' figures on one line the budget test reads
+- [v0.1.45](docs/2-changelog/w2_v0.1.45.md) — 2026-09-10 — the arithmetic guardrail's Guidelines family: a resolved Sentencing Guidelines range refused, the Filter's plumbing per family
+- [v0.1.44](docs/2-changelog/w2_v0.1.44.md) — 2026-09-10 — the default engine list without DuckDuckGo; the page loader's rendered agent and its 30 s bound
+- [v0.1.43](docs/2-changelog/w2_v0.1.43.md) — 2026-09-09 — the reasoning withheld from the screen and the guardrail's judgement; the restatement rule's answer-side forms over a canonical date
+- [v0.1.42](docs/2-changelog/w2_v0.1.42.md) — 2026-09-09 — a prompt in the chat page's URL leaves no log: the ingress's line redacted, the frontend's access line off
+- [v0.1.41](docs/2-changelog/w2_v0.1.41.md) — 2026-09-09 — the pin watch watches `models.lock` and the release note's "What was bumped" section is generated, never typed
+- [v0.1.40](docs/2-changelog/w2_v0.1.40.md) — 2026-09-09 — secret rotation through the CLI: `secrets rotate <name>` regenerates a rotatable secret and recreates exactly its consumers
+- [v0.1.39](docs/2-changelog/w2_v0.1.39.md) — 2026-09-09 — the hidden base model withheld by the guardrail's inlet: a user-role turn on anything but a preset refused before the engine
+- [v0.1.38](docs/2-changelog/w2_v0.1.38.md) — 2026-09-09 — General's search pages reach the model: File Context on its record, the retrieval query task off, proven on the stored message
+- [v0.1.37](docs/2-changelog/w2_v0.1.37.md) — 2026-09-09 — the memory table: every service's Compose memory limit from the hardware profile
+- [v0.1.36](docs/2-changelog/w2_v0.1.36.md) — 2026-09-09 — the public face: the security policy, this index and its tripwire, the contributor's templates, and Dependabot
+- [v0.1.35](docs/2-changelog/w2_v0.1.35.md) — 2026-09-09 — the search-query sentinel: no search-query text anywhere
+- [v0.1.34](docs/2-changelog/w2_v0.1.34.md) — 2026-09-09 — guardrail trips as kept events
+- [v0.1.33](docs/2-changelog/w2_v0.1.33.md) — 2026-09-08 — the standing tracker
+- [v0.1.32](docs/2-changelog/w2_v0.1.32.md) — 2026-09-08 — the tracker board
+- [v0.1.31](docs/2-changelog/w2_v0.1.31.md) — 2026-09-08 — office values out of the tree, and the tripwire that keeps them out
+- [v0.1.30](docs/2-changelog/w2_v0.1.30.md) — 2026-09-08 — the recreate row: `render --diff` names every service an apply recreates
+- [v0.1.29](docs/2-changelog/w2_v0.1.29.md) — 2026-09-08 — the cycles record: every session's cost from the harness's transcripts
+- [v0.1.28](docs/2-changelog/w2_v0.1.28.md) — 2026-09-08 — the vendored-skills hash rule holds a block-carrying skill around its blocks
+- [v0.1.27](docs/2-changelog/w2_v0.1.27.md) — 2026-09-08 — the citation stamp
+- [v0.1.26](docs/2-changelog/w2_v0.1.26.md) — 2026-09-08 — the research notes bound to their pins, listed by every bump pull request
+- [v0.1.25](docs/2-changelog/w2_v0.1.25.md) — 2026-09-08 — web search through SearXNG with the privilege reminder
+- [v0.1.24](docs/2-changelog/w2_v0.1.24.md) — 2026-09-07 — GIDEON blocks are pointers
+- [v0.1.23](docs/2-changelog/w2_v0.1.23.md) — 2026-09-07 — the dev toolchain pinned once, and the local gate equal to CI's
+- [v0.1.22](docs/2-changelog/w2_v0.1.22.md) — 2026-09-07 — engine verify through the frontend, and the install and upgrade gate
+- [v0.1.21](docs/2-changelog/w2_v0.1.21.md) — 2026-09-07 — the window guard counts a browser turn as three engine calls
+- [v0.1.20](docs/2-changelog/w2_v0.1.20.md) — 2026-09-07 — engine verify
+- [v0.1.19](docs/2-changelog/w2_v0.1.19.md) — 2026-09-07 — TRIP-2 proves staged work on the acceptance VM
+- [v0.1.18](docs/2-changelog/w2_v0.1.18.md) — 2026-09-07 — the arithmetic guardrail's lag window
+- [v0.1.17](docs/2-changelog/w1_v0.1.17.md) — 2026-09-06 — the engine observed
+- [v0.1.16](docs/2-changelog/w1_v0.1.16.md) — 2026-09-06 — ARCHI-rules.md's Step 7 checklist names the landed-mechanism case
+- [v0.1.15](docs/2-changelog/w1_v0.1.15.md) — 2026-09-06 — glossary entries name their leaf
+- [v0.1.14](docs/2-changelog/w1_v0.1.14.md) — 2026-09-06 — ARCHI as a map with leaves
+- [v0.1.13](docs/2-changelog/w1_v0.1.13.md) — 2026-09-06 — General the default model for every user, the arena model off, the web-upload leaf off, no suggestion cards
+- [v0.1.12](docs/2-changelog/w1_v0.1.12.md) — 2026-09-05 — the turn harness's browser mode
+- [v0.1.11](docs/2-changelog/w1_v0.1.11.md) — 2026-09-05 — the turn harness
+- [v0.1.10](docs/2-changelog/w1_v0.1.10.md) — 2026-09-05 — the arithmetic guardrail's deadline family at the outlet
+- [v0.1.9](docs/2-changelog/w1_v0.1.9.md) — 2026-09-04 — the General preset through the apply manifest
+- [v0.1.8](docs/2-changelog/w1_v0.1.8.md) — 2026-09-04 — the base model's record in the apply manifest
+- [v0.1.7](docs/2-changelog/w1_v0.1.7.md) — 2026-09-04 — the frontend's Chat Completions connection and task model
+- [v0.1.6](docs/2-changelog/w1_v0.1.6.md) — 2026-09-04 — the engine service, rendered and applied
+- [v0.1.5](docs/2-changelog/w1_v0.1.5.md) — 2026-09-04 — models pull
+- [v0.1.4](docs/2-changelog/w1_v0.1.4.md) — 2026-09-04 — preflight checks the profile's requirements
+- [v0.1.3](docs/2-changelog/w1_v0.1.3.md) — 2026-09-04 — the release-note template and the 0.x rulings
+- [v0.1.2](docs/2-changelog/w1_v0.1.2.md) — 2026-09-04 — models.lock and the hardware profile
+- [v0.1.0](docs/2-changelog/w1_v0.1.0.md) — 2026-09-03 — no-GPU mode and the clean-VM acceptance
+- [v0.0.25](docs/2-changelog/w1_v0.0.25.md) — 2026-09-03 — install, upgrade, and rollback
+- [v0.0.22](docs/2-changelog/w1_v0.0.22.md) — 2026-09-03 — observability and alerting
+- [v0.0.21](docs/2-changelog/w1_v0.0.21.md) — 2026-09-03 — the pin watch watches the vendored skills too, and a tripwire holds them to the lock
+- [v0.0.20](docs/2-changelog/w1_v0.0.20.md) — 2026-09-02 — the runner stops updating itself
+- [v0.0.19](docs/2-changelog/w1_v0.0.19.md) — 2026-09-02 — host timezone and office-local timers
+- [v0.0.18](docs/2-changelog/w1_v0.0.18.md) — 2026-09-02 — backup, restore, and the drills
+- [v0.0.17](docs/2-changelog/w1_v0.0.17.md) — 2026-09-02 — the first GIDEON-built image
+- [v0.0.16](docs/2-changelog/w1_v0.0.16.md) — 2026-09-02 — no test pins a value it also reads from a lock file
+- [v0.0.15](docs/2-changelog/w1_v0.0.15.md) — 2026-09-02 — CI actions off Node 20
+- [v0.0.13](docs/2-changelog/w1_v0.0.13.md) — 2026-09-02 — the pin watch
+- [v0.0.12](docs/2-changelog/w1_v0.0.12.md) — 2026-09-02 — directory identity is the userPrincipalName
+- [v0.0.11](docs/2-changelog/w1_v0.0.11.md) — 2026-09-02 — gideon apply brings up the frontend
+- [v0.0.10](docs/2-changelog/w1_v0.0.10.md) — 2026-09-01 — gideon render/apply/tls reload + registry mirror
+- [v0.0.8](docs/2-changelog/w1_v0.0.8.md) — 2026-09-01 — gideon preflight
+- [v0.0.4](docs/2-changelog/w1_v0.0.4.md) — 2026-09-01 — gideon host provision
+- [v0.0.3](docs/2-changelog/w1_v0.0.3.md) — 2026-09-01 — site-file model and validation

@@ -1,0 +1,139 @@
+# Rendered by gideon render — never hand-edit (spec §3.5). Re-run gideon apply after editing /etc/gideon/site.yaml.
+release: "fixture"
+inputs:
+  site_sha256: "0515e1b8d467d98b5ed1762ba2fbb2b18d9595d364fdd894d043dbce3cf7d716"
+  host_lock_sha256: "6207481c43821eb63a08f39174cc4045201e1a51e339c520418b60a32bc4dfd5"
+  models_lock_sha256: "69db04fe2802598b1a11f95afe88cb6f91c6fcb5edeb23c0d2b0fd7253b84fd5"
+  hardware_profile: "2x96v-256d"
+  images_lock_version: 1
+  no_gpu: false
+  build_box: false
+files:
+  compose.yaml:
+    sha256: "5c32968200097fdd18d5e04b2c89d1937a7c201ecb51635acb2a5052bcfe717b"
+    mode: "0644"
+    owners: []
+  "prometheus/prometheus.yml":
+    sha256: "3ccfea49d3389d02d45487432296d74594e31a9fde558272aa02733b0b29bab5"
+    mode: "0644"
+    owners:
+      - "prometheus"
+  "blackbox/blackbox.yml":
+    sha256: "169f3fd5c0f5e4edc646156605195ef3db9f8eed806a704b4d232ab9cecc720f"
+    mode: "0644"
+    owners:
+      - "blackbox-exporter"
+  "grafana/ldap.toml":
+    sha256: "0e56d35221d501dee0f9f8556856eef3f414f129c327d7e96fde87d4f0475f21"
+    mode: "0644"
+    owners:
+      - "grafana"
+  "grafana/provisioning/datasources/datasources.yaml":
+    sha256: "7855cc9ec1b9cc6bd185998472e31aa8c22bcf4a342b5afa773260de6643bf3b"
+    mode: "0644"
+    owners:
+      - "grafana"
+  "grafana/provisioning/dashboards/provider.yaml":
+    sha256: "302da2623a311f6c7055a8f9b4bbb5615130ce2cb6243248c5bb48eff9f2bf59"
+    mode: "0644"
+    owners:
+      - "grafana"
+  "grafana/provisioning/alerting/contact-points.yaml":
+    sha256: "cbe599beb2d3ff0ab81229a6491c1683a7c78008f75e8fdffcf6180bb6825c95"
+    mode: "0644"
+    owners:
+      - "grafana"
+  "grafana/provisioning/alerting/policies.yaml":
+    sha256: "d218ffbc2d57f2ed494d636e4f572b9bf2855e6e440d39ace2cd38df98c060c7"
+    mode: "0644"
+    owners:
+      - "grafana"
+  "grafana/provisioning/alerting/time-intervals.yaml":
+    sha256: "31f46692da4a02f00ef5dc55b6c24ad820f0e0de9c5b24bb4099308f1ac68a4a"
+    mode: "0644"
+    owners:
+      - "grafana"
+  "grafana/provisioning/alerting/rules.yaml":
+    sha256: "3b8456e0ef2b82329e1ceb5866905efbc5188044386a83c5c99de51a53ba64ca"
+    mode: "0644"
+    owners:
+      - "grafana"
+  "grafana/dashboards/overview.json":
+    sha256: "41efae11138354b110e48788743ed7af7cb149415f32716e2d9bcbb13882b0e8"
+    mode: "0644"
+    owners:
+      - "grafana"
+  "grafana/dashboards/backup.json":
+    sha256: "2781357cf95ee5b1be07c1bda5783810372ea3014f263f69b08a858094660f7a"
+    mode: "0644"
+    owners:
+      - "grafana"
+  "grafana/dashboards/gpu.json":
+    sha256: "ffef85f3b9e16bf1f1f39fd20977c05b5a7bcfb8d669eec8a666d7dbbeca792d"
+    mode: "0644"
+    owners:
+      - "grafana"
+  "postgres/pgbackrest.conf":
+    sha256: "486f5f28df5063a54e17658cba1c4bed67f017a792065d4e4c86e3f213f82b51"
+    mode: "0644"
+    owners:
+      - "postgres"
+  "caddy/Caddyfile":
+    sha256: "2141ca3bc10af805dd7c2260158a5dec62763ee184a515328417314507a736c8"
+    mode: "0644"
+    owners:
+      - "caddy"
+  "open-webui/env":
+    sha256: "1cbfb2e5d9fd8eac93ae22c30c4643f034d88ff59ce6af0ffb09a58c62e8aefc"
+    mode: "0600"
+    owners:
+      - "open-webui"
+  "open-webui/manifest.yaml":
+    sha256: "4f9eb7831ddfbf9fddf9ff559ac9ca74497c44c7c66f98e261dfd6b7c122fece"
+    mode: "0644"
+    owners: []
+  "systemd/gideon-users-reconcile.service":
+    sha256: "10a219009a102f03eb5d5772cc3c5d1d1dafaef8bf8ca3cbaaa9ab314f35398c"
+    mode: "0644"
+    owners: []
+  "systemd/gideon-users-reconcile.timer":
+    sha256: "dab86c6d9110690cf5658afcb258fb4d01a72eb55e1d2afaba877962144356b3"
+    mode: "0644"
+    owners: []
+  "systemd/gideon-backup.service":
+    sha256: "39ad41225d54446dd95be9295959c1bd3f384bad27d0ca1e15668992b15324cf"
+    mode: "0644"
+    owners: []
+  "systemd/gideon-backup.timer":
+    sha256: "85ad90ddf8dae860e64b2ebc625c26b66cb6a61beb094a3a7044714a520bb534"
+    mode: "0644"
+    owners: []
+  "systemd/gideon-backup-drill.service":
+    sha256: "f48a0a3b5b25f8140f8ffccb7700d627e3756d3003f585afc812ec2a83d09baf"
+    mode: "0644"
+    owners: []
+  "systemd/gideon-backup-drill.timer":
+    sha256: "46be408953d2627bea7654c7fe68cf0655a7b15aacfc0780be1d1c55a148213c"
+    mode: "0644"
+    owners: []
+  "systemd/gideon-backup-verify.service":
+    sha256: "73251157589fbf65b0f05b6afa6f9ee75d9e27635a1b736510bff50d1b4398a6"
+    mode: "0644"
+    owners: []
+  "systemd/gideon-backup-verify.timer":
+    sha256: "00221dfe2766333099994817e4251aeb5459e0aaa0e36a22cb7f4f3bf6ebe635"
+    mode: "0644"
+    owners: []
+services:
+  caddy: "6ab86c4b4080e9f36a8a33ac2c17068802e1161844d10a4474b8285c69c1650f"
+  prometheus: "7a73ab08985ed9765b04f35b0e78d36befc83b80e562755d063bef6565a7b96b"
+  node-exporter: "a581b1f8a717fdaab3b3e0ffa46114516da01f2c51c85838380c168d506632df"
+  grafana: "52fa41c180c0104195fc8ce1f53bf9316bd6b09571095f953e9c5187988e0c04"
+  postgres: "4a590ddadb50388c39df40b7b3ea5fc7f5b2cf2d683a5fc05b85fd92dc546669"
+  open-webui: "7cb6f7ad2c9c1a4db59acc89bcf5557b5742927c30bdffe77e52403cd7df3043"
+  gideon-generator: "7e6fb8478dc880dc237408c62456aa742b2612de5c2bb1e2882ad65d8eaf800b"
+  dcgm-exporter: "2500bba775db3bda0b62a98a323e4c6bf1fbc02e5544752ba0e5f25c21cdb1fa"
+  postgres-exporter: "d36e03785dee0d52e65763c1d7f6dda2c4c09b17c129d7e8439fe5994338bfe7"
+  cadvisor: "3eef1969696a19143af4ac661101740caa88ab9382214f7298a0188e6f2c9e95"
+  blackbox-exporter: "5b3942cc5a72cac952fe8085233662b727ad6e9ee6caf933d7f4590572db8024"
+top_level: "80da2104bbc0f314a36f30f89c3fc75a5df40f011deeed069916646d0e8dd4ee"

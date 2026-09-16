@@ -1,0 +1,23 @@
+{
+  "disable_existing_loggers": false,
+  "loggers": {
+    "_granian": {
+      "handlers": [
+        "console"
+      ],
+      "level": "INFO",
+      "propagate": false
+    },
+    "granian.access": {
+      "handlers": [
+        "access"
+      ],
+      "level": "INFO",
+      "propagate": false
+    },
+    "searx.network": {
+      "level": "ERROR"
+    }
+  },
+  "version": 1
+}

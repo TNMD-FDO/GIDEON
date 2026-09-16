@@ -1,0 +1,19 @@
+# Claude Code local (per-machine) settings and personal memory — never version these
+.claude/settings.local.json
+CLAUDE.local.md
+# A TRIP cycle's worktree (CLAUDE.md, "Two sessions, one checkout")
+.claude/worktrees/
+
+# Pre-wipe prototype harvest (ticket 01): raw exports and working files contain
+# case data and credentials — only the reviewed harvest.jsonl is committed.
+eval/seed/prototype-qa/raw/
+eval/seed/prototype-qa/work/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+# python3 -m tools.tracker generates the board page beside committed .scratch/BOARD.md
+.scratch/BOARD.html
+# the dev venv: the primary's directory, or a worktree's link to it
+.venv
+*.egg-info/

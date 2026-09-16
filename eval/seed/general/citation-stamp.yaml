@@ -1,0 +1,134 @@
+# The citation stamp's seed (spec §15, [06] item 16, slice-1 ticket 14): the
+# answers the stamp's unit tests run its outlet over.  A shaped case carries a
+# citation shape and names the family that must hit; a free case carries none
+# and must pass untouched.  Every text is invented; no matter, client, or real
+# case.  A case is never edited — a correction is a new case with a new id.
+family: citation
+pattern_set_version: 1
+cases:
+  - id: shaped-reporter-case-pin
+    kind: shaped
+    answer: "The invented harbor panel used 17 F.3d 204, 209 (Mock Cir. 2026) as a fictional example."
+    pattern: citation/reporter@1
+  - id: shaped-reporter-blank-form
+    kind: shaped
+    answer: "A blank-form illustration is ___ U.S. ___, with no real matter attached."
+    pattern: citation/reporter@1
+  - id: shaped-reporter-federal-register
+    kind: shaped
+    answer: "The fictional notice is formatted as 91 Fed. Reg. 2048."
+    pattern: citation/reporter@1
+  - id: shaped-reporter-no-space
+    kind: shaped
+    answer: "The fictional order appears at 512 F.Supp.2d 77, written without the reporter's spaces."
+    pattern: citation/reporter@1
+  - id: shaped-reporter-supreme-court
+    kind: shaped
+    answer: "I have not verified it, but the invented opinion is usually cited as 140 S. Ct. 1204."
+    pattern: citation/reporter@1
+  - id: shaped-code-subsection
+    kind: shaped
+    answer: "The invented statute example is 18 U.S.C. § 4123(b)(2)."
+    pattern: citation/code@1
+  - id: shaped-code-bare-section
+    kind: shaped
+    answer: "The bare section example is § 88A(c)(1)."
+    pattern: citation/code@1
+  - id: shaped-code-cfr
+    kind: shaped
+    answer: "The fictional regulation reference is 28 C.F.R. § 19.4."
+    pattern: citation/code@1
+  - id: shaped-code-guidelines
+    kind: shaped
+    answer: "The invented guideline reference is U.S.S.G. § 2K2.4(b)."
+    pattern: citation/code@1
+  - id: shaped-code-guidelines-no-space
+    kind: shaped
+    answer: "The fictional guideline is written U.S.S.G. §2D1.1(c)(5), with no space after the symbol."
+    pattern: citation/code@1
+  - id: shaped-code-no-symbol
+    kind: shaped
+    answer: "Sentencing factors in this invented example come from 18 U.S.C. 3553(a), cited without a section symbol."
+    pattern: citation/code@1
+  - id: shaped-code-state-hyphenated
+    kind: shaped
+    answer: "The invented state provision is Tenn. Code Ann. § 40-35-501(a)."
+    pattern: citation/code@1
+  - id: shaped-code-periodless
+    kind: shaped
+    answer: "The invented reference is 21 USC 841(b)(1), written without periods."
+    pattern: citation/code@1
+  - id: shaped-rule-criminal
+    kind: shaped
+    answer: "The fictional criminal procedure example uses Fed. R. Crim. P. 17."
+    pattern: citation/rule@1
+  - id: shaped-rule-appellate-alone
+    kind: shaped
+    answer: "The appellate label alone is Fed. R. App. P."
+    pattern: citation/rule@1
+  - id: shaped-database-westlaw
+    kind: shaped
+    answer: "The invented database pointer is 2026 WL 741852."
+    pattern: citation/database@1
+  - id: shaped-database-lexis
+    kind: shaped
+    answer: "The fictional database pointer is 2026 U.S. Dist. LEXIS 86420."
+    pattern: citation/database@1
+  - id: shaped-several-families
+    kind: shaped
+    answer: "Several fictional shapes appear together: 4 P.3d 18, § 77(a), Fed. R. Evid., and 2026 WL 321654."
+    pattern: citation/reporter@1
+  - id: free-everyday-rewrite
+    kind: free
+    answer: "Please rewrite this friendly note so it sounds concise and calm."
+  - id: free-doctrinal-explanation
+    kind: free
+    answer: "A general explanation can compare competing ideas without naming any authority."
+  - id: free-numbers-heavy
+    kind: free
+    answer: "The project started on 2026-04-17, cost $18,240, used 42%, mentions Section 3 of the agreement and page 12, and follows a Rule of thumb without a symbol."
+  - id: free-case-name-only
+    kind: free
+    answer: "Fictional Harbor Board v. Mock Agency is only a case name in this invented discussion."
+  - id: free-ordinary-planning
+    kind: free
+    answer: "Set three reminders for Monday, Tuesday, and Wednesday before the meeting."
+  - id: free-plain-number
+    kind: free
+    answer: "The sample has 2026 entries, a 12-page outline, and 7 pending edits."
+  - id: free-section-word
+    kind: free
+    answer: "Section 3 of the agreement describes the fictional review process."
+  - id: free-page-word
+    kind: free
+    answer: "The invented instructions refer to page 12 and then continue with a short note."
+  - id: free-rule-word
+    kind: free
+    answer: "Rule of thumb: keep the fictional checklist short."
+  - id: free-several-figures
+    kind: free
+    answer: "The invented survey counted 8 teams, 11 drafts, 64% agreement, and $930 in sample costs."
+  - id: free-date-and-sum
+    kind: free
+    answer: "On 2027-02-03 the sample budget was $4,500, or 15% of the invented total."
+  - id: free-case-caption
+    kind: free
+    answer: "Mock Orchard Cooperative v. Paper Lantern is an invented caption without a reporter."
+  - id: free-section-word-statute
+    kind: free
+    answer: "Section 3553 of Title 18 lists the sentencing factors in this invented summary, which names no symbol and no code."
+  - id: free-clock-time
+    kind: free
+    answer: "The invented meeting runs from 9 a.m. to 3 p.m. on the 12th, with a break at 1 p.m."
+  - id: free-version-number
+    kind: free
+    answer: "The fictional release is version 2.3.1, built from 14 commits over 3 days."
+  - id: free-article-section
+    kind: free
+    answer: "Article II, Section 2 of the invented charter names the committee and its 5 members."
+  - id: free-form-line
+    kind: free
+    answer: "Enter the invented figure on Form 1040, line 12, then sign page 2 and date it."
+  - id: free-docket-number
+    kind: free
+    answer: "The invented docket is No. 3:26-cr-00123, filed with a fictional clerk on the 4th."

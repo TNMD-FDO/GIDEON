@@ -1,0 +1,75 @@
+# GIDEON site file — /etc/gideon/site.yaml
+#
+# The one file a receiving office edits. It states the office's facts and the
+# policies the office is entitled to set; it never sets GIDEON's behaviour
+# (ADR-0028). It contains no secret and no path: secrets are files in
+# /etc/gideon/secrets/, the certificate is /etc/gideon/tls/cert.pem, the office
+# CA root is /etc/gideon/ca.pem.
+#
+# Required keys are uncommented. Every commented key shows its default; leave
+# it commented to accept the default. Unknown keys refuse. Enumerated keys list
+# their allowed values. The consumer of each key is in its trailing comment.
+
+office:
+  name: Office of the Federal Public Defender, Middle District of Tennessee   # General preset text, release notes
+  short_name: TNMD-FDO                                                        # alert subjects, Grafana title
+  timezone: America/Chicago                                                   # IANA name; provision sets the host clock to it, every container gets it as TZ, every timer's OnCalendar carries it — §19.6's schedule is office time
+
+hostname: gideon.example.org      # Caddy, WEBUI_URL, certificate subject
+lan_cidrs: [192.0.2.0/24]         # ufw allow-list for 443 (and 22); one or more CIDRs
+
+# Home courts for ranking and labels. Pulls nothing into the corpus: the corpus
+# lockfile's courts[] decides what is ingested; every id here must be in it
+# (preflight refuses otherwise). CourtListener ids; one circuit; lists for
+# districts and states (a state expands to its appellate courts via courts.yaml).
+jurisdiction: {circuit: ca6, districts: [tnmd], states: [tenn]}
+
+auth:
+  ldap:
+    host: example.org              # the AD domain name (resolves to every DC), never one DC; every signing-in account needs a userPrincipalName (ADR-0030)
+    # port: 636
+    # search_base: DC=example,DC=org       (derived from host when omitted)
+    # bind_user: svc-gideon-ldap            (password: secrets/ldap_bind_password)
+    # users_group: GIDEON-Users             (group CN, or its full DN when the group is outside AD's default Users container; direct membership = may log in)
+    # admins_group: GIDEON-Admins           (group CN, or its full DN when the group is outside AD's default Users container; direct membership = admin, enforced by `gideon users reconcile`)
+    # mirror_groups: []                     (group CNs, or their full DNs when groups are outside AD's default Users container; direct memberships mirrored as sharing targets only)
+  # session_hours: 12
+
+backup:
+  target:
+    host: nas.example.org          # any SSH host with disk; Synology/QNAP: the account must be a NAS administrator
+    path: /volume3/gideon-backup   # all dated snapshots live under this one path (same filesystem)
+    # user: gideon-backup           # SSH account on the backup target (default; used by backup push and preflight)
+  # local_days: 7                  nightly sets kept on the server's own disk (at least 1; also the repository's point-in-time window)
+  # remote_days: 30                dated snapshots kept on the target; nothing older is recoverable (at least 1)
+  # drill_interval: 1m             restore drill cadence: 1w | 2w | 1m | 3m | 6m | 1y (a Saturday at 04:00)
+
+alerts:
+  smtp:
+    host: smtp.example.org         # office relay; password, if any, in secrets/smtp_password
+    from: gideon@example.org
+    # user: ""                     # relay AUTH identity (default); used only with secrets/smtp_password
+    # port: 25
+  recipients: [csa1@example.org, csa2@example.org]   # page-class alerts go here; no on-call
+
+# hardware_profile: 2x96v-256d      profile section of models.lock; unknown refuses, non-reference warns
+# registry: ghcr.io/tnmd-fdo       image-reference prefix for every image in images.lock (the two plain-HTTP registries: loopback 127.0.0.1:5000 pre-1.0, and the box's bridge address 192.168.122.1:5000 for the acceptance VM)
+# egress_proxy: ""                 optional; applied to apt, Docker pulls, the CLI, SearXNG, Open WebUI; credentials in secrets/proxy_auth
+
+# web:                             General branch search policy
+#   search: on                     off = no web search anywhere; SearXNG not started
+#   engines: [brave, bing, startpage, wikipedia]
+#                                  allowed: duckduckgo, brave, bing, startpage,
+#                                  wikipedia, google; DuckDuckGo and Google are
+#                                  available but off by default; DuckDuckGo's bot
+#                                  detection answers a SearXNG instance with a CAPTCHA at every search
+#   domain_filter: []              allow-list of result domains, e.g. [law.cornell.edu, uscourts.gov]; empty = any;
+#                                  bare lowercase names only, each covering itself and its subdomains
+
+# retention:
+#   chats: 90d                     from last activity; uploads expire with the chat: 1d | 7d | 30d | 60d | 90d | 180d | 1y
+# prompt_logging: metadata_only    metadata_only | full
+
+# Maintainers: every edit to this file, comments included, moves the example
+# render fixture's recorded site digest (tests/fixtures/render/example/manifest.yaml);
+# run .venv/bin/python tests/regenerate_render_fixtures.py in the same change.

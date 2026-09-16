@@ -1,0 +1,144 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
+      "targets": [
+        {"expr": "up", "legendFormat": "{{job}} / {{instance}}", "refId": "A"},
+        {"expr": "probe_success{job=~\"ingress|frontend\"}", "legendFormat": "{{job}} probe", "refId": "B"}
+      ],
+      "title": "Services and probes",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {"unit": "percent", "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 15}]}},
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
+      "targets": [
+        {"expr": "100 * node_filesystem_avail_bytes{mountpoint=\"/data\"} / node_filesystem_size_bytes{mountpoint=\"/data\"}", "legendFormat": "/data", "refId": "A"},
+        {"expr": "100 * node_filesystem_avail_bytes{mountpoint=\"/data/fast\"} / node_filesystem_size_bytes{mountpoint=\"/data/fast\"}", "legendFormat": "/data/fast", "refId": "B"},
+        {"expr": "100 * node_filesystem_avail_bytes{mountpoint=\"/\"} / node_filesystem_size_bytes{mountpoint=\"/\"}", "legendFormat": "/", "refId": "C"},
+        {"expr": "100 * node_filesystem_avail_bytes{mountpoint=\"/var/lib/docker\"} / node_filesystem_size_bytes{mountpoint=\"/var/lib/docker\"}", "legendFormat": "/var/lib/docker", "refId": "D"}
+      ],
+      "title": "Filesystems free",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "postgres", "uid": "gideon-rows"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 8},
+      "options": {"legend": {"displayMode": "hidden", "placement": "bottom"}},
+      "targets": [{"format": "time_series", "rawSql": "SELECT at AS time, EXTRACT(EPOCH FROM (now() - at)) AS \"age_seconds\" FROM audit_log WHERE kind = 'backup_run' AND detail->>'phase' = 'applied' ORDER BY at", "refId": "A"}],
+      "title": "Backup set age",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "postgres", "uid": "gideon-rows"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 8},
+      "options": {"legend": {"displayMode": "hidden", "placement": "bottom"}},
+      "targets": [{"format": "time_series", "rawSql": "SELECT at AS time, EXTRACT(EPOCH FROM (now() - at)) AS \"age_seconds\" FROM audit_log WHERE kind = 'backup_push' ORDER BY at", "refId": "A"}],
+      "title": "Backup push age",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "postgres", "uid": "gideon-rows"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 8},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"format": "table", "rawSql": "SELECT at AS time, detail->>'result' AS result FROM audit_log WHERE kind = 'backup_drill' ORDER BY at DESC LIMIT 1", "refId": "A"}],
+      "title": "Last drill result",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "percent"}, "overrides": []},
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 15},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}},
+      "targets": [{"expr": "DCGM_FI_DEV_GPU_UTIL", "legendFormat": "{{gpu}}", "refId": "A"}],
+      "title": "GPU utilisation",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []},
+      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 15},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}},
+      "targets": [{"expr": "DCGM_FI_DEV_FB_USED", "legendFormat": "{{gpu}}", "refId": "A"}],
+      "title": "GPU memory",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 15},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}},
+      "targets": [{"expr": "node_load1", "legendFormat": "load 1m", "refId": "A"}],
+      "title": "Host load",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "percent"}, "overrides": []},
+      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 22},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}},
+      "targets": [{"expr": "100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)", "legendFormat": "memory used", "refId": "A"}],
+      "title": "Host memory",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": [{"matcher": {"id": "byRegexp", "options": "/ limit$/"}, "properties": [{"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [10, 10]}}]}]},
+      "gridPos": {"h": 7, "w": 12, "x": 12, "y": 22},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}},
+      "targets": [
+        {"expr": "sum by (name) (container_memory_working_set_bytes{name!=\"\"})", "legendFormat": "{{name}}", "refId": "A"},
+        {"expr": "sum by (name) (container_spec_memory_limit_bytes{name!=\"\"} > 0)", "legendFormat": "{{name}} limit", "refId": "B"}
+      ],
+      "title": "Container memory",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "postgres", "uid": "gideon-rows"},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars"}, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 7, "w": 16, "x": 0, "y": 29},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
+      "targets": [{"format": "time_series", "rawSql": "SELECT date_trunc('day', at) AS time, pattern_id AS metric, count(*) AS trips FROM guardrail_trips WHERE source = 'user' AND $__timeFilter(at) GROUP BY date_trunc('day', at), pattern_id ORDER BY time", "refId": "A"}],
+      "timeFrom": "30d",
+      "title": "Guardrail trips",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "postgres", "uid": "gideon-rows"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 29},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"format": "table", "rawSql": "SELECT EXTRACT(EPOCH FROM (now() - max(at))) AS age_seconds FROM guardrail_trips WHERE source = 'eval'", "refId": "A"}],
+      "title": "Last eval trip",
+      "type": "stat"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 41,
+  "tags": ["GIDEON", "overview"],
+  "templating": {"list": []},
+  "time": {"from": "now-6h", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "GIDEON Overview",
+  "uid": "gideon-overview",
+  "version": 1
+}

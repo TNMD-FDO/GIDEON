@@ -1,0 +1,14 @@
+[Unit]
+Description=Run the GIDEON backup and off-box push
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=$checkout
+ExecStart=/usr/bin/python3 -m gideon backup run
+ExecStart=/usr/bin/python3 -m gideon backup push
+TimeoutStartSec=21600
+StandardOutput=journal
+StandardError=journal

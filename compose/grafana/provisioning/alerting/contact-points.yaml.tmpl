@@ -1,0 +1,11 @@
+apiVersion: 1
+contactPoints:
+  - orgId: 1
+    name: page
+    receivers:
+      - uid: page-email
+        type: email
+        settings:
+          addresses: "$recipients"
+          singleEmail: true
+          subject: "[GIDEON $short_name] {{ .Status | toUpper }}: {{ .CommonLabels.alertname }}"

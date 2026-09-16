@@ -1,0 +1,17 @@
+modules:
+  http_2xx_ca:
+    prober: http
+    timeout: 5s
+    http:
+      method: GET
+      fail_if_not_ssl: true
+      headers:
+        Host: "gideon.exd.example.internal"
+      tls_config:
+        ca_file: /etc/gideon/ca.pem
+        server_name: "gideon.exd.example.internal"
+  http_2xx:
+    prober: http
+    timeout: 5s
+    http:
+      method: GET

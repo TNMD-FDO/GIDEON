@@ -1,0 +1,27 @@
+office:
+  name: Office of the Federal Public Defender, Test District
+  short_name: TEST-FDO
+  timezone: America/Chicago
+
+hostname: gideon.test
+lan_cidrs: [192.0.2.0/24]
+jurisdiction: {circuit: ca6, districts: [tnmd], states: [tenn]}
+
+auth:
+  ldap:
+    host: ad.test
+    users_group: CN=GIDEON-Users,OU=Security Groups,DC=ad,DC=test
+    admins_group: CN=GIDEON-Admins,OU=Security Groups,DC=ad,DC=test
+    mirror_groups:
+      - CN=GIDEON-ReadOnly,OU=Security Groups,DC=ad,DC=test
+
+backup:
+  target:
+    host: nas.test
+    path: /volume1/backup
+
+alerts:
+  smtp:
+    host: smtp.test
+    from: gideon@ad.test
+  recipients: [csa@ad.test]

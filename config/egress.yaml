@@ -1,0 +1,105 @@
+# GIDEON egress allowlist.  Each host has one stable probe URL so an office's
+# firewall team can allow exactly the destinations required by each run.
+# An entry's optional `expect` lists HTTP statuses that count as the host
+# answering, beyond the global rule (2xx/3xx, 401, 404) — e.g. signed-URL
+# CDNs answer 403 to every unsigned probe.
+version: 7
+
+groups:
+  host-provisioning:
+    - host: archive.ubuntu.com
+      probe_url: https://archive.ubuntu.com/ubuntu/
+    - host: security.ubuntu.com
+      probe_url: https://security.ubuntu.com/ubuntu/
+    - host: developer.download.nvidia.com
+      probe_url: https://developer.download.nvidia.com/compute/cuda/repos/
+    - host: download.docker.com
+      probe_url: https://download.docker.com/linux/ubuntu/
+    - host: github.com
+      probe_url: https://github.com/
+    # Release-asset downloads (the pinned gh-runner tarball) redirect here.
+    - host: objects.githubusercontent.com
+      probe_url: https://objects.githubusercontent.com/
+    # Docker Hub's real endpoints for the pinned registry image ("docker.io"
+    # in ticket 02's recorded addition): the v2 API and its token service.
+    - host: registry-1.docker.io
+      probe_url: https://registry-1.docker.io/v2/
+    - host: auth.docker.io
+      probe_url: https://auth.docker.io/token
+    # Docker Hub redirects layer downloads to its CDN (live-verified 2026-09-01,
+    # answers 403 to unsigned requests); provision's docker pull and the
+    # registry mirror both traverse it.
+    - host: production.cloudfront.docker.com
+      probe_url: https://production.cloudfront.docker.com/
+      expect: [403]
+    # NVIDIA's container registry: the DCGM exporter (images.lock, slice-0
+    # ticket 07) is published there and nowhere else. The v2 probe answers 401
+    # unauthenticated, which the global rule counts. Layer pulls redirect
+    # (307) to the signed-URL blob host below (live-verified 2026-09-03),
+    # which answers 403 to every unsigned request.
+    - host: nvcr.io
+      probe_url: https://nvcr.io/v2/
+    - host: layers.nvcr.io
+      probe_url: https://layers.nvcr.io/
+      expect: [403]
+    - host: cloud-images.ubuntu.com
+      probe_url: https://cloud-images.ubuntu.com/
+
+  install-upgrade:
+    - host: huggingface.co
+      probe_url: https://huggingface.co/
+    # Hugging Face download hosts, live-verified 2026-09-01 (the spec's
+    # "huggingface.co + CDN"; cdn-lfs.huggingface.co is NXDOMAIN — retired).
+    # These three answer 403 to unsigned requests. The real pull on the box
+    # (slice-1 ticket 03, 2026-09-04) was redirected to us.aws.cdn.hf.co below,
+    # which answers 200; `models pull` prints an `uncovered host` line for any
+    # host a fetch traverses that this group lacks.
+    - host: us.aws.cdn.hf.co
+      probe_url: https://us.aws.cdn.hf.co/
+    - host: cdn-lfs.hf.co
+      probe_url: https://cdn-lfs.hf.co/
+      expect: [403]
+    - host: cdn-lfs-us-1.hf.co
+      probe_url: https://cdn-lfs-us-1.hf.co/
+      expect: [403]
+    - host: cas-bridge.xethub.hf.co
+      probe_url: https://cas-bridge.xethub.hf.co/
+      expect: [403]
+    # GHCR answers 401 to its unauthenticated v2 probe; the global rule counts
+    # that response, so no per-entry expect is needed.
+    - host: ghcr.io
+      probe_url: https://ghcr.io/v2/
+    # GHCR's blob host answers 400 to an unsigned request (live-verified
+    # 2026-09-01); it needs an explicit accepted status.
+    - host: pkg-containers.githubusercontent.com
+      probe_url: https://pkg-containers.githubusercontent.com/
+      expect: [400]
+
+  corpus:
+    - host: com-courtlistener-storage.s3-us-west-2.amazonaws.com
+      probe_url: https://com-courtlistener-storage.s3-us-west-2.amazonaws.com/list.html?prefix=bulk-data/
+    - host: uscode.house.gov
+      probe_url: https://uscode.house.gov/
+    - host: www.ussc.gov
+      probe_url: https://www.ussc.gov/
+    - host: www.uscourts.gov
+      probe_url: https://www.uscourts.gov/
+    - host: www.govinfo.gov
+      probe_url: https://www.govinfo.gov/
+    - host: www.ecfr.gov
+      probe_url: https://www.ecfr.gov/
+    - host: www.congress.gov
+      probe_url: https://www.congress.gov/
+    - host: www.supremecourt.gov
+      probe_url: https://www.supremecourt.gov/
+
+  # The box that builds GIDEON's images (spec §2.4: "GIDEON-built and upstream
+  # stock alike") — TNMD's pre-1.0, the release pipeline at the public flip.
+  # Probed by `python3 -m tools.imagebuild` before a build, never by preflight:
+  # an office never builds. The base image needs no egress (it comes from the
+  # release registry); these serve apt inside the build.
+  image-build:
+    - host: apt.postgresql.org
+      probe_url: https://apt.postgresql.org/pub/repos/apt/
+    - host: deb.debian.org
+      probe_url: https://deb.debian.org/debian/

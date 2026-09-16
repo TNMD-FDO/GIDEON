@@ -1,0 +1,20 @@
+{
+  "commands": [
+    {"argv": ["uname", "-m"], "returncode": 0, "stdout": "x86_64\n"},
+    {"argv": ["getent", "passwd", "gideon"], "returncode": 2, "stderr": "not found\n"},
+    {"argv": ["getent", "group", "sudo"], "returncode": 0, "stdout": "sudo:x:27:fpdadmin\n"},
+    {"argv": ["getent", "passwd", "fpdadmin"], "returncode": 0, "stdout": "fpdadmin:x:1000:27::/home/fpdadmin:/bin/bash\n"},
+    {"argv": ["pvs", "--reportformat", "json", "-o", "pv_name,vg_name"], "returncode": 0, "stdout": "{\"report\":[{\"pv\":[{\"pv_name\":\"/dev/sdb\",\"vg_name\":\"vg_data\"}]}]}"},
+    {"argv": ["vgs", "--reportformat", "json", "--units", "b", "-o", "vg_name,vg_size"], "returncode": 0, "stdout": "{\"report\":[{\"vg\":[{\"vg_name\":\"vg_data\",\"vg_size\":\"8730000000000B\"}]}]}"},
+    {"argv": ["lvs", "--reportformat", "json", "-o", "lv_name,vg_name,lv_path"], "returncode": 0, "stdout": "{\"report\":[{\"lv\":[{\"lv_name\":\"data\",\"vg_name\":\"vg_data\",\"lv_path\":\"/dev/vg_data/data\"}]}]}"},
+    {"argv": ["blkid", "-o", "value", "-s", "TYPE", "/dev/vg_data/data"], "returncode": 0, "stdout": "xfs\n"},
+    {"argv": ["blkid", "-o", "value", "-s", "UUID", "/dev/vg_data/data"], "returncode": 0, "stdout": "baseline-data\n"},
+    {"argv": ["findmnt", "-rn", "-o", "TARGET", "--mountpoint", "/data"], "returncode": 0, "stdout": "/data\n"},
+    {"argv": ["dpkg-query", "-W", "-f=${Status} ${Version}\n", "chrony"], "returncode": 1, "stderr": "not installed\n"},
+    {"argv": ["timedatectl", "show", "-p", "Timezone", "--value"], "returncode": 0, "stdout": "Etc/UTC\n"},
+    {"argv": ["dpkg-query", "-W", "-f=${Status} ${Version}\n", "unattended-upgrades"], "returncode": 0, "stdout": "install ok installed 2.12\n"},
+    {"argv": ["ufw", "status", "numbered"], "returncode": 0, "stdout": "Status: inactive\n"},
+    {"argv": ["dpkg-query", "-W", "-f=${Status} ${Version}\n", "qemu-system-x86"], "returncode": 1, "stderr": "not installed\n"},
+    {"argv": ["dpkg-query", "-W", "-f=${Status} ${Version}\n", "libvirt-daemon-system"], "returncode": 1, "stderr": "not installed\n"}
+  ]
+}

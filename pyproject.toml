@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gideon"
+description = "A fully local legal AI system for federal defender offices"
+license = "CC0-1.0"
+# 3.12 = the Ubuntu 24.04 fallback (spec §1.2); the box runs 26.04's 3.14.
+requires-python = ">=3.12"
+dynamic = ["version"]
+
+[tool.setuptools]
+packages = ["gideon", "gideon.host"]
+
+[tool.setuptools.dynamic]
+# The version lives in exactly one place; TRIP-init and TRIP-3 bump it there.
+version = {attr = "gideon.__version__"}
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q --strict-markers"
+markers = [
+    "slow: a case past ten seconds; skipped by python3 -m tools.gate's default, run by --all and by CI",
+]
+
+[tool.ruff]
+target-version = "py312"
+# Ticket 01's pre-wipe harvest tooling predates the lint config; frozen as-is.
+extend-exclude = ["eval/seed"]
+
+[tool.ruff.lint]
+# The set the code names (workflow ticket 12): every noqa in the tree suppresses a
+# rule this line enables, and RUF100 reports any that does not. TRY003 is excluded
+# because a refusal here deliberately carries a long message ending in its fix; PTH
+# (66 findings at v0.1.22) is a migration and is deferred, not omitted.
+select = ["E4", "E7", "E9", "F", "I", "UP", "B", "C4", "SIM", "RUF100", "BLE", "DTZ"]
+
+[tool.ruff.lint.per-file-ignores]
+# The stdlib-only contract modules put sys.path.insert before their imports by design.
+"tests/contract/*.py" = ["E402"]
+# On-box proof records, frozen as they ran.
+".scratch/**/*.py" = ["E402", "B905"]
+# Applied on the box and embedded whole in the render fixtures, so its findings ride
+# a product cycle whose plan carries a Window, never a tooling commit (ticket 12).
+"compose/open-webui/functions/arithmetic_guardrail.py" = ["B905", "SIM105", "RUF100"]
+
+[tool.mypy]
+python_version = "3.12"
+check_untyped_defs = true
+warn_unused_ignores = true

@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a vulnerability
+    url: https://github.com/TNMD-FDO/GIDEON/security/policy
+    about: A vulnerability is never a public issue. SECURITY.md states the private route.

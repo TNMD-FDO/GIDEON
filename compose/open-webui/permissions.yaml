@@ -1,0 +1,88 @@
+# The complete v0.11.0 permissions tree. Each leaf records the source of its
+# desired value so changes remain reviewable as an explicit product decision.
+workspace:
+  models: false # §4.2 value: model access is not granted by default
+  # §21's 0.x must-not: no matter knowledge bases before Ingestion GA. §4.2's value
+  # (true) returns at Ingestion GA (v0.7.0 as re-locked, §22.1). The permission binds
+  # every user-role account; the frontend's admins bypass it by design (§4.1).
+  # Slice-1 ticket 17.
+  knowledge: false # §21 0.x must-not until Ingestion GA; §4.2 value: true
+  prompts: true # §4.2 value
+  tools: false # §4.2 value
+  skills: false # §4.2 value
+  models_import: false # upstream default
+  models_export: false # upstream default
+  prompts_import: false # upstream default
+  prompts_export: false # upstream default
+  tools_import: false # upstream default
+  tools_export: false # upstream default
+  skills_import: false # upstream default
+  skills_export: false # upstream default
+
+sharing:
+  models: false # upstream default
+  public_models: false # plan rule: public sharing off across the board
+  knowledge: false # upstream default
+  public_knowledge: false # plan rule: public sharing off across the board
+  prompts: true # §4.2 value
+  public_prompts: false # plan rule: public sharing off across the board
+  tools: false # upstream default
+  public_tools: false # plan rule: public sharing off across the board
+  skills: false # upstream default
+  public_skills: false # plan rule: public sharing off across the board
+  notes: false # upstream default
+  public_notes: false # plan rule: public sharing off across the board
+  folders: false # upstream default
+  public_chats: false # plan rule: public sharing off across the board
+  public_calendars: false # plan rule: public sharing off across the board
+
+access_grants:
+  allow_users: true # upstream default
+  allow_groups: true # upstream default
+
+chat:
+  controls: false # §4.2 value
+  valves: false # plan rule: disabled with chat controls
+  system_prompt: false # plan rule: disabled with chat controls
+  params: false # plan rule: disabled with chat controls
+  file_upload: true # §4.2 value
+  # "Attach Webpage" is a fetch of a user-typed URL off the box outside §15's
+  # warned search egress and an upload by another door ([06] item 7), and a
+  # failed YouTube fetch logs the URL ([22]'s content-free logs). The pinned
+  # frontend gates the item and the chat page's ?load-url= and ?youtube=
+  # parameters on this leaf alone; the route stays open below the UI to a
+  # signed-in session's direct call, the accepted class of gate; the frontend's
+  # admins bypass it by design (§4.1). Slice-1 ticket 28; exempt: policy toggles.
+  web_upload: false # ticket 28's ruling; upstream default: true
+  delete: true # §4.2 value
+  delete_message: true # upstream default
+  continue_response: true # upstream default
+  regenerate_response: true # upstream default
+  rate_response: true # upstream default
+  edit: true # upstream default
+  share: false # plan rule: no chat share links
+  export: true # §4.2 value
+  import: true # upstream default
+  stt: true # upstream default
+  tts: true # upstream default
+  call: true # upstream default
+  multiple_models: false # §4.2 value
+  temporary: true # upstream default
+  temporary_enforced: false # upstream default
+
+features:
+  api_keys: false # §4.2 value
+  notes: true # upstream default
+  channels: true # upstream default
+  folders: true # upstream default
+  direct_tool_servers: false # §4.2 value
+  web_search: true # §4.2 value
+  image_generation: false # §4.2 value
+  code_interpreter: false # §4.2 value
+  memories: false # plan rule: Memory off
+  calendar: true # upstream default
+  automations: false # upstream default
+  webhooks: false # upstream default
+
+settings:
+  interface: true # upstream default

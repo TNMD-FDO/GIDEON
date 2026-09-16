@@ -1,0 +1,11 @@
+office:
+  name: Example Office
+  short_nam: EXAMPLE
+  timezone: Not/AZone
+hostname: gideon.example
+lan_cidrs: []
+jurisdiction: {circuit: ca6, districts: [tnmd], states: []}
+auth: {ldap: {host: example.org}}
+backup: {target: {host: nas.example, path: /backup}}
+alerts: {smtp: {host: smtp.example, from: gideon@example.org}, recipients: [csa@example.org]}
+web: {search: bad}

@@ -1,0 +1,15 @@
+# The development and CI toolchain — never the product's. ci.yml's checks job and a
+# fresh .venv (docs/4-unit-tests/TESTING.md) install this file, and
+# tests/test_toolchain_pins.py holds the PyYAML and Playwright copies to it. The product never
+# installs from PyPI: the bare-host path is the standard library and the box's
+# python3-yaml (spec §1.5). Exact pins only; moved by a person, never the pin watch.
+ruff==0.16.5
+mypy==2.3.1
+pytest==9.1.1
+# PyYAML stands in for the box's python3-yaml (the bare-host path's one non-stdlib
+# import). pin-watch.yml pins it alone for the watch; the test holds that copy equal.
+PyYAML==6.0.3
+# Playwright is the turn harness's browser mode, dev venv and CI only: the package
+# alone so mypy sees its types; no browser is downloaded here. Its version is also
+# tools/turns/chromium.py's PLAYWRIGHT_VERSION (the box-side check); they move together.
+playwright==1.62.0

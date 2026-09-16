@@ -1,0 +1,461 @@
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: rows
+    folder: GIDEON
+    interval: 1m
+    rules:
+      - uid: gideon-backup-set-overdue
+        title: Backup set overdue
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 60
+              to: 0
+            datasourceUid: gideon-rows
+            model:
+              datasource:
+                type: postgres
+                uid: gideon-rows
+              format: table
+              rawQuery: true
+              rawSql: |
+                SELECT EXTRACT(EPOCH FROM (now() - at)) AS value
+                FROM audit_log
+                WHERE kind = 'backup_run' AND detail->>'phase' = 'applied'
+                ORDER BY at DESC LIMIT 1
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              reducer: last
+              refId: B
+              type: reduce
+          - refId: C
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params: [93600]
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params: [B, 5m, now]
+                  reducer:
+                    params: []
+                    type: avg
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: B
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: threshold
+        for: 0s
+        noDataState: Alerting
+        execErrState: Alerting
+        annotations:
+          summary: The newest applied backup set is overdue
+          runbook: docs/runbooks/observability.md §4
+        labels:
+          class: page
+        isPaused: false
+      - uid: gideon-push-overdue
+        title: Push overdue
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 60, to: 0}
+            datasourceUid: gideon-rows
+            model:
+              datasource: {type: postgres, uid: gideon-rows}
+              format: table
+              rawQuery: true
+              rawSql: |
+                SELECT EXTRACT(EPOCH FROM (now() - at)) AS value
+                FROM audit_log
+                WHERE kind = 'backup_push'
+                ORDER BY at DESC LIMIT 1
+              refId: A
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model: {datasource: {type: __expr__, uid: __expr__}, expression: A, reducer: last, refId: B, type: reduce}
+          - refId: C
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - {evaluator: {params: [93600], type: gt}, operator: {type: and}, query: {params: [B, 5m, now]}, reducer: {params: [], type: avg}, type: query}
+              datasource: {type: __expr__, uid: __expr__}
+              expression: B
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: threshold
+        for: 0s
+        noDataState: Alerting
+        execErrState: Alerting
+        annotations: {summary: The newest backup push is overdue, runbook: docs/runbooks/observability.md §4}
+        labels: {class: page}
+        isPaused: false
+      - uid: gideon-drill-overdue
+        title: Drill overdue
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 60, to: 0}
+            datasourceUid: gideon-rows
+            model:
+              datasource: {type: postgres, uid: gideon-rows}
+              format: table
+              rawQuery: true
+              rawSql: |
+                SELECT EXTRACT(EPOCH FROM (now() - at)) AS value
+                FROM audit_log
+                WHERE kind = 'backup_drill' AND detail->>'result' = 'pass'
+                ORDER BY at DESC LIMIT 1
+              refId: A
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model: {datasource: {type: __expr__, uid: __expr__}, expression: A, reducer: last, refId: B, type: reduce}
+          - refId: C
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - {evaluator: {params: [$drill_threshold], type: gt}, operator: {type: and}, query: {params: [B, 5m, now]}, reducer: {params: [], type: avg}, type: query}
+              datasource: {type: __expr__, uid: __expr__}
+              expression: B
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: threshold
+        for: 0s
+        noDataState: Alerting
+        execErrState: Alerting
+        annotations: {summary: The newest passing backup drill is overdue, runbook: docs/runbooks/observability.md §4}
+        labels: {class: page}
+        isPaused: false
+      - uid: gideon-drill-failed
+        title: Drill failed
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 60, to: 0}
+            datasourceUid: gideon-rows
+            model:
+              datasource: {type: postgres, uid: gideon-rows}
+              format: table
+              rawQuery: true
+              rawSql: |
+                SELECT CASE WHEN detail->>'result' <> 'pass' THEN 1 ELSE 0 END AS value
+                FROM audit_log
+                WHERE kind = 'backup_drill'
+                ORDER BY at DESC LIMIT 1
+              refId: A
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model: {datasource: {type: __expr__, uid: __expr__}, expression: A, reducer: last, refId: B, type: reduce}
+          - refId: C
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - {evaluator: {params: [0], type: gt}, operator: {type: and}, query: {params: [B, 5m, now]}, reducer: {params: [], type: avg}, type: query}
+              datasource: {type: __expr__, uid: __expr__}
+              expression: B
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: threshold
+        for: 0s
+        noDataState: Alerting
+        execErrState: Alerting
+        annotations: {summary: The newest backup drill failed, runbook: docs/runbooks/observability.md §4}
+        labels: {class: page}
+        isPaused: false
+  - orgId: 1
+    name: metrics
+    folder: GIDEON
+    interval: 1m
+    rules:
+      - uid: gideon-backup-unit-failed
+        title: Backup unit failed
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: {from: 60, to: 0}
+            datasourceUid: prometheus
+            model: {datasource: {type: prometheus, uid: prometheus}, expr: 'max(node_systemd_unit_state{name=~"gideon-backup.service|gideon-backup-drill.service|gideon-backup-verify.service",state="failed"})', instant: true, intervalMs: 1000, maxDataPoints: 43200, refId: A}
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - {evaluator: {params: [0], type: gt}, operator: {type: and}, query: {params: [A, 5m, now]}, reducer: {params: [], type: avg}, type: query}
+              datasource: {type: __expr__, uid: __expr__}
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+              type: threshold
+        for: 0s
+        noDataState: OK
+        execErrState: OK
+        annotations: {summary: A GIDEON backup unit is failed, runbook: docs/runbooks/observability.md §4}
+        labels: {class: page}
+        isPaused: false
+      - uid: gideon-target-down
+        title: Target down
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: {from: 60, to: 0}
+            datasourceUid: prometheus
+            model: {datasource: {type: prometheus, uid: prometheus}, expr: 'min by (job, instance) (up{job!="$engine_job"}) == bool 0', instant: true, intervalMs: 1000, maxDataPoints: 43200, refId: A}
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - {evaluator: {params: [0], type: gt}, operator: {type: and}, query: {params: [A, 5m, now]}, reducer: {params: [], type: avg}, type: query}
+              datasource: {type: __expr__, uid: __expr__}
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+              type: threshold
+        for: 10m
+        noDataState: Alerting
+        execErrState: Alerting
+        annotations: {summary: A Prometheus target is down, runbook: docs/runbooks/observability.md §4}
+        labels: {class: page}
+        isPaused: false
+      - uid: gideon-postgres-down
+        title: Postgres down
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: {from: 60, to: 0}
+            datasourceUid: prometheus
+            model: {datasource: {type: prometheus, uid: prometheus}, expr: 'pg_up == bool 0', instant: true, intervalMs: 1000, maxDataPoints: 43200, refId: A}
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - {evaluator: {params: [0], type: gt}, operator: {type: and}, query: {params: [A, 5m, now]}, reducer: {params: [], type: avg}, type: query}
+              datasource: {type: __expr__, uid: __expr__}
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+              type: threshold
+        for: 10m
+        noDataState: OK
+        execErrState: OK
+        annotations: {summary: Postgres is down, runbook: docs/runbooks/observability.md §4}
+        labels: {class: page}
+        isPaused: false
+      - uid: gideon-ingress-probe-failing
+        title: Ingress probe failing
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: {from: 60, to: 0}
+            datasourceUid: prometheus
+            model: {datasource: {type: prometheus, uid: prometheus}, expr: 'probe_success{job="ingress"} == bool 0', instant: true, intervalMs: 1000, maxDataPoints: 43200, refId: A}
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - {evaluator: {params: [0], type: gt}, operator: {type: and}, query: {params: [A, 5m, now]}, reducer: {params: [], type: avg}, type: query}
+              datasource: {type: __expr__, uid: __expr__}
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+              type: threshold
+        for: 10m
+        noDataState: OK
+        execErrState: OK
+        annotations: {summary: The ingress probe is failing, runbook: docs/runbooks/observability.md §4}
+        labels: {class: page}
+        isPaused: false
+      - uid: gideon-frontend-probe-failing
+        title: Frontend probe failing
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: {from: 60, to: 0}
+            datasourceUid: prometheus
+            model: {datasource: {type: prometheus, uid: prometheus}, expr: 'probe_success{job="frontend"} == bool 0', instant: true, intervalMs: 1000, maxDataPoints: 43200, refId: A}
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - {evaluator: {params: [0], type: gt}, operator: {type: and}, query: {params: [A, 5m, now]}, reducer: {params: [], type: avg}, type: query}
+              datasource: {type: __expr__, uid: __expr__}
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+              type: threshold
+        for: 10m
+        noDataState: OK
+        execErrState: OK
+        annotations: {summary: The frontend probe is failing, runbook: docs/runbooks/observability.md §4}
+        labels: {class: page}
+        isPaused: false
+$host_unit_rules
+      - uid: gideon-systemd-collector-failed
+        title: Systemd collector failed
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: {from: 60, to: 0}
+            datasourceUid: prometheus
+            model: {datasource: {type: prometheus, uid: prometheus}, expr: 'node_scrape_collector_success{collector="systemd"} == bool 0', instant: true, intervalMs: 1000, maxDataPoints: 43200, refId: A}
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - {evaluator: {params: [0], type: gt}, operator: {type: and}, query: {params: [A, 5m, now]}, reducer: {params: [], type: avg}, type: query}
+              datasource: {type: __expr__, uid: __expr__}
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+              type: threshold
+        for: 10m
+        noDataState: OK
+        execErrState: OK
+        annotations: {summary: The node exporter cannot read systemd, so the unit rules are blind, runbook: docs/runbooks/observability.md §4}
+        labels: {class: page}
+        isPaused: false
+      - uid: gideon-data-volume-low
+        title: Data volume low
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: {from: 60, to: 0}
+            datasourceUid: prometheus
+            model: {datasource: {type: prometheus, uid: prometheus}, expr: '100 * node_filesystem_avail_bytes{mountpoint="/data"} / node_filesystem_size_bytes{mountpoint="/data"}', instant: true, intervalMs: 1000, maxDataPoints: 43200, refId: A}
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - {evaluator: {params: [15], type: lt}, operator: {type: and}, query: {params: [A, 5m, now]}, reducer: {params: [], type: avg}, type: query}
+              datasource: {type: __expr__, uid: __expr__}
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+              type: threshold
+        for: 0s
+        noDataState: OK
+        execErrState: OK
+        annotations: {summary: The data volume has less than 15 percent free, runbook: docs/runbooks/observability.md §4}
+        labels: {class: page}
+        isPaused: false
+      - uid: gideon-host-filesystem-low
+        title: Host filesystem low
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: {from: 60, to: 0}
+            datasourceUid: prometheus
+            model: {datasource: {type: prometheus, uid: prometheus}, expr: '100 * node_filesystem_avail_bytes{mountpoint=~"/|/var/lib/docker"} / node_filesystem_size_bytes{mountpoint=~"/|/var/lib/docker"}', instant: true, intervalMs: 1000, maxDataPoints: 43200, refId: A}
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - {evaluator: {params: [15], type: lt}, operator: {type: and}, query: {params: [A, 5m, now]}, reducer: {params: [], type: avg}, type: query}
+              datasource: {type: __expr__, uid: __expr__}
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+              type: threshold
+        for: 0s
+        noDataState: OK
+        execErrState: OK
+        annotations: {summary: 'The filesystem {{ $$labels.mountpoint }} has less than 15 percent free', runbook: docs/runbooks/observability.md §4}
+        labels: {class: page}
+        isPaused: false
+      - uid: gideon-tls-expiring
+        title: TLS certificate expiring
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: {from: 60, to: 0}
+            datasourceUid: prometheus
+            model: {datasource: {type: prometheus, uid: prometheus}, expr: 'probe_ssl_earliest_cert_expiry{job="ingress"} - time()', instant: true, intervalMs: 1000, maxDataPoints: 43200, refId: A}
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - {evaluator: {params: [1209600], type: lt}, operator: {type: and}, query: {params: [A, 5m, now]}, reducer: {params: [], type: avg}, type: query}
+              datasource: {type: __expr__, uid: __expr__}
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+              type: threshold
+        for: 0s
+        noDataState: OK
+        execErrState: OK
+        annotations: {summary: The ingress certificate expires within 14 days, runbook: docs/runbooks/observability.md §4}
+        labels: {class: page}
+        isPaused: false
+$search_rules
+$gpu_rules
+      - uid: gideon-heartbeat
+        title: Alerting heartbeat
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: {from: 60, to: 0}
+            datasourceUid: prometheus
+            model: {datasource: {type: prometheus, uid: prometheus}, expr: 'vector(1) > 0', instant: true, intervalMs: 1000, maxDataPoints: 43200, refId: A}
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - {evaluator: {params: [0], type: gt}, operator: {type: and}, query: {params: [A, 5m, now]}, reducer: {params: [], type: avg}, type: query}
+              datasource: {type: __expr__, uid: __expr__}
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+              type: threshold
+        for: 0s
+        noDataState: OK
+        execErrState: OK
+        annotations: {summary: The Grafana alerting channel heartbeat, runbook: docs/runbooks/observability.md §4}
+        labels: {class: page, heartbeat: 'true'}
+        isPaused: false

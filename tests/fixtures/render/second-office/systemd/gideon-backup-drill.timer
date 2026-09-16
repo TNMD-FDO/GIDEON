@@ -1,0 +1,9 @@
+[Unit]
+Description=GIDEON backup restore drill
+
+[Timer]
+OnCalendar=Sat *-*-1..7,15..21 04:00:00 America/Denver
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,485 @@
+# Rendered by gideon render — never hand-edit (spec §3.5). Re-run gideon apply after editing /etc/gideon/site.yaml.
+name: "gideon"
+services:
+  caddy:
+    image: "ghcr.io/tnmd-fdo/caddy@sha256:df7f1c2fb114453b951de51a98efc010db1655a92c2e86be6706714e2417a78d"
+    restart: "unless-stopped"
+    environment:
+      TZ: "America/Chicago"
+    ports:
+      - "0.0.0.0:443:443"
+    volumes:
+      - "/etc/gideon/rendered/caddy/Caddyfile:/etc/caddy/Caddyfile:ro"
+      - "/etc/gideon/tls:/etc/gideon/tls:ro"
+      - "caddy_data:/data"
+      - "caddy_config:/config"
+    secrets:
+      - "tls_key"
+    networks:
+      - "gideon"
+    mem_limit: 1000000000
+  prometheus:
+    image: "ghcr.io/tnmd-fdo/prometheus@sha256:5ce7540c3c00ef4ab0c9d2c995c6a5b9c421f44b4a115d97a2c7af3b1c21cbb0"
+    restart: "unless-stopped"
+    environment:
+      TZ: "America/Chicago"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/data/observability/prometheus"
+      - "--storage.tsdb.retention.time=1y"
+      - "--web.listen-address=0.0.0.0:9090"
+    volumes:
+      - "/etc/gideon/rendered/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro"
+      - "/data/observability/prometheus:/data/observability/prometheus"
+    ports:
+      - "127.0.0.1:9090:9090"
+    networks:
+      - "gideon"
+    mem_limit: 2000000000
+  node-exporter:
+    image: "ghcr.io/tnmd-fdo/node-exporter@sha256:1b4e4438faca4dd7e001dd445d161a4a2091b0fededa84093b3a8dfeae1f1be0"
+    restart: "unless-stopped"
+    environment:
+      TZ: "America/Chicago"
+    pid: "host"
+    command:
+      - "--path.rootfs=/host"
+      - "--collector.systemd"
+      - "--collector.systemd.unit-include=^(gideon-registry|actions\\.runner\\..+|gideon-.*)\\.service$"
+    volumes:
+      - "/:/host:ro,rslave"
+      - "/run/dbus/system_bus_socket:/var/run/dbus/system_bus_socket:ro"
+    security_opt:
+      - "apparmor=unconfined"
+    networks:
+      - "gideon"
+    mem_limit: 1000000000
+  grafana:
+    image: "ghcr.io/tnmd-fdo/grafana@sha256:5dad0df181cb644a14e13617b913b261a54f7d4fd4510721dba420929f35bea2"
+    restart: "unless-stopped"
+    environment:
+      GF_SERVER_ROOT_URL: "https://gideon.example.org/grafana/"
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      GF_AUTH_LDAP_ENABLED: "true"
+      GF_AUTH_LDAP_CONFIG_FILE: "/etc/grafana/ldap.toml"
+      GF_AUTH_LDAP_ALLOW_SIGN_UP: "true"
+      GF_SECURITY_ADMIN_USER: "grafana-admin"
+      GF_SECURITY_ADMIN_PASSWORD__FILE: "/run/secrets/grafana_admin_password"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SECURITY_COOKIE_SECURE: "true"
+      GF_DATE_FORMATS_DEFAULT_TIMEZONE: "America/Chicago"
+      GF_SMTP_ENABLED: "true"
+      GF_SMTP_HOST: "smtp.example.org:25"
+      GF_SMTP_FROM_ADDRESS: "gideon@example.org"
+      GF_SMTP_FROM_NAME: "GIDEON (TNMD-FDO)"
+      GF_SMTP_STARTTLS_POLICY: "OpportunisticStartTLS"
+      GF_INSTANCE_NAME: "TNMD-FDO"
+      GF_METRICS_ENABLED: "true"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      TZ: "America/Chicago"
+    group_add:
+      - "4242"
+    depends_on:
+      postgres:
+        condition: "service_healthy"
+    volumes:
+      - "/data/observability/grafana:/var/lib/grafana"
+      - "/etc/gideon/rendered/grafana/provisioning:/etc/grafana/provisioning:ro"
+      - "/etc/gideon/rendered/grafana/dashboards:/etc/grafana/dashboards:ro"
+      - "/etc/gideon/rendered/grafana/ldap.toml:/etc/grafana/ldap.toml:ro"
+      - "/etc/gideon/ca.pem:/etc/gideon/ca.pem:ro"
+      - "/etc/gideon/ca.pem:/etc/ssl/certs/gideon-ca.pem:ro"
+    secrets:
+      - "grafana_admin_password"
+      - "ldap_bind_password"
+      - "postgres_gideon_ro_metrics_password"
+    networks:
+      - "gideon"
+    mem_limit: 3000000000
+  postgres:
+    image: "ghcr.io/tnmd-fdo/postgres@sha256:8f7b5321069a4d783752e99d0350eb448ec67406bb9b691ab30c622dab017ea3"
+    restart: "unless-stopped"
+    environment:
+      POSTGRES_PASSWORD_FILE: "/run/secrets/postgres_superuser_password"
+      PGDATA: "/var/lib/postgresql/18/docker"
+      TZ: "America/Chicago"
+    command:
+      - "postgres"
+      - "-c"
+      - "archive_mode=on"
+      - "-c"
+      - "archive_command=pgbackrest --stanza=gideon archive-push %p"
+      - "-c"
+      - "archive_timeout=300"
+    volumes:
+      - "/data/fast/postgres:/var/lib/postgresql"
+      - "/data/backup-staging/pgbackrest:/data/backup-staging/pgbackrest"
+      - "/etc/gideon/rendered/postgres/pgbackrest.conf:/etc/pgbackrest.conf:ro"
+    secrets:
+      - "postgres_superuser_password"
+    healthcheck:
+      test:
+        - "CMD"
+        - "pg_isready"
+        - "-U"
+        - "postgres"
+        - "-h"
+        - "127.0.0.1"
+      interval: "10s"
+      timeout: "5s"
+      retries: 12
+      start_period: "30s"
+    networks:
+      - "gideon"
+    mem_limit: 20000000000
+  open-webui:
+    image: "ghcr.io/tnmd-fdo/open-webui@sha256:751b617714b91e4cfd0186a509c72480c858e012976103b09a30dad053c36175"
+    restart: "unless-stopped"
+    depends_on:
+      postgres:
+        condition: "service_healthy"
+    env_file:
+      - path: "/etc/gideon/rendered/open-webui/env"
+        format: "raw"
+    environment:
+      WEBUI_NAME: "GIDEON"
+      WEBUI_URL: "https://gideon.example.org"
+      ENABLE_PERSISTENT_CONFIG: "false"
+      ENABLE_SIGNUP: "false"
+      ENABLE_LOGIN_FORM: "true"
+      DEFAULT_USER_ROLE: "user"
+      WEBUI_ADMIN_EMAIL: "gideon-admin@gideon.invalid"
+      WEBUI_ADMIN_NAME: "gideon-admin"
+      WEBUI_SECRET_KEY_FILE: "/run/secrets/webui_secret_key"
+      JWT_EXPIRES_IN: "12h"
+      WEBUI_SESSION_COOKIE_SECURE: "true"
+      WEBUI_SESSION_COOKIE_SAME_SITE: "strict"
+      GLOBAL_LOG_LEVEL: "INFO"
+      AUDIT_LOG_LEVEL: "METADATA"
+      AUDIT_LOGS_FILE_PATH: "/app/backend/data/audit.log"
+      ENABLE_AUDIT_STDOUT: "false"
+      AUDIT_EXCLUDED_PATHS: "/chats,/chat,/folders"
+      ENABLE_AUDIT_GET_REQUESTS: "false"
+      AUDIT_UVICORN_LOGGER_NAMES: "uvicorn.error"
+      ENABLE_OTEL: "false"
+      ENABLE_OTEL_TRACES: "false"
+      ENABLE_OTEL_METRICS: "false"
+      ENABLE_OTEL_LOGS: "false"
+      ENABLE_QUERIES_CACHE: "false"
+      LOGURU_DIAGNOSE: "false"
+      ENABLE_ADMIN_CHAT_ACCESS: "true"
+      BYPASS_ADMIN_ACCESS_CONTROL: "true"
+      ENABLE_API_KEYS: "true"
+      ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS: "true"
+      API_KEYS_ALLOWED_ENDPOINTS: "/api/v1/functions,/api/v1/models,/api/v1/groups,/api/v1/users,/api/v1/knowledge,/api/v1/auths/add,/api/chat/completions,/api/models"
+      BYPASS_EMBEDDING_AND_RETRIEVAL: "true"
+      BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL: "true"
+      STORAGE_PROVIDER: "local"
+      ENABLE_OLLAMA_API: "false"
+      ENABLE_OPENAI_API: "true"
+      OPENAI_API_BASE_URLS: "http://gideon-generator:8000/v1"
+      TASK_MODEL_EXTERNAL: "gideon-generator"
+      ENABLE_TITLE_GENERATION: "true"
+      ENABLE_TAGS_GENERATION: "true"
+      ENABLE_SEARCH_QUERY_GENERATION: "true"
+      ENABLE_RETRIEVAL_QUERY_GENERATION: "false"
+      ENABLE_FOLLOW_UP_GENERATION: "false"
+      ENABLE_AUTOCOMPLETE_GENERATION: "false"
+      DEFAULT_MODELS: "gideon-general"
+      ENABLE_WEB_SEARCH: "true"
+      WEB_SEARCH_ENGINE: "searxng"
+      SEARXNG_QUERY_URL: "http://searxng:8080/search"
+      WEB_SEARCH_RESULT_COUNT: "3"
+      WEB_LOADER_ENGINE: "safe_web"
+      USER_AGENT: "GIDEON (+https://github.com/TNMD-FDO/gideon)"
+      WEB_LOADER_TIMEOUT: "30"
+      BYPASS_WEB_SEARCH_WEB_LOADER: "false"
+      WEB_SEARCH_TRUST_ENV: "true"
+      ENABLE_WEB_LOADER_SSL_VERIFICATION: "true"
+      ENABLE_WEB_SEARCH_CONFIRMATION: "true"
+      WEB_SEARCH_CONFIRMATION_CONTENT: "Turning on search sends what you type — as search queries — to internet search engines, and fetches pages from the web. Do not paste client or case material here. For anything you will rely on, use Research."
+      WEB_SEARCH_DOMAIN_FILTER_LIST: "[]"
+      ENABLE_EVALUATION_ARENA_MODELS: "false"
+      ENABLE_VERSION_UPDATE_CHECK: "false"
+      CONTENT_SECURITY_POLICY: "img-src 'self' data: blob:"
+      TZ: "America/Chicago"
+      ENABLE_LDAP: "true"
+      LDAP_SERVER_LABEL: "example.org"
+      LDAP_SERVER_HOST: "example.org"
+      LDAP_SERVER_PORT: "636"
+      LDAP_USE_TLS: "true"
+      LDAP_VALIDATE_CERT: "true"
+      LDAP_CA_CERT_FILE: "/etc/gideon/ca.pem"
+      LDAP_APP_DN: "svc-gideon-ldap@example.org"
+      LDAP_SEARCH_BASE: "DC=example,DC=org"
+      LDAP_SEARCH_FILTERS: "(memberOf=CN=GIDEON-Users,CN=Users,DC=example,DC=org)"
+      LDAP_ATTRIBUTE_FOR_USERNAME: "sAMAccountName"
+      LDAP_ATTRIBUTE_FOR_MAIL: "userPrincipalName"
+      ENABLE_LDAP_GROUP_MANAGEMENT: "true"
+      ENABLE_LDAP_GROUP_CREATION: "false"
+      LDAP_ATTRIBUTE_FOR_GROUPS: "memberOf"
+      USER_PERMISSIONS_WORKSPACE_MODELS_ACCESS: "false"
+      USER_PERMISSIONS_WORKSPACE_KNOWLEDGE_ACCESS: "false"
+      USER_PERMISSIONS_WORKSPACE_PROMPTS_ACCESS: "true"
+      USER_PERMISSIONS_WORKSPACE_TOOLS_ACCESS: "false"
+      USER_PERMISSIONS_WORKSPACE_SKILLS_ACCESS: "false"
+      USER_PERMISSIONS_WORKSPACE_MODELS_IMPORT: "false"
+      USER_PERMISSIONS_WORKSPACE_MODELS_EXPORT: "false"
+      USER_PERMISSIONS_WORKSPACE_PROMPTS_IMPORT: "false"
+      USER_PERMISSIONS_WORKSPACE_PROMPTS_EXPORT: "false"
+      USER_PERMISSIONS_WORKSPACE_TOOLS_IMPORT: "false"
+      USER_PERMISSIONS_WORKSPACE_TOOLS_EXPORT: "false"
+      USER_PERMISSIONS_WORKSPACE_SKILLS_IMPORT: "false"
+      USER_PERMISSIONS_WORKSPACE_SKILLS_EXPORT: "false"
+      USER_PERMISSIONS_SHARING_MODELS: "false"
+      USER_PERMISSIONS_SHARING_PUBLIC_MODELS: "false"
+      USER_PERMISSIONS_SHARING_KNOWLEDGE: "false"
+      USER_PERMISSIONS_SHARING_PUBLIC_KNOWLEDGE: "false"
+      USER_PERMISSIONS_SHARING_PROMPTS: "true"
+      USER_PERMISSIONS_SHARING_PUBLIC_PROMPTS: "false"
+      USER_PERMISSIONS_SHARING_TOOLS: "false"
+      USER_PERMISSIONS_SHARING_PUBLIC_TOOLS: "false"
+      USER_PERMISSIONS_SHARING_SKILLS: "false"
+      USER_PERMISSIONS_SHARING_PUBLIC_SKILLS: "false"
+      USER_PERMISSIONS_SHARING_NOTES: "false"
+      USER_PERMISSIONS_SHARING_PUBLIC_NOTES: "false"
+      USER_PERMISSIONS_SHARING_FOLDERS: "false"
+      USER_PERMISSIONS_SHARING_PUBLIC_CHATS: "false"
+      USER_PERMISSIONS_SHARING_PUBLIC_CALENDARS: "false"
+      USER_PERMISSIONS_ACCESS_GRANTS_ALLOW_USERS: "true"
+      USER_PERMISSIONS_ACCESS_GRANTS_ALLOW_GROUPS: "true"
+      USER_PERMISSIONS_CHAT_CONTROLS: "false"
+      USER_PERMISSIONS_CHAT_VALVES: "false"
+      USER_PERMISSIONS_CHAT_SYSTEM_PROMPT: "false"
+      USER_PERMISSIONS_CHAT_PARAMS: "false"
+      USER_PERMISSIONS_CHAT_FILE_UPLOAD: "true"
+      USER_PERMISSIONS_CHAT_WEB_UPLOAD: "false"
+      USER_PERMISSIONS_CHAT_DELETE: "true"
+      USER_PERMISSIONS_CHAT_DELETE_MESSAGE: "true"
+      USER_PERMISSIONS_CHAT_CONTINUE_RESPONSE: "true"
+      USER_PERMISSIONS_CHAT_REGENERATE_RESPONSE: "true"
+      USER_PERMISSIONS_CHAT_RATE_RESPONSE: "true"
+      USER_PERMISSIONS_CHAT_EDIT: "true"
+      USER_PERMISSIONS_CHAT_SHARE: "false"
+      USER_PERMISSIONS_CHAT_EXPORT: "true"
+      USER_PERMISSIONS_CHAT_IMPORT: "true"
+      USER_PERMISSIONS_CHAT_STT: "true"
+      USER_PERMISSIONS_CHAT_TTS: "true"
+      USER_PERMISSIONS_CHAT_CALL: "true"
+      USER_PERMISSIONS_CHAT_MULTIPLE_MODELS: "false"
+      USER_PERMISSIONS_CHAT_TEMPORARY: "true"
+      USER_PERMISSIONS_CHAT_TEMPORARY_ENFORCED: "false"
+      USER_PERMISSIONS_FEATURES_API_KEYS: "false"
+      USER_PERMISSIONS_FEATURES_NOTES: "true"
+      USER_PERMISSIONS_FEATURES_CHANNELS: "true"
+      USER_PERMISSIONS_FEATURES_FOLDERS: "true"
+      USER_PERMISSIONS_FEATURES_DIRECT_TOOL_SERVERS: "false"
+      USER_PERMISSIONS_FEATURES_WEB_SEARCH: "true"
+      USER_PERMISSIONS_FEATURES_IMAGE_GENERATION: "false"
+      USER_PERMISSIONS_FEATURES_CODE_INTERPRETER: "false"
+      USER_PERMISSIONS_FEATURES_MEMORIES: "false"
+      USER_PERMISSIONS_FEATURES_CALENDAR: "true"
+      USER_PERMISSIONS_FEATURES_AUTOMATIONS: "false"
+      USER_PERMISSIONS_FEATURES_WEBHOOKS: "false"
+      USER_PERMISSIONS_SETTINGS_INTERFACE: "true"
+    command:
+      - "bash"
+      - "start.sh"
+      - "--workers"
+      - "1"
+      - "--ws-per-message-deflate"
+      - "true"
+      - "--no-access-log"
+    volumes:
+      - "/data/bulk/openwebui:/app/backend/data"
+      - "/etc/gideon/ca.pem:/etc/gideon/ca.pem:ro"
+    secrets:
+      - "webui_secret_key"
+      - "postgres_gideon_audit_password"
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "curl --silent --fail http://localhost:8080/health | jq -ne \"input.status == true\""
+      interval: "30s"
+      timeout: "10s"
+      retries: 5
+      start_period: "120s"
+    networks:
+      - "gideon"
+    mem_limit: 4000000000
+  gideon-generator:
+    image: "ghcr.io/tnmd-fdo/vllm-openai@sha256:0a51ea5b4ae2dc5d81890e5173f54203d2a3ae0cfffe51b8fd2afd4391bfd967"
+    restart: "unless-stopped"
+    environment:
+      VLLM_USE_DEEP_GEMM: "0"
+      HF_HUB_OFFLINE: "1"
+      HF_HOME: "/data/models"
+      VLLM_NO_USAGE_STATS: "1"
+      DO_NOT_TRACK: "1"
+      TZ: "America/Chicago"
+    entrypoint:
+      - "sh"
+      - "-c"
+      - "set -eu; if [ ! -s /run/secrets/engine_api_key ]; then echo \"engine API key file is missing or empty: /run/secrets/engine_api_key\" >&2; exit 1; fi; VLLM_API_KEY=$(cat /run/secrets/engine_api_key); export VLLM_API_KEY; exec vllm serve \"$@\""
+      - "gideon-generator"
+    command:
+      - "Qwen/Qwen3.8-27B-FP8"
+      - "--revision"
+      - "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a"
+      - "--served-model-name"
+      - "gideon-generator"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8000"
+      - "--disable-access-log-for-endpoints"
+      - "/health,/metrics"
+      - "--max-model-len"
+      - "262144"
+      - "--max-num-seqs"
+      - "96"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--enable-chunked-prefill"
+      - "--long-prefill-token-threshold"
+      - "4096"
+      - "--scheduling-policy"
+      - "priority"
+      - "--kv-cache-dtype"
+      - "fp8"
+      - "--gpu-memory-utilization"
+      - "0.92"
+      - "--reasoning-parser"
+      - "qwen3"
+    devices:
+      - "nvidia.com/gpu=GPU-11111111-1111-1111-1111-111111111111"
+    volumes:
+      - "/data/models:/data/models:ro"
+    secrets:
+      - "engine_api_key"
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "curl --silent --fail http://127.0.0.1:8000/health"
+      interval: "30s"
+      timeout: "10s"
+      retries: 3
+      start_period: "900s"
+    networks:
+      - "gideon"
+    mem_limit: 32000000000
+  searxng:
+    image: "ghcr.io/tnmd-fdo/searxng@sha256:1dab138ea70a8ceb4d1c182f5c8f256088406c1742b99e279976157dbe1e9759"
+    restart: "unless-stopped"
+    environment:
+      GRANIAN_LOG_ACCESS_ENABLED: "false"
+      GRANIAN_LOG_CONFIG: "/etc/searxng/logging.json"
+      TZ: "America/Chicago"
+    env_file:
+      - path: "/etc/gideon/rendered/searxng/env"
+        format: "raw"
+    volumes:
+      - "/etc/gideon/rendered/searxng/settings.yml:/etc/searxng/settings.yml:ro"
+      - "/etc/gideon/rendered/searxng/logging.json:/etc/searxng/logging.json:ro"
+    healthcheck:
+      test:
+        - "CMD"
+        - "wget"
+        - "-q"
+        - "-O"
+        - "/dev/null"
+        - "http://127.0.0.1:8080/healthz"
+      interval: "30s"
+      timeout: "5s"
+      retries: 3
+      start_period: "30s"
+    networks:
+      - "gideon"
+    mem_limit: 1000000000
+  dcgm-exporter:
+    image: "ghcr.io/tnmd-fdo/dcgm-exporter@sha256:613ab03c11d442fd960ff515f547e9921537454a712d08160bc8f677f89f1c35"
+    restart: "unless-stopped"
+    environment:
+      TZ: "America/Chicago"
+    devices:
+      - "nvidia.com/gpu=all"
+    cap_add:
+      - "SYS_ADMIN"
+    networks:
+      - "gideon"
+    mem_limit: 2000000000
+  postgres-exporter:
+    image: "ghcr.io/tnmd-fdo/postgres-exporter@sha256:ac5ec343104fae0e2d84a27bb8d69b38430a11910c5382cad85d478d2bab713e"
+    restart: "unless-stopped"
+    environment:
+      DATA_SOURCE_URI: "postgres:5432/gideon?sslmode=disable"
+      DATA_SOURCE_USER: "gideon_ro_metrics"
+      DATA_SOURCE_PASS_FILE: "/run/secrets/postgres_gideon_ro_metrics_password"
+      TZ: "America/Chicago"
+    group_add:
+      - "4242"
+    depends_on:
+      postgres:
+        condition: "service_healthy"
+    secrets:
+      - "postgres_gideon_ro_metrics_password"
+    networks:
+      - "gideon"
+    mem_limit: 1000000000
+  cadvisor:
+    image: "ghcr.io/tnmd-fdo/cadvisor@sha256:763aecf1c32c2be8a1a75f9abfc2fc461005c9dbbaa39cb356b354aac1296dbe"
+    restart: "unless-stopped"
+    environment:
+      TZ: "America/Chicago"
+    privileged: true
+    command:
+      - "--docker_only=true"
+      - "--housekeeping_interval=30s"
+      - "--disable_metrics=advtcp,app,cpu_topology,cpuset,hugetlb,memory_numa,perf_event,process,referenced_memory,resctrl,sched,tcp,udp"
+    volumes:
+      - "/:/rootfs:ro"
+      - "/var/run:/var/run:rw"
+      - "/sys:/sys:ro"
+      - "/var/lib/docker:/var/lib/docker:ro"
+      - "/dev/disk:/dev/disk:ro"
+    networks:
+      - "gideon"
+    mem_limit: 5000000000
+  blackbox-exporter:
+    image: "ghcr.io/tnmd-fdo/blackbox-exporter@sha256:e753ff9f3fc458d02cca5eddab5a77e1c175eee484a8925ac7d524f04366c2fc"
+    restart: "unless-stopped"
+    environment:
+      TZ: "America/Chicago"
+    command:
+      - "--config.file=/etc/blackbox_exporter/config.yml"
+    volumes:
+      - "/etc/gideon/rendered/blackbox/blackbox.yml:/etc/blackbox_exporter/config.yml:ro"
+      - "/etc/gideon/ca.pem:/etc/gideon/ca.pem:ro"
+    networks:
+      - "gideon"
+    mem_limit: 1000000000
+networks:
+  gideon: {}
+volumes:
+  caddy_data: {}
+  caddy_config: {}
+secrets:
+  tls_key:
+    file: "/etc/gideon/secrets/tls_key"
+  postgres_superuser_password:
+    file: "/etc/gideon/secrets/postgres_superuser_password"
+  webui_secret_key:
+    file: "/etc/gideon/secrets/webui_secret_key"
+  grafana_admin_password:
+    file: "/etc/gideon/secrets/grafana_admin_password"
+  ldap_bind_password:
+    file: "/etc/gideon/secrets/ldap_bind_password"
+  postgres_gideon_ro_metrics_password:
+    file: "/etc/gideon/secrets/postgres_gideon_ro_metrics_password"
+  postgres_gideon_audit_password:
+    file: "/etc/gideon/secrets/postgres_gideon_audit_password"
+  engine_api_key:
+    file: "/etc/gideon/secrets/engine_api_key"

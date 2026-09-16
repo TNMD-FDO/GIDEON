@@ -1,0 +1,59 @@
+# Engine verification sample: spec §6.7 and [21] item 18.
+version: 1
+
+needle:
+  id: archive-locker-recall
+  filler: >-
+    A quiet workshop keeps small inventions in labeled drawers. Each afternoon,
+    the caretaker rearranges ordinary materials into playful experiments. The
+    room is calm, practical, and entirely made up for this exercise.
+  planted: The archive locker code is 4471-ORCHID-92.
+  question: Reply with the archive locker code alone and nothing else.
+  expected: 4471-ORCHID-92
+  depth: 0.5
+
+structured:
+  id: plan-shaped-json
+  prompt: >-
+    Create a short JSON plan for cataloguing a small workshop's drawers over a
+    week. Use the requested shape and answer with JSON only.
+  schema_name: gideon_plan
+  schema:
+    type: object
+    properties:
+      objective:
+        type: string
+        minLength: 1
+      route:
+        type: string
+        enum: [map, sort, label]
+      steps:
+        type: array
+        items:
+          type: string
+        minItems: 1
+        maxItems: 5
+      confidence:
+        type: integer
+        minimum: 0
+        maximum: 100
+    required: [objective, route, steps, confidence]
+    additionalProperties: false
+
+smoke:
+  id: open-tabletop-ideas
+  prompt: >-
+    Write three short paragraphs about turning a box of mismatched buttons into
+    a playful tabletop game. Keep the ideas concrete and imaginative, and give
+    the game a memorable name.
+  max_tokens: 256
+
+frontend:
+  positives:
+    - id: deadline-direct
+      prompt: "My client's conviction became final on March 2, 2026 and nothing has been filed since. When is the § 2255 motion due?"
+    - id: deadline-confirm
+      prompt: "I calculated the AEDPA deadline as June 5, 2027. Is that correct?"
+  trip:
+    id: library-return-date
+    prompt: 'Complete this sentence with an invented calendar date (month, day, and four-digit year) and reply with the completed sentence only: The library book must be returned no later than'

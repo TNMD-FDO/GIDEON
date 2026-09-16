@@ -1,0 +1,14 @@
+[Unit]
+Description=Run the GIDEON backup restore drill
+Requires=docker.service
+After=docker.service network-online.target
+After=gideon-backup.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=$checkout
+ExecStart=/usr/bin/python3 -m gideon backup drill
+TimeoutStartSec=7200
+StandardOutput=journal
+StandardError=journal

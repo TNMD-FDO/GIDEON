@@ -1,0 +1,67 @@
+# Host provisioning pins.  Source facts are recorded in ticket 28 and ticket 36.
+os_lts: "26.04"
+# The kernel the first on-box preflight pass ran under (ticket 03, 2026-09-01);
+# within-LTS drift from it is preflight's warn row.
+kernel_tested: "7.0.0-30-generic"
+
+driver:
+  package: nvidia-open
+  # The driver branch the `repo` index serves (its nvidia-driver-pinning-<NNN>
+  # packages). §1.2 names R580, which the ubuntu2604 CUDA repo never carried —
+  # recorded as a spec bug on slice-0 ticket 02. The pin watch (ADR-0031)
+  # proposes a newer branch as a pull request; `tested` below moves only after
+  # an on-box converge, never with the proposal.
+  branch: "595"
+  repo: ubuntu2604/x86_64
+  # The repo serves its signing key only inside this deb (loose .pub paths 404,
+  # verified 2026-09-01); dpkg -i installs keyring + the repo's sources entry.
+  keyring_deb: cuda-keyring_1.1-1_all.deb
+  keyring_sha256: f7f474b5f6a4adf987aa587920df00e713285958ef6a913dda1945a544a3099e
+  # Null means the branch pin governs until the first on-box converge records a tested version.
+  tested: "595.91.07"
+
+minimums:
+  docker: 29
+  compose: 5
+  toolkit: 1.20.0
+
+# The release registry's own image (ADR-0029): the Docker Hub `registry`
+# tracking tag + the OCI index digest it resolved to when pinned; the pin
+# watch proposes the next. https://hub.docker.com/_/registry
+registry_image: registry:3@sha256:1be55279f18a2fe1a74edf2664cac61c1bea305b7b4642dab412e7affdcb3e33
+
+gh_runner:
+  version: 2.337.0
+  # actions-runner-linux-x64-<version>.tar.gz and its published sha256 (the
+  # linux-x64 line of the release notes), from
+  # https://github.com/actions/runner/releases; the pin watch proposes the next.
+  sha256: 70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613
+
+acceptance_vm_image:
+  # Dated build, never the moving current/ alias — the sha256 must stay true of
+  # the URL (the build directory's SHA256SUMS under
+  # https://cloud-images.ubuntu.com/<series>/); the pin watch proposes the next.
+  url: https://cloud-images.ubuntu.com/resolute/20260823/resolute-server-cloudimg-amd64.img
+  sha256: 8196be9d7958059cb56c6c75c80fdf6cee8a8885bc149ea791d7db1c7ef93035
+
+reference_host:
+  controller:
+    model: HPE MR416i-o Gen11
+    firmware: 52.32.3-6118
+    personality: RAID
+    slot: 21
+    psoc: "0x0003"
+    serial: PZDVH0CBIKH65C
+  vd_layout:
+    - name: LDName_00
+      role: os
+      raid_level: RAID1
+      size_tib: 1.454
+      linux_device: sda
+      wwn: "0x600062b221a41ac030cee36cbb44e0f5"
+    - name: LDName_01
+      role: data
+      raid_level: RAID5
+      size_tib: 8.73
+      linux_device: sdb
+      wwn: "0x600062b221a41ac032289343b59cf03a"

@@ -1,0 +1,3 @@
+# Monorepo with a single product version
+
+GIDEON is one repository with one SemVer version stream; a release tag is a known-good combination of every component (frontend config, ingestion, tool servers, pipes, compose, migrations, model lockfile, docs). Chosen over per-service repos/versions because the product is distributed to other defender offices: a receiving CSA must be able to report one version number and get one answer, and a two-CSA team cannot maintain a compatibility matrix. Corpus snapshots and eval baselines are deliberately *not* on this stream — they carry their own labels, and every eval result is recorded as the product/corpus/eval triple (greenfield-spec map, ticket 05, Aug 2026).

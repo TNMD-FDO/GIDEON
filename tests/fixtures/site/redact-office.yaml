@@ -1,0 +1,32 @@
+# Documentation-only site values for slice-1 ticket 55's redaction contract.
+office:
+  name: Office of the Federal Public Defender, Example District
+  short_name: EXD-FDO
+  timezone: America/Chicago
+
+hostname: gideon.example.org
+lan_cidrs: [192.0.2.0/24, 198.51.100.0/24]
+jurisdiction: {circuit: ca6, districts: [tnmd], states: [tenn]}
+
+auth:
+  ldap:
+    host: example.org
+    bind_user: svc-example-ldap
+    users_group: 'CN=Last\, First,OU=Security Groups,DC=example,DC=org'
+    mirror_groups: [Example-Mirror]
+
+backup:
+  target:
+    host: backup.example.org
+    path: /srv/gideon-backup
+    user: example-backup
+
+alerts:
+  smtp:
+    host: smtp.example.org
+    from: gideon@example.org
+    user: smtp-example
+  recipients: [csa@example.org, csa-é@example.org]
+
+registry: registry.example.org:5000
+egress_proxy: http://proxy.example.org:3128

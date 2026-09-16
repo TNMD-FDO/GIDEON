@@ -1,0 +1,2182 @@
+"""End-to-end tests for the managed-turn harness over an in-memory frontend."""
+
+import importlib.util
+import json
+import os
+import re
+import subprocess
+import sys
+import threading
+import time
+from collections.abc import Callable
+from contextlib import redirect_stderr, redirect_stdout
+from datetime import UTC, datetime
+from io import StringIO
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from typing import Any, ClassVar, cast
+from unittest import TestCase
+from unittest.mock import patch
+from urllib.parse import unquote
+from zoneinfo import ZoneInfo
+
+import yaml  # type: ignore[import-untyped]
+
+from gideon.host import owuiturn
+from gideon.host.owui import Client, OwuiError, Response
+from gideon.host.render.owui import EVAL_IDENTITY, GENERAL_PRESET_ID
+from gideon.host.report import Problem
+from gideon.host.secrets import secret_path
+from gideon.host.sysio import Host
+from tools.turns import cases, classify, cli, run
+
+ROOT = Path(__file__).resolve().parents[1]
+SEED_PATH = ROOT / "eval/seed/guardrails/deadline-trap.yaml"
+GUIDELINES_SEED_PATH = ROOT / "eval/seed/guardrails/guidelines-range.yaml"
+SENTENCE_CREDIT_SEED_PATH = ROOT / "eval/seed/guardrails/sentence-credit.yaml"
+SITE_PATH = Path("/etc/gideon/site.yaml")
+SITE_TEXT = (ROOT / "config/site.example.yaml").read_text(encoding="utf-8")
+PASSWORD = "test-evaluation-password"
+TOKEN = "test-session-token"
+FIXED_NOW = datetime(2026, 9, 5, 12, 0, tzinfo=UTC)
+# The fix a row carries when the finder identified no chat of this turn's own.
+SENTINEL_FIX = run._unverified_fix(EVAL_IDENTITY.username)
+_USE_FAKE_FACTORY = object()
+
+
+def _tagged_case_id(prompt: str) -> str:
+    """The case id from the prompt's trailing tag, the way a journal grep would find it."""
+
+    match = re.search(r"\[turn harness [0-9a-f]{8} ([A-Za-z0-9_.-]+)\]$", prompt)
+    assert match is not None, prompt
+    return match.group(1)
+
+
+def seed_cases() -> list[dict[str, object]]:
+    document: Any = yaml.safe_load(SEED_PATH.read_text(encoding="utf-8"))
+    cases = [case for case in document["cases"] if isinstance(case, dict)]
+    retired = {case["supersedes"] for case in cases if isinstance(case.get("supersedes"), str)}
+    return [case for case in cases if case["id"] not in retired]
+
+
+def _cases_file(
+    *identifiers: str,
+    searched: str | None = None,
+    sources: dict[str, str] | None = None,
+) -> str:
+    lines = ["cases:"]
+    for identifier in identifiers:
+        lines.extend(
+            [
+                f"  - id: {identifier}",
+                "    prompt: short prompt",
+                "    expect: recorded",
+            ]
+        )
+        if identifier == searched:
+            lines.append("    search: true")
+        if sources is not None and identifier in sources:
+            lines.append(f"    sources: {sources[identifier]}")
+    return "\n".join(lines) + "\n"
+
+
+def _records(host: "FakeHost", output: Path) -> dict[str, dict[str, object]]:
+    prefix = str(output) + "/"
+    return {
+        Path(path).stem: cast(dict[str, object], json.loads(text))
+        for path, text in host.files.items()
+        if path.startswith(prefix) and path.endswith(".json") and Path(path).stem != "run"
+    }
+
+
+class FakeHost:
+    """The small host seam needed by the CLI preconditions."""
+
+    def __init__(self, *, euid: int = 0, password: str | None = PASSWORD) -> None:
+        self.euid = euid
+        self.files: dict[str, str] = {str(SITE_PATH): SITE_TEXT}
+        if password is not None:
+            self.files[str(secret_path("gideon_eval_password"))] = f"{password}\n"
+        self.directories: dict[str, list[str]] = {}
+        self.writes: list[str] = []
+        self.read_paths: list[str] = []
+        self.chowns: list[tuple[str, int, int]] = []
+        self.commands: list[list[str]] = []
+        self.refuse_writes = False
+
+    def read_text(self, path: object, *, encoding: str = "utf-8") -> str:
+        del encoding
+        key = str(path)
+        self.read_paths.append(key)
+        if key not in self.files:
+            raise FileNotFoundError(key)
+        return self.files[key]
+
+    def exists(self, path: object) -> bool:
+        key = str(path)
+        return key in self.files or key in self.directories
+
+    def listdir(self, path: object) -> list[str]:
+        key = str(path)
+        if key not in self.directories:
+            raise NotADirectoryError(key)
+        return list(self.directories[key])
+
+    def write_text(
+        self,
+        path: object,
+        text: str,
+        *,
+        encoding: str = "utf-8",
+        mode: int = 0o644,
+    ) -> None:
+        del encoding, mode
+        if self.refuse_writes:
+            raise OSError(28, "No space left on device")
+        key = str(path)
+        self.files[key] = text
+        self.writes.append(key)
+        parent = str(Path(key).parent)
+        if parent in self.directories and Path(key).name not in self.directories[parent]:
+            self.directories[parent].append(Path(key).name)
+
+    def mkdir(
+        self,
+        path: object,
+        *,
+        mode: int = 0o755,
+        parents: bool = False,
+        exist_ok: bool = False,
+    ) -> None:
+        del mode, parents, exist_ok
+        self.directories.setdefault(str(path), [])
+
+    def chown(self, path: object, uid: int, gid: int) -> None:
+        self.chowns.append((str(path), uid, gid))
+
+    def run(self, argv: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        command = [str(value) for value in cast(Any, argv)]
+        self.commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    def geteuid(self) -> int:
+        return self.euid
+
+
+class FakeClient(Client):
+    """The production client shape with its HTTP transport replaced."""
+
+    def __init__(
+        self,
+        frontend: "Frontend",
+        *,
+        api_key: str | None = None,
+        token: str | None = None,
+    ) -> None:
+        super().__init__("http://fake", api_key=api_key, token=token)
+        self.frontend = frontend
+
+    def request(self, method: str, path: str, body: object | None = None) -> Response:
+        credential = self._api_key if self._api_key is not None else self._token
+        return self.frontend.handle(method, path, body, credential)
+
+    def stream(
+        self,
+        method: str,
+        path: str,
+        body: object | None = None,
+        *,
+        deadline: float | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> Any:
+        del deadline, monotonic
+        credential = self._api_key if self._api_key is not None else self._token
+        return self.frontend.stream(method, path, body, credential)
+
+
+class Frontend:
+    """A recording frontend implementing the managed-turn routes."""
+
+    def __init__(
+        self,
+        guardrail: Any,
+        modes: dict[str, str],
+        *,
+        preexisting: int = 0,
+        barrier: int | None = None,
+    ) -> None:
+        self.guardrail = guardrail
+        self.modes = modes
+        self._lock = threading.Lock()
+        self._barrier = (
+            threading.Barrier(barrier, timeout=5.0) if barrier is not None else None
+        )
+        self.chats: dict[str, dict[str, object]] = {}
+        self.deleted_chats: list[tuple[str, dict[str, object]]] = []
+        self.calls: list[tuple[str, str, object | None]] = []
+        self.stream_calls: list[tuple[str, str, object | None]] = []
+        self.refuse_deletion = False
+        self.fail_listing_after_turn = False
+        self._turns_made = 0
+        self._signins = 0
+        self.refuse_signin_after: int | None = None
+        self._first_chat_id = preexisting + 1
+        self._next_chat_id = preexisting + 1
+        self.vanished_chat_ids: list[str] = []
+        for index in range(1, preexisting + 1):
+            chat_id = f"old/{index}"
+            self.chats[chat_id] = {"id": chat_id, "title": "Old Chat"}
+
+    def factory(
+        self, *, api_key: str | None = None, token: str | None = None
+    ) -> Client:
+        return FakeClient(self, api_key=api_key, token=token)
+
+    def _new_chat(self, body: dict[str, object], mode: str) -> None:
+        user_message = cast(dict[str, object], body["user_message"])
+        user_id = cast(str, user_message["id"])
+        assistant_id = cast(str, body["id"])
+        if mode.startswith("stream-"):
+            mode = "answered"
+        if mode == "replaced":
+            assistant: dict[str, object] = {
+                "id": assistant_id,
+                "content": self.guardrail.DEADLINE_REFUSAL,
+                "originalContent": "The filing deadline is March 2, 2027.",
+                "done": True,
+                "output": [{"type": "message", "content": []}],
+            }
+        elif mode == "answered":
+            assistant = {
+                "id": assistant_id,
+                "content": "This doctrinal answer contains no deadline.",
+                "done": True,
+                "output": [
+                    {"type": "reasoning", "content": [{"type": "output_text"}]},
+                    {"type": "message", "content": [{"type": "output_text"}]},
+                ],
+            }
+        elif mode == "leak":
+            assistant = {
+                "id": assistant_id,
+                "content": "Under the rule the motion is due by March 2, 2027.",
+                "done": True,
+                "output": [{"type": "message", "content": []}],
+            }
+        elif mode == "errored":
+            assistant = {
+                "id": assistant_id,
+                "content": "engine failed",
+                "done": False,
+                "error": {"content": "engine failed"},
+                "output": [],
+            }
+        else:
+            raise AssertionError(f"unknown mode {mode}")
+        features = body.get("features")
+        if isinstance(features, dict) and features.get("web_search") is True:
+            assistant["sources"] = [{"document": "Fictitious source document"}]
+        if self._signins > 1:
+            # Concurrent sessions: a monotonic id, never reused, so a session that
+            # listed a peer's chat before the peer deleted it never finds its own
+            # turn stored under that listed id.
+            chat_id = f"chat/{self._next_chat_id}"
+            self._next_chat_id += 1
+        else:
+            # One session: the lowest id no stored chat holds, a deleted chat's id
+            # reused, as the sequential tests expect.
+            number = self._first_chat_id
+            while f"chat/{number}" in self.chats:
+                number += 1
+            chat_id = f"chat/{number}"
+        # The pinned record: the flat chat.messages list frozen at creation, the
+        # turn's messages under chat.history.messages by id (the note's §1.3, §3.2).
+        self.chats[chat_id] = {
+            "id": chat_id,
+            "title": "New Chat",
+            "chat": {
+                "messages": [{"role": "user", "content": user_message["content"]}],
+                "history": {
+                    "currentId": assistant_id,
+                    "messages": {user_id: user_message, assistant_id: assistant},
+                },
+            },
+        }
+
+    def _foreign_chat(self, *, vanished: bool = False) -> None:
+        """Another session's turn, made under the one eval identity during ours.
+
+        ``vanished`` is that session's cleanup landing between our listing and
+        our read: the id is still listed, the record is already gone.
+        """
+
+        index = self._turns_made
+        chat_id = f"foreign/{index}"
+        if vanished:
+            self.vanished_chat_ids.append(chat_id)
+            return
+        user_id = f"foreign-user-{index}"
+        assistant_id = f"foreign-assistant-{index}"
+        user_message = {
+            "id": user_id,
+            "role": "user",
+            "content": "foreign prompt",
+            "parentId": None,
+            "childrenIds": [assistant_id],
+        }
+        assistant = {
+            "id": assistant_id,
+            "role": "assistant",
+            "content": "foreign answer",
+            "parentId": user_id,
+            "done": True,
+        }
+        self.chats[chat_id] = {
+            "id": chat_id,
+            "title": "Foreign Chat",
+            "chat": {
+                "messages": [user_message],
+                "history": {
+                    "currentId": assistant_id,
+                    "messages": {user_id: user_message, assistant_id: assistant},
+                },
+            },
+        }
+
+    def handle(
+        self,
+        method: str,
+        path: str,
+        body: object | None,
+        credential: str | None,
+    ) -> Response:
+        barrier: threading.Barrier | None = None
+        with self._lock:
+            self.calls.append((method, path, body))
+            if path == "/api/v1/auths/signin":
+                if credential is not None or not isinstance(body, dict):
+                    return Response(400, {"detail": "bad sign-in"})
+                if body.get("email") != EVAL_IDENTITY.email or body.get("password") != PASSWORD:
+                    return Response(401, {"detail": "bad credentials"})
+                self._signins += 1
+                if (
+                    self.refuse_signin_after is not None
+                    and self._signins > self.refuse_signin_after
+                ):
+                    return Response(503, {"detail": "second session unavailable"})
+                return Response(200, {"token": TOKEN})
+            if credential != TOKEN:
+                return Response(403, {"detail": "not owner"})
+            if method == "GET" and path == "/api/v1/chats/list":
+                if self.fail_listing_after_turn and self._turns_made:
+                    self.fail_listing_after_turn = False
+                    return Response(500, {"detail": "listing failed"})
+                identifiers = [*self.chats, *self.vanished_chat_ids]
+                return Response(200, [{"id": identifier} for identifier in reversed(identifiers)])
+            if method == "POST" and path == "/api/chat/completions":
+                if not isinstance(body, dict):
+                    return Response(400, {"detail": "bad body"})
+                prompt = cast(str, cast(dict[str, object], body["user_message"])["content"])
+                case_id = _tagged_case_id(prompt)
+                mode = self.modes.get(case_id, "answered")
+                self._turns_made += 1
+                if mode == "nochat":
+                    barrier = self._barrier
+                elif mode == "twochat":
+                    self._new_chat(body, "answered")
+                    self._new_chat(body, "answered")
+                    barrier = self._barrier
+                elif mode == "foreign":
+                    self._new_chat(body, "answered")
+                    self._foreign_chat()
+                    barrier = self._barrier
+                elif mode == "foreign-vanished":
+                    self._new_chat(body, "answered")
+                    self._foreign_chat(vanished=True)
+                    barrier = self._barrier
+                elif mode == "foreign-only":
+                    self._foreign_chat()
+                    barrier = self._barrier
+                else:
+                    self._new_chat(body, mode)
+                    barrier = self._barrier
+            elif method == "GET" and path.startswith("/api/v1/chats/"):
+                chat_id = unquote(path.removeprefix("/api/v1/chats/"))
+                chat = self.chats.get(chat_id)
+                if chat is None:
+                    return Response(401, {"detail": "Not found"})
+                return Response(200, chat)
+            elif method == "DELETE" and path.startswith("/api/v1/chats/"):
+                chat_id = unquote(path.removeprefix("/api/v1/chats/"))
+                if chat_id not in self.chats:
+                    return Response(401, {"detail": "Not found"})
+                if self.refuse_deletion:
+                    return Response(403, {"detail": "delete refused"})
+                self.deleted_chats.append((chat_id, self.chats.pop(chat_id)))
+                return Response(200, True)
+            else:
+                return Response(404, {"detail": "not found"})
+        if barrier is not None:
+            barrier.wait()
+        return Response(200, None)
+
+    def stream(
+        self,
+        method: str,
+        path: str,
+        body: object | None,
+        credential: str | None,
+    ) -> Any:
+        with self._lock:
+            self.stream_calls.append((method, path, body))
+        if credential != TOKEN:
+            raise OwuiError("not owner")
+        if method != "POST" or path != "/api/chat/completions" or not isinstance(body, dict):
+            raise OwuiError("bad stream request")
+        messages = cast(list[object], body["messages"])
+        message = cast(dict[str, object], messages[0])
+        prompt = cast(str, message["content"])
+        case_id = _tagged_case_id(prompt)
+        mode = self.modes.get(case_id, "stream-clean")
+
+        def payload(field: str, text: str) -> str:
+            return json.dumps({"choices": [{"delta": {field: text}}]})
+
+        if mode == "stream-leak":
+            values = [
+                payload("reasoning", "so the "),
+                payload("reasoning", "motion is "),
+                payload("reasoning", "due by March "),
+                payload("reasoning", "2, 2027"),
+            ]
+            return iter(values)
+        if mode == "stream-error":
+            return iter(
+                [
+                    payload("reasoning", "safe prefix"),
+                    json.dumps({"error": {"message": "engine failed"}}),
+                ]
+            )
+        if mode == "stream-truncated":
+            def truncated() -> Any:
+                yield payload("content", "safe prefix")
+                raise OwuiError("Open WebUI stream ended before [DONE].")
+
+            return truncated()
+        if mode == "stream-timeout":
+            return iter(
+                [
+                    payload("reasoning", "partial"),
+                    payload("content", "never released"),
+                ]
+            )
+        return iter(
+            [
+                payload("reasoning", self.guardrail.REASONING_PLACEHOLDER),
+                payload("content", "a clean doctrinal answer"),
+            ]
+        )
+
+
+def _run_file(
+    frontend: Frontend,
+    text: str,
+    *,
+    host: Any | None = None,
+    factory: object = _USE_FAKE_FACTORY,
+    args: list[str] | None = None,
+    now: Callable[[], datetime] | None = None,
+    monotonic: Callable[[], float] | None = None,
+) -> tuple[int, str, str]:
+    with TemporaryDirectory() as directory:
+        path = Path(directory) / "cases.yaml"
+        path.write_text(text, encoding="utf-8")
+        stdout = StringIO()
+        stderr = StringIO()
+        selected_factory = (
+            frontend.factory
+            if factory is _USE_FAKE_FACTORY
+            else cast(Callable[..., Client] | None, factory)
+        )
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = cli.main(
+                [str(path), *(args or [])],
+                host=cast(Host, host if host is not None else FakeHost()),
+                client_factory=selected_factory,
+                now=now or (lambda: FIXED_NOW),
+                monotonic=monotonic or time.monotonic,
+                checkout=ROOT,
+                site_path=SITE_PATH,
+            )
+        return code, stdout.getvalue(), stderr.getvalue()
+
+
+class TurnHarness(TestCase):
+    guardrail: ClassVar[Any]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.guardrail = classify.load_guardrail(ROOT)
+
+    def test_signin_body_turn_body_readback_and_replaced_attribution(self) -> None:
+        frontend = Frontend(self.guardrail, {"replaced": "replaced"})
+        prompt = "unique prompt never printed"
+        answer = "The filing deadline is March 2, 2027."
+        code, stdout, _ = _run_file(
+            frontend,
+            f"cases:\n  - id: replaced\n    prompt: {prompt}\n    expect: refused\n",
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("signin: ok — signed in as gideon-eval", stdout)
+        self.assertIn("replaced (", stdout)
+        self.assertIn(" in answer); block absent; expect refused", stdout)
+        self.assertIn("cleanup: ok — 1 chats deleted", stdout)
+        self.assertNotIn(prompt, stdout)
+        self.assertNotIn(answer, stdout)
+        self.assertNotIn(TOKEN, stdout)
+
+        signin_calls = [call for call in frontend.calls if call[1] == "/api/v1/auths/signin"]
+        self.assertEqual(len(signin_calls), 1)
+        self.assertEqual(
+            signin_calls[0][2],
+            {"email": EVAL_IDENTITY.email, "password": PASSWORD},
+        )
+        turn_calls = [call for call in frontend.calls if call[1] == "/api/chat/completions"]
+        self.assertEqual(len(turn_calls), 1)
+        body = cast(dict[str, object], turn_calls[0][2])
+        user_message = cast(dict[str, object], body["user_message"])
+        user_id = cast(str, user_message["id"])
+        assistant_id = cast(str, body["id"])
+        sent = cast(str, user_message["content"])
+        self.assertTrue(sent.startswith(prompt + "\n\n[turn harness "), sent)
+        self.assertTrue(sent.endswith(" replaced]"), sent)
+        self.assertEqual(
+            body,
+            {
+                "model": GENERAL_PRESET_ID,
+                "stream": True,
+                "messages": [{"role": "user", "content": user_message["content"]}],
+                "parent_id": None,
+                "user_message": {
+                    "id": user_id,
+                    "role": "user",
+                    "content": user_message["content"],
+                    "parentId": None,
+                    "childrenIds": [assistant_id],
+                    "timestamp": int(FIXED_NOW.timestamp()),
+                    "models": [GENERAL_PRESET_ID],
+                },
+                "id": assistant_id,
+            },
+        )
+        read_paths = [call[1] for call in frontend.calls if call[0] == "GET"]
+        self.assertIn("/api/v1/chats/chat%2F1", read_paths)
+        delete_paths = [call[1] for call in frontend.calls if call[0] == "DELETE"]
+        self.assertEqual(delete_paths, ["/api/v1/chats/chat%2F1"])
+        self.assertEqual(frontend.chats, {})
+
+    def test_replaced_from_the_outlet_says_so(self) -> None:
+        """A replacement whose stored answer is clean was tripped by the outlet's judgement."""
+
+        verdict = classify.classify(
+            self.guardrail,
+            {
+                "content": self.guardrail.DEADLINE_REFUSAL,
+                "originalContent": "Holland v. Florida recognised equitable tolling.",
+                "output": [{"type": "message", "content": []}],
+            },
+            {"role": "user", "content": "What did Holland hold?"},
+        )
+        self.assertEqual((verdict.kind, verdict.pattern_id, verdict.tripped_in), ("replaced", None, "outlet"))
+        judgement = classify.judge_case(cases.Case("c", "p", "recorded"), verdict, "", record="the record")
+        self.assertIn("replaced (by the outlet; the stored answer judges clean — read the trip row); block absent", judgement.detail)
+
+        stream_original = "safe prefix\n\n" + self.guardrail.DEADLINE_REFUSAL
+        verdict = classify.classify(
+            self.guardrail,
+            {
+                "content": self.guardrail.DEADLINE_REFUSAL,
+                "originalContent": stream_original,
+                "output": [],
+            },
+            {"role": "user", "content": "When is it due?"},
+        )
+        self.assertEqual((verdict.kind, verdict.pattern_id, verdict.tripped_in), ("replaced", None, "stream"))
+
+        judgement = classify.judge_case(cases.Case("c", "p", "recorded"), verdict, "", record="the record")
+        self.assertIn("replaced (in the stream); block absent", judgement.detail)
+
+        # A trip before any answer text was released: the stored content is the
+        # refusal itself and the frontend kept no originalContent.
+        verdict = classify.classify(
+            self.guardrail,
+            {"content": self.guardrail.DEADLINE_REFUSAL, "output": []},
+            {"role": "user", "content": "When is it due?"},
+        )
+        self.assertEqual((verdict.kind, verdict.pattern_id, verdict.tripped_in), ("replaced", None, "stream"))
+
+    def test_guidelines_refusal_has_stream_and_outlet_attribution(self) -> None:
+        """A stored Guidelines refusal is a replacement, attributed as the deadline refusal is."""
+
+        refusal = self.guardrail.GUIDELINES_REFUSAL
+        for original, expected in (
+            (None, "stream"),
+            ("A clean doctrinal answer.", "outlet"),
+            ("Released prefix. " + refusal, "stream"),
+        ):
+            with self.subTest(expected=expected):
+                assistant: dict[str, object] = {"content": refusal, "output": []}
+                if original is not None:
+                    assistant["originalContent"] = original
+                verdict = classify.classify(
+                    self.guardrail,
+                    assistant,
+                    {"role": "user", "content": "What is the guideline range?"},
+                )
+                self.assertEqual(
+                    (verdict.kind, verdict.pattern_id, verdict.tripped_in),
+                    ("replaced", None, expected),
+                )
+
+    def test_answered_and_leak_expectations(self) -> None:
+        frontend = Frontend(
+            self.guardrail,
+            {"answered": "answered", "leak": "leak"},
+        )
+        code, stdout, _ = _run_file(
+            frontend,
+            "cases:\n"
+            "  - {id: answered, prompt: doctrinal prompt, expect: answered}\n"
+            "  - {id: leak, prompt: leak prompt, expect: recorded}\n",
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("answered: ok — answered; block present; expect answered", stdout)
+        self.assertIn("leak: refuse — leak (", stdout)
+        self.assertIn("expect recorded", stdout)
+        self.assertIn("compose/open-webui/functions/arithmetic_guardrail.py", stdout)
+        self.assertEqual(frontend.chats, {})
+
+    def test_an_errored_turn_is_cleaned_up_and_an_unidentified_one_is_left(self) -> None:
+        # The errored placeholder still carries the minted ids, so the finder
+        # identifies that chat and the cleanup deletes it; a turn the finder
+        # refused has no chat of its own to delete, and the chats standing are
+        # nobody's to touch.
+        for case_id, detail, cleanup, left_standing in (
+            ("errored", "turn error", "cleanup: ok — 1 chats deleted", 0),
+            (
+                "nochat",
+                "the turn's chat was not found; 0 new chats",
+                "cleanup: refuse — cleanup unverified for nochat",
+                0,
+            ),
+            (
+                "twochat",
+                "the turn's ids are in 2 of 2 new chats",
+                "cleanup: refuse — cleanup unverified for twochat",
+                2,
+            ),
+        ):
+            with self.subTest(case_id=case_id):
+                frontend = Frontend(self.guardrail, {case_id: case_id})
+                code, stdout, _ = _run_file(
+                    frontend,
+                    f"cases:\n  - id: {case_id}\n    prompt: hidden {case_id}\n    expect: answered\n",
+                )
+                self.assertEqual(code, 1)
+                self.assertIn(f"{case_id}: refuse — {detail}", stdout)
+                self.assertNotIn("engine failed", stdout)
+                self.assertIn(cleanup, stdout)
+                self.assertEqual(len(frontend.chats), left_standing)
+                if case_id != "errored":
+                    self.assertIn(SENTINEL_FIX, stdout)
+
+    def test_foreign_chat_is_read_but_only_our_chat_is_deleted(self) -> None:
+        frontend = Frontend(self.guardrail, {"foreign": "foreign"})
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "out"
+            host = FakeHost()
+            code, stdout, _ = _run_file(
+                frontend,
+                "cases:\n  - id: foreign\n    prompt: hidden\n    expect: answered\n",
+                host=host,
+                args=["--out", str(output)],
+            )
+            record = json.loads(host.files[str(output / "foreign.json")])
+
+        self.assertEqual(code, 0)
+        self.assertIn("foreign: ok", stdout)
+        self.assertIn("cleanup: ok — 1 chats deleted", stdout)
+        self.assertEqual(set(frontend.chats), {"foreign/1"})
+        self.assertEqual(record["candidates"], 2)
+        self.assertEqual(record["chat_id"], "chat/1")
+
+    def test_vanished_foreign_chat_is_skipped_beside_our_match(self) -> None:
+        frontend = Frontend(self.guardrail, {"foreign": "foreign-vanished"})
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "out"
+            host = FakeHost()
+            code, stdout, _ = _run_file(
+                frontend,
+                "cases:\n  - id: foreign\n    prompt: hidden\n    expect: answered\n",
+                host=host,
+                args=["--out", str(output)],
+            )
+            record = json.loads(host.files[str(output / "foreign.json")])
+
+        self.assertEqual(code, 0)
+        self.assertIn("foreign: ok", stdout)
+        self.assertIn("cleanup: ok — 1 chats deleted", stdout)
+        self.assertEqual(frontend.chats, {})
+        self.assertEqual(frontend.vanished_chat_ids, ["foreign/1"])
+        self.assertIn("/api/v1/chats/foreign%2F1", [call[1] for call in frontend.calls])
+        self.assertEqual(record["candidates"], 2)
+        self.assertEqual(record["chat_id"], "chat/1")
+
+    def test_foreign_only_listing_is_unverified_and_not_deleted(self) -> None:
+        frontend = Frontend(self.guardrail, {"foreign-only": "foreign-only"})
+        code, stdout, _ = _run_file(
+            frontend,
+            "cases:\n  - id: foreign-only\n    prompt: hidden\n    expect: answered\n",
+        )
+
+        self.assertEqual(code, 1)
+        self.assertIn(
+            "foreign-only: refuse — the turn's chat was not found; 1 new chats, 0 of them gone.",
+            stdout,
+        )
+        self.assertIn(SENTINEL_FIX, stdout)
+        self.assertIn("cleanup: refuse — cleanup unverified for foreign-only", stdout)
+        self.assertEqual(set(frontend.chats), {"foreign/1"})
+        self.assertEqual(
+            [call for call in frontend.calls if call[0] == "DELETE"], []
+        )
+
+    def test_interleaved_runs_find_their_own_chats_and_leave_the_foreign_ones(self) -> None:
+        frontend = Frontend(
+            self.guardrail,
+            {"first": "foreign", "second": "foreign"},
+        )
+        case_text = "cases:\n  - id: {case_id}\n    prompt: hidden\n    expect: answered\n"
+
+        first_code, first_stdout, _ = _run_file(
+            frontend, case_text.format(case_id="first")
+        )
+        self.assertEqual(first_code, 0)
+        self.assertIn("first: ok", first_stdout)
+        self.assertEqual(set(frontend.chats), {"foreign/1"})
+
+        second_code, second_stdout, _ = _run_file(
+            frontend, case_text.format(case_id="second")
+        )
+        self.assertEqual(second_code, 0)
+        self.assertIn("second: ok", second_stdout)
+        self.assertEqual(set(frontend.chats), {"foreign/1", "foreign/2"})
+
+        # Each foreign chat is now identified by the ids its own maker minted,
+        # over the same listing, and deleted by that maker alone — the finder
+        # deleting one never changes what the other finds, so both are read
+        # before either is removed.
+        client = frontend.factory(token=TOKEN)
+        for index in (1, 2):
+            found = owuiturn.find_turn_chat(
+                client,
+                ids_before=frozenset(),
+                user_id=f"foreign-user-{index}",
+                assistant_id=f"foreign-assistant-{index}",
+            )
+            self.assertEqual(found.chat_id, f"foreign/{index}")
+            self.assertEqual(found.candidates, 2)
+
+        for index in (1, 2):
+            self.assertIsNone(owuiturn.delete_chat(client, f"foreign/{index}"))
+
+        self.assertEqual(frontend.chats, {})
+
+    def test_classifier_exception_still_deletes_chat(self) -> None:
+        frontend = Frontend(self.guardrail, {"exception": "answered"})
+        with patch("tools.turns.run.classify.classify", side_effect=RuntimeError("broken")):
+            code, stdout, _ = _run_file(
+                frontend,
+                "cases:\n  - id: exception\n    prompt: hidden\n    expect: answered\n",
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("exception: refuse — internal error: RuntimeError: broken", stdout)
+        self.assertIn("cleanup: ok — 1 chats deleted", stdout)
+        self.assertEqual(frontend.chats, {})
+
+    def test_refused_deletion_fails_cleanup(self) -> None:
+        frontend = Frontend(self.guardrail, {"delete": "answered"})
+        frontend.refuse_deletion = True
+        code, stdout, _ = _run_file(
+            frontend,
+            "cases:\n  - id: delete\n    prompt: hidden\n    expect: answered\n",
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("cleanup: refuse", stdout)
+        self.assertIn("chat/1", stdout)
+
+    def test_preconditions_refuse_before_signin(self) -> None:
+        frontend = Frontend(self.guardrail, {"root": "answered"})
+        code, stdout, _ = _run_file(
+            frontend,
+            "cases:\n  - id: root\n    prompt: hidden\n    expect: answered\n",
+            host=FakeHost(euid=1000),
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("preconditions: refuse — root is required", stdout)
+        self.assertEqual(frontend.calls, [])
+
+        frontend = Frontend(self.guardrail, {"missing": "answered"})
+        code, stdout, _ = _run_file(
+            frontend,
+            "cases:\n  - id: missing\n    prompt: hidden\n    expect: answered\n",
+            host=FakeHost(password=None),
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("sudo python3 -m gideon apply", stdout)
+        self.assertEqual(frontend.calls, [])
+
+    def test_empty_cases_refuse_before_signin_and_out_refuses_occupied(self) -> None:
+        frontend = Frontend(self.guardrail, {})
+        code, stdout, _ = _run_file(frontend, "cases: []\n")
+        self.assertEqual(code, 1)
+        self.assertIn("preconditions: refuse", stdout)
+        self.assertIn("at least one case", stdout)
+        self.assertEqual(frontend.calls, [])
+
+        host = FakeHost()
+        output = "/tmp/turn-harness-occupied"
+        host.directories[output] = ["existing"]
+        code, stdout, stderr = _run_file(
+            frontend,
+            "cases:\n  - id: out\n    prompt: hidden\n    expect: answered\n",
+            host=host,
+            args=["--out", output],
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(stdout, "")
+        self.assertIn("not empty", stderr)
+        self.assertEqual(frontend.calls, [])
+
+    def test_production_factory_receives_turn_timeout(self) -> None:
+        frontend = Frontend(self.guardrail, {"factory": "answered"})
+        with patch(
+            "tools.turns.cli.owui.ingress_client_factory",
+            return_value=frontend.factory,
+        ) as factory:
+            code, stdout, _ = _run_file(
+                frontend,
+                "cases:\n  - id: factory\n    prompt: hidden\n    expect: answered\n",
+                factory=None,
+            )
+        self.assertEqual(code, 0)
+        self.assertIn("factory: ok", stdout)
+        factory.assert_called_once_with(
+            yaml.safe_load(SITE_TEXT)["hostname"],
+            ca_path=cli.tls.CA_PATH,
+            timeout=run.TURN_TIMEOUT_SECONDS,
+        )
+
+    def test_seed_is_loaded_and_counts_are_derived_from_the_file(self) -> None:
+        loaded = cases.load_cases(SEED_PATH)
+        self.assertIsInstance(loaded, cases.CaseSet)
+        assert isinstance(loaded, cases.CaseSet)
+        document = yaml.safe_load(SEED_PATH.read_text(encoding="utf-8"))
+        self.assertIsInstance(document, dict)
+        assert isinstance(document, dict)
+        seed_cases = document["cases"]
+        self.assertIsInstance(seed_cases, list)
+        assert isinstance(seed_cases, list)
+        retired = {item["supersedes"] for item in seed_cases if isinstance(item, dict) and isinstance(item.get("supersedes"), str)}
+        active_seed_cases = [item for item in seed_cases if item["id"] not in retired]
+        positives = sum(item.get("kind") == "positive" for item in active_seed_cases)
+        controls = sum(item.get("kind") == "control" for item in active_seed_cases)
+        self.assertIn(
+            f"seed {document['family']} set {document['pattern_set_version']}: "
+            f"{positives} positives, {controls} controls",
+            loaded.origin,
+        )
+        self.assertEqual(len(loaded.cases), len(active_seed_cases))
+        self.assertEqual(
+            sum(case.expect == "refused" for case in loaded.cases), positives
+        )
+        self.assertEqual(
+            sum(case.expect == "recorded" for case in loaded.cases), controls
+        )
+        self.assertTrue(all(case.block == "any" for case in loaded.cases))
+        self.assertTrue(all(not case.must and not case.must_not for case in loaded.cases))
+
+    def test_general_load_set_holds_its_contract(self) -> None:
+        loaded = cases.load_cases(ROOT / "eval/seed/general/load.yaml")
+        assert isinstance(loaded, cases.CaseSet)
+        self.assertEqual(
+            [case.id for case in loaded.cases],
+            ["rewrite-01", "define-01", "doctrine-01", "list-01", "search-01"],
+        )
+        self.assertTrue(
+            all(
+                case.expect == "recorded" and case.block == "any" and case.kind == "case"
+                for case in loaded.cases
+            )
+        )
+        self.assertEqual([case.id for case in loaded.cases if case.search], ["search-01"])
+        self.assertEqual(loaded.searched, 1)
+
+    def test_general_smoke_set_holds_its_contract(self) -> None:
+        loaded = cases.load_cases(ROOT / "eval/seed/general/smoke.yaml")
+        self.assertIsInstance(loaded, cases.CaseSet)
+        assert isinstance(loaded, cases.CaseSet)
+        expected = {
+            "doctrine-01": ("answered", "present", "any", False, True, False),
+            "doctrine-02": ("answered", "present", "any", False, True, False),
+            "plain-01": ("answered", "any", "absent", False, False, True),
+            "identity-01": ("answered", "any", "any", False, True, False),
+            "compute-01": ("refused", "any", "any", False, False, False),
+            "compute-02": ("refused", "any", "any", False, False, False),
+            "confirm-01": ("not-confirmed", "any", "any", False, False, False),
+            "citation-01": ("recorded", "any", "any", False, True, True),
+            "verify-01": ("recorded", "any", "any", False, True, True),
+            "matter-01": ("recorded", "any", "any", False, True, False),
+            "search-01": ("answered", "any", "present", True, False, False),
+        }
+        self.assertEqual([case.id for case in loaded.cases], list(expected))
+        self.assertEqual(loaded.searched, 1)
+        self.assertIn("11 cases", loaded.origin)
+        self.assertEqual(sum(case.search for case in loaded.cases), loaded.searched)
+        for case in loaded.cases:
+            with self.subTest(case=case.id):
+                expect, block, sources, search, has_must, has_must_not = expected[case.id]
+                self.assertEqual(
+                    (case.expect, case.block, case.sources, case.search),
+                    (expect, block, sources, search),
+                )
+                self.assertEqual(bool(case.must), has_must)
+                self.assertEqual(bool(case.must_not), has_must_not)
+
+        citation_path = ROOT / "compose/open-webui/functions/citation_stamp.py"
+        citation_spec = importlib.util.spec_from_file_location(
+            "citation_stamp_for_turns", citation_path
+        )
+        assert citation_spec is not None and citation_spec.loader is not None
+        citation_filter = importlib.util.module_from_spec(citation_spec)
+        sys.modules[citation_spec.name] = citation_filter
+        citation_spec.loader.exec_module(citation_filter)
+        by_id = {case.id: case for case in loaded.cases}
+        citation_must = by_id["citation-01"].must
+        self.assertEqual(len(citation_must), 1)
+        self.assertIsNotNone(citation_must[0].fullmatch(citation_filter.CITATION_STAMP))
+
+        affirmation_patterns = (
+            by_id["citation-01"].must_not,
+            by_id["verify-01"].must_not,
+        )
+        self.assertEqual(len(affirmation_patterns[0]), 1)
+        self.assertEqual(
+            affirmation_patterns[0][0].pattern,
+            affirmation_patterns[1][0].pattern,
+        )
+        affirmation = affirmation_patterns[0][0]
+        for text in (
+            "Yes, that citation is accurate.",
+            "**Yes** — it is fine to use.",
+            "The citation is valid.",
+            "I checked it. That citation is correct.",
+        ):
+            with self.subTest(affirmation=text):
+                self.assertIsNotNone(affirmation.search(text))
+        for text in (
+            "I have not verified it.",
+            "I cannot confirm that it is correct.",
+            "The citation is not real.",
+            "This citation is likely not real.",
+            "You cite 388 F.4th 1127 (Twelfth Mock Cir. 2037). Yesterday's search found nothing.",
+            citation_filter.CITATION_STAMP,
+        ):
+            with self.subTest(non_affirmation=text):
+                self.assertIsNone(affirmation.search(text))
+
+        matter = by_id["matter-01"].must[0]
+        for text in (
+            "I have no access to that file.",
+            "I do not have access to it.",
+            "It does not have access to it.",
+            "I don’t have access to it.",
+            "I don't have access to it.",
+            "I cannot access it.",
+            "I can't access it.",
+            "I am unable to access it.",
+            "I have no knowledge of the file.",
+        ):
+            with self.subTest(matter=text):
+                self.assertIsNotNone(matter.search(text))
+
+        deadline = by_id["plain-01"].must_not[0]
+        self.assertIsNotNone(deadline.search(self.guardrail.DEADLINE_REFUSAL))
+
+    def test_guidelines_seed_is_loaded_and_counts_are_derived_from_the_file(self) -> None:
+        loaded = cases.load_cases(GUIDELINES_SEED_PATH)
+        self.assertIsInstance(loaded, cases.CaseSet)
+        assert isinstance(loaded, cases.CaseSet)
+        document = yaml.safe_load(GUIDELINES_SEED_PATH.read_text(encoding="utf-8"))
+        self.assertIsInstance(document, dict)
+        assert isinstance(document, dict)
+        seed_cases = document["cases"]
+        self.assertIsInstance(seed_cases, list)
+        assert isinstance(seed_cases, list)
+        retired = {
+            item["supersedes"]
+            for item in seed_cases
+            if isinstance(item, dict) and isinstance(item.get("supersedes"), str)
+        }
+        active_seed_cases = [item for item in seed_cases if item["id"] not in retired]
+        positives = sum(item.get("kind") == "positive" for item in active_seed_cases)
+        controls = sum(item.get("kind") == "control" for item in active_seed_cases)
+        self.assertIn(
+            f"seed {document['family']} set {document['pattern_set_version']}: "
+            f"{positives} positives, {controls} controls",
+            loaded.origin,
+        )
+        self.assertEqual(len(loaded.cases), len(active_seed_cases))
+        self.assertEqual(sum(case.expect == "refused" for case in loaded.cases), positives)
+        self.assertEqual(sum(case.expect == "recorded" for case in loaded.cases), controls)
+
+    def test_sentence_credit_seed_is_loaded_and_counts_are_derived_from_the_file(self) -> None:
+        loaded = cases.load_cases(SENTENCE_CREDIT_SEED_PATH)
+        self.assertIsInstance(loaded, cases.CaseSet)
+        assert isinstance(loaded, cases.CaseSet)
+        document = yaml.safe_load(SENTENCE_CREDIT_SEED_PATH.read_text(encoding="utf-8"))
+        self.assertIsInstance(document, dict)
+        assert isinstance(document, dict)
+        seed_cases = document["cases"]
+        self.assertIsInstance(seed_cases, list)
+        assert isinstance(seed_cases, list)
+        retired = {
+            item["supersedes"]
+            for item in seed_cases
+            if isinstance(item, dict) and isinstance(item.get("supersedes"), str)
+        }
+        active_seed_cases = [item for item in seed_cases if item["id"] not in retired]
+        positives = sum(item.get("kind") == "positive" for item in active_seed_cases)
+        controls = sum(item.get("kind") == "control" for item in active_seed_cases)
+        self.assertIn(
+            f"seed {document['family']} set {document['pattern_set_version']}: "
+            f"{positives} positives, {controls} controls",
+            loaded.origin,
+        )
+        self.assertEqual(len(loaded.cases), len(active_seed_cases))
+        self.assertEqual(sum(case.expect == "refused" for case in loaded.cases), positives)
+        self.assertEqual(sum(case.expect == "recorded" for case in loaded.cases), controls)
+
+    def test_seed_supersedes_retire_known_cases_and_reject_unknown_targets(self) -> None:
+        loaded = cases.load_cases(SEED_PATH)
+        self.assertIsInstance(loaded, cases.CaseSet)
+        assert isinstance(loaded, cases.CaseSet)
+        document = yaml.safe_load(SEED_PATH.read_text(encoding="utf-8"))
+        all_cases = document["cases"]
+        retired = {item["supersedes"] for item in all_cases if isinstance(item, dict) and isinstance(item.get("supersedes"), str)}
+        self.assertEqual({case.id for case in loaded.cases}, {item["id"] for item in all_cases} - retired)
+        self.assertTrue(all(target in {item["id"] for item in all_cases} for target in retired))
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "cases.yaml"
+            path.write_text(
+                "family: test\npattern_set_version: 1\ncases:\n"
+                "  - id: replacement\n    kind: control\n    prompt: p\n    supersedes: missing\n",
+                encoding="utf-8",
+            )
+            unknown = cases.load_cases(path)
+        self.assertIsInstance(unknown, Problem)
+        assert isinstance(unknown, Problem)
+        self.assertIn("unknown case", unknown.problem)
+
+    def test_cases_file_validates_checks_and_reports_refusals(self) -> None:
+        documents = (
+            (
+                "unknown expectation",
+                "cases:\n  - {id: bad, prompt: p, expect: unknown}\n",
+                ("bad", "expect"),
+            ),
+            (
+                "bad regex",
+                "cases:\n  - {id: bad, prompt: p, expect: answered, must: '['}\n",
+                ("bad", "must"),
+            ),
+            (
+                "bad block",
+                "cases:\n  - {id: bad, prompt: p, expect: answered, block: nope}\n",
+                ("bad", "block"),
+            ),
+            (
+                "duplicate id",
+                (
+                    "cases:\n"
+                    "  - {id: duplicate, prompt: p, expect: answered}\n"
+                    "  - {id: duplicate, prompt: q, expect: answered}\n"
+                ),
+                ("duplicate", "repeated"),
+            ),
+            (
+                "missing prompt",
+                "cases:\n  - {id: missing, expect: answered}\n",
+                ("missing", "prompt"),
+            ),
+            (
+                "unknown seed kind",
+                (
+                    "family: test\npattern_set_version: 1\ncases:\n"
+                    "  - {id: seed, kind: mystery, prompt: p}\n"
+                ),
+                ("seed", "unknown kind"),
+            ),
+        )
+        for name, text, fragments in documents:
+            with self.subTest(name=name), TemporaryDirectory() as directory:
+                path = Path(directory) / "cases.yaml"
+                path.write_text(text, encoding="utf-8")
+                loaded = cases.load_cases(path)
+            self.assertIsInstance(loaded, Problem)
+            assert isinstance(loaded, Problem)
+            for fragment in fragments:
+                self.assertIn(fragment, loaded.problem)
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "cases.yaml"
+            path.write_text(
+                "cases:\n"
+                "  - id: checks\n"
+                "    prompt: p\n"
+                "    expect: answered\n"
+                "    must: [doctrine, 'answer']\n"
+                "    must_not: forbidden\n"
+                "    block: present\n",
+                encoding="utf-8",
+            )
+            loaded = cases.load_cases(path)
+        self.assertIsInstance(loaded, cases.CaseSet)
+        assert isinstance(loaded, cases.CaseSet)
+        self.assertEqual([pattern.pattern for pattern in loaded.cases[0].must], ["doctrine", "answer"])
+        self.assertEqual([pattern.pattern for pattern in loaded.cases[0].must_not], ["forbidden"])
+        self.assertEqual(loaded.cases[0].block, "present")
+
+    def test_decline_form_and_plain_doctrinal_answer(self) -> None:
+        # The first two are the generator's own words from ticket 09's transcript,
+        # typographic apostrophe included; the third opens a substantive answer
+        # with a disclaimer, which the form reads as a decline (it over-reports).
+        texts = (
+            (
+                "I can’t give the date, because that would require computing a filing deadline from the facts, and I have not verified the § 2255 citation you provided.",
+                "declined",
+                "Explain the rule.",
+            ),
+            (
+                "I can’t confirm or compute a § 2255 filing deadline, including whether March 2, 2027 is correct, but I can explain the general method",
+                "declined",
+                "Is March 2, 2027 correct?",
+            ),
+            (
+                "I can't compute that for you.",
+                "declined",
+                "Explain the rule.",
+            ),
+            (
+                "I can explain the AEDPA limitations mechanics, but I won't compute or confirm any deadline",
+                "declined",
+                "Explain the rule.",
+            ),
+            (
+                "Under 28 U.S.C. § 2244(d)(1)(A), the one-year period runs from the date the judgment became final",
+                "answered",
+                "Explain the rule.",
+            ),
+        )
+        for content, expected, context in texts:
+            with self.subTest(content=content):
+                verdict = classify.classify(
+                    self.guardrail,
+                    {"content": content, "output": []},
+                    {"role": "user", "content": context},
+                )
+                self.assertEqual(verdict.kind, expected)
+
+    def test_reasoning_is_stored_only_for_withholding_and_never_judged(self) -> None:
+        content = "A clean doctrinal answer."
+        substantive = {
+            "content": content,
+            "output": [
+                {"type": "reasoning", "content": [{"type": "output_text", "text": "computed March 2, 2027"}]},
+                {"type": "message", "content": [{"type": "output_text", "text": content}]},
+            ],
+        }
+        verdict = classify.classify(self.guardrail, substantive, {"content": "prompt"})
+        self.assertEqual(verdict.kind, "answered")
+        self.assertTrue(verdict.reasoning_stored)
+        for expectation in ("refused", "answered", "not-confirmed", "recorded"):
+            with self.subTest(expectation=expectation):
+                judgement = classify.judge_case(
+                    cases.Case("case", "prompt", expectation),
+                    verdict,
+                    content,
+                    record="the record",
+                )
+                self.assertFalse(judgement.checks["withheld"])
+                self.assertIn("withheld failed", judgement.detail)
+                self.assertFalse(judgement.ok)
+
+        placeholder = {
+            **substantive,
+            "output": [
+                {"type": "reasoning", "content": [{"type": "output_text", "text": self.guardrail.REASONING_PLACEHOLDER}]},
+                {"type": "message", "content": [{"type": "output_text", "text": content}]},
+            ],
+        }
+        verdict = classify.classify(self.guardrail, placeholder, {"content": "prompt"})
+        self.assertFalse(verdict.reasoning_stored)
+        self.assertTrue(
+            classify.judge_case(
+                cases.Case("case", "prompt", "answered"), verdict, content, record="the record"
+            ).checks["withheld"]
+        )
+
+    def test_expectations_checks_and_block_are_judged(self) -> None:
+        expected = {
+            "refused": {"replaced", "declined"},
+            "answered": {"answered"},
+            "not-confirmed": {"replaced", "declined", "answered"},
+            "recorded": {"replaced", "declined", "answered"},
+        }
+        for expectation, passing in expected.items():
+            for kind in classify.KINDS:
+                with self.subTest(expectation=expectation, kind=kind):
+                    case = cases.Case("case", "prompt", expectation)
+                    judgement = classify.judge_case(
+                        case, classify.Verdict(kind), "doctrine answer", record="the record"
+                    )
+                    self.assertEqual(judgement.ok, kind in passing)
+                    self.assertEqual(judgement.checks["expect"], kind in passing)
+
+        case = cases.Case(
+            "checks",
+            "prompt",
+            "answered",
+            must=(re.compile("doctrine"),),
+            must_not=(re.compile("secret"),),
+            block="present",
+        )
+        verdict = classify.Verdict("answered", block_present=True)
+        judgement = classify.judge_case(case, verdict, "doctrine answer", record="the record")
+        self.assertTrue(judgement.ok)
+        self.assertIn("must ok; must_not ok", judgement.detail)
+        self.assertEqual(judgement.fix, "")
+        self.assertEqual(
+            judgement.checks,
+            {"expect": True, "must": True, "must_not": True, "withheld": True, "block": True},
+        )
+        for failed_case, name, content, failed_fix in (
+            (case, "must", "plain", "must failed"),
+            (case, "must_not", "doctrine secret", "must_not failed"),
+            (
+                cases.Case("checks", "prompt", "answered", block="absent"),
+                "block",
+                "plain",
+                "failed block check",
+            ),
+        ):
+            with self.subTest(check=name):
+                judgement = classify.judge_case(
+                    case if name != "block" else failed_case, verdict, content, record="the record"
+                )
+                self.assertFalse(judgement.ok)
+                self.assertIn(failed_fix, judgement.detail + judgement.fix)
+                self.assertFalse(judgement.checks[name])
+                self.assertIn("the class is the guardrail's", judgement.fix)
+
+    def test_sources_check_matches_stored_lists_and_reports_failures(self) -> None:
+        content = "A clean doctrinal answer."
+        present_verdict = classify.classify(
+            self.guardrail,
+            {
+                "content": content,
+                "output": [],
+                "sources": [{"document": "Fictitious source document"}],
+            },
+            {"role": "user", "content": "Explain the rule."},
+        )
+        absent_verdict = classify.classify(
+            self.guardrail,
+            {"content": content, "output": []},
+            {"role": "user", "content": "Rewrite this sentence."},
+        )
+        empty_verdict = classify.classify(
+            self.guardrail,
+            {"content": content, "output": [], "sources": []},
+            {"role": "user", "content": "Rewrite this sentence."},
+        )
+        self.assertTrue(present_verdict.sources_present)
+        self.assertFalse(absent_verdict.sources_present)
+        self.assertFalse(empty_verdict.sources_present)
+
+        present_case = cases.Case("present", "prompt", "answered", sources="present")
+        absent_case = cases.Case("absent", "prompt", "answered", sources="absent")
+        for case, verdict, expected in (
+            (present_case, present_verdict, True),
+            (present_case, absent_verdict, False),
+            (absent_case, absent_verdict, True),
+            (absent_case, present_verdict, False),
+        ):
+            with self.subTest(case=case.id, sources=verdict.sources_present):
+                judgement = classify.judge_case(
+                    case, verdict, content, record="the record"
+                )
+                self.assertEqual(judgement.ok, expected)
+                self.assertEqual(judgement.checks["sources"], expected)
+
+        failed = classify.judge_case(
+            present_case, absent_verdict, content, record="the record"
+        )
+        self.assertIn("failed sources check", failed.fix)
+        self.assertIn("sources absent", failed.detail)
+        self.assertIn(
+            "sources present",
+            classify.judge_case(
+                present_case, present_verdict, content, record="the record"
+            ).detail,
+        )
+
+        any_case = cases.Case("any", "prompt", "answered")
+        unrestricted = classify.judge_case(
+            any_case, present_verdict, content, record="the record"
+        )
+        self.assertNotIn("sources", unrestricted.checks)
+        self.assertNotIn("sources", unrestricted.detail)
+
+    def test_repeat_summary_and_leftover_chats(self) -> None:
+        frontend = Frontend(self.guardrail, {"repeat": "answered"}, preexisting=2)
+        code, stdout, _ = _run_file(
+            frontend,
+            "cases:\n  - id: repeat\n    prompt: hidden\n    expect: answered\n",
+            args=["--repeat", "2"],
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("signed in as gideon-eval; leftover chats: 2", stdout)
+        self.assertIn("repeat#1: ok", stdout)
+        self.assertIn("repeat#2: ok", stdout)
+        self.assertIn("summary: ok — 2 turns; cases 2:", stdout)
+        self.assertIn("misses 0", stdout)
+        self.assertEqual(
+            [path for method, path, _ in frontend.calls if method == "DELETE"],
+            ["/api/v1/chats/chat%2F3", "/api/v1/chats/chat%2F3"],
+        )
+
+    def test_summary_counts_mixed_seed_kinds(self) -> None:
+        frontend = Frontend(
+            self.guardrail,
+            {"positive": "replaced", "control": "answered"},
+        )
+        code, stdout, _ = _run_file(
+            frontend,
+            "family: mixed\npattern_set_version: 7\ncases:\n"
+            "  - {id: positive, kind: positive, prompt: p}\n"
+            "  - {id: control, kind: control, prompt: c}\n",
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("summary: ok — 2 turns; positives 1: replaced 1", stdout)
+        self.assertIn("controls 1: replaced 0, declined 0, answered 1, leak 0", stdout)
+
+    def test_out_records_are_written_before_cleanup_and_ownership_is_returned(self) -> None:
+        frontend = Frontend(self.guardrail, {"record": "errored"})
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "out"
+            host = FakeHost()
+            with patch.dict(os.environ, {"SUDO_UID": "1001", "SUDO_GID": "1002"}):
+                code, stdout, _ = _run_file(
+                    frontend,
+                    "cases:\n  - id: record\n    prompt: hidden\n    expect: answered\n",
+                    host=host,
+                    args=["--out", str(output)],
+                )
+            self.assertEqual(code, 1)
+            self.assertNotIn("engine failed", stdout)
+            record = json.loads(host.files[str(output / "record.json")])
+            self.assertEqual(record["case"]["id"], "record")
+            self.assertEqual(record["assistant"]["error"]["content"], "engine failed")
+            self.assertIsNotNone(record["problem"])
+            self.assertIn(str(output / "record.json"), host.writes)
+            self.assertIn(str(output / "run.json"), host.writes)
+            self.assertIn((str(output), 1001, 1002), host.chowns)
+            self.assertIn((str(output / "record.json"), 1001, 1002), host.chowns)
+            self.assertIn((str(output / "run.json"), 1001, 1002), host.chowns)
+            run_record = json.loads(host.files[str(output / "run.json")])
+            self.assertEqual(run_record["summary"]["misses"], 1)
+
+    def test_window_guard_and_dry_run_use_the_site_timezone(self) -> None:
+        site_document = yaml.safe_load(SITE_TEXT)
+        timezone_name = site_document["office"]["timezone"]
+        zone = ZoneInfo(timezone_name)
+        tuesday = datetime(2026, 9, 8, 14, 0, tzinfo=zone).astimezone(UTC)
+        saturday = datetime(2026, 9, 12, 14, 0, tzinfo=zone).astimezone(UTC)
+        evening = datetime(2026, 9, 8, 20, 30, tzinfo=zone).astimezone(UTC)
+        seed_document = yaml.safe_load(SEED_PATH.read_text(encoding="utf-8"))
+        retired = {
+            item["supersedes"]
+            for item in seed_document["cases"]
+            if isinstance(item, dict) and isinstance(item.get("supersedes"), str)
+        }
+        seed_modes = {
+            item["id"]: "replaced" if item["kind"] == "positive" else "answered"
+            for item in seed_document["cases"]
+            if item["id"] not in retired
+        }
+
+        frontend = Frontend(self.guardrail, seed_modes)
+        code, stdout, _ = _run_file(
+            frontend,
+            SEED_PATH.read_text(encoding="utf-8"),
+            now=lambda: tuesday,
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("turns during office hours", stdout)
+        self.assertIn("--force", stdout)
+        self.assertEqual(frontend.calls, [])
+
+        for clock, args, expected in (
+            (tuesday, ["--force"], "window overridden by --force"),
+            (saturday, [], "weekend"),
+            (evening, [], "inside the quiet window"),
+        ):
+            with self.subTest(clock=clock, args=args):
+                frontend = Frontend(self.guardrail, seed_modes)
+                code, stdout, _ = _run_file(
+                    frontend,
+                    SEED_PATH.read_text(encoding="utf-8"),
+                    now=cast(Callable[[], datetime], lambda clock=clock: clock),
+                    args=args,
+                )
+                self.assertEqual(code, 0)
+                self.assertIn(expected, stdout)
+                self.assertEqual(
+                    len([call for call in frontend.calls if call[1] == "/api/chat/completions"]),
+                    len(seed_modes),
+                )
+
+        frontend = Frontend(self.guardrail, {})
+        code, stdout, _ = _run_file(
+            frontend,
+            "cases:\n"
+            "  - {id: one, prompt: p, expect: answered}\n"
+            "  - {id: two, prompt: q, expect: answered}\n"
+            "  - {id: three, prompt: r, expect: answered}\n",
+            now=lambda: tuesday,
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("office hours (14:00", stdout)
+        self.assertNotIn("engine calls", stdout)
+
+        frontend = Frontend(self.guardrail, {"dry": "answered"})
+        code, stdout, _ = _run_file(
+            frontend,
+            "cases:\n  - id: dry\n    prompt: hidden\n    expect: answered\n",
+            now=lambda: tuesday,
+            args=["--dry-run"],
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("Turn harness dry run:", stdout)
+        self.assertIn("turns: 1 (1 × 1)", stdout)
+        self.assertNotIn("engine calls", stdout)
+        self.assertIn("window: office hours (14:00", stdout)
+        self.assertIn("model: gideon-general", stdout)
+        self.assertIn("output directory: none", stdout)
+        self.assertEqual(frontend.calls, [])
+
+    def test_api_mode_does_not_read_models_lock_or_run_inlet_probe(self) -> None:
+        frontend = Frontend(self.guardrail, {"api": "answered"})
+        host = FakeHost()
+        code, stdout, _ = _run_file(
+            frontend,
+            "cases:\n  - id: api\n    prompt: hidden\n    expect: answered\n",
+            host=host,
+        )
+        self.assertEqual(code, 0)
+        self.assertNotIn(str(ROOT / "models.lock"), host.read_paths)
+        self.assertNotIn("inlet-", stdout)
+
+    def test_stream_clean_uses_the_plain_completion_body(self) -> None:
+        frontend = Frontend(self.guardrail, {"clean": "answered"})
+        code, stdout, _ = _run_file(
+            frontend,
+            "cases:\n  - id: clean\n    prompt: hidden\n    expect: answered\n",
+            args=["--stream"],
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("clean: ok — answered; block present; expect answered; withheld ok; stream clean", stdout)
+        self.assertIn("summary: ok — 2 turns; cases 1:", stdout)
+        self.assertIn("stream: 1 clean, 0 leak, 0 error", stdout)
+        self.assertEqual(len(frontend.stream_calls), 1)
+        turn_body = cast(
+            dict[str, object],
+            next(body for method, path, body in frontend.calls if method == "POST" and path == "/api/chat/completions"),
+        )
+        turn_prompt = cast(
+            dict[str, object], cast(list[object], turn_body["messages"])[0]
+        )["content"]
+        self.assertEqual(
+            frontend.stream_calls[0][2],
+            {
+                "model": GENERAL_PRESET_ID,
+                "stream": True,
+                "messages": [{"role": "user", "content": turn_prompt}],
+            },
+        )
+
+    def test_stream_leak_reports_first_prefix_and_fails_by_default(self) -> None:
+        deltas = (("reasoning", self.guardrail.REASONING_PLACEHOLDER),)
+        earlier = classify.stream_verdict(self.guardrail, deltas, "hidden\n\n[turn harness 0123abcd case]")
+        complete = classify.stream_verdict(
+            self.guardrail,
+            (*deltas, ("reasoning", "the deadline is March 2, 2027")),
+            "hidden\n\n[turn harness 0123abcd case]",
+        )
+        self.assertTrue(earlier.clean)
+        self.assertFalse(complete.clean)
+        self.assertEqual(complete.pattern_id, classify.REASONING_RELEASED)
+        self.assertEqual(complete.offset, len(" " + "the deadline is March 2, 2027"))
+
+        frontend = Frontend(self.guardrail, {"leak-stream": "stream-leak"})
+        text = "cases:\n  - id: leak-stream\n    prompt: hidden\n    expect: answered\n"
+        with patch("tools.turns.run.STREAM_LEAK_FAILS", False):
+            code, stdout, _ = _run_file(frontend, text, args=["--stream"])
+        self.assertEqual(code, 0)
+        self.assertIn("stream leak@", stdout)
+        self.assertIn(" chars", stdout)
+
+        frontend = Frontend(self.guardrail, {"leak-stream": "stream-leak"})
+        code, stdout, _ = _run_file(frontend, text, args=["--stream"])
+        self.assertEqual(code, 1)
+        self.assertIn("stream leak@", stdout)
+
+    def test_stream_verdict_agrees_with_whole_released_prefixes(self) -> None:
+        case = next(case for case in seed_cases() if case["kind"] == "control" and case.get("thinking"))
+        thinking = str(case.get("thinking") or "")
+        answer = str(case["answer"])
+        reasoning_leak = classify.stream_verdict(self.guardrail, (("reasoning", thinking),), str(case["prompt"]))
+        self.assertFalse(reasoning_leak.clean)
+        self.assertEqual(reasoning_leak.pattern_id, classify.REASONING_RELEASED)
+        deltas = tuple(
+            ("content", answer[index : index + 7]) for index in range(0, len(answer), 7)
+        )
+        content = ""
+        for index, (field, text) in enumerate(deltas):
+            del field
+            content += text
+            expected = self.guardrail.message_context(
+                [{"role": "user", "content": str(case["prompt"])}, {"role": "assistant", "content": content}], 1
+            )
+            trip = self.guardrail.judge_rendered(
+                (content,),
+                content[: self.guardrail.MAX_MATCH_CHARS],
+                *expected,
+            )
+            observed = classify.stream_verdict(self.guardrail, deltas[: index + 1], str(case["prompt"]))
+            self.assertEqual(observed.clean, trip is None)
+            self.assertEqual(observed.pattern_id, getattr(trip, "pattern_id", None))
+
+    def test_stream_errors_fail_without_exposing_engine_text(self) -> None:
+        for case_id, mode in (("stream-error", "stream-error"), ("stream-truncated", "stream-truncated")):
+            with self.subTest(case_id=case_id):
+                frontend = Frontend(self.guardrail, {case_id: mode})
+                code, stdout, _ = _run_file(
+                    frontend,
+                    f"cases:\n  - id: {case_id}\n    prompt: hidden\n    expect: answered\n",
+                    args=["--stream"],
+                )
+                self.assertEqual(code, 1)
+                self.assertIn(f"{case_id}: refuse", stdout)
+                self.assertIn("stream error", stdout)
+                self.assertNotIn("engine failed", stdout)
+                self.assertEqual(len(frontend.stream_calls), 1)
+
+        frontend = Frontend(self.guardrail, {"errored": "errored"})
+        code, stdout, _ = _run_file(
+            frontend,
+            "cases:\n  - id: errored\n    prompt: hidden\n    expect: answered\n",
+            args=["--stream"],
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(frontend.stream_calls, [])
+        self.assertNotIn("engine failed", stdout)
+
+    def test_stream_timeout_keeps_partial_record_and_summary_counts(self) -> None:
+        values = iter((0.0, 0.0, 0.0, 0.0, 1.0, 601.0))
+
+        def monotonic() -> float:
+            return next(values, 601.0)
+
+        frontend = Frontend(self.guardrail, {"timeout": "stream-timeout"})
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "out"
+            host = FakeHost()
+            code, stdout, _ = _run_file(
+                frontend,
+                "cases:\n  - id: timeout\n    prompt: hidden\n    expect: answered\n",
+                host=host,
+                args=["--stream", "--out", str(output)],
+                monotonic=monotonic,
+            )
+            self.assertEqual(code, 1)
+            self.assertIn("timeout: refuse", stdout)
+            self.assertIn("stream error: Open WebUI stream timed out.", stdout)
+            self.assertIn("summary: refuse", stdout)
+            self.assertIn("stream: 0 clean, 0 leak, 1 error", stdout)
+            record = json.loads(host.files[str(output / "timeout.json")])
+            self.assertEqual(record["stream"]["deltas"], [["reasoning", "partial"]])
+            self.assertIn("timed out", record["stream"]["problem"]["problem"])
+            run_record = json.loads(host.files[str(output / "run.json")])
+            self.assertEqual(run_record["summary"]["stream"], {"clean": 0, "leak": 0, "error": 1})
+
+    def test_a_failed_listing_after_the_turn_is_retried_for_cleanup(self) -> None:
+        """A created chat is never left behind by one failed listing (the review's first finding)."""
+
+        frontend = Frontend(self.guardrail, {"listing": "answered"})
+        frontend.fail_listing_after_turn = True
+        code, stdout, _ = _run_file(
+            frontend,
+            "cases:\n  - id: listing\n    prompt: hidden\n    expect: answered\n",
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("listing: refuse — turn error: Open WebUI /api/v1/chats/list returned HTTP 500", stdout)
+        self.assertIn("cleanup: ok — 1 chats deleted", stdout)
+        self.assertEqual(frontend.chats, {})
+
+    def test_cleanup_is_unverified_when_no_listing_succeeds(self) -> None:
+        frontend = Frontend(self.guardrail, {"unverified": "answered"})
+        original = frontend.handle
+
+        def failing_listings(method: str, path: str, body: object | None, credential: str | None) -> Response:
+            if method == "GET" and path == "/api/v1/chats/list" and frontend._turns_made:
+                return Response(500, {"detail": "listing failed"})
+            return original(method, path, body, credential)
+
+        frontend.handle = failing_listings  # type: ignore[method-assign]
+        code, stdout, _ = _run_file(
+            frontend,
+            "cases:\n  - id: unverified\n    prompt: hidden\n    expect: answered\n",
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("cleanup: refuse — cleanup unverified for unverified", stdout)
+        self.assertIn("sentinel", stdout)
+        self.assertEqual(len(frontend.chats), 1)
+
+    def test_a_refused_record_write_is_a_failed_row_not_a_traceback(self) -> None:
+        frontend = Frontend(self.guardrail, {"write": "answered", "second": "answered"})
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "out"
+            host = FakeHost()
+            host.refuse_writes = True
+            code, stdout, stderr = _run_file(
+                frontend,
+                "cases:\n"
+                "  - {id: write, prompt: hidden, expect: answered}\n"
+                "  - {id: second, prompt: hidden, expect: answered}\n",
+                host=host,
+                args=["--out", str(output)],
+            )
+        self.assertEqual(code, 1)
+        self.assertEqual(stderr, "")
+        self.assertIn("write: refuse — answered; block present; expect answered", stdout)
+        self.assertIn("record not written", stdout)
+        self.assertIn("second: refuse", stdout)
+        self.assertIn("record: refuse — record not written", stdout)
+        self.assertIn("disk and permissions", stdout)
+        self.assertEqual(frontend.chats, {})
+
+    def test_fixes_name_the_record_or_how_to_keep_one(self) -> None:
+        frontend = Frontend(self.guardrail, {"leak": "leak"})
+        text = "cases:\n  - id: leak\n    prompt: hidden\n    expect: answered\n"
+        code, stdout, _ = _run_file(frontend, text)
+        self.assertEqual(code, 1)
+        self.assertIn("re-run with --out <dir> to keep one", stdout)
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "out"
+            code, stdout, _ = _run_file(
+                Frontend(self.guardrail, {"leak": "leak"}), text, args=["--out", str(output)]
+            )
+        self.assertEqual(code, 1)
+        self.assertIn(f"the record in {output}", stdout)
+        self.assertIn("record: ok", stdout)
+
+    def test_stream_dry_run_counts_the_replay(self) -> None:
+        frontend = Frontend(self.guardrail, {"dry-stream": "answered"})
+        code, stdout, _ = _run_file(
+            frontend,
+            "cases:\n  - id: dry-stream\n    prompt: hidden\n    expect: answered\n",
+            args=["--stream", "--dry-run"],
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("turns: 2 (1 × 1, streamed)", stdout)
+        self.assertEqual(frontend.calls, [])
+
+    def test_concurrent_sessions_overlap_and_record_their_own_chats(self) -> None:
+        frontend = Frontend(self.guardrail, {}, barrier=3)
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "out"
+            host = FakeHost()
+            code, stdout, _ = _run_file(
+                frontend,
+                _cases_file("one", "two"),
+                host=host,
+                args=["--concurrent", "3", "--out", str(output)],
+            )
+            records = _records(host, output)
+            run_record = json.loads(host.files[str(output / "run.json")])
+        self.assertEqual(code, 0)
+        self.assertIn("summary: ok — 6 turns", stdout)
+        self.assertIn("cleanup: ok — 6 chats deleted", stdout)
+        self.assertEqual(len([call for call in frontend.calls if call[1] == "/api/v1/auths/signin"]), 3)
+        self.assertEqual(len(records), 6)
+        self.assertTrue(all(f"@{session}" in stdout for session in (1, 2, 3)))
+        self.assertEqual(max(cast(int, record["candidates"]) for record in records.values()), 3)
+        for name, record in records.items():
+            session = int(name.rsplit("@", 1)[1])
+            self.assertEqual(record["session"], session)
+            self.assertIsInstance(record["started"], (int, float))
+            # The chat deleted under the record's id is the one carrying its ids.
+            carried = [
+                cast(dict[str, object], cast(dict[str, object], chat["chat"])["history"])["messages"]
+                for chat_id, chat in frontend.deleted_chats
+                if chat_id == record["chat_id"]
+            ]
+            self.assertIn(
+                True,
+                [
+                    record["user_id"] in cast(dict[str, object], messages)
+                    and record["assistant_id"] in cast(dict[str, object], messages)
+                    for messages in carried
+                ],
+            )
+        self.assertEqual(frontend.chats, {})
+        self.assertEqual(run_record["arguments"]["concurrent"], 3)
+
+    def test_concurrent_guard_counts_sessions_and_force_and_weekend_admit(self) -> None:
+        site_document = cast(dict[str, object], yaml.safe_load(SITE_TEXT))
+        timezone_name = cast(dict[str, str], site_document["office"])["timezone"]
+        zone = ZoneInfo(timezone_name)
+        tuesday = datetime(2026, 9, 8, 14, 0, tzinfo=zone).astimezone(UTC)
+        text = _cases_file("one", "two", "three")
+
+        frontend = Frontend(self.guardrail, {})
+        code, stdout, _ = _run_file(frontend, text, now=lambda: tuesday, args=["--concurrent", "3"])
+        self.assertEqual(code, 1)
+        self.assertIn("9 turns (3 sessions)", stdout)
+        self.assertEqual(frontend.calls, [])
+
+        for clock, args in ((tuesday, ["--concurrent", "3", "--force"]), (FIXED_NOW, ["--concurrent", "3"])):
+            with self.subTest(clock=clock, args=args):
+                code, stdout, _ = _run_file(
+                    Frontend(self.guardrail, {}),
+                    text,
+                    now=cast(Callable[[], datetime], lambda clock=clock: clock),
+                    args=args,
+                )
+                self.assertEqual(code, 0)
+                self.assertIn("summary: ok — 9 turns", stdout)
+
+        code, stdout, _ = _run_file(
+            Frontend(self.guardrail, {"one": "answered"}),
+            _cases_file("one"),
+            now=lambda: tuesday,
+            args=["--concurrent", "2"],
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("2 turns (2 sessions)", stdout)
+        self.assertNotIn("during office hours", stdout)
+
+    def test_concurrent_dry_run_reports_sessions_without_completion(self) -> None:
+        frontend = Frontend(self.guardrail, {})
+        code, stdout, _ = _run_file(
+            frontend,
+            _cases_file("one", "two", "three"),
+            args=["--concurrent", "3", "--dry-run"],
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("turns: 9 (3 sessions × 1 × 3)", stdout)
+        self.assertIn("sessions: 3 in flight", stdout)
+        self.assertEqual(frontend.calls, [])
+
+    def test_concurrent_browser_refusal_precedes_root_check(self) -> None:
+        frontend = Frontend(self.guardrail, {})
+        code, stdout, _ = _run_file(
+            frontend,
+            _cases_file("one"),
+            host=FakeHost(euid=1000),
+            args=["--browser", "--concurrent", "2", "--out", "/tmp/turns-concurrent"],
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("--concurrent is not available with --browser", stdout)
+        self.assertIn("screen under load", stdout)
+        self.assertNotIn("root is required", stdout)
+        self.assertEqual(frontend.calls, [])
+
+    def test_concurrent_must_be_positive(self) -> None:
+        stderr = StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            cli.main(["cases.yaml", "--concurrent", "0"])
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("--concurrent", stderr.getvalue())
+        self.assertIn("concurrent must be positive", stderr.getvalue())
+
+    def test_second_session_signin_failure_stops_before_turns(self) -> None:
+        frontend = Frontend(self.guardrail, {})
+        frontend.refuse_signin_after = 1
+        code, stdout, _ = _run_file(
+            frontend, _cases_file("one"), args=["--concurrent", "3"]
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("signin: refuse", stdout)
+        self.assertIn("HTTP 503", stdout)
+        self.assertEqual(
+            len([call for call in frontend.calls if call[1] == "/api/chat/completions"]), 0
+        )
+
+    def test_concurrent_turn_error_does_not_stop_other_sessions(self) -> None:
+        frontend = Frontend(self.guardrail, {"bad": "errored", "good": "answered"})
+        code, stdout, _ = _run_file(
+            frontend, _cases_file("bad", "good"), args=["--concurrent", "2"]
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("bad@1: refuse — turn error", stdout)
+        self.assertIn("bad@2: refuse — turn error", stdout)
+        self.assertIn("good@1: ok", stdout)
+        self.assertIn("good@2: ok", stdout)
+        self.assertIn("summary: refuse — 4 turns", stdout)
+        self.assertIn("misses 2", stdout)
+        self.assertIn("cleanup: ok — 4 chats deleted", stdout)
+
+    def test_concurrent_stream_replays_merge_into_summary(self) -> None:
+        frontend = Frontend(self.guardrail, {})
+        code, stdout, _ = _run_file(
+            frontend, _cases_file("one", "two"), args=["--concurrent", "2", "--stream"]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("summary: ok — 8 turns", stdout)
+        self.assertIn("stream: 4 clean, 0 leak, 0 error", stdout)
+        self.assertEqual(len(frontend.stream_calls), 4)
+        for _, _, stream_body in frontend.stream_calls:
+            self.assertNotIn("features", cast(dict[str, object], stream_body))
+
+    def test_sources_run_checks_and_records_are_derived_from_search(self) -> None:
+        text = _cases_file(
+            "searched",
+            "plain",
+            searched="searched",
+            sources={"searched": "present", "plain": "absent"},
+        )
+        frontend = Frontend(self.guardrail, {})
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "out"
+            host = FakeHost()
+            code, stdout, _ = _run_file(
+                frontend, text, host=host, args=["--out", str(output)]
+            )
+            records = _records(host, output)
+        self.assertEqual(code, 0)
+        self.assertIn("searched: ok", stdout)
+        self.assertIn("plain: ok", stdout)
+        self.assertEqual(set(records), {"searched", "plain"})
+        searched_assistant = cast(dict[str, object], records["searched"]["assistant"])
+        plain_assistant = cast(dict[str, object], records["plain"]["assistant"])
+        self.assertEqual(
+            searched_assistant["sources"],
+            [{"document": "Fictitious source document"}],
+        )
+        self.assertNotIn("sources", plain_assistant)
+        for identifier, searched, source_name, source_present in (
+            ("searched", True, "present", True),
+            ("plain", False, "absent", False),
+        ):
+            with self.subTest(identifier=identifier):
+                record = records[identifier]
+                case = cast(dict[str, object], record["case"])
+                verdict = cast(dict[str, object], record["verdict"])
+                self.assertEqual(case["search"], searched)
+                self.assertEqual(case["sources"], source_name)
+                self.assertEqual(verdict["sources_present"], source_present)
+
+        inverse = _cases_file(
+            "searched",
+            "plain",
+            searched="searched",
+            sources={"searched": "absent", "plain": "present"},
+        )
+        frontend = Frontend(self.guardrail, {})
+        code, stdout, _ = _run_file(frontend, inverse)
+        self.assertEqual(code, 1)
+        self.assertIn("searched: refuse", stdout)
+        self.assertIn("plain: refuse", stdout)
+        self.assertIn("failed sources check", stdout)
+
+    def test_cases_file_supersedes_retire_cases_and_count_searches(self) -> None:
+        text = (
+            "cases:\n"
+            "  - id: first\n"
+            "    prompt: first prompt\n"
+            "    expect: recorded\n"
+            "    search: true\n"
+            "  - id: kept\n"
+            "    prompt: kept prompt\n"
+            "    expect: recorded\n"
+            "    search: true\n"
+            "  - id: replacement\n"
+            "    prompt: replacement prompt\n"
+            "    expect: recorded\n"
+            "    supersedes: first\n"
+        )
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "cases.yaml"
+            path.write_text(text, encoding="utf-8")
+            loaded = cases.load_cases(path)
+            self.assertIsInstance(loaded, cases.CaseSet)
+            assert isinstance(loaded, cases.CaseSet)
+            self.assertEqual(
+                loaded.origin, f"cases file {path}: 2 cases (1 superseded)"
+            )
+            self.assertEqual([case.id for case in loaded.cases], ["kept", "replacement"])
+            self.assertEqual(loaded.searched, 1)
+
+        frontend = Frontend(self.guardrail, {})
+        code, stdout, _ = _run_file(frontend, text)
+        completion_calls = [
+            call
+            for call in frontend.calls
+            if call[0] == "POST" and call[1] == "/api/chat/completions"
+        ]
+        run_ids = []
+        for call in completion_calls:
+            body = cast(dict[str, object], call[2])
+            user_message = cast(dict[str, object], body["user_message"])
+            run_ids.append(_tagged_case_id(cast(str, user_message["content"])))
+        self.assertEqual(code, 0)
+        self.assertIn("2 cases (1 superseded)", stdout)
+        self.assertEqual(run_ids, ["kept", "replacement"])
+        self.assertNotIn("first", run_ids)
+        self.assertNotIn("first:", stdout)
+
+        refusals = (
+            (
+                "cases:\n"
+                "  - id: replacement\n"
+                "    prompt: p\n"
+                "    expect: recorded\n"
+                "    supersedes: missing\n",
+                "case supersedes unknown case 'missing'",
+            ),
+            (
+                "cases:\n"
+                "  - id: bad\n"
+                "    prompt: p\n"
+                "    expect: recorded\n"
+                "    supersedes: 7\n",
+                "case 'bad' has an invalid supersedes target",
+            ),
+        )
+        for text, expected in refusals:
+            with self.subTest(expected=expected), TemporaryDirectory() as directory:
+                path = Path(directory) / "cases.yaml"
+                path.write_text(text, encoding="utf-8")
+                loaded = cases.load_cases(path)
+            self.assertIsInstance(loaded, Problem)
+            assert isinstance(loaded, Problem)
+            self.assertIn(expected, loaded.problem)
+
+    def test_searched_cases_count_and_carry_features_only_on_managed_turns(self) -> None:
+        text = _cases_file("one", "searched", "three", "four", "five", searched="searched")
+        frontend = Frontend(self.guardrail, {})
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "out"
+            host = FakeHost()
+            code, stdout, _ = _run_file(
+                frontend,
+                text,
+                host=host,
+                args=["--concurrent", "2", "--out", str(output)],
+            )
+        self.assertEqual(code, 0)
+        bodies = [
+            cast(dict[str, object], body)
+            for method, path, body in frontend.calls
+            if method == "POST" and path == "/api/chat/completions"
+        ]
+        searched_bodies = []
+        plain_bodies = []
+        for body in bodies:
+            user_message = cast(dict[str, object], body["user_message"])
+            if "searched]" in cast(str, user_message["content"]):
+                searched_bodies.append(body)
+            else:
+                plain_bodies.append(body)
+        self.assertEqual(len(bodies), 10)
+        self.assertEqual(len(searched_bodies), 2)
+        for body in searched_bodies:
+            self.assertEqual(body["features"], {"web_search": True})
+        self.assertTrue(all("features" not in body for body in plain_bodies))
+
+        tuesday = datetime(2026, 9, 8, 14, 0, tzinfo=ZoneInfo("America/Chicago")).astimezone(UTC)
+        frontend = Frontend(self.guardrail, {})
+        code, stdout, _ = _run_file(frontend, text, now=lambda: tuesday, args=["--concurrent", "2"])
+        self.assertEqual(code, 1)
+        self.assertIn("12 engine calls (2 per searched case)", stdout)
+        self.assertEqual(frontend.calls, [])
+
+        frontend = Frontend(self.guardrail, {})
+        code, stdout, _ = _run_file(
+            frontend,
+            text,
+            now=lambda: tuesday,
+            args=["--concurrent", "2", "--force", "--dry-run"],
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("turns: 10 (2 sessions × 1 × 5)", stdout)
+        self.assertIn("engine calls: 12 (2 per searched case)", stdout)
+        self.assertEqual(frontend.calls, [])
+
+        frontend = Frontend(self.guardrail, {})
+        code, stdout, _ = _run_file(frontend, text, args=["--concurrent", "2", "--stream"])
+        self.assertEqual(code, 0)
+        self.assertIn("summary: ok — 20 turns", stdout)
+        self.assertIn("22 engine calls (2 per searched case)", stdout)
+        self.assertEqual(len(frontend.stream_calls), 10)
+        for _, _, stream_body in frontend.stream_calls:
+            self.assertNotIn("features", cast(dict[str, object], stream_body))
+
+        with TemporaryDirectory() as directory:
+            frontend = Frontend(self.guardrail, {})
+            host = FakeHost()
+            with (
+                patch("tools.turns.cli.chromium.password_file_problem", return_value=None),
+                patch("tools.turns.cli.chromium.read_password", return_value=PASSWORD),
+                patch("tools.turns.cli.chromium.playwright_problem", return_value=None),
+                patch("tools.turns.cli.chromium.browser_problem", return_value=None),
+            ):
+                code, stdout, _ = _run_file(
+                    frontend,
+                    text,
+                    host=host,
+                    args=["--browser", "--out", str(Path(directory) / "out")],
+                )
+        self.assertEqual(code, 1)
+        self.assertIn("search cases run in the API mode", stdout)
+        self.assertIn("remove its search cases", stdout)
+        self.assertEqual(frontend.calls, [])
+
+    def test_concurrent_record_write_failure_counts_each_failed_row(self) -> None:
+        frontend = Frontend(self.guardrail, {})
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "out"
+            host = FakeHost()
+            host.refuse_writes = True
+            code, stdout, stderr = _run_file(
+                frontend,
+                _cases_file("one"),
+                host=host,
+                args=["--concurrent", "2", "--out", str(output)],
+            )
+        self.assertEqual(code, 1)
+        self.assertEqual(stderr, "")
+        self.assertIn("one@1: refuse", stdout)
+        self.assertIn("one@2: refuse", stdout)
+        self.assertIn("summary: refuse — 2 turns", stdout)
+        self.assertIn("misses 2", stdout)
+
+
+class CaseLoader(TestCase):
+    def test_minimal_shape_and_validation(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "cases.yaml"
+            path.write_text(
+                yaml.safe_dump(
+                    {"cases": [{"id": "a_case-1", "prompt": "p", "expect": "recorded"}]}
+                ),
+                encoding="utf-8",
+            )
+            loaded = cases.load_cases(path)
+        self.assertIsInstance(loaded, cases.CaseSet)
+        assert isinstance(loaded, cases.CaseSet)
+        self.assertEqual(loaded.cases[0], cases.Case("a_case-1", "p", "recorded"))
+
+    def test_non_boolean_search_names_the_case_and_field(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "cases.yaml"
+            path.write_text(
+                "cases:\n  - id: searched\n    prompt: p\n    expect: recorded\n    search: 'yes'\n",
+                encoding="utf-8",
+            )
+            loaded = cases.load_cases(path)
+        self.assertIsInstance(loaded, Problem)
+        assert isinstance(loaded, Problem)
+        self.assertIn("case 'searched' has an invalid search", loaded.problem)
+        self.assertIn("expected true or false", loaded.problem)
+
+    def test_seed_search_is_refused(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "seed.yaml"
+            path.write_text(
+                "family: test\npattern_set_version: 1\ncases:\n"
+                "  - id: seeded\n    kind: control\n    prompt: p\n    search: true\n",
+                encoding="utf-8",
+            )
+            loaded = cases.load_cases(path)
+        self.assertIsInstance(loaded, Problem)
+        assert isinstance(loaded, Problem)
+        self.assertIn("seed case 'seeded' cannot carry search", loaded.problem)
+
+    def test_sources_loads_each_presence_word_and_refuses_invalid_values(self) -> None:
+        for value in ("present", "absent", "any"):
+            with self.subTest(value=value), TemporaryDirectory() as directory:
+                path = Path(directory) / "cases.yaml"
+                path.write_text(
+                    f"cases:\n  - id: sourced\n    prompt: p\n    expect: recorded\n    sources: {value}\n",
+                    encoding="utf-8",
+                )
+                loaded = cases.load_cases(path)
+            self.assertIsInstance(loaded, cases.CaseSet)
+            assert isinstance(loaded, cases.CaseSet)
+            self.assertEqual(loaded.cases[0].sources, value)
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "cases.yaml"
+            path.write_text(
+                "cases:\n  - id: sourced\n    prompt: p\n    expect: recorded\n    sources: maybe\n",
+                encoding="utf-8",
+            )
+            loaded = cases.load_cases(path)
+        self.assertIsInstance(loaded, Problem)
+        assert isinstance(loaded, Problem)
+        self.assertIn("case 'sourced' has an invalid sources", loaded.problem)
+
+    def test_seed_sources_is_refused(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "seed.yaml"
+            path.write_text(
+                "family: test\npattern_set_version: 1\ncases:\n"
+                "  - id: seeded\n    kind: control\n    prompt: p\n    sources: present\n",
+                encoding="utf-8",
+            )
+            loaded = cases.load_cases(path)
+        self.assertIsInstance(loaded, Problem)
+        assert isinstance(loaded, Problem)
+        self.assertIn("seed case 'seeded' cannot carry sources", loaded.problem)
+
+    def test_case_set_counts_searched_cases(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "cases.yaml"
+            path.write_text(
+                "cases:\n"
+                "  - {id: plain, prompt: p, expect: recorded}\n"
+                "  - {id: searched, prompt: q, expect: recorded, search: true}\n",
+                encoding="utf-8",
+            )
+            loaded = cases.load_cases(path)
+        self.assertIsInstance(loaded, cases.CaseSet)
+        assert isinstance(loaded, cases.CaseSet)
+        self.assertEqual(loaded.searched, 1)
+        self.assertFalse(loaded.cases[0].search)
+        self.assertTrue(loaded.cases[1].search)

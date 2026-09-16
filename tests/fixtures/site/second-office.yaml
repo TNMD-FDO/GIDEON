@@ -1,0 +1,48 @@
+# A synthetic second office for the render byte-stability contract (spec §3.4):
+# every non-default path the example file leaves at its default — a proxy, web
+# search off, several districts, the loopback release registry, non-default
+# ports, mirrored groups. Valid; nothing here is a real office.
+office:
+  name: Office of the Federal Public Defender, Example District
+  short_name: EXD-FDO
+  timezone: America/Denver
+
+hostname: gideon.exd.example.internal
+lan_cidrs: [198.51.100.0/24, 203.0.113.0/24]
+
+jurisdiction: {circuit: ca10, districts: [cod, utd, wyd], states: [colo, utah]}
+
+auth:
+  ldap:
+    host: exd.example.internal
+    port: 3269
+    bind_user: svc-gideon-bind
+    mirror_groups: [EXD-Trial, EXD-Habeas]
+  session_hours: 8
+
+backup:
+  target:
+    host: backup.exd.example.internal
+    path: /srv/gideon-backup
+    user: gideon-push
+  local_days: 3
+  remote_days: 60
+  drill_interval: 2w
+
+alerts:
+  smtp:
+    host: relay.exd.example.internal
+    from: gideon@exd.example.org
+    user: gideon-relay
+    port: 587
+  recipients: [ops@exd.example.org]
+
+registry: 127.0.0.1:5000
+egress_proxy: http://proxy.exd.example.internal:3128
+
+web:
+  search: off
+
+retention:
+  chats: 30d
+prompt_logging: full
