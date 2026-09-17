@@ -105,6 +105,12 @@ def select_set(ctx: HarnessContext) -> StageResult:
             "Run sudo python3 -m gideon backup run --full so the newest set is sealed "
             "to the box identity, then retry acceptance.",
         )
+    if manifest.gideon_ids is None:
+        return _failure(
+            f"set {manifest.label} records no gideon ids",
+            "Run sudo python3 -m gideon backup run from the release's checkout so the "
+            "newest set records them, then retry acceptance.",
+        )
 
     size = _set_size(selected)
     free_space, problem = _available(ctx.host)
@@ -319,6 +325,9 @@ def restore_target(ctx: HarnessContext) -> StageResult:
     fetch = details.get("fetch")
     if fetch is None or f"selected set {ref.label}" not in fetch[1]:
         return _restore_failure(ctx, f"fetch row does not name selected set {ref.label}")
+    files = details.get("files")
+    if files is None or restore.REOWN_MAPPED_DETAIL not in files[1]:
+        return _restore_failure(ctx, "files row does not carry the mapped ownership detail")
     next_row = details.get("next")
     if next_row is None or next_row[0] != "ok":
         return _restore_failure(ctx, "next row is not ok")

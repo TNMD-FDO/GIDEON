@@ -402,10 +402,6 @@ FULL_RESTORE_STAGES: Final[tuple[Stage, ...]] = (
     Stage("counts", fullrestore.counts, fullrestore.FULL_RESTORE_FIX),
     Stage("decrypt", fullrestore.decrypt, fullrestore.FULL_RESTORE_FIX),
     Stage("reinstall", fullrestore.reinstall, fullrestore.FULL_RESTORE_FIX),
-    # restore re-owns by the box's numeric ids, which a rebuilt host's gideon
-    # need not share; provision re-owns the managed /data directories (the
-    # fix preflight names), as the runbook's §5 does after the restore.
-    Stage("provision", _second_provision, vm.VM_FIX, key="provision-3"),
     Stage("apply", fullrestore.apply_again, fullrestore.FULL_RESTORE_FIX, key="apply-2"),
     Stage("health", fullrestore.health, fullrestore.FULL_RESTORE_FIX),
     Stage("preflight", _preflight_stage, vm.VM_FIX, key="preflight-2"),

@@ -519,6 +519,7 @@ def restore_manifest(
         recipients,
         backupset.LinkVerdict(1, 1),
         "d" * 64,
+        backupset.AccountIds(999, 983),
     )
 
 
@@ -776,15 +777,10 @@ class HarnessCli(unittest.TestCase):
             "apply-2",
         )
         self.assertIn("preflight-2", FULL_RESTORE_IDENTIFIERS)
-        # The restored /data tree carries the box's numeric owners: provision
-        # re-owns it after the site re-install and before the second apply.
-        self.assertEqual(
-            FULL_RESTORE_IDENTIFIERS.index("provision-3"),
-            FULL_RESTORE_IDENTIFIERS.index("reinstall") + 1,
-        )
+        self.assertNotIn("provision-3", FULL_RESTORE_IDENTIFIERS)
         self.assertEqual(
             FULL_RESTORE_IDENTIFIERS.index("apply-2"),
-            FULL_RESTORE_IDENTIFIERS.index("provision-3") + 1,
+            FULL_RESTORE_IDENTIFIERS.index("reinstall") + 1,
         )
         self.assertEqual(FULL_RESTORE_STAGES[-1].identifier, "teardown")
 
@@ -920,6 +916,25 @@ class FullRestoreContracts(unittest.TestCase):
             if str(AGE_IDENTITY_PATH) in call[0]
         ]
         self.assertEqual(identity_calls, [("age-keygen", "-y", str(AGE_IDENTITY_PATH))])
+
+    def test_set_refuses_a_manifest_without_gideon_ids(self) -> None:
+        host, manifest = restore_host()
+        without_record = replace(manifest, gideon_ids=None)
+        host.files[backupset.set_dir(manifest.label) + "/manifest.json"] = (
+            without_record.to_json()
+        )
+
+        result = fullrestore.select_set(harness_context(host))
+
+        self.assertFalse(result.ok)
+        self.assertIn(manifest.label, result.detail)
+        self.assertIn("records no gideon ids", result.detail)
+        self.assertEqual(
+            result.fix,
+            "Run sudo python3 -m gideon backup run from the release's checkout so the "
+            "newest set records them, then retry acceptance.",
+        )
+        self.assertFalse(any(call[0][0] == "df" for call in host.calls))
 
     def test_compare_counts_accepts_equal_tables_and_the_restore_audit_row(self) -> None:
         expected = {
@@ -1072,6 +1087,7 @@ class FullRestoreContracts(unittest.TestCase):
             f"select: ok — snapshot={ctx.snapshot_label}\n"
             f"pre-restore: ok — {host_restore.FRESH_STACK_SKIPPED_DETAIL}\n"
             f"fetch: ok — selected set {manifest.label}\n"
+            f"files: ok — {host_restore.REOWN_MAPPED_DETAIL}\n"
             "next: ok — restored\n"
             "Secrets: a rebuilt box\n"
         )
@@ -1100,6 +1116,7 @@ class FullRestoreContracts(unittest.TestCase):
             ("pre-restore: ok — skipped (stack not running)\n", "pre-restore row"),
             ("Secrets: the secrets on disk are the set\n", "Secrets line"),
             ("fetch: refuse — failed\n", "refusal row"),
+            ("files: ok — restored\n", "files row"),
         )
         for line, expected in cases:
             with self.subTest(line=line):
@@ -1112,9 +1129,14 @@ class FullRestoreContracts(unittest.TestCase):
                     else f"pre-restore: ok — {host_restore.FRESH_STACK_SKIPPED_DETAIL}"
                 )
                 fetch_line = line if line.startswith("fetch:") else f"fetch: ok — selected set {manifest.label}"
+                files_line = (
+                    line
+                    if line.startswith("files:")
+                    else f"files: ok — {host_restore.REOWN_MAPPED_DETAIL}"
+                )
                 secrets_line = line if line.startswith("Secrets:") else "Secrets: a rebuilt box"
                 transcript = (
-                    f"{select_line}\n{pre_restore_line}\n{fetch_line}\n"
+                    f"{select_line}\n{pre_restore_line}\n{fetch_line}\n{files_line}\n"
                     f"next: ok — restored\n{secrets_line}\n"
                 )
                 command = vm_product_argv(

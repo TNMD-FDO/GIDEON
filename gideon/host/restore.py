@@ -42,6 +42,10 @@ _SITE_PATH: Final = "/etc/gideon/site.yaml"
 _RENDERED_DIR: Final = "/etc/gideon/rendered"
 # The pre-restore row a fresh stack reads; the acceptance harness requires it.
 FRESH_STACK_SKIPPED_DETAIL: Final = "skipped (fresh stack has no backup set in staging)"
+# The two ownership phrases the fetch and files rows carry; the acceptance
+# harness requires the mapped one on the files row.
+REOWN_MAPPED_DETAIL: Final = "mapped to gideon"
+REOWN_NO_RECORD_DETAIL: Final = "no gideon ids recorded"
 _ROOT_FIX: Final = "Run sudo python3 -m gideon restore --from <staging|target>, then retry."
 _APPLY_FIX: Final = "Run sudo python3 -m gideon apply, then retry."
 _TARGET_FIX: Final = (
@@ -49,6 +53,7 @@ _TARGET_FIX: Final = (
     "runbook §3, then re-run restore."
 )
 _SET_FIX: Final = "Run sudo python3 -m gideon backup run, then retry."
+_ACCOUNT_FIX: Final = "Run sudo python3 -m gideon host provision, then retry."
 _PUSH_FIX: Final = "Run sudo python3 -m gideon backup push, then retry."
 _SELECT_FIX: Final = "Choose an earlier --at, or omit it for the latest state."
 _STAGE_FIX: Final = "Run sudo python3 -m gideon apply, then retry."
@@ -95,7 +100,7 @@ def _preconditions(
     build_box: bool,
     rendered_dir: PathLike,
     site_path: PathLike,
-) -> tuple[SiteConfig, str, datetime | None] | None:
+) -> tuple[SiteConfig, str, datetime | None, backupset.AccountIds] | None:
     loaded = site.load_site(Path(site_path), host=io)
     if loaded.errors or loaded.config is None:
         _refuse(
@@ -118,6 +123,14 @@ def _preconditions(
         _refuse(
             "--set cannot be combined with --at or --from target.",
             "Use --at for a point in time; use --from target for the off-box copy.",
+        )
+        return None
+
+    gideon_ids = backupset.gideon_account_ids(io)
+    if gideon_ids is None:
+        _refuse(
+            f"the {backupset.SERVICE_ACCOUNT} service account is missing or malformed.",
+            _ACCOUNT_FIX,
         )
         return None
 
@@ -163,7 +176,7 @@ def _preconditions(
         if active is not None and active.returncode == 0:
             _refuse(_UNDECLARED_REGISTRY_PROBLEM, _UNDECLARED_REGISTRY_FIX)
             return None
-    return config, source, at
+    return config, source, at, gideon_ids
 
 
 def _selection_detail(selection: _Selection) -> str:
@@ -561,6 +574,7 @@ def _root_owned_metadata(
     io: Host,
     side: str,
     sets: Sequence[backupset.SetRef],
+    gideon_ids: backupset.AccountIds,
 ) -> StageResult | None:
     paths_by_owner: dict[OwnerKey, list[str]] = {}
     paths_by_mode: dict[int, list[str]] = {}
@@ -569,6 +583,7 @@ def _root_owned_metadata(
         if not set_ref.complete or set_ref.manifest is None:
             continue
         manifest = set_ref.manifest
+        owner_map = backupset.OwnerMap(manifest.gideon_ids, gideon_ids)
         snapshotted = _snapshotted_root_names(manifest.checkout)
         for root_name, entries in manifest.inventory.items():
             if root_name not in snapshotted:
@@ -584,7 +599,8 @@ def _root_owned_metadata(
             for entry in entries:
                 path = _entry_path(set_ref, root_name, entry.path)
                 is_link = entry.kind == "l"
-                paths_by_owner.setdefault((entry.uid, entry.gid, is_link), []).append(path)
+                uid, gid = owner_map.map(entry.uid, entry.gid)
+                paths_by_owner.setdefault((uid, gid, is_link), []).append(path)
                 if not is_link:
                     paths_by_mode.setdefault(entry.mode, []).append(path)
         root_owned.extend(
@@ -675,6 +691,7 @@ def _fetch_stage(
     snapshot: backupset.RemoteSnapshot,
     at: datetime | None,
     operation_label: str,
+    gideon_ids: backupset.AccountIds,
 ) -> tuple[StageResult, _Fetched | None]:
     side = f"{backupset.STAGING}.fetch-{operation_label}"
     remote_root = config.backup.target.path.rstrip("/") or "/"
@@ -743,14 +760,25 @@ def _fetch_stage(
     if repository_modes is not None and not repository_modes.ok:
         return repository_modes, None
 
-    reowned = sum(
-        len(entry)
-        for ref in sets
-        if ref.complete and ref.manifest is not None
-        for root_name, entry in ref.manifest.inventory.items()
-        if root_name in _snapshotted_root_names(ref.manifest.checkout)
-    )
-    root_metadata = _root_owned_metadata(io, side, sets)
+    # The row's three figures over the same entries the re-own walks: every
+    # snapshotted root of every complete set, and each set's own record.
+    reowned = 0
+    mapped = 0
+    no_record_sets = 0
+    for ref in sets:
+        if not ref.complete or ref.manifest is None:
+            continue
+        owner_map = backupset.OwnerMap(ref.manifest.gideon_ids, gideon_ids)
+        if owner_map.is_identity:
+            no_record_sets += 1
+        for root_name, entries in ref.manifest.inventory.items():
+            if root_name not in _snapshotted_root_names(ref.manifest.checkout):
+                continue
+            reowned += len(entries)
+            mapped += sum(
+                1 for entry in entries if owner_map.matches(entry.uid, entry.gid)
+            )
+    root_metadata = _root_owned_metadata(io, side, sets, gideon_ids)
     if root_metadata is not None:
         return root_metadata, None
 
@@ -758,12 +786,20 @@ def _fetch_stage(
     if isinstance(selected, Problem):
         return StageResult("fetch", False, selected.problem, selected.fix), None
     replaced = f"{backupset.STAGING}.replaced-{operation_label}"
+    ownership = (
+        f"{mapped} {REOWN_MAPPED_DETAIL} {gideon_ids.uid}:{gideon_ids.gid}"
+        if no_record_sets == 0
+        else (
+            f"re-owned by their recorded ids "
+            f"({no_record_sets} set(s) with {REOWN_NO_RECORD_DETAIL})"
+        )
+    )
     return (
         StageResult(
             "fetch",
             True,
             f"fetched {snapshot.label}; selected set {selected.label}; "
-            f"re-owned {reowned} path(s)",
+            f"re-owned {reowned} path(s), {ownership}",
             "",
         ),
         _Fetched(side, replaced, selected, reowned),
@@ -973,6 +1009,7 @@ def _restore_files_stage(
     io: Host,
     *,
     selected: backupset.SetRef,
+    gideon_ids: backupset.AccountIds,
 ) -> tuple[StageResult, tuple[str, ...], int]:
     if selected.manifest is None:
         return StageResult("files", False, "selected set has no manifest", _SET_FIX), (), 0
@@ -980,6 +1017,8 @@ def _restore_files_stage(
     restored: list[str] = []
     paths_by_owner: dict[OwnerKey, list[str]] = {}
     paths_by_mode: dict[int, list[str]] = {}
+    owner_map = backupset.OwnerMap(selected.manifest.gideon_ids, gideon_ids)
+    mapped = 0
     for root in roots:
         if not root.restore_in_place:
             continue
@@ -1023,7 +1062,10 @@ def _restore_files_stage(
         for entry in root_entries:
             path = os.path.join(root.source, entry.path)
             is_link = entry.kind == "l"
-            paths_by_owner.setdefault((entry.uid, entry.gid, is_link), []).append(path)
+            if owner_map.matches(entry.uid, entry.gid):
+                mapped += 1
+            uid, gid = owner_map.map(entry.uid, entry.gid)
+            paths_by_owner.setdefault((uid, gid, is_link), []).append(path)
             if not is_link:
                 paths_by_mode.setdefault(entry.mode, []).append(path)
 
@@ -1034,12 +1076,17 @@ def _restore_files_stage(
     if mode_result is not None:
         return mode_result, tuple(restored), 0
     checkout_copy = os.path.join(selected.path, backupset.FILES_DIR, "checkout")
+    ownership = (
+        f"re-owned by the recorded ids ({REOWN_NO_RECORD_DETAIL})"
+        if owner_map.is_identity
+        else f"{mapped} {REOWN_MAPPED_DETAIL} {gideon_ids.uid}:{gideon_ids.gid}"
+    )
     return (
         StageResult(
             "files",
             True,
             f"restored {', '.join(restored)}; the checkout copy stays in {checkout_copy} "
-            "(clone the tag the manifest names)",
+            f"(clone the tag the manifest names); {ownership}",
             "",
         ),
         tuple(restored),
@@ -1221,13 +1268,21 @@ def _stores_stage(
 
 
 def _next_stage(
-    io: Host, selected: backupset.SetRef, *, build_box: bool
+    io: Host,
+    selected: backupset.SetRef,
+    *,
+    build_box: bool,
+    has_gideon_ids: bool,
 ) -> tuple[StageResult, tuple[str, ...]]:
     """State the terminal state and the two next steps.
 
     Whether the secrets on disk are the restored cluster's is decided by the
     set's keyed fingerprint against the live secret directory, never by a
     file's presence: apply regenerates the files on a rebuilt box.
+
+    A set that records no ``gideon`` ids was re-owned by the ids it holds,
+    so its next steps name ``host provision`` — which re-owns the managed
+    ``/data`` directories — before the apply.
     """
 
     tarball = os.path.join(selected.path, backupset.TARBALL_NAME)
@@ -1248,12 +1303,20 @@ def _next_stage(
                 f"<identity file kept off-box> {tarball} | tar -x -C /etc/gideon"
             ),
         )
-    lines += (
-        (
+    if has_gideon_ids:
+        lines += (
             "Next: sudo python3 -m gideon apply, then "
-            "sudo python3 -m gideon backup run --full"
-        ),
-    )
+            "sudo python3 -m gideon backup run --full",
+        )
+    else:
+        # This set was re-owned by the ids it records, so the managed /data
+        # directories still need provision's own re-own before the apply.
+        lines += (
+            "Next: sudo python3 -m gideon host provision (the first provision's "
+            "mode flags), because this set records no gideon ids, then "
+            "sudo python3 -m gideon apply, then "
+            "sudo python3 -m gideon backup run --full",
+        )
     return (
         StageResult(
             "next",
@@ -1301,7 +1364,7 @@ def run_restore(
     )
     if prerequisites is None:
         return 1
-    config, source, at = prerequisites
+    config, source, at, gideon_ids = prerequisites
 
     if source == "staging":
         select_result, selection = _select_staging(io, at, label=getattr(args, "set", None))
@@ -1341,6 +1404,7 @@ def run_restore(
             snapshot=selection.snapshot,
             at=at,
             operation_label=operation_label,
+            gideon_ids=gideon_ids,
         )
         print_stage(fetch_result)
         if not fetch_result.ok or fetched is None:
@@ -1384,6 +1448,7 @@ def run_restore(
     files_result, roots_restored, file_reowned = _restore_files_stage(
         io,
         selected=selected,
+        gideon_ids=gideon_ids,
     )
     print_stage(files_result)
     if not files_result.ok:
@@ -1423,7 +1488,12 @@ def run_restore(
     if not stores_result.ok:
         return 1
 
-    next_result, next_lines = _next_stage(io, selected, build_box=build_box)
+    next_result, next_lines = _next_stage(
+        io,
+        selected,
+        build_box=build_box,
+        has_gideon_ids=selected.manifest.gideon_ids is not None,
+    )
     print_stage(next_result)
     if next_result.ok:
         for line in next_lines:

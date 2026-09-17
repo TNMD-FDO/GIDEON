@@ -49,6 +49,7 @@ def manifest(label: str, finished: datetime) -> backupset.Manifest:
         ("age1recipient",),
         backupset.LinkVerdict(2, 2),
         "f" * 64,
+        backupset.AccountIds(999, 983),
     )
 
 
@@ -60,9 +61,11 @@ class FakeHost:
         *,
         names: Sequence[str] = (),
         files: Mapping[str, str] | None = None,
+        getent: subprocess.CompletedProcess[str] | None = None,
     ) -> None:
         self.names = list(names)
         self.files = dict(files or {})
+        self.getent = getent
 
     def run(
         self,
@@ -76,6 +79,8 @@ class FakeHost:
         passthrough: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         del check, input, cwd, env, timeout
+        if tuple(argv) == ("getent", "passwd", backupset.SERVICE_ACCOUNT):
+            return self.getent or subprocess.CompletedProcess(list(argv), 127, "", "not configured")
         return subprocess.CompletedProcess(list(argv), 127, "", "not configured")
 
     def read_text(self, path: PathLike, *, encoding: str = "utf-8") -> str:
@@ -254,8 +259,45 @@ class ManifestContracts(unittest.TestCase):
         self.assertEqual(text, value.to_json())
         parsed = backupset.parse_manifest(text)
         self.assertEqual(parsed, value)
+        self.assertEqual(
+            json.loads(text)["gideon_ids"],
+            {"gid": 983, "uid": 999},
+        )
         self.assertEqual(json.loads(text)["version"], 1)
         self.assertIn('"archive_through"', text)
+
+    def test_manifest_without_gideon_ids_is_an_earlier_shape(self) -> None:
+        value = manifest("20260902T120809Z", aware(12))
+        document = json.loads(value.to_json())
+        del document["gideon_ids"]
+        parsed = backupset.parse_manifest(json.dumps(document))
+        self.assertIsInstance(parsed, backupset.Manifest)
+        assert isinstance(parsed, backupset.Manifest)
+        self.assertIsNone(parsed.gideon_ids)
+
+        without_record = replace(value, gideon_ids=None)
+        serialized = json.loads(without_record.to_json())
+        self.assertNotIn("gideon_ids", serialized)
+
+    def test_manifest_gideon_ids_malformed_shapes_name_the_component(self) -> None:
+        value = manifest("20260902T120809Z", aware(12))
+        cases = (
+            ("not-an-object", "gideon_ids"),
+            ({"uid": -1, "gid": 983}, "gideon_ids.uid"),
+            ({"uid": "999", "gid": 983}, "gideon_ids.uid"),
+            ({"gid": 983}, "gideon_ids.uid"),
+            ({"uid": 999}, "gideon_ids.gid"),
+            ({"uid": 999, "gid": "983"}, "gideon_ids.gid"),
+        )
+        for malformed, field in cases:
+            with self.subTest(field=field, malformed=malformed):
+                document = json.loads(value.to_json())
+                document["gideon_ids"] = malformed
+                problem = backupset.parse_manifest(json.dumps(document))
+                self.assertIsInstance(problem, backupset.Problem)
+                assert isinstance(problem, backupset.Problem)
+                self.assertIn(field, problem.problem)
+                self.assertIn("backup run", problem.fix)
 
     def test_manifest_rejects_naive_datetime(self) -> None:
         with self.assertRaises(ValueError):
@@ -319,6 +361,11 @@ class ManifestContracts(unittest.TestCase):
                     self.assertIsInstance(problem, backupset.Manifest)
                     assert isinstance(problem, backupset.Manifest)
                     self.assertEqual(problem.recipients, (document["recipient"],))
+                    continue
+                if field == "gideon_ids":
+                    self.assertIsInstance(problem, backupset.Manifest)
+                    assert isinstance(problem, backupset.Manifest)
+                    self.assertIsNone(problem.gideon_ids)
                     continue
                 self.assertIsInstance(problem, backupset.Problem)
                 assert isinstance(problem, backupset.Problem)
@@ -526,3 +573,74 @@ class CarryForwardAndSampling(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             backupset.sample_paths(paths, percent=0)
+
+
+class OwnershipContracts(unittest.TestCase):
+    def test_owner_map_maps_each_component_and_identifies_recorded_owners(self) -> None:
+        record = backupset.AccountIds(999, 983)
+        host = backupset.AccountIds(998, 997)
+        owner_map = backupset.OwnerMap(record, host)
+        cases = (
+            ((999, 983), (998, 997), True),
+            ((999, 0), (998, 0), True),
+            ((0, 983), (0, 997), True),
+            ((123, 456), (123, 456), False),
+        )
+        for owner, expected, matches in cases:
+            with self.subTest(owner=owner):
+                self.assertEqual(owner_map.map(*owner), expected)
+                self.assertEqual(owner_map.matches(*owner), matches)
+        self.assertFalse(owner_map.is_identity)
+
+        equal_ids = backupset.OwnerMap(record, record)
+        self.assertEqual(equal_ids.map(record.uid, record.gid), (record.uid, record.gid))
+        self.assertTrue(equal_ids.matches(record.uid, record.gid))
+
+        identity = backupset.OwnerMap(None, host)
+        self.assertTrue(identity.is_identity)
+        self.assertEqual(identity.map(999, 983), (999, 983))
+        self.assertFalse(identity.matches(999, 983))
+
+
+class AccountResolutionContracts(unittest.TestCase):
+    def test_gideon_account_ids_reads_a_passwd_record(self) -> None:
+        command = ("getent", "passwd", backupset.SERVICE_ACCOUNT)
+        host = FakeHost(
+            getent=subprocess.CompletedProcess(
+                list(command),
+                0,
+                f"{backupset.SERVICE_ACCOUNT}:x:999:983::/home/"
+                f"{backupset.SERVICE_ACCOUNT}:/bin/bash\n",
+                "",
+            )
+        )
+        self.assertEqual(
+            backupset.gideon_account_ids(host), backupset.AccountIds(999, 983)
+        )
+
+    def test_gideon_account_ids_rejects_a_failed_command_and_malformed_line(self) -> None:
+        command = ("getent", "passwd", backupset.SERVICE_ACCOUNT)
+        cases = (
+            subprocess.CompletedProcess(list(command), 2, "", "not found\n"),
+            subprocess.CompletedProcess(
+                list(command),
+                0,
+                f"{backupset.SERVICE_ACCOUNT}:x:not-a-uid:983::/nonexistent:/bin/false\n",
+                "",
+            ),
+            subprocess.CompletedProcess(
+                list(command),
+                0,
+                f"{backupset.SERVICE_ACCOUNT}:x:999:983\n",
+                "",
+            ),
+            subprocess.CompletedProcess(
+                list(command),
+                0,
+                "other:x:999:983::/nonexistent:/bin/false\n",
+                "",
+            ),
+        )
+        for response in cases:
+            with self.subTest(response=response):
+                self.assertIsNone(backupset.gideon_account_ids(FakeHost(getent=response)))

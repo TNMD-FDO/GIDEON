@@ -118,8 +118,12 @@ retention — but only when the whole stack is running; a partially running
 stack refuses; verifies every inventoried file and runs pgBackRest's `verify`
 while the stack still serves; stops the stack and, on the build box, the host
 registry; restores the file roots in place (the checkout copy stays in the set —
-clone the tag the manifest names); restores Postgres; brings the store tier back
-to prove the cluster promotes and to write its row. It ends with **the frontend
+clone the tag the manifest names), re-owning what the making box's `gideon`
+owned to this box's `gideon` read by name, every other id kept — a set made
+before `v0.1.79` records no ids, is re-owned by the numbers it holds, and its
+`Next:` line then names `host provision` before the apply, because provision
+re-owns the managed `/data` directories; restores Postgres; brings the store
+tier back to prove the cluster promotes and to write its row. It ends with **the frontend
 and ingress down and the store tier running, and on the build box the host
 registry**. On a host that is not the build box but whose `gideon-registry` is
 still active (a former build box), it refuses before any stage: stop and disable
@@ -160,11 +164,7 @@ rotated since the set was made (the install runbook's rotation step, `v0.1.40`).
 5. Decrypt the set's tarball over the fresh secrets with the **old** identity
    from the password manager (the restored databases carry the old role
    passwords, so the old secrets must be back before anything connects).
-6. `sudo python3 -m gideon host provision` (with `--no-gpu` as in step 1):
-   the restore re-owns files by the old box's numeric ids, which the rebuilt
-   box's `gideon` account need not share, and provision re-owns the managed
-   `/data` directories (interim, until `restore` re-owns by name).
-7. `sudo python3 -m gideon apply`, then `sudo python3 -m gideon backup run --full`,
+6. `sudo python3 -m gideon apply`, then `sudo python3 -m gideon backup run --full`,
    then `sudo python3 -m gideon backup drill`.
 
 **The custody line.** After a provision, after a total-loss recovery, and

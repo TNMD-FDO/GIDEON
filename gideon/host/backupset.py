@@ -26,6 +26,9 @@ TARBALL_NAME: Final = "secrets.tar.age"
 FILES_DIR: Final = "files"
 PUSH_RECORD_NAME: Final = "push.json"
 PARTIAL_SUFFIX: Final = ".partial"
+# The system account provision creates for the host services; the one name
+# a restore resolves on the host it runs on.
+SERVICE_ACCOUNT: Final = "gideon"
 # find expands these escapes itself; an argv string cannot carry a NUL, so the
 # format travels as the two-character sequences and the listing arrives with
 # real tabs and NULs.
@@ -90,6 +93,8 @@ def etc_gideon_exclusions() -> tuple[str, ...]:
 def inventory_roots(checkout: str) -> tuple[InventoryRoot, ...]:
     """Return the ordered five-root inventory registry."""
 
+    # A root a container writes under an id of its image's own would carry
+    # its ownership policy here, beside restore_in_place; none does today.
     return (
         InventoryRoot("etc-gideon", "/etc/gideon", etc_gideon_exclusions(), True, True),
         InventoryRoot("checkout", checkout, CHECKOUT_EXCLUSIONS, True, False),
@@ -161,6 +166,43 @@ def kind_of(label: str) -> Kind | None:
     if label.startswith("pre-"):
         return Kind.LABELLED
     return Kind.NIGHTLY
+
+
+@dataclass(frozen=True, slots=True)
+class AccountIds:
+    """The numeric uid and gid of the ``gideon`` account."""
+
+    uid: int
+    gid: int
+
+    def __post_init__(self) -> None:
+        for field in ("uid", "gid"):
+            value = getattr(self, field)
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise TypeError(f"AccountIds {field} must be an integer")
+            if value < 0:
+                raise ValueError(f"AccountIds {field} must be non-negative")
+
+
+def gideon_account_ids(host: Host) -> AccountIds | None:
+    """The ids of the ``gideon`` account through the seam; ``None`` when absent or malformed.
+
+    The one place the account is resolved: ``backup run`` records the pair
+    in the manifest it writes, and ``restore`` reads the restoring host's
+    own to map what the making host's ``gideon`` owned onto it.
+    """
+
+    result = host.run(["getent", "passwd", SERVICE_ACCOUNT])
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        fields = line.split(":")
+        if len(fields) >= 7 and fields[0] == SERVICE_ACCOUNT:
+            try:
+                return AccountIds(int(fields[2]), int(fields[3]))
+            except (TypeError, ValueError):
+                return None
+    return None
 
 
 EntryKind = Literal["f", "d", "l"]
@@ -450,6 +492,7 @@ class Manifest:
     recipients: tuple[str, ...]
     hard_links: LinkVerdict
     secrets_fingerprint: str
+    gideon_ids: AccountIds | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -467,6 +510,8 @@ class Manifest:
             raise ValueError(
                 "Manifest recipients must be a non-empty tuple of non-empty strings"
             )
+        if self.gideon_ids is not None and not isinstance(self.gideon_ids, AccountIds):
+            raise TypeError("Manifest gideon_ids must be AccountIds or None")
         for field in ("started", "finished", "archive_through"):
             object.__setattr__(self, field, _utc(getattr(self, field), field))
 
@@ -505,6 +550,11 @@ class Manifest:
             "tarball_sha256": self.tarball_sha256,
             "version": self.version,
         }
+        if self.gideon_ids is not None:
+            document["gideon_ids"] = {
+                "gid": self.gideon_ids.gid,
+                "uid": self.gideon_ids.uid,
+            }
         return json.dumps(document, indent=1, sort_keys=True) + "\n"
 
 
@@ -595,6 +645,23 @@ def _parse_manifest_document(document: object) -> Manifest:
             raise _ParseError(
                 _field_problem("recipients", "must begin with recipient")
             )
+    gideon_ids_value = document.get("gideon_ids", _MISSING)
+    if gideon_ids_value is _MISSING:
+        gideon_ids = None
+    else:
+        gideon_ids_mapping = _mapping_field(gideon_ids_value, "gideon_ids")
+        gideon_ids = AccountIds(
+            _integer(
+                gideon_ids_mapping.get("uid", _MISSING),
+                "gideon_ids.uid",
+                nonnegative=True,
+            ),
+            _integer(
+                gideon_ids_mapping.get("gid", _MISSING),
+                "gideon_ids.gid",
+                nonnegative=True,
+            ),
+        )
     hard_links_value = _mapping_field(
         _required(document, "hard_links", _MANIFEST_FIX), "hard_links"
     )
@@ -630,6 +697,7 @@ def _parse_manifest_document(document: object) -> Manifest:
             recipients,
             LinkVerdict(sampled, linked),
             secrets_fingerprint.lower(),
+            gideon_ids,
         )
     except (TypeError, ValueError) as exc:
         raise _ParseError(_field_problem("manifest", str(exc))) from exc
@@ -649,6 +717,42 @@ def parse_manifest(text: str) -> Manifest | Problem:
         # A constructor guard (a naive datetime, a wrong kind) rather than a
         # field check: still a refusal, never a traceback.
         return Problem(f"Manifest is invalid: {exc}.", _MANIFEST_FIX)
+
+
+@dataclass(frozen=True, slots=True)
+class OwnerMap:
+    """Map recorded owner ids to the restoring host's ``gideon`` ids."""
+
+    recorded: AccountIds | None
+    host: AccountIds
+
+    def map(self, uid: int, gid: int) -> tuple[int, int]:
+        """Map the recorded uid and gid independently, preserving other ids."""
+
+        if self.recorded is None:
+            return uid, gid
+        return (
+            self.host.uid if uid == self.recorded.uid else uid,
+            self.host.gid if gid == self.recorded.gid else gid,
+        )
+
+    def matches(self, uid: int, gid: int) -> bool:
+        """Whether either component of this owner is the recorded account's.
+
+        A record equal to the host's ids maps every such path to itself, so
+        the question is what the making host's ``gideon`` owned, never what
+        the chown argv changed.
+        """
+
+        if self.recorded is None:
+            return False
+        return uid == self.recorded.uid or gid == self.recorded.gid
+
+    @property
+    def is_identity(self) -> bool:
+        """Whether this map has no recorded account ids."""
+
+        return self.recorded is None
 
 
 @dataclass(frozen=True, slots=True)

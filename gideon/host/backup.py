@@ -47,6 +47,7 @@ _RECIPIENT_FIX: Final = (
 _IDENTITY_FIX: Final = (
     "Run sudo python3 -m gideon host provision --only age-identity, then retry."
 )
+_ACCOUNT_FIX: Final = "Run sudo python3 -m gideon host provision, then retry."
 _STAGE_FIX: Final = "Run sudo python3 -m gideon apply, then retry."
 _LINK_FIX: Final = (
     "Confirm /data/backup-staging is one filesystem (§3.7), then re-run backup run"
@@ -105,7 +106,12 @@ def _preconditions(
     *,
     rendered_dir: PathLike,
     site_path: PathLike,
-) -> tuple[SiteConfig, tuple[str, ...], pgbackrest.InfoResult] | None:
+) -> tuple[
+    SiteConfig,
+    tuple[str, ...],
+    pgbackrest.InfoResult,
+    backupset.AccountIds,
+] | None:
     loaded = site.load_site(Path(site_path), host=io)
     if loaded.errors or loaded.config is None:
         _refuse(
@@ -158,6 +164,14 @@ def _preconditions(
     if AGE_RECIPIENT.fullmatch(recipient) is None:
         _refuse(
             f"age recipient is malformed: {AGE_RECIPIENT_PATH}.", _RECIPIENT_FIX
+        )
+        return None
+
+    gideon_ids = backupset.gideon_account_ids(io)
+    if gideon_ids is None:
+        _refuse(
+            f"the {backupset.SERVICE_ACCOUNT} service account is missing or malformed.",
+            _ACCOUNT_FIX,
         )
         return None
 
@@ -232,7 +246,7 @@ def _preconditions(
             stack.logs_fix(rendered_dir, "postgres"),
         )
         return None
-    return config, (recipient, box_recipient), info
+    return config, (recipient, box_recipient), info, gideon_ids
 
 
 def _existing_labels(sets: Sequence[backupset.SetRef]) -> frozenset[str]:
@@ -796,6 +810,7 @@ def _manifest_stage(
     links: backupset.LinkVerdict,
     checkout: str,
     secrets_fingerprint: str,
+    gideon_ids: backupset.AccountIds,
 ) -> tuple[StageResult, backupset.Manifest | None]:
     inventory: dict[str, tuple[backupset.Entry, ...]] = {}
     for root in roots:
@@ -845,6 +860,7 @@ def _manifest_stage(
         tuple(recipients),
         links,
         secrets_fingerprint,
+        gideon_ids,
     )
     manifest_path = os.path.join(partial, backupset.MANIFEST_NAME)
     try:
@@ -997,7 +1013,7 @@ def run_backup_run(
     prerequisites = _preconditions(io, rendered_dir=rendered_dir, site_path=site_path)
     if prerequisites is None:
         return 1
-    config, recipients, info = prerequisites
+    config, recipients, info, gideon_ids = prerequisites
 
     try:
         sets = backupset.list_sets(io)
@@ -1085,6 +1101,7 @@ def run_backup_run(
         links=links,
         checkout=checkout_text,
         secrets_fingerprint=secrets_stage.fingerprint,
+        gideon_ids=gideon_ids,
     )
     print_stage(manifest_result)
     if not manifest_result.ok or manifest is None:

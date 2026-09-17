@@ -24,6 +24,7 @@ REMOTE_SNAPSHOT = "20260902T120000Z"
 NOW = datetime(2026, 9, 2, 12, 0, tzinfo=UTC)
 RECIPIENT = "age1" + "a" * 58
 SECOND_RECIPIENT = "age1" + "c" * 58
+DEFAULT_GIDEON_IDS = backupset.AccountIds(999, 983)
 TARBALL_BYTES = b"tarball"
 TARBALL_SHA256 = hashlib.sha256(TARBALL_BYTES).hexdigest()
 SELECT_FIX = "Choose an earlier --at, or omit it for the latest state."
@@ -139,6 +140,8 @@ class FakeHost:
         physical_escape: bool = False,
         extra_physical_file: tuple[str, str] | None = None,
         registry_active: bool = False,
+        gideon_ids: backupset.AccountIds = DEFAULT_GIDEON_IDS,
+        fail_gideon_ids: bool = False,
     ) -> None:
         value = manifest_value or manifest()
         self.manifest_value = value
@@ -147,6 +150,8 @@ class FakeHost:
         self.physical_escape = physical_escape
         self.extra_physical_file = extra_physical_file
         self.registry_active = registry_active
+        self.gideon_ids = gideon_ids
+        self.fail_gideon_ids = fail_gideon_ids
         self.running = running
         self.target = target
         self.source = source
@@ -202,6 +207,16 @@ class FakeHost:
         del check, env
         command = tuple(argv)
         self.calls.append((command, input, None if cwd is None else os.fspath(cwd), timeout))
+        if command == ("getent", "passwd", backupset.SERVICE_ACCOUNT):
+            if self.fail_gideon_ids:
+                return completed(command, returncode=1)
+            return completed(
+                command,
+                stdout=(
+                    f"{backupset.SERVICE_ACCOUNT}:x:{self.gideon_ids.uid}:"
+                    f"{self.gideon_ids.gid}::/home/{backupset.SERVICE_ACCOUNT}:/bin/bash\n"
+                ),
+            )
         if command == ("systemctl", "is-active", "gideon-registry"):
             return completed(command, returncode=0 if self.registry_active else 3)
         if "exec" in command and "pg_isready" in command:
@@ -395,7 +410,7 @@ class RestoreContracts(unittest.TestCase):
         self.assertLess(verify_index, down_index)
         self.assertIn("age -d -i <identity file kept off-box>", out.getvalue())
         self.assertIn("not the set's", out.getvalue())
-        self.assertIn("Next: sudo python3 -m gideon apply", out.getvalue())
+        self.assertIn("Next: sudo python3 -m gideon host provision", out.getvalue())
         self.assertIn("stop: ok — stopped the host registry", out.getvalue())
         self.assertIn(
             "stores: ok — frontend and ingress down; the store tier and the host registry running",
@@ -551,11 +566,124 @@ class RestoreContracts(unittest.TestCase):
         self.assertTrue(any(call[0][:2] == ("mv", backupset.STAGING) for call in fake.calls))
         side = f"{backupset.STAGING}.fetch-{REMOTE_SNAPSHOT}"
         chowns = [call[0] for call in fake.calls if call[0][0] == "chown"]
+        self.assertTrue(
+            any(
+                argv[1] == "1000:1000" and "/etc/gideon/config.yaml" in argv
+                for argv in chowns
+            )
+        )
         self.assertIn(("chown", "gideon:gideon", "--", side), chowns)
         skeleton = [argv for argv in chowns if argv[1] == "0:0" and f"{side}/sets" in argv]
         self.assertTrue(skeleton, chowns)
         self.assertIn(f"{side}/sets/{LOCAL_SET}/files", skeleton[0])
         self.assertIn("frontend and ingress down", out.getvalue())
+
+    def test_recorded_ids_are_mapped_in_fetch_and_files_for_target_and_staging(self) -> None:
+        value = manifest()
+        recorded = backupset.AccountIds(999, 983)
+        additions = (
+            entry("mapped-both", uid=999, gid=983),
+            entry("mapped-uid", uid=999, gid=0),
+            entry("mapped-gid", uid=0, gid=983),
+            backupset.Entry("mapped-link", "l", 1, 999, 983, 0o777, 100.0, None),
+        )
+        value = replace(
+            value,
+            gideon_ids=recorded,
+            inventory={
+                **value.inventory,
+                "etc-gideon": (*value.inventory["etc-gideon"], *additions),
+            },
+        )
+        host_ids = backupset.AccountIds(998, 997)
+        for source in ("target", "staging"):
+            with self.subTest(source=source):
+                fake = make_host(
+                    source=source,
+                    manifest_value=value,
+                    gideon_ids=host_ids,
+                    remote_listing=f"{REMOTE_SNAPSHOT}\t1\n",
+                    side_names=(LOCAL_SET,),
+                )
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    code = restore.run_restore(
+                        argparse.Namespace(source=source, at=None),
+                        host=fake,
+                        now=NOW,
+                    )
+                self.assertEqual(code, 0, out.getvalue())
+                output = out.getvalue()
+                self.assertIn(
+                    f"4 {restore.REOWN_MAPPED_DETAIL} {host_ids.uid}:{host_ids.gid}",
+                    output,
+                )
+                chowns = [call[0] for call in fake.calls if call[0][0] == "chown"]
+                self.assertIn(
+                    ("chown", "998:997", "--", "/etc/gideon/mapped-both"),
+                    chowns,
+                )
+                self.assertIn(
+                    ("chown", "998:0", "--", "/etc/gideon/mapped-uid"),
+                    chowns,
+                )
+                self.assertIn(
+                    ("chown", "0:997", "--", "/etc/gideon/mapped-gid"),
+                    chowns,
+                )
+                self.assertIn(
+                    ("chown", "-h", "998:997", "--", "/etc/gideon/mapped-link"),
+                    chowns,
+                )
+
+    def test_no_record_rows_and_next_line_name_host_provision(self) -> None:
+        fake = make_host(
+            source="target",
+            remote_listing=f"{REMOTE_SNAPSHOT}\t1\n",
+            side_names=(LOCAL_SET,),
+        )
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = restore.run_restore(
+                argparse.Namespace(source="target", at=None),
+                host=fake,
+                now=NOW,
+            )
+        self.assertEqual(code, 0, out.getvalue())
+        output = out.getvalue()
+        self.assertIn(
+            f"re-owned 4 path(s), re-owned by their recorded ids "
+            f"(1 set(s) with {restore.REOWN_NO_RECORD_DETAIL})",
+            output,
+        )
+        self.assertIn(
+            f"; re-owned by the recorded ids ({restore.REOWN_NO_RECORD_DETAIL})",
+            output,
+        )
+        self.assertIn("Next: sudo python3 -m gideon host provision", output)
+        self.assertIn("then sudo python3 -m gideon apply", output)
+
+    def test_missing_gideon_account_refuses_before_select(self) -> None:
+        fake = make_host(fail_gideon_ids=True)
+        out = io.StringIO()
+        err = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = restore.run_restore(
+                argparse.Namespace(source="staging", at=None),
+                host=fake,
+                now=NOW,
+            )
+        self.assertEqual(code, 1)
+        self.assertEqual(out.getvalue(), "")
+        self.assertFalse(any(call[0][0] == "docker" for call in fake.calls))
+        self.assertIn(
+            f"the {backupset.SERVICE_ACCOUNT} service account is missing or malformed.",
+            err.getvalue(),
+        )
+        self.assertIn(
+            "Run sudo python3 -m gideon host provision, then retry.",
+            err.getvalue(),
+        )
 
     def test_at_uses_the_oldest_remote_boundary_that_covers_it(self) -> None:
         early = backupset.PushRecord(
@@ -1179,7 +1307,7 @@ class RestoreBySetLabel(unittest.TestCase):
         # before the target, at second granularity) would skip it for the older one.
         self.assertIn(f"--set={manifest().pgbackrest_label}", restore_call)
         self.assertIn("--target-timeline=2", restore_call)
-        self.assertIn("Next: sudo python3 -m gideon apply", out)
+        self.assertIn("Next: sudo python3 -m gideon host provision", out)
 
     def test_target_restore_recovers_the_set_on_its_own_timeline_to_its_boundary(self) -> None:
         """--from target with no --at: the newest snapshot's set, its backup, its timeline, its boundary."""

@@ -22,6 +22,7 @@ CHECKOUT = "/work/GIDEON"
 NOW = datetime(2026, 9, 2, 12, 0, tzinfo=UTC)
 RECIPIENT = "age1" + "a" * 58
 IDENTITY = "AGE-SECRET-KEY-1" + "A" * 58
+GIDEON_IDS = backupset.AccountIds(999, 983)
 OLD_LABEL = "20260901T120000Z"
 BACKUP_INFO = {
     "backup": [
@@ -233,6 +234,15 @@ class FakeHost:
 def _commands(*, old: backupset.Manifest | None = None) -> dict[tuple[str, ...], list[subprocess.CompletedProcess[str]]]:
     info_argv = tuple(pgbackrest.exec_argv(RENDERED, "info", "--output=json"))
     commands: dict[tuple[str, ...], list[subprocess.CompletedProcess[str]]] = {
+        ("getent", "passwd", backupset.SERVICE_ACCOUNT): [
+            result(
+                ("getent", "passwd", backupset.SERVICE_ACCOUNT),
+                stdout=(
+                    f"{backupset.SERVICE_ACCOUNT}:x:{GIDEON_IDS.uid}:"
+                    f"{GIDEON_IDS.gid}::/home/{backupset.SERVICE_ACCOUNT}:/bin/bash\n"
+                ),
+            )
+        ],
         tuple(stack.exec_argv(RENDERED, "postgres", "pg_isready")): [result(())],
         info_argv: [result(info_argv, stdout=json.dumps(BACKUP_INFO)), result(info_argv, stdout=json.dumps(FRESH_INFO))],
         tuple(stack.exec_argv(RENDERED, "postgres", "psql", "-U", "gideon_audit", "-d", "gideon", "-v", "ON_ERROR_STOP=1", "--single-transaction", "-f", "-")): [result(())] * 3,
@@ -458,6 +468,11 @@ class BackupRun(unittest.TestCase):
         self.assertEqual(parsed.archive_through, NOW)
         self.assertEqual(parsed.commit, "new-commit")
         self.assertEqual(parsed.recipients, (RECIPIENT, "age1" + "c" * 58))
+        self.assertEqual(parsed.gideon_ids, GIDEON_IDS)
+        self.assertEqual(
+            json.loads(host.files[manifest_path])["gideon_ids"],
+            {"gid": GIDEON_IDS.gid, "uid": GIDEON_IDS.uid},
+        )
         self.assertEqual(json.loads(host.files[manifest_path])["recipient"], RECIPIENT)
         self.assertEqual(json.loads(host.files[manifest_path])["recipients"], [RECIPIENT, "age1" + "c" * 58])
         self.assertEqual(
@@ -537,6 +552,43 @@ class BackupRun(unittest.TestCase):
             "SELECT 'public.users', count(*) FROM public.users;\n", psql_inputs
         )
         self.assertNotIn("invalid-name", "".join(psql_inputs))
+
+    def test_missing_or_malformed_gideon_account_refuses_before_intent(self) -> None:
+        command = ("getent", "passwd", backupset.SERVICE_ACCOUNT)
+        cases = (
+            result(command, returncode=1),
+            result(
+                command,
+                stdout=(
+                    f"{backupset.SERVICE_ACCOUNT}:x:not-a-uid:983::/home/"
+                    f"{backupset.SERVICE_ACCOUNT}:/bin/bash\n"
+                ),
+            ),
+        )
+        for response in cases:
+            with self.subTest(response=response):
+                host = _host()
+                host.commands[command] = [response]
+                out = io.StringIO()
+                err = io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    code = backup.run_backup_run(
+                        argparse.Namespace(full=True, label=None),
+                        host=host,
+                        root=CHECKOUT,
+                        now=NOW,
+                    )
+                self.assertEqual(code, 1)
+                self.assertEqual(out.getvalue(), "")
+                self.assertFalse(any(call[0][0] == "docker" and "gideon_audit" in call[0] for call in host.calls))
+                self.assertIn(
+                    f"the {backupset.SERVICE_ACCOUNT} service account is missing or malformed.",
+                    err.getvalue(),
+                )
+                self.assertIn(
+                    "Run sudo python3 -m gideon host provision, then retry.",
+                    err.getvalue(),
+                )
 
     def test_repository_carries_forward_only_unchanged_hashes(self) -> None:
         host = _host(previous=True)
