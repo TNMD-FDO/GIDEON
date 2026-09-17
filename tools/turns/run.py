@@ -434,6 +434,7 @@ def _verdict_data(verdict: classify.Verdict | None) -> dict[str, object] | None:
         "block_present": verdict.block_present,
         "reasoning_stored": verdict.reasoning_stored,
         "sources_present": verdict.sources_present,
+        "length": verdict.length,
     }
 
 
