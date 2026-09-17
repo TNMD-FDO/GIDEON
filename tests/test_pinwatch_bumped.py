@@ -10,6 +10,7 @@ from unittest.mock import patch as mock_patch
 
 import gideon
 from gideon.host.sysio import Host, PathLike
+from tools.exportboundary import absent_from_export
 from tools.pinwatch import bumped
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -179,6 +180,12 @@ class BumpedHost:
             relative = "images.lock"
         if relative in self.current:
             return self.current[relative]
+        if relative == "tooling.md" and absent_from_export(
+            "docs/agents/tooling.md", ROOT
+        ):
+            raise unittest.SkipTest(
+                "docs/agents/tooling.md is excluded from the public export"
+            )
         return (ROOT / str(path).split("/checkout/", 1)[-1]).read_text()
 
 

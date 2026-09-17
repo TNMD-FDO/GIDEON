@@ -1,4 +1,4 @@
-"""Contract checks for the public repository's filtered export boundary."""
+"""Contract checks for the filtered export boundary and its text exemptions."""
 
 from __future__ import annotations
 
@@ -12,16 +12,20 @@ from io import BytesIO
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-from tools.exportboundary import EXCLUDED_PREFIXES, in_export_tree, is_excluded
+from tools.exportboundary import (
+    EXCLUDED_PREFIXES,
+    absent_from_export,
+    in_export_tree,
+    is_excluded,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 ATTRIBUTES_PATH = Path(".gitattributes")
-# The tracker's own tools and the skill-record mover, whose subject those paths are, and the list itself.
+# The list itself and the pin watch's modules, whose subject is the excluded
+# provenance record.
 TEXT_RULE_EXEMPT = (
-    "tools/tracker.py",
-    "tools/cycles.py",
-    "tools/pinwatch/skills.py",
     "tools/exportboundary.py",
+    "tools/pinwatch",
 )
 _TEXT_ROOTS = (Path("gideon"), Path("compose"), Path("config"), Path("tools"))
 _SKIP_DIRECTORIES = {
@@ -48,13 +52,20 @@ def _finding(root: Path, path: Path, line: int, problem: str, fix: str) -> Findi
     return Finding(path.relative_to(root), line, problem, fix)
 
 
-def _attribute_entries(text: str) -> tuple[tuple[int, str], ...]:
-    entries: list[tuple[int, str]] = []
+def _attribute_entries(text: str) -> tuple[tuple[int, str, bool], ...]:
+    entries: list[tuple[int, str, bool]] = []
     for line_number, line in enumerate(text.splitlines(), 1):
         fields = line.split()
         if "export-ignore" in fields and fields.index("export-ignore") > 0:
-            entries.append((line_number, fields[0].rstrip("/")))
+            raw_prefix = fields[0]
+            entries.append((line_number, raw_prefix.rstrip("/"), raw_prefix.endswith("/")))
     return tuple(entries)
+
+
+def _is_file_prefix(root: Path, prefix: str) -> bool:
+    """Return whether an existing prefix is a file; absent prefixes are directories."""
+
+    return (root / prefix).is_file()
 
 
 def rule_attributes(root: Path) -> list[Finding]:
@@ -74,22 +85,14 @@ def rule_attributes(root: Path) -> list[Finding]:
             )
         ]
     entries = _attribute_entries(text)
-    mirrored = {prefix for _line, prefix in entries}
+    mirrored = {prefix for _line, prefix, _has_trailing_slash in entries}
+    allowed = set(EXCLUDED_PREFIXES)
     findings: list[Finding] = []
     for prefix in EXCLUDED_PREFIXES:
         if prefix in mirrored:
             continue
         line = len(text.splitlines()) + 1
-        rendered = prefix + (
-            ""
-            if prefix
-            in {
-                ".github/workflows/acceptance.yml",
-                ".github/workflows/pin-watch.yml",
-                ".github/dependabot.yml",
-            }
-            else "/"
-        )
+        rendered = prefix if _is_file_prefix(root, prefix) else prefix + "/"
         findings.append(
             _finding(
                 root,
@@ -99,8 +102,23 @@ def rule_attributes(root: Path) -> list[Finding]:
                 f"Add {rendered} export-ignore to .gitattributes.",
             )
         )
-    allowed = set(EXCLUDED_PREFIXES)
-    for line, prefix in entries:
+    for line, prefix, has_trailing_slash in entries:
+        if prefix not in allowed or not (root / prefix).exists():
+            continue
+        expected_trailing_slash = not _is_file_prefix(root, prefix)
+        if has_trailing_slash == expected_trailing_slash:
+            continue
+        rendered = prefix + ("/" if expected_trailing_slash else "")
+        findings.append(
+            _finding(
+                root,
+                path,
+                line,
+                f"export-ignore line for {prefix!r} has the wrong path shape",
+                f"Use {rendered} export-ignore in .gitattributes.",
+            )
+        )
+    for line, prefix, _has_trailing_slash in entries:
         if prefix in allowed:
             continue
         findings.append(
@@ -152,7 +170,8 @@ def _text_files(root: Path) -> tuple[Path, ...]:
     candidates.append(root / ".github/workflows/ci.yml")
     for candidate in candidates:
         if candidate.is_file():
-            paths.append(candidate)
+            if not is_excluded(candidate.relative_to(root).as_posix()):
+                paths.append(candidate)
             continue
         if not candidate.is_dir():
             continue
@@ -162,26 +181,23 @@ def _text_files(root: Path) -> tuple[Path, ...]:
                 not path.is_file()
                 or any(part in _SKIP_DIRECTORIES for part in relative.parts)
                 or relative.is_relative_to(Path(".claude/worktrees"))
+                or is_excluded(relative.as_posix())
             ):
                 continue
             paths.append(path)
     return tuple(sorted(paths))
 
 
-def _text_pattern(prefix: str) -> re.Pattern[str]:
+def _text_pattern(root: Path, prefix: str) -> re.Pattern[str]:
     if "/" not in prefix and not prefix.startswith("."):
-        # A bare top-level name (`bin`) is a path only at a path's start: not
-        # after a path character, so `/usr/bin` and `.venv/bin` are not it.
+        # A bare top-level name (`bin`, `CLAUDE.md`) is a path only at a path's
+        # start: not after a path character, so `/usr/bin` and `.venv/bin` are not it.
         return re.compile(
             r"(?<![A-Za-z0-9_.\\/'\"-])"
             + re.escape(prefix)
             + r"(?:/|(?![A-Za-z0-9_.-]))"
         )
-    if prefix in {
-        ".github/workflows/acceptance.yml",
-        ".github/workflows/pin-watch.yml",
-        ".github/dependabot.yml",
-    }:
+    if _is_file_prefix(root, prefix):
         return re.compile(re.escape(prefix) + r"(?![A-Za-z0-9_./-])")
     return re.compile(re.escape(prefix) + r"(?:/|(?![A-Za-z0-9_.-]))")
 
@@ -190,11 +206,13 @@ def rule_text(root: Path) -> list[Finding]:
     """Find excluded paths named by text in the scoped kept source files."""
 
     findings: list[Finding] = []
-    exemptions = set(TEXT_RULE_EXEMPT)
-    patterns = {prefix: _text_pattern(prefix) for prefix in EXCLUDED_PREFIXES}
+    patterns = {prefix: _text_pattern(root, prefix) for prefix in EXCLUDED_PREFIXES}
     for path in _text_files(root):
         relative = path.relative_to(root).as_posix()
-        if relative in exemptions:
+        if any(
+            relative == prefix or relative.startswith(prefix + "/")
+            for prefix in TEXT_RULE_EXEMPT
+        ):
             continue
         try:
             text = path.read_bytes().decode("utf-8")
@@ -367,6 +385,20 @@ class SeededTrees(unittest.TestCase):
         self.assertEqual(items[-1].line, 2)
         self.assertIn("tools/exportboundary.py", items[-1].fix)
 
+    def test_attributes_reports_existing_file_with_directory_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "CLAUDE.md").write_text("development\n", encoding="utf-8")
+            (root / ATTRIBUTES_PATH).write_text(
+                "CLAUDE.md/ export-ignore\n", encoding="utf-8"
+            )
+            items = rule_attributes(root)
+        shape_findings = [item for item in items if "wrong path shape" in item.problem]
+        self.assertEqual(len(shape_findings), 1)
+        self.assertEqual(shape_findings[0].path, ATTRIBUTES_PATH)
+        self.assertEqual(shape_findings[0].line, 1)
+        self.assertIn("Use CLAUDE.md export-ignore", shape_findings[0].fix)
+
     def test_archive_reports_excluded_member(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -389,11 +421,23 @@ class SeededTrees(unittest.TestCase):
             path = root / "gideon" / "source.py"
             path.parent.mkdir()
             path.write_text("docs/1-plans/F_example\nscratchpad\n", encoding="utf-8")
+            excluded = root / "tools" / "tracker.py"
+            excluded.parent.mkdir()
+            excluded.write_text("docs/1-plans/ignored\n", encoding="utf-8")
+            exempt = root / "tools" / "pinwatch" / "reader.py"
+            exempt.parent.mkdir()
+            exempt.write_text("docs/agents/tooling.md\n", encoding="utf-8")
+            boundary = root / "tools" / "exportboundary.py"
+            boundary.write_text("docs/1-plans/ignored\n", encoding="utf-8")
+            sibling = root / "tools" / "sibling.py"
+            sibling.write_text("docs/agents/tooling.md\n", encoding="utf-8")
             items = rule_text(root)
-        self.assertEqual(len(items), 1)
+        self.assertEqual(len(items), 2)
         self.assertEqual(items[0].path, Path("gideon/source.py"))
         self.assertEqual(items[0].line, 1)
         self.assertIn("Remove or retarget", items[0].fix)
+        self.assertEqual(items[1].path, Path("tools/sibling.py"))
+        self.assertEqual(items[1].line, 1)
 
     def test_links_reports_excluded_target(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -409,6 +453,23 @@ class SeededTrees(unittest.TestCase):
 
 
 class HelperContracts(unittest.TestCase):
+    def test_file_prefix_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "CLAUDE.md").write_text("development\n", encoding="utf-8")
+            (root / "docs" / "agents").mkdir(parents=True)
+            self.assertTrue(_is_file_prefix(root, "CLAUDE.md"))
+            self.assertFalse(_is_file_prefix(root, "docs/agents"))
+            self.assertFalse(_is_file_prefix(root, "missing"))
+
+    def test_absent_from_export_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.assertTrue(absent_from_export(".scratch/missing.md", root))
+            (root / ".scratch").mkdir()
+            self.assertFalse(absent_from_export(".scratch", root))
+            self.assertFalse(absent_from_export("gideon/missing.py", root))
+
     def test_export_tree_detection(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

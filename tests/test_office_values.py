@@ -18,6 +18,7 @@ from typing import cast
 from gideon.host.egress import load_egress_allowlist
 from gideon.host.images import LIBVIRT_BRIDGE_CIDR
 from gideon.host.site import FIELD_REGISTRY
+from tools.exportboundary import absent_from_export
 from tools.pinwatch.skills import load_skills_lock
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -148,6 +149,8 @@ class _Finding:
 def _skill_directories(root: Path) -> frozenset[Path]:
     lock_path = root / _SKILLS_LOCK.name
     if not lock_path.is_file():
+        if absent_from_export(_SKILLS_LOCK.name, ROOT):
+            return frozenset()
         lock_path = _SKILLS_LOCK
     lock = load_skills_lock(lock_path.read_text(encoding="utf-8"))
     return frozenset(root / ".claude" / "skills" / entry.name for entry in lock.entries)

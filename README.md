@@ -8,7 +8,7 @@ assistant, on one box the office controls. Built by TNMD-FDO (the Office of
 the Federal Public Defender, Middle District of Tennessee) and designed from
 day one for distribution: clone a tag, edit `site.yaml`, run one script.
 
-**Status:** 0.x — slice 0 (platform) complete at `v0.1.0`, the clean-VM acceptance at minor tags its standing proof; slice 1 (General) under way toward `v0.2.0`; this tree is `v0.1.73`.
+**Status:** 0.x — slice 0 (platform) complete at `v0.1.0`, the clean-VM acceptance at minor tags its standing proof; slice 1 (General) under way toward `v0.2.0`; this tree is `v0.1.74`.
 What each release changed is in [`CHANGELOG.md`](CHANGELOG.md), the index over `docs/2-changelog/`, one file per release. Later-slice commands still print "not implemented".
 
 ## Install
@@ -91,30 +91,30 @@ python3 -m tools.gate
 
 ## Documentation
 
-Paths under `.scratch/` are the development repository's work tracker, committed and authoritative despite the name, and are not carried by the public export.
+Paths under `.scratch/` are the development repository's work tracker, committed and authoritative despite the name; neither they nor a file marked "(development repository)" is carried by the public export.
 
 | What | Where |
 |---|---|
 | The build spec (authoritative) | `.scratch/greenfield-spec/spec.md` |
-| Vocabulary | [`CONTEXT.md`](CONTEXT.md) |
+| Vocabulary | `CONTEXT.md` (development repository) |
 | Decision records | [`docs/adr/`](docs/adr/) |
 | Changelog index (what each release changed; `upgrade` prints a major release's `## Breaking` section from the files it indexes) | [`CHANGELOG.md`](CHANGELOG.md) |
 | Reporting a vulnerability | [`SECURITY.md`](SECURITY.md) |
 | Work tracker | `.scratch/` — committed and authoritative despite the name |
-| How the work is done (a CSA's reading order, one worked cycle, the tracker's shapes, the first-day constraints) | [`docs/agents/onboarding.md`](docs/agents/onboarding.md) |
+| How the work is done (a CSA's reading order, one worked cycle, the tracker's shapes, the first-day constraints) | `docs/agents/onboarding.md` (development repository) |
 | How the code is built | [`docs/ARCHI.md`](docs/ARCHI.md) (the map) · [`docs/archi/`](docs/archi/) (one leaf per subsystem) |
-| The shared server and organisation (what each of the office's two projects owns on the box and in GitHub, and the log between them) | [`docs/box-ledger.md`](docs/box-ledger.md) |
+| The shared server and organisation (what each of the office's two projects owns on the box and in GitHub, and the log between them) | `docs/box-ledger.md` (development repository) |
 | Site file example + editor schema | [`config/site.example.yaml`](config/site.example.yaml) · [`config/site.schema.json`](config/site.schema.json) |
 | Host pins (OS, driver, toolchain, service artifacts) | [`host.lock`](host.lock) |
 | Egress allowlist (the hosts each run must reach) | [`config/egress.yaml`](config/egress.yaml) |
 | Image pins (mirrored: source + digest; built: base + inputs + pushed digest) | [`images.lock`](images.lock) |
-| The development toolchain (the five pins a fresh `.venv` and the hosted checks install; never the product's) | [`requirements-dev.txt`](requirements-dev.txt) · [`docs/4-unit-tests/TESTING.md`](docs/4-unit-tests/TESTING.md) |
+| The development toolchain (the five pins a fresh `.venv` and the hosted checks install; never the product's) | [`requirements-dev.txt`](requirements-dev.txt) · `docs/4-unit-tests/TESTING.md` (development repository) |
 | Model pins and hardware profiles (per profile: the `requires` minimums, the model set by Hugging Face repo + revision + per-file sha256 and size, the engine baseline the model is served with) | [`models.lock`](models.lock) |
 | GIDEON-built images (Dockerfiles with no pin in them; `python3 -m tools.imagebuild <name>` on the box builds, records, and `--check`s) | [`images/`](images/) · [`tools/imagebuild/`](tools/imagebuild/) · [`docs/runbooks/built-images.md`](docs/runbooks/built-images.md) |
 | The pin watch (one pull request per pin bump across the three product locks, the model pins and the skills' record included; `python3 -m tools.pinwatch --dry-run` from a checkout; `python3 -m tools.pinwatch.hub <repo>` prints a model's files block by hand; `python3 -m tools.pinwatch.bumped` generates the release note's "What was bumped" section) | [`tools/pinwatch/`](tools/pinwatch/) · `.github/workflows/pin-watch.yml` · [`docs/runbooks/pin-watch-app-setup.md`](docs/runbooks/pin-watch-app-setup.md) |
-| The cycles record (one row per development session — started, where, skill, model, effort, tickets, plans, turns, peak context, compactions — and the band table, from the harness's transcripts; `python3 -m tools.cycles --write` from the dev venv merges the present sessions in, on demand) | `.scratch/CYCLES.md` · [`tools/cycles.py`](tools/cycles.py) |
+| The cycles record (one row per development session — started, where, skill, model, effort, tickets, plans, turns, peak context, compactions — and the band table, from the harness's transcripts; `python3 -m tools.cycles --write` from the dev venv merges the present sessions in, on demand) | `.scratch/CYCLES.md` · `tools/cycles.py` (development repository) |
 | The cycle launcher (one session per TRIP phase on its paired model and effort, `bin/trip cycle <ticket>` chaining plan, implement, and release on the handoff record; development tooling outside the export) | `bin/trip` · `docs/6-memo/workflow-commands.md` |
-| The tracker board (what is open, what blocks the next tag, what a session may pick up, the decisions owed, and apart from them the standing tickets waiting on an event no session can cause — from one parse of the tracker's issue files; `python3 -m tools.tracker` from the dev venv regenerates it at every release, its page beside it) | `.scratch/BOARD.md` · [`tools/tracker.py`](tools/tracker.py) |
+| The tracker board (what is open, what blocks the next tag, what a session may pick up, the decisions owed, and apart from them the standing tickets waiting on an event no session can cause — from one parse of the tracker's issue files; `python3 -m tools.tracker` from the dev venv regenerates it at every release, its page beside it) | `.scratch/BOARD.md` · `tools/tracker.py` (development repository) |
 | Rendered-config templates (Caddyfile, the frontend's permission set and General's texts, `pgbackrest.conf`, the reconcile, backup, drill, and verify-all units, the Prometheus and probe configuration, Grafana's LDAP, provisioning, alert rules — the search probe's among them — and the three boards; SearXNG's settings are built in code from the site file) | [`compose/`](compose/) |
 | Release notes (the user-facing note every tag from `v0.2.0` ships, written from the template at version 2, its "What was bumped" section pasted from the generator) | [`docs/release-notes/`](docs/release-notes/) |
 | Backup, restore, and the drill (what runs, first-time setup, reading the rows, total-loss recovery) | [`docs/runbooks/backup-restore.md`](docs/runbooks/backup-restore.md) · [`docs/runbooks/office-services-setup.md`](docs/runbooks/office-services-setup.md) §3 (the Synology) |
@@ -131,7 +131,7 @@ Paths under `.scratch/` are the development repository's work tracker, committed
 
 A bug or an enhancement is reported on the public repository, `TNMD-FDO/GIDEON`, through its issue forms; the CSAs triage it into the development repository's private tracker.
 A vulnerability goes through [`SECURITY.md`](SECURITY.md), never an issue.
-A pull request on the public repository is ported by a CSA into the development repository under [`CONTRIBUTING.md`](CONTRIBUTING.md)'s dedication and lands in the next tagged export, credited in the release note.
+A contribution is made in the private development repository, `TNMD-FDO/GIDEON-dev`. Request access through the [access-request issue form](https://github.com/TNMD-FDO/GIDEON/issues/new?template=access-request.yml); a CSA decides each request under [`CONTRIBUTING.md`](CONTRIBUTING.md)'s dedication. A pull request on the public repository is not merged, since each release's export overwrites `main`.
 
 ## License
 

@@ -15,6 +15,7 @@ from pathlib import Path
 from gideon.host.images import load_image_lock
 from gideon.host.lock import load_host_lock
 from gideon.host.models import load_models_lock
+from tools.exportboundary import absent_from_export
 from tools.pinwatch import notes
 from tools.pinwatch.pins import pin_registry
 from tools.pinwatch.skills import parse_provenance
@@ -25,6 +26,11 @@ MINIMUM_NOTE_COUNT = 13
 
 
 def committed_vocabulary() -> notes.NoteVocabulary:
+    tooling_path = Path("docs/agents/tooling.md")
+    if absent_from_export(tooling_path, ROOT):
+        raise unittest.SkipTest(
+            "docs/agents/tooling.md is excluded from the public export"
+        )
     image_result = load_image_lock(ROOT / "images.lock")
     host_result = load_host_lock(ROOT / "host.lock")
     models_result = load_models_lock(ROOT / "models.lock")

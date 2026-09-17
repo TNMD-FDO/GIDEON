@@ -27,6 +27,7 @@ from gideon.host.images import (
 from gideon.host.lock import HostLock, load_host_lock
 from gideon.host.models import ModelsLock, load_models_lock, load_models_lock_text
 from gideon.host.sysio import PathLike
+from tools.exportboundary import absent_from_export
 from tools.pinwatch import hub, notes
 from tools.pinwatch import patch as patch_module
 from tools.pinwatch.cli import main as pinwatch_main
@@ -286,10 +287,15 @@ class DictFetcher:
         return answer
 
 
+def _committed_tooling_text() -> str:
+    path = Path("docs/agents/tooling.md")
+    if absent_from_export(path, ROOT):
+        raise unittest.SkipTest("docs/agents/tooling.md is excluded from the public export")
+    return (ROOT / path).read_text(encoding="utf-8")
+
+
 def _committed_provenance() -> Provenance:
-    return parse_provenance(
-        (ROOT / "docs" / "agents" / "tooling.md").read_text(encoding="utf-8")
-    )
+    return parse_provenance(_committed_tooling_text())
 
 
 def _add_committed_skill_sources(fetcher: DictFetcher) -> DictFetcher:
@@ -1764,7 +1770,7 @@ class PinWatchHost:
         self.tooling_text = (
             tooling_text
             if tooling_text is not None
-            else (ROOT / "docs" / "agents" / "tooling.md").read_text()
+            else _committed_tooling_text()
         )
         self.branch_exists = branch_exists
         self.branch_text = branch_text
@@ -2316,9 +2322,7 @@ class CliContracts(unittest.TestCase):
             {
                 "/repo/images.lock": IMAGE_LOCK_TEXT,
                 "/repo/host.lock": (ROOT / "host.lock").read_text(),
-                "/repo/docs/agents/tooling.md": (
-                    ROOT / "docs" / "agents" / "tooling.md"
-                ).read_text(),
+                "/repo/docs/agents/tooling.md": _committed_tooling_text(),
                 "/repo/docs/research/example.md": note_text,
             }
         )

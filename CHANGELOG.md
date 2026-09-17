@@ -10,6 +10,7 @@ history at commit f06e83f. User-facing notes for every tag from `v0.2.0` live un
 `docs/release-notes/`, and `tests/test_release_records.py` holds this index
 complete, ordered, and dated from the release files.
 
+- [v0.1.74](docs/2-changelog/w3_v0.1.74.md) — 2026-09-16 — the public repository is the application alone (79)
 - [v0.1.73](docs/2-changelog/w3_v0.1.73.md) — 2026-09-16 — the build box's crossing, procedure and proof (21)
 - [v0.1.72](docs/2-changelog/w3_v0.1.72.md) — 2026-09-16 — the host-mode fakes answer exists from their dict alone
 - [v0.1.71](docs/2-changelog/w3_v0.1.71.md) — 2026-09-16 — the deadline family's elapsed forms (ticket 44)

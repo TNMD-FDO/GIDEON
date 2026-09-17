@@ -1,0 +1,46 @@
+name: Development access request
+description: Ask for access to the private development repository to contribute.
+title: "[Access]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        GIDEON is developed in the private `TNMD-FDO/GIDEON-dev`. The public
+        repository carries the application alone. A pull request here is not
+        merged. A CSA decides each request and answers on the issue.
+
+        Do not paste any site-file value, secret, chat, matter, or client text.
+        Use placeholders and synthetic text throughout this request.
+  - type: input
+    id: github-account
+    attributes:
+      label: GitHub account
+      description: Enter the GitHub account that should receive access.
+      placeholder: "@example-account"
+    validations:
+      required: true
+  - type: textarea
+    id: affiliation
+    attributes:
+      label: Office or organisation and role
+      description: Tell us who you are and the office or organisation you represent.
+    validations:
+      required: true
+  - type: textarea
+    id: work
+    attributes:
+      label: What would you like to work on?
+      description: Describe the part of GIDEON you want to contribute to.
+    validations:
+      required: true
+  - type: checkboxes
+    id: access-requirements
+    attributes:
+      label: Request requirements
+      options:
+        - label: I replaced every hostname, address, directory name, and mailbox with a placeholder.
+          required: true
+        - label: This is not a vulnerability report; a vulnerability goes through SECURITY.md, never an issue.
+          required: true
+        - label: I dedicate this request and any contribution made in the development repository to the public domain under the CC0 1.0 Universal dedication, waiving all copyright and related rights I hold in it, worldwide (CONTRIBUTING.md).
+          required: true

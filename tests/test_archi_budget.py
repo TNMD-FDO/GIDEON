@@ -435,11 +435,14 @@ def rule_links(root: Path) -> list[Finding]:
     """Find inline links whose file, or whose anchor's heading, does not exist.
 
     A link into an excluded export prefix is the export boundary test's, so it
-    is skipped here; the renderer's own anchor ids are not modelled.
+    is skipped here, except into this test's own documents (`CLAUDE.md`,
+    `CONTEXT.md`, `docs/agents/`), which leave with the export yet are checked
+    wherever they are; the renderer's own anchor ids are not modelled.
     """
 
     findings: list[Finding] = []
     top = root.resolve()
+    own = (GLOSSARY_PATH, CLAUDE_PATH, AGENTS_PATH)
     for path in _files_to_scan(root):
         text = path.read_text(encoding="utf-8")
         for line, target in _links(text):
@@ -449,8 +452,12 @@ def rule_links(root: Path) -> list[Finding]:
             resolved = (
                 path.parent.joinpath(unquote(target_path)).resolve() if target_path else path.resolve()
             )
-            if resolved.is_relative_to(top) and is_excluded(resolved.relative_to(top).as_posix()):
-                continue
+            if resolved.is_relative_to(top):
+                relative = resolved.relative_to(top)
+                if is_excluded(relative.as_posix()) and not any(
+                    relative.is_relative_to(path) for path in own
+                ):
+                    continue
             where = f"line {line}: inline link target {target!r}"
             if not resolved.exists():
                 problem = f"{where} does not resolve"

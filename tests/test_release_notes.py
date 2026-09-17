@@ -9,6 +9,7 @@ from pathlib import Path
 
 import gideon
 from gideon.host.upgrade import Version
+from tools.exportboundary import absent_from_export
 from tools.pinwatch import bumped
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -302,6 +303,8 @@ class ReleaseNoteTests(unittest.TestCase):
     def test_template_contract(self) -> None:
         """The committed template declares the newest version and exactly its required sections (§21)."""
 
+        if absent_from_export(TEMPLATE.relative_to(ROOT), ROOT):
+            self.skipTest("the release-note template is excluded from the public export")
         self.assertEqual(template_findings(), [])
 
     def test_each_committed_note_conforms(self) -> None:

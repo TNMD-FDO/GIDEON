@@ -28,6 +28,7 @@ from gideon.host.images import (
 )
 from gideon.host.lock import HostLock, load_host_lock
 from gideon.host.models import ModelsLock, load_models_lock
+from tools.exportboundary import absent_from_export
 from tools.pinwatch.skills import Provenance, parse_provenance
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -53,7 +54,7 @@ class Finding:
     pin: PinnedValue
 
 
-def _committed_locks() -> tuple[ImageLock, HostLock, ModelsLock, Provenance]:
+def _committed_locks() -> tuple[ImageLock, HostLock, ModelsLock, Provenance | None]:
     image_result = load_image_lock(IMAGE_LOCK_PATH)
     host_result = load_host_lock(HOST_LOCK_PATH)
     models_result = load_models_lock(MODELS_LOCK_PATH)
@@ -63,7 +64,9 @@ def _committed_locks() -> tuple[ImageLock, HostLock, ModelsLock, Provenance]:
         raise AssertionError(host_result.errors)
     if not models_result.ok or models_result.lock is None:
         raise AssertionError(models_result.errors)
-    provenance = parse_provenance(TOOLING_PATH.read_text(encoding="utf-8"))
+    provenance = None
+    if not absent_from_export(TOOLING_PATH.relative_to(ROOT), ROOT):
+        provenance = parse_provenance(TOOLING_PATH.read_text(encoding="utf-8"))
     return image_result.lock, host_result.lock, models_result.lock, provenance
 
 
@@ -78,7 +81,7 @@ def pinned_values(
     image_lock: ImageLock,
     host_lock: HostLock,
     models_lock: ModelsLock,
-    provenance: Provenance,
+    provenance: Provenance | None,
 ) -> tuple[PinnedValue, ...]:
     """Return every textual pin whose change can invalidate a test fake."""
 
@@ -165,12 +168,13 @@ def pinned_values(
                 )
                 for file in model.files
             )
-    values.extend(
-        (
-            PinnedValue("skills.matt-pocock.commit", provenance.matt_commit),
-            PinnedValue("skills.matt-pocock.date", provenance.matt_date),
+    if provenance is not None:
+        values.extend(
+            (
+                PinnedValue("skills.matt-pocock.commit", provenance.matt_commit),
+                PinnedValue("skills.matt-pocock.date", provenance.matt_date),
+            )
         )
-    )
     return tuple(values)
 
 
@@ -273,10 +277,11 @@ class LockCouplingContracts(unittest.TestCase):
                         for file in model.files
                     ),
                 ]
-        expected += [
-            "skills.matt-pocock.commit",
-            "skills.matt-pocock.date",
-        ]
+        if provenance is not None:
+            expected += [
+                "skills.matt-pocock.commit",
+                "skills.matt-pocock.date",
+            ]
         self.assertEqual([pin.key_path for pin in values], expected)
         self.assertTrue(all(pin.value for pin in values))
         for pin in values:
