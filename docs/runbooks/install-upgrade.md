@@ -148,10 +148,16 @@ files as new. The marker is never carried in a backup set.
 `sudo python3 -m gideon host provision --build-box`, which writes
 `/etc/gideon/build-box`; every other host skips them, and a no-GPU host cannot
 be declared the build box (nor the build box a no-GPU host). The marker is never
-carried in a backup set. At `v0.1.68`, the release that introduced it, TNMD's box
-runs `sudo ./upgrade.sh v0.1.68` (the three steps skipped, their units still running),
-then the declaration (the three `ok`), then `sudo python3 -m gideon apply`,
-which renders the host-unit rule and the runner's unit pattern back. To leave
+carried in a backup set. A host that already runs the three units when it
+crosses `v0.1.68` runs `sudo ./upgrade.sh <tag>` (its provision skips the three
+with a reason naming the declaration, their units still running, and its apply
+renders the host-unit rule and the runner's unit pattern away), then
+`sudo python3 -m gideon host provision --build-box` (the three `ok`), then
+`sudo python3 -m gideon apply`, which renders the rule and the pattern back; the
+transcript is kept as §2 says. TNMD's box was declared on 2026-09-16, at
+`v0.1.71`'s release, before any upgrade; the transcripts of its crossing — the
+marker removed to leave the mode, then the three commands — are kept at
+`.scratch/slice-0/assets/21-on-box.txt`. To leave
 the mode, remove the marker, run provision again, then apply; the three units
 stay until removed by hand, and until they are, `restore` refuses on a host
 whose registry is still active.

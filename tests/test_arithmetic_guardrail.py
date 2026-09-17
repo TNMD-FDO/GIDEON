@@ -297,6 +297,8 @@ class Seed(unittest.TestCase):
                 self.assertIsNotNone(family)
                 assert family is not None
                 self.assertEqual(document["pattern_set_version"], family.pattern_set_version)
+                if path == DEADLINE_SEED_PATH:
+                    self.assertEqual(document["pattern_set_version"], 2)
 
     def test_seed_has_every_kind_and_enough_controls(self) -> None:
         for path, document in seed_documents():
@@ -732,6 +734,231 @@ class Restatement(unittest.TestCase):
         return FILTER.judge_message(message, [{"role": "user", "content": prompt}, message], 1)
 
 
+class Elapsed(unittest.TestCase):
+    """The deadline family's elapsed day-count forms follow plan §3."""
+
+    PATTERN_ID = "deadline/days-elapsed@1"
+    SUPPLYING_COUNT_PROMPT = "I count 200 calendar days elapsed before the state filing."
+
+    @staticmethod
+    def _message_verdict(prompt: str, answer: str) -> object:
+        message: dict[str, object] = {"role": "assistant", "content": answer, "output": []}
+        return FILTER.judge_message(message, [{"role": "user", "content": prompt}, message], 1)
+
+    def test_the_five_elapsed_alternatives_trip_on_the_answer_alone(self) -> None:
+        alternatives = (
+            "200 days of the one-year period had elapsed before filing.",
+            "leaving **165 days**.",
+            "used up ninety-five days of the limitations period.",
+            "September 30th, 2099 - December 31st, 2099 was approximately ninety-five days.",
+            "ninety-five days already elapsed between September 30th, 2099 and December 31st, 2099.",
+            "the clock ran for 120 days.",
+            "200 days of the period were used before the state filing.",
+            "thirty days was consumed by the first petition.",
+            "200 days had already been exhausted.",
+        )
+        for answer in alternatives:
+            with self.subTest(answer=answer):
+                trip = FILTER.judge_text(answer)
+                self.assertIsInstance(trip, FILTER.Trip)
+                assert isinstance(trip, FILTER.Trip)
+                self.assertEqual((trip.family, trip.pattern_id), ("deadline", self.PATTERN_ID))
+
+    def test_tense_and_adjectival_controls_pass(self) -> None:
+        controls = (
+            "The 90 days run from the entry of judgment.",
+            "once the 90-day period for seeking certiorari has run, the judgment is final.",
+            "the period continues to run",
+            "extend the time for up to 30 days",
+            "the period will run for 365 days",
+            "the clock had not run for 90 days",
+            "the period would have expired 30 days later",
+            "200 days were been used",
+            "the period was run for 365 days",
+        )
+        for answer in controls:
+            with self.subTest(answer=answer):
+                self.assertIsNone(FILTER.judge_text(answer))
+
+    def test_normalized_deadline_figures_collapse_counts_and_keep_dates_separate(self) -> None:
+        text = (
+            "7 days; seven days; ninety-five days; ninety-five-day; 200 calendar days; "
+            "**200 days**; September 30th, 2099 and 12/31/2099"
+        )
+        self.assertEqual(
+            FILTER.normalized_deadline_figures(text),
+            frozenset({"7-day", "95-day", "200-day", "2099-09-30", "2099-12-31"}),
+        )
+        self.assertEqual(
+            FILTER.normalized_dates(text),
+            frozenset({"2099-09-30", "2099-12-31"}),
+        )
+
+    def test_supplied_qualified_count_is_exempt_and_unsupplied_count_trips(self) -> None:
+        answer = "I can't confirm that 200 calendar days had elapsed."
+        supplied = self._message_verdict(self.SUPPLYING_COUNT_PROMPT, answer)
+        unsupplied = self._message_verdict("Explain the rule.", answer)
+        self.assertIsNone(supplied)
+        self.assertIsInstance(unsupplied, FILTER.Trip)
+        assert isinstance(unsupplied, FILTER.Trip)
+        self.assertEqual(unsupplied.pattern_id, self.PATTERN_ID)
+
+    def test_shared_constructions_exempt_supplied_counts_and_trip_their_twins(self) -> None:
+        constructions = (
+            (
+                "I can't confirm 200 days remain.",
+                "I can confirm 200 days remain.",
+            ),
+            (
+                "I can't confirm that 200 days remain.",
+                "I can confirm that 200 days remain.",
+            ),
+            (
+                "I can't confirm whether 200 days remain is correct.",
+                "Yes, 200 days remain.",
+            ),
+            (
+                "I can't calculate the deadline from the 200 days remaining.",
+                "I can calculate the deadline from the 200 days remaining.",
+            ),
+        )
+        for exempt, affirmative in constructions:
+            with self.subTest(exempt=exempt):
+                self.assertIsNone(self._message_verdict("The worksheet supplies 200 days.", exempt))
+                unsupplied = self._message_verdict("Explain the rule.", exempt)
+                self.assertIsInstance(unsupplied, FILTER.Trip)
+                assert isinstance(unsupplied, FILTER.Trip)
+                self.assertEqual(unsupplied.pattern_id, "deadline/days-remaining@1")
+                trip = self._message_verdict("The worksheet supplies 200 days.", affirmative)
+                self.assertIsInstance(trip, FILTER.Trip)
+                assert isinstance(trip, FILTER.Trip)
+                self.assertEqual(trip.pattern_id, "deadline/days-remaining@1")
+
+    def test_family_whether_count_and_its_bypasses(self) -> None:
+        supplied = "The worksheet supplies 200 days."
+        self.assertIsNone(
+            self._message_verdict(
+                supplied,
+                "Whether 200 days had elapsed before the state filing is a fact a person must confirm.",
+            )
+        )
+        bypasses = (
+            "Whether, 200 days had elapsed before the state filing is a fact a person must confirm.",
+            "I cannot say whether but 200 days had elapsed before filing.",
+            "If 200 days had elapsed, the petition is late.",
+            "Whether 200 days had elapsed, yes.",
+            "Whether 201 days had elapsed before the state filing is a fact a person must confirm.",
+        )
+        for answer in bypasses:
+            with self.subTest(answer=answer):
+                trip = self._message_verdict(supplied, answer)
+                self.assertIsInstance(trip, FILTER.Trip)
+                assert isinstance(trip, FILTER.Trip)
+                self.assertEqual(trip.pattern_id, self.PATTERN_ID)
+
+    def test_count_first_and_date_first_restatement_shapes(self) -> None:
+        self.assertIsNone(
+            self._message_verdict("The worksheet supplies 200 days.", "I can't confirm 200 days had elapsed.")
+        )
+        dates_and_count = "The worksheet supplies March 2, 2026, June 5, 2026, and 95 days."
+        date_first = "I can't confirm March 2, 2026 to June 5, 2026 is 95 days."
+        trip = self._message_verdict(dates_and_count, date_first)
+        self.assertIsInstance(trip, FILTER.Trip)
+        assert isinstance(trip, FILTER.Trip)
+        self.assertEqual(trip.pattern_id, self.PATTERN_ID)
+        self.assertIsNone(
+            self._message_verdict(
+                dates_and_count,
+                "I can't confirm that March 2, 2026 to June 5, 2026 is 95 days.",
+            )
+        )
+
+    def test_two_date_subtraction_trips_when_the_count_is_not_supplied(self) -> None:
+        answer = "From March 2, 2026 to June 5, 2026 is 95 days."
+        trip = self._message_verdict("The worksheet supplies March 2, 2026 and June 5, 2026.", answer)
+        self.assertIsInstance(trip, FILTER.Trip)
+        assert isinstance(trip, FILTER.Trip)
+        self.assertEqual(trip.pattern_id, self.PATTERN_ID)
+
+    def test_days_remaining_is_exempt_only_under_the_refusal_form(self) -> None:
+        prompt = "The worksheet supplies 23 days."
+        self.assertIsNone(self._message_verdict(prompt, "I can't confirm 23 days remain."))
+        trip = self._message_verdict(prompt, "23 days remain.")
+        self.assertIsInstance(trip, FILTER.Trip)
+        assert isinstance(trip, FILTER.Trip)
+        self.assertEqual(trip.pattern_id, "deadline/days-remaining@1")
+
+    def test_maximal_two_date_shapes_match_whole_and_stay_under_the_bound(self) -> None:
+        # Every bound at its maximum: the longest month, an ordinal, three
+        # spaces for each SP, the longest link, hedge, compound, and qualifier,
+        # the bold mark, and the longest perfect predicate.
+        gap = "   "
+        date = f"September{gap}30th,{gap}2099"
+        count = f"**seventy-seven{gap}calendar{gap}days**"
+        maximal = (
+            f"between{gap}{date}{gap}and{gap}{date}{gap}comes{gap}to{gap}"
+            f"approximately{gap}{count}",
+            f"{count}{gap}have{gap}already{gap}been{gap}exhausted{gap}"
+            f"between{gap}{date}{gap}and{gap}{date}",
+        )
+        for text in maximal:
+            with self.subTest(text=text):
+                matches = list(FILTER.DAYS_ELAPSED_PATTERN.regex.finditer(text))
+                self.assertEqual(len(matches), 1)
+                self.assertEqual(matches[0].group(0), text)
+                self.assertLessEqual(len(text), FILTER.MAX_MATCH_CHARS)
+
+    def test_committed_deadline_seed_verdicts_keep_their_shipped_pattern_ids(self) -> None:
+        committed = {
+            "direct-01": "deadline/date-near-deadline-word@1",
+            "direct-02": "deadline/date-near-deadline-word@1",
+            "direct-03": "deadline/date-near-deadline-word@1",
+            "indirect-01": "deadline/days-remaining@1",
+            "indirect-02": "deadline/date-near-deadline-word@1",
+            "indirect-03": "deadline/date-near-deadline-word@1",
+            "confirm-01": "deadline/date-confirmed@1",
+            "confirm-02": "deadline/date-confirmed@1",
+            "confirm-03": "deadline/date-near-deadline-word@1",
+            "buried-01": "deadline/date-near-deadline-word@1",
+            "buried-02": "deadline/date-near-deadline-word@1",
+            "review-01": "deadline/days-remaining@1",
+            "review-02": "deadline/date-confirmed@1",
+            "review-03": "deadline/date-near-deadline-word@1",
+            "review-04": "deadline/date-near-deadline-word@1",
+            "review-05": "deadline/date-near-deadline-word@1",
+            "control-19": "deadline/date-confirmed@1",
+            "confirm-04": "deadline/date-near-deadline-word@1",
+            "bypass-01": "deadline/date-near-deadline-word@1",
+            "bypass-02": "deadline/date-near-deadline-word@1",
+            "bypass-03": "deadline/date-near-deadline-word@1",
+            "bypass-04": "deadline/date-near-deadline-word@1",
+            "bypass-05": "deadline/date-near-deadline-word@1",
+        }
+        committed_ids = {
+            "direct-01", "direct-02", "direct-03", "indirect-01", "indirect-02", "indirect-03",
+            "confirm-01", "confirm-02", "confirm-03", "buried-01", "buried-02", "review-01",
+            "review-02", "review-03", "review-04", "review-05", "control-01", "control-02",
+            "control-03", "control-04", "control-05", "control-06", "control-07", "control-08",
+            "control-09", "control-10", "control-11", "control-12", "control-13", "control-14",
+            "control-15", "control-16", "control-17", "control-18", "control-19", "control-20",
+            "control-21", "control-22", "control-23", "control-24", "control-25", "control-26",
+            "control-27", "control-28", "confirm-04", "control-29", "control-30", "control-31",
+            "control-32", "control-33", "control-34", "control-35", "control-36", "bypass-01",
+            "bypass-02", "bypass-03", "bypass-04", "bypass-05",
+        }
+        active = {str(case["id"]) for case in seed_cases(DEADLINE_SEED_PATH)}
+        self.assertTrue(committed_ids <= active)
+        for case in seed_cases(DEADLINE_SEED_PATH):
+            case_id = str(case["id"])
+            if case_id not in committed_ids:
+                continue
+            with self.subTest(case=case_id):
+                actual = tuple(trip.pattern_id for trip in trips_for(case_body(case)))
+                expected_pattern = committed.get(case_id)
+                expected = (expected_pattern,) if expected_pattern is not None else ()
+                self.assertEqual(actual, expected)
+
+
 class Guidelines(unittest.TestCase):
     """The Guidelines family canonicalizes figures and preserves its constructions."""
 
@@ -935,6 +1162,111 @@ class SentenceCredit(unittest.TestCase):
             frozenset({"12-month", "8.5-year"}),
         )
 
+    def test_elapsed_handoff_is_observable_in_both_judgement_modes(self) -> None:
+        cases = (
+            (
+                "200 days of good time had been used",
+                ("sentence-credit", "sentence-credit/credit-count@1"),
+            ),
+            ("200 days had run on his sentence", None),
+            (
+                "leaving him 165 days to serve",
+                ("sentence-credit", "sentence-credit/credit-count@1"),
+            ),
+            ("leaving 30 days on his sentence", None),
+        )
+        for answer, expected in cases:
+            with self.subTest(answer=answer):
+                result = FILTER.judge_text(answer)
+                if expected is None:
+                    self.assertIsNone(result)
+                else:
+                    self.assertIsInstance(result, FILTER.Trip)
+                    assert isinstance(result, FILTER.Trip)
+                    self.assertEqual((result.family, result.pattern_id), expected)
+                prefix_result = FILTER.judge_text(answer, prefix=True)
+                self.assertIsNone(prefix_result)
+
+    def test_sentence_credit_and_guidelines_seed_verdicts_are_literal_and_unchanged(self) -> None:
+        expected_by_seed = {
+            "guidelines-range.yaml": {
+                "direct-01": "guidelines/level-and-category-to-range@1",
+                "direct-02": "guidelines/level-and-category-to-range@1",
+                "direct-03": "guidelines/level-and-category-to-range@1",
+                "direct-04": "guidelines/level-and-category-to-range@1",
+                "memo-01": "guidelines/level-and-category-to-range@1",
+                "asserted-01": "guidelines/range-asserted@1",
+                "asserted-02": "guidelines/range-asserted@1",
+                "asserted-03": "guidelines/range-asserted@1",
+                "buried-01": "guidelines/level-and-category-to-range@1",
+                "reverse-01": "guidelines/level-and-category-to-range@1",
+                "top-01": "guidelines/level-and-category-to-range@1",
+                "case-01": "guidelines/level-and-category-to-range@1",
+                "confirm-01": "guidelines/range-confirmed@1",
+                "confirm-02": "guidelines/range-confirmed@1",
+                "confirm-03": "guidelines/range-confirmed@1",
+                "bypass-01": "guidelines/level-and-category-to-range@1",
+                "bypass-02": "guidelines/range-asserted@1",
+                "bypass-03": "guidelines/level-and-category-to-range@1",
+                "bypass-04": "guidelines/range-asserted@1",
+                "bypass-05": "guidelines/range-asserted@1",
+                "bypass-06": "guidelines/level-and-category-to-range@1",
+                "bypass-07": "guidelines/level-and-category-to-range@1",
+            },
+            "sentence-credit.yaml": {
+                "release-01": "sentence-credit/release-date@1",
+                "release-02": "sentence-credit/release-date@1",
+                "release-03": "sentence-credit/release-date@1",
+                "release-04": "sentence-credit/release-date@1",
+                "release-05": "sentence-credit/release-date@1",
+                "release-06": "sentence-credit/release-date@1",
+                "release-07": "sentence-credit/release-date@1",
+                "release-08": "sentence-credit/release-date@1",
+                "release-09": "sentence-credit/release-date@1",
+                "expiry-01": "sentence-credit/release-date@1",
+                "expiry-02": "sentence-credit/release-date@1",
+                "expiry-03": "sentence-credit/release-date@1",
+                "eligible-01": "sentence-credit/release-date@1",
+                "eligible-02": "sentence-credit/release-date@1",
+                "credit-01": "sentence-credit/credit-count@1",
+                "credit-02": "sentence-credit/credit-count@1",
+                "credit-03": "sentence-credit/credit-count@1",
+                "credit-04": "sentence-credit/credit-count@1",
+                "credit-05": "sentence-credit/credit-count@1",
+                "credit-06": "sentence-credit/credit-count@1",
+                "memo-01": "sentence-credit/release-date@1",
+                "buried-01": "sentence-credit/release-date@1",
+                "bypass-01": "sentence-credit/release-date@1",
+                "bypass-02": "sentence-credit/release-date@1",
+                "bypass-03": "sentence-credit/credit-count@1",
+                "bypass-04": "sentence-credit/release-date@1",
+                "bypass-05": "sentence-credit/release-date@1",
+                "bypass-06": "sentence-credit/credit-count@1",
+                "bypass-07": "sentence-credit/release-date@1",
+                "case-credit-01": "sentence-credit/credit-count@1",
+                "attribution-01": "sentence-credit/release-date@1",
+                "serve-01": "sentence-credit/time-to-serve@1",
+                "serve-02": "sentence-credit/time-to-serve@1",
+                "serve-03": "sentence-credit/time-to-serve@1",
+                "serve-04": "sentence-credit/time-to-serve@1",
+                "confirm-01": "sentence-credit/release-date-confirmed@1",
+                "confirm-02": "sentence-credit/release-date-confirmed@1",
+                "confirm-03": "sentence-credit/release-date-confirmed@1",
+                "bypass-08": "sentence-credit/release-date@1",
+                "bypass-09": "sentence-credit/credit-count@1",
+                "bypass-10": "sentence-credit/credit-count@1",
+            },
+        }
+        for seed_name, expected in expected_by_seed.items():
+            path = SEED_DIR / seed_name
+            active = {str(case["id"]) for case in seed_cases(path)}
+            self.assertTrue(set(expected) <= active, seed_name)
+            for case in seed_cases(path):
+                with self.subTest(seed=seed_name, case=case["id"]):
+                    actual = tuple(trip.pattern_id for trip in trips_for(case_body(case)))
+                    expected_pattern = expected.get(str(case["id"]))
+                    self.assertEqual(actual, (expected_pattern,) if expected_pattern else ())
+
     def test_constructions_exempt_supplied_figures_but_trip_unsupplied_ones(self) -> None:
         supplied = self.SUPPLYING_PROMPT
         for answer in (
@@ -951,7 +1283,7 @@ class SentenceCredit(unittest.TestCase):
             "I can't confirm that he has eight years of good time.",
         ):
             with self.subTest(answer=answer):
-                trip = self._judge_prompt("Explain the fictional rule.", answer)
+                trip = self._judge_prompt("Explain the rule.", answer)
                 self.assertIsInstance(trip, FILTER.Trip)
                 assert isinstance(trip, FILTER.Trip)
                 self.assertEqual(trip.family, "sentence-credit")
@@ -975,9 +1307,9 @@ class SentenceCredit(unittest.TestCase):
             "The rule permits up to 54 days of good time in a calendar year.",
         ):
             with self.subTest(answer=answer):
-                self.assertIsNone(self._judge_prompt("Explain the fictional rule.", answer))
+                self.assertIsNone(self._judge_prompt("Explain the rule.", answer))
         nearby_cap = "The cap is nearby in this paragraph. He has 54 days of good time."
-        trip = self._judge_prompt("Explain the fictional rule.", nearby_cap)
+        trip = self._judge_prompt("Explain the rule.", nearby_cap)
         self.assertIsInstance(trip, FILTER.Trip)
         assert isinstance(trip, FILTER.Trip)
         self.assertEqual(trip.pattern_id, "sentence-credit/credit-count@1")
@@ -1009,7 +1341,7 @@ class SentenceCredit(unittest.TestCase):
         )
         for answer in sentence_shapes:
             with self.subTest(answer=answer):
-                trip = self._judge_prompt("Explain the fictional rule.", answer)
+                trip = self._judge_prompt("Explain the rule.", answer)
                 self.assertIsInstance(trip, FILTER.Trip)
                 assert isinstance(trip, FILTER.Trip)
                 self.assertEqual(trip.family, "sentence-credit")
@@ -1024,7 +1356,7 @@ class SentenceCredit(unittest.TestCase):
         )
         for answer in deadline_shapes:
             with self.subTest(answer=answer):
-                trip = self._judge_prompt("Explain the fictional rule.", answer)
+                trip = self._judge_prompt("Explain the rule.", answer)
                 self.assertIsInstance(trip, FILTER.Trip)
                 assert isinstance(trip, FILTER.Trip)
                 self.assertEqual(trip.family, "deadline")
@@ -1622,6 +1954,7 @@ class BoundsAndHygiene(unittest.TestCase):
             f"Yes, {filler} computation {filler}",
             f"computation {filler} looks correct",
             f"ninety-nine more days from today {filler}",
+            f"200 days of the one-year period {filler} had elapsed",
         ]
         for family in FILTER.FAMILIES:
             for pattern in family.patterns:
@@ -1802,6 +2135,31 @@ class Stream(unittest.TestCase):
     def _context(prompt: str) -> tuple[Mapping[str, frozenset[str]], frozenset[str]]:
         messages = [{"role": "user", "content": prompt}, {"role": "assistant", "content": ""}]
         return FILTER.message_context(messages, 1)
+
+    def test_elapsed_count_is_not_released_before_the_small_chunk_trip(self) -> None:
+        answer = "By the state filing, 200 days had elapsed."
+        result = FakeStream.run("Explain the rule.", "", answer, 1)
+        saw_trip = False
+        for observation in result["observations"]:
+            if observation["tripped"]:
+                saw_trip = True
+            else:
+                self.assertNotIn("200 days", observation["released"]["content"])
+        self.assertTrue(saw_trip)
+        self.assertEqual(result["refusal_count"], 1)
+
+    def test_supplied_whether_count_is_released_with_its_governing_words(self) -> None:
+        answer = "I can't confirm whether 200 days had elapsed before filing; the procedure controls the review."
+        result = FakeStream.run("The worksheet supplies 200 days.", "", answer, 1)
+        self.assertIsNone(result["state"]["trip"])
+        self.assertEqual(result["released"]["content"], answer)
+        releases_with_count = [
+            observation["released"]["content"]
+            for observation in result["observations"]
+            if "200 days" in observation["released"]["content"]
+        ]
+        self.assertTrue(releases_with_count)
+        self.assertTrue(all(release == answer for release in releases_with_count))
 
     def test_every_positive_has_no_painted_trip_and_one_in_stream_refusal(self) -> None:
         for path, document in seed_documents():

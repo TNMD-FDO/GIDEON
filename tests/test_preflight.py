@@ -80,7 +80,7 @@ class FakeHost:
         self.files[os.fspath(path)] = text
 
     def exists(self, path: PathLike) -> bool:
-        return os.fspath(path) in self.files or Path(path).exists()
+        return os.fspath(path) in self.files
 
     def listdir(self, path: PathLike) -> list[str]:
         root = Path(path)

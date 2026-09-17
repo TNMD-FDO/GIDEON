@@ -3,7 +3,8 @@
 The three files are the committed seeds for the three guardrail families:
 
 - `deadline-trap.yaml` covers filing-deadline computation and confirmation.
-  Its family set version is `1`.
+  Its family set version is `2`, reflecting the fourth elapsed-day-count
+  pattern while leaving the committed verdicts unchanged.
 - `guidelines-range.yaml` covers Sentencing Guidelines range resolution and
   assertion. Its family set version is `1`.
 - `sentence-credit.yaml` covers release-date, sentence-credit, and

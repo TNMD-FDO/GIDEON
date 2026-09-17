@@ -1,5 +1,5 @@
 """title: GIDEON arithmetic guardrail
-version: 7
+version: 8
 description: Enforces the no-model-arithmetic rule for filing deadlines, Sentencing Guidelines ranges, and sentence credit or release dates.
 """
 
@@ -8,8 +8,9 @@ description: Enforces the no-model-arithmetic rule for filing deadlines, Sentenc
 # families judged in FAMILIES order, each carrying its own refusal, its figure
 # form and normaliser (the figures a user may supply, keyed canonically), the
 # four restatement constructions built over that form, its confirmation
-# context, and its own pattern-set version; the deadline family is first, the
-# Guidelines family second, and sentence credit third.  The deadline patterns
+# context, and its own pattern-set version; the deadline family is first, with
+# its fourth bounded days-elapsed pattern and date-or-day-count figure form,
+# the Guidelines family second, and sentence credit third.  The deadline patterns
 # carry bounded exclusions for sentence-expiry and credit-count wording, so
 # those shapes are judged by the sentence-credit family.  Sentence credit's
 # confirmation context displaces the deadline context, and the deadline's
@@ -106,7 +107,15 @@ DEADLINE_NOUNS = ("deadline", "due date", "last day", "cutoff", "due")
 # The nouns a restatement construction names a date by: a question form's
 # predicate ("whether June 5, 2027 is the deadline") and the "if the <noun>
 # of <date>" slot.
-DEADLINE_FIGURE_NOUNS = ("deadline", "due date", "date", "last day", "filing deadline")
+DEADLINE_FIGURE_NOUNS = (
+    "deadline",
+    "due date",
+    "date",
+    "last day",
+    "filing deadline",
+    "count",
+    "day count",
+)
 
 # The sentence-credit family draws the line at a present or conditional release,
 # credit, or served-time computation.  Tense and voice keep past authority
@@ -491,6 +500,27 @@ TIMELINESS_WORDS = ("timely", "untimely", "too late", "out of time", "time-barre
 # "you have 23 days", "10 days from today", "the deadline is in 10 days" — never
 # the period's length ("a 14-day period", "within 90 days").
 REMAINING_WORDS = ("remain", "remaining", "left", "to go")
+# Elapsed day counts are judged only in a past or perfect predicate.  These
+# starting vocabularies keep present-tense doctrinal rules ("the clock runs")
+# and adjectival periods ("the 90-day period") outside the elapsed pattern.
+ELAPSED_PAST_VERBS = ("elapsed", "ran", "passed", "expired")
+ELAPSED_PERFECT_VERBS = ("elapsed", "run", "passed", "expired")
+ELAPSED_AUXILIARIES = ("had", "have", "has")
+# A count used of the period in the passive: "were used", "had been consumed".
+PASSIVE_AUXILIARIES = ("was", "were")
+LEAVING_WORDS = ("leaving", "leaves", "left")
+USING_VERBS = ("used", "consumed", "exhausted")
+PERIOD_SUBJECTS = (
+    "clock",
+    "period",
+    "year",
+    "time",
+    "limitations period",
+    "one-year period",
+    "statute",
+)
+ELAPSED_LINKS = ("is", "was", "comes to", "totals", "equals", "makes", "=")
+COUNT_QUALIFIERS = ("calendar", "full", "business")
 CONFIRMATION_WORDS = (
     "yes",
     "correct",
@@ -661,6 +691,31 @@ MARK = r"\x2a{0,2}"
 RATE_LOOKAHEAD = (
     rf"(?!{MARK}\s{{0,3}}{MARK}(?:{_phrases(RATE_WORDS)})\b|{MARK}\s{{0,3}}/)"
 )
+DAY_UNITS = ("days", "day")
+
+
+def _deadline_count(separator: str, *, named: bool = False) -> str:
+    """The deadline family's day count: a number, a separator, a qualifier, the unit."""
+
+    number = rf"(?P<number>{NUMBER_VALUE})" if named else NUMBER_VALUE
+    unit = rf"(?P<unit>{_phrases(DAY_UNITS)})" if named else _phrases(DAY_UNITS)
+    return (
+        rf"{MARK}(?<![\w/]){number}{separator}"
+        rf"(?:{_phrases(COUNT_QUALIFIERS)}{SP})?{unit}\b{MARK}"
+    )
+
+
+# The figure reader admits the hyphenated adjectival form, so the user's "the
+# 14-day period" keys its count; the elapsed count is spaced by construction,
+# since an adjectival period is a rule's noun phrase and never a count that
+# elapsed.
+DEADLINE_COUNT_SEPARATOR = rf"(?:{SP}|-)"
+DEADLINE_COUNT = _deadline_count(DEADLINE_COUNT_SEPARATOR)
+ELAPSED_COUNT = _deadline_count(SP)
+DEADLINE_FIGURE = rf"(?:{DATE}|{DEADLINE_COUNT})"
+DEADLINE_FIGURE_FORM = re.compile(
+    rf"(?<![\w/]){DEADLINE_FIGURE}(?![\w/])", re.IGNORECASE
+)
 # The unit ends at a word boundary before the rate look-ahead, so "54 days per
 # year" cannot back off to "54 day"; the number starts after a non-word.
 # "more" between the number and the unit is the deadline's day count's, so
@@ -703,6 +758,85 @@ DAYS_REMAINING = (
     + rf"|\b{_phrases(DEADLINE_NOUNS)}\b[\s\S]{{0,40}}\bin{SP}(?:about{SP}|roughly{SP}|just{SP})?{DAY_COUNT}\b"
     + rf"|\bin{SP}(?:about{SP}|roughly{SP}|just{SP})?{DAY_COUNT}\b[\s\S]{{0,40}}\b{_phrases(DEADLINE_NOUNS)}\b"
     + r")"
+)
+# "already" once, before the past verb or after the auxiliary, which keeps the
+# reverse two-date shape at its bounds under MAX_MATCH_CHARS.
+ELAPSED_PREDICATE = (
+    rf"{SP}(?:"
+    rf"(?:already{SP})?\b{_phrases(ELAPSED_PAST_VERBS)}\b"
+    rf"|\b{_phrases(ELAPSED_AUXILIARIES)}{SP}(?:already{SP})?"
+    rf"(?:{_phrases(ELAPSED_PERFECT_VERBS)}|been{SP}{_phrases(USING_VERBS)})\b"
+    rf"|\b{_phrases(PASSIVE_AUXILIARIES)}{SP}(?:already{SP})?"
+    rf"{_phrases(USING_VERBS)}\b"
+    rf")"
+)
+ELAPSED_PERIOD = (
+    rf"(?:{SP}of{SP}(?:the{SP})?{_phrases(PERIOD_SUBJECTS)}\b)?"
+)
+# The word links take word boundaries; the equals sign, the table's last
+# entry, takes none.
+ELAPSED_DATE_LINK = rf"(?:\b{_phrases(ELAPSED_LINKS[:-1])}\b|=)"
+ELAPSED_DATE_SPAN = (
+    rf"(?:\bfrom{SP}{DATE}{SP}to{SP}{DATE}|\bbetween{SP}{DATE}{SP}and{SP}{DATE})"
+)
+ELAPSED_DATE_PAIR = (
+    rf"(?:{ELAPSED_DATE_SPAN}"
+    rf"|{DATE}(?:{SP}to{SP}|\s{{0,3}}[-–—]\s{{0,3}}){DATE})"
+)
+ELAPSED_DATE_RESOLUTION = (
+    rf"(?:{ELAPSED_DATE_PAIR}{SP}{ELAPSED_DATE_LINK}{SP}"
+    rf"(?:{_phrases(('about', 'roughly', 'approximately', 'around'))}{SP})?"
+    rf"{ELAPSED_COUNT}"
+    rf"|{ELAPSED_COUNT}(?:{ELAPSED_PREDICATE})?{SP}{ELAPSED_DATE_SPAN})"
+)
+# Up to two noun words after the period subject ("the clock on the claim"),
+# never a verb's auxiliary, a modal, or a negation, so "the period would have
+# expired" and "the clock had not run" are no subject.
+ELAPSED_SUBJECT_STOPS = (
+    *ELAPSED_AUXILIARIES,
+    *PASSIVE_AUXILIARIES,
+    "is",
+    "will",
+    "would",
+    "should",
+    "could",
+    "may",
+    "might",
+    "must",
+    "does",
+    "did",
+    "not",
+    "never",
+)
+ELAPSED_SUBJECT_WORD = rf"(?!\b{_phrases(ELAPSED_SUBJECT_STOPS)}\b)\w{{1,20}}"
+ELAPSED_PERIOD_SUBJECT = (
+    rf"\b(?:the{SP})?{_phrases(PERIOD_SUBJECTS)}"
+    rf"(?:{SP}{ELAPSED_SUBJECT_WORD}){{0,2}}"
+)
+# A period runs for a count in the past, or in the perfect after its
+# auxiliary: "the period will run for 365 days" states a rule and passes.
+ELAPSED_PERIOD_VERB = (
+    rf"(?:{SP}\b{_phrases(ELAPSED_AUXILIARIES)}{SP}{_phrases(('run', 'elapsed', 'expired'))}"
+    rf"|{SP}{_phrases(('ran', 'elapsed', 'expired'))})\b"
+)
+# The lead of a count left after one ("leaving him only 165 days"), which the
+# exclusion carries too, so its hit covers the match's start.
+ELAPSED_LEAVING_LEAD = (
+    rf"\b{_phrases(LEAVING_WORDS)}{SP}"
+    rf"(?:(?:me|you|him|her|us|them|it){SP})?"
+    rf"(?:{_phrases(('only', 'about', 'roughly', 'just'))}{SP})?"
+)
+DAYS_ELAPSED = (
+    rf"(?:"
+    rf"{ELAPSED_COUNT}{ELAPSED_PERIOD}{ELAPSED_PREDICATE}"
+    rf"(?!{SP}(?:between|from){SP}{DATE})"
+    rf"|{ELAPSED_LEAVING_LEAD}{ELAPSED_COUNT}"
+    rf"|\b{_phrases(USING_VERBS)}{SP}(?:up{SP})?{ELAPSED_COUNT}"
+    rf"{SP}of{SP}(?:the{SP})?{_phrases(PERIOD_SUBJECTS)}\b"
+    rf"|{ELAPSED_DATE_RESOLUTION}"
+    rf"|{ELAPSED_PERIOD_SUBJECT}{ELAPSED_PERIOD_VERB}"
+    rf"{SP}(?:(?:for|after){SP})?{ELAPSED_COUNT}"
+    rf")"
 )
 SENTENCE_START = r"(?:^|[.!?]\s{1,3}|\n\s{0,3})"
 AFFIRMATION = _phrases(CONFIRMATION_WORDS)
@@ -1015,6 +1149,17 @@ DAYS_EXCLUSION_SOURCE = (
     rf"{_phrases(('sentence', 'term', 'custody', 'imprisonment'))}\b"
     rf"|{DAYS_EXCLUSION_PREFIX}\b{DAY_COUNT}{SP}(?:left{SP}|remaining{SP})?to{SP}serve\b)"
 )
+# The elapsed pattern hands the sentence-credit family a count joined to a
+# credit noun, a count elapsed on a sentence, and a count left to serve or
+# remaining on a sentence (the days-remaining exclusion's shapes).
+ELAPSED_OWNER = rf"\b(?:his|her|their|the|my|your{SP}client{APOSTROPHE}s)"
+ELAPSED_SENTENCE = rf"(?:on|of|against|toward){SP}{ELAPSED_OWNER}{SP}{EXPIRY_SUBJECT}\b"
+ELAPSED_EXCLUSION_SOURCE = (
+    rf"(?:(?:{ELAPSED_LEAVING_LEAD})?{ELAPSED_COUNT}{SP}of{SP}{CREDIT_NOUN}\b"
+    rf"|{ELAPSED_COUNT}{ELAPSED_PREDICATE}{SP}{ELAPSED_SENTENCE}"
+    rf"|{ELAPSED_LEAVING_LEAD}{ELAPSED_COUNT}{SP}(?:(?:left|remaining){SP})?"
+    rf"(?:to{SP}serve\b|{ELAPSED_SENTENCE}))"
+)
 CAP_EXCLUSION_SOURCE = rf"\b{_phrases(CAP_WORDS)}{SP}{MARK}{SENTENCE_COUNT}"
 # The family's fifth restatement construction, the echo: the user's own
 # count, led by a determiner and joined to a credit noun ("subtract the 412
@@ -1058,6 +1203,14 @@ REFUSAL_PREFIX = (
     rf"\b{_phrases(REFUSAL_NEGATIONS)}{SP}"
     rf"(?:\w{{1,{REFUSAL_OPTIONAL_WORD_MAX_CHARS}}}{SP}){{0,{REFUSAL_OPTIONAL_WORDS}}}"
     rf"{_phrases(REFUSAL_VERBS)}"
+)
+# The deadline family's own echo governs a user's count after "whether" or a
+# refusal's "if".  A comma, clause-break word, bare "if", or affirmation
+# bypasses it, so the elapsed count remains a computation in those shapes.
+DEADLINE_COUNT_QUESTION_FORM = re.compile(
+    rf"(?:\bwhether{SP}{NO_CLAUSE_BREAK}|{REFUSAL_PREFIX}{SP}if{SP}{NO_CLAUSE_BREAK})"
+    rf"(?P<echo_figure>{DEADLINE_COUNT})",
+    re.IGNORECASE,
 )
 FROM_DATE_DETERMINERS = ("the", "your", "a", "that", "this")
 FROM_DATE_PREFIXES = tuple(f"from {determiner}" for determiner in FROM_DATE_DETERMINERS)
@@ -1169,7 +1322,8 @@ class Family:
     confirmation_displaces: tuple[str, ...] = ()
     # A family's own further restatement construction, or None: a form whose
     # ``echo_figure`` group, lying inside a match every figure of which the
-    # user supplied, exempts it (the sentence-credit family's echo).
+    # user supplied, exempts it (the sentence-credit echo or deadline
+    # whether-count).
     echo_form: re.Pattern[str] | None = None
 
 
@@ -1246,6 +1400,11 @@ DATE_CONFIRMED_PATTERN = _compiled(
     "deadline/date-confirmed@1",
     DATE_CONFIRMED,
     yields_to=("sentence-credit",),
+)
+DAYS_ELAPSED_PATTERN = _compiled(
+    "deadline/days-elapsed@1",
+    DAYS_ELAPSED,
+    exclusion=ELAPSED_EXCLUSION_SOURCE,
 )
 GUIDELINES_LEVEL_AND_CATEGORY_TO_RANGE_PATTERN = _compiled(
     "guidelines/level-and-category-to-range@1", GUIDELINES_LEVEL_AND_CATEGORY_TO_RANGE
@@ -1440,6 +1599,11 @@ def normalized_dates(text: str) -> frozenset[str]:
     return frozenset(_normalised_date(found) for found in DATE_FORM.findall(text))
 
 
+DEADLINE_COUNT_FORM = re.compile(
+    rf"{_deadline_count(DEADLINE_COUNT_SEPARATOR, named=True)}(?![\w/])", re.IGNORECASE
+)
+
+
 MONTH_AND_YEAR_PART = re.compile(
     rf"(?P<month>{MONTH}){SP}(?P<year>\d{{4}})", re.IGNORECASE
 )
@@ -1481,7 +1645,7 @@ NUMBER_WORD_VALUES.update(
 )
 
 
-def _normalised_sentence_count(match: re.Match[str]) -> str:
+def _normalised_count(match: re.Match[str]) -> str:
     number = match.group("number")
     canonical_number = NUMBER_WORD_VALUES.get(number.lower(), number)
     canonical_number = canonical_number.removesuffix(".0")
@@ -1494,10 +1658,17 @@ def normalized_sentence_figures(text: str) -> frozenset[str]:
         for match in RELEASE_DATE_FORM.finditer(text)
     }
     counts = {
-        _normalised_sentence_count(match)
+        _normalised_count(match)
         for match in SENTENCE_COUNT_FORM.finditer(text)
     }
     return frozenset(dates | counts)
+
+
+def normalized_deadline_figures(text: str) -> frozenset[str]:
+    counts = {
+        _normalised_count(match) for match in DEADLINE_COUNT_FORM.finditer(text)
+    }
+    return frozenset(normalized_dates(text) | counts)
 
 
 _GUIDELINES_LEVEL_VALUE = re.compile(
@@ -1548,19 +1719,25 @@ def normalized_figures(text: str) -> frozenset[str]:
 
 
 QUESTION_FORM, REFUSAL_FORM, THAT_CLAUSE, FROM_DATE_FORM = _build_constructions(
-    DATE, DEADLINE_FIGURE_NOUNS
+    DEADLINE_FIGURE, DEADLINE_FIGURE_NOUNS
 )
 DEADLINE_FAMILY = Family(
     name="deadline",
     refusal=DEADLINE_REFUSAL,
-    patterns=(DATE_NEAR_DEADLINE, DAYS_REMAINING_PATTERN, DATE_CONFIRMED_PATTERN),
-    pattern_set_version=1,
-    figure_form=DATE_FORM,
+    patterns=(
+        DATE_NEAR_DEADLINE,
+        DAYS_REMAINING_PATTERN,
+        DATE_CONFIRMED_PATTERN,
+        DAYS_ELAPSED_PATTERN,
+    ),
+    pattern_set_version=2,
+    figure_form=DEADLINE_FIGURE_FORM,
     reverse_form=DATE_FORM,
-    figures=normalized_dates,
+    figures=normalized_deadline_figures,
     figure_nouns=DEADLINE_FIGURE_NOUNS,
     constructions=(QUESTION_FORM, REFUSAL_FORM, THAT_CLAUSE, FROM_DATE_FORM),
     confirmation=(CONFIRMATION_CONTEXT, "deadline/date-confirmed@1"),
+    echo_form=DEADLINE_COUNT_QUESTION_FORM,
 )
 GUIDELINES_QUESTION_FORM, GUIDELINES_REFUSAL_FORM, GUIDELINES_THAT_CLAUSE, GUIDELINES_FROM_DATE_FORM = _build_constructions(
     GUIDELINES_FIGURE_SOURCE, GUIDELINES_FIGURE_NOUNS
