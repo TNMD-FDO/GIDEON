@@ -1118,7 +1118,7 @@ def run_backup_run(
 
 
 @dataclass(frozen=True, slots=True)
-class _PushStats:
+class PushStats:
     total_bytes: int
     transferred_bytes: int
 
@@ -1385,7 +1385,7 @@ def _push_list_stage(
     )
 
 
-def _parse_rsync_stats(stdout: str) -> _PushStats | None:
+def parse_rsync_stats(stdout: str) -> PushStats | None:
     values: dict[str, int] = {}
     for line in stdout.splitlines():
         match = _RSYNC_STAT_PATTERN.match(line)
@@ -1393,7 +1393,7 @@ def _parse_rsync_stats(stdout: str) -> _PushStats | None:
             values[match.group(1)] = int(match.group(2).replace(",", ""), 10)
     if set(values) != {"file size", "transferred file size"}:
         return None
-    return _PushStats(values["file size"], values["transferred file size"])
+    return PushStats(values["file size"], values["transferred file size"])
 
 
 def _push_stage(
@@ -1402,7 +1402,7 @@ def _push_stage(
     *,
     label: str,
     previous: backupset.RemoteSnapshot | None,
-) -> tuple[StageResult, _PushStats | None]:
+) -> tuple[StageResult, PushStats | None]:
     argv = [
         "rsync",
         "-aH",
@@ -1431,7 +1431,7 @@ def _push_stage(
         )
     if result.returncode != 0:
         return _run_failure("push", "rsync push failed", result, _PUSH_STAGE_FIX), None
-    stats = _parse_rsync_stats(result.stdout)
+    stats = parse_rsync_stats(result.stdout)
     if stats is None:
         return (
             StageResult(
@@ -1769,7 +1769,7 @@ def _push_audit_stage(
     newest_set: str,
     started: datetime,
     finished: datetime,
-    stats: _PushStats,
+    stats: PushStats,
     checked: _PushCheck,
     pruned: int,
     verify_all: bool,

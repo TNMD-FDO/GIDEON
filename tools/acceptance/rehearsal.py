@@ -148,13 +148,7 @@ def _build_rc(ctx: HarnessContext, worktree: Path, version: str, tag: str) -> St
         return StageResult("rehearse", False, "the VM has no address for the rehearsal push", REHEARSAL_FIX)
     # The tag reaches the VM's own mirror over SSH as the CSA account; the key
     # and known-hosts file are the run's, named in the environment, never argv.
-    env = {
-        "GIT_SSH_COMMAND": (
-            "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new "
-            f"-o UserKnownHostsFile={ctx.spec.run_dir / 'known_hosts'} "
-            f"-i {ctx.spec.run_dir / 'id_ed25519'}"
-        )
-    }
+    env = {"GIT_SSH_COMMAND": vm.ssh_option_string(ctx)}
     pushed = _git(
         ctx.host,
         ["git", "-C", str(worktree), "push", f"ssh://{vm.CSA_ACCOUNT}@{ctx.address}/srv/GIDEON.git", f"refs/tags/{tag}"],

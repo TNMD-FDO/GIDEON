@@ -139,18 +139,31 @@ rotated since the set was made (the install runbook's rotation step, `v0.1.40`).
 ## 5. Total-loss recovery (a rebuilt box)
 
 1. OS per §1.9, then `sudo python3 -m gideon host provision` — a **new** backup
-   keypair and a **new** age identity are printed; store the identity and
-   authorize the printed public key on the target. The rebuilt box also mints
+   keypair and a **new** age identity are printed; authorize the printed public
+   key on the target. Do not replace the password manager's identity with the
+   new one: step 4 brings the set's `backup_age_recipient` back, so every later
+   set is sealed to the **old** office identity again and the new one opens
+   nothing (the custody line below is the check). The rebuilt box also mints
    its own **new** box identity, which opens none of the earlier sets: they
    open here with the office identity alone.
 2. Write `site.yaml`, place the certificate, CA root, and supplied secrets;
    `sudo python3 -m gideon preflight`.
 3. `sudo python3 -m gideon apply` — a fresh stack with freshly generated secrets.
-4. `sudo python3 -m gideon restore --from target` (with `--at` if needed).
+4. Stop the fresh stack first — `sudo docker compose --project-directory
+   /etc/gideon/rendered -f /etc/gideon/rendered/compose.yaml down` — then
+   `sudo python3 -m gideon restore --from target` (with `--at` if needed). On a
+   running stack the restore's pre-restore push refuses against the target's
+   earlier snapshots, with which a fresh stack shares nothing; a stopped stack
+   skips that set, which protects nothing here (interim, until the product
+   admits a rebuilt box's first push).
 5. Decrypt the set's tarball over the fresh secrets with the **old** identity
    from the password manager (the restored databases carry the old role
    passwords, so the old secrets must be back before anything connects).
-6. `sudo python3 -m gideon apply`, then `sudo python3 -m gideon backup run --full`,
+6. `sudo python3 -m gideon host provision` (with `--no-gpu` as in step 1):
+   the restore re-owns files by the old box's numeric ids, which the rebuilt
+   box's `gideon` account need not share, and provision re-owns the managed
+   `/data` directories (interim, until `restore` re-owns by name).
+7. `sudo python3 -m gideon apply`, then `sudo python3 -m gideon backup run --full`,
    then `sudo python3 -m gideon backup drill`.
 
 **The custody line.** After a provision, after a total-loss recovery, and

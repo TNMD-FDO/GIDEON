@@ -6,12 +6,12 @@ level without a cycle.
 
 import ipaddress
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, Protocol
 
-from gideon.host import images
+from gideon.host import backupset, images
 from gideon.host.lock import HostLock
 from gideon.host.report import StageResult
 from gideon.host.site import SiteConfig
@@ -19,9 +19,13 @@ from gideon.host.sysio import Host
 from tools.pinwatch.fetch import Fetcher
 
 # Every disk, seed, key, and mirror of a run lives under its own directory
-# here; the domain guard and the leftover sweep act on nothing outside it.
-HARNESS_ROOT: Final = Path("/var/lib/libvirt/images/gideon-acceptance")
+# here, on /data because the full restore writes about four copies of the
+# box's set (the registry's images) into the VM's data disk and the root
+# filesystem cannot hold them; the domain guard and the leftover sweep act on
+# nothing outside it.
+HARNESS_ROOT: Final = Path("/data/acceptance")
 DEFAULT_VM_NAME: Final = "gideon-acceptance"
+DEFAULT_RESTORE_VM_NAME: Final = "gideon-acceptance-restore"
 DEFAULT_SITE_PATH: Final = Path("/etc/gideon/site.yaml")
 # The first usable address on libvirt's default bridge is where both the
 # provisioned registry and this run's SMTP sink are reachable from the VM.
@@ -44,6 +48,7 @@ class RunSpec:
     # The tag the VM clones: the ref itself when it is a tag, else the
     # mirror-only acceptance-<sha12> tag the image stage makes.
     clone_ref: str = ""
+    full_restore: bool = False
 
 
 StageCallable = Callable[["HarnessContext"], StageResult]
@@ -131,6 +136,11 @@ class HarnessContext:
     base_version: str | None = None
     rc_tag: str | None = None
     transcripts: list[Path] = field(default_factory=list)
+    restore_set: backupset.SetRef | None = None
+    snapshot_label: str | None = None
+    box_recipient: str | None = None
+    services_listing: str | None = None
+    applied_record: Mapping[str, object] | None = None
 
 
 def authenticated_messages(ctx: "HarnessContext") -> tuple[SinkMessageLike, ...]:

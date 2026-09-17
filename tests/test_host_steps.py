@@ -720,6 +720,7 @@ class DiskLayoutStepTests(unittest.TestCase):
                 "registry",
                 "drill",
                 "backup-staging",
+                "acceptance",
                 "observability",
             )
         }
@@ -2392,6 +2393,7 @@ class BaselineCheckPass(unittest.TestCase):
                     "registry",
                     "drill",
                     "backup-staging",
+                    "acceptance",
                 )
             }
         )

@@ -11,22 +11,26 @@ import unittest
 import xml.etree.ElementTree as ET
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
 import yaml  # type: ignore[import-untyped]
 
+from gideon.host import backupset, stack, stages
 from gideon.host import install as host_install
 from gideon.host import site as host_site
 from gideon.host.apply import PRINT_ONCE_SUFFIX
 from gideon.host.lock import load_host_lock
 from gideon.host.report import Problem, StageResult, stage_line
 from gideon.host.steps.services import acceptance_image_path
+from gideon.host.steps.site_dirs import AGE_IDENTITY_PATH
 from gideon.host.sysio import Command, PathLike
-from tools.acceptance import domain, image, rehearsal, seed, services, vm
+from tools.acceptance import domain, fullrestore, image, rehearsal, seed, services, vm
 from tools.acceptance.cli import main
 from tools.acceptance.context import (
+    DEFAULT_RESTORE_VM_NAME,
     HARNESS_ROOT,
     HarnessContext,
     RunSpec,
@@ -34,7 +38,12 @@ from tools.acceptance.context import (
     SinkFactory,
     SinkLike,
 )
-from tools.acceptance.run import STAGE_IDENTIFIERS, STAGES
+from tools.acceptance.run import (
+    FULL_RESTORE_IDENTIFIERS,
+    FULL_RESTORE_STAGES,
+    STAGE_IDENTIFIERS,
+    STAGES,
+)
 from tools.pinwatch.fetch import FetchError, Response
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -180,6 +189,8 @@ class FakeHost:
             return outcome.pop(0) if len(outcome) > 1 else outcome[0]
         if outcome is not None:
             return outcome
+        if command[:3] == ("du", "-s", "-B1"):
+            return completed(command, stdout=f"0\t{command[-1]}\n")
         if command[0] == "openssl" and len(command) > 1 and command[1] in {
             "req",
             "x509",
@@ -345,7 +356,7 @@ def base_commands(*, checksum: str = IMAGE_CHECKSUM) -> dict[tuple[str, ...], su
 def phase_b_commands(name: str = "test-vm") -> dict[tuple[str, ...], subprocess.CompletedProcess[str]]:
     run_dir = HARNESS_ROOT / name
     commands = base_commands()
-    for size, filename in (("40G", "os.qcow2"), ("2T", "data.qcow2")):
+    for size, filename in ((image.OS_DISK_SIZE, "os.qcow2"), ("2T", "data.qcow2")):
         command = ("qemu-img", "create", "-f", "qcow2", str(run_dir / filename), size)
         commands[command] = completed(command)
     commands[("guestfish",)] = completed(("guestfish",))
@@ -469,6 +480,104 @@ def harness_context(
     )
 
 
+def restore_manifest(
+    label: str = "20260917T010000Z",
+    *,
+    recipients: tuple[str, ...] = ("age1office", "age1box"),
+) -> backupset.Manifest:
+    finished = datetime(2026, 9, 17, 1, tzinfo=UTC)
+    return backupset.Manifest(
+        1,
+        label,
+        backupset.Kind.NIGHTLY,
+        finished - timedelta(minutes=1),
+        finished,
+        "v-test",
+        "/opt/gideon",
+        "fictitious-commit",
+        "box.acceptance.invalid",
+        None,
+        "fictitious-backup",
+        "full",
+        finished,
+        {
+            "gideon": {
+                "public.audit_log": 2,
+                "public.audit_log_202609": 2,
+                "public.users": 3,
+            },
+            "openwebui": {"main.chats": 4},
+        },
+        {
+            "data": (
+                backupset.Entry("one", "f", 7, 1000, 1000, 0o644, 1.0, "a" * 64),
+                backupset.Entry("two", "f", 3, 1000, 1000, 0o644, 1.0, "b" * 64),
+            )
+        },
+        "c" * 64,
+        recipients,
+        backupset.LinkVerdict(1, 1),
+        "d" * 64,
+    )
+
+
+def restore_host(
+    *, free_space: int = 40, recipient: str = "age1box", identity: bool = True
+) -> tuple[FakeHost, backupset.Manifest]:
+    manifest = restore_manifest()
+    files = {
+        backupset.set_dir(manifest.label) + "/manifest.json": manifest.to_json()
+    }
+    if identity:
+        files[str(AGE_IDENTITY_PATH)] = "AGE-SECRET-KEY-1" + "A" * 58
+    age_keygen = ("age-keygen", "-y", str(AGE_IDENTITY_PATH))
+    df = ("df", "-B1", "--output=avail", str(HARNESS_ROOT))
+    host = FakeHost(
+        commands={
+            age_keygen: completed(age_keygen, stdout=recipient + "\n"),
+            df: completed(df, stdout=f"Avail\n{free_space}\n"),
+        },
+        files=files,
+    )
+    return host, manifest
+
+
+def restore_context(
+    *, free_space: int = 40, recipient: str = "age1box"
+) -> tuple[FakeHost, HarnessContext, backupset.Manifest]:
+    host, manifest = restore_host(free_space=free_space, recipient=recipient)
+    ctx = harness_context(host)
+    selected = backupset.select_set(backupset.list_sets(host))
+    assert isinstance(selected, backupset.SetRef)
+    ctx.restore_set = selected
+    return host, ctx, manifest
+
+
+def vm_root_argv(ctx: HarnessContext, script: str) -> tuple[str, ...]:
+    return tuple(vm.ssh_argv(ctx, f"sudo {script}"))
+
+
+def vm_product_argv(
+    ctx: HarnessContext,
+    command: Sequence[str],
+    transcript: str,
+    forwards: Sequence[str] = (),
+) -> tuple[str, ...]:
+    script = (
+        f"cd {shlex.quote(vm.VM_CHECKOUT)} && sudo {shlex.join(command)} 2>&1 | "
+        f"tee {vm.VM_TRANSCRIPTS}/{transcript}"
+    )
+    return tuple(vm.ssh_argv(ctx, script, forwards=forwards))
+
+
+def vm_sql_argv(ctx: HarnessContext, database: str) -> tuple[str, ...]:
+    script = (
+        f"cd {shlex.quote(vm.VM_CHECKOUT)} && sudo "
+        f"{shlex.join(stages.psql_argv('/etc/gideon/rendered', database))}"
+    )
+    return tuple(vm.ssh_argv(ctx, script))
+
+
 class HarnessCli(unittest.TestCase):
     def test_dry_run_prints_the_complete_plan_without_host_io(self) -> None:
         host = FakeHost()
@@ -527,8 +636,8 @@ class HarnessCli(unittest.TestCase):
 
         self.assertEqual(code, 1)
         names = [line.split(":", 1)[0] for line in out.splitlines()]
-        self.assertEqual(names, ["preconditions", "image", "teardown"])
-        self.assertIn("image: refuse — created os.qcow2 (40G): not configured", out)
+        self.assertEqual(names, ["preconditions", "image", "teardown", "elapsed"])
+        self.assertIn(f"image: refuse — created os.qcow2 ({image.OS_DISK_SIZE}): not configured", out)
         self.assertIn("teardown: ok — removed acceptance run directory", out)
 
     def test_keep_skips_teardown_and_until_stops_after_the_named_stage(self) -> None:
@@ -640,6 +749,650 @@ class HarnessCli(unittest.TestCase):
 
         self.assertEqual(default_out("v1.2.0", "gideon-acceptance").name, "v1.2.0")
         self.assertEqual(default_out("v1.2.0", "second").name, "v1.2.0-second")
+
+    def test_full_restore_dry_run_prints_its_complete_plan_without_host_io(self) -> None:
+        host = FakeHost()
+        code, out, err, _ = invoke(host, argv=["HEAD", "--full-restore", "--dry-run"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        self.assertIn("Acceptance dry run (full restore):", out)
+        self.assertIn("stages: " + ", ".join(FULL_RESTORE_IDENTIFIERS), out)
+        self.assertIn(f"run directory: {HARNESS_ROOT / DEFAULT_RESTORE_VM_NAME}", out)
+        self.assertEqual(host.calls, [])
+        self.assertEqual(host.writes, [])
+
+    def test_full_restore_stage_identifiers_are_unique_and_keep_shared_keys(self) -> None:
+        self.assertEqual(len(FULL_RESTORE_IDENTIFIERS), len(set(FULL_RESTORE_IDENTIFIERS)))
+        self.assertEqual(FULL_RESTORE_IDENTIFIERS[1], "set")
+        self.assertEqual(
+            FULL_RESTORE_IDENTIFIERS[FULL_RESTORE_IDENTIFIERS.index("apply-2")],
+            "apply-2",
+        )
+        self.assertIn("preflight-2", FULL_RESTORE_IDENTIFIERS)
+        # The restored /data tree carries the box's numeric owners: provision
+        # re-owns it after the site re-install and before the second apply.
+        self.assertEqual(
+            FULL_RESTORE_IDENTIFIERS.index("provision-3"),
+            FULL_RESTORE_IDENTIFIERS.index("reinstall") + 1,
+        )
+        self.assertEqual(
+            FULL_RESTORE_IDENTIFIERS.index("apply-2"),
+            FULL_RESTORE_IDENTIFIERS.index("provision-3") + 1,
+        )
+        self.assertEqual(FULL_RESTORE_STAGES[-1].identifier, "teardown")
+
+    def test_full_restore_accepts_its_until_identifiers_and_uses_its_default_name(self) -> None:
+        for identifier in ("set", "apply-2", "preflight-2"):
+            with self.subTest(identifier=identifier):
+                host = FakeHost()
+                code, out, err, _ = invoke(
+                    host,
+                    argv=["HEAD", "--full-restore", "--until", identifier, "--dry-run"],
+                )
+                self.assertEqual(code, 0)
+                self.assertEqual(err, "")
+                self.assertIn("Acceptance dry run (full restore):", out)
+                self.assertIn(
+                    f"run directory: {HARNESS_ROOT / DEFAULT_RESTORE_VM_NAME}", out
+                )
+                self.assertEqual(host.calls, [])
+
+    def test_full_restore_refuses_an_install_only_until_before_host_io(self) -> None:
+        host = FakeHost()
+        code, out, err, _ = invoke(
+            host, argv=["HEAD", "--full-restore", "--until", "rehearse"]
+        )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertIn("--until rehearse is not valid", err)
+        self.assertIn("omit --full-restore", err)
+        self.assertEqual(host.calls, [])
+
+    def test_teardown_reports_allocated_run_size_before_removal_and_elapsed(self) -> None:
+        from tools.acceptance import run as run_module
+        from tools.acceptance.context import Stage
+
+        host = FakeHost(commands=base_commands(), files=base_files())
+        du = ("du", "-s", "-B1", str(RUN_DIR))
+        host.commands[du] = completed(du, stdout=f"12345\t{RUN_DIR}\n")
+
+        def fail_after_creating_run_dir(ctx: HarnessContext) -> StageResult:
+            ctx.run_dir_created = True
+            return StageResult("marker", False, "stop", "fix")
+
+        spec = RunSpec(
+            ref="HEAD",
+            resolved_commit=RESOLVED,
+            vm_name="test-vm",
+            run_dir=RUN_DIR,
+            out=OUT,
+            keep=False,
+            until=None,
+        )
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = run_module.run(
+                spec,
+                host=host,
+                fetcher=FakeFetcher(),
+                checkout=CHECKOUT,
+                site_path=SITE,
+                template_path=CHECKOUT / "tools/acceptance/domain.xml.tmpl",
+                stages=(Stage("marker", fail_after_creating_run_dir, "fix"),),
+            )
+
+        self.assertEqual(code, 1)
+        report = output.getvalue()
+        self.assertIn("run directory allocated 12345 bytes", report)
+        self.assertRegex(report, r"elapsed: [0-9]+ s")
+        calls = [call[0] for call in host.calls]
+        self.assertLess(calls.index(du), calls.index(("rm", "-rf", str(RUN_DIR))))
+
+
+class FullRestoreContracts(unittest.TestCase):
+    def test_set_refuses_when_no_complete_set_exists(self) -> None:
+        host = FakeHost()
+        result = fullrestore.select_set(harness_context(host))
+
+        self.assertFalse(result.ok)
+        self.assertIn("No complete backup set", result.detail)
+        self.assertIn("backup run", result.fix)
+
+    def test_set_refuses_when_the_box_identity_is_missing(self) -> None:
+        host, manifest = restore_host(identity=False)
+        result = fullrestore.select_set(harness_context(host))
+
+        self.assertFalse(result.ok)
+        self.assertIn(str(AGE_IDENTITY_PATH), result.detail)
+        self.assertIn("host provision --only age-identity", result.fix)
+        self.assertNotIn("age-keygen", [call[0][0] for call in host.calls])
+        self.assertTrue(any(manifest.label in path for path in host.files))
+
+    def test_set_refuses_when_the_box_recipient_is_not_in_the_manifest(self) -> None:
+        host, manifest = restore_host(recipient="age1other")
+        result = fullrestore.select_set(harness_context(host))
+
+        self.assertFalse(result.ok)
+        self.assertIn(manifest.label, result.detail)
+        self.assertIn("backup run --full", result.fix)
+        self.assertFalse(
+            any(call[0][0] in {"virsh", "ssh", "qemu-img"} for call in host.calls)
+        )
+
+    def test_set_refuses_when_four_copies_do_not_fit_under_harness_root(self) -> None:
+        host, manifest = restore_host(free_space=39)
+        result = fullrestore.select_set(harness_context(host))
+
+        self.assertFalse(result.ok)
+        self.assertIn(str(HARNESS_ROOT), result.detail)
+        self.assertIn(manifest.label, result.detail)
+        self.assertIn(str(HARNESS_ROOT), result.fix)
+
+    def test_set_accepts_matching_identity_without_reading_or_recording_its_text(self) -> None:
+        host, manifest = restore_host()
+        ctx = harness_context(host)
+        result = fullrestore.select_set(ctx)
+        secret = host.files[str(AGE_IDENTITY_PATH)]
+
+        self.assertTrue(result.ok, result.detail)
+        self.assertIn(manifest.label, result.detail)
+        self.assertIn(manifest.release, result.detail)
+        self.assertIn("2 recipients", result.detail)
+        self.assertIn("10 bytes", result.detail)
+        self.assertIn("40 bytes free", result.detail)
+        self.assertIsNotNone(ctx.restore_set)
+        assert ctx.restore_set is not None
+        self.assertEqual(ctx.restore_set.label, manifest.label)
+        self.assertEqual(ctx.box_recipient, "age1box")
+        recorded = repr(host.calls) + repr(host.writes)
+        self.assertNotIn(secret, recorded)
+        identity_calls = [
+            call[0]
+            for call in host.calls
+            if str(AGE_IDENTITY_PATH) in call[0]
+        ]
+        self.assertEqual(identity_calls, [("age-keygen", "-y", str(AGE_IDENTITY_PATH))])
+
+    def test_compare_counts_accepts_equal_tables_and_the_restore_audit_row(self) -> None:
+        expected = {
+            "gideon": {
+                "public.audit_log": 2,
+                "public.audit_log_202609": 2,
+                "public.users": 3,
+            },
+            "openwebui": {"main.chats": 4},
+        }
+        observed = {database: dict(counts) for database, counts in expected.items()}
+        observed["gideon"]["public.audit_log"] += 1
+        observed["gideon"]["public.audit_log_202609"] += 1
+
+        self.assertEqual(fullrestore.compare_counts(expected, observed), ())
+
+    def test_compare_counts_accepts_a_new_current_audit_partition_with_one_row(self) -> None:
+        expected = {
+            "gideon": {
+                "public.audit_log": 2,
+                "public.audit_log_202609": 2,
+            }
+        }
+        observed = {
+            "gideon": {
+                "public.audit_log": 3,
+                "public.audit_log_202609": 2,
+                "public.audit_log_202610": 1,
+            }
+        }
+
+        self.assertEqual(fullrestore.compare_counts(expected, observed), ())
+
+    def test_compare_counts_rejects_missing_unexpected_or_unequal_tables(self) -> None:
+        expected: dict[str, dict[str, int]] = {"gideon": {"public.users": 3}}
+
+        missing: dict[str, dict[str, int]] = {"gideon": {}}
+        unexpected: dict[str, dict[str, int]] = {
+            "gideon": {"public.users": 3, "public.extra": 1}
+        }
+        unequal: dict[str, dict[str, int]] = {"gideon": {"public.users": 4}}
+
+        for observed in (missing, unexpected, unequal):
+            with self.subTest(observed=observed):
+                self.assertTrue(fullrestore.compare_counts(expected, observed))
+
+    def test_compare_counts_rejects_two_audit_partitions_one_higher(self) -> None:
+        expected = {
+            "gideon": {
+                "public.audit_log": 2,
+                "public.audit_log_202609": 2,
+                "public.audit_log_202610": 2,
+            }
+        }
+        observed = {
+            "gideon": {
+                "public.audit_log": 3,
+                "public.audit_log_202609": 3,
+                "public.audit_log_202610": 3,
+            }
+        }
+
+        self.assertTrue(fullrestore.compare_counts(expected, observed))
+
+    def test_snapshot_copies_the_set_records_push_and_finalizes_last(self) -> None:
+        host, ctx, manifest = restore_context()
+        fixed = datetime(2026, 9, 17, 2, tzinfo=UTC)
+        label = backupset.nightly_label(fixed)
+        partial = f"{services.ACCEPTANCE_TARGET_PATH}/{label}{backupset.PARTIAL_SUFFIX}"
+        final = f"{services.ACCEPTANCE_TARGET_PATH}/{label}"
+        create = vm_root_argv(ctx, f"install -d -m 0750 {partial}")
+        chown = vm_root_argv(
+            ctx,
+            f"chown -R {services.ACCEPTANCE_TARGET_USER}:{services.ACCEPTANCE_TARGET_USER} {partial}",
+        )
+        finalize = vm_root_argv(ctx, f"mv -- {partial} {final}")
+        rsync = (
+            "rsync",
+            "-aH",
+            "--no-owner",
+            "--no-group",
+            "--relative",
+            "--stats",
+            "-e",
+            vm.ssh_option_string(ctx),
+            "--rsync-path",
+            "sudo rsync",
+            f"{backupset.STAGING}/./sets/{manifest.label}",
+            f"{backupset.STAGING}/./pgbackrest",
+            f"{vm.CSA_ACCOUNT}@{ctx.address}:{partial}/",
+        )
+        host.commands[create] = completed(create)
+        host.commands[rsync] = completed(
+            rsync,
+            stdout="Total file size: 10 bytes\nTotal transferred file size: 7 bytes\n",
+        )
+        host.commands[chown] = completed(chown)
+        host.commands[finalize] = completed(finalize)
+
+        with patch.object(fullrestore, "_now", return_value=fixed):
+            result = fullrestore.snapshot(ctx)
+
+        self.assertTrue(result.ok, result.detail)
+        self.assertIn("-aH", rsync)
+        self.assertIn("--no-owner", rsync)
+        self.assertIn("--no-group", rsync)
+        self.assertIn("--relative", rsync)
+        self.assertIn(f"{backupset.STAGING}/./sets/{manifest.label}", rsync)
+        self.assertIn(f"{backupset.STAGING}/./pgbackrest", rsync)
+        self.assertIn(vm.CSA_ACCOUNT, rsync[-1])
+        self.assertTrue(rsync[-1].endswith(f"{services.ACCEPTANCE_TARGET_PATH}/{label}.partial/"))
+        expected_record = backupset.PushRecord(
+            label, fixed, manifest.label, manifest.archive_through
+        ).to_json()
+        record_calls = [call for call in host.calls if call[2] == expected_record]
+        self.assertEqual(len(record_calls), 1)
+        ssh_calls = [call[0] for call in host.calls if call[0][0] == "ssh"]
+        # Two root commands: vm.run_as_root's sudo covers the first command of a
+        # script alone, so a chained `chown && mv` renamed as the CSA account.
+        self.assertEqual(ssh_calls[-2:], [chown, finalize])
+        self.assertIn(label, result.detail)
+        self.assertIn("7 bytes", result.detail)
+
+    def test_snapshot_refuses_a_nonzero_rsync_without_finalizing(self) -> None:
+        host, ctx, manifest = restore_context()
+        label = backupset.nightly_label(datetime(2026, 9, 17, 2, tzinfo=UTC))
+        partial = f"{services.ACCEPTANCE_TARGET_PATH}/{label}{backupset.PARTIAL_SUFFIX}"
+        create = vm_root_argv(ctx, f"install -d -m 0750 {partial}")
+        rsync = (
+            "rsync", "-aH", "--no-owner", "--no-group", "--relative", "--stats",
+            "-e", vm.ssh_option_string(ctx), "--rsync-path", "sudo rsync",
+            f"{backupset.STAGING}/./sets/{manifest.label}",
+            f"{backupset.STAGING}/./pgbackrest",
+            f"{vm.CSA_ACCOUNT}@{ctx.address}:{partial}/",
+        )
+        host.commands[create] = completed(create)
+        host.commands[rsync] = completed(rsync, returncode=23, stderr="copy failed")
+
+        with patch.object(fullrestore, "_now", return_value=datetime(2026, 9, 17, 2, tzinfo=UTC)):
+            result = fullrestore.snapshot(ctx)
+
+        self.assertFalse(result.ok)
+        self.assertIn("rsync snapshot copy failed", result.detail)
+        self.assertNotIn(backupset.PUSH_RECORD_NAME, repr(host.calls))
+
+    def test_stop_uses_compose_down_before_restore(self) -> None:
+        host, ctx, manifest = restore_context()
+        ctx.snapshot_label = "20260917T020000Z"
+        stop_command = stack.compose_argv("/etc/gideon/rendered", "down")
+        stop_argv = vm_root_argv(ctx, shlex.join(stop_command))
+        transcript = (
+            f"select: ok — snapshot={ctx.snapshot_label}\n"
+            "pre-restore: ok — skipped (stack not running)\n"
+            f"fetch: ok — selected set {manifest.label}\n"
+            "next: ok — restored\n"
+            "Secrets: a rebuilt box\n"
+        )
+        restore_argv = vm_product_argv(
+            ctx,
+            ["python3", "-m", "gideon", "restore", "--from", "target"],
+            "restore.txt",
+            forwards=(fullrestore.REGISTRY_FORWARD,),
+        )
+        host.commands[stop_argv] = completed(stop_argv)
+        host.commands[restore_argv] = completed(restore_argv, stdout=transcript)
+
+        stopped = fullrestore.stop_stack(ctx)
+        restored = fullrestore.restore_target(ctx)
+
+        self.assertTrue(stopped.ok, stopped.detail)
+        self.assertTrue(restored.ok, restored.detail)
+        calls = [call[0] for call in host.calls]
+        self.assertLess(calls.index(stop_argv), calls.index(restore_argv))
+        self.assertIn("down", stop_argv[-1])
+        # The restored build-box tree pulls from the VM's loopback registry port.
+        forward = restore_argv.index("-R")
+        self.assertEqual(restore_argv[forward + 1], "127.0.0.1:5000:127.0.0.1:5000")
+        self.assertIn("ExitOnForwardFailure=yes", restore_argv)
+
+    def test_restore_checks_the_snapshot_fetch_skip_secrets_and_refusals(self) -> None:
+        cases = (
+            ("select: ok — snapshot=other\n", "snapshot="),
+            ("pre-restore: ok — stack running\n", "pre-restore row"),
+            ("Secrets: the secrets on disk are the set\n", "Secrets line"),
+            ("fetch: refuse — failed\n", "refusal row"),
+        )
+        for line, expected in cases:
+            with self.subTest(line=line):
+                host, ctx, manifest = restore_context()
+                ctx.snapshot_label = "20260917T020000Z"
+                select_line = line if line.startswith("select:") else "select: ok — snapshot=20260917T020000Z"
+                pre_restore_line = line if line.startswith("pre-restore:") else "pre-restore: ok — skipped (stack not running)"
+                fetch_line = line if line.startswith("fetch:") else f"fetch: ok — selected set {manifest.label}"
+                secrets_line = line if line.startswith("Secrets:") else "Secrets: a rebuilt box"
+                transcript = (
+                    f"{select_line}\n{pre_restore_line}\n{fetch_line}\n"
+                    f"next: ok — restored\n{secrets_line}\n"
+                )
+                command = vm_product_argv(
+                    ctx,
+                    ["python3", "-m", "gideon", "restore", "--from", "target"],
+                    "restore.txt",
+                    forwards=(fullrestore.REGISTRY_FORWARD,),
+                )
+                host.commands[command] = completed(command, stdout=transcript)
+                result = fullrestore.restore_target(ctx)
+                self.assertFalse(result.ok)
+                self.assertIn(expected, result.detail)
+                self.assertIn("restore.txt", result.detail)
+
+    def test_counts_put_sql_on_stdin_and_report_only_count_mismatches(self) -> None:
+        host, ctx, _manifest = restore_context()
+        observed = {
+            "gideon": {
+                "public.audit_log": 3,
+                "public.audit_log_202609": 3,
+                "public.users": 3,
+            },
+            "openwebui": {"main.chats": 4},
+        }
+        for database in sorted(observed):
+            tables = sorted(observed[database])
+            listing = "\n".join(tables) + "\n"
+            counts = "".join(f"{table}|{observed[database][table]}\n" for table in tables)
+            command = vm_sql_argv(ctx, database)
+            host.commands[command] = [
+                completed(command, stdout=listing),
+                completed(command, stdout=counts),
+            ]
+
+        result = fullrestore.counts(ctx)
+
+        self.assertTrue(result.ok, result.detail)
+        sql_calls = [call for call in host.calls if call[0] in {vm_sql_argv(ctx, "gideon"), vm_sql_argv(ctx, "openwebui")}]
+        self.assertTrue(all(call[2] is not None for call in sql_calls))
+        self.assertTrue(all("SELECT" not in " ".join(call[0]) for call in sql_calls))
+
+        host, ctx, manifest = restore_context()
+        mismatch = {
+            "gideon": {"public.audit_log": 3, "public.audit_log_202609": 3, "public.users": 4},
+            "openwebui": {"main.chats": 4},
+        }
+        for database in sorted(mismatch):
+            tables = sorted(mismatch[database])
+            command = vm_sql_argv(ctx, database)
+            host.commands[command] = [
+                completed(command, stdout="\n".join(tables) + "\n"),
+                completed(command, stdout="".join(f"{table}|{mismatch[database][table]}\n" for table in tables)),
+            ]
+        result = fullrestore.counts(ctx)
+        self.assertFalse(result.ok)
+        self.assertIn("public.users", result.detail)
+        self.assertIn("3 -> 4", result.detail)
+        self.assertNotIn("row content", result.detail)
+
+    def test_decrypt_uses_one_box_pipeline_and_never_echoes_streams(self) -> None:
+        host, ctx, manifest = restore_context()
+        selected = fullrestore.select_set(ctx)
+        self.assertTrue(selected.ok, selected.detail)
+        secret = host.files[str(AGE_IDENTITY_PATH)]
+        pipeline = (
+            shlex.join(["age", "-d", "-i", str(AGE_IDENTITY_PATH), f"{backupset.set_dir(manifest.label)}/{backupset.TARBALL_NAME}"])
+            + " | "
+            + shlex.join(vm.ssh_argv(ctx, "sudo tar -xv -C /etc/gideon"))
+        )
+        command = ("bash", "-o", "pipefail", "-c", pipeline)
+        host.commands[command] = completed(command, stdout="one\ntwo\n")
+
+        result = fullrestore.decrypt(ctx)
+
+        self.assertTrue(result.ok, result.detail)
+        self.assertIn("2 name(s)", result.detail)
+        self.assertNotIn("one", result.detail)
+        self.assertNotIn("two", result.detail)
+        self.assertEqual([call[0] for call in host.calls if call[0][0] == "bash"], [command])
+        self.assertIsNone(next(call for call in host.calls if call[0] == command)[2])
+        self.assertNotIn(secret, repr(host.calls) + repr(host.writes))
+        identity_calls = [
+            call[0] for call in host.calls if str(AGE_IDENTITY_PATH) in " ".join(call[0])
+        ]
+        self.assertEqual(
+            identity_calls,
+            [("age-keygen", "-y", str(AGE_IDENTITY_PATH)), command],
+        )
+        self.assertIn("age -d", pipeline)
+        self.assertIn("sudo tar -xv -C /etc/gideon", pipeline)
+
+        host, ctx, manifest = restore_context()
+        pipeline = (
+            shlex.join(["age", "-d", "-i", str(AGE_IDENTITY_PATH), f"{backupset.set_dir(manifest.label)}/{backupset.TARBALL_NAME}"])
+            + " | " + shlex.join(vm.ssh_argv(ctx, "sudo tar -xv -C /etc/gideon"))
+        )
+        command = ("bash", "-o", "pipefail", "-c", pipeline)
+        host.commands[command] = completed(command, returncode=1, stdout="secret name\n", stderr="decoder quoted input")
+        result = fullrestore.decrypt(ctx)
+        self.assertFalse(result.ok)
+        self.assertIn("exited 1", result.detail)
+        self.assertNotIn("secret name", result.detail)
+        self.assertNotIn("decoder quoted input", result.detail)
+
+    def test_decrypt_reinstall_and_apply_again_keep_the_required_order(self) -> None:
+        host, ctx, manifest = restore_context()
+        decrypt_pipeline = (
+            shlex.join(["age", "-d", "-i", str(AGE_IDENTITY_PATH), f"{backupset.set_dir(manifest.label)}/{backupset.TARBALL_NAME}"])
+            + " | " + shlex.join(vm.ssh_argv(ctx, "sudo tar -xv -C /etc/gideon"))
+        )
+        decrypt_argv = ("bash", "-o", "pipefail", "-c", decrypt_pipeline)
+        apply_argv = vm_product_argv(ctx, ["python3", "-m", "gideon", "apply"], "apply-2.txt")
+        host.commands[decrypt_argv] = completed(decrypt_argv, stdout="/etc/gideon/site.yaml\n")
+        host.commands[apply_argv] = completed(apply_argv, stdout="apply: ok — applied\n")
+        ctx.services = ServiceMaterial("site\n", "ca\n", "cert\n", "key\n", "ldap\n", "smtp\n", "user")
+
+        decrypted = fullrestore.decrypt(ctx)
+        reinstalled = fullrestore.reinstall(ctx)
+        applied = fullrestore.apply_again(ctx)
+
+        self.assertTrue(decrypted.ok, decrypted.detail)
+        self.assertTrue(reinstalled.ok, reinstalled.detail)
+        self.assertTrue(applied.ok, applied.detail)
+        calls = [call[0] for call in host.calls]
+        decrypt_index = calls.index(decrypt_argv)
+        apply_index = calls.index(apply_argv)
+        site_writes = [
+            index for index, call in enumerate(host.calls)
+            if call[2] is not None and index > decrypt_index
+        ]
+        self.assertTrue(site_writes)
+        self.assertLess(decrypt_index, site_writes[0])
+        self.assertLess(max(site_writes), apply_index)
+
+    def test_health_and_mode_check_release_services_and_no_gpu_generator(self) -> None:
+        record = {
+            "release": "v-test",
+            "inputs": {"no_gpu": True},
+            "services": {"postgres": "digest", "openwebui": "digest"},
+        }
+        listing = json.dumps([
+            {"Service": "postgres", "State": "running", "Health": "healthy"},
+            {"Service": "openwebui", "State": "running", "Health": "healthy"},
+        ])
+
+        def run_health(value: Mapping[str, object], ps: str | None) -> tuple[StageResult, FakeHost, HarnessContext]:
+            host, ctx, manifest = restore_context()
+            ctx.base_version = manifest.release
+            cat = vm_root_argv(ctx, f"cat {rehearsal.APPLIED_RECORD}")
+            host.commands[cat] = completed(cat, stdout=yaml.safe_dump(value))
+            if ps is not None:
+                ps_argv = vm_root_argv(ctx, shlex.join(stack.compose_argv("/etc/gideon/rendered", "ps", "--all", "--format", "json")))
+                host.commands[ps_argv] = completed(ps_argv, stdout=ps)
+            return fullrestore.health(ctx), host, ctx
+
+        healthy, host, ctx = run_health(record, listing)
+        self.assertTrue(healthy.ok, healthy.detail)
+        self.assertEqual(ctx.services_listing, listing)
+        marker = vm_root_argv(ctx, f"test -e {fullrestore.nogpu.NO_GPU_PATH}")
+        host.commands[marker] = completed(marker)
+        mode_result = fullrestore.mode(ctx)
+        self.assertTrue(mode_result.ok, mode_result.detail)
+
+        cases = (
+            ({**record, "release": "v-other"}, listing, "release"),
+            (record, json.dumps([{"Service": "postgres", "State": "exited", "Health": ""}]), "not running"),
+        )
+        for value, ps, expected in cases:
+            with self.subTest(expected=expected):
+                result, _host, _ctx = run_health(value, ps)
+                self.assertFalse(result.ok)
+                self.assertIn(expected, result.detail)
+
+        for value, ps, expected in (
+            ({**record, "services": {**cast(dict[str, str], record["services"]), fullrestore.ENGINE_SERVICE_NAME: "digest"}}, listing, fullrestore.ENGINE_SERVICE_NAME),
+            (record, json.dumps(json.loads(listing) + [{"Service": fullrestore.ENGINE_SERVICE_NAME, "State": "running", "Health": "healthy"}]), fullrestore.ENGINE_SERVICE_NAME),
+        ):
+            with self.subTest(expected=expected, ps=ps):
+                host, ctx, _manifest = restore_context()
+                ctx.applied_record = value
+                ctx.services_listing = ps
+                marker = vm_root_argv(ctx, f"test -e {fullrestore.nogpu.NO_GPU_PATH}")
+                host.commands[marker] = completed(marker)
+                result = fullrestore.mode(ctx)
+                self.assertFalse(result.ok)
+                self.assertIn(expected, result.detail)
+
+    def test_users_program_prints_only_the_manifest_count_without_a_secret(self) -> None:
+        def run_users(stdout: str) -> tuple[StageResult, tuple[str, ...]]:
+            host, ctx, manifest = restore_context()
+            selected = ctx.restore_set
+            assert selected is not None
+            row_counts = dict(manifest.row_counts)
+            row_counts["openwebui"] = {"public.user": 3}
+            ctx.restore_set = replace(
+                selected, manifest=replace(manifest, row_counts=row_counts)
+            )
+            fullrestore.users(ctx)
+            command = host.calls[-1][0]
+            host.commands[command] = completed(command, stdout=stdout)
+            result = fullrestore.users(ctx)
+            return result, command
+
+        result, command = run_users("3\n")
+        self.assertTrue(result.ok, result.detail)
+        program = command[-1]
+        self.assertIn("print(len(", program)
+        self.assertEqual(program.count("print("), 1)
+        self.assertNotIn("AGE-SECRET-KEY-1", program)
+        self.assertNotIn("A" * 58, program)
+        self.assertIn("gideon_admin_api_key", program)
+        self.assertIn("users_all()", program)
+
+        for stdout, expected in (("4\n", "users 4"), ("not an integer\n", "did not print one integer")):
+            with self.subTest(stdout=stdout):
+                result, _command = run_users(stdout)
+                self.assertFalse(result.ok)
+                self.assertIn(expected, result.detail)
+                if not stdout.strip().isdigit():
+                    self.assertNotIn(stdout.strip(), result.detail)
+
+    def test_backup_requires_two_recipients_and_the_restored_first_recipient(self) -> None:
+        def run_backup(recipients: tuple[str, ...]) -> StageResult:
+            host, ctx, manifest = restore_context()
+            new_label = "20260917T020000Z"
+            new_manifest = restore_manifest(new_label, recipients=recipients)
+            product = vm_product_argv(ctx, ["python3", "-m", "gideon", "backup", "run", "--full"], "backup.txt")
+            listed = vm_root_argv(ctx, f"ls -1 {backupset.SETS_DIR}")
+            manifest_argv = vm_root_argv(ctx, f"cat {backupset.set_dir(new_label)}/{backupset.MANIFEST_NAME}")
+            host.commands[product] = completed(product, stdout="backup: ok — complete\n")
+            host.commands[listed] = completed(listed, stdout=f"{manifest.label}\n{new_label}\n")
+            host.commands[manifest_argv] = completed(manifest_argv, stdout=new_manifest.to_json())
+            return fullrestore.backup(ctx)
+
+        result = run_backup(("age1office", "age1box"))
+        self.assertTrue(result.ok, result.detail)
+        self.assertIn("20260917T020000Z", result.detail)
+        self.assertIn("2 recipients", result.detail)
+        for recipients, expected in ((("age1office",), "not 2"), (("age1other", "age1box"), "wrong first recipient")):
+            with self.subTest(recipients=recipients):
+                result = run_backup(recipients)
+                self.assertFalse(result.ok)
+                self.assertIn(expected, result.detail)
+
+    def test_audit_requires_one_restore_and_two_post_restore_backup_runs(self) -> None:
+        label = restore_manifest().label
+        restore_sql = f"SELECT count(*) FROM audit_log WHERE kind = 'restore' AND detail->>'set_label' = '{label}';\n"
+        backup_sql = f"SELECT count(*) FROM audit_log WHERE kind = 'backup_run' AND at > (SELECT max(at) FROM audit_log WHERE kind = 'restore' AND detail->>'set_label' = '{label}');\n"
+
+        def run_audit(restore_count: int, backup_count: int) -> tuple[StageResult, FakeHost]:
+            host, ctx, _manifest = restore_context()
+            command = vm_sql_argv(ctx, "gideon")
+            host.commands[command] = [
+                completed(command, stdout=f"{restore_count}\n"),
+                completed(command, stdout=f"{backup_count}\n"),
+            ]
+            return fullrestore.audit(ctx), host
+
+        result, host = run_audit(1, 2)
+        self.assertTrue(result.ok, result.detail)
+        inputs = [call[2] for call in host.calls if call[2] is not None]
+        self.assertEqual(inputs, [restore_sql, backup_sql])
+        self.assertTrue(all(label in cast(str, value) for value in inputs))
+        for restore_count, backup_count in ((0, 2), (1, 1)):
+            with self.subTest(restore_count=restore_count, backup_count=backup_count):
+                result, _host = run_audit(restore_count, backup_count)
+                self.assertFalse(result.ok)
+
+    def test_run_product_redacts_the_box_site_value_in_the_transcript(self) -> None:
+        host = FakeHost()
+        ctx = harness_context(host)
+        loaded = host_site.load_site(SITE)
+        assert loaded.config is not None
+        ctx.site = loaded.config
+        script = "cd /opt/gideon && sudo print-site 2>&1 | tee ~/acceptance/site.txt"
+        command = tuple(vm.ssh_argv(ctx, script))
+        host.commands[command] = completed(command, stdout=f"https://{ctx.site.hostname}/health\n")
+
+        result, text = vm.run_product(ctx, "restore", "site.txt", ["print-site"])
+
+        self.assertTrue(result.ok, result.detail)
+        self.assertEqual(text, "https://<hostname>/health\n")
+        self.assertEqual(host.files[str(OUT / "07-site.txt")], text)
 
     def test_services_prepares_the_sink_and_site_before_boot(self) -> None:
         host = FakeHost(commands=phase_b_commands(), files=base_files())
@@ -892,10 +1645,16 @@ class ServicesContracts(unittest.TestCase):
         stage = next(stage for stage in STAGES if stage.identifier == "preflight")
         result = stage.callable(ctx)
         self.assertFalse(result.ok)
+        # A message already in the sink is the earlier run's: preflight-2 needs its own.
         sink.messages.append(FakeMessage(user="gideon-acceptance", tls=True))
         result = stage.callable(ctx)
+        self.assertFalse(result.ok)
+        ctx.sleep = lambda _seconds: sink.messages.append(
+            FakeMessage(user="gideon-acceptance", tls=True)
+        )
+        result = stage.callable(ctx)
         self.assertTrue(result.ok, result.detail)
-        self.assertIn("1 authenticated TLS", result.detail)
+        self.assertIn("2 authenticated TLS", result.detail)
 
     def test_install_captures_the_last_nonempty_url(self) -> None:
         _host, ctx = self._prepared()
@@ -1000,6 +1759,19 @@ class ServicesContracts(unittest.TestCase):
 
 
 class PhaseBBuild(unittest.TestCase):
+    def test_os_disk_fits_its_volumes_and_the_root_lv_holds_the_loopback_target(self) -> None:
+        # The loopback target lives on the root LV; the v0.1.77 run's 36 GB set
+        # filled the 24 GiB root LV at the full restore's snapshot stage.
+        lvm_start, lvm_end = image._partition_sectors()[-1]
+        lvm_mib = (lvm_end - lvm_start + 1) // image.SECTORS_PER_MIB
+        volumes_mib = image.ROOT_LV_MIB + image.DOCKER_LV_MIB + image.SWAP_LV_MIB
+        self.assertLess(volumes_mib, lvm_mib)
+        self.assertEqual(image.OS_DISK_SIZE, f"{image.OS_DISK_GIB}G")
+        self.assertGreaterEqual(image.ROOT_LV_MIB, 2 * 36 * 1024)  # the snapshot, twice over
+        script = image._guestfish_script(RUN_DIR / "os.qcow2", IMAGE)
+        self.assertIn(f"lvcreate root ubuntu-vg {image.ROOT_LV_MIB}", script.splitlines())
+        self.assertIn(f"part-add /dev/sda p {lvm_start} {lvm_end}", script.splitlines())
+
     def test_image_conversion_keeps_source_read_only_and_records_the_mirror_tag(self) -> None:
         host = FakeHost(commands=phase_b_commands(), files=base_files())
         ctx = harness_context(host)
@@ -1011,7 +1783,7 @@ class PhaseBBuild(unittest.TestCase):
         self.assertEqual(
             commands[:2],
             [
-                ("qemu-img", "create", "-f", "qcow2", str(RUN_DIR / "os.qcow2"), "40G"),
+                ("qemu-img", "create", "-f", "qcow2", str(RUN_DIR / "os.qcow2"), image.OS_DISK_SIZE),
                 ("qemu-img", "create", "-f", "qcow2", str(RUN_DIR / "data.qcow2"), "2T"),
             ],
         )

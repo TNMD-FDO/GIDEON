@@ -33,6 +33,8 @@ ACCEPTANCE_SINK_USER: Final = "gideon-acceptance"
 ACCEPTANCE_SINK_NAME: Final = "gideon-acceptance"
 ACCEPTANCE_BRIDGE_ADDRESS: Final = ACCEPTANCE_REGISTRY_AUTHORITY.rsplit(":", 1)[0]
 ACCEPTANCE_UFW_COMMENT: Final = "gideon-acceptance"
+ACCEPTANCE_TARGET_PATH: Final = "/srv/gideon-backup"
+ACCEPTANCE_TARGET_USER: Final = "gideon-backup"
 
 
 def sink_port(vm_name: str) -> int:
@@ -124,8 +126,8 @@ def _site_text(ctx: HarnessContext, hostname: str, sink_port_bound: int) -> str:
     }
     backup_target = {
         "host": "127.0.0.1",
-        "path": "/srv/gideon-backup",
-        "user": "gideon-backup",
+        "path": ACCEPTANCE_TARGET_PATH,
+        "user": ACCEPTANCE_TARGET_USER,
     }
     smtp_document = {
         "host": ACCEPTANCE_BRIDGE_ADDRESS,
@@ -488,17 +490,18 @@ def authorize(ctx: HarnessContext) -> StageResult:
         return StageResult("authorize", False, "the backup public key is empty", SERVICE_FIX)
     directory = vm.run_as_root(
         ctx,
-        "install -d -m 0700 -o gideon-backup -g gideon-backup /srv/gideon-backup/.ssh",
+        f"install -d -m 0700 -o {ACCEPTANCE_TARGET_USER} -g {ACCEPTANCE_TARGET_USER} "
+        f"{ACCEPTANCE_TARGET_PATH}/.ssh",
     )
     if directory.returncode != 0:
         return StageResult("authorize", False, f"could not create the backup SSH directory: {command_detail(directory)}", SERVICE_FIX)
     copied = vm.copy_in(
         ctx,
-        "/srv/gideon-backup/.ssh/authorized_keys",
+        f"{ACCEPTANCE_TARGET_PATH}/.ssh/authorized_keys",
         public_key + "\n",
         0o600,
         as_root=True,
-        owner="gideon-backup:gideon-backup",
+        owner=f"{ACCEPTANCE_TARGET_USER}:{ACCEPTANCE_TARGET_USER}",
     )
     if not copied.ok:
         return StageResult("authorize", False, copied.detail, copied.fix)

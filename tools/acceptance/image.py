@@ -30,7 +30,11 @@ from gideon.host.steps.services import acceptance_image_path
 from gideon.host.sysio import Host
 from tools.acceptance.context import HarnessContext, checkout_git
 
-OS_DISK_SIZE: Final = "40G"
+# The root LV holds the loopback backup target (`/srv/gideon-backup`), so the
+# full restore's snapshot of the box's set (36 GB at v0.1.77, the registry's
+# images) lands there; the qcow2 is sparse, so the size costs nothing unwritten.
+OS_DISK_GIB: Final = 160
+OS_DISK_SIZE: Final = f"{OS_DISK_GIB}G"
 DATA_DISK_SIZE: Final = "2T"
 SECTOR_SIZE: Final = 512
 SECTORS_PER_MIB: Final = 1024 * 1024 // SECTOR_SIZE
@@ -42,16 +46,16 @@ BOOT_MIB: Final = 1024
 BIOS_BOOT_TYPE: Final = "21686148-6449-6E6F-744E-656564454649"
 ESP_TYPE: Final = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
 LVM_TYPE: Final = "E6D6D379-F507-44C2-A23C-238F2A3DF928"
-ROOT_LV_MIB: Final = 24 * 1024
+ROOT_LV_MIB: Final = 128 * 1024
 DOCKER_LV_MIB: Final = 12 * 1024
 SWAP_LV_MIB: Final = 2 * 1024
 IMAGE_FIX: Final = "Inspect qemu-img, guestfish, and virt-customize output, then retry acceptance."
 
 
 def _partition_sectors() -> tuple[tuple[int, int], ...]:
-    """Return aligned GPT ranges for the fixed 40 GiB target disk."""
+    """Return aligned GPT ranges for the fixed ``OS_DISK_GIB`` target disk."""
 
-    total_sectors = 40 * 1024 * 1024 * 1024 // SECTOR_SIZE
+    total_sectors = OS_DISK_GIB * 1024 * 1024 * 1024 // SECTOR_SIZE
     next_sector = PARTITION_ALIGNMENT_SECTORS
 
     def fixed_partition(size_mib: int) -> tuple[int, int]:

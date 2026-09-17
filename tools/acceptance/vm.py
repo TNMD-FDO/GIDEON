@@ -14,6 +14,7 @@ import time
 from collections.abc import Callable, Sequence
 from typing import Final
 
+from gideon.host import stages
 from gideon.host.report import StageResult, command_detail
 from gideon.host.sysio import Host, PathLike
 from tools.acceptance import domain
@@ -34,7 +35,9 @@ VM_TRANSCRIPTS: Final = "~/acceptance"
 # A reboot scheduled two seconds out: the SSH session returns instead of
 # hanging until the connection drops.
 REBOOT_SCRIPT: Final = "sudo systemd-run --quiet --on-active=2 systemctl reboot"
-_ROW: Final = re.compile(r"^(?P<step>[A-Za-z0-9_-]+): (?P<outcome>[a-z-]+) — ")
+_ROW: Final = re.compile(
+    r"^(?P<step>[A-Za-z0-9_-]+): (?P<outcome>[a-z-]+) — (?P<detail>.*)$"
+)
 VM_FIX: Final = "Inspect the acceptance VM and its console log, then retry acceptance."
 
 
@@ -42,7 +45,9 @@ def _attempts(timeout: float) -> int:
     return max(1, int(timeout / POLL_INTERVAL_SECONDS) + 1)
 
 
-def ssh_argv(ctx: HarnessContext, script: str) -> list[str]:
+def ssh_argv(
+    ctx: HarnessContext, script: str, *, forwards: Sequence[str] = ()
+) -> list[str]:
     """The non-interactive, run-scoped SSH command running *script* in bash.
 
     ssh joins its remote words with spaces for the remote shell to re-parse,
@@ -54,6 +59,12 @@ def ssh_argv(ctx: HarnessContext, script: str) -> list[str]:
         raise ValueError("the VM has no address")
     known_hosts = ctx.spec.run_dir / "known_hosts"
     private_key = ctx.spec.run_dir / "id_ed25519"
+    # A remote forward that cannot bind fails the session, never silently.
+    forwarding = [
+        "-o",
+        "ExitOnForwardFailure=yes",
+        *(argument for spec in forwards for argument in ("-R", spec)),
+    ] if forwards else []
     return [
         "ssh",
         "-o",
@@ -66,6 +77,7 @@ def ssh_argv(ctx: HarnessContext, script: str) -> list[str]:
         "ConnectTimeout=10",
         "-i",
         str(private_key),
+        *forwarding,
         f"{CSA_ACCOUNT}@{ctx.address}",
         "--",
         "bash",
@@ -76,19 +88,42 @@ def ssh_argv(ctx: HarnessContext, script: str) -> list[str]:
     ]
 
 
+def ssh_option_string(ctx: HarnessContext) -> str:
+    """Return the run-scoped SSH command for tools that accept one string."""
+
+    known_hosts = ctx.spec.run_dir / "known_hosts"
+    private_key = ctx.spec.run_dir / "id_ed25519"
+    return shlex.join(
+        (
+            "ssh",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            "-o",
+            f"UserKnownHostsFile={known_hosts}",
+            "-i",
+            str(private_key),
+        )
+    )
+
+
 def _row_failure(stage: str, detail: str, fix: str = VM_FIX) -> StageResult:
     return StageResult(stage, False, detail, fix)
 
 
-def _ssh(
+def ssh(
     ctx: HarnessContext,
     script: str,
     *,
     input: str | None = None,
     timeout: float | None = None,
+    forwards: Sequence[str] = (),
 ) -> subprocess.CompletedProcess[str]:
     try:
-        return ctx.host.run(ssh_argv(ctx, script), input=input, timeout=timeout)
+        return ctx.host.run(
+            ssh_argv(ctx, script, forwards=forwards), input=input, timeout=timeout
+        )
     except subprocess.TimeoutExpired as exc:
         return subprocess.CompletedProcess([], SSH_TIMED_OUT, "", f"timed out after {exc.timeout} s")
     except (OSError, subprocess.SubprocessError) as exc:
@@ -132,7 +167,7 @@ def wait_for_cloud_init(ctx: HarnessContext) -> StageResult:
 
     deadline = ctx.clock() + RECONNECT_TIMEOUT_SECONDS
     while True:
-        result = _ssh(ctx, "cloud-init status --wait", timeout=CLOUD_INIT_TIMEOUT_SECONDS)
+        result = ssh(ctx, "cloud-init status --wait", timeout=CLOUD_INIT_TIMEOUT_SECONDS)
         if result.returncode == 0:
             return StageResult("boot", True, "cloud-init is done", "")
         if result.returncode == 2:
@@ -154,6 +189,7 @@ def run_product(
     *,
     cwd: str = VM_CHECKOUT,
     timeout: float | None = None,
+    forwards: Sequence[str] = (),
 ) -> tuple[StageResult, str]:
     """Run one product command in the VM and keep its transcript on both sides.
 
@@ -164,8 +200,9 @@ def run_product(
     script = (
         f"cd {shlex.quote(cwd)} && sudo {shlex.join(command)} 2>&1 | tee {transcript}"
     )
-    result = _ssh(ctx, script, timeout=timeout)
+    result = ssh(ctx, script, timeout=timeout, forwards=forwards)
     text = redact(result.stdout, ctx.vm_site)
+    text = redact(text, ctx.site)
     host_transcript = ctx.spec.out / f"{ctx.stage_index:02d}-{transcript_name}"
     ctx.host.write_text(host_transcript, text, mode=0o644)
     ctx.transcripts.append(host_transcript)
@@ -186,7 +223,17 @@ def run_as_root(
 ) -> subprocess.CompletedProcess[str]:
     """One non-interactive root command in the VM."""
 
-    return _ssh(ctx, f"sudo {script}", timeout=timeout)
+    return ssh(ctx, f"sudo {script}", timeout=timeout)
+
+
+def run_sql(
+    ctx: HarnessContext, database: str, sql: str
+) -> subprocess.CompletedProcess[str]:
+    """Run the product's canonical psql command in the VM with SQL on stdin."""
+
+    command = stages.psql_argv("/etc/gideon/rendered", database)
+    script = f"cd {shlex.quote(VM_CHECKOUT)} && sudo {shlex.join(command)}"
+    return ssh(ctx, script, input=sql)
 
 
 def copy_in(
@@ -215,7 +262,7 @@ def copy_in(
         script = f"sudo sh -c {shlex.quote(inner)} sh {target}"
     else:
         script = f"cat > {target} && chmod {mode:o} {target}"
-    result = _ssh(ctx, script, input=text, timeout=timeout)
+    result = ssh(ctx, script, input=text, timeout=timeout)
     if result.returncode != 0:
         return _row_failure("copy", f"could not copy {path}: {command_detail(result)}")
     return StageResult("copy", True, f"copied {path}", "")
@@ -226,7 +273,7 @@ def read_file(
 ) -> tuple[StageResult, str | None]:
     """Read a small VM file back over SSH."""
 
-    result = _ssh(ctx, f"cat {shlex.quote(str(path))}", timeout=timeout)
+    result = ssh(ctx, f"cat {shlex.quote(str(path))}", timeout=timeout)
     if result.returncode != 0:
         return _row_failure("read", f"could not read {path}: {command_detail(result)}"), None
     return StageResult("read", True, f"read {path}", ""), result.stdout
@@ -235,13 +282,13 @@ def read_file(
 def reboot_and_wait(ctx: HarnessContext) -> StageResult:
     """Reboot the VM, wait for it to go down and come back, then for cloud-init."""
 
-    requested = _ssh(ctx, REBOOT_SCRIPT, timeout=30)
+    requested = ssh(ctx, REBOOT_SCRIPT, timeout=30)
     if requested.returncode not in (0, SSH_DISCONNECTED):
         return _row_failure("reboot", f"reboot request failed: {command_detail(requested)}")
     down = False
     deadline = ctx.clock() + RECONNECT_TIMEOUT_SECONDS
     while True:
-        probe = _ssh(ctx, "true", timeout=30)
+        probe = ssh(ctx, "true", timeout=30)
         if probe.returncode != 0:
             # Refused, dropped, or timed out: the VM is (still) going down.
             down = True
@@ -307,7 +354,7 @@ def clone(ctx: HarnessContext) -> StageResult:
     )
     if created.returncode != 0:
         return _row_failure("clone", f"could not create the VM checkout: {command_detail(created)}")
-    cloned = _ssh(
+    cloned = ssh(
         ctx,
         f"git clone --branch {shlex.quote(ctx.spec.clone_ref)} /srv/GIDEON.git {VM_CHECKOUT}",
         timeout=300,
@@ -320,12 +367,19 @@ def clone(ctx: HarnessContext) -> StageResult:
 def row_outcomes(text: str) -> dict[str, str]:
     """The name → outcome map of a transcript's rows (provision steps, command stages)."""
 
-    outcomes: dict[str, str] = {}
+    return {name: outcome for name, (outcome, _detail) in row_details(text).items()}
+
+
+def row_details(text: str) -> dict[str, tuple[str, str]]:
+    """The name → (outcome, detail) map of a transcript's rows."""
+
+    details: dict[str, tuple[str, str]] = {}
     for line in text.splitlines():
         match = _ROW.match(line)
         if match is not None:
-            outcomes[match.group("step")] = match.group("outcome")
-    return outcomes
+            detail = match.group("detail").partition(" Fix: ")[0]
+            details[match.group("step")] = (match.group("outcome"), detail)
+    return details
 
 
 def provision(ctx: HarnessContext, *, allow_blocked: bool) -> StageResult:

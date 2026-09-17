@@ -10,6 +10,7 @@ history at commit f06e83f. User-facing notes for every tag from `v0.2.0` live un
 `docs/release-notes/`, and `tests/test_release_records.py` holds this index
 complete, ordered, and dated from the release files.
 
+- [v0.1.77](docs/2-changelog/w3_v0.1.77.md) — 2026-09-17 — clean-VM full restore form (slice-0 20)
 - [v0.1.76](docs/2-changelog/w3_v0.1.76.md) — 2026-09-17 — the turn harness's decline form (38)
 - [v0.1.75](docs/2-changelog/w3_v0.1.75.md) — 2026-09-17 — Guidelines level and point totals (45)
 - [v0.1.74](docs/2-changelog/w3_v0.1.74.md) — 2026-09-16 — the public repository is the application alone (79)

@@ -14,7 +14,7 @@ from gideon.host.report import StageResult, print_stage, stage_line
 from gideon.host.stages import site_problem
 from gideon.host.steps.services import acceptance_image_path
 from gideon.host.sysio import Host
-from tools.acceptance import domain, image, rehearsal, seed, services, vm
+from tools.acceptance import domain, fullrestore, image, rehearsal, seed, services, vm
 from tools.acceptance.context import (
     ACCEPTANCE_REGISTRY_AUTHORITY,
     HARNESS_ROOT,
@@ -159,6 +159,19 @@ def preconditions(ctx: HarnessContext) -> StageResult:
     return StageResult("preconditions", True, "acceptance preconditions passed", "")
 
 
+def _allocated_size(io: Host, run_dir: Path) -> str:
+    # Allocated blocks, never the apparent size: the data disk is sparse.
+    # The figure is a record, so a failed read never fails the teardown.
+    try:
+        result = io.run(["du", "-s", "-B1", str(run_dir)])
+    except (OSError, subprocess.SubprocessError):
+        return "run directory size unknown"
+    fields = result.stdout.split()
+    if result.returncode != 0 or not fields or not fields[0].isdigit():
+        return "run directory size unknown"
+    return f"run directory allocated {fields[0]} bytes"
+
+
 def _teardown(ctx: HarnessContext, *, remove_vm: bool = True) -> StageResult:
     """Stop run services and, unless kept, remove only the owned VM/files."""
 
@@ -179,6 +192,7 @@ def _teardown(ctx: HarnessContext, *, remove_vm: bool = True) -> StageResult:
 
     if remove_vm:
         if ctx.run_dir_created or ctx.domain_defined:
+            details.append(_allocated_size(ctx.host, ctx.spec.run_dir))
             vm_result = domain.teardown(
                 ctx.host,
                 name=ctx.spec.vm_name,
@@ -234,6 +248,8 @@ def _wait_for_messages(
 
 
 def _preflight_stage(ctx: HarnessContext) -> StageResult:
+    # The second run finds the first run's message in the sink already.
+    before = len(authenticated_messages(ctx))
     transcript = ctx.spec.out / f"{ctx.stage_index:02d}-preflight.txt"
     result, _text = vm.run_product(
         ctx,
@@ -244,7 +260,7 @@ def _preflight_stage(ctx: HarnessContext) -> StageResult:
     )
     if not result.ok:
         return result
-    found, authenticated = _wait_for_messages(ctx, 0)
+    found, authenticated = _wait_for_messages(ctx, before)
     if not found:
         return StageResult(
             "preflight",
@@ -371,6 +387,39 @@ STAGES: Final[tuple[Stage, ...]] = (
     Stage("teardown", _teardown, _TEARDOWN_FIX),
 )
 STAGE_IDENTIFIERS: Final[tuple[str, ...]] = tuple(stage.identifier for stage in STAGES)
+# The receiving-office stages the full restore shares, image through preflight.
+_SHARED: Final = STAGES[
+    STAGE_IDENTIFIERS.index("image") : STAGE_IDENTIFIERS.index("preflight") + 1
+]
+FULL_RESTORE_STAGES: Final[tuple[Stage, ...]] = (
+    STAGES[0],
+    # Second, so a set the box cannot open boots nothing.
+    Stage("set", fullrestore.select_set, fullrestore.SET_FIX),
+    *_SHARED,
+    Stage("apply", fullrestore.apply_fresh, fullrestore.FULL_RESTORE_FIX),
+    Stage("snapshot", fullrestore.snapshot, fullrestore.FULL_RESTORE_FIX),
+    Stage("stop", fullrestore.stop_stack, fullrestore.FULL_RESTORE_FIX),
+    Stage("restore", fullrestore.restore_target, fullrestore.FULL_RESTORE_FIX),
+    Stage("counts", fullrestore.counts, fullrestore.FULL_RESTORE_FIX),
+    Stage("decrypt", fullrestore.decrypt, fullrestore.FULL_RESTORE_FIX),
+    Stage("reinstall", fullrestore.reinstall, fullrestore.FULL_RESTORE_FIX),
+    # restore re-owns by the box's numeric ids, which a rebuilt host's gideon
+    # need not share; provision re-owns the managed /data directories (the
+    # fix preflight names), as the runbook's §5 does after the restore.
+    Stage("provision", _second_provision, vm.VM_FIX, key="provision-3"),
+    Stage("apply", fullrestore.apply_again, fullrestore.FULL_RESTORE_FIX, key="apply-2"),
+    Stage("health", fullrestore.health, fullrestore.FULL_RESTORE_FIX),
+    Stage("preflight", _preflight_stage, vm.VM_FIX, key="preflight-2"),
+    Stage("mode", fullrestore.mode, fullrestore.FULL_RESTORE_FIX),
+    Stage("users", fullrestore.users, fullrestore.FULL_RESTORE_FIX),
+    Stage("backup", fullrestore.backup, fullrestore.FULL_RESTORE_FIX),
+    Stage("audit", fullrestore.audit, fullrestore.FULL_RESTORE_FIX),
+    Stage("drill", fullrestore.drill, fullrestore.FULL_RESTORE_FIX),
+    STAGES[-1],
+)
+FULL_RESTORE_IDENTIFIERS: Final[tuple[str, ...]] = tuple(
+    stage.identifier for stage in FULL_RESTORE_STAGES
+)
 
 
 def run(
@@ -398,6 +447,7 @@ def run(
         sink_factory=sink_factory,
     )
     successful = True
+    started = time.monotonic()
     until = spec.until
     try:
         for index, stage in enumerate(stages, start=1):
@@ -428,6 +478,7 @@ def run(
             teardown_result = _teardown(ctx)
             print_stage(teardown_result)
             successful = successful and teardown_result.ok
+        print(f"elapsed: {round(time.monotonic() - started)} s")
         # The transcripts belong to whoever ran sudo, as the build tool's
         # record does; run directly by root there is nothing to restore. Only
         # the harness's own tree is re-owned — never recursively, so an --out

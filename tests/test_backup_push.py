@@ -513,11 +513,11 @@ class PushContracts(unittest.TestCase):
         self.assertIn("archive/gideon/archive.info", outcome.detail)
 
     def test_rsync_stats_strip_commas(self) -> None:
-        parsed = backup._parse_rsync_stats(
+        parsed = backup.parse_rsync_stats(
             "Total file size: 1,234,567 bytes\n"
             "Total transferred file size: 987,654 bytes\n"
         )
-        self.assertEqual(parsed, backup._PushStats(1_234_567, 987_654))
+        self.assertEqual(parsed, backup.PushStats(1_234_567, 987_654))
 
 
 if __name__ == "__main__":

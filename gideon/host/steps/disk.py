@@ -54,6 +54,7 @@ _DATA_DIRS: Final[tuple[_DataDirectory, ...]] = (
     _DataDirectory("registry", "gideon", 0o755),
     _DataDirectory("drill", "gideon", 0o755),
     _DataDirectory("backup-staging", "gideon", 0o755),
+    _DataDirectory("acceptance", "gideon", 0o755),
     _DataDirectory("observability", "gideon", 0o755),
     _DataDirectory("observability/prometheus", "prometheus", 0o750),
     _DataDirectory("observability/grafana", "grafana", 0o750),
