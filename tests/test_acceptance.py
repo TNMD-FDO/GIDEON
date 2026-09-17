@@ -20,6 +20,7 @@ import yaml  # type: ignore[import-untyped]
 
 from gideon.host import backupset, stack, stages
 from gideon.host import install as host_install
+from gideon.host import restore as host_restore
 from gideon.host import site as host_site
 from gideon.host.apply import PRINT_ONCE_SUFFIX
 from gideon.host.lock import load_host_lock
@@ -764,6 +765,11 @@ class HarnessCli(unittest.TestCase):
 
     def test_full_restore_stage_identifiers_are_unique_and_keep_shared_keys(self) -> None:
         self.assertEqual(len(FULL_RESTORE_IDENTIFIERS), len(set(FULL_RESTORE_IDENTIFIERS)))
+        self.assertNotIn("stop", FULL_RESTORE_IDENTIFIERS)
+        self.assertEqual(
+            FULL_RESTORE_IDENTIFIERS.index("restore"),
+            FULL_RESTORE_IDENTIFIERS.index("snapshot") + 1,
+        )
         self.assertEqual(FULL_RESTORE_IDENTIFIERS[1], "set")
         self.assertEqual(
             FULL_RESTORE_IDENTIFIERS[FULL_RESTORE_IDENTIFIERS.index("apply-2")],
@@ -1059,14 +1065,12 @@ class FullRestoreContracts(unittest.TestCase):
         self.assertIn("rsync snapshot copy failed", result.detail)
         self.assertNotIn(backupset.PUSH_RECORD_NAME, repr(host.calls))
 
-    def test_stop_uses_compose_down_before_restore(self) -> None:
+    def test_restore_accepts_the_fresh_stack_row_without_compose_down(self) -> None:
         host, ctx, manifest = restore_context()
         ctx.snapshot_label = "20260917T020000Z"
-        stop_command = stack.compose_argv("/etc/gideon/rendered", "down")
-        stop_argv = vm_root_argv(ctx, shlex.join(stop_command))
         transcript = (
             f"select: ok — snapshot={ctx.snapshot_label}\n"
-            "pre-restore: ok — skipped (stack not running)\n"
+            f"pre-restore: ok — {host_restore.FRESH_STACK_SKIPPED_DETAIL}\n"
             f"fetch: ok — selected set {manifest.label}\n"
             "next: ok — restored\n"
             "Secrets: a rebuilt box\n"
@@ -1077,17 +1081,14 @@ class FullRestoreContracts(unittest.TestCase):
             "restore.txt",
             forwards=(fullrestore.REGISTRY_FORWARD,),
         )
-        host.commands[stop_argv] = completed(stop_argv)
         host.commands[restore_argv] = completed(restore_argv, stdout=transcript)
 
-        stopped = fullrestore.stop_stack(ctx)
         restored = fullrestore.restore_target(ctx)
 
-        self.assertTrue(stopped.ok, stopped.detail)
         self.assertTrue(restored.ok, restored.detail)
-        calls = [call[0] for call in host.calls]
-        self.assertLess(calls.index(stop_argv), calls.index(restore_argv))
-        self.assertIn("down", stop_argv[-1])
+        # The stack is left running: no compose down reaches the VM at all.
+        down_script = shlex.join(stack.compose_argv("/etc/gideon/rendered", "down"))
+        self.assertNotIn(down_script, repr(host.calls))
         # The restored build-box tree pulls from the VM's loopback registry port.
         forward = restore_argv.index("-R")
         self.assertEqual(restore_argv[forward + 1], "127.0.0.1:5000:127.0.0.1:5000")
@@ -1096,7 +1097,7 @@ class FullRestoreContracts(unittest.TestCase):
     def test_restore_checks_the_snapshot_fetch_skip_secrets_and_refusals(self) -> None:
         cases = (
             ("select: ok — snapshot=other\n", "snapshot="),
-            ("pre-restore: ok — stack running\n", "pre-restore row"),
+            ("pre-restore: ok — skipped (stack not running)\n", "pre-restore row"),
             ("Secrets: the secrets on disk are the set\n", "Secrets line"),
             ("fetch: refuse — failed\n", "refusal row"),
         )
@@ -1105,7 +1106,11 @@ class FullRestoreContracts(unittest.TestCase):
                 host, ctx, manifest = restore_context()
                 ctx.snapshot_label = "20260917T020000Z"
                 select_line = line if line.startswith("select:") else "select: ok — snapshot=20260917T020000Z"
-                pre_restore_line = line if line.startswith("pre-restore:") else "pre-restore: ok — skipped (stack not running)"
+                pre_restore_line = (
+                    line
+                    if line.startswith("pre-restore:")
+                    else f"pre-restore: ok — {host_restore.FRESH_STACK_SKIPPED_DETAIL}"
+                )
                 fetch_line = line if line.startswith("fetch:") else f"fetch: ok — selected set {manifest.label}"
                 secrets_line = line if line.startswith("Secrets:") else "Secrets: a rebuilt box"
                 transcript = (

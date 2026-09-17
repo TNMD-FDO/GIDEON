@@ -8,7 +8,7 @@ from typing import Final
 
 import yaml  # type: ignore[import-untyped]
 
-from gideon.host import backupset, nogpu, stack, stages
+from gideon.host import backupset, nogpu, restore, stack, stages
 from gideon.host.backup import parse_rsync_stats
 from gideon.host.render.engine import ENGINE_SERVICE_NAME
 from gideon.host.report import Problem, StageResult, command_detail
@@ -281,16 +281,6 @@ def snapshot(ctx: HarnessContext) -> StageResult:
     )
 
 
-def stop_stack(ctx: HarnessContext) -> StageResult:
-    """Stop the fresh Compose project before the target restore."""
-
-    command = stack.compose_argv("/etc/gideon/rendered", "down")
-    result = vm.run_as_root(ctx, shlex.join(command))
-    if result.returncode != 0:
-        return _stage_failure("stop", f"could not stop project: {command_detail(result)}")
-    return StageResult("stop", True, "stopped project /etc/gideon/rendered", "")
-
-
 def _restore_failure(ctx: HarnessContext, issue: str) -> StageResult:
     transcript = ctx.spec.out / f"{ctx.stage_index:02d}-restore.txt"
     return _stage_failure("restore", f"{issue}; transcript {transcript}")
@@ -321,8 +311,11 @@ def restore_target(ctx: HarnessContext) -> StageResult:
     if select is None or f"snapshot={ctx.snapshot_label}" not in select[1]:
         return _restore_failure(ctx, f"select row does not name snapshot={ctx.snapshot_label}")
     pre_restore = details.get("pre-restore")
-    if pre_restore is None or pre_restore[1] != "skipped (stack not running)":
-        return _restore_failure(ctx, "pre-restore row was not skipped (stack not running)")
+    if pre_restore is None or pre_restore[1] != restore.FRESH_STACK_SKIPPED_DETAIL:
+        return _restore_failure(
+            ctx,
+            f"pre-restore row was not {restore.FRESH_STACK_SKIPPED_DETAIL}",
+        )
     fetch = details.get("fetch")
     if fetch is None or f"selected set {ref.label}" not in fetch[1]:
         return _restore_failure(ctx, f"fetch row does not name selected set {ref.label}")
@@ -338,7 +331,7 @@ def restore_target(ctx: HarnessContext) -> StageResult:
         "restore",
         True,
         f"restored snapshot {ctx.snapshot_label}, set {ref.label}; "
-        "pre-restore skipped (stack not running); next: a rebuilt box",
+        f"pre-restore {restore.FRESH_STACK_SKIPPED_DETAIL}; next: a rebuilt box",
         "",
     )
 

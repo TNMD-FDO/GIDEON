@@ -149,13 +149,14 @@ rotated since the set was made (the install runbook's rotation step, `v0.1.40`).
 2. Write `site.yaml`, place the certificate, CA root, and supplied secrets;
    `sudo python3 -m gideon preflight`.
 3. `sudo python3 -m gideon apply` — a fresh stack with freshly generated secrets.
-4. Stop the fresh stack first — `sudo docker compose --project-directory
-   /etc/gideon/rendered -f /etc/gideon/rendered/compose.yaml down` — then
-   `sudo python3 -m gideon restore --from target` (with `--at` if needed). On a
-   running stack the restore's pre-restore push refuses against the target's
-   earlier snapshots, with which a fresh stack shares nothing; a stopped stack
-   skips that set, which protects nothing here (interim, until the product
-   admits a rebuilt box's first push).
+4. `sudo python3 -m gideon restore --from target` (with `--at` if needed) on
+   the running fresh stack. Its `pre-restore` row reads the fresh-stack skip
+   because a stack holding no set has nothing a safety set would protect. If
+   the 01:00 nightly ran between steps 3 and 4, the stack holds a set and is
+   not fresh, so its pre-restore push refuses against the office's earlier
+   snapshots and the stack must first be stopped with `sudo docker compose
+   --project-directory /etc/gideon/rendered -f
+   /etc/gideon/rendered/compose.yaml down`.
 5. Decrypt the set's tarball over the fresh secrets with the **old** identity
    from the password manager (the restored databases carry the old role
    passwords, so the old secrets must be back before anything connects).

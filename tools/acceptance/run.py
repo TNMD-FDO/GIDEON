@@ -398,7 +398,6 @@ FULL_RESTORE_STAGES: Final[tuple[Stage, ...]] = (
     *_SHARED,
     Stage("apply", fullrestore.apply_fresh, fullrestore.FULL_RESTORE_FIX),
     Stage("snapshot", fullrestore.snapshot, fullrestore.FULL_RESTORE_FIX),
-    Stage("stop", fullrestore.stop_stack, fullrestore.FULL_RESTORE_FIX),
     Stage("restore", fullrestore.restore_target, fullrestore.FULL_RESTORE_FIX),
     Stage("counts", fullrestore.counts, fullrestore.FULL_RESTORE_FIX),
     Stage("decrypt", fullrestore.decrypt, fullrestore.FULL_RESTORE_FIX),

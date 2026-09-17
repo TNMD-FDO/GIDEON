@@ -40,6 +40,8 @@ from gideon.host.sysio import Host, PathLike, RealHost
 
 _SITE_PATH: Final = "/etc/gideon/site.yaml"
 _RENDERED_DIR: Final = "/etc/gideon/rendered"
+# The pre-restore row a fresh stack reads; the acceptance harness requires it.
+FRESH_STACK_SKIPPED_DETAIL: Final = "skipped (fresh stack has no backup set in staging)"
 _ROOT_FIX: Final = "Run sudo python3 -m gideon restore --from <staging|target>, then retry."
 _APPLY_FIX: Final = "Run sudo python3 -m gideon apply, then retry."
 _TARGET_FIX: Final = (
@@ -281,6 +283,11 @@ _PARTIAL_FIX: Final = (
     "Start the whole stack with sudo python3 -m gideon apply, or stop it with "
     "docker compose -f /etc/gideon/rendered/compose.yaml down, then retry restore."
 )
+_INCOMPLETE_STAGING_FIX: Final = (
+    "Run sudo python3 -m gideon backup run to complete a set, or on a rebuilt box "
+    "stop the stack with docker compose -f /etc/gideon/rendered/compose.yaml down, "
+    "then retry restore."
+)
 
 
 def _pre_restore_stage(
@@ -292,9 +299,12 @@ def _pre_restore_stage(
     root: PathLike | None,
     now: datetime,
 ) -> tuple[StageResult, str | None]:
-    # The safety set needs Postgres; a stack whose other services are still
-    # serving while Postgres is down would be replaced without one, so the
-    # decision is made on every service, not on Postgres alone.
+    # The order is running, fresh, partial, incomplete, take, push: a fresh
+    # stack has nothing a safety set would protect, while a staging of
+    # incomplete entries alone is damage, not freshness. The safety set needs
+    # Postgres; a stack whose other services are still serving while Postgres
+    # is down would be replaced without one, so the running decision is made
+    # on every service, not on Postgres alone.
     running = stack.running_services(io, rendered_dir)
     if running is None:
         return (
@@ -311,6 +321,15 @@ def _pre_restore_stage(
             "pre-restore", True, "skipped (stack not running)", ""
         )
         return result, None
+    try:
+        sets = backupset.list_sets(io)
+    except OSError as exc:
+        return (
+            StageResult("pre-restore", False, f"cannot list backup sets: {exc}", _SET_FIX),
+            None,
+        )
+    if not sets:
+        return StageResult("pre-restore", True, FRESH_STACK_SKIPPED_DETAIL, ""), None
     if not _postgres_answers(io, rendered_dir):
         return (
             StageResult(
@@ -319,6 +338,21 @@ def _pre_restore_stage(
                 f"the stack is partially running ({', '.join(sorted(running))}) and "
                 "Postgres does not answer, so the pre-restore set cannot be taken",
                 _PARTIAL_FIX,
+            ),
+            None,
+        )
+
+    if not any(ref.complete for ref in sets):
+        incomplete = tuple(ref.label for ref in sets if not ref.complete)
+        count = len(incomplete)
+        entry_word = "entry" if count == 1 else "entries"
+        return (
+            StageResult(
+                "pre-restore",
+                False,
+                "no complete backup set in staging, only "
+                f"{count} incomplete {entry_word}: {', '.join(incomplete)}",
+                _INCOMPLETE_STAGING_FIX,
             ),
             None,
         )

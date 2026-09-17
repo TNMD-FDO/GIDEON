@@ -133,6 +133,7 @@ class FakeHost:
         fail_identity_exec: bool = False,
         secrets_present: bool = False,
         partial: bool = False,
+        sets_absent: bool = False,
         fail_swap: bool = False,
         manifest_value: backupset.Manifest | None = None,
         physical_escape: bool = False,
@@ -151,6 +152,7 @@ class FakeHost:
         self.source = source
         self.names = list(names)
         self.side_names = list(side_names)
+        self.sets_absent = sets_absent
         self.remote_listing = remote_listing
         self.remote_record = remote_record or backupset.PushRecord(
             REMOTE_SNAPSHOT, NOW, LOCAL_SET, value.archive_through
@@ -324,6 +326,8 @@ class FakeHost:
     def listdir(self, path: PathLike) -> list[str]:
         key = os.fspath(path)
         if key == backupset.SETS_DIR:
+            if self.sets_absent:
+                raise FileNotFoundError(key)
             return list(self.names)
         if key == f"{backupset.STAGING}.fetch-{REMOTE_SNAPSHOT}/sets":
             return list(self.side_names)
@@ -640,6 +644,236 @@ class RestoreContracts(unittest.TestCase):
                 assert isinstance(run_kwargs, dict)
                 self.assertTrue(run_kwargs["pre_restore"])
                 self.assertEqual(run_kwargs["now"], NOW)
+
+    def test_fresh_target_skips_pre_restore_for_absent_and_empty_sets(self) -> None:
+        for sets_absent in (True, False):
+            with self.subTest(sets_absent=sets_absent):
+                fake = make_host(
+                    running=True,
+                    source="target",
+                    names=(),
+                    sets_absent=sets_absent,
+                    remote_listing=f"{REMOTE_SNAPSHOT}\t1\n",
+                )
+                out = io.StringIO()
+                with (
+                    patch.object(
+                        restore.backup,
+                        "run_backup_run",
+                        side_effect=AssertionError("fresh stack must not take a set"),
+                    ),
+                    patch.object(
+                        restore.backup,
+                        "run_backup_push",
+                        side_effect=AssertionError("fresh stack must not push a set"),
+                    ),
+                    contextlib.redirect_stdout(out),
+                ):
+                    code = restore.run_restore(
+                        argparse.Namespace(source="target", at=None),
+                        host=fake,
+                        now=NOW,
+                    )
+
+                self.assertEqual(code, 0, out.getvalue())
+                output = out.getvalue()
+                self.assertIn(
+                    f"pre-restore: ok — {restore.FRESH_STACK_SKIPPED_DETAIL}",
+                    output,
+                )
+                self.assertIn("fetch: ok", output)
+                audit_sql = "\n".join(call[1] or "" for call in fake.calls)
+                self.assertIn('"pre_restore_label": null', audit_sql)
+
+    def test_incomplete_staging_refuses_before_backup_or_down(self) -> None:
+        partial_label = LOCAL_SET + backupset.PARTIAL_SUFFIX
+        cases = ((partial_label, None), (LOCAL_SET, "{not a manifest"))
+        for label, malformed_manifest in cases:
+            with self.subTest(label=label):
+                fake = make_host(
+                    running=True,
+                    source="target",
+                    names=(label,),
+                    remote_listing=f"{REMOTE_SNAPSHOT}\t1\n",
+                )
+                if malformed_manifest is not None:
+                    fake.files[
+                        os.path.join(
+                            backupset.set_dir(LOCAL_SET), backupset.MANIFEST_NAME
+                        )
+                    ] = malformed_manifest
+                out = io.StringIO()
+                with (
+                    patch.object(
+                        restore.backup,
+                        "run_backup_run",
+                        side_effect=AssertionError("incomplete staging must not take a set"),
+                    ),
+                    patch.object(
+                        restore.backup,
+                        "run_backup_push",
+                        side_effect=AssertionError("incomplete staging must not push a set"),
+                    ),
+                    contextlib.redirect_stdout(out),
+                ):
+                    code = restore.run_restore(
+                        argparse.Namespace(source="target", at=None),
+                        host=fake,
+                        now=NOW,
+                    )
+
+                self.assertEqual(code, 1)
+                output = out.getvalue()
+                pre_restore = next(
+                    line for line in output.splitlines() if line.startswith("pre-restore:")
+                )
+                self.assertIn(
+                    f"no complete backup set in staging, only 1 incomplete entry: {label}",
+                    pre_restore,
+                )
+                self.assertNotIn(backupset.SETS_DIR, pre_restore.split(" Fix:", 1)[0])
+                self.assertIn(
+                    "Run sudo python3 -m gideon backup run to complete a set",
+                    output,
+                )
+                self.assertIn(
+                    "stop the stack with docker compose -f /etc/gideon/rendered/compose.yaml down",
+                    output,
+                )
+                self.assertFalse(
+                    any(
+                        call[0][:2] == ("docker", "compose")
+                        and call[0][-1] == "down"
+                        for call in fake.calls
+                    )
+                )
+
+    def test_pre_restore_push_failure_refuses_before_down(self) -> None:
+        fake = make_host(
+            running=True,
+            source="target",
+            remote_listing=f"{REMOTE_SNAPSHOT}\t1\n",
+        )
+        out = io.StringIO()
+        with (
+            patch.object(restore.backup, "run_backup_run", return_value=0),
+            patch.object(restore.backup, "run_backup_push", return_value=1),
+            contextlib.redirect_stdout(out),
+        ):
+            code = restore.run_restore(
+                argparse.Namespace(source="target", at=None),
+                host=fake,
+                now=NOW,
+            )
+
+        self.assertEqual(code, 1)
+        self.assertIn("pre-restore push failed", out.getvalue())
+        self.assertFalse(any(call[0][-1] == "down" for call in fake.calls))
+
+    def test_partly_running_fresh_stack_skips_pre_restore(self) -> None:
+        fake = make_host(
+            running=True,
+            partial=True,
+            source="target",
+            names=(),
+            remote_listing=f"{REMOTE_SNAPSHOT}\t1\n",
+        )
+        out = io.StringIO()
+        with (
+            patch.object(
+                restore.backup,
+                "run_backup_run",
+                side_effect=AssertionError("fresh stack must not take a set"),
+            ),
+            patch.object(
+                restore.backup,
+                "run_backup_push",
+                side_effect=AssertionError("fresh stack must not push a set"),
+            ),
+            contextlib.redirect_stdout(out),
+        ):
+            restore.run_restore(
+                argparse.Namespace(source="target", at=None),
+                host=fake,
+                now=NOW,
+            )
+
+        # The partial refusal protects a safety set a fresh stack cannot have,
+        # so the skip wins and the later stop stage runs down itself.
+        output = out.getvalue()
+        self.assertIn(
+            f"pre-restore: ok — {restore.FRESH_STACK_SKIPPED_DETAIL}",
+            output,
+        )
+        self.assertNotIn("partially running", output)
+
+    def test_partly_running_incomplete_staging_refuses_as_partial(self) -> None:
+        fake = make_host(
+            running=True,
+            partial=True,
+            source="target",
+            names=(LOCAL_SET + backupset.PARTIAL_SUFFIX,),
+            remote_listing=f"{REMOTE_SNAPSHOT}\t1\n",
+        )
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = restore.run_restore(
+                argparse.Namespace(source="target", at=None),
+                host=fake,
+                now=NOW,
+            )
+
+        self.assertEqual(code, 1)
+        output = out.getvalue()
+        self.assertIn("partially running (open-webui)", output)
+        self.assertNotIn("no complete backup set in staging", output)
+
+    def test_stopped_fresh_stack_keeps_the_existing_skip_row(self) -> None:
+        fake = make_host(
+            running=False,
+            source="target",
+            names=(),
+            remote_listing=f"{REMOTE_SNAPSHOT}\t1\n",
+        )
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = restore.run_restore(
+                argparse.Namespace(source="target", at=None),
+                host=fake,
+                now=NOW,
+            )
+
+        self.assertEqual(code, 0, out.getvalue())
+        self.assertIn("pre-restore: ok — skipped (stack not running)", out.getvalue())
+
+    def test_unlistable_staging_refuses_with_the_backup_run_fix(self) -> None:
+        fake = make_host(
+            running=True,
+            source="target",
+            remote_listing=f"{REMOTE_SNAPSHOT}\t1\n",
+        )
+        listable = fake.listdir
+
+        def deny_sets(path: PathLike) -> list[str]:
+            if os.fspath(path) == backupset.SETS_DIR:
+                raise PermissionError("permission denied")
+            return listable(path)
+
+        out = io.StringIO()
+        with (
+            patch.object(fake, "listdir", side_effect=deny_sets),
+            contextlib.redirect_stdout(out),
+        ):
+            code = restore.run_restore(
+                argparse.Namespace(source="target", at=None),
+                host=fake,
+                now=NOW,
+            )
+
+        self.assertEqual(code, 1)
+        output = out.getvalue()
+        self.assertIn("cannot list backup sets: permission denied", output)
+        self.assertIn("Run sudo python3 -m gideon backup run, then retry.", output)
 
     def test_staging_at_after_refreshed_archive_boundary_refuses_before_down(self) -> None:
         fake = make_host()
