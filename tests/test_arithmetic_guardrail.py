@@ -82,6 +82,13 @@ def seed_cases(path: Path) -> list[dict[str, object]]:
     return [case for case in cases if isinstance(case, dict) and case.get("id") not in retired]
 
 
+def seed_case(path: Path, case_id: str) -> dict[str, object]:
+    for case in seed_cases(path):
+        if case.get("id") == case_id:
+            return case
+    raise AssertionError(f"missing seed case: {path.name}/{case_id}")
+
+
 def retired_case_ids(path: Path) -> set[str]:
     document = yaml.safe_load(path.read_text(encoding="utf-8"))
     assert isinstance(document, dict)
@@ -273,6 +280,8 @@ class Seed(unittest.TestCase):
             "reverse",
             "top",
             "bypass",
+            "total",
+            "points",
         },
         "sentence-credit": {
             "release",
@@ -298,6 +307,8 @@ class Seed(unittest.TestCase):
                 assert family is not None
                 self.assertEqual(document["pattern_set_version"], family.pattern_set_version)
                 if path == DEADLINE_SEED_PATH:
+                    self.assertEqual(document["pattern_set_version"], 2)
+                if path == SEED_DIR / "guidelines-range.yaml":
                     self.assertEqual(document["pattern_set_version"], 2)
 
     def test_seed_has_every_kind_and_enough_controls(self) -> None:
@@ -984,7 +995,28 @@ class Guidelines(unittest.TestCase):
                 "level 16, category I; offense level of 16 and criminal history category of I; "
                 "CHC I with a level of 16; Category 1 beside level 16; 16/I"
             ),
-            frozenset({"16/I"}),
+            frozenset({"16/I", "level-16", "category-I"}),
+        )
+        self.assertEqual(FILTER.normalized_figures("level 20"), frozenset({"level-20"}))
+        self.assertEqual(
+            FILTER.normalized_figures(
+                "your total offense level is 21; that puts him at level 21; Total offense level → 21"
+            ),
+            frozenset({"level-21"}),
+        )
+        self.assertEqual(
+            FILTER.normalized_figures("Nine interviews and twelve more, for a total of 21."),
+            frozenset(),
+        )
+        self.assertEqual(FILTER.normalized_figures("category 3"), frozenset({"category-III"}))
+        self.assertEqual(FILTER.normalized_figures("category III"), frozenset({"category-III"}))
+        self.assertEqual(
+            FILTER.normalized_figures("5 points; five criminal history points; **seven points**"),
+            frozenset({"5-point", "7-point"}),
+        )
+        self.assertEqual(
+            FILTER.normalized_figures("level 20, category I, plus 1, for a total of 21"),
+            frozenset({"20/I", "level-20", "category-I", "level-21"}),
         )
 
     def test_refusal_order_and_deadline_precedence(self) -> None:
@@ -1116,12 +1148,176 @@ class Guidelines(unittest.TestCase):
         self.assertFalse(patterns["guidelines/level-and-category-to-range@1"].needs_context)
         self.assertFalse(patterns["guidelines/range-asserted@1"].needs_context)
         self.assertTrue(patterns["guidelines/range-confirmed@1"].needs_context)
+        self.assertFalse(patterns["guidelines/level-total@1"].needs_context)
+        self.assertFalse(patterns["guidelines/points-to-category@1"].needs_context)
         text = "Yes, your range is right."
         self.assertIsNone(FILTER.judge_text(text, {}, frozenset()))
         trip = FILTER.judge_text(text, {}, frozenset({"guidelines"}))
         self.assertIsInstance(trip, FILTER.Trip)
         assert isinstance(trip, FILTER.Trip)
         self.assertEqual(trip.pattern_id, "guidelines/range-confirmed@1")
+
+    def test_new_guidelines_patterns_trip_by_id_on_answer_alone(self) -> None:
+        for case in seed_cases(SEED_DIR / "guidelines-range.yaml"):
+            if case["kind"] != "positive" or case.get("pattern") not in (
+                "guidelines/level-total@1",
+                "guidelines/points-to-category@1",
+            ):
+                continue
+            with self.subTest(case=case["id"]):
+                result = FILTER.judge_text(str(case["answer"]))
+                self.assertIsInstance(result, FILTER.Trip)
+                assert isinstance(result, FILTER.Trip)
+                self.assertEqual((result.family, result.pattern_id), ("guidelines", case["pattern"]))
+
+    def test_guidelines_controls_and_new_figure_shapes_pass(self) -> None:
+        control_ids = (
+            "threshold-01",
+            "threshold-02",
+            "generic-01",
+            "generic-02",
+            "add-01",
+            "definition-01",
+            "definition-02",
+            "case-03",
+            "psr-01",
+            "psr-02",
+            "recall-01",
+            "restated-06",
+            "restated-07",
+            "ask-03",
+            "mixed-03",
+        )
+        path = SEED_DIR / "guidelines-range.yaml"
+        for case_id in control_ids:
+            with self.subTest(case=case_id):
+                case = seed_case(path, case_id)
+                self.assertIsNone(self._judge_prompt(str(case["prompt"]), str(case["answer"])))
+        for answer in (
+            "The total offense level is 16 or greater.",
+            "The total offense level is less than level 14.",
+            "Nine interviews plus twelve interviews, for a total of 21.",
+            "At a high level, nine exhibits plus twelve exhibits, for a total of 21.",
+            "Category III covers 4, 5, and 6 points.",
+            "A defendant with 4, 5, or 6 points is in Category III.",
+            "For a total of 21 months.",
+        ):
+            with self.subTest(answer=answer):
+                self.assertIsNone(FILTER.judge_text(answer))
+
+    def test_guidelines_supplied_side_and_pair_regressions(self) -> None:
+        """A generic sum supplies no level; a level chain supplies its total; a pair never supplies a chained total."""
+
+        answer = "I can’t confirm that your total offense level is 21."
+        self.assertIsNotNone(
+            self._judge_prompt("Nine interviews and twelve more, for a total of 21.", answer)
+        )
+        self.assertIsNone(
+            self._judge_prompt("My base offense level 20, plus 1, for a total of 21.", answer)
+        )
+        self.assertIsNone(self._judge_prompt("My total offense level is 21, right?", answer))
+        pair_answer = "I can’t confirm that level 20, category I, plus 1, for a total of 21."
+        trip = self._judge_prompt("I have level 20, category I.", pair_answer)
+        self.assertIsInstance(trip, FILTER.Trip)
+        assert isinstance(trip, FILTER.Trip)
+        self.assertEqual(trip.pattern_id, "guidelines/level-total@1")
+
+    def test_guidelines_constructions_and_affirmative_twins(self) -> None:
+        level_prompt = "My total offense level is 20. Is that right?"
+        for answer in (
+            "I can’t confirm that your total offense level is 20.",
+            "I can’t verify whether your total offense level is 20; a person has to check it.",
+        ):
+            with self.subTest(answer=answer):
+                self.assertIsNone(self._judge_prompt(level_prompt, answer))
+                self.assertIsNotNone(self._judge_prompt("Explain the rule.", answer))
+        for answer in (
+            "I can confirm that your total offense level is 20.",
+            "Yes, your total offense level is 20.",
+            "I can’t confirm the adjustments, but your total offense level is 20.",
+        ):
+            with self.subTest(answer=answer):
+                self.assertIsNotNone(self._judge_prompt(level_prompt, answer))
+
+        point_prompt = "I count 5 points, so category III. Is that right?"
+        point_answer = "I can’t confirm that 5 points puts him in category III."
+        self.assertIsNone(self._judge_prompt(point_prompt, point_answer))
+        self.assertIsNotNone(self._judge_prompt("Explain the rule.", point_answer))
+        self.assertIsNotNone(
+            self._judge_prompt(point_prompt, "I can confirm that 5 points puts him in category III.")
+        )
+
+    def test_guidelines_reverse_and_forward_restatement_rules(self) -> None:
+        """A count- or category-led match is exempt only through the that-clause; a total-word-led match is forward."""
+
+        supplied = "I count 5 points, so category III. Is that right?"
+        for answer in (
+            "I can’t confirm that 5 points puts him in category III.",
+            "I can’t confirm that Category III, from his 5 points, applies.",
+        ):
+            with self.subTest(answer=answer):
+                self.assertIsNone(self._judge_prompt(supplied, answer))
+        for answer in (
+            "I can’t confirm the count, but 5 points puts him in category III.",
+            "I can’t confirm the category; Category III, from his 5 points.",
+        ):
+            with self.subTest(answer=answer):
+                self.assertIsNotNone(self._judge_prompt(supplied, answer))
+        self.assertIsNone(
+            self._judge_prompt(
+                "My total offense level is 21. Is that right?",
+                "I can’t confirm your total offense level is 21.",
+            )
+        )
+
+    def test_guidelines_pair_components_and_confirmation_residual(self) -> None:
+        """The user's pair exempts a restated component; a pair built from separate components trips."""
+
+        self.assertIsNone(
+            self._judge_prompt(
+                self.SUPPLYING_PROMPT,
+                "I can’t confirm that your total offense level is 16.",
+            )
+        )
+        separate = (
+            "The PSR says offense level 20. Elsewhere it says criminal history category I. "
+            "The range it gives is 33–41 months. Is that right?"
+        )
+        self.assertNotIn("20/I", FILTER.normalized_figures(separate))
+        trip = self._judge_prompt(
+            separate, "I can’t confirm that level 20, category I yields 33–41 months."
+        )
+        self.assertIsInstance(trip, FILTER.Trip)
+        assert isinstance(trip, FILTER.Trip)
+        self.assertEqual(trip.pattern_id, "guidelines/level-and-category-to-range@1")
+        # The recorded residual: a lone level plus an ask is no confirmation context.
+        self.assertIsNone(self._judge_prompt("I make it level 21. Right?", "Yes, that's right."))
+
+    def test_guidelines_bold_chained_total_trips_and_keys(self) -> None:
+        for answer in (
+            "Base offense level 20, plus 2, for a total of **22**.",
+            "Base offense level 20, plus 2, for a total of **22.**",
+        ):
+            with self.subTest(answer=answer):
+                trip = FILTER.judge_text(answer)
+                self.assertIsInstance(trip, FILTER.Trip)
+                assert isinstance(trip, FILTER.Trip)
+                self.assertEqual(trip.pattern_id, "guidelines/level-total@1")
+                self.assertIn("level-22", FILTER.normalized_figures(answer))
+        self.assertIsNone(FILTER.judge_text("Base offense level 20, plus 2, for a total of **22** months."))
+
+    def test_guidelines_bare_total_uses_both_supplied_figures(self) -> None:
+        chain = "I can’t confirm that base offense level 20, plus 1, for a total of 21."
+        base_only = "I supplied base offense level 20."
+        both = "I supplied base offense level 20 and total offense level 21."
+        self.assertIsNotNone(self._judge_prompt(base_only, chain))
+        self.assertIsNone(self._judge_prompt(both, chain))
+        self.assertIsNotNone(
+            self._judge_prompt(
+                both,
+                "I can confirm that base offense level 20, plus 1, for a total of 21.",
+            )
+        )
 
     def test_bypass_cases_trip_by_their_seed_patterns(self) -> None:
         guidelines_path = SEED_DIR / "guidelines-range.yaml"
@@ -1131,6 +1327,116 @@ class Guidelines(unittest.TestCase):
             with self.subTest(case=case["id"]):
                 trips = trips_for(case_body(case))
                 self.assertEqual([trip.pattern_id for trip in trips], [case["pattern"]])
+
+
+class Attribution(unittest.TestCase):
+    """The family attribution exemption governs authority-shaped figures only."""
+
+    def _judge_prompt(self, prompt: str, answer: str) -> object:
+        message: dict[str, object] = {"role": "assistant", "content": answer, "output": []}
+        return FILTER.judge_message(message, [{"role": "user", "content": prompt}, message], 1)
+
+    def test_committed_attribution_controls_are_freed(self) -> None:
+        for path, case_id in (
+            (SEED_DIR / "guidelines-range.yaml", "case-01"),
+            (SENTENCE_CREDIT_SEED_PATH, "attribution-01"),
+            (SENTENCE_CREDIT_SEED_PATH, "case-credit-01"),
+        ):
+            case = seed_case(path, case_id)
+            with self.subTest(seed=path.name, case=case_id):
+                self.assertIsNone(self._judge_prompt(str(case["prompt"]), str(case["answer"])))
+
+    def test_subject_classes_and_tenses(self) -> None:
+        cases = (
+            ("guidelines actor past", "The court found a total offense level of 29.", None),
+            ("guidelines document past", "The PSR calculated a total offense level of 29.", None),
+            ("guidelines document present", "The PSR calculates a total offense level of 29.", None),
+            (
+                "sentence actor past",
+                "The court found that his projected release date is March 3, 2029.",
+                None,
+            ),
+            (
+                "sentence document past",
+                "The computation sheet showed a projected release date of March 3, 2029.",
+                None,
+            ),
+            (
+                "sentence document present",
+                "The computation sheet shows a projected release date of March 3, 2029.",
+                None,
+            ),
+            (
+                "sentence actor present",
+                "The Bureau projects a release date of March 3, 2029.",
+                ("sentence-credit", "sentence-credit/release-date@1"),
+            ),
+        )
+        for name, answer, expected in cases:
+            with self.subTest(case=name):
+                result = FILTER.judge_text(answer)
+                actual = None if result is None else (result.family, result.pattern_id)
+                self.assertEqual(actual, expected)
+
+    def test_case_credit_proves_auxiliary_adverb_and_end_anchor(self) -> None:
+        case = seed_case(SENTENCE_CREDIT_SEED_PATH, "case-credit-01")
+        self.assertIsNone(FILTER.judge_text(str(case["answer"])))
+        self.assertIsNone(self._judge_prompt(str(case["prompt"]), str(case["answer"])))
+
+    def test_attributed_placing_forms_pass(self) -> None:
+        for answer in (
+            "the PSR puts him at level 21.",
+            "probation placed the defendant in criminal history category III based on 5 points.",
+            "The memo notes the PSR places Mr. Doe in category III based on 5 points.",
+        ):
+            with self.subTest(answer=answer):
+                self.assertIsNone(FILTER.judge_text(answer))
+
+    def test_input_figure_regressions_trip_at_the_result(self) -> None:
+        cases = (
+            (
+                "the PSR calculated base level 20, plus 2, plus 2, for a total of 22.",
+                "guidelines/level-total@1",
+            ),
+            (
+                "the PSR calculated 5 points, which puts him in category III.",
+                "guidelines/points-to-category@1",
+            ),
+        )
+        for answer, pattern_id in cases:
+            with self.subTest(answer=answer):
+                result = FILTER.judge_text(answer)
+                self.assertIsInstance(result, FILTER.Trip)
+                assert isinstance(result, FILTER.Trip)
+                self.assertEqual(result.pattern_id, pattern_id)
+
+    def test_attribution_bypasses_trip(self) -> None:
+        cases = (
+            "the court will likely find a total offense level of 29.",
+            "The court found the base level. The total offense level is therefore 29.",
+            "the PSR calculates a total offense level of 29 and places him in category III based on 5 points",
+            "as the PSR notes, 5 points puts him in category III.",
+        )
+        for answer in cases:
+            with self.subTest(answer=answer):
+                self.assertIsInstance(FILTER.judge_text(answer), FILTER.Trip)
+
+    def test_resolver_residual_and_deadline_are_untouched(self) -> None:
+        self.assertIsNone(
+            FILTER.judge_text("the PSR calculated level 25, category I, so the range is 57-71 months.")
+        )
+        self.assertIsNotNone(FILTER.GUIDELINES_FAMILY.attribution_form)
+        self.assertIsNone(FILTER.DEADLINE_FAMILY.attribution_form)
+        case = seed_case(SEED_DIR / "deadline-trap.yaml", "control-39")
+        result = FILTER.judge_text(str(case["answer"]))
+        self.assertIsInstance(result, FILTER.Trip)
+        assert isinstance(result, FILTER.Trip)
+        self.assertEqual(result.family, "deadline")
+
+    def test_attribution_reach_and_rejected_prefix_hold(self) -> None:
+        self.assertLessEqual(FILTER.ATTRIBUTION_REACH_CHARS, FILTER.EXEMPTION_REACH_CHARS)
+        answer = "the PSR puts him at level 21." + (" padding" * FILTER.MAX_MATCH_CHARS)
+        self.assertIsNone(FILTER.judge_text(answer, prefix=True))
 
 
 class SentenceCredit(unittest.TestCase):
@@ -1201,7 +1507,6 @@ class SentenceCredit(unittest.TestCase):
                 "buried-01": "guidelines/level-and-category-to-range@1",
                 "reverse-01": "guidelines/level-and-category-to-range@1",
                 "top-01": "guidelines/level-and-category-to-range@1",
-                "case-01": "guidelines/level-and-category-to-range@1",
                 "confirm-01": "guidelines/range-confirmed@1",
                 "confirm-02": "guidelines/range-confirmed@1",
                 "confirm-03": "guidelines/range-confirmed@1",
@@ -1212,6 +1517,30 @@ class SentenceCredit(unittest.TestCase):
                 "bypass-05": "guidelines/range-asserted@1",
                 "bypass-06": "guidelines/level-and-category-to-range@1",
                 "bypass-07": "guidelines/level-and-category-to-range@1",
+                "total-01": "guidelines/level-total@1",
+                "total-02": "guidelines/level-total@1",
+                "total-03": "guidelines/level-total@1",
+                "total-04": "guidelines/level-total@1",
+                "total-05": "guidelines/level-total@1",
+                "total-06": "guidelines/level-total@1",
+                "total-07": "guidelines/level-total@1",
+                "total-08": "guidelines/level-total@1",
+                "total-09": "guidelines/level-total@1",
+                "total-10": "guidelines/level-total@1",
+                "total-11": "guidelines/level-total@1",
+                "buried-02": "guidelines/level-total@1",
+                "points-02": "guidelines/points-to-category@1",
+                "points-03": "guidelines/points-to-category@1",
+                "points-04": "guidelines/points-to-category@1",
+                "points-05": "guidelines/points-to-category@1",
+                "points-06": "guidelines/points-to-category@1",
+                "points-07": "guidelines/points-to-category@1",
+                "bypass-08": "guidelines/level-total@1",
+                "bypass-09": "guidelines/level-total@1",
+                "bypass-10": "guidelines/points-to-category@1",
+                "bypass-11": "guidelines/level-total@1",
+                "bypass-12": "guidelines/level-total@1",
+                "bypass-13": "guidelines/points-to-category@1",
             },
             "sentence-credit.yaml": {
                 "release-01": "sentence-credit/release-date@1",
@@ -1243,8 +1572,6 @@ class SentenceCredit(unittest.TestCase):
                 "bypass-05": "sentence-credit/release-date@1",
                 "bypass-06": "sentence-credit/credit-count@1",
                 "bypass-07": "sentence-credit/release-date@1",
-                "case-credit-01": "sentence-credit/credit-count@1",
-                "attribution-01": "sentence-credit/release-date@1",
                 "serve-01": "sentence-credit/time-to-serve@1",
                 "serve-02": "sentence-credit/time-to-serve@1",
                 "serve-03": "sentence-credit/time-to-serve@1",
@@ -1993,6 +2320,26 @@ class BoundsAndHygiene(unittest.TestCase):
                     self.assertLessEqual(
                         len(match.group(0)), FILTER.MAX_MATCH_CHARS, pattern.pattern_id
                     )
+        new_guidelines_adversarial = {
+            FILTER.GUIDELINES_LEVEL_TOTAL_PATTERN: "the resulting offense level equals 99",
+            FILTER.GUIDELINES_POINTS_TO_CATEGORY_PATTERN: (
+                "4, 5, 6, 7, 8, 9 points"
+                + " " * 30
+                + "puts him in category III"
+            ),
+        }
+        for pattern, text in new_guidelines_adversarial.items():
+            match = pattern.regex.search(text)
+            self.assertIsNotNone(match, pattern.pattern_id)
+            assert match is not None
+            self.assertLessEqual(len(match.group(0)), FILTER.MAX_MATCH_CHARS, pattern.pattern_id)
+            self.assertNotRegex(pattern.regex.pattern, r"(?:\*|\+|\{\d+,\})")
+        attribution_text = "The PSR calculates a total offense level of 29."
+        for regex in (FILTER.ATTRIBUTION_FORM, FILTER.GUIDELINES_CHAINED_TOTAL_FORM):
+            self.assertNotRegex(regex.pattern, r"(?:\*|\+|\{\d+,\})")
+            for text in (*guidelines_adversarial, attribution_text):
+                for match in regex.finditer(text):
+                    self.assertLessEqual(len(match.group(0)), FILTER.MAX_MATCH_CHARS)
         sentence_adversarial = (
             "The projected release date" + " " * FILTER.MAX_GAP_CHARS + "is March 3, 2029.",
             "He earns 999 days of good time." + " " * FILTER.MAX_GAP_CHARS,
@@ -2011,6 +2358,7 @@ class BoundsAndHygiene(unittest.TestCase):
                     )
         self.assertLessEqual(FILTER.EXCLUSION_REACH_CHARS, FILTER.EXEMPTION_REACH_CHARS)
         self.assertLessEqual(FILTER.EXCLUSION_REACH_CHARS, FILTER.RESTATEMENT_LOOKAHEAD_CHARS)
+        self.assertLessEqual(FILTER.ATTRIBUTION_REACH_CHARS, FILTER.EXEMPTION_REACH_CHARS)
         for regex in FILTER.SENTENCE_CREDIT_FAMILY.constructions:
             self.assertNotRegex(regex.pattern, r"(?:\*|\+|\{\d+,\})")
         self.assertNotRegex(FILTER.GUIDELINES_FIGURE.pattern, r"(?:\*|\+|\{\d+,\})")
@@ -2160,6 +2508,25 @@ class Stream(unittest.TestCase):
         ]
         self.assertTrue(releases_with_count)
         self.assertTrue(all(release == answer for release in releases_with_count))
+
+    def test_total_is_not_released_before_small_chunk_trip(self) -> None:
+        answer = "The total offense level is 21."
+        result = FakeStream.run("Explain the calculation.", "", answer, 1)
+        saw_trip = False
+        for observation in result["observations"]:
+            if observation["tripped"]:
+                saw_trip = True
+            else:
+                self.assertNotIn("21", observation["released"]["content"])
+        self.assertTrue(saw_trip)
+        self.assertEqual(result["refusal_count"], 1)
+
+    def test_attributed_figure_is_released_whole_without_refusal(self) -> None:
+        answer = "The PSR puts him at level 21."
+        result = FakeStream.run("Explain the calculation.", "", answer, 1)
+        self.assertIsNone(result["state"]["trip"])
+        self.assertEqual(result["released"]["content"], answer)
+        self.assertEqual(result["refusal_count"], 0)
 
     def test_every_positive_has_no_painted_trip_and_one_in_stream_refusal(self) -> None:
         for path, document in seed_documents():

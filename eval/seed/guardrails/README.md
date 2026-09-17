@@ -6,7 +6,9 @@ The three files are the committed seeds for the three guardrail families:
   Its family set version is `2`, reflecting the fourth elapsed-day-count
   pattern while leaving the committed verdicts unchanged.
 - `guidelines-range.yaml` covers Sentencing Guidelines range resolution and
-  assertion. Its family set version is `1`.
+  assertion. Its family set version is `2`, reflecting two total patterns;
+  committed verdicts are unchanged, and the attribution form exempts two
+  families without moving either family's version.
 - `sentence-credit.yaml` covers release-date, sentence-credit, and
   time-to-serve computation and confirmation. Its family set version is `1`.
 

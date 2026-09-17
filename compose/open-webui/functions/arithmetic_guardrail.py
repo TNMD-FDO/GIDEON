@@ -1,5 +1,5 @@
 """title: GIDEON arithmetic guardrail
-version: 8
+version: 9
 description: Enforces the no-model-arithmetic rule for filing deadlines, Sentencing Guidelines ranges, and sentence credit or release dates.
 """
 
@@ -10,7 +10,9 @@ description: Enforces the no-model-arithmetic rule for filing deadlines, Sentenc
 # four restatement constructions built over that form, its confirmation
 # context, and its own pattern-set version; the deadline family is first, with
 # its fourth bounded days-elapsed pattern and date-or-day-count figure form,
-# the Guidelines family second, and sentence credit third.  The deadline patterns
+# the Guidelines family second, with its level-total and points-to-category
+# patterns, and sentence credit third; the Guidelines and sentence-credit
+# families share an attribution construction.  The deadline patterns
 # carry bounded exclusions for sentence-expiry and credit-count wording, so
 # those shapes are judged by the sentence-credit family.  Sentence credit's
 # confirmation context displaces the deadline context, and the deadline's
@@ -449,14 +451,19 @@ SENTENCE_CREDIT_CONFIRMATION_FAMILY_NOUNS = (
     "credits",
 )
 
-# The Guidelines family draws the line at a range the model resolved or placed
-# on the matter. A range restated under a governing construction, a court's
-# past-tense finding, a statute's years, or a guideline's own term range
+# The Guidelines family draws the line at a range or total the model resolved or
+# placed on the matter. A range restated under a governing construction, a
+# court's past-tense finding, a statute's years, or a guideline's own term range
 # passes; a bare months range trips nothing. An illustrative table cell is a
 # positive at the cost of the example; a court's range in a case description
-# is a seed control and ticket 45's attribution construction; the user's own
-# figures are handled by the restatement constructions. "was" and "were" are
-# never links or leads.
+# passes by the attribution construction; the user's own figures are handled
+# by the restatement constructions. Total and point
+# resolution require a resolving link, while thresholds and category
+# definitions have no such link. "was" and "were" are never links or leads.
+# An attributed figure is governed by an authority subject followed directly
+# by its finding or recitation verb: actors are past-tense only, documents may
+# use past or present tense. A modal, actor present tense, new sentence,
+# coordinated verb, or comma breaks that attribution.
 GUIDELINES_LEVEL_PREFIXES = ("total", "adjusted", "final", "base")
 # U+2011 NON-BREAKING HYPHEN and U+202F NARROW NO-BREAK SPACE — the characters
 # HARV-011 wrote — are written as regex escapes below; U+00A0 NO-BREAK SPACE is
@@ -487,6 +494,91 @@ GUIDELINES_MATTER_MODIFIERS = (
 )
 GUIDELINES_MATTER_LEADS = ("faces", "is looking at", "is exposed to", "would face", "is facing")
 GUIDELINES_RANGE_LINKS = ("is", "would be", "comes to", "falls at", "of")
+GUIDELINES_TOTAL_WORDS = ("total", "adjusted", "final", "combined", "resulting")
+# Links that resolve a total level; "was" and "were" stay out so past-tense
+# authority descriptions remain outside this pattern.
+GUIDELINES_LEVEL_LINKS = (
+    "of",
+    "is",
+    "would be",
+    "would then be",
+    "comes to",
+    "equals",
+    "totals",
+    "becomes",
+    "at",
+)
+GUIDELINES_LINK_ADVERBS = ("therefore", "then", "now", "thus")
+# Comparative words after a resolving link make a threshold, not a result.
+GUIDELINES_COMPARATIVES = (
+    "less than",
+    "more than",
+    "greater than",
+    "at least",
+    "at most",
+    "below",
+    "above",
+    "under",
+    "over",
+)
+# Comparative words after the result number likewise describe a rule.
+GUIDELINES_TRAILING_COMPARATIVES = (
+    "or greater",
+    "or higher",
+    "or more",
+    "or less",
+    "or lower",
+    "or above",
+    "or below",
+)
+# Units after a bare "for a total of N" make N a count of things, not a level.
+GUIDELINES_UNIT_WORDS = (
+    "month",
+    "months",
+    "firearm",
+    "firearms",
+)
+# The base forms carry a modal's prediction ("would put him at level 21").
+GUIDELINES_PLACING_VERBS = (
+    "puts",
+    "places",
+    "put",
+    "place",
+    "leaves",
+    "lands",
+    "brings",
+    "takes",
+    "ends up",
+)
+GUIDELINES_PLACED_OBJECTS = (
+    "him",
+    "her",
+    "them",
+    "you",
+    "your client",
+    "the defendant",
+    "the client",
+)
+# The placing verbs a point count takes to its category ("puts him in").
+GUIDELINES_POINT_PLACING_VERBS = ("puts", "places", "lands")
+# Links that resolve a point count to a criminal history category.
+GUIDELINES_POINT_LINKS = (
+    "falls into",
+    "falls in",
+    "falls within",
+    "is",
+    "is in",
+    "is a",
+    "means",
+    "yields",
+    "equals",
+    "gives",
+    "results in",
+    "would be",
+    "corresponds to",
+    "translates to",
+)
+GUIDELINES_CATEGORY_LEADS = ("from", "based on", "with", "on", "given")
 GUIDELINES_FIGURE_NOUNS = (
     "range",
     "guideline range",
@@ -863,7 +955,8 @@ NEGATION = (
 # tolling, but the deadline is June 5, 2027" assert; a reverse form outside a
 # refusal's that-clause ("June 5, 2027 is your deadline") and an affirmation
 # beside the date ("yes", "correct") assert; "no" is not a marker.
-DETERMINER = rf"(?:(?:the|your|my|his|her|their|a|that|this){SP})?"
+DETERMINER_WORDS = ("the", "your", "my", "his", "her", "their", "a", "that", "this")
+DETERMINER = rf"(?:{_phrases(DETERMINER_WORDS)}{SP})?"
 CLAUSE_BREAK_WORDS = ("but", "and", "however", "though", "yet", "so", "while")
 
 # The Guidelines grammar joins its words with one whitespace character and
@@ -953,21 +1046,292 @@ GUIDELINES_RANGE_ASSERTED = (
     rf"{_phrases(GUIDELINES_RANGE_LINKS)}{SP}"
     rf"){GUIDELINES_RANGE_SOURCE}"
 )
-GUIDELINES_FIGURE_SOURCE = rf"(?:{GUIDELINES_RANGE_SOURCE}|{GUIDELINES_PAIR_SOURCE})"
+# A point count is a one- or two-digit number or a number word carrying its
+# noun ("5 points", "seven criminal history points"): a bare number is never a
+# count, so "category VI given two prior convictions" names none. Markdown
+# emphasis is admitted around the whole count; underscore emphasis remains
+# outside the grammar.
+GUIDELINES_POINT_COUNT_SOURCE = (
+    rf"{MARK}(?<![\w/])(?:\d{{1,2}}|{_phrases(NUMBER_WORDS)}|"
+    rf"{_phrases(NUMBER_COMPOUNDS)})(?:{SP}criminal{SP}history)?"
+    rf"{SP}points?{MARK}(?![\w/])"
+)
+# A gap inside one sentence: a period ends the sentence only before
+# whitespace or the text's end, so "§ 2K2.1" stays inside it.
+GUIDELINES_SENTENCE_BREAK = r"(?:[.!?](?:\s|$)|\n)"
+# The reach from a chain's level figure to its "for a total of", and from a
+# point count to its link or a category to its lead.
+GUIDELINES_CHAIN_GAP_CHARS = 60
+GUIDELINES_POINT_GAP_CHARS = 30
+# The chained-total prefix starts at a level figure so a generic sum cannot
+# qualify. Its gap admits commas but no sentence break, and its look-ahead
+# requires the result number to end a clause without a following unit word.
+GUIDELINES_CHAINED_TOTAL_PREFIX = (
+    rf"{GUIDELINES_LEVEL_SOURCE}"
+    rf"(?:(?!{GUIDELINES_SENTENCE_BREAK})[\s\S]){{0,{GUIDELINES_CHAIN_GAP_CHARS}}}?"
+    rf"\bfor{SP}a{SP}total"
+    rf"(?:{SP}offense{SP}level)?(?:{SP}of)?"
+    rf"{SP}(?={MARK}\d{{1,2}}(?!\d)"
+    rf"(?!{SP}\b{_phrases(GUIDELINES_UNIT_WORDS)}\b)"
+    rf"{MARK}[ \t]{{0,3}}(?:[.!?,;:]|\n|$))"
+)
+GUIDELINES_CHAINED_TOTAL_SOURCE = (
+    rf"{GUIDELINES_CHAINED_TOTAL_PREFIX}{MARK}(?P<result>\d{{1,2}}(?!\d))"
+)
+GUIDELINES_CHAINED_TOTAL_FORM = re.compile(
+    rf"(?<![\w/]){GUIDELINES_CHAINED_TOTAL_SOURCE}(?![\w/])", re.IGNORECASE
+)
+# The three prefixes of a resolved total — a total word and its link, the
+# chain, a placing verb — share one result tail, since Python's re rejects a
+# group name defined twice. The link and trailing comparative guards keep
+# thresholds out; the chained prefix adds the level-in-reach and clause-end
+# guards.
+GUIDELINES_TOTAL_WORD_PREFIX = (
+    rf"\b{_phrases(GUIDELINES_TOTAL_WORDS)}{SP}(?:offense{SP})?level"
+    rf"(?:"
+    rf"{SP}\b{_phrases(GUIDELINES_LEVEL_LINKS)}\b"
+    rf"(?!{SP}\b{_phrases(GUIDELINES_COMPARATIVES)}\b)"
+    rf"(?:{SP}\b{_phrases(GUIDELINES_LINK_ADVERBS)}\b)?{SP}"
+    rf"(?:level{SP})?"
+    rf"|[\s]{{0,3}}(?:→|->|=>|=|:)[\s]{{0,3}}(?:level{SP})?"
+    rf"|{SP}"
+    rf")"
+)
+GUIDELINES_PLACING_PREFIX = (
+    rf"\b{_phrases(GUIDELINES_PLACING_VERBS)}{SP}"
+    rf"{_phrases(GUIDELINES_PLACED_OBJECTS)}{SP}at"
+    rf"(?:{SP}(?:the|a|an))?"
+    rf"(?:{SP}\b{_phrases(GUIDELINES_TOTAL_WORDS)}\b)?"
+    rf"(?:{SP}offense)?{SP}level(?:{SP}of)?{SP}"
+)
+
+
+def _level_result(group: str | None) -> str:
+    """The shared tail: the level number, named when the regex reads it."""
+
+    number = r"\d{1,2}(?!\d)"
+    captured = rf"(?P<{group}>{number})" if group is not None else number
+    return (
+        rf"{MARK}(?<!\$){captured}"
+        rf"(?!{SP}\b{_phrases(GUIDELINES_TRAILING_COMPARATIVES)}\b)"
+    )
+
+
+GUIDELINES_LEVEL_TOTAL = (
+    rf"(?:{GUIDELINES_TOTAL_WORD_PREFIX}|{GUIDELINES_CHAINED_TOTAL_PREFIX}"
+    rf"|{GUIDELINES_PLACING_PREFIX}){_level_result('result')}"
+)
+# A stated total is a level figure too, so the user's "my total offense level
+# is 21" supplies level-21 and a refusal's object reaches the model's; the
+# chain is read by its own scan, since its level figure would be consumed first.
+GUIDELINES_STATED_TOTAL_SOURCE = (
+    rf"(?:{GUIDELINES_TOTAL_WORD_PREFIX}|{GUIDELINES_PLACING_PREFIX}){_level_result(None)}"
+)
+GUIDELINES_STATED_TOTAL_FORM = re.compile(
+    rf"(?:{GUIDELINES_TOTAL_WORD_PREFIX}|{GUIDELINES_PLACING_PREFIX}){_level_result('result')}",
+    re.IGNORECASE,
+)
+# A point count resolves a category in the forward order, or a category is
+# explained from a point count in the reverse order. The two category groups
+# are separate because Python permits each name only once in one expression.
+GUIDELINES_POINTS_TO_CATEGORY = (
+    rf"(?:"
+    rf"{GUIDELINES_POINT_COUNT_SOURCE}"
+    rf"(?:(?!{GUIDELINES_SENTENCE_BREAK})[\s\S]){{0,{GUIDELINES_POINT_GAP_CHARS}}}?"
+    rf"(?:"
+    rf"\b{_phrases(GUIDELINES_POINT_PLACING_VERBS)}{SP}"
+    rf"{_phrases(GUIDELINES_PLACED_OBJECTS)}{SP}in\b"
+    rf"|\b{_phrases(GUIDELINES_POINT_LINKS)}\b"
+    rf"|[\s]{{0,3}}(?:→|->|=>|=|:)[\s]{{0,3}}"
+    rf")"
+    rf"{SP}(?:(?:the|a|an){SP})?"
+    rf"(?P<category_after>{GUIDELINES_CATEGORY_SOURCE})"
+    rf"|(?P<category_before>{GUIDELINES_CATEGORY_SOURCE})"
+    rf"(?:(?!{GUIDELINES_SENTENCE_BREAK})[\s\S]){{0,{GUIDELINES_POINT_GAP_CHARS}}}?"
+    rf"\b{_phrases(GUIDELINES_CATEGORY_LEADS)}\b"
+    rf"(?:{SP}(?:his|her|their|your|my|the))?"
+    rf"{SP}{GUIDELINES_POINT_COUNT_SOURCE}"
+    rf")"
+)
+# A list of counts is a category definition, not a point-to-category result.
+# This bounded exclusion is searched around the match start because a variable
+# width list cannot be represented by a look-behind.
+GUIDELINES_LIST_NUMBER = (
+    rf"(?:\d{{1,2}}|{_phrases(NUMBER_WORDS)}|{_phrases(NUMBER_COMPOUNDS)})"
+)
+# The whole list is one hit, so its last count lies inside it.
+GUIDELINES_POINT_LIST_ITEMS = 5
+GUIDELINES_POINT_LIST_EXCLUSION_SOURCE = (
+    rf"\b{GUIDELINES_LIST_NUMBER}"
+    rf"(?:(?:[\s]{{0,3}},(?:{SP}(?:or|and))?|{SP}(?:or|and)){SP}"
+    rf"{GUIDELINES_LIST_NUMBER}\b){{1,{GUIDELINES_POINT_LIST_ITEMS}}}"
+)
+GUIDELINES_RANGE_OR_PAIR_SOURCE = (
+    rf"(?:{GUIDELINES_RANGE_SOURCE}|{GUIDELINES_PAIR_SOURCE})"
+)
+GUIDELINES_FIGURE_SOURCE = (
+    rf"(?:{GUIDELINES_RANGE_OR_PAIR_SOURCE}|{GUIDELINES_LEVEL_SOURCE}|"
+    rf"{GUIDELINES_CATEGORY_SOURCE}|{GUIDELINES_POINT_COUNT_SOURCE}|"
+    rf"{GUIDELINES_STATED_TOTAL_SOURCE})"
+)
 GUIDELINES_FIGURE = re.compile(
     rf"(?<![\w/]){GUIDELINES_FIGURE_SOURCE}(?![\w/])", re.IGNORECASE
 )
 GUIDELINES_RANGE_FORM = re.compile(
     rf"(?<![\w/]){GUIDELINES_RANGE_SOURCE}(?![\w/])", re.IGNORECASE
 )
+GUIDELINES_REVERSE_FORM = re.compile(
+    rf"(?<![\w/])(?:{GUIDELINES_RANGE_SOURCE}|{GUIDELINES_CATEGORY_SOURCE}|"
+    rf"{GUIDELINES_POINT_COUNT_SOURCE})(?![\w/])",
+    re.IGNORECASE,
+)
+
+# This family-level construction serves the Guidelines and sentence-credit
+# families. It admits an optional determiner and word, an authority subject,
+# optional perfect auxiliary and adverb, a finding verb, and its object up to
+# the figure anchor. Actors require past tense; documents allow past or
+# present. A modal, present-tense actor, new sentence, coordinated verb, or
+# comma bypasses the form.
+# Actor subjects admit courts, parties, officials, probation, the government,
+# and the Bureau as authority sources.
+ATTRIBUTION_ACTOR_SUBJECTS = (
+    "court",
+    "district court",
+    "sentencing court",
+    "trial court",
+    "court of appeals",
+    "circuit",
+    "panel",
+    "judge",
+    "probation",
+    "probation officer",
+    "probation office",
+    "government",
+    "prosecution",
+    "prosecutor",
+    "United States",
+    "Bureau",
+    "Bureau of Prisons",
+    "BOP",
+    "warden",
+    "parties",
+)
+# Document subjects admit the named records as sources whose content is recited.
+ATTRIBUTION_DOCUMENT_SUBJECTS = (
+    "PSR",
+    "presentence report",
+    "presentence investigation report",
+    "computation sheet",
+    "sentence computation",
+    "worksheet",
+    "judgment",
+    "plea agreement",
+    "sentencing memorandum",
+)
+# Perfect auxiliaries admit only completed attribution, never a modal or future auxiliary.
+ATTRIBUTION_AUXILIARIES = ("had", "has", "have")
+# These adverbs admit the bounded modifier slot between an auxiliary and its verb.
+ATTRIBUTION_ADVERBS = (
+    "correctly",
+    "properly",
+    "ultimately",
+    "then",
+    "also",
+    "initially",
+    "expressly",
+    "erroneously",
+    "first",
+    "later",
+)
+# Past verbs admit findings, recitations, advocacy, agreements, and dispositions.
+ATTRIBUTION_PAST_VERBS = (
+    "found",
+    "calculated",
+    "computed",
+    "determined",
+    "held",
+    "concluded",
+    "adopted",
+    "applied",
+    "assigned",
+    "scored",
+    "set",
+    "fixed",
+    "placed",
+    "put",
+    "arrived at",
+    "reached",
+    "assessed",
+    "counted",
+    "tallied",
+    "identified",
+    "treated",
+    "noted",
+    "stated",
+    "recited",
+    "reported",
+    "showed",
+    "argued",
+    "argued for",
+    "urged",
+    "sought",
+    "requested",
+    "asked for",
+    "proposed",
+    "recommended",
+    "objected to",
+    "agreed on",
+    "stipulated to",
+    "refused",
+    "denied",
+    "awarded",
+    "credited",
+    "imposed",
+    "gave",
+)
+# Present verbs admit only document recitations, not present-tense actors.
+ATTRIBUTION_PRESENT_VERBS = (
+    "calculates",
+    "computes",
+    "puts",
+    "places",
+    "assigns",
+    "scores",
+    "sets",
+    "shows",
+    "lists",
+    "states",
+    "reflects",
+    "reports",
+    "projects",
+    "recommends",
+    "proposes",
+    "identifies",
+    "treats",
+    "notes",
+    "recites",
+)
+# These honorifics admit their periods inside the attribution object gap.
+ATTRIBUTION_HONORIFICS = ("Mr.", "Ms.", "Mrs.", "Dr.")
 
 
-def _no_clause_break(max_chars: int) -> str:
+def _no_clause_break(
+    max_chars: int, *, honorifics: tuple[str, ...] = ()
+) -> str:
     # A hyphen joining letters ("one-year", "post-conviction") is a word's
     # own; a spaced hyphen is a dash and breaks the clause as the dashes do.
+    if not honorifics:
+        return (
+            rf"(?:(?!\b{_phrases(CLAUSE_BREAK_WORDS)}\b)(?!\s-)"
+            rf"[^.,;:!?\n—–]){{0,{max_chars}}}?"
+        )
+    honorific_periods = "|".join(
+        rf"(?<=\b{re.escape(honorific.removesuffix('.'))})\."
+        for honorific in honorifics
+    )
     return (
         rf"(?:(?!\b{_phrases(CLAUSE_BREAK_WORDS)}\b)(?!\s-)"
-        rf"[^.,;:!?\n—–]){{0,{max_chars}}}?"
+        rf"(?:[^.,;:!?\n—–]|{honorific_periods})){{0,{max_chars}}}?"
     )
 
 
@@ -984,6 +1348,32 @@ NOUN_WORD_MAX_CHARS = 20
 # A word begins and ends with a word character, a hyphen only inside it: a
 # spaced hyphen is a dash, never a word ("from your records - June 5, 2027").
 NOUN_WORD = rf"\w(?:[\w-]{{0,{NOUN_WORD_MAX_CHARS - 2}}}\w)?"
+# The attribution object stays within one clause, while these four periods are
+# admitted as the words "Mr.", "Ms.", "Mrs.", and "Dr.".
+ATTRIBUTION_OBJECT_GAP = _no_clause_break(
+    MAX_GAP_CHARS, honorifics=ATTRIBUTION_HONORIFICS
+)
+ATTRIBUTION_FORM_SOURCE = (
+    rf"(?:"
+    rf"{DETERMINER}(?:{NOUN_WORD}{SP})?"
+    rf"\b{_phrases(ATTRIBUTION_ACTOR_SUBJECTS)}\b"
+    rf"(?:{APOSTROPHE}s)?{SP}"
+    rf"(?:\b{_phrases(ATTRIBUTION_AUXILIARIES)}\b{SP})?"
+    rf"(?:\b{_phrases(ATTRIBUTION_ADVERBS)}\b{SP})?"
+    rf"\b{_phrases(ATTRIBUTION_PAST_VERBS)}\b{SP}{ATTRIBUTION_OBJECT_GAP}"
+    rf"|"
+    rf"{DETERMINER}(?:{NOUN_WORD}{SP})?"
+    rf"\b{_phrases(ATTRIBUTION_DOCUMENT_SUBJECTS)}\b"
+    rf"(?:{APOSTROPHE}s)?{SP}"
+    rf"(?:\b{_phrases(ATTRIBUTION_AUXILIARIES)}\b{SP})?"
+    rf"(?:\b{_phrases(ATTRIBUTION_ADVERBS)}\b{SP})?"
+    rf"\b{_phrases((*ATTRIBUTION_PAST_VERBS, *ATTRIBUTION_PRESENT_VERBS))}\b"
+    rf"{SP}{ATTRIBUTION_OBJECT_GAP}"
+    rf")"
+)
+# End-anchored: a hit ends on the anchor's character, the window's last, so
+# one search decides and an earlier subject never hides a later one.
+ATTRIBUTION_FORM = re.compile(rf"{ATTRIBUTION_FORM_SOURCE}[\s\S]\Z", re.IGNORECASE)
 NOUN_PHRASE = rf"{NOUN_WORD}(?:{SP}{NOUN_WORD}){{0,2}}"
 SUBJECT_WORDS = 3
 POSSESSIVE_WORDS = 2
@@ -1268,6 +1658,24 @@ REFUSAL_PREFIX_REACH_CHARS = (
     + _longest_phrase(REFUSAL_VERBS)
     + SP_MAX_CHARS
 )
+# The attribution window covers its optional determiner and word, subject,
+# possessive, auxiliary, adverb, verb, object gap, and every intervening SP.
+ATTRIBUTION_REACH_CHARS = (
+    _longest_phrase(DETERMINER_WORDS)
+    + SP_MAX_CHARS
+    + NOUN_WORD_MAX_CHARS
+    + SP_MAX_CHARS
+    + _longest_phrase((*ATTRIBUTION_ACTOR_SUBJECTS, *ATTRIBUTION_DOCUMENT_SUBJECTS))
+    + len("’s")
+    + SP_MAX_CHARS
+    + _longest_phrase(ATTRIBUTION_AUXILIARIES)
+    + SP_MAX_CHARS
+    + _longest_phrase(ATTRIBUTION_ADVERBS)
+    + SP_MAX_CHARS
+    + _longest_phrase((*ATTRIBUTION_PAST_VERBS, *ATTRIBUTION_PRESENT_VERBS))
+    + SP_MAX_CHARS
+    + MAX_GAP_CHARS
+)
 RESTATEMENT_REACH_CHARS = (
     REFUSAL_PREFIX_REACH_CHARS + MAX_GAP_CHARS + FROM_DATE_PREFIX_REACH_CHARS
 )
@@ -1295,6 +1703,7 @@ class Pattern:
     needs_context: bool = False
     exclusion: re.Pattern[str] | None = None
     yields_to: tuple[str, ...] = ()
+    anchor: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1325,6 +1734,9 @@ class Family:
     # user supplied, exempts it (the sentence-credit echo or deadline
     # whether-count).
     echo_form: re.Pattern[str] | None = None
+    # The attribution form serves the Guidelines and sentence-credit families;
+    # the deadline family deliberately leaves this slot empty.
+    attribution_form: re.Pattern[str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1378,6 +1790,7 @@ def _compiled(
     needs_context: bool = False,
     exclusion: str | None = None,
     yields_to: tuple[str, ...] = (),
+    anchor: tuple[str, ...] = (),
 ) -> Pattern:
     return Pattern(
         pattern_id,
@@ -1385,6 +1798,7 @@ def _compiled(
         needs_context,
         re.compile(exclusion, re.IGNORECASE) if exclusion is not None else None,
         yields_to,
+        anchor,
     )
 
 
@@ -1411,6 +1825,17 @@ GUIDELINES_LEVEL_AND_CATEGORY_TO_RANGE_PATTERN = _compiled(
 )
 GUIDELINES_RANGE_ASSERTED_PATTERN = _compiled(
     "guidelines/range-asserted@1", GUIDELINES_RANGE_ASSERTED
+)
+GUIDELINES_LEVEL_TOTAL_PATTERN = _compiled(
+    "guidelines/level-total@1",
+    GUIDELINES_LEVEL_TOTAL,
+    anchor=("result",),
+)
+GUIDELINES_POINTS_TO_CATEGORY_PATTERN = _compiled(
+    "guidelines/points-to-category@1",
+    GUIDELINES_POINTS_TO_CATEGORY,
+    exclusion=GUIDELINES_POINT_LIST_EXCLUSION_SOURCE,
+    anchor=("category_after", "category_before"),
 )
 SENTENCE_CREDIT_RELEASE_DATE_PATTERN = _compiled(
     "sentence-credit/release-date@1", RELEASE_DATE_PATTERN_SOURCE
@@ -1458,12 +1883,12 @@ GUIDELINES_CONFIRMATION_ASK = (
     + r"|\bconfirm(?:ed|ation|s)?\b"
     + rf"|\bis{SP}(?:my|the|this|that|our){SP}(?:(?:guideline|advisory|applicable|sentencing){SP})?range\b"
     + rf"|\bis{SP}that{SP}(?:(?:right|correct){SP})?range\b"
-    + rf"|(?<![\w/]){GUIDELINES_FIGURE_SOURCE}(?![\w/])\s{{0,3}}\b(?:right|correct)\b\s{{0,3}}\?"
+    + rf"|(?<![\w/]){GUIDELINES_RANGE_OR_PAIR_SOURCE}(?![\w/])\s{{0,3}}\b(?:right|correct)\b\s{{0,3}}\?"
     + r")"
 )
 GUIDELINES_CONFIRMATION_CONTEXT = re.compile(
-    rf"(?:{GUIDELINES_FIGURE_SOURCE}[\s\S]{{0,120}}{GUIDELINES_CONFIRMATION_ASK}"
-    rf"|{GUIDELINES_CONFIRMATION_ASK}[\s\S]{{0,120}}{GUIDELINES_FIGURE_SOURCE})",
+    rf"(?:{GUIDELINES_RANGE_OR_PAIR_SOURCE}[\s\S]{{0,120}}{GUIDELINES_CONFIRMATION_ASK}"
+    rf"|{GUIDELINES_CONFIRMATION_ASK}[\s\S]{{0,120}}{GUIDELINES_RANGE_OR_PAIR_SOURCE})",
     re.IGNORECASE,
 )
 # The in-text confirmation shape is gated on that context: Guidelines
@@ -1686,14 +2111,27 @@ _GUIDELINES_CATEGORY_ROMANS = {
     "5": "V",
     "6": "VI",
 }
+_GUIDELINES_POINT_VALUE = re.compile(
+    rf"{MARK}(?P<value>\d{{1,2}}|{_phrases(NUMBER_COMPOUNDS)}|"
+    rf"{_phrases(NUMBER_WORDS)})(?:{SP}criminal{SP}history)?"
+    rf"{SP}points?{MARK}",
+    re.IGNORECASE,
+)
 
 
-def _normalised_guidelines_figure(found: str) -> str:
+def _category_roman(category: re.Match[str]) -> str:
+    value = category.group("value").upper()
+    return _GUIDELINES_CATEGORY_ROMANS.get(value, value)
+
+
+def _normalised_guidelines_figure(found: str) -> set[str]:
+    """The keys of one written figure: a pair keys its two components beside itself."""
+
     if GUIDELINES_RANGE_FORM.fullmatch(found) is not None:
         numbers = re.findall(r"\d{1,3}", found)
         if "life" in found.lower():
-            return f"{int(numbers[0])}-life"
-        return f"{int(numbers[0])}-{int(numbers[1])}"
+            return {f"{int(numbers[0])}-life"}
+        return {f"{int(numbers[0])}-{int(numbers[1])}"}
     shorthand = re.fullmatch(
         rf"\s*(\d{{1,2}}){GUIDELINES_OPTIONAL_SPACE}/{GUIDELINES_OPTIONAL_SPACE}"
         rf"(VI|IV|V|III|II|I)\s*",
@@ -1701,21 +2139,45 @@ def _normalised_guidelines_figure(found: str) -> str:
         re.IGNORECASE,
     )
     if shorthand is not None:
-        return f"{int(shorthand.group(1))}/{shorthand.group(2).upper()}"
+        level_value, category_roman = int(shorthand.group(1)), shorthand.group(2).upper()
+        return {
+            f"{level_value}/{category_roman}",
+            f"level-{level_value}",
+            f"category-{category_roman}",
+        }
+    stated_total = GUIDELINES_STATED_TOTAL_FORM.fullmatch(found)
+    if stated_total is not None:
+        return {f"level-{int(stated_total.group('result'))}"}
     level = _GUIDELINES_LEVEL_VALUE.search(found)
     category = _GUIDELINES_CATEGORY_VALUE.search(found)
-    if level is None or category is None:
-        return found
-    category_value = category.group("value").upper()
-    category_roman = _GUIDELINES_CATEGORY_ROMANS.get(category_value, category_value)
-    return f"{int(level.group('value'))}/{category_roman}"
+    if level is not None and category is not None:
+        level_value, category_roman = int(level.group("value")), _category_roman(category)
+        return {
+            f"{level_value}/{category_roman}",
+            f"level-{level_value}",
+            f"category-{category_roman}",
+        }
+    if level is not None:
+        return {f"level-{int(level.group('value'))}"}
+    if category is not None:
+        return {f"category-{_category_roman(category)}"}
+    point_count = _GUIDELINES_POINT_VALUE.fullmatch(found)
+    if point_count is not None:
+        number = point_count.group("value")
+        canonical_number = NUMBER_WORD_VALUES.get(number.lower(), number)
+        return {f"{canonical_number}-point"}
+    return {found}
 
 
 def normalized_figures(text: str) -> frozenset[str]:
-    return frozenset(
-        _normalised_guidelines_figure(match.group(0))
-        for match in GUIDELINES_FIGURE.finditer(text)
+    figures: set[str] = set()
+    for match in GUIDELINES_FIGURE.finditer(text):
+        figures.update(_normalised_guidelines_figure(match.group(0)))
+    figures.update(
+        f"level-{int(match.group('result'))}"
+        for match in GUIDELINES_CHAINED_TOTAL_FORM.finditer(text)
     )
+    return frozenset(figures)
 
 
 QUESTION_FORM, REFUSAL_FORM, THAT_CLAUSE, FROM_DATE_FORM = _build_constructions(
@@ -1749,10 +2211,12 @@ GUIDELINES_FAMILY = Family(
         GUIDELINES_LEVEL_AND_CATEGORY_TO_RANGE_PATTERN,
         GUIDELINES_RANGE_ASSERTED_PATTERN,
         GUIDELINES_RANGE_CONFIRMED_PATTERN,
+        GUIDELINES_LEVEL_TOTAL_PATTERN,
+        GUIDELINES_POINTS_TO_CATEGORY_PATTERN,
     ),
-    pattern_set_version=1,
+    pattern_set_version=2,
     figure_form=GUIDELINES_FIGURE,
-    reverse_form=GUIDELINES_RANGE_FORM,
+    reverse_form=GUIDELINES_REVERSE_FORM,
     figures=normalized_figures,
     figure_nouns=GUIDELINES_FIGURE_NOUNS,
     constructions=(
@@ -1762,6 +2226,7 @@ GUIDELINES_FAMILY = Family(
         GUIDELINES_FROM_DATE_FORM,
     ),
     confirmation=(GUIDELINES_CONFIRMATION_CONTEXT, "guidelines/range-confirmed@1"),
+    attribution_form=ATTRIBUTION_FORM,
 )
 SENTENCE_CREDIT_QUESTION_FORM, SENTENCE_CREDIT_REFUSAL_FORM, SENTENCE_CREDIT_THAT_CLAUSE, SENTENCE_CREDIT_FROM_DATE_FORM = _build_constructions(
     SENTENCE_FIGURE, SENTENCE_FIGURE_NOUNS
@@ -1792,6 +2257,7 @@ SENTENCE_CREDIT_FAMILY = Family(
     ),
     confirmation_displaces=("deadline",),
     echo_form=SENTENCE_CREDIT_ECHO_FORM,
+    attribution_form=ATTRIBUTION_FORM,
 )
 FAMILIES = (DEADLINE_FAMILY, GUIDELINES_FAMILY, SENTENCE_CREDIT_FAMILY)
 # Every family's refusal in family order — the one export the tools read to
@@ -1850,6 +2316,23 @@ def _is_restatement(
         if span_start <= figure_start and figure_end <= span_end:
             return AFFIRMATION_NEAR.search(after[:30]) is None
     return False
+
+
+def _is_attributed(
+    text: str, match: re.Match[str], pattern: Pattern, family: Family
+) -> bool:
+    """Whether a family's attribution form reaches this pattern's anchor."""
+
+    if family.attribution_form is None:
+        return False
+    anchor = match.start()
+    for name in pattern.anchor:
+        span = match.span(name)
+        if span != (-1, -1):
+            anchor = span[0]
+            break
+    window = text[max(0, anchor - ATTRIBUTION_REACH_CHARS) : anchor + 1]
+    return family.attribution_form.search(window) is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1915,6 +2398,10 @@ def judge_text(
                 if match.end() <= since:
                     continue
                 if prefix and match.end() + RESTATEMENT_LOOKAHEAD_CHARS > len(text):
+                    continue
+                if _is_attributed(text, match, pattern, family):
+                    # An authority's figure: no trip, no constraint, as an
+                    # exclusion's hit rejects.
                     continue
                 found = family.figures(match.group(0))
                 if not found or not found <= family_supplied:
