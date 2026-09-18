@@ -27,6 +27,7 @@ tests/test_skills_vendored.py export-ignore
 tests/test_evidence_hygiene.py export-ignore
 tests/test_release_git.py export-ignore
 tests/test_worktree_claim.py export-ignore
+tests/test_worktree_remove.py export-ignore
 tests/test_trip.py export-ignore
 tests/test_release_export.py export-ignore
 eval/seed/prototype-qa/ export-ignore

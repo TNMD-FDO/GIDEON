@@ -35,6 +35,7 @@ EXCLUDED_PREFIXES = (
     "tests/test_evidence_hygiene.py",  # the tracker assets' secret check
     "tests/test_release_git.py",  # bin/release-git's tests
     "tests/test_worktree_claim.py",  # bin/worktree-claim's tests
+    "tests/test_worktree_remove.py",  # bin/worktree-remove's tests
     "tests/test_trip.py",  # bin/trip's tests
     "tests/test_release_export.py",  # bin/release-export's tests
     "eval/seed/prototype-qa",  # harvested QA data pending a CSA ruling

@@ -10,6 +10,7 @@ history at commit f06e83f. User-facing notes for every tag from `v0.2.0` live un
 `docs/release-notes/`, and `tests/test_release_records.py` holds this index
 complete, ordered, and dated from the release files.
 
+- [v0.2.1](docs/2-changelog/w3_v0.2.1.md) — 2026-09-18 — the box's install home is /opt/gideon (slice-1 84)
 - [v0.2.0](docs/2-changelog/w3_v0.2.0.md) — 2026-09-18 — the pre-launch release; slice 1 closes (slice-1 18)
 - [v0.1.82](docs/2-changelog/w3_v0.1.82.md) — 2026-09-18 — General's texts refer a user nowhere (slice-1 83)
 - [v0.1.81](docs/2-changelog/w3_v0.1.81.md) — 2026-09-17 — backup, push, and restore share one lock (slice-0 26)
