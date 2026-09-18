@@ -673,6 +673,101 @@ class TurnHarness(TestCase):
                     ("replaced", None, expected),
                 )
 
+    def test_stream_suffix_replacement_keeps_the_cancelled_message_shape(self) -> None:
+        prefix = "The governing doctrine explains the applicable rule."
+        for refusal in self.guardrail.REFUSALS:
+            with self.subTest(refusal=refusal):
+                content = prefix + "\n\n" + refusal
+                assistant = {
+                    "content": content,
+                    "output": [
+                        {
+                            "type": "reasoning",
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": self.guardrail.REASONING_PLACEHOLDER,
+                                }
+                            ],
+                        },
+                        {
+                            "type": "message",
+                            "content": [{"type": "output_text", "text": content}],
+                        },
+                    ],
+                }
+                verdict = classify.classify(
+                    self.guardrail,
+                    assistant,
+                    {"role": "user", "content": "Explain the general doctrine."},
+                )
+                self.assertEqual(
+                    (verdict.kind, verdict.pattern_id, verdict.tripped_in),
+                    ("replaced", None, "stream"),
+                )
+                self.assertTrue(verdict.block_present)
+                self.assertFalse(verdict.reasoning_stored)
+                judgement = classify.judge_case(
+                    cases.Case("cancel", "prompt", "recorded"),
+                    verdict,
+                    content,
+                    record="the record",
+                )
+                self.assertIn("replaced (in the stream); block present", judgement.detail)
+
+    def test_stream_suffix_prefix_computations_are_leaks_with_loaded_patterns(self) -> None:
+        seed_paths = (
+            SEED_PATH,
+            GUIDELINES_SEED_PATH,
+            SENTENCE_CREDIT_SEED_PATH,
+        )
+        for seed_path, refusal in zip(seed_paths, self.guardrail.REFUSALS, strict=True):
+            document = yaml.safe_load(seed_path.read_text(encoding="utf-8"))
+            positive = next(
+                case
+                for case in document["cases"]
+                if isinstance(case, dict) and case.get("kind") == "positive"
+            )
+            prefix = cast(str, positive["answer"])
+            content = prefix + "\n\n" + refusal
+            assistant = {
+                "content": content,
+                "output": [
+                    {
+                        "type": "reasoning",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": self.guardrail.REASONING_PLACEHOLDER,
+                            }
+                        ],
+                    },
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": content}],
+                    },
+                ],
+            }
+            with self.subTest(seed=seed_path.name, case=positive["id"]):
+                verdict = classify.classify(
+                    self.guardrail,
+                    assistant,
+                    {"role": "user", "content": cast(str, positive["prompt"])},
+                )
+                self.assertEqual(verdict.kind, "leak")
+                self.assertEqual(verdict.pattern_id, positive["pattern"])
+                self.assertTrue(verdict.block_present)
+
+    def test_stream_suffix_helper_normalizes_separator_whitespace(self) -> None:
+        prefix = "safe doctrinal prefix"
+        refusal = self.guardrail.DEADLINE_REFUSAL
+        for separator in ("\n\n", " ", "\t\r\n"):
+            with self.subTest(separator=repr(separator)):
+                self.assertEqual(
+                    classify._replacement_prefix(self.guardrail, prefix + separator + refusal),
+                    prefix,
+                )
+
     def test_answered_and_leak_expectations(self) -> None:
         frontend = Frontend(
             self.guardrail,

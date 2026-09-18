@@ -826,6 +826,9 @@ class BrowserTurnIntegration(TestCase):
         self.assertEqual(record["browser"]["states"][0]["tripped"], None)
         self.assertFalse(record["browser"]["states"][0]["block_text"])
         self.assertIsNone(record["browser"]["reasoning_painted_at"])
+        self.assertIsNone(record["browser"]["refused_index"])
+        self.assertIsNone(record["browser"]["refused_at"])
+        self.assertEqual(record["browser"]["ended_at"], 0.0)
         self.assertFalse(record["verdict"]["reasoning_stored"])
         self.assertEqual(set(record["browser"]["texts"]), {"0"})
 
@@ -1374,8 +1377,8 @@ class BrowserTurnIntegration(TestCase):
 
     def test_live_verdict_uses_the_first_painted_state_as_zero(self) -> None:
         pattern = "deadline/date-near-deadline-word@1"
-        tripped = browser.LiveEntry(1000.0, "Thinking", True, 0, 28, False, False, pattern, False)
-        replaced = browser.LiveEntry(1250.0, "Answer", False, 0, 90, False, False, None, True)
+        tripped = browser.LiveEntry(1000.0, "Thinking", True, 0, 28, False, False, pattern, False, False)
+        replaced = browser.LiveEntry(1250.0, "Answer", False, 0, 90, False, False, None, True, True)
         verdict = classify.live_verdict((tripped, replaced))
         self.assertEqual(verdict.first_trip_index, 0)
         self.assertEqual(verdict.trips, (pattern, None))
@@ -1387,18 +1390,70 @@ class BrowserTurnIntegration(TestCase):
             classify.live_field(verdict), f"live: {pattern} at 0.0s, replaced at 0.2s"
         )
 
-        gone = browser.LiveEntry(1400.0, "Answer", False, 0, 12, False, False, None, False)
+        gone = browser.LiveEntry(1400.0, "Answer", False, 0, 12, False, False, None, False, False)
         verdict = classify.live_verdict((tripped, gone))
         self.assertEqual(verdict.gone_index, 1)
         self.assertEqual(classify.live_field(verdict), f"live: {pattern} at 0.0s, gone at 0.4s")
         self.assertFalse(classify.live_fails(verdict, False))
         self.assertTrue(classify.live_fails(verdict, True))
 
-        still = browser.LiveEntry(1400.0, "Answer", False, 0, 28, False, False, pattern, False)
+        still = browser.LiveEntry(1400.0, "Answer", False, 0, 28, False, False, pattern, False, False)
         verdict = classify.live_verdict((tripped, still))
         self.assertTrue(verdict.on_screen_at_end)
         self.assertEqual(classify.live_field(verdict), f"live: {pattern} at 0.0s, on screen at end")
         self.assertTrue(classify.live_fails(verdict, False))
+
+    def test_refusal_predicate_accepts_a_stream_suffix_and_rejects_a_prefix(self) -> None:
+        guardrail = classify.load_guardrail(ROOT)
+        is_refusal = classify.refusal_test(guardrail)
+        for refusal in guardrail.REFUSALS:
+            with self.subTest(refusal=refusal):
+                self.assertTrue(is_refusal("safe doctrinal prefix\n\n" + refusal))
+                self.assertFalse(is_refusal("safe doctrinal prefix"))
+
+    def test_clean_stream_refusal_records_its_first_and_last_painted_times(self) -> None:
+        guardrail = classify.load_guardrail(ROOT)
+        refusal = guardrail.DEADLINE_REFUSAL
+        watch = browser._Watch(
+            classify.live_judge(guardrail, "Explain the general doctrine."),
+            classify.refusal_test(guardrail),
+        )
+        watch.take_frames(
+            (
+                browser_frame(1000.0, "safe doctrinal prefix"),
+                browser_frame(1250.0, "safe doctrinal prefix\n\n" + refusal),
+                browser_frame(1500.0, "safe doctrinal prefix\n\n" + refusal),
+            )
+        )
+        verdict = classify.live_verdict(watch.entries)
+        self.assertIsNone(verdict.first_trip_index)
+        self.assertEqual(verdict.refused_index, 1)
+        self.assertEqual(verdict.refused_at, 0.25)
+        self.assertEqual(verdict.ended_at, 0.5)
+        self.assertEqual(
+            classify.live_field(verdict),
+            "live: clean, refused at 0.2s, ended at 0.5s",
+        )
+
+    def test_stream_prefix_refusal_keeps_trip_on_screen_at_end(self) -> None:
+        guardrail = classify.load_guardrail(ROOT)
+        refusal = guardrail.DEADLINE_REFUSAL
+        answer = "the deadline is June 5, 2027"
+        watch = browser._Watch(
+            classify.live_judge(guardrail, "Explain the rule."),
+            classify.refusal_test(guardrail),
+        )
+        watch.take_frames(
+            (
+                browser_frame(1000.0, answer),
+                browser_frame(1250.0, answer + "\n\n" + refusal),
+            )
+        )
+        verdict = classify.live_verdict(watch.entries)
+        self.assertEqual(verdict.replaced_index, 1)
+        self.assertTrue(verdict.on_screen_at_end)
+        self.assertTrue(classify.live_fails(verdict, False))
+        self.assertIn("replaced at 0.2s, on screen at end", classify.live_field(verdict))
 
     def test_flash_fails_under_the_shared_stream_policy(self) -> None:
         guardrail = classify.load_guardrail(ROOT)

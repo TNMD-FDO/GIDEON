@@ -52,6 +52,7 @@ class LiveEntry:
     block_extended: bool
     answer_extended: bool
     tripped: str | None
+    refused: bool
     replaced: bool
     # A frame the browser painted, or the regions read directly at the end.
     painted: bool = True
@@ -362,12 +363,14 @@ class _Watch:
         self._expanded = False
         self._instant = 0.0
         self._tripped_once = False
+        self._refused_once = False
         self._replaced_once = False
         self._reasoning_once = False
 
     def take(self, state: LiveState, *, painted: bool = True) -> None:
         tripped = self._judge(state.block, state.answer)
-        replaced = self._tripped_once and self._is_replacement(state.answer)
+        refused = self._is_replacement(state.answer)
+        replaced = self._tripped_once and refused
         index = len(self.entries)
         self.entries.append(
             LiveEntry(
@@ -379,6 +382,7 @@ class _Watch:
                 block_extended=state.block_extended,
                 answer_extended=state.answer_extended,
                 tripped=tripped,
+                refused=refused,
                 replaced=replaced,
                 painted=painted,
                 block_text=bool(state.block.strip()),
@@ -386,6 +390,9 @@ class _Watch:
         )
         if tripped is not None and not self._tripped_once:
             self._tripped_once = True
+            self.texts[index] = (state.block, state.answer)
+        if refused and not self._refused_once:
+            self._refused_once = True
             self.texts[index] = (state.block, state.answer)
         if replaced and not self._replaced_once:
             self._replaced_once = True
@@ -450,7 +457,8 @@ def turn(
     *judge* answers a pattern id or ``None`` for a block text and an answer,
     the block ignored since the Filter withholds the reasoning (the block's
     text beyond whitespace is the withholding check's flag, not the judge's);
-    *is_replacement* says whether an answer is the guardrail's refusal.
+    *is_replacement* says whether an answer is the guardrail's refusal, alone
+    or after a prefix and the stream separator.
     The pause between drains is the page's own (:meth:`Page.sleep`), never a
     bare sleep: the routed requests the page makes meanwhile are serviced only
     while the driver is inside a page call, so a Python sleep would freeze the

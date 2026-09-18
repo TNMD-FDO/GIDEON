@@ -10,6 +10,7 @@ history at commit f06e83f. User-facing notes for every tag from `v0.2.0` live un
 `docs/release-notes/`, and `tests/test_release_records.py` holds this index
 complete, ordered, and dated from the release files.
 
+- [v0.1.80](docs/2-changelog/w3_v0.1.80.md) — 2026-09-17 — a stream trip cancels its turn (slice-1 52)
 - [v0.1.79](docs/2-changelog/w3_v0.1.79.md) — 2026-09-17 — restore re-owns the old gideon by name (slice-0 25)
 - [v0.1.78](docs/2-changelog/w3_v0.1.78.md) — 2026-09-17 — a fresh stack skips its pre-restore set (slice-0 24)
 - [v0.1.77](docs/2-changelog/w3_v0.1.77.md) — 2026-09-17 — clean-VM full restore form (slice-0 20)

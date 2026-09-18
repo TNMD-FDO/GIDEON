@@ -1,6 +1,7 @@
 """The arithmetic guardrail's detector, stream, outlet, and contract tests."""
 
 import ast
+import asyncio
 import contextlib
 import copy
 import importlib.util
@@ -253,6 +254,136 @@ class FakeStream:
             "body": body,
             "body_before": body_before,
             "returned_body": returned_body,
+        }
+
+    @classmethod
+    def run_task(
+        cls,
+        prompt: str,
+        thinking: str,
+        answer: str,
+        granularity: int,
+        *,
+        usage: bool = False,
+        finish: bool = True,
+        metadata: dict[str, object] | None = None,
+        before_chunk: Callable[[int], None] | None = None,
+    ) -> dict[str, Any]:
+        request_metadata: dict[str, object] = (
+            metadata
+            if metadata is not None
+            else {
+                "session_id": "fake-session",
+                "chat_id": "fake-chat",
+                FILTER.TASK_ID_KEY: "fake-task",
+            }
+        )
+        stream_filter, request_metadata = cls.start(
+            prompt, metadata=request_metadata
+        )
+        released = {"reasoning": "", "content": ""}
+        observations: list[dict[str, object]] = []
+        refusal_count = 0
+        emitted_refusals: list[str] = []
+        tripped_at: int | None = None
+        chunks = cls.chunks(thinking, answer, granularity, usage=usage, finish=finish)
+        result_container: dict[str, Any] = {
+            "observations": observations,
+            "cancel_landed_at": None,
+            "outlet_called": False,
+            "returned_body": None,
+        }
+
+        async def drive() -> None:
+            nonlocal refusal_count, tripped_at
+            index = -1
+            task = asyncio.current_task()
+            assert task is not None
+            try:
+                for index, chunk in enumerate(chunks):
+                    if before_chunk is not None:
+                        before_chunk(index)
+                    original = copy.deepcopy(chunk)
+                    returned = stream_filter.stream(chunk, request_metadata)
+                    delta: dict[str, object] = {}
+                    if (
+                        isinstance(returned, dict)
+                        and isinstance(returned.get("choices"), list)
+                        and returned["choices"]
+                    ):
+                        choice = returned["choices"][0]
+                        if isinstance(choice, dict) and isinstance(
+                            choice.get("delta"), dict
+                        ):
+                            delta = choice["delta"]
+                    for key in released:
+                        value = delta.get(key)
+                        if isinstance(value, str):
+                            if any(refusal in value for refusal in FILTER.REFUSALS):
+                                emitted_refusals.extend(
+                                    refusal
+                                    for refusal in FILTER.REFUSALS
+                                    if refusal in value
+                                )
+                                refusal_count += sum(
+                                    value.count(refusal) for refusal in FILTER.REFUSALS
+                                )
+                            else:
+                                released[key] += value
+                    state = request_metadata[FILTER.STREAM_STATE_KEY]
+                    assert isinstance(state, dict)
+                    if tripped_at is None and state.get("trip") is not None:
+                        tripped_at = index
+                    observations.append(
+                        {
+                            "input": original,
+                            "output": copy.deepcopy(returned),
+                            "delta": copy.deepcopy(delta),
+                            "released": dict(released),
+                            "text_state": copy.deepcopy(state["content"]),
+                            "tripped": state.get("trip") is not None,
+                            "cancelling": task.cancelling(),
+                        }
+                    )
+                    await asyncio.sleep(0)
+            except asyncio.CancelledError:
+                result_container["cancel_landed_at"] = index
+                result_container["state"] = request_metadata[FILTER.STREAM_STATE_KEY]
+                return
+
+            body = case_body(
+                {
+                    "prompt": prompt,
+                    "thinking": released["reasoning"],
+                    "answer": released["content"],
+                }
+            )
+            body_before = copy.deepcopy(body)
+            state = request_metadata[FILTER.STREAM_STATE_KEY]
+            result_container["state"] = state
+            result_container["body"] = body
+            result_container["body_before"] = body_before
+            result_container["returned_body"] = stream_filter.outlet(
+                body, request_metadata
+            )
+            result_container["outlet_called"] = True
+
+        asyncio.run(drive())
+        return {
+            "filter": stream_filter,
+            "metadata": request_metadata,
+            "chunks": chunks,
+            "observations": observations,
+            "released": released,
+            "refusal_count": refusal_count,
+            "emitted_refusals": emitted_refusals,
+            "tripped_at": tripped_at,
+            "state": result_container["state"],
+            "body": result_container.get("body"),
+            "body_before": result_container.get("body_before"),
+            "returned_body": result_container["returned_body"],
+            "outlet_called": result_container["outlet_called"],
+            "cancel_landed_at": result_container["cancel_landed_at"],
         }
 
 
@@ -2474,6 +2605,314 @@ class BoundsAndHygiene(unittest.TestCase):
             self.assertNotRegex(regex.pattern, r"(?:\*|\+|\{\d+,\})")
 
 
+class StreamCancellation(unittest.TestCase):
+    """The task-form stream proves browser cancellation after a trip (spec §16)."""
+
+    CLEAN_TAIL = (
+        " The governing doctrine explains the applicable rule and the record; "
+        "the applicable procedure should be followed carefully."
+    ) * 4
+    CLEAN_ANSWER = (
+        "The governing doctrine explains the applicable rule and the record. "
+    ) * 8
+
+    @staticmethod
+    def _positive_case() -> dict[str, object]:
+        return next(
+            case
+            for path, _document in seed_documents()
+            for case in seed_cases(path)
+            if case["kind"] == "positive"
+        )
+
+    @staticmethod
+    def _run_with_dispatch(
+        prompt: str,
+        thinking: str,
+        answer: str,
+        granularity: int,
+        *,
+        metadata: dict[str, object] | None = None,
+    ) -> tuple[dict[str, Any], list[tuple[int, Any]]]:
+        current_chunk = [-1]
+        dispatches: list[tuple[int, Any]] = []
+
+        def mark_chunk(index: int) -> None:
+            current_chunk[0] = index
+
+        def dispatch(row: Any) -> None:
+            dispatches.append((current_chunk[0], row))
+
+        with patch.object(FILTER, "dispatch_trip_row", side_effect=dispatch):
+            result = FakeStream.run_task(
+                prompt,
+                thinking,
+                answer,
+                granularity,
+                usage=True,
+                metadata=metadata,
+                before_chunk=mark_chunk,
+            )
+        return result, dispatches
+
+    def _assert_cancelled(
+        self, result: dict[str, Any], dispatches: list[tuple[int, Any]]
+    ) -> None:
+        observations = result["observations"]
+        cancel_indices = [
+            index
+            for index, observation in enumerate(observations)
+            if observation["output"] is None
+        ]
+        self.assertEqual(len(cancel_indices), 1)
+        cancel_index = cancel_indices[0]
+        trip_index = result["tripped_at"]
+        self.assertIsInstance(trip_index, int)
+        assert isinstance(trip_index, int)
+        self.assertLess(trip_index, cancel_index)
+        trip_observation = observations[trip_index]
+        trip_delta = trip_observation["delta"]
+        self.assertIsInstance(trip_delta, dict)
+        assert isinstance(trip_delta, dict)
+        trip = result["state"]["trip"]
+        self.assertIsInstance(trip, dict)
+        assert isinstance(trip, dict)
+        family = trip["family"]
+        self.assertIsInstance(family, str)
+        assert isinstance(family, str)
+        refusal = FILTER.REFUSAL_BY_FAMILY[family]
+        content = trip_delta.get("content")
+        self.assertIsInstance(content, str)
+        assert isinstance(content, str)
+        self.assertIn(refusal, content)
+        cancel_observation = observations[cancel_index]
+        self.assertTrue(FILTER._is_generating_choice(cancel_observation["input"]))
+        self.assertEqual(cancel_observation["cancelling"], 1)
+        self.assertTrue(
+            all(observation["cancelling"] == 0 for observation in observations[:cancel_index])
+        )
+        self.assertEqual(result["cancel_landed_at"], cancel_index)
+        self.assertEqual(len(observations), cancel_index + 1)
+        self.assertEqual(len(dispatches), 1)
+        self.assertLess(dispatches[0][0], cancel_index)
+        self.assertFalse(result["outlet_called"])
+        self.assertIsNone(result["returned_body"])
+        self.assertTrue(result["state"]["cancel_requested"])
+
+    def _assert_finish_trip(
+        self, result: dict[str, Any], dispatches: list[tuple[int, Any]]
+    ) -> None:
+        self.assertIsNone(result["cancel_landed_at"])
+        self.assertFalse(result["state"]["cancel_requested"])
+        self.assertTrue(result["outlet_called"])
+        self.assertEqual(
+            [observation for observation in result["observations"] if observation["output"] is None],
+            [],
+        )
+        usage_observations = [
+            observation
+            for observation in result["observations"]
+            if observation["input"].get("choices") == []
+        ]
+        self.assertEqual(len(usage_observations), 1)
+        self.assertEqual(usage_observations[0]["output"], usage_observations[0]["input"])
+        self.assertEqual(len(dispatches), 1)
+        body = result["returned_body"]
+        self.assertIsInstance(body, dict)
+        assert isinstance(body, dict)
+        message = body["messages"][-1]
+        self.assertIsInstance(message, dict)
+        assert isinstance(message, dict)
+        trip = result["state"]["trip"]
+        self.assertIsInstance(trip, dict)
+        assert isinstance(trip, dict)
+        self.assertEqual(message["content"], FILTER.REFUSAL_BY_FAMILY[trip["family"]])
+        self.assertEqual(len(message["output"]), 1)
+
+    def test_one_padded_positive_cancels_the_turn_after_its_trip(self) -> None:
+        """The cancel itself, on one case, so the default gate carries the mechanism.
+
+        The whole-seed sweep below is slow-marked; this case keeps the padded
+        cancel — the trip, the dropped chunk, the landing, no outlet — in the
+        gate every run makes.
+        """
+
+        case = self._positive_case()
+        result, dispatches = self._run_with_dispatch(
+            str(case["prompt"]),
+            str(case.get("thinking") or ""),
+            str(case["answer"]) + self.CLEAN_TAIL,
+            7,
+        )
+        self._assert_cancelled(result, dispatches)
+
+    @pytest.mark.slow
+    def test_positive_streams_cancel_after_a_trip_and_match_finish_verdict(self) -> None:
+        for path, _document in seed_documents():
+            for case in seed_cases(path):
+                if case["kind"] != "positive":
+                    continue
+                for granularity in (1, 7, 0):
+                    with self.subTest(
+                        seed=path.name, case=case["id"], granularity=granularity
+                    ):
+                        prompt = str(case["prompt"])
+                        thinking = str(case.get("thinking") or "")
+                        answer = str(case["answer"])
+                        unpadded, unpadded_dispatches = self._run_with_dispatch(
+                            prompt, thinking, answer, granularity
+                        )
+                        padded, padded_dispatches = self._run_with_dispatch(
+                            prompt,
+                            thinking,
+                            answer + self.CLEAN_TAIL,
+                            granularity,
+                        )
+                        unpadded_trip = unpadded["state"]["trip"]
+                        padded_trip = padded["state"]["trip"]
+                        self.assertIsInstance(unpadded_trip, dict)
+                        self.assertIsInstance(padded_trip, dict)
+                        assert isinstance(unpadded_trip, dict)
+                        assert isinstance(padded_trip, dict)
+                        trip_index = unpadded["tripped_at"]
+                        self.assertIsInstance(trip_index, int)
+                        assert isinstance(trip_index, int)
+                        trip_input = unpadded["observations"][trip_index]["input"]
+                        choices = trip_input.get("choices")
+                        self.assertIsInstance(choices, list)
+                        assert isinstance(choices, list)
+                        trip_choice = choices[0]
+                        self.assertIsInstance(trip_choice, dict)
+                        assert isinstance(trip_choice, dict)
+                        # A finish-only trip is judged after the prefix look-ahead.  If
+                        # padding lets a context-gated confirmation trip before finish,
+                        # the loaded seed pattern remains the authoritative identity;
+                        # content trips must keep the same pattern through padding.
+                        self.assertEqual(unpadded_trip["family"], padded_trip["family"])
+                        self.assertEqual(unpadded_trip["pattern_id"], case["pattern"])
+                        if trip_choice.get("finish_reason") is None:
+                            self.assertEqual(
+                                padded_trip["pattern_id"], unpadded_trip["pattern_id"]
+                            )
+                        self._assert_cancelled(padded, padded_dispatches)
+                        later_generating = any(
+                            FILTER._is_generating_choice(observation["input"])
+                            for observation in unpadded["observations"][trip_index + 1 :]
+                        )
+                        if (
+                            trip_choice.get("finish_reason") is not None
+                            or not later_generating
+                        ):
+                            self._assert_finish_trip(unpadded, unpadded_dispatches)
+                        else:
+                            self._assert_cancelled(unpadded, unpadded_dispatches)
+
+    def test_clean_task_has_no_cancel_or_exception(self) -> None:
+        result = FakeStream.run_task(
+            "Explain finality.", "", self.CLEAN_ANSWER, 1, usage=True
+        )
+        self.assertIsNone(result["cancel_landed_at"])
+        self.assertFalse(result["state"]["cancel_requested"])
+        self.assertTrue(result["outlet_called"])
+        self.assertTrue(
+            all(observation["cancelling"] == 0 for observation in result["observations"])
+        )
+
+    def test_only_usage_after_a_finish_trip_does_not_cancel(self) -> None:
+        for path, _document in seed_documents():
+            for case in seed_cases(path):
+                if case["kind"] != "positive":
+                    continue
+                result, dispatches = self._run_with_dispatch(
+                    str(case["prompt"]),
+                    str(case.get("thinking") or ""),
+                    str(case["answer"]),
+                    1,
+                )
+                trip_index = result["tripped_at"]
+                if trip_index is None:
+                    continue
+                trip_input = result["observations"][trip_index]["input"]
+                trip_choice = trip_input["choices"][0]
+                if trip_choice.get("finish_reason") is None:
+                    continue
+                self._assert_finish_trip(result, dispatches)
+                return
+        self.fail("the loaded positive seeds contain no finish-chunk trip")
+
+    def test_missing_task_id_scrubs_post_trip_chunks_without_cancel(self) -> None:
+        case = self._positive_case()
+        result, dispatches = self._run_with_dispatch(
+            str(case["prompt"]),
+            str(case.get("thinking") or ""),
+            str(case["answer"]) + self.CLEAN_TAIL,
+            7,
+            metadata={"session_id": "fake-session", "chat_id": "fake-chat"},
+        )
+        self.assertIsNone(result["cancel_landed_at"])
+        self.assertFalse(result["state"]["cancel_requested"])
+        self.assertTrue(result["outlet_called"])
+        self.assertEqual(len(dispatches), 1)
+        trip_index = result["tripped_at"]
+        self.assertIsInstance(trip_index, int)
+        assert isinstance(trip_index, int)
+        for observation in result["observations"][trip_index + 1 :]:
+            self.assertIsNotNone(observation["output"])
+
+    def test_plain_driver_without_a_loop_does_not_cancel(self) -> None:
+        case = self._positive_case()
+        result = FakeStream.run(
+            str(case["prompt"]),
+            str(case.get("thinking") or ""),
+            str(case["answer"]) + self.CLEAN_TAIL,
+            7,
+            usage=True,
+        )
+        self.assertFalse(result["state"]["cancel_requested"])
+        self.assertTrue(all(observation["output"] is not None for observation in result["observations"]))
+        message = result["returned_body"]["messages"][-1]
+        self.assertEqual(len(message["output"]), 1)
+
+    def test_false_cancel_receives_metadata_and_scrubs_the_chunk(self) -> None:
+        case = self._positive_case()
+        with patch.object(FILTER, "_cancel_current_task", return_value=False) as cancel:
+            result = FakeStream.run_task(
+                str(case["prompt"]),
+                str(case.get("thinking") or ""),
+                str(case["answer"]) + self.CLEAN_TAIL,
+                7,
+                usage=True,
+            )
+        cancel.assert_called()
+        self.assertIs(cancel.call_args.args[0], result["metadata"])
+        trip_index = result["tripped_at"]
+        self.assertIsInstance(trip_index, int)
+        assert isinstance(trip_index, int)
+        generating = next(
+            observation
+            for observation in result["observations"][trip_index + 1 :]
+            if FILTER._is_generating_choice(observation["input"])
+        )
+        self.assertIsNotNone(generating["output"])
+        output = generating["output"]
+        self.assertIsInstance(output, dict)
+        assert isinstance(output, dict)
+        delta = output["choices"][0]["delta"]
+        self.assertEqual(delta["content"], "")
+
+    def test_cancel_state_repr_is_content_free_and_requires_the_new_key(self) -> None:
+        state = FILTER.StreamState({}, frozenset())
+        distinctive = "FICTITIOUS_STREAM_CONTENT"
+        state["content"]["text"] = distinctive
+        rendered = repr(state)
+        self.assertIn("cancel_requested=False", rendered)
+        self.assertNotIn(distinctive, rendered)
+        incomplete = dict(state)
+        incomplete.pop("cancel_requested")
+        self.assertIsNone(FILTER._stream_state(incomplete))
+        self.assertFalse(FILTER._cancel_current_task({FILTER.TASK_ID_KEY: "fake-task"}))
+
+
 class Stream(unittest.TestCase):
     """The fake Chat Completions stream proves withholding, transitions, and fail-closed shapes."""
 
@@ -2650,6 +3089,7 @@ class Stream(unittest.TestCase):
                     "content",
                     "placeholder_sent",
                     "trip",
+                    "cancel_requested",
                     "finished",
                     "supplied",
                     "confirmation",
@@ -2853,6 +3293,7 @@ class Stream(unittest.TestCase):
             "content",
             "placeholder_sent",
             "trip",
+            "cancel_requested",
             "finished",
             "supplied",
             "confirmation",

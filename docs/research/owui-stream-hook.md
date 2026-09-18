@@ -906,6 +906,43 @@ is simply never reached if the generator is cancelled mid-iteration, for the sam
 reason as §6.2. The eval identity's API stream has no "Stop" concept in this codebase distinct
 from an ordinary client disconnect.
 
+### Addendum, 2026-09-17 (slice-1 ticket 52): the hook cancels the turn itself
+
+The cancel this section describes as the composer's is reachable from inside the hook. The six
+facts the triage read on the pinned sources (Open WebUI v0.11.3, vLLM v0.27.1), with this note's
+own line references:
+
+1. **The task id is the branch discriminator.** A request carrying a session id and a chat id
+   runs `process_chat` as a registered task whose id the frontend also writes onto the request's
+   metadata (`main.py:1792`, read back at `main.py:1824`). The direct branch — the harness's
+   managed turns and raw replays, which send no session id — runs inside the HTTP request's own
+   task, with no task id on the metadata and no cancel handling at all (§7's "The API path"
+   paragraph), so cancelling there tears the response down.
+2. **The hook runs inside that task.** The sync `stream` handler is called inline in the
+   streaming loop (`process_filter_functions`, `utils/middleware.py:4842-4849`), so
+   `asyncio.current_task()` inside the hook is the frontend's chat task on the browser path —
+   the very task `stop_task` cancels.
+3. **A cancel from inside lands at the next suspension.** The loop processes the hook's return
+   only when it is truthy, so a dropped chunk's next suspension is the next read; the frontend's
+   cancel branch then shields an `aclose()` of the body iterator, emits `chat:tasks:cancel`,
+   writes `{done: true, output: <prior + accumulated>}` to the chat, and re-raises. The outlet
+   is not in that branch, and the stored `content` is filled from the output's text.
+4. **The engine aborts at its next scheduler step**, its client gone
+   (`async_llm.py`'s `except (CancelledError, GeneratorExit): abort`).
+5. **No event the hook can emit makes the stored message the refusal alone** — a `replace` event
+   writes `content` only, never `output`, and the client renders the output's text — so a
+   whole-message replacement on this path would need a write through the frontend's chat model.
+   Declined: the released prefix never held a matched span, so prefix-then-refusal is doctrine.
+6. **The trip's record already rides the hook** (slice-1 ticket 11, `v0.1.34`):
+   `_record_stream_trip` dispatches the row at the trip, before the refusal chunk returns, on a
+   daemon thread. The cancel comes after the record by construction.
+
+**The "genuinely held tail" gap above does not apply to the hook's own cancel.** That gap is
+real for a composer Stop, which can land while the lag window still holds text. Under the hook's
+cancel there is no held tail: the trip discards the texts and the refusal leaves in the trip's
+own chunk, before the chunk that cancels. Nothing is lost that a person had not already been
+shown.
+
 ---
 
 ## 8. Chunk shapes the hook must recognise

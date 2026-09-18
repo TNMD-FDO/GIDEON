@@ -1,5 +1,5 @@
 """title: GIDEON arithmetic guardrail
-version: 9
+version: 10
 description: Enforces the no-model-arithmetic rule for filing deadlines, Sentencing Guidelines ranges, and sentence credit or release dates.
 """
 
@@ -38,6 +38,7 @@ description: Enforces the no-model-arithmetic rule for filing deadlines, Sentenc
 # stored content differ from the manifest's (docs/research/owui-filter-function.md
 # §4.2).  Its inlet holds two transport-only gates — the session gate and the
 # branch gate — and neither reads a message (slice-1 tickets 09 and 43).
+import asyncio
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -702,6 +703,8 @@ BRANCH_REFUSAL = (
 # The evaluation identity (render/owui.py's EVAL_IDENTITY; a test holds the
 # two equal): the one user-role account whose API calls the inlet lets through.
 EVAL_IDENTITY_EMAIL = "gideon-eval@gideon.invalid"
+# The pinned frontend's metadata key for the registered browser turn's task.
+TASK_ID_KEY = "task_id"
 ERROR_PATTERN_ID = "guardrail/error@1"
 REPLACEMENT_MESSAGE_ID = "msg_000000000000000000000000"
 
@@ -2542,6 +2545,9 @@ def _new_text_state() -> dict[str, object]:
     }
 
 
+# The per-request state remains on the request metadata after a browser cancel:
+# the frontend's cancel path does not run the outlet, and the state dies with
+# that metadata when the request ends.
 class StreamState(dict[str, object]):
     """The per-request stream state, kept on ``__metadata__`` under STREAM_STATE_KEY.
 
@@ -2551,7 +2557,7 @@ class StreamState(dict[str, object]):
     stream or of the user's dates may reach a log (spec §19.4).  The content
     entry holds its accumulated string, released length, decided length, and
     release constraints; the state also holds the placeholder flag, trip,
-    finished flag, and inlet stash.
+    cancel-requested and finished flags, and inlet stash.
     """
 
     def __init__(
@@ -2567,6 +2573,7 @@ class StreamState(dict[str, object]):
                 "content": _new_text_state(),
                 "placeholder_sent": False,
                 "trip": None,
+                "cancel_requested": False,
                 "finished": False,
                 "supplied": {
                     name: sorted(figures) for name, figures in supplied.items()
@@ -2588,7 +2595,9 @@ class StreamState(dict[str, object]):
             content = "invalid"
         return (
             f"StreamState(content={content}, placeholder_sent={self.get('placeholder_sent')}, "
-            f"tripped={self.get('trip') is not None}, finished={self.get('finished')})"
+            f"tripped={self.get('trip') is not None}, "
+            f"cancel_requested={self.get('cancel_requested')}, "
+            f"finished={self.get('finished')})"
         )
 
     __str__ = __repr__
@@ -2601,6 +2610,7 @@ def _stream_state(value: object) -> dict[str, object] | None:
         "content",
         "placeholder_sent",
         "trip",
+        "cancel_requested",
         "finished",
         "supplied",
         "confirmation",
@@ -2791,6 +2801,41 @@ def _refusal_chunk(answer_released: bool, refusal: str) -> dict[str, object]:
     }
 
 
+def _cancel_current_task(metadata: object) -> bool:
+    """Request the browser turn's current task to cancel, and never raise.
+
+    The pinned frontend carries the registered task id on browser metadata
+    (docs/research/owui-stream-hook.md §7); the direct path has no such id and
+    is left alone.  A missing running task is also a refusal to cancel.
+    """
+
+    try:
+        if not isinstance(metadata, Mapping):
+            return False
+        task_id = metadata.get(TASK_ID_KEY)
+        if not isinstance(task_id, str) or not task_id:
+            return False
+        task = asyncio.current_task()
+        if task is None:
+            return False
+        task.cancel()
+        return True
+    except Exception:  # noqa: BLE001 - cancellation is a total, fail-closed hook.
+        return False
+
+
+def _is_generating_choice(event: object) -> bool:
+    """Return whether an event carries a non-finished first generating choice."""
+
+    if not isinstance(event, Mapping):
+        return False
+    choices = event.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return False
+    choice = choices[0]
+    return isinstance(choice, Mapping) and choice.get("finish_reason") is None
+
+
 def _clear_text(event: object) -> object:
     """After a trip: a recognised chunk's structure kept and its text removed; anything else dropped.
 
@@ -2940,10 +2985,17 @@ def _trip_chunk(state: dict[str, object], event: object) -> object:
     return _refusal_chunk(answer_released, refusal)
 
 
-def _filter_chunk(state: dict[str, object], event: object) -> object:
+def _filter_chunk(state: dict[str, object], event: object, metadata: object) -> object:
     """Withhold, release, or refuse one chunk (docs/research/owui-stream-hook.md §5, §8)."""
 
     if state.get("trip") is not None:
+        if (
+            not state.get("cancel_requested")
+            and _is_generating_choice(event)
+            and _cancel_current_task(metadata)
+        ):
+            state["cancel_requested"] = True
+            return None
         return _clear_text(event)
     if not isinstance(event, dict):
         raise TypeError("unrecognised stream event")
@@ -3127,7 +3179,10 @@ class Filter:
         The pinned frontend drops a raising hook's chunk and keeps streaming on
         the browser path and tears the whole response down on the API path
         (docs/research/owui-stream-hook.md §6), so every failure here is the
-        refusal in-stream and the stream's text discarded from there on.
+        refusal in-stream and the stream's text discarded from there on.  After
+        a trip, the first generating chunk on a browser turn requests
+        cancellation of that turn's own task and is dropped; a direct turn
+        continues to scrub later chunks.
         """
 
         if not isinstance(__metadata__, dict):
@@ -3139,7 +3194,7 @@ class Filter:
             state = StreamState({}, frozenset(), branch=None, source="user")
             __metadata__[STREAM_STATE_KEY] = state
         try:
-            return _filter_chunk(state, event)
+            return _filter_chunk(state, event, __metadata__)
         except Exception:  # noqa: BLE001 - the guardrail fails closed on every internal error.
             _record_stream_trip(state, Trip(DEADLINE_FAMILY.name, ERROR_PATTERN_ID))
             return _trip_chunk(state, event)

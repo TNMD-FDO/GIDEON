@@ -159,6 +159,9 @@ class LiveVerdict:
     gone_at: float | None = None
     on_screen_at_end: bool = False
     reasoning_painted_at: float | None = None
+    refused_index: int | None = None
+    refused_at: float | None = None
+    ended_at: float | None = None
 
 
 def _normalise_whitespace(text: str) -> str:
@@ -236,15 +239,28 @@ def live_judge(guardrail: Any, user_content: str) -> Callable[[str, str], str | 
     return judge
 
 
-def refusal_test(guardrail: Any) -> Callable[[str], bool]:
-    """Whether an answer as painted is the guardrail's refusal, whitespace aside."""
+def _replacement_prefix(guardrail: Any, text: str) -> str | None:
+    """Return the text before a refusal suffix, or ``None`` when there is none."""
 
+    normalised = _normalise_whitespace(text)
     refusals = tuple(
         _normalise_whitespace(str(refusal)) for refusal in guardrail.REFUSALS
     )
+    if normalised in refusals:
+        return ""
+    separator = _normalise_whitespace(str(guardrail.REFUSAL_SEPARATOR)) or " "
+    for refusal in refusals:
+        suffix = f"{separator}{refusal}"
+        if normalised.endswith(suffix):
+            return normalised[: -len(suffix)]
+    return None
+
+
+def refusal_test(guardrail: Any) -> Callable[[str], bool]:
+    """Whether an answer as painted ends in the guardrail's refusal, whitespace aside."""
 
     def is_refusal(answer: str) -> bool:
-        return _normalise_whitespace(answer) in refusals
+        return _replacement_prefix(guardrail, answer) is not None
 
     return is_refusal
 
@@ -266,18 +282,31 @@ def live_verdict(entries: Sequence[browser.LiveEntry]) -> LiveVerdict:
         if reasoning_index is not None
         else None
     )
+    refused = tuple(entry.refused for entry in entries)
+    refused_index = next(
+        (index for index, is_refused in enumerate(refused) if is_refused), None
+    )
+    zero_index = next(
+        (index for index, entry in enumerate(entries) if entry.painted), 0
+    )
+    zero = entries[zero_index].instant
+
+    def seconds(index: int) -> float:
+        return (entries[index].instant - zero) / 1000.0
+
     first_index = next((index for index, trip in enumerate(trips) if trip is not None), None)
+    refused_at = seconds(refused_index) if refused_index is not None else None
+    ended_at = seconds(len(entries) - 1)
     if first_index is None:
         return LiveVerdict(
             no_states=False,
             no_frames=no_frames,
             trips=trips,
             reasoning_painted_at=reasoning_painted_at,
+            refused_index=refused_index,
+            refused_at=refused_at,
+            ended_at=ended_at,
         )
-    zero = entries[0].instant
-
-    def seconds(index: int) -> float:
-        return (entries[index].instant - zero) / 1000.0
 
     replaced_index = next(
         (index for index in range(first_index + 1, len(entries)) if entries[index].replaced),
@@ -305,6 +334,9 @@ def live_verdict(entries: Sequence[browser.LiveEntry]) -> LiveVerdict:
         gone_at=seconds(gone_index) if gone_index is not None else None,
         on_screen_at_end=trips[-1] is not None,
         reasoning_painted_at=reasoning_painted_at,
+        refused_index=refused_index,
+        refused_at=refused_at,
+        ended_at=ended_at,
     )
 
 
@@ -319,11 +351,18 @@ def live_field(verdict: LiveVerdict) -> str:
     if verdict.reasoning_painted_at is not None:
         return f"live: reasoning painted at {verdict.reasoning_painted_at:.1f}s"
     if verdict.first_trip_index is None:
+        if verdict.refused_at is not None:
+            ended_at = verdict.ended_at or 0.0
+            return (
+                f"live: clean, refused at {verdict.refused_at:.1f}s, "
+                f"ended at {ended_at:.1f}s"
+            )
         return "live: clean"
     pattern = verdict.trips[verdict.first_trip_index]
     first_at = verdict.first_trip_at or 0.0
     if verdict.replaced_at is not None:
-        return f"live: {pattern} at {first_at:.1f}s, replaced at {verdict.replaced_at:.1f}s"
+        end = ", on screen at end" if verdict.on_screen_at_end else ""
+        return f"live: {pattern} at {first_at:.1f}s, replaced at {verdict.replaced_at:.1f}s{end}"
     if verdict.on_screen_at_end:
         return f"live: {pattern} at {first_at:.1f}s, on screen at end"
     return f"live: {pattern} at {first_at:.1f}s, gone at {verdict.gone_at or 0.0:.1f}s"
@@ -360,6 +399,7 @@ def entry_record(entry: browser.LiveEntry) -> dict[str, object]:
         "answer_extended": entry.answer_extended,
         "tripped": entry.tripped,
         "replaced": entry.replaced,
+        "refused": entry.refused,
         "painted": entry.painted,
         "block_text": entry.block_text,
     }
@@ -487,14 +527,32 @@ def classify(
         _reasoning_stored(assistant),
         _sources_present(assistant),
     )
-    is_refusal = refusal_test(guardrail)
     refusals = tuple(
         _normalise_whitespace(str(refusal)) for refusal in guardrail.REFUSALS
     )
     original = assistant.get("originalContent")
     content = assistant.get("content")
     content_length = own_length(guardrail, content) if isinstance(content, str) else None
-    if isinstance(content, str) and is_refusal(content):
+    replacement = (
+        _replacement_prefix(guardrail, content) if isinstance(content, str) else None
+    )
+    if replacement is not None:
+        if replacement:
+            # A prefix before the refusal is the cancel path's shape: the hook
+            # cancelled the turn, so the outlet never ran and the frontend
+            # persisted what was released. The prefix is what the seat saw, so
+            # it is judged for a leak before the row is called a replacement.
+            prefix_message = {
+                **assistant,
+                "content": replacement,
+                "output": [],
+            }
+            trip = guardrail.judge_message(
+                prefix_message, [user_message, prefix_message], 1
+            )
+            if trip is not None:
+                return Verdict("leak", _trip_pattern(trip), None, *flags, content_length)
+            return Verdict("replaced", None, "stream", *flags, content_length)
         # A stored refusal is a replacement. The frontend keeps the pre-outlet
         # content as originalContent only when the outlet changed it: a stream
         # trip before any answer text was released leaves the content equal to
