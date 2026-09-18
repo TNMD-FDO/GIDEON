@@ -10,7 +10,7 @@ inputs:
   build_box: false
 files:
   compose.yaml:
-    sha256: "23f092f80e0e72d6486b4ceb66d94b7e80c77dd1d2bf99003af78bce92949459"
+    sha256: "c7ce79855e0f73f63341eac878c0496636e40d3eb7584a322d56475917161e58"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
@@ -140,7 +140,7 @@ services:
   node-exporter: "8612faaf00b45f47987af313bf79e1df2336243ee6bc9f6eeb2bcaf6f7071e2e"
   grafana: "86e24511cbb77a0b1bec1a2a8f1355c9b7af147143937b88441071b959f3c7f3"
   postgres: "7039d090c0ae384766b132e1bbddf593645233c1df0d4d716963776e5f7902c1"
-  open-webui: "7ef64aa1053a092a0036791f7f755d4bab8e68063ce971c4931c949b646abbd4"
+  open-webui: "196cfe68edcd7cf4cf3a33e3e40241403a462a6155a200770952349c885af64f"
   searxng: "790f3d23c5a48d8b2e3c02d12c6615884bb4073095bdf7faa51ccee49aa51c2c"
   postgres-exporter: "71024e25f248a0a94b2ea92c4f48813f8b4f95e3d17d41522f300fa9f1407291"
   cadvisor: "f7daefbbe23b45c463cbff7d7c9452c9dbca6fb26e2ca5f386ba6f32c40ed8c2"

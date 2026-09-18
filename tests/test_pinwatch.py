@@ -1905,6 +1905,38 @@ def _cli_output(
 
 
 class PullRequestContracts(unittest.TestCase):
+    def test_frontend_bump_body_names_the_two_mode_proof(self) -> None:
+        sentence = (
+            "Before the merge, this bump is proven on the box with the turn "
+            "harness in both modes on `eval/seed/general/frontend-bump.yaml`, "
+            "per `docs/runbooks/pin-watch-app-setup.md` §5."
+        )
+        frontend = Bump(
+            "images.open-webui",
+            "images.lock",
+            (Change("images.open-webui.digest", "sha256:" + "a" * 64, "sha256:" + "b" * 64),),
+            "https://example.invalid/frontend",
+            False,
+        )
+        self.assertIn(sentence, body_for(frontend, ()))
+
+        other_image = Bump(
+            "images.caddy",
+            "images.lock",
+            (Change("images.caddy.digest", "sha256:" + "a" * 64, "sha256:" + "b" * 64),),
+            "https://example.invalid/caddy",
+            False,
+        )
+        driver = Bump(
+            "host.driver.branch",
+            "host.lock",
+            (Change("driver.branch", "example-old", "example-new"),),
+            "https://example.invalid/driver",
+            False,
+        )
+        self.assertNotIn(sentence, body_for(other_image, ()))
+        self.assertNotIn(sentence, body_for(driver, ()))
+
     def test_pr_helpers_render_and_withdraw_idempotently(self) -> None:
         bump = Bump(
             "images.postgres",

@@ -1500,6 +1500,36 @@ class TurnHarness(TestCase):
         self.assertEqual([case.id for case in loaded.cases if case.search], ["search-01"])
         self.assertEqual(loaded.searched, 1)
 
+    def test_frontend_bump_cases_hold_their_contract(self) -> None:
+        path = ROOT / "eval/seed/general/frontend-bump.yaml"
+        loaded = cases.load_cases(path)
+        self.assertIsInstance(loaded, cases.CaseSet)
+        assert isinstance(loaded, cases.CaseSet)
+        expected = {
+            "ticket-34-A": "refused",
+            "ticket-34-B": "recorded",
+            "ticket-34-C": "not-confirmed",
+            "direct-01": "refused",
+            "confirm-01": "refused",
+            "control-02": "recorded",
+            "cancel-force-02": "refused",
+        }
+        self.assertEqual([case.id for case in loaded.cases], list(expected))
+        self.assertEqual(loaded.searched, 0)
+        self.assertIn("7 cases", loaded.origin)
+        for case in loaded.cases:
+            with self.subTest(case=case.id):
+                self.assertEqual((case.kind, case.expect), ("case", expected[case.id]))
+                self.assertFalse(case.must)
+                self.assertFalse(case.must_not)
+
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        explicit = {case["id"]: case["block"] for case in document["cases"] if "block" in case}
+        self.assertEqual(
+            explicit,
+            dict.fromkeys(("ticket-34-A", "ticket-34-B", "ticket-34-C", "cancel-force-02"), "any"),
+        )
+
     def test_general_smoke_set_holds_its_contract(self) -> None:
         loaded = cases.load_cases(ROOT / "eval/seed/general/smoke.yaml")
         self.assertIsInstance(loaded, cases.CaseSet)

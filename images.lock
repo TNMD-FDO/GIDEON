@@ -19,7 +19,7 @@ images:
     digest: sha256:df7f1c2fb114453b951de51a98efc010db1655a92c2e86be6706714e2417a78d
   open-webui:
     source: ghcr.io/open-webui/open-webui:v0.11.3
-    digest: sha256:751b617714b91e4cfd0186a509c72480c858e012976103b09a30dad053c36175
+    digest: sha256:41daa0cf2561a5d4c8d1ff31ee2a98d93ab4d3ac2605cac69366ff6a3374a933
   # The generator's engine (spec §5.2, ADR-0009): vLLM's published image,
   # resolved on the box with `skopeo inspect` on 2026-09-04 — a multi-platform
   # index (amd64 and arm64) the mirror copies whole. The pin watch proposes

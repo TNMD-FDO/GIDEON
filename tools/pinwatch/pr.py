@@ -319,6 +319,15 @@ def body_for(
             "What merging does: nothing on the box moves until the next gideon host "
             "provision; a human tags the release."
         )
+    if bump.pin_id == "images.open-webui":
+        lines.extend(
+            (
+                "",
+                "Before the merge, this bump is proven on the box with the turn "
+                "harness in both modes on `eval/seed/general/frontend-bump.yaml`, "
+                "per `docs/runbooks/pin-watch-app-setup.md` §5.",
+            )
+        )
     if bump.pin_id == "host.gh_runner":
         lines.append("")
         lines.append(

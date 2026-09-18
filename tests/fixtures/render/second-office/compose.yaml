@@ -139,7 +139,7 @@ services:
       - "gideon"
     mem_limit: 20000000000
   open-webui:
-    image: "127.0.0.1:5000/open-webui@sha256:751b617714b91e4cfd0186a509c72480c858e012976103b09a30dad053c36175"
+    image: "127.0.0.1:5000/open-webui@sha256:41daa0cf2561a5d4c8d1ff31ee2a98d93ab4d3ac2605cac69366ff6a3374a933"
     restart: "unless-stopped"
     depends_on:
       postgres:

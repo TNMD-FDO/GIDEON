@@ -3,7 +3,7 @@
 This directory holds the case sets that belong to General's own guardrails and
 checks, beside `../guardrails/` (the arithmetic guardrail's families). Its
 first file is the citation stamp's seed; the load set is its second; General's
-smoke set is its third.
+smoke set is its third; the frontend-bump cases are its fourth.
 
 ## `citation-stamp.yaml`
 
@@ -84,3 +84,11 @@ A case is never edited. A correction is a new case with a new id naming the
 old with `supersedes:`; the old stays in this file byte for byte, and the loader
 retires it (in a cases file since slice-1 ticket 39). The nightly schedule is
 slice 2's `gideon eval` (§18.5), not this file's.
+
+## `frontend-bump.yaml`
+
+The seven-case turn-harness file for proving an `images.open-webui` bump in the
+API and browser modes, as required by the pin-watch review's §5 runbook step.
+It grades the bump's frontend behavior, never General's release. Every prompt is
+invented, and a correction is a new case with a new id naming the old with
+`supersedes:`; cases are never edited in place.
