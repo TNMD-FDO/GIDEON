@@ -306,8 +306,8 @@ def body_for(
             "What merging does: nothing moves on a box until its next `apply`, and "
             "only on a box whose site file selects this pin's profile. The models "
             "stage fetches and verifies the new files into the weights tree and "
-            "recreates the engine — a maintenance window from `v0.2.0` (§21), with "
-            "`engine verify` gating the go-live — and a human tags the release."
+            "recreates the engine — a maintenance window from go-live (§21), with "
+            "`engine verify` gating the new weights — and a human tags the release."
         )
     elif bump.pin_id.startswith("images."):
         lines.append(

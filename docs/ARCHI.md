@@ -188,8 +188,8 @@ How the skeleton becomes the product, per §22 (sequence normative, calendar not
 | Slice | Tag | Code it adds here | Leaf |
 |---|---|---|---|
 | 0 Platform | `v0.1.0` | **Complete**, declared done on the tracker at `v0.1.33` — the leaves' inventories are the record; its open follow-ons are the board's | [`archi/host.md`](archi/host.md), [`archi/render-apply.md`](archi/render-apply.md), [`archi/engine-frontend.md`](archi/engine-frontend.md), [`archi/backup-restore.md`](archi/backup-restore.md), [`archi/stack.md`](archi/stack.md), [`archi/tools.md`](archi/tools.md), [`archi/tests.md`](archi/tests.md) |
-| 1 General | `v0.2.0` | **In progress** — landed through `v0.1.40`: the leaves' slice-1 rows. What remains is the board's: the pre-launch release on the critical path to the tag | [`archi/host.md`](archi/host.md) (the profile and its memory table), [`archi/render-apply.md`](archi/render-apply.md), [`archi/engine-frontend.md`](archi/engine-frontend.md), [`archi/stack.md`](archi/stack.md), [`archi/tools.md`](archi/tools.md), [`archi/tests.md`](archi/tests.md) |
-| 2 Eval harness | `v0.3.0` | `gideon eval` (plain Python: stdlib + httpx + numpy, §18.1), `courts.yaml`, extraction grammar | `archi/eval.md` |
+| 1 General | `v0.2.0` | **Complete** at `v0.2.0`, the pre-launch release, with no user on the box until go-live (ADR-0044) — the leaves' slice-1 rows are the record; its open follow-ons are the board's | [`archi/host.md`](archi/host.md) (the profile and its memory table), [`archi/render-apply.md`](archi/render-apply.md), [`archi/engine-frontend.md`](archi/engine-frontend.md), [`archi/stack.md`](archi/stack.md), [`archi/tools.md`](archi/tools.md), [`archi/tests.md`](archi/tests.md) |
+| 2 Eval harness | `v0.3.0` | **In progress** — `gideon eval` (plain Python: stdlib + httpx + numpy, §18.1), `courts.yaml`, extraction grammar | `archi/eval.md` |
 | 3 Corpus + tranche 1 | `v0.4.0` | corpus/index commands, parsers, chunker, the worker `caselaw` path | `archi/corpus.md` |
 | 4 Research go-live | `v0.5.0` | the `/turn` service: plan → retrieve → gate → render (§§11–13) | `archi/turn.md` |
 

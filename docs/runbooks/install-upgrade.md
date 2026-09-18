@@ -260,14 +260,21 @@ command runs from the *current* release's tree and hands over to the new tree's
 own CLI after the checkout; nothing of the new release is loaded into the
 running process.
 
-**Before a user-facing tag** (from `v0.2.0`, spec §21). The release ships its
-note at `docs/release-notes/<tag>.md`, written from the template beside it:
-what is new, the coverage line, the next maintenance window. Send that note to
-the users at least one working day before the window, inform the supervisor in
-the same span, and announce the window. The changelog under `docs/2-changelog/`
-is the engineering record; its `## Breaking` section is what the `version` stage
-below prints. The quiet window and the maintenance window enter this runbook with
-the pre-launch release (slice-1 ticket 18).
+**From go-live** (ADR-0044). A tag is user-facing from the office's first
+users; before them the rules below do not bind. The **quiet window** is
+weeknights 19:00–06:00 and Friday 19:00 to Monday 06:00 in the site's timezone
+(TNMD: America/Chicago). Work is window-bound when it sends requests to the
+engine on GPU 0; nothing scheduled in this release does. A **maintenance
+window** is a span inside the quiet window, announced at least one working day
+ahead, weekend nights by default — the only sanctioned unavailability. An
+engine swap, a driver, engine, or Docker change, and every upgrade on a
+user-facing tag take one. Read its cost beforehand from `render --diff`'s
+recreate row; count on the whole stack only when `provision` or a rollback
+needs it. Before the window, send the release's note from
+`docs/release-notes/<tag>.md` to the users and inform the supervisor, both at
+least one working day ahead. The changelog under `docs/2-changelog/` is the
+engineering record; its `## Breaking` section is what the `version` stage below
+prints.
 
 | Stage | What happens | Fix on a refusal |
 |---|---|---|
@@ -282,6 +289,7 @@ the pre-launch release (slice-1 ticket 18).
 | `preflight` | the new tree's preflight: the gate for apply and the new release's own readiness checks. An unconverged or `reboot-required` step, or a new office-services requirement, refuses here — nothing of the product has changed yet | **reboot if asked, then re-run `upgrade <tag>`**: the checkout is already made and the set is reused, so the re-run resumes here |
 | `apply` | the new tree's `apply` (thirteen stages, streamed; a pin bump in `models.lock` fetches the new revision here, before the engine restarts) | `upgrade --rollback` |
 | `verify` | the new tree answers `--version` with the tag's version, the applied record names it, every service the rendered project declares has a container that is running and healthy on a fresh read | `upgrade --rollback` |
+| `engine-verify` | the new tree's `engine verify` as a passthrough child; its rows carry the failing check | `upgrade --rollback` |
 | `audit-applied` | the `upgrade` row with the durations | — |
 
 The standing next step after a failure depends on where it happened: before the
@@ -292,7 +300,8 @@ refusal prints exactly that.
 
 An upgrade takes about the time of a preflight before and after the checkout
 (two relay test messages), one full set (TNMD: about 35 s), a provision check
-pass, and an apply. The pre-upgrade set is not pushed; the nightly unit pushes.
+pass, an apply, and the `engine-verify` gate (about two to eight minutes). The
+pre-upgrade set is not pushed; the nightly unit pushes.
 
 ## 3. Rolling back: `sudo ./upgrade.sh --rollback [<tag>]`
 
@@ -314,6 +323,7 @@ which exists only while one is in progress (the `plan` row below).
 | `restore` | when needed, the previous tree's `restore --from staging --set <label>`: verified whole before anything is replaced, Postgres back to the set's archive boundary |
 | `apply` | the previous tree's `apply` — restore leaves the frontend and ingress down and names apply as the next command; here the command runs it |
 | `verify` | as the forward path, against the set's release |
+| `engine-verify` | the previous tree's `engine verify`; if it refuses, read the engine's logs and run `engine verify` by hand, never going live |
 | `audit-applied` | the `rollback` row |
 
 **What is preserved and what is not.** The database, `/etc/gideon`, the

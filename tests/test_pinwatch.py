@@ -2109,7 +2109,7 @@ class PullRequestContracts(unittest.TestCase):
         )
         self.assertIn(f"| `{files_path}` | 1 files, 3 bytes | 2 files, 7 bytes |", body)
         self.assertIn("only on a box whose site file selects this pin's profile", body)
-        self.assertIn("v0.2.0` (§21)", body)
+        self.assertIn("maintenance window from go-live (§21)", body)
         self.assertIn("role `generator`", body)
         self.assertIn("7 GB", body)
         self.assertIn("Re-judge the memory row per §7.6", body)
