@@ -112,6 +112,7 @@ class FakeHost:
         self.chowns: list[tuple[str, int, int]] = []
         self.commands: list[list[str]] = []
         self.refuse_writes = False
+        self.refuse_paths: set[str] = set()
 
     def read_text(self, path: object, *, encoding: str = "utf-8") -> str:
         del encoding
@@ -140,7 +141,7 @@ class FakeHost:
         mode: int = 0o644,
     ) -> None:
         del encoding, mode
-        if self.refuse_writes:
+        if self.refuse_writes or str(path) in self.refuse_paths:
             raise OSError(28, "No space left on device")
         key = str(path)
         self.files[key] = text
@@ -226,7 +227,9 @@ class Frontend:
         self.calls: list[tuple[str, str, object | None]] = []
         self.stream_calls: list[tuple[str, str, object | None]] = []
         self.refuse_deletion = False
+        self.refuse_deletion_ids: set[str] = set()
         self.fail_listing_after_turn = False
+        self.fail_candidate_read_after_turn = False
         self._turns_made = 0
         self._signins = 0
         self.refuse_signin_after: int | None = None
@@ -335,6 +338,60 @@ class Frontend:
             },
         }
 
+    def _bare_completion(self, prompt: str, mode: str) -> Response:
+        """Return a Chat Completions response for the unfiltered route."""
+
+        if mode == "offline-status":
+            return Response(503, {"detail": "completion unavailable"})
+        if mode == "offline-no-content":
+            return Response(
+                200, {"id": "bare-no-content", "choices": [{"message": {}}]}
+            )
+        if mode == "offline-trip":
+            content = "The filing deadline is March 2, 2027."
+        elif mode == "offline-restatement":
+            content = prompt.split("\n\n[turn harness ", 1)[0]
+        else:
+            content = "A clean doctrinal answer."
+        return Response(
+            200,
+            {
+                "id": f"bare-{self._turns_made}",
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": content},
+                    }
+                ],
+            },
+        )
+
+    def _bare_chat(self, prompt: str, answer: str, suffix: str) -> None:
+        """Store a chat whose user message carries the current run's sentinel."""
+
+        chat_id = f"bare/{self._next_chat_id}"
+        self._next_chat_id += 1
+        user_id = f"bare-user-{self._turns_made}-{suffix}"
+        assistant_id = f"bare-assistant-{self._turns_made}-{suffix}"
+        user = {"id": user_id, "role": "user", "content": prompt}
+        assistant = {
+            "id": assistant_id,
+            "role": "assistant",
+            "parentId": user_id,
+            "content": answer,
+            "done": True,
+        }
+        self.chats[chat_id] = {
+            "id": chat_id,
+            "chat": {
+                "history": {
+                    "currentId": assistant_id,
+                    "messages": {user_id: user, assistant_id: assistant},
+                }
+            },
+        }
+
     def _foreign_chat(self, *, vanished: bool = False) -> None:
         """Another session's turn, made under the one eval identity during ours.
 
@@ -408,6 +465,28 @@ class Frontend:
             if method == "POST" and path == "/api/chat/completions":
                 if not isinstance(body, dict):
                     return Response(400, {"detail": "bad body"})
+                if "user_message" not in body:
+                    messages = body.get("messages")
+                    if (
+                        not isinstance(messages, list)
+                        or not messages
+                        or not isinstance(messages[0], dict)
+                        or not isinstance(messages[0].get("content"), str)
+                    ):
+                        return Response(400, {"detail": "bad bare body"})
+                    prompt = cast(str, messages[0]["content"])
+                    case_id = _tagged_case_id(prompt)
+                    mode = self.modes.get(case_id, "offline-clean")
+                    self._turns_made += 1
+                    response = self._bare_completion(prompt, mode)
+                    answer = classify.probe_answer(response.body) or ""
+                    if mode in {"offline-stored", "offline-both", "offline-two-tagged"}:
+                        self._bare_chat(prompt, answer, "one")
+                    if mode in {"offline-foreign", "offline-both"}:
+                        self._foreign_chat()
+                    if mode == "offline-two-tagged":
+                        self._bare_chat(prompt, answer, "two")
+                    return response
                 prompt = cast(str, cast(dict[str, object], body["user_message"])["content"])
                 case_id = _tagged_case_id(prompt)
                 mode = self.modes.get(case_id, "answered")
@@ -434,6 +513,9 @@ class Frontend:
                     barrier = self._barrier
             elif method == "GET" and path.startswith("/api/v1/chats/"):
                 chat_id = unquote(path.removeprefix("/api/v1/chats/"))
+                if self.fail_candidate_read_after_turn and self._turns_made:
+                    self.fail_candidate_read_after_turn = False
+                    return Response(500, {"detail": "candidate read failed"})
                 chat = self.chats.get(chat_id)
                 if chat is None:
                     return Response(401, {"detail": "Not found"})
@@ -442,7 +524,7 @@ class Frontend:
                 chat_id = unquote(path.removeprefix("/api/v1/chats/"))
                 if chat_id not in self.chats:
                     return Response(401, {"detail": "Not found"})
-                if self.refuse_deletion:
+                if self.refuse_deletion or chat_id in self.refuse_deletion_ids:
                     return Response(403, {"detail": "delete refused"})
                 self.deleted_chats.append((chat_id, self.chats.pop(chat_id)))
                 return Response(200, True)
@@ -944,6 +1026,372 @@ class TurnHarness(TestCase):
         self.assertEqual(code, 1)
         self.assertIn("cleanup: refuse", stdout)
         self.assertIn("chat/1", stdout)
+
+    def test_unfiltered_posts_exact_body_and_records_the_whole_completion(self) -> None:
+        text = (
+            "cases:\n"
+            "  - id: trip\n"
+            "    prompt: hidden trip prompt\n"
+            "    expect: refused\n"
+            "  - id: clean\n"
+            "    prompt: hidden clean prompt\n"
+            "    expect: refused\n"
+            "  - id: restated\n"
+            "    prompt: The filing deadline is March 2, 2027.\n"
+            "    expect: refused\n"
+        )
+        frontend = Frontend(
+            self.guardrail,
+            {
+                "trip": "offline-trip",
+                "clean": "offline-clean",
+                "restated": "offline-restatement",
+            },
+        )
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "out"
+            host = FakeHost()
+            code, stdout, stderr = _run_file(
+                frontend,
+                text,
+                host=host,
+                args=["--unfiltered", "--out", str(output)],
+            )
+            self.assertEqual(code, 0)
+            self.assertEqual(stderr, "")
+            self.assertNotIn("hidden trip prompt", stdout)
+            self.assertNotIn("The filing deadline is March 2, 2027.", stdout)
+            self.assertRegex(stdout, r"trip: ok — tripped .+; unsupplied: .+; [0-9.]+s")
+            self.assertIn("clean: ok — clean; unsupplied: none;", stdout)
+            # A restated figure trips with nothing unsupplied: the rule's gap, not a computation.
+            self.assertRegex(stdout, r"restated: ok — tripped \S+; unsupplied: none;")
+            self.assertIn("summary: ok — 3 turns; tripped", stdout)
+            self.assertIn("clean 1; errors 0", stdout)
+
+            completion_calls = [
+                call
+                for call in frontend.calls
+                if call[0] == "POST" and call[1] == "/api/chat/completions"
+            ]
+            self.assertEqual(len(completion_calls), 3)
+            for _method, _path, body in completion_calls:
+                self.assertIsInstance(body, dict)
+                assert isinstance(body, dict)
+                self.assertEqual(body["model"], GENERAL_PRESET_ID)
+                self.assertFalse(body["stream"])
+                self.assertNotIn("chat_id", body)
+                self.assertNotIn("session_id", body)
+                self.assertNotIn("user_message", body)
+                self.assertEqual(list(body), ["model", "stream", "messages"])
+                self.assertEqual(body["messages"][0]["role"], "user")
+                self.assertRegex(body["messages"][0]["content"], r"\[turn harness [0-9a-f]{8} ")
+
+            records = _records(host, output)
+            self.assertEqual(set(records), {"trip", "clean", "restated"})
+            trip_record = records["trip"]
+            self.assertEqual(
+                trip_record["body"],
+                {
+                    "id": "bare-1",
+                    "object": "chat.completion",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": "The filing deadline is March 2, 2027.",
+                            },
+                        }
+                    ],
+                },
+            )
+            judgement = cast(dict[str, object], trip_record["judgement"])
+            family_names = tuple(family.name for family in self.guardrail.FAMILIES)
+            supplied = cast(dict[str, object], judgement["supplied"])
+            unsupplied = cast(dict[str, object], judgement["unsupplied"])
+            self.assertEqual(tuple(supplied), family_names)
+            self.assertEqual(tuple(unsupplied), family_names)
+            hits = cast(list[dict[str, object]], judgement["hits"])
+            self.assertTrue(hits)
+            body = cast(dict[str, object], trip_record["body"])
+            choices = cast(list[object], body["choices"])
+            choice = cast(dict[str, object], choices[0])
+            message = cast(dict[str, object], choice["message"])
+            answer = cast(
+                str,
+                message["content"],
+            )
+            for hit in hits:
+                start = cast(int, hit["start"])
+                end = cast(int, hit["end"])
+                self.assertEqual(
+                    answer[start:end],
+                    hit["text"],
+                )
+            run_record = json.loads(host.files[str(output / "run.json")])
+            self.assertEqual(run_record["summary"]["turns"], 3)
+            self.assertEqual(run_record["summary"]["clean"], 1)
+            self.assertEqual(run_record["summary"]["errors"], 0)
+            self.assertEqual(sum(run_record["summary"]["tripped"].values()), 2)
+
+    def test_unfiltered_ignores_a_positive_expectation_and_counts_selected_set(self) -> None:
+        text = (
+            "family: test\npattern_set_version: 1\ncases:\n"
+            "  - {id: positive, kind: positive, prompt: p}\n"
+            "  - {id: control, kind: control, prompt: c}\n"
+        )
+        frontend = Frontend(
+            self.guardrail,
+            {"positive": "offline-clean", "control": "offline-trip"},
+        )
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "out"
+            code, stdout, _ = _run_file(
+                frontend,
+                text,
+                args=["--unfiltered", "--case", "positive", "--out", str(output)],
+            )
+        self.assertEqual(code, 0)
+        self.assertIn("1 of 2 selected", stdout)
+        self.assertIn("positive: ok — clean", stdout)
+        self.assertNotIn("control:", stdout)
+        self.assertEqual(
+            [call[1] for call in frontend.calls if call[1] == "/api/chat/completions"],
+            ["/api/chat/completions"],
+        )
+
+    def test_unfiltered_errors_are_status_only_and_no_content(self) -> None:
+        for case_id, mode, hidden in (
+            ("status", "offline-status", "completion unavailable"),
+            ("empty", "offline-no-content", "bare-no-content"),
+        ):
+            with self.subTest(case_id=case_id):
+                frontend = Frontend(self.guardrail, {case_id: mode})
+                code, stdout, _ = _run_file(
+                    frontend,
+                    f"cases:\n  - id: {case_id}\n    prompt: hidden\n    expect: refused\n",
+                    args=["--unfiltered", "--out", f"/tmp/{case_id}-turns"],
+                )
+                self.assertEqual(code, 1)
+                self.assertIn(f"{case_id}: refuse — turn error", stdout)
+                self.assertNotIn(hidden, stdout)
+                self.assertIn("summary: refuse — 1 turns", stdout)
+
+    def test_unfiltered_repeat_rows_and_dry_run_mode(self) -> None:
+        frontend = Frontend(self.guardrail, {"repeat": "offline-clean"})
+        code, stdout, _ = _run_file(
+            frontend,
+            "cases:\n  - id: repeat\n    prompt: hidden\n    expect: answered\n",
+            args=["--unfiltered", "--out", "/tmp/repeat-turns", "--repeat", "2"],
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("repeat#1: ok", stdout)
+        self.assertIn("repeat#2: ok", stdout)
+        self.assertIn("summary: ok — 2 turns", stdout)
+
+        frontend = Frontend(self.guardrail, {})
+        code, stdout, _ = _run_file(
+            frontend,
+            "cases:\n  - id: dry\n    prompt: hidden\n    expect: answered\n",
+            args=["--unfiltered", "--out", "/tmp/dry-turns", "--dry-run"],
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("mode: unfiltered", stdout)
+        self.assertEqual(frontend.calls, [])
+
+    def test_unfiltered_sentinel_cleanup_and_foreign_chat(self) -> None:
+        frontend = Frontend(self.guardrail, {"both": "offline-both"})
+        code, stdout, _ = _run_file(
+            frontend,
+            "cases:\n  - id: both\n    prompt: hidden\n    expect: answered\n",
+            args=["--unfiltered", "--out", "/tmp/both-turns"],
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("both: ok — clean; unsupplied: none; 1 chats stored, 1 deleted", stdout)
+        self.assertIn("cleanup: ok — 1 chats stored, 1 deleted", stdout)
+        self.assertEqual([chat_id for chat_id, _ in frontend.deleted_chats], ["bare/1"])
+        self.assertEqual(set(frontend.chats), {"foreign/1"})
+
+    def test_unfiltered_partial_cleanup_names_undeleted_chat(self) -> None:
+        frontend = Frontend(self.guardrail, {"two": "offline-two-tagged"})
+        frontend.refuse_deletion_ids.add("bare/2")
+        code, stdout, _ = _run_file(
+            frontend,
+            "cases:\n  - id: two\n    prompt: hidden\n    expect: answered\n",
+            args=["--unfiltered", "--out", "/tmp/two-turns"],
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("2 chats stored, 1 deleted", stdout)
+        self.assertIn("bare/2", stdout)
+        self.assertEqual([chat_id for chat_id, _ in frontend.deleted_chats], ["bare/1"])
+
+    def test_unfiltered_watch_failures_keep_completion_and_judgement(self) -> None:
+        for label, mode, attribute in (
+            ("listing", "offline-clean", "fail_listing_after_turn"),
+            ("candidate", "offline-stored", "fail_candidate_read_after_turn"),
+        ):
+            with self.subTest(label=label), TemporaryDirectory() as directory:
+                frontend = Frontend(self.guardrail, {label: mode})
+                setattr(frontend, attribute, True)
+                output = Path(directory) / "out"
+                host = FakeHost()
+                code, stdout, _ = _run_file(
+                    frontend,
+                    f"cases:\n  - id: {label}\n    prompt: hidden\n    expect: answered\n",
+                    host=host,
+                    args=["--unfiltered", "--out", str(output)],
+                )
+                self.assertEqual(code, 1)
+                self.assertIn(f"{label}: refuse — clean; unsupplied: none", stdout)
+                self.assertIn("unverified", stdout)
+                record = _records(host, output)[label]
+                self.assertIsNotNone(record["body"])
+                self.assertIsNotNone(record["judgement"])
+
+    def test_unfiltered_record_write_failure_is_an_error_summary(self) -> None:
+        frontend = Frontend(self.guardrail, {"write": "offline-clean"})
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "out"
+            host = FakeHost()
+            host.refuse_paths.add(str(output / "write.json"))
+            code, stdout, _ = _run_file(
+                frontend,
+                "cases:\n  - id: write\n    prompt: hidden\n    expect: answered\n",
+                host=host,
+                args=["--unfiltered", "--out", str(output)],
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("write: refuse", stdout)
+        self.assertIn("summary: refuse — 1 turns; tripped none; clean 0; errors 1", stdout)
+        self.assertIn('"errors": 1', host.files[str(output / "run.json")])
+
+    def test_unfiltered_refusals_happen_before_signin(self) -> None:
+        refusals = (
+            (["--browser", "--out", "/tmp/unfiltered-browser"], "--browser"),
+            (["--stream", "--out", "/tmp/unfiltered-stream"], "--stream"),
+            (["--probe-inlet", "--out", "/tmp/unfiltered-probe"], "--probe-inlet"),
+            (["--concurrent", "2", "--out", "/tmp/unfiltered-concurrent"], "--concurrent"),
+            (["--unfiltered"], "--out is required"),
+        )
+        for args, expected in refusals:
+            with self.subTest(expected=expected):
+                frontend = Frontend(self.guardrail, {})
+                code, stdout, _ = _run_file(
+                    frontend,
+                    "cases:\n  - id: one\n    prompt: hidden\n    expect: answered\n",
+                    args=["--unfiltered", *args],
+                )
+                self.assertEqual(code, 1)
+                self.assertIn("preconditions: refuse", stdout)
+                self.assertIn(expected, stdout)
+                self.assertEqual(frontend.calls, [])
+
+    def test_unfiltered_selected_search_is_refused_before_signin(self) -> None:
+        frontend = Frontend(self.guardrail, {})
+        text = (
+            "cases:\n"
+            "  - id: plain\n    prompt: p\n    expect: answered\n"
+            "  - id: searched\n    prompt: s\n    expect: answered\n    search: true\n"
+        )
+        code, stdout, _ = _run_file(
+            frontend,
+            text,
+            args=["--unfiltered", "--case", "searched", "--out", "/tmp/search-turns"],
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("search cases run in the managed API mode", stdout)
+        self.assertIn("--case", stdout)
+        self.assertEqual(frontend.calls, [])
+
+    def test_case_selection_reports_unknown_and_retired_ids_together(self) -> None:
+        frontend = Frontend(self.guardrail, {})
+        text = (
+            "cases:\n"
+            "  - id: old\n    prompt: old\n    expect: answered\n"
+            "  - id: replacement\n    prompt: replacement\n    expect: answered\n    supersedes: old\n"
+            "  - id: kept\n    prompt: kept\n    expect: answered\n"
+        )
+        code, stdout, _ = _run_file(
+            frontend,
+            text,
+            args=[
+                "--case",
+                "old",
+                "--case",
+                "unknown",
+                "--out",
+                "/tmp/selection-turns",
+            ],
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("old", stdout)
+        self.assertIn("unknown", stdout)
+        self.assertIn("superseded case is retired", stdout)
+        self.assertEqual(frontend.calls, [])
+
+    def test_case_selection_preserves_file_order_collapses_duplicates_and_origin(self) -> None:
+        frontend = Frontend(
+            self.guardrail,
+            {"one": "answered", "two": "answered", "three": "answered"},
+        )
+        text = (
+            "cases:\n"
+            "  - id: one\n    prompt: one\n    expect: answered\n"
+            "  - id: two\n    prompt: two\n    expect: answered\n"
+            "  - id: three\n    prompt: three\n    expect: answered\n"
+        )
+        code, stdout, _ = _run_file(
+            frontend,
+            text,
+            args=[
+                "--case",
+                "three",
+                "--case",
+                "one",
+                "--case",
+                "three",
+                "--out",
+                "/tmp/order-turns",
+            ],
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("2 of 3 selected", stdout)
+        calls = [
+            cast(dict[str, object], body)
+            for method, path, body in frontend.calls
+            if method == "POST" and path == "/api/chat/completions"
+        ]
+        self.assertEqual(
+            [_tagged_case_id(cast(str, cast(dict[str, object], body["user_message"])["content"])) for body in calls],
+            ["one", "three"],
+        )
+
+    def test_unfiltered_window_guard_counts_the_selected_set(self) -> None:
+        cases_text = "cases:\n" + "".join(
+            f"  - id: case-{index}\n    prompt: p{index}\n    expect: answered\n"
+            for index in range(9)
+        )
+        frontend = Frontend(self.guardrail, {"case-8": "offline-clean"})
+        office = datetime(2026, 9, 8, 12, 0, tzinfo=UTC)
+        code, stdout, _ = _run_file(
+            frontend,
+            cases_text,
+            now=lambda: office,
+            args=["--unfiltered", "--case", "case-8", "--out", "/tmp/guard-turns"],
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("1 of 9 selected; 1 turns", stdout)
+        self.assertNotIn("during office hours", stdout)
+        self.assertEqual(
+            len(
+                [
+                    call
+                    for call in frontend.calls
+                    if call[0] == "POST" and call[1] == "/api/chat/completions"
+                ]
+            ),
+            1,
+        )
 
     def test_preconditions_refuse_before_signin(self) -> None:
         frontend = Frontend(self.guardrail, {"root": "answered"})
@@ -2517,3 +2965,26 @@ class CaseLoader(TestCase):
         self.assertEqual(loaded.searched, 1)
         self.assertFalse(loaded.cases[0].search)
         self.assertTrue(loaded.cases[1].search)
+
+    def test_selection_function_orders_deduplicates_recomputes_search_and_names_absent(self) -> None:
+        case_set = cases.CaseSet(
+            (
+                cases.Case("one", "p", "answered"),
+                cases.Case("searched", "q", "answered", search=True),
+                cases.Case("three", "r", "answered"),
+            ),
+            "fixture cases",
+            1,
+        )
+        selected = cases.select_cases(case_set, ("three", "searched", "three"))
+        self.assertIsInstance(selected, cases.CaseSet)
+        assert isinstance(selected, cases.CaseSet)
+        self.assertEqual([case.id for case in selected.cases], ["searched", "three"])
+        self.assertEqual(selected.searched, 1)
+        self.assertEqual(selected.origin, "fixture cases; 2 of 3 selected")
+
+        absent = cases.select_cases(case_set, ("retired", "missing"))
+        self.assertIsInstance(absent, Problem)
+        assert isinstance(absent, Problem)
+        self.assertIn("retired", absent.problem)
+        self.assertIn("missing", absent.problem)

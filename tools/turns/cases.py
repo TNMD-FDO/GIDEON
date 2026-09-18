@@ -1,6 +1,7 @@
 """Load seed and operator-authored case sets for the turn harness."""
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -232,3 +233,28 @@ def load_cases(path: str | Path) -> CaseSet | Problem:
     if seed:
         return _load_seed(case_path, document)
     return _load_cases_file(case_path, document.get("cases"))
+
+
+def select_cases(case_set: CaseSet, requested_ids: Sequence[str]) -> CaseSet | Problem:
+    """Return the retained cases named by the operator, in file order."""
+
+    requested: list[str] = []
+    seen: set[str] = set()
+    for identifier in requested_ids:
+        if identifier not in seen:
+            requested.append(identifier)
+            seen.add(identifier)
+    available = {case.id for case in case_set.cases}
+    absent = [identifier for identifier in requested if identifier not in available]
+    if absent:
+        absent_text = ", ".join(absent)
+        return Problem(
+            f"requested case ids are absent: {absent_text}.",
+            "Name ids the cases file holds; a superseded case is retired, then retry.",
+        )
+    selected = tuple(case for case in case_set.cases if case.id in seen)
+    return CaseSet(
+        selected,
+        f"{case_set.origin}; {len(selected)} of {len(case_set.cases)} selected",
+        sum(case.search for case in selected),
+    )

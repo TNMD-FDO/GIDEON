@@ -75,6 +75,17 @@ class RunSpec:
     probe_inlet: bool = False
     trust_ca: bool = False
     concurrent: int = 1
+    unfiltered: bool = False
+    case_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class UnfilteredTurn:
+    """The bare completion and the stored-chat watch for one unfiltered turn."""
+
+    status: int
+    body: object | None
+    watch: session.ChatWatch
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +120,9 @@ class TurnRow:
     stream_kind: str | None
     session: int
     started: float | None
+    offline_kind: str | None = None
+    stored_deleted: tuple[str, ...] = ()
+    stored_not_deleted: tuple[str, ...] = ()
 
 
 class TurnDriver(Protocol):
@@ -245,6 +259,58 @@ class ApiTurnDriver:
             unidentified=found.problem,
             user_id=user_id,
             assistant_id=assistant_id,
+            started=started,
+        )
+
+
+class UnfilteredTurnDriver(ApiTurnDriver):
+    """Drive one bare non-streaming completion: the eval identity's sign-in, no stored chat."""
+
+    def __init__(
+        self,
+        client_factory: Callable[..., Client],
+        password: str,
+        *,
+        model: str = GENERAL_PRESET_ID,
+        sentinel: str,
+    ) -> None:
+        super().__init__(client_factory, password, model)
+        self._sentinel = sentinel
+
+    def turn(
+        self,
+        case: Case,
+        prompt: str,
+        *,
+        now: Callable[[], datetime],
+        monotonic: Callable[[], float],
+        ids_before: frozenset[str],
+        row_name: str,
+    ) -> TurnOutcome:
+        del case, now, row_name
+        started = monotonic()
+        response = session.post_unfiltered(self.client, self._model, prompt)
+        elapsed = monotonic() - started
+        watch = session.watch_chats(
+            self.client,
+            ids_before=ids_before,
+            sentinel=self._sentinel,
+        )
+        problem = response.problem
+        if problem is None and response.status != 200:
+            problem = Problem(
+                f"Open WebUI returned HTTP {response.status}.", session.LOGS_FIX
+            )
+        if problem is None and classify.probe_answer(response.body) is None:
+            problem = Problem("completion has no string content.", session.LOGS_FIX)
+        return TurnOutcome(
+            chat_id=None,
+            assistant=None,
+            user=None,
+            elapsed=elapsed,
+            problem=problem,
+            candidates=watch.candidates,
+            extras=UnfilteredTurn(response.status, response.body, watch),
             started=started,
         )
 
@@ -554,6 +620,74 @@ def _case_record(
         "problem": _problem_data(problem),
         "stream": _stream_data(stream_capture, stream_verdict),
         "browser": browser_data,
+    }
+
+
+def _offline_data(
+    judgement: classify.OfflineJudgement | None,
+) -> dict[str, object] | None:
+    if judgement is None:
+        return None
+    return {
+        "family": judgement.family,
+        "pattern_id": judgement.pattern_id,
+        "supplied": {
+            family: sorted(figures)
+            for family, figures in judgement.supplied.items()
+        },
+        "unsupplied": {
+            family: sorted(figures)
+            for family, figures in judgement.unsupplied.items()
+        },
+        "hits": [
+            {
+                "family": hit.family,
+                "pattern_id": hit.pattern_id,
+                "start": hit.start,
+                "end": hit.end,
+                "text": hit.text,
+            }
+            for hit in judgement.hits
+        ],
+    }
+
+
+def _unfiltered_record(
+    case: Case,
+    spec: RunSpec,
+    *,
+    session_number: int,
+    prompt: str,
+    turn: UnfilteredTurn | None,
+    judgement: classify.OfflineJudgement | None,
+    problem: Problem | None,
+    elapsed: float | None,
+    deletions: Mapping[str, Problem | None],
+) -> dict[str, object]:
+    watch = turn.watch if turn is not None else session.ChatWatch((), 0)
+    return {
+        "case": _case_data(case),
+        "sentinel": spec.sentinel,
+        "session": session_number,
+        "started": None,
+        "prompt": prompt,
+        "status": turn.status if turn is not None else None,
+        "body": turn.body if turn is not None else None,
+        "elapsed": elapsed,
+        "judgement": _offline_data(judgement),
+        "watch": {
+            "candidates": watch.candidates,
+            "stored_ids": list(watch.stored_ids),
+            "problem": _problem_data(watch.problem),
+        },
+        "deletions": {
+            chat_id: {
+                "deleted": deletion is None,
+                "problem": _problem_data(deletion),
+            }
+            for chat_id, deletion in deletions.items()
+        },
+        "problem": _problem_data(problem),
     }
 
 
@@ -886,7 +1020,19 @@ def _summary_counts(
     misses: int,
     stream_counts: Mapping[str, int] | None = None,
     extra_turns: int = 0,
+    offline_counts: Mapping[str, int] | None = None,
 ) -> dict[str, object]:
+    if offline_counts is not None:
+        return {
+            "turns": sum(offline_counts.values()),
+            "tripped": {
+                kind: count
+                for kind, count in offline_counts.items()
+                if kind not in {"clean", "error"} and count
+            },
+            "clean": offline_counts.get("clean", 0),
+            "errors": offline_counts.get("error", 0),
+        }
     # A turn is a row: every case row, plus every replay and the probe's call;
     # the guard's engine-call count lives in cli.py.
     replays = sum(stream_counts.values()) if stream_counts is not None else 0
@@ -911,7 +1057,20 @@ def _summary_detail(
     misses: int,
     stream_counts: Mapping[str, int] | None = None,
     extra_turns: int = 0,
+    offline_counts: Mapping[str, int] | None = None,
 ) -> str:
+    if offline_counts is not None:
+        tripped = ", ".join(
+            f"{kind} {count}"
+            for kind, count in offline_counts.items()
+            if kind not in {"clean", "error"} and count
+        )
+        return (
+            f"{sum(offline_counts.values())} turns; "
+            f"tripped {tripped or 'none'}; "
+            f"clean {offline_counts.get('clean', 0)}; "
+            f"errors {offline_counts.get('error', 0)}"
+        )
     replays = sum(stream_counts.values()) if stream_counts is not None else 0
     parts = [f"{sum(totals.values()) + replays + extra_turns} turns"]
     labels = {"positive": "positives", "control": "controls", "case": "cases"}
@@ -997,7 +1156,9 @@ class _Bookkeeping:
 
     totals: dict[str, int]
     counts: dict[str, dict[str, int]]
+    offline_counts: dict[str, int] = field(default_factory=dict)
     deleted: int = 0
+    stored: int = 0
     not_deleted: list[str] = field(default_factory=list)
     unverified: list[str] = field(default_factory=list)
     misses: int = 0
@@ -1019,6 +1180,13 @@ class _Bookkeeping:
             self.counts[row.kind][row.verdict_kind] += 1
         if row.stream_kind is not None:
             self.stream_counts[row.stream_kind] += 1
+        if row.offline_kind is not None:
+            self.offline_counts[row.offline_kind] = (
+                self.offline_counts.get(row.offline_kind, 0) + 1
+            )
+        self.stored += len(row.stored_deleted) + len(row.stored_not_deleted)
+        self.deleted += len(row.stored_deleted)
+        self.not_deleted.extend(row.stored_not_deleted)
         if row.deleted:
             self.deleted += 1
         elif row.chat_id is not None:
@@ -1063,6 +1231,9 @@ class _Bookkeeping:
                             write_problem.fix,
                         ),
                         missed=True,
+                        offline_kind=(
+                            "error" if row.offline_kind is not None else None
+                        ),
                     )
             self.absorb(finalized)
             emit(finalized.result)
@@ -1259,6 +1430,149 @@ def _run_turn(
     )
 
 
+def _run_unfiltered_turn(
+    spec: RunSpec,
+    *,
+    client: Client,
+    driver: TurnDriver,
+    guardrail: Any,
+    case: Case,
+    session_number: int,
+    row_name: str,
+    now: Callable[[], datetime],
+    monotonic: Callable[[], float],
+) -> TurnRow:
+    """Run one bare completion, judge it offline, and clean up proven chats."""
+
+    prompt = ""
+    turn: UnfilteredTurn | None = None
+    watch = session.ChatWatch((), 0)
+    judgement: classify.OfflineJudgement | None = None
+    problem: Problem | None = None
+    elapsed: float | None = None
+    started: float | None = None
+    deletions: dict[str, Problem | None] = {}
+    stored_deleted: list[str] = []
+    stored_not_deleted: list[str] = []
+
+    try:
+        ids_before = owuiturn.chat_ids(client)
+        prompt = session.prompt_text(case.id, spec.sentinel, case.prompt)
+        outcome = driver.turn(
+            case,
+            prompt,
+            now=now,
+            monotonic=monotonic,
+            ids_before=ids_before,
+            row_name=row_name,
+        )
+        elapsed = outcome.elapsed
+        started = outcome.started
+        problem = outcome.problem
+        if isinstance(outcome.extras, UnfilteredTurn):
+            turn = outcome.extras
+            watch = turn.watch
+        elif problem is None:
+            problem = Problem("unfiltered turn response is missing.", _turn_fix(spec))
+        if problem is None and turn is not None:
+            answer = classify.probe_answer(turn.body)
+            if answer is None:
+                problem = Problem("completion has no string content.", _turn_fix(spec))
+            else:
+                judgement = classify.offline_judgement(
+                    guardrail, answer, prompt
+                )
+    except owui.OwuiError as exc:
+        problem = Problem(exc.problem, exc.fix)
+    except Exception as exc:  # noqa: BLE001 - the case boundary owns the traceback.
+        problem = Problem(
+            f"internal error: {type(exc).__name__}: {exc}", _turn_fix(spec)
+        )
+    finally:
+        for chat_id in watch.stored_ids:
+            try:
+                deletion = owuiturn.delete_chat(client, chat_id)
+            except Exception:  # noqa: BLE001 - cleanup must reach its row.
+                deletion = Problem(
+                    "chat deletion raised an internal error",
+                    _cleanup_fix(driver.account),
+                )
+            deletions[chat_id] = deletion
+            if deletion is None:
+                stored_deleted.append(chat_id)
+            else:
+                stored_not_deleted.append(chat_id)
+
+    offline_kind = (
+        judgement.family if judgement is not None and judgement.family is not None else "clean"
+    )
+    if problem is not None or judgement is None:
+        offline_kind = "error"
+        result = StageResult(
+            row_name,
+            False,
+            f"turn error: {problem.problem if problem is not None else 'offline judgement is missing'}"
+            + (f"; {elapsed:.2f}s" if elapsed is not None else ""),
+            _turn_fix(spec),
+        )
+    else:
+        detail = classify.offline_field(judgement)
+        if watch.stored_ids:
+            detail += (
+                f"; {len(watch.stored_ids)} chats stored, "
+                f"{len(stored_deleted)} deleted"
+            )
+        detail += f"; {elapsed:.2f}s" if elapsed is not None else "; elapsed unavailable"
+        if stored_not_deleted:
+            result = StageResult(
+                row_name,
+                False,
+                detail,
+                _cleanup_fix(driver.account),
+            )
+        elif watch.problem is not None:
+            result = StageResult(
+                row_name,
+                False,
+                detail,
+                _unverified_fix(driver.account),
+            )
+        else:
+            result = StageResult(row_name, True, detail, "")
+
+    record = (
+        _unfiltered_record(
+            case,
+            spec,
+            session_number=session_number,
+            prompt=prompt,
+            turn=turn,
+            judgement=judgement,
+            problem=problem,
+            elapsed=elapsed,
+            deletions=deletions,
+        )
+        if spec.out is not None
+        else None
+    )
+    return TurnRow(
+        result=result,
+        record=record,
+        kind=case.kind,
+        verdict_kind=None,
+        missed=not result.ok,
+        chat_id=None,
+        deleted=False,
+        unverified=watch.problem is not None,
+        stream_kind=None,
+        session=session_number,
+        started=started,
+        offline_kind=offline_kind,
+        stored_deleted=tuple(stored_deleted),
+        stored_not_deleted=tuple(stored_not_deleted),
+    )
+
+
 def _arguments(spec: RunSpec) -> dict[str, object]:
     return {
         "cases": str(spec.cases),
@@ -1271,6 +1585,8 @@ def _arguments(spec: RunSpec) -> dict[str, object]:
         "browser": spec.browser,
         "probe_inlet": spec.probe_inlet,
         "trust_ca": spec.trust_ca,
+        "unfiltered": spec.unfiltered,
+        "case_ids": list(spec.case_ids),
     }
 
 
@@ -1321,15 +1637,24 @@ def _run_cases(
     for case in cases:
         totals.setdefault(case.kind, 0)
         counts.setdefault(case.kind, dict.fromkeys(classify.KINDS, 0))
+    offline_counts = (
+        dict.fromkeys((*(family.name for family in guardrail.FAMILIES), "clean", "error"), 0)
+        if spec.unfiltered
+        else {}
+    )
     bookkeeping = _Bookkeeping(
-        totals, counts, origin=monotonic() if len(drivers) > 1 else None
+        totals,
+        counts,
+        offline_counts=offline_counts,
+        origin=monotonic() if len(drivers) > 1 else None,
     )
     units = _units(cases, spec.repeat)
+    run_turn = _run_unfiltered_turn if spec.unfiltered else _run_turn
 
     def run_session(session_number: int) -> None:
         driver = drivers[session_number - 1]
         for case, repetition in _session_units(units, session_number):
-            row = _run_turn(
+            row = run_turn(
                 spec,
                 client=driver.client,
                 driver=driver,
@@ -1368,33 +1693,41 @@ def _run_cases(
         bookkeeping.not_deleted.extend(probe.not_deleted)
         bookkeeping.all_ok = bookkeeping.all_ok and probe.misses == 0
 
+    reported_offline = bookkeeping.offline_counts if spec.unfiltered else None
+    summary_args = (bookkeeping.totals, bookkeeping.counts, bookkeeping.misses, reported_stream)
     summary_counts = _summary_counts(
-        bookkeeping.totals,
-        bookkeeping.counts,
-        bookkeeping.misses,
-        reported_stream,
-        extra_turns=probe_turns,
+        *summary_args, extra_turns=probe_turns, offline_counts=reported_offline
     )
-    summary_ok = bookkeeping.misses == 0
+    summary_detail = _summary_detail(
+        *summary_args, extra_turns=probe_turns, offline_counts=reported_offline
+    )
+    summary_ok = (
+        bookkeeping.offline_counts["error"] == 0
+        if spec.unfiltered
+        else bookkeeping.misses == 0
+    )
     emit(
         StageResult(
             "summary",
             summary_ok,
-            _summary_detail(
-                bookkeeping.totals,
-                bookkeeping.counts,
-                bookkeeping.misses,
-                reported_stream,
-                extra_turns=probe_turns,
-            ),
+            summary_detail,
             "" if summary_ok else "Read the failed rows above.",
         )
     )
     cleanup_ok = not bookkeeping.not_deleted and not bookkeeping.unverified
     if cleanup_ok:
-        emit(StageResult("cleanup", True, f"{bookkeeping.deleted} chats deleted", ""))
+        cleanup_detail = (
+            f"{bookkeeping.stored} chats stored, {bookkeeping.deleted} deleted"
+            if spec.unfiltered
+            else f"{bookkeeping.deleted} chats deleted"
+        )
+        emit(StageResult("cleanup", True, cleanup_detail, ""))
     else:
-        details = []
+        details = (
+            [f"{bookkeeping.stored} chats stored, {bookkeeping.deleted} deleted"]
+            if spec.unfiltered
+            else []
+        )
         if bookkeeping.not_deleted:
             details.append(
                 f"{len(bookkeeping.not_deleted)} chats not deleted: "
@@ -1506,7 +1839,17 @@ def run(
         if output is not None:
             io.mkdir(output, mode=0o755, parents=True, exist_ok=True)
             output_ready = True
-        if spec.browser:
+        drivers: tuple[TurnDriver, ...]
+        if spec.unfiltered:
+            drivers = (
+                UnfilteredTurnDriver(
+                    client_factory,
+                    password,
+                    model=spec.model,
+                    sentinel=spec.sentinel,
+                ),
+            )
+        elif spec.browser:
             if browser_setup is None or output is None:
                 print_stage(
                     StageResult(
@@ -1532,7 +1875,7 @@ def run(
                 output=output,
                 browser_setup=browser_setup,
             )
-            drivers: tuple[TurnDriver, ...] = (
+            drivers = (
                 BrowserTurnDriver(
                     browser_setup,
                     client_factory,

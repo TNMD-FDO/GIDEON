@@ -47,6 +47,20 @@ _BROWSER_SEARCH_FIX: Final[str] = (
     "Run the API mode over this file, or remove its search cases for a browser run, "
     "then retry."
 )
+_UNFILTERED_BROWSER_FIX: Final[str] = (
+    "Drop --browser when using --unfiltered, then retry."
+)
+_UNFILTERED_STREAM_FIX: Final[str] = "Drop --stream when using --unfiltered, then retry."
+_UNFILTERED_PROBE_FIX: Final[str] = (
+    "Drop --probe-inlet when using --unfiltered, then retry."
+)
+_UNFILTERED_CONCURRENT_FIX: Final[str] = (
+    "Drop --concurrent or set it to 1 when using --unfiltered, then retry."
+)
+_UNFILTERED_OUT_FIX: Final[str] = "Pass --out <dir> when using --unfiltered, then retry."
+_UNFILTERED_SEARCH_FIX: Final[str] = (
+    "Select the file's other cases with --case, then retry."
+)
 _BROWSER_ONLY_FIX: Final[str] = "Pass --browser with this flag, then retry."
 _LAUNCH_FIX: Final[str] = (
     "Run .venv/bin/playwright install-deps chromium for the shared libraries and "
@@ -87,6 +101,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--probe-inlet", action="store_true")
     parser.add_argument("--trust-ca", action="store_true")
     parser.add_argument("--out", type=Path, metavar="DIR")
+    parser.add_argument("--case", action="append", default=[], metavar="ID")
+    parser.add_argument("--unfiltered", action="store_true")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     return parser
@@ -132,6 +148,29 @@ def _out_refusal(io: Host, output: Path) -> int | None:
     return None
 
 
+def _unfiltered_refusal(
+    options: argparse.Namespace, output: Path | None
+) -> StageResult | None:
+    """The first flag ``--unfiltered`` cannot run beside, or a missing ``--out``."""
+
+    conflicts = (
+        (options.browser, "--browser", _UNFILTERED_BROWSER_FIX),
+        (options.stream, "--stream", _UNFILTERED_STREAM_FIX),
+        (options.probe_inlet, "--probe-inlet", _UNFILTERED_PROBE_FIX),
+        (options.concurrent > 1, "--concurrent above 1", _UNFILTERED_CONCURRENT_FIX),
+    )
+    for present, flag, fix in conflicts:
+        if present:
+            return StageResult(
+                "preconditions", False, f"--unfiltered is not available with {flag}", fix
+            )
+    if output is None:
+        return StageResult(
+            "preconditions", False, "--out is required with --unfiltered", _UNFILTERED_OUT_FIX
+        )
+    return None
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -149,6 +188,11 @@ def main(
     io = host or RealHost()
     root = checkout or Path(__file__).resolve().parents[2]
     output = options.out.resolve() if options.out is not None else None
+    if options.unfiltered:
+        refused_flag = _unfiltered_refusal(options, output)
+        if refused_flag is not None:
+            print_stage(refused_flag)
+            return 1
     if options.browser and output is None:
         print_stage(StageResult("preconditions", False, "--out is required with --browser", _BROWSER_OUT_FIX))
         return 1
@@ -298,6 +342,16 @@ def main(
             StageResult("preconditions", False, loaded_cases.problem, loaded_cases.fix)
         )
         return 1
+    if options.case:
+        selected_cases = cases.select_cases(loaded_cases, options.case)
+        if not isinstance(selected_cases, cases.CaseSet):
+            print_stage(
+                StageResult(
+                    "preconditions", False, selected_cases.problem, selected_cases.fix
+                )
+            )
+            return 1
+        loaded_cases = selected_cases
     if options.browser and loaded_cases.searched:
         print_stage(
             StageResult(
@@ -305,6 +359,16 @@ def main(
                 False,
                 "search cases run in the API mode",
                 _BROWSER_SEARCH_FIX,
+            )
+        )
+        return 1
+    if options.unfiltered and loaded_cases.searched:
+        print_stage(
+            StageResult(
+                "preconditions",
+                False,
+                "search cases run in the managed API mode",
+                _UNFILTERED_SEARCH_FIX,
             )
         )
         return 1
@@ -416,6 +480,8 @@ def main(
             print(f"browsers directory: {chromium.BROWSERS_DIR}")
             print(f"browser home: {chromium.BROWSER_HOME}")
             print(f"playwright: {chromium.PLAYWRIGHT_VERSION}")
+        elif options.unfiltered:
+            print("mode: unfiltered")
         return 0
 
     chosen_factory = client_factory or owui.ingress_client_factory(
@@ -462,6 +528,8 @@ def main(
         probe_inlet=options.probe_inlet,
         trust_ca=options.trust_ca,
         base_model=base_model,
+        unfiltered=options.unfiltered,
+        case_ids=tuple(case.id for case in case_values) if options.case else (),
     )
     selected_now = now or _utc_now
     return run(

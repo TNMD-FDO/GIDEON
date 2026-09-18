@@ -32,6 +32,7 @@ class FakeHost:
     """A small dict-backed Host for launcher and footprint checks."""
 
     def __init__(self, *, site_text: str = SITE_TEXT, models_text: str | None = None) -> None:
+        self.euid = 0
         self.files: dict[str, str] = {
             str(SITE_PATH): site_text,
             str(ROOT / "models.lock"):
@@ -116,7 +117,7 @@ class FakeHost:
         self.directories.setdefault(os.fspath(path), [])
 
     def geteuid(self) -> int:
-        return 0
+        return self.euid
 
 
 def _base_model_id(host: FakeHost) -> str:
@@ -929,6 +930,95 @@ class BrowserTurnIntegration(TestCase):
                     self.assertEqual(code, 1)
                     self.assertIn("preconditions: refuse", stdout.getvalue())
                     self.assertIn(fix, stdout.getvalue())
+
+    def test_case_narrows_browser_run_and_search_refusal_follows_selection(self) -> None:
+        host = self._host()
+        with TemporaryDirectory() as directory:
+            cases_path = Path(directory) / "cases.yaml"
+            cases_path.write_text(
+                "cases:\n"
+                "  - id: plain\n    prompt: p\n    expect: answered\n"
+                "  - id: searched\n    prompt: s\n    expect: answered\n    search: true\n",
+                encoding="utf-8",
+            )
+            frontend = FakeFrontend()
+            page = FakePage(frontend, drains=self._drains())
+            output = StringIO()
+            with (
+                redirect_stdout(output),
+                patch("tools.turns.cli.chromium.playwright_problem", return_value=None),
+                patch("tools.turns.cli.chromium.browser_problem", return_value=None),
+            ):
+                code = cli.main(
+                    [
+                        str(cases_path),
+                        "--browser",
+                        "--case",
+                        "plain",
+                        "--out",
+                        str(Path(directory) / "plain-out"),
+                    ],
+                    host=host,
+                    client_factory=frontend.factory,
+                    page_factory=lambda _hostname, _log: (
+                        page,
+                        lambda: None,
+                        "browser detail",
+                    ),
+                    now=lambda: datetime(2026, 9, 5, 12, 0, tzinfo=UTC),
+                    checkout=ROOT,
+                    site_path=SITE_PATH,
+                )
+            self.assertEqual(code, 0)
+            self.assertIn("2 cases; 1 of 2 selected", output.getvalue())
+            self.assertIn("plain: ok", output.getvalue())
+            self.assertNotIn("searched:", output.getvalue())
+
+            refused = StringIO()
+            with redirect_stdout(refused):
+                code = cli.main(
+                    [
+                        str(cases_path),
+                        "--browser",
+                        "--case",
+                        "searched",
+                        "--out",
+                        str(Path(directory) / "searched-out"),
+                    ],
+                    host=host,
+                    checkout=ROOT,
+                    site_path=SITE_PATH,
+                )
+            self.assertEqual(code, 1)
+            self.assertIn("search cases run in the API mode", refused.getvalue())
+
+    def test_unfiltered_browser_refuses_before_root_check(self) -> None:
+        host = self._host()
+        host.euid = 1000
+        with TemporaryDirectory() as directory:
+            cases_path = Path(directory) / "cases.yaml"
+            cases_path.write_text(
+                "cases:\n  - id: one\n    prompt: p\n    expect: answered\n",
+                encoding="utf-8",
+            )
+            output = StringIO()
+            with redirect_stdout(output):
+                code = cli.main(
+                    [
+                        str(cases_path),
+                        "--unfiltered",
+                        "--browser",
+                        "--out",
+                        str(Path(directory) / "out"),
+                    ],
+                    host=host,
+                    checkout=ROOT,
+                    site_path=SITE_PATH,
+                )
+            self.assertEqual(code, 1)
+            self.assertIn("--unfiltered is not available with --browser", output.getvalue())
+            self.assertIn("Drop --browser", output.getvalue())
+            self.assertEqual(host.read_paths, [])
 
     def test_inlet_probe_rows_are_clean_and_count_the_chat_id_call(self) -> None:
         frontend = FakeFrontend()

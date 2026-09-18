@@ -10,6 +10,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Final
 
+from gideon.host import owuiturn
 from gideon.host.owui import Client, OwuiError
 from gideon.host.owuiturn import COMPLETIONS_PATH, LOGS_FIX
 from gideon.host.report import Problem
@@ -39,6 +40,15 @@ class ProbeResponse:
     problem: Problem | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ChatWatch:
+    """The stored chats proven to carry this run's sentinel, or a lookup problem."""
+
+    stored_ids: tuple[str, ...]
+    candidates: int
+    problem: Problem | None = None
+
+
 def _probe(client: Client, body: Mapping[str, object]) -> ProbeResponse:
     """Post one non-streaming probe body without converting HTTP responses to errors."""
 
@@ -47,6 +57,16 @@ def _probe(client: Client, body: Mapping[str, object]) -> ProbeResponse:
     except OwuiError as exc:
         return ProbeResponse(0, None, Problem(exc.problem, LOGS_FIX))
     return ProbeResponse(response.status, response.body)
+
+
+def _bare_body(model: str, prompt: str) -> dict[str, object]:
+    """Build the shared non-streaming body without a chat or session id."""
+
+    return {
+        "model": model,
+        "stream": False,
+        "messages": [{"role": "user", "content": prompt}],
+    }
 
 
 def new_chat(client: Client, model: str) -> str:
@@ -80,14 +100,13 @@ def new_chat(client: Client, model: str) -> str:
 def probe_bare(client: Client, model: str, prompt: str) -> ProbeResponse:
     """Probe the inlet without a session or chat id."""
 
-    return _probe(
-        client,
-        {
-            "model": model,
-            "stream": False,
-            "messages": [{"role": "user", "content": prompt}],
-        },
-    )
+    return _probe(client, _bare_body(model, prompt))
+
+
+def post_unfiltered(client: Client, model: str, prompt: str) -> ProbeResponse:
+    """Post one unfiltered turn without a session or chat id."""
+
+    return _probe(client, _bare_body(model, prompt))
 
 
 def probe_with_chat_id(
@@ -195,6 +214,51 @@ def raw_stream(
     return StreamCapture(tuple(deltas), elapsed, problem)
 
 
+def sentinel_fragment(sentinel: str) -> str:
+    """Return the sentinel-bearing prefix shared by sent prompts and chat reads."""
+
+    return f"[turn harness {sentinel} "
+
+
+def _has_sentinel(messages: Mapping[str, object], fragment: str) -> bool:
+    for message in messages.values():
+        if not isinstance(message, Mapping):
+            continue
+        content = message.get("content")
+        if isinstance(content, str) and fragment in content:
+            return True
+    return False
+
+
+def watch_chats(
+    client: Client, *, ids_before: frozenset[str], sentinel: str
+) -> ChatWatch:
+    """Find the chats new since ``ids_before`` that carry this run's sentinel.
+
+    Never raises: a failed listing or candidate read is the value's problem,
+    the ids proven before it kept, so the caller keeps its completed turn.
+    A candidate gone between the listing and its read is skipped.
+    """
+
+    try:
+        candidate_ids = sorted(owuiturn.chat_ids(client) - ids_before)
+    except OwuiError as exc:
+        return ChatWatch((), 0, Problem(exc.problem, exc.fix))
+
+    fragment = sentinel_fragment(sentinel)
+    stored_ids: list[str] = []
+    candidates = 0
+    for chat_id in candidate_ids:
+        candidates += 1
+        try:
+            messages = owuiturn.candidate_messages(client, chat_id)
+        except OwuiError as exc:
+            return ChatWatch(tuple(stored_ids), candidates, Problem(exc.problem, exc.fix))
+        if messages is not None and _has_sentinel(messages, fragment):
+            stored_ids.append(chat_id)
+    return ChatWatch(tuple(stored_ids), candidates)
+
+
 def prompt_text(case_id: str, sentinel: str, prompt: str) -> str:
     """The prompt as sent: the case's text, then a bracketed tag naming the run and the case.
 
@@ -205,4 +269,4 @@ def prompt_text(case_id: str, sentinel: str, prompt: str) -> str:
     about it), which distorts the very turn being measured.
     """
 
-    return f"{prompt}\n\n[turn harness {sentinel} {case_id}]"
+    return f"{prompt}\n\n{sentinel_fragment(sentinel)}{case_id}]"

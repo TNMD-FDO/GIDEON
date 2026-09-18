@@ -139,6 +139,28 @@ class StreamVerdict:
 
 
 @dataclass(frozen=True, slots=True)
+class OfflineHit:
+    """One raw pattern match in an unfiltered answer."""
+
+    family: str
+    pattern_id: str
+    start: int
+    end: int
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class OfflineJudgement:
+    """The Filter verdict, figures, and raw pattern matches for one answer."""
+
+    family: str | None
+    pattern_id: str | None
+    supplied: Mapping[str, frozenset[str]]
+    unsupplied: Mapping[str, frozenset[str]]
+    hits: tuple[OfflineHit, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class LiveVerdict:
     """The guardrail's verdict over the states painted for one browser turn.
 
@@ -438,6 +460,56 @@ def probe_verdict(guardrail: Any, body: object, user_content: str) -> str | None
     if not isinstance(content, str):
         return None
     return _trip_pattern(_judge_answer(guardrail, content, user_content))
+
+
+def offline_judgement(
+    guardrail: Any, answer: str, prompt: str
+) -> OfflineJudgement:
+    """Judge an unfiltered answer and expose every family's figures and raw hits."""
+
+    user_message = {"role": "user", "content": prompt}
+    assistant_message = {"role": "assistant", "content": answer}
+    trip = guardrail.judge_message(
+        assistant_message, [user_message, assistant_message], 1
+    )
+    supplied: dict[str, frozenset[str]] = {}
+    unsupplied: dict[str, frozenset[str]] = {}
+    hits: list[OfflineHit] = []
+    for family_definition in guardrail.FAMILIES:
+        family_name = family_definition.name
+        prompt_figures = family_definition.figures(prompt)
+        supplied[family_name] = prompt_figures
+        unsupplied[family_name] = family_definition.figures(answer) - prompt_figures
+        for pattern in family_definition.patterns:
+            for match in pattern.regex.finditer(answer):
+                hits.append(
+                    OfflineHit(
+                        family_name,
+                        pattern.pattern_id,
+                        match.start(),
+                        match.end(),
+                        match.group(0),
+                    )
+                )
+    return OfflineJudgement(
+        trip.family if trip is not None else None,
+        trip.pattern_id if trip is not None else None,
+        supplied,
+        unsupplied,
+        tuple(hits),
+    )
+
+
+def offline_field(judgement: OfflineJudgement) -> str:
+    """Render the unfiltered row's verdict and non-zero unsupplied counts."""
+
+    verdict = f"tripped {judgement.pattern_id}" if judgement.pattern_id else "clean"
+    counts = ", ".join(
+        f"{family} {len(figures)}"
+        for family, figures in judgement.unsupplied.items()
+        if figures
+    )
+    return f"{verdict}; unsupplied: {counts or 'none'}"
 
 
 def load_guardrail(checkout: str | Path) -> ModuleType:

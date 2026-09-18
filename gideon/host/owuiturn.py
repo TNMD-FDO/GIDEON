@@ -208,8 +208,8 @@ def _history(
     return path, history, messages
 
 
-def _candidate_messages(client: Client, chat_id: str) -> Mapping[str, object] | None:
-    """One candidate's ``history.messages``, or ``None`` when it is gone.
+def candidate_messages(client: Client, chat_id: str) -> Mapping[str, object] | None:
+    """Read one candidate chat's ``history.messages``, or ``None`` when it is gone.
 
     A not-found status is the skip: between the listing and this read another
     session deleted the chat it made, and the route reports that the same way
@@ -290,7 +290,7 @@ def find_turn_chat(
     matches: list[tuple[str, StoredTurn]] = []
     vanished = 0
     for chat_id in candidate_ids:
-        messages = _candidate_messages(client, chat_id)
+        messages = candidate_messages(client, chat_id)
         if messages is None:
             vanished += 1
             continue
