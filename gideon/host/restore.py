@@ -1,4 +1,9 @@
-"""Verified staging and off-box restore orchestration (§19.2)."""
+"""Verified staging and off-box restore orchestration (§19.2).
+
+Each entry holds the backup lock (``backuplock.py``) for its whole run, so a
+backup, a push, and a restore never overlap; ``docs/archi/backup-restore.md``
+names its rules.
+"""
 
 import argparse
 import os
@@ -17,6 +22,7 @@ from gideon.host import (
     apply,
     audit,
     backup,
+    backuplock,
     backupset,
     nogpu,
     pgbackrest,
@@ -36,7 +42,7 @@ from gideon.host.report import (
 )
 from gideon.host.site import SiteConfig
 from gideon.host.stages import aware_now, run_stage, site_problem
-from gideon.host.sysio import Host, PathLike, RealHost
+from gideon.host.sysio import Host, LockingHost, PathLike, RealHost
 
 _SITE_PATH: Final = "/etc/gideon/site.yaml"
 _RENDERED_DIR: Final = "/etc/gideon/rendered"
@@ -304,7 +310,7 @@ _INCOMPLETE_STAGING_FIX: Final = (
 
 
 def _pre_restore_stage(
-    io: Host,
+    io: LockingHost,
     *,
     source: str,
     rendered_dir: PathLike,
@@ -1336,7 +1342,7 @@ def _next_stage(
 def run_restore(
     args: object,
     *,
-    host: Host | None = None,
+    host: LockingHost | None = None,
     rendered_dir: PathLike = _RENDERED_DIR,
     site_path: PathLike = _SITE_PATH,
     root: PathLike | None = None,
@@ -1354,6 +1360,35 @@ def run_restore(
             "restore's clock value must be timezone-aware.",
             "Use an aware UTC time, then retry.",
         )
+    outcome = backuplock.take(io, command="restore", now=effective_now)
+    if outcome.problem is not None:
+        return _refuse(outcome.problem.problem, outcome.problem.fix)
+    try:
+        return _restore_body(
+            args,
+            io=io,
+            rendered_dir=rendered_dir,
+            site_path=site_path,
+            root=root,
+            effective_now=effective_now,
+            sleep=sleep,
+        )
+    finally:
+        # A nested run is its holder's; the holder releases.
+        if outcome.state is backuplock.State.HELD:
+            backuplock.release(io)
+
+
+def _restore_body(
+    args: object,
+    *,
+    io: LockingHost,
+    rendered_dir: PathLike,
+    site_path: PathLike,
+    root: PathLike | None,
+    effective_now: datetime,
+    sleep: Callable[[float], None],
+) -> int:
     build_box = nogpu.is_build_box(io)
     prerequisites = _preconditions(
         io,

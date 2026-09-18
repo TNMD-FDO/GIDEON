@@ -57,7 +57,7 @@ GIDEON/
 │       ├── owui.py · owuiturn.py · grafana.py · ingress.py   # the frontend client and its managed turn, the Grafana client, the shared SNI connection
 │       ├── stores.py · audit.py · users.py · ldap.py · alerts.py   # Postgres roles and migrations, the audit writer, reconcile and its directory reads, alerts test
 │       ├── stack.py · tls.py · registry.py · pgbackrest.py · sshtarget.py   # argv builders and probes
-│       └── install.py · upgrade.py · backupset.py · backup.py · restore.py · drill.py   # install; the two-tree upgrade and its rollback; the set model and the four backup commands
+│       └── install.py · upgrade.py · backupset.py · backup.py · backuplock.py · restore.py · drill.py   # install; the two-tree upgrade and its rollback; the set model, the four backup commands, and their lock
 ├── images/postgres/Dockerfile   # the one built image (base + pgbackrest; no pin in the file)
 ├── compose/                 # templates by service: caddy/, open-webui/ (permissions.yaml, general.yaml, functions/ — the two Filters, release content
 │                            #   never imported as a gideon module), postgres/, systemd/, prometheus/, blackbox/, grafana/

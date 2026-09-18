@@ -21,7 +21,7 @@ from gideon.host import apply, backup, backupset, drill, engine, preflight, site
 from gideon.host import audit as audit_module
 from gideon.host.report import StageResult, print_stage, refusal
 from gideon.host.stages import site_problem
-from gideon.host.sysio import Host, PathLike, RealHost
+from gideon.host.sysio import Host, LockingHost, PathLike, RealHost
 
 _SITE_PATH: Final = "/etc/gideon/site.yaml"
 _RENDERED_DIR: Final = "/etc/gideon/rendered"
@@ -64,7 +64,7 @@ _PHASES: Final[tuple[_Phase, ...]] = (
 
 
 def _default_runners(
-    io: Host, *, site_path: PathLike, rendered_dir: PathLike
+    io: LockingHost, *, site_path: PathLike, rendered_dir: PathLike
 ) -> dict[str, Runner]:
     """The real commands, each given the keyword arguments its signature takes."""
 
@@ -172,7 +172,7 @@ def _refuse(problem: str, fix: str) -> int:
 def run_install(
     args: argparse.Namespace,
     *,
-    host: Host | None = None,
+    host: LockingHost | None = None,
     site_path: PathLike = _SITE_PATH,
     rendered_dir: PathLike = _RENDERED_DIR,
     runners: Mapping[str, Runner] | None = None,

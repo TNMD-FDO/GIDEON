@@ -40,6 +40,11 @@ once whenever the box has drilled before, and waits for a running backup
 `journalctl -u gideon-backup.service -u gideon-users-reconcile.service -u gideon-backup-drill.service`
 says afterwards which ran.
 
+`backup run`, `backup push`, and `restore` share one lock
+(`/run/gideon/backup.lock`, slice-0 ticket 26): a second started while one runs
+refuses before any stage, naming the running command, when it started, and its
+pid, and a refused nightly fails its unit like any other failure.
+
 The four file roots in a set are `/etc/gideon` (minus `secrets/` and the
 frontend's rendered env file — both carry secrets), the checkout the command ran
 from, `/data/registry`, and `/data/bulk/openwebui`. The secrets ride only as

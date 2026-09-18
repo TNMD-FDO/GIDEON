@@ -9,8 +9,9 @@ import unittest
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from unittest import mock
 
-from gideon.host import backup, backupset, site, sshtarget, stack
+from gideon.host import backup, backuplock, backupset, site, sshtarget, stack
 from gideon.host.steps.site_dirs import AGE_RECIPIENT_PATH
 from gideon.host.sysio import Command, PathLike
 
@@ -126,6 +127,7 @@ class FakeHost:
         self.fail_target = fail_target
         self.calls: list[tuple[tuple[str, ...], str | None, float | None]] = []
         self.writes: list[str] = []
+        self.locks: dict[str, str] = {}
 
     def run(
         self,
@@ -219,6 +221,16 @@ class FakeHost:
     ) -> None:
         del path, mode, parents, exist_ok
 
+    def take_lock(self, path: PathLike, record: str) -> str | None:
+        key = os.fspath(path)
+        if key in self.locks:
+            return self.locks[key]
+        self.locks[key] = record
+        return None
+
+    def release_lock(self, path: PathLike) -> None:
+        self.locks.pop(os.fspath(path), None)
+
     def geteuid(self) -> int:
         return self.euid
 
@@ -285,6 +297,24 @@ class Preconditions(unittest.TestCase):
 
 
 class PushContracts(unittest.TestCase):
+    def test_refuses_while_a_foreign_holder_has_the_lock(self) -> None:
+        fake = host()
+        holder = backuplock.Record("restore", os.getpid() + 1, NOW)
+        stored = holder.to_json()
+        fake.locks[backuplock.LOCK_PATH] = stored
+        out = io.StringIO()
+        err = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = backup.run_backup_push(
+                argparse.Namespace(verify_all=False), host=fake, now=NOW
+            )
+        self.assertEqual(code, 1)
+        self.assertEqual(out.getvalue(), "")
+        self.assertIn(holder.command, err.getvalue())
+        self.assertIn(holder.started.isoformat(), err.getvalue())
+        self.assertEqual(fake.calls, [])
+        self.assertEqual(fake.locks[backuplock.LOCK_PATH], stored)
+
     def test_listing_parser_and_script(self) -> None:
         parsed = backup._parse_remote_listing(
             "20260901T120000Z\t1\n"
@@ -314,11 +344,28 @@ class PushContracts(unittest.TestCase):
     def test_push_record_rsync_finalize_and_check(self) -> None:
         fake = host()
         out = io.StringIO()
-        with contextlib.redirect_stdout(out):
+        records: list[str] = []
+        original_take_lock = fake.take_lock
+
+        def capture_lock(path: PathLike, record: str) -> str | None:
+            records.append(record)
+            return original_take_lock(path, record)
+
+        with (
+            mock.patch.object(fake, "take_lock", side_effect=capture_lock),
+            contextlib.redirect_stdout(out),
+        ):
             code = backup.run_backup_push(
                 argparse.Namespace(verify_all=False), host=fake, now=NOW
             )
         self.assertEqual(code, 0)
+        self.assertEqual(len(records), 1)
+        record = backuplock.parse(records[0])
+        self.assertIsNotNone(record)
+        assert record is not None
+        self.assertEqual(record.command, "backup push")
+        self.assertEqual(record.started, NOW)
+        self.assertNotIn(backuplock.LOCK_PATH, fake.locks)
         self.assertEqual(
             [line.split(":", 1)[0] for line in out.getvalue().splitlines()],
             ["record", "list", "push", "finalize", "prune", "check", "audit"],
@@ -468,6 +515,7 @@ class PushContracts(unittest.TestCase):
                 argparse.Namespace(verify_all=False), host=fake, now=NOW
             )
         self.assertEqual(code, 1)
+        self.assertNotIn(backuplock.LOCK_PATH, fake.locks)
         check_row = next(line for line in out.getvalue().splitlines() if line.startswith("check:"))
         self.assertIn("1 path(s)", check_row)
         self.assertNotIn("pgbackrest/file", check_row)

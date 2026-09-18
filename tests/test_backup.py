@@ -12,7 +12,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from unittest import mock
 
-from gideon.host import backup, backupset, pgbackrest, secrets, stack
+from gideon.host import backup, backuplock, backupset, pgbackrest, secrets, stack
 from gideon.host.steps.site_dirs import AGE_IDENTITY_PATH, AGE_RECIPIENT_PATH
 from gideon.host.sysio import Command, PathLike
 
@@ -143,6 +143,7 @@ class FakeHost:
         self.euid = euid
         self.calls: list[tuple[tuple[str, ...], str | None, float | None]] = []
         self.mkdir_calls: list[str] = []
+        self.locks: dict[str, str] = {}
 
     def run(
         self,
@@ -226,6 +227,16 @@ class FakeHost:
     ) -> None:
         del mode, parents, exist_ok
         self.mkdir_calls.append(os.fspath(path))
+
+    def take_lock(self, path: PathLike, record: str) -> str | None:
+        key = os.fspath(path)
+        if key in self.locks:
+            return self.locks[key]
+        self.locks[key] = record
+        return None
+
+    def release_lock(self, path: PathLike) -> None:
+        self.locks.pop(os.fspath(path), None)
 
     def geteuid(self) -> int:
         return self.euid
@@ -446,10 +457,32 @@ class Preconditions(unittest.TestCase):
 
 
 class BackupRun(unittest.TestCase):
-    def test_full_run_orders_stages_and_writes_manifest(self) -> None:
+    def test_refuses_while_a_foreign_holder_has_the_lock(self) -> None:
         host = _host()
+        holder = backuplock.Record("restore", os.getpid() + 1, NOW)
+        stored = holder.to_json()
+        host.locks[backuplock.LOCK_PATH] = stored
         out = io.StringIO()
-        with contextlib.redirect_stdout(out):
+        err = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = backup.run_backup_run(
+                argparse.Namespace(full=True, label=None),
+                host=host,
+                root=CHECKOUT,
+                now=NOW,
+            )
+        self.assertEqual(code, 1)
+        self.assertEqual(out.getvalue(), "")
+        self.assertIn(holder.command, err.getvalue())
+        self.assertIn(holder.started.isoformat(), err.getvalue())
+        self.assertEqual(host.calls, [])
+        self.assertEqual(host.locks[backuplock.LOCK_PATH], stored)
+
+    def test_nested_run_passes_and_leaves_the_holder_lock(self) -> None:
+        host = _host()
+        stored = backuplock.Record("restore", os.getpid(), NOW).to_json()
+        host.locks[backuplock.LOCK_PATH] = stored
+        with contextlib.redirect_stdout(io.StringIO()):
             code = backup.run_backup_run(
                 argparse.Namespace(full=True, label=None),
                 host=host,
@@ -457,6 +490,36 @@ class BackupRun(unittest.TestCase):
                 now=NOW,
             )
         self.assertEqual(code, 0)
+        self.assertEqual(host.locks[backuplock.LOCK_PATH], stored)
+
+    def test_full_run_orders_stages_and_writes_manifest(self) -> None:
+        host = _host()
+        out = io.StringIO()
+        records: list[str] = []
+        original_take_lock = host.take_lock
+
+        def capture_lock(path: PathLike, record: str) -> str | None:
+            records.append(record)
+            return original_take_lock(path, record)
+
+        with (
+            mock.patch.object(host, "take_lock", side_effect=capture_lock),
+            contextlib.redirect_stdout(out),
+        ):
+            code = backup.run_backup_run(
+                argparse.Namespace(full=True, label=None),
+                host=host,
+                root=CHECKOUT,
+                now=NOW,
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(len(records), 1)
+        record = backuplock.parse(records[0])
+        self.assertIsNotNone(record)
+        assert record is not None
+        self.assertEqual(record.command, "backup run")
+        self.assertEqual(record.started, NOW)
+        self.assertNotIn(backuplock.LOCK_PATH, host.locks)
         self.assertEqual(
             [line.split(":", 1)[0] for line in out.getvalue().splitlines()],
             ["intent", "files", "secrets", "postgres", "counts", "manifest", "prune", "applied"],
@@ -763,4 +826,5 @@ class BackupRun(unittest.TestCase):
         host.commands[bash_command] = [result(bash_command, returncode=1)]
         code = backup.run_backup_run(argparse.Namespace(full=True, label=None), host=host, root=CHECKOUT, now=NOW)
         self.assertEqual(code, 1)
+        self.assertNotIn(backuplock.LOCK_PATH, host.locks)
         self.assertFalse(any(call[0][0] == "docker" and "pgbackrest" in call[0] and "backup" in call[0] for call in host.calls))

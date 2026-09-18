@@ -28,7 +28,7 @@ from gideon.host.render.engine import ENGINE_SERVICE_NAME
 from gideon.host.report import StageResult, command_detail, print_stage, refusal
 from gideon.host.stages import aware_now, site_problem
 from gideon.host.steps.site_dirs import AGE_IDENTITY_PATH
-from gideon.host.sysio import Host, PathLike, RealHost
+from gideon.host.sysio import Host, LockingHost, PathLike, RealHost
 
 _SITE_PATH: Final = "/etc/gideon/site.yaml"
 _RENDERED_DIR: Final = "/etc/gideon/rendered"
@@ -606,7 +606,7 @@ def _version_stage(
 
 
 def _default_runners(
-    io: Host, *, site_path: PathLike, rendered_dir: PathLike
+    io: LockingHost, *, site_path: PathLike, rendered_dir: PathLike
 ) -> dict[str, Runner]:
     """The current tree's in-process commands with the keyword arguments they take."""
 
@@ -1230,7 +1230,7 @@ def _rollback_checkout_stage(io: Host, plan: _RollbackPlan) -> StageResult:
 def _run_rollback(
     args: argparse.Namespace,
     *,
-    io: Host,
+    io: LockingHost,
     site_path: PathLike,
     rendered_dir: PathLike,
     checkout: Path,
@@ -1479,7 +1479,7 @@ def _run_rollback(
 def run_upgrade(
     args: argparse.Namespace,
     *,
-    host: Host | None = None,
+    host: LockingHost | None = None,
     site_path: PathLike = _SITE_PATH,
     rendered_dir: PathLike = _RENDERED_DIR,
     checkout: PathLike | None = None,

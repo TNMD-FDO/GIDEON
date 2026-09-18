@@ -1,4 +1,9 @@
-"""The local backup-run command and its ordered host-side stages (§19.1)."""
+"""The local backup-run command and its ordered host-side stages (§19.1).
+
+Each entry holds the backup lock (``backuplock.py``) for its whole run, so a
+backup, a push, and a restore never overlap; ``docs/archi/backup-restore.md``
+names its rules.
+"""
 
 import hashlib
 import os
@@ -15,7 +20,16 @@ from pathlib import Path
 from typing import Final
 
 import gideon
-from gideon.host import audit, backupset, pgbackrest, secrets, site, sshtarget, stack
+from gideon.host import (
+    audit,
+    backuplock,
+    backupset,
+    pgbackrest,
+    secrets,
+    site,
+    sshtarget,
+    stack,
+)
 from gideon.host.report import (
     Problem,
     StageResult,
@@ -32,7 +46,7 @@ from gideon.host.steps.site_dirs import (
     AGE_RECIPIENT,
     AGE_RECIPIENT_PATH,
 )
-from gideon.host.sysio import Host, PathLike, RealHost
+from gideon.host.sysio import Host, LockingHost, PathLike, RealHost
 
 _SITE_PATH: Final = "/etc/gideon/site.yaml"
 _RENDERED_DIR: Final = "/etc/gideon/rendered"
@@ -991,7 +1005,7 @@ def _applied_stage(
 def run_backup_run(
     args: object,
     *,
-    host: Host | None = None,
+    host: LockingHost | None = None,
     rendered_dir: PathLike = _RENDERED_DIR,
     site_path: PathLike = _SITE_PATH,
     root: PathLike | None = None,
@@ -1010,6 +1024,41 @@ def run_backup_run(
             "Use an aware UTC time, then retry.",
         )
     now_was_supplied = now is not None
+    outcome = backuplock.take(io, command="backup run", now=started)
+    if outcome.problem is not None:
+        return _refuse(
+            outcome.problem.problem,
+            outcome.problem.fix,
+            command="backup run",
+        )
+    try:
+        return _backup_run_body(
+            args,
+            io=io,
+            rendered_dir=rendered_dir,
+            site_path=site_path,
+            root=root,
+            started=started,
+            now_was_supplied=now_was_supplied,
+            pre_restore=pre_restore,
+        )
+    finally:
+        # A nested run is its holder's; the holder releases.
+        if outcome.state is backuplock.State.HELD:
+            backuplock.release(io)
+
+
+def _backup_run_body(
+    args: object,
+    *,
+    io: Host,
+    rendered_dir: PathLike,
+    site_path: PathLike,
+    root: PathLike | None,
+    started: datetime,
+    now_was_supplied: bool,
+    pre_restore: bool,
+) -> int:
     prerequisites = _preconditions(io, rendered_dir=rendered_dir, site_path=site_path)
     if prerequisites is None:
         return 1
@@ -1829,7 +1878,7 @@ def _push_audit_stage(
 def run_backup_push(
     args: object,
     *,
-    host: Host | None = None,
+    host: LockingHost | None = None,
     rendered_dir: PathLike = _RENDERED_DIR,
     site_path: PathLike = _SITE_PATH,
     now: datetime | None = None,
@@ -1847,6 +1896,37 @@ def run_backup_push(
             command="backup push",
         )
     now_was_supplied = now is not None
+    outcome = backuplock.take(io, command="backup push", now=started)
+    if outcome.problem is not None:
+        return _refuse(
+            outcome.problem.problem,
+            outcome.problem.fix,
+            command="backup push",
+        )
+    try:
+        return _backup_push_body(
+            args,
+            io=io,
+            rendered_dir=rendered_dir,
+            site_path=site_path,
+            started=started,
+            now_was_supplied=now_was_supplied,
+        )
+    finally:
+        # A nested run is its holder's; the holder releases.
+        if outcome.state is backuplock.State.HELD:
+            backuplock.release(io)
+
+
+def _backup_push_body(
+    args: object,
+    *,
+    io: Host,
+    rendered_dir: PathLike,
+    site_path: PathLike,
+    started: datetime,
+    now_was_supplied: bool,
+) -> int:
     prerequisites = _push_preconditions(
         io, site_path=site_path, rendered_dir=rendered_dir
     )

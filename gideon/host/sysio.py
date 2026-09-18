@@ -3,10 +3,12 @@
 Only this module is allowed to call :mod:`subprocess` or perform filesystem
 operations for the host path.  Provisioning code can therefore be exercised
 against a recording or replaying fixture without requiring root or a Linux
-host.
+host.  The seam also owns the one advisory lock shared by the ordered backup
+and restore commands.
 """
 
 import contextlib
+import fcntl
 import os
 import subprocess
 import sys
@@ -70,8 +72,21 @@ class Host(Protocol):
     def geteuid(self) -> int: ...
 
 
+class LockingHost(Host, Protocol):
+    """The host operations plus the shared advisory lock pair."""
+
+    def take_lock(self, path: PathLike, record: str) -> str | None:
+        """Return ``None`` when *path* is taken, else the holder's record."""
+
+    def release_lock(self, path: PathLike) -> None:
+        """Release *path* by closing its descriptor; never unlink the file."""
+
+
 class RealHost:
-    """The production implementation of :class:`Host`."""
+    """The production implementation of :class:`Host` and :class:`LockingHost`."""
+
+    def __init__(self) -> None:
+        self._lock_descriptors: dict[str, int] = {}
 
     def run(
         self,
@@ -186,3 +201,43 @@ class RealHost:
 
     def geteuid(self) -> int:
         return os.geteuid()
+
+    def take_lock(self, path: PathLike, record: str) -> str | None:
+        # Root's alone: any process that can open the file can take the flock.
+        # os.open's descriptor is non-inheritable, so no child outlives the
+        # holder with the lock.
+        key = os.fspath(path)
+        descriptor = os.open(key, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            try:
+                return _read_descriptor(descriptor)
+            finally:
+                os.close(descriptor)
+        try:
+            os.ftruncate(descriptor, 0)
+            os.write(descriptor, record.encode())
+        except BaseException:
+            os.close(descriptor)
+            raise
+        self._lock_descriptors[key] = descriptor
+        return None
+
+    def release_lock(self, path: PathLike) -> None:
+        descriptor = self._lock_descriptors.pop(os.fspath(path), None)
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _read_descriptor(descriptor: int) -> str:
+    """The text behind *descriptor* from offset zero; empty when unreadable."""
+
+    try:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        chunks: list[bytes] = []
+        while chunk := os.read(descriptor, 4096):
+            chunks.append(chunk)
+        return b"".join(chunks).decode()
+    except (OSError, UnicodeDecodeError):
+        return ""

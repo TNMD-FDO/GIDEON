@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import patch
 
-from gideon.host import backupset, nogpu, restore, secrets, site, sshtarget
+from gideon.host import backuplock, backupset, nogpu, restore, secrets, site, sshtarget
 from gideon.host.steps.site_dirs import AGE_RECIPIENT_PATH
 from gideon.host.sysio import Command, PathLike
 
@@ -180,6 +180,7 @@ class FakeHost:
             ): value.to_json(),
         }
         self.secrets_present = secrets_present
+        self.locks: dict[str, str] = {}
 
     def _root_for(self, base: str) -> str:
         """Which inventory root a find base names: a set's files/<root>, a live source, or the repository."""
@@ -375,6 +376,16 @@ class FakeHost:
     ) -> None:
         del path, mode, parents, exist_ok
 
+    def take_lock(self, path: PathLike, record: str) -> str | None:
+        key = os.fspath(path)
+        if key in self.locks:
+            return self.locks[key]
+        self.locks[key] = record
+        return None
+
+    def release_lock(self, path: PathLike) -> None:
+        self.locks.pop(os.fspath(path), None)
+
     def geteuid(self) -> int:
         return 0
 
@@ -384,6 +395,26 @@ def make_host(**kwargs: Any) -> FakeHost:
 
 
 class RestoreContracts(unittest.TestCase):
+    def test_refuses_while_a_foreign_holder_has_the_lock(self) -> None:
+        fake = make_host()
+        holder = backuplock.Record("backup push", os.getpid() + 1, NOW)
+        stored = holder.to_json()
+        fake.locks[backuplock.LOCK_PATH] = stored
+        out = io.StringIO()
+        err = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = restore.run_restore(
+                argparse.Namespace(source="staging", at=None),
+                host=fake,
+                now=NOW,
+            )
+        self.assertEqual(code, 1)
+        self.assertEqual(out.getvalue(), "")
+        self.assertIn(holder.command, err.getvalue())
+        self.assertIn(holder.started.isoformat(), err.getvalue())
+        self.assertEqual(fake.calls, [])
+        self.assertEqual(fake.locks[backuplock.LOCK_PATH], stored)
+
     def test_staging_restore_verifies_before_down_and_prints_next_steps(self) -> None:
         fake = make_host()
         fake.files[os.fspath(nogpu.BUILD_BOX_PATH)] = "declared\n"
@@ -773,6 +804,87 @@ class RestoreContracts(unittest.TestCase):
                 self.assertTrue(run_kwargs["pre_restore"])
                 self.assertEqual(run_kwargs["now"], NOW)
 
+    def test_pre_restore_nested_runs_keep_the_restore_lock(self) -> None:
+        for source in ("staging", "target"):
+            with self.subTest(source=source):
+                fake = make_host(
+                    running=True,
+                    source=source,
+                    remote_listing=f"{REMOTE_SNAPSHOT}\t1\n",
+                    side_names=(LOCAL_SET,),
+                )
+                outer_records: list[str] = []
+                nested_returns: list[str] = []
+                original_take_lock = fake.take_lock
+
+                def observe_lock(
+                    path: PathLike,
+                    record: str,
+                    *,
+                    _original_take_lock: Any = original_take_lock,
+                    _outer_records: list[str] = outer_records,
+                    _nested_returns: list[str] = nested_returns,
+                ) -> str | None:
+                    result = _original_take_lock(path, record)
+                    if result is None:
+                        _outer_records.append(record)
+                    else:
+                        _nested_returns.append(result)
+                    return result
+
+                def nested_run(
+                    *args: object,
+                    _fake: FakeHost = fake,
+                    _outer_records: list[str] = outer_records,
+                    **kwargs: object,
+                ) -> int:
+                    del args, kwargs
+                    outcome = backuplock.take(_fake, command="backup run", now=NOW)
+                    self.assertEqual(outcome.state, backuplock.State.NESTED)
+                    self.assertEqual(
+                        _fake.locks[backuplock.LOCK_PATH], _outer_records[0]
+                    )
+                    return 0
+
+                def nested_push(
+                    *args: object,
+                    _fake: FakeHost = fake,
+                    _outer_records: list[str] = outer_records,
+                    **kwargs: object,
+                ) -> int:
+                    del args, kwargs
+                    outcome = backuplock.take(_fake, command="backup push", now=NOW)
+                    self.assertEqual(outcome.state, backuplock.State.NESTED)
+                    self.assertEqual(
+                        _fake.locks[backuplock.LOCK_PATH], _outer_records[0]
+                    )
+                    return 0
+
+                with (
+                    patch.object(fake, "take_lock", side_effect=observe_lock),
+                    patch.object(restore.backup, "run_backup_run", side_effect=nested_run),
+                    patch.object(restore.backup, "run_backup_push", side_effect=nested_push),
+                    contextlib.redirect_stdout(io.StringIO()),
+                ):
+                    code = restore.run_restore(
+                        argparse.Namespace(source=source, at=None),
+                        host=fake,
+                        now=NOW,
+                    )
+
+                self.assertEqual(code, 0)
+                self.assertEqual(len(outer_records), 1)
+                record = backuplock.parse(outer_records[0])
+                self.assertIsNotNone(record)
+                assert record is not None
+                self.assertEqual(record.command, "restore")
+                self.assertEqual(record.started, NOW)
+                self.assertEqual(
+                    len(nested_returns), 2 if source == "target" else 1
+                )
+                self.assertTrue(all(value == outer_records[0] for value in nested_returns))
+                self.assertNotIn(backuplock.LOCK_PATH, fake.locks)
+
     def test_fresh_target_skips_pre_restore_for_absent_and_empty_sets(self) -> None:
         for sets_absent in (True, False):
             with self.subTest(sets_absent=sets_absent):
@@ -897,6 +1009,7 @@ class RestoreContracts(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("pre-restore push failed", out.getvalue())
         self.assertFalse(any(call[0][-1] == "down" for call in fake.calls))
+        self.assertNotIn(backuplock.LOCK_PATH, fake.locks)
 
     def test_partly_running_fresh_stack_skips_pre_restore(self) -> None:
         fake = make_host(
