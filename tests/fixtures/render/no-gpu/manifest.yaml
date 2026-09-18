@@ -10,7 +10,7 @@ inputs:
   build_box: false
 files:
   compose.yaml:
-    sha256: "3f2603850e7eb65d1bff9e4e7cd79add8427fe15819c3a78c403ee9e78a0ff7e"
+    sha256: "23f092f80e0e72d6486b4ceb66d94b7e80c77dd1d2bf99003af78bce92949459"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
@@ -84,7 +84,7 @@ files:
     owners:
       - "open-webui"
   "open-webui/manifest.yaml":
-    sha256: "196c042ab9893ca3d74e1609bde4384f7b90de4771e4dd3be35442b9eb6e43b2"
+    sha256: "1002f128f364cee2de537a510edf69e54516b81128584c22c95bc0aa5598f67d"
     mode: "0644"
     owners: []
   "searxng/settings.yml":
@@ -140,7 +140,7 @@ services:
   node-exporter: "8612faaf00b45f47987af313bf79e1df2336243ee6bc9f6eeb2bcaf6f7071e2e"
   grafana: "86e24511cbb77a0b1bec1a2a8f1355c9b7af147143937b88441071b959f3c7f3"
   postgres: "7039d090c0ae384766b132e1bbddf593645233c1df0d4d716963776e5f7902c1"
-  open-webui: "ae614f4c1f0ac2a678b7e3c5d225ba301be7fc55265c7d5b2b30efcd4673ea6a"
+  open-webui: "7ef64aa1053a092a0036791f7f755d4bab8e68063ce971c4931c949b646abbd4"
   searxng: "790f3d23c5a48d8b2e3c02d12c6615884bb4073095bdf7faa51ccee49aa51c2c"
   postgres-exporter: "71024e25f248a0a94b2ea92c4f48813f8b4f95e3d17d41522f300fa9f1407291"
   cadvisor: "f7daefbbe23b45c463cbff7d7c9452c9dbca6fb26e2ca5f386ba6f32c40ed8c2"

@@ -1060,14 +1060,14 @@ class TurnHarness(TestCase):
             "doctrine-01": ("answered", "present", "any", False, True, False),
             "doctrine-02": ("answered", "present", "any", False, True, False),
             "plain-01": ("answered", "any", "absent", False, False, True),
-            "identity-01": ("answered", "any", "any", False, True, False),
             "compute-01": ("refused", "any", "any", False, False, False),
             "compute-02": ("refused", "any", "any", False, False, False),
             "confirm-01": ("not-confirmed", "any", "any", False, False, False),
-            "citation-01": ("recorded", "any", "any", False, True, True),
-            "verify-01": ("recorded", "any", "any", False, True, True),
             "matter-01": ("recorded", "any", "any", False, True, False),
             "search-01": ("answered", "any", "present", True, False, False),
+            "identity-02": ("answered", "any", "any", False, True, True),
+            "citation-02": ("recorded", "any", "any", False, True, True),
+            "verify-02": ("recorded", "any", "any", False, True, True),
         }
         self.assertEqual([case.id for case in loaded.cases], list(expected))
         self.assertEqual(loaded.searched, 1)
@@ -1083,6 +1083,11 @@ class TurnHarness(TestCase):
                 self.assertEqual(bool(case.must), has_must)
                 self.assertEqual(bool(case.must_not), has_must_not)
 
+        by_id = {case.id: case for case in loaded.cases}
+        for predecessor in ("identity-01", "citation-01", "verify-01"):
+            with self.subTest(predecessor=predecessor):
+                self.assertNotIn(predecessor, by_id)
+
         citation_path = ROOT / "compose/open-webui/functions/citation_stamp.py"
         citation_spec = importlib.util.spec_from_file_location(
             "citation_stamp_for_turns", citation_path
@@ -1091,21 +1096,21 @@ class TurnHarness(TestCase):
         citation_filter = importlib.util.module_from_spec(citation_spec)
         sys.modules[citation_spec.name] = citation_filter
         citation_spec.loader.exec_module(citation_filter)
-        by_id = {case.id: case for case in loaded.cases}
-        citation_must = by_id["citation-01"].must
+        citation_must = by_id["citation-02"].must
         self.assertEqual(len(citation_must), 1)
         self.assertIsNotNone(citation_must[0].fullmatch(citation_filter.CITATION_STAMP))
 
         affirmation_patterns = (
-            by_id["citation-01"].must_not,
-            by_id["verify-01"].must_not,
+            by_id["citation-02"].must_not,
+            by_id["verify-02"].must_not,
         )
-        self.assertEqual(len(affirmation_patterns[0]), 1)
+        self.assertEqual(len(affirmation_patterns[0]), 2)
+        self.assertEqual(len(affirmation_patterns[1]), 2)
         self.assertEqual(
-            affirmation_patterns[0][0].pattern,
-            affirmation_patterns[1][0].pattern,
+            affirmation_patterns[0][-1].pattern,
+            affirmation_patterns[1][-1].pattern,
         )
-        affirmation = affirmation_patterns[0][0]
+        affirmation = affirmation_patterns[0][-1]
         for text in (
             "Yes, that citation is accurate.",
             "**Yes** — it is fine to use.",

@@ -116,12 +116,11 @@ OWUI_SECRET_NAMES: Final[tuple[str, ...]] = (
     "gideon_admin_password",
     "engine_api_key",
 )
-# [06] item 15 and §15: the pinned frontend shows this once per chat while
-# the search toggle stays on (research note §10).
+# [06] item 15, §15, and ADR-0043: the pinned frontend shows this once per
+# chat while the search toggle stays on (research note §10).
 WEB_SEARCH_CONFIRMATION_TEXT: Final[str] = (
     "Turning on search sends what you type — as search queries — to internet search engines, "
-    "and fetches pages from the web. Do not paste client or case material here. For anything "
-    "you will rely on, use Research."
+    "and fetches pages from the web. Do not paste client or case material here."
 )
 # Slice-1 ticket 72 and §15: the citations component's sources toggle and the
 # two rows of the web-search results component each load an image from a

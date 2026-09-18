@@ -1,4 +1,4 @@
-"""Hold release notes to the versioned template contract in spec §21."""
+"""Hold release notes to the versioned template contract in spec §21 and ADR-0043."""
 
 from __future__ import annotations
 
@@ -26,10 +26,10 @@ KNOWN_TEMPLATE_HEADINGS: dict[int, tuple[str, ...]] = {
         "## Next maintenance window",
     ),
 }
-# §21's practice rule, the sentence the pre-launch note carries verbatim.
+# §21's practice rule, the sentence the pre-launch note carries verbatim (ADR-0043).
 PRACTICE_RULE = (
     "Nothing from General goes into a court filing unchecked, and until go-live "
-    "there is no Research to check it in."
+    "there is no Legal chat to check it in."
 )
 _COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 _HEADING_RE = re.compile(r"^#{1,6}\s+.+$", re.MULTILINE)
@@ -281,7 +281,7 @@ def _good_note() -> str:
         "# GIDEON v0.2.0\n\n"
         "Template: 1\n\n"
         "## What is new\n\nA user-visible change.\n\n"
-        "## Coverage\n\nGeneral only; Research returns at go-live on SCOTUS and the Sixth Circuit\n\n"
+        "## Coverage\n\nGeneral only; the Legal chat arrives at go-live on SCOTUS and the Sixth Circuit.\n\n"
         "## Next maintenance window\n\nNo window is announced.\n"
     )
 
@@ -292,7 +292,7 @@ def _good_note_v2() -> str:
         "Template: 2\n\n"
         "## What is new\n\nA user-visible change.\n\n"
         "## What was bumped\n\nNo pin moved since v0.1.37.\n\n"
-        "## Coverage\n\nGeneral only; Research returns at go-live on SCOTUS and the Sixth Circuit\n\n"
+        "## Coverage\n\nGeneral only; the Legal chat arrives at go-live on SCOTUS and the Sixth Circuit.\n\n"
         "## Next maintenance window\n\nNo window is announced.\n"
     )
 

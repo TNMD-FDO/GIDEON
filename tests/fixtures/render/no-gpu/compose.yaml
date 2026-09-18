@@ -191,7 +191,7 @@ services:
       WEB_SEARCH_TRUST_ENV: "true"
       ENABLE_WEB_LOADER_SSL_VERIFICATION: "true"
       ENABLE_WEB_SEARCH_CONFIRMATION: "true"
-      WEB_SEARCH_CONFIRMATION_CONTENT: "Turning on search sends what you type — as search queries — to internet search engines, and fetches pages from the web. Do not paste client or case material here. For anything you will rely on, use Research."
+      WEB_SEARCH_CONFIRMATION_CONTENT: "Turning on search sends what you type — as search queries — to internet search engines, and fetches pages from the web. Do not paste client or case material here."
       WEB_SEARCH_DOMAIN_FILTER_LIST: "[]"
       ENABLE_EVALUATION_ARENA_MODELS: "false"
       ENABLE_VERSION_UPDATE_CHECK: "false"

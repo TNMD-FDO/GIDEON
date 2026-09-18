@@ -306,13 +306,13 @@ class BoundsAndHygiene(unittest.TestCase):
         self.assertFalse(hasattr(FILTER.Filter, "stream"))
         frontmatter = ast.get_docstring(tree) or ""
         self.assertIn("title: GIDEON citation stamp", frontmatter)
-        self.assertIn("version: 1", frontmatter)
+        self.assertIn("version: 2", frontmatter)
         self.assertNotIn("requirements:", frontmatter)
         for forbidden in ("from utils", "from apps", "from main", "from config"):
             self.assertNotIn(forbidden, source)
         self.assertEqual(
             FILTER.CITATION_STAMP,
-            "General does not verify citations. Anything you intend to rely on must be checked in Research.",
+            "General does not verify citations.",
         )
         self.assertEqual(tuple(inspect.signature(FILTER.Filter.outlet).parameters), ("self", "body"))
 

@@ -1,5 +1,5 @@
 """title: GIDEON citation stamp
-version: 1
+version: 2
 description: Appends General's fixed citation warning to any answer that carries a citation shape.
 """
 
@@ -24,10 +24,8 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-# §15's sentence, verbatim: fixed product text, no site value (ADR-0028).
-CITATION_STAMP = (
-    "General does not verify citations. Anything you intend to rely on must be checked in Research."
-)
+# ADR-0043 and §15: fixed product text, no site value (ADR-0028).
+CITATION_STAMP = "General does not verify citations."
 STAMP_SEPARATOR = "\n\n"
 # The longest text one pattern may match; a test holds every pattern to it.
 MAX_MATCH_CHARS = 150

@@ -10,6 +10,7 @@ history at commit f06e83f. User-facing notes for every tag from `v0.2.0` live un
 `docs/release-notes/`, and `tests/test_release_records.py` holds this index
 complete, ordered, and dated from the release files.
 
+- [v0.1.82](docs/2-changelog/w3_v0.1.82.md) — 2026-09-18 — General's texts refer a user nowhere (slice-1 83)
 - [v0.1.81](docs/2-changelog/w3_v0.1.81.md) — 2026-09-17 — backup, push, and restore share one lock (slice-0 26)
 - [v0.1.80](docs/2-changelog/w3_v0.1.80.md) — 2026-09-17 — a stream trip cancels its turn (slice-1 52)
 - [v0.1.79](docs/2-changelog/w3_v0.1.79.md) — 2026-09-17 — restore re-owns the old gideon by name (slice-0 25)

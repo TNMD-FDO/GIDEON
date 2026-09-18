@@ -89,7 +89,7 @@ files:
     owners:
       - "open-webui"
   "open-webui/manifest.yaml":
-    sha256: "800ede07c451e8f0088b3715079deff58d9886c9f69648cf0d7110303283e5f5"
+    sha256: "dc6aa0ebec3350cf75ededfa5f1be27894c141011143357c3eb4941282dc1e35"
     mode: "0644"
     owners: []
   "systemd/gideon-users-reconcile.service":
