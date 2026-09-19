@@ -7,17 +7,19 @@ from typing import Literal, cast
 
 from gideon.host import models, weights
 from gideon.host.images import (
-    BuiltImagePin as LockedBuiltImagePin,
-)
-from gideon.host.images import (
+    AptWatch,
     ImageLock,
     MirroredImagePin,
+    PypiWatch,
+)
+from gideon.host.images import (
+    BuiltImagePin as LockedBuiltImagePin,
 )
 from gideon.host.lock import HostLock
 from gideon.host.models import (
     ModelPin as LockedModelPin,
 )
-from tools.pinwatch import hub
+from tools.pinwatch import hub, pypi
 from tools.pinwatch.fetch import Fetcher, FetchError
 from tools.pinwatch.oci import (
     Reference,
@@ -281,6 +283,8 @@ class AptPackagePin(Pin):
 
     def resolve(self, fetcher: Fetcher) -> Bump | None:
         watch = self.image.watch[self.argument]
+        if not isinstance(watch, AptWatch):
+            raise ValueError(f"{self.id} is not watched at an apt index")
         versions = apt_package_versions(fetcher, watch.apt_index, watch.package)
         current = self.current()
         candidate = newest(versions)
@@ -297,6 +301,43 @@ class AptPackagePin(Pin):
                 ),
             ),
             watch.apt_index,
+            True,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class PypiProjectPin(Pin):
+    """A watched PyPI project release used as a built-image argument (§2.2)."""
+
+    image: LockedBuiltImagePin
+    argument: str
+
+    @property
+    def key_paths(self) -> tuple[str, ...]:
+        return (f"images.{self.image.name}.build_args.{self.argument}",)
+
+    def current(self) -> str:
+        return self.image.build_args[self.argument]
+
+    def resolve(self, fetcher: Fetcher) -> Bump | None:
+        watch = self.image.watch[self.argument]
+        if not isinstance(watch, PypiWatch):
+            raise ValueError(f"{self.id} is not watched on PyPI")
+        current = self.current()
+        candidate = pypi.pypi_version(fetcher, watch.project, current)
+        if candidate is None:
+            return None
+        return Bump(
+            self.id,
+            self.lock,
+            (
+                Change(
+                    f"images.{self.image.name}.build_args.{self.argument}",
+                    current,
+                    candidate,
+                ),
+            ),
+            pypi.project_page(watch.project, candidate),
             True,
         )
 
@@ -615,8 +656,8 @@ def pin_registry(
     """Build the ordered pin registry from the four loaded records.
 
     The order is the plan's pins table: images in lock order, with each built
-    image followed by its watched arguments, then the host pins, the models,
-    and the Matt Pocock skills' record.
+    image followed by its watched apt and PyPI arguments, then the host pins,
+    the models, and the Matt Pocock skills' record.
     """
 
     pins: list[Pin] = []
@@ -625,15 +666,12 @@ def pin_registry(
             pins.append(ImagePin(f"images.{image.name}", "images.lock", image))
         elif isinstance(image, LockedBuiltImagePin):
             pins.append(BuiltImagePin(f"images.{image.name}", "images.lock", image))
-            pins.extend(
-                AptPackagePin(
-                    f"images.{image.name}.build_args.{argument}",
-                    "images.lock",
-                    image,
-                    argument,
-                )
-                for argument in image.watch
-            )
+            for argument, watch in image.watch.items():
+                pin_id = f"images.{image.name}.build_args.{argument}"
+                if isinstance(watch, AptWatch):
+                    pins.append(AptPackagePin(pin_id, "images.lock", image, argument))
+                elif isinstance(watch, PypiWatch):
+                    pins.append(PypiProjectPin(pin_id, "images.lock", image, argument))
     pins.extend(
         (
             RegistryImagePin(

@@ -46,6 +46,16 @@ class AptWatch:
 
 
 @dataclass(frozen=True, slots=True)
+class PypiWatch:
+    """A normalized PyPI project watched for a built image input (§2.2)."""
+
+    project: str
+
+
+type WatchEntry = AptWatch | PypiWatch
+
+
+@dataclass(frozen=True, slots=True)
 class BuiltImagePin(ImagePin):
     """A locally built image whose base and inputs are recorded (§2.2/§2.4)."""
 
@@ -53,7 +63,7 @@ class BuiltImagePin(ImagePin):
     base: str
     base_digest: str
     build_args: Mapping[str, str]
-    watch: Mapping[str, AptWatch]
+    watch: Mapping[str, WatchEntry]
     inputs_digest: str
 
     @property
@@ -137,6 +147,10 @@ _SECRET_ARG_TOKENS: Final = frozenset(
     {"PASSWORD", "PASSWD", "SECRET", "TOKEN", "KEY", "CREDENTIAL", "CREDENTIALS", "PRIVATE"}
 )
 DEBIAN_PACKAGE_NAME: Final = re.compile(r"^[a-z0-9][a-z0-9+.-]{1,99}$")
+PYPI_PROJECT_NAME: Final = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+_PYPI_PROJECT_NAME_INPUT: Final = re.compile(
+    r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+)
 DIGEST: Final = re.compile(r"^sha256:[0-9a-f]{64}$")
 """The one digest grammar; the pin watch validates what it writes against it."""
 _IMAGE_NAME = re.compile(
@@ -385,7 +399,7 @@ def _validate_built_pin(
         watch_items = {}
     else:
         watch_items = watch_value
-    watch: dict[str, AptWatch] = {}
+    watch: dict[str, WatchEntry] = {}
     for key, value in watch_items.items():
         watch_path = _path(f"{image_path}.watch", key)
         if not isinstance(key, str) or key not in build_args:
@@ -400,10 +414,54 @@ def _validate_built_pin(
             continue
         watch_mapping = cast(Mapping[str, object], value)
         for child_key in watch_mapping:
-            if child_key not in ("apt_index", "package"):
+            if child_key not in ("apt_index", "package", "pypi_project"):
                 errors.append(
-                    _unknown(_path(watch_path, child_key), ("apt_index", "package"))
+                    _unknown(
+                        _path(watch_path, child_key),
+                        ("apt_index", "package", "pypi_project"),
+                    )
                 )
+        has_pypi_project = "pypi_project" in watch_mapping
+        has_apt_kind = "apt_index" in watch_mapping or "package" in watch_mapping
+        if has_pypi_project and has_apt_kind:
+            errors.append(
+                _error(
+                    watch_path,
+                    "a watch entry must name exactly one kind: apt_index and "
+                    "package, or pypi_project",
+                )
+            )
+            continue
+        if not has_pypi_project and not has_apt_kind:
+            errors.append(
+                _error(
+                    watch_path,
+                    "a watch entry must name either apt_index and package, "
+                    "or pypi_project",
+                )
+            )
+            continue
+        if has_pypi_project:
+            project = _string(
+                watch_mapping,
+                "pypi_project",
+                errors,
+                error_path=f"{watch_path}.pypi_project",
+            )
+            if project is not None:
+                if PYPI_PROJECT_NAME.fullmatch(project) is None:
+                    if _PYPI_PROJECT_NAME_INPUT.fullmatch(project) is not None:
+                        normalized = re.sub(r"[-_.]+", "-", project).lower()
+                        detail = (
+                            "expected the normalized PyPI project name "
+                            f"{normalized!r} (got {project!r})"
+                        )
+                    else:
+                        detail = f"expected a PyPI project name (got {project!r})"
+                    errors.append(_error(f"{watch_path}.pypi_project", detail))
+                elif isinstance(key, str) and key in build_args:
+                    watch[key] = PypiWatch(project=project)
+            continue
         apt_index = _string(
             watch_mapping,
             "apt_index",
@@ -532,13 +590,18 @@ def _construct_pin(name: str, pin: Mapping[str, object]) -> ImagePin:
         cast(str, key): cast(str, value)
         for key, value in cast(Mapping[object, object], build_args_value).items()
     }
-    watch = {
-        cast(str, key): AptWatch(
-            apt_index=cast(str, cast(Mapping[str, object], value)["apt_index"]),
-            package=cast(str, cast(Mapping[str, object], value)["package"]),
-        )
-        for key, value in cast(Mapping[object, object], watch_value).items()
-    }
+    watch: dict[str, WatchEntry] = {}
+    for key, value in cast(Mapping[object, object], watch_value).items():
+        watch_mapping = cast(Mapping[str, object], value)
+        if "pypi_project" in watch_mapping:
+            watch[cast(str, key)] = PypiWatch(
+                project=cast(str, watch_mapping["pypi_project"])
+            )
+        else:
+            watch[cast(str, key)] = AptWatch(
+                apt_index=cast(str, watch_mapping["apt_index"]),
+                package=cast(str, watch_mapping["package"]),
+            )
     return BuiltImagePin(
         name=name,
         digest=digest,

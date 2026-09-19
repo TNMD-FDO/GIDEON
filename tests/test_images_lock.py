@@ -9,9 +9,11 @@ from pathlib import Path
 from gideon.host.images import (
     DIGEST,
     SOURCE_REFERENCE,
+    AptWatch,
     BuiltImagePin,
     ImageLock,
     MirroredImagePin,
+    PypiWatch,
     RegistryTarget,
     compute_inputs_digest,
     inputs_digest_text,
@@ -53,6 +55,20 @@ BUILT_LOCK = (
     "        package: pgbackrest\n"
     f"    inputs_digest: {BUILT_DIGEST}\n"
     f"    digest: {BUILT_DIGEST}\n"
+)
+BUILT_LOCK_WITH_PYPI = BUILT_LOCK.replace(
+    "      PGBACKREST_VERSION: 1000.0.0-1.example\n",
+    "      PGBACKREST_VERSION: 1000.0.0-1.example\n"
+    "      PYPI_VERSION: 1.2.3\n",
+).replace(
+    "    watch:\n      PGBACKREST_VERSION:\n"
+    "        apt_index: https://apt.example/dists/trixie/Packages\n"
+    "        package: pgbackrest\n",
+    "    watch:\n      PGBACKREST_VERSION:\n"
+    "        apt_index: https://apt.example/dists/trixie/Packages\n"
+    "        package: pgbackrest\n"
+    "      PYPI_VERSION:\n"
+    "        pypi_project: example-project\n",
 )
 
 
@@ -179,14 +195,21 @@ class CommittedLock(unittest.TestCase):
 
     def test_fictitious_lock_accepts_both_pin_kinds(self) -> None:
         mirrored = load_text(VALID).lock
-        built = load_text(BUILT_LOCK).lock
+        built = load_text(BUILT_LOCK_WITH_PYPI).lock
         assert mirrored is not None and built is not None
         self.assertIsInstance(mirrored.images[0], MirroredImagePin)
         self.assertIsInstance(built.images[0], BuiltImagePin)
         pin = built.images[0]
         assert isinstance(pin, BuiltImagePin)
         self.assertEqual(pin.base, "docker.io/library/example:18")
-        self.assertEqual(pin.watch["PGBACKREST_VERSION"].package, "pgbackrest")
+        apt_watch = pin.watch["PGBACKREST_VERSION"]
+        self.assertIsInstance(apt_watch, AptWatch)
+        assert isinstance(apt_watch, AptWatch)
+        self.assertEqual(apt_watch.package, "pgbackrest")
+        pypi_watch = pin.watch["PYPI_VERSION"]
+        self.assertIsInstance(pypi_watch, PypiWatch)
+        assert isinstance(pypi_watch, PypiWatch)
+        self.assertEqual(pypi_watch.project, "example-project")
         self.assertTrue(pin.built)
 
     def test_inputs_digest_is_canonical_and_sorted(self) -> None:
@@ -287,6 +310,60 @@ class Refusals(unittest.TestCase):
         self.assertTrue(any("present in build_args" in error.problem for error in result.errors))
         non_https = load_text(BUILT_LOCK.replace("https://apt.example", "http://apt.example"))
         self.assertTrue(any("https://" in error.problem for error in non_https.errors))
+
+    def test_watch_rejects_both_kinds_in_one_entry(self) -> None:
+        text = BUILT_LOCK.replace(
+            "        package: pgbackrest\n",
+            "        package: pgbackrest\n        pypi_project: pgbackrest\n",
+        )
+        self.assert_single_error(text, "images.postgres.watch.PGBACKREST_VERSION", "exactly one kind")
+
+    def test_watch_rejects_entry_without_a_kind(self) -> None:
+        text = BUILT_LOCK.replace(
+            "      PGBACKREST_VERSION:\n"
+            "        apt_index: https://apt.example/dists/trixie/Packages\n"
+            "        package: pgbackrest\n",
+            "      PGBACKREST_VERSION: {}\n",
+        )
+        result = load_text(text)
+        self.assertTrue(any("either apt_index and package, or pypi_project" in error.problem for error in result.errors))
+
+    def test_watch_unknown_key_names_pypi_kind(self) -> None:
+        text = BUILT_LOCK_WITH_PYPI.replace(
+            "        pypi_project: example-project",
+            "        pypi_projec: example-project\n"
+            "        pypi_project: example-project",
+        )
+        result = load_text(text)
+        self.assertTrue(any("nearest valid key is 'pypi_project'" in error.problem for error in result.errors))
+
+    def test_pypi_project_must_be_a_non_empty_string(self) -> None:
+        for value in ("7", "''"):
+            with self.subTest(value=value):
+                text = BUILT_LOCK_WITH_PYPI.replace("pypi_project: example-project", f"pypi_project: {value}")
+                result = load_text(text)
+                self.assertTrue(any("pypi_project" in (error.key_path or "") for error in result.errors))
+
+    def test_pypi_project_must_use_normalized_name(self) -> None:
+        text = BUILT_LOCK_WITH_PYPI.replace("example-project", "Example_Project")
+        self.assert_single_error(
+            text,
+            "images.postgres.watch.PYPI_VERSION.pypi_project",
+            "example-project",
+        )
+
+    def test_pypi_project_must_match_name_grammar(self) -> None:
+        text = BUILT_LOCK_WITH_PYPI.replace("example-project", "not!a-project")
+        self.assert_single_error(
+            text,
+            "images.postgres.watch.PYPI_VERSION.pypi_project",
+            "expected a PyPI project name",
+        )
+
+    def test_pypi_watch_requires_build_args(self) -> None:
+        text = BUILT_LOCK_WITH_PYPI.replace("      PYPI_VERSION: 1.2.3\n", "")
+        result = load_text(text)
+        self.assertTrue(any("present in build_args" in error.problem for error in result.errors))
 
     def test_multiline_build_arg_is_refused(self) -> None:
         text = BUILT_LOCK.replace(

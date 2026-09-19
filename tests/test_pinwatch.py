@@ -21,6 +21,8 @@ from gideon.host.images import (
     BuiltImagePin,
     ImageLock,
     MirroredImagePin,
+    PypiWatch,
+    compute_inputs_digest,
     load_image_lock,
     load_image_lock_text,
 )
@@ -28,7 +30,7 @@ from gideon.host.lock import HostLock, load_host_lock
 from gideon.host.models import ModelsLock, load_models_lock, load_models_lock_text
 from gideon.host.sysio import PathLike
 from tools.exportboundary import absent_from_export
-from tools.pinwatch import hub, notes
+from tools.pinwatch import hub, notes, pypi
 from tools.pinwatch import patch as patch_module
 from tools.pinwatch.cli import main as pinwatch_main
 from tools.pinwatch.fetch import FetchError, Response, UrllibFetcher
@@ -55,6 +57,7 @@ from tools.pinwatch.pins import (
     GithubReleasePin,
     MajorFloorPin,
     ModelPin,
+    PypiProjectPin,
     RegistryImagePin,
     SkillBranchPin,
     VersionFloorPin,
@@ -129,6 +132,16 @@ BUILT_IMAGE_LOCK_TEXT = (
     "        package: pgbackrest\n"
     "    inputs_digest: sha256:" + "b" * 64 + "\n"
     "    digest: sha256:" + "c" * 64 + "\n"
+)
+BUILT_TWO_KIND_IMAGE_LOCK_TEXT = BUILT_IMAGE_LOCK_TEXT.replace(
+    "      PGBACKREST_VERSION: 1000.0.0-1.example\n",
+    "      PGBACKREST_VERSION: 1000.0.0-1.example\n"
+    "      PYPI_VERSION: 1.2.3\n",
+).replace(
+    "        package: pgbackrest\n",
+    "        package: pgbackrest\n"
+    "      PYPI_VERSION:\n"
+    "        pypi_project: example-project\n",
 )
 APT_INDEX = "https://apt.example/dists/fictitious/Packages"
 # Keep the fixture's repeated-hex commit visibly separate from every committed
@@ -266,6 +279,17 @@ def response(
     return Response(status, headers or {}, body)
 
 
+def _pypi_reply(project: str, current: str, candidate: str) -> dict[str, object]:
+    return {
+        "meta": {"api-version": "1.0"},
+        "versions": [current, candidate],
+        "files": [
+            {"filename": f"{project}-{current}.tar.gz", "yanked": False},
+            {"filename": f"{project}-{candidate}.tar.gz", "yanked": False},
+        ],
+    }
+
+
 class DictFetcher:
     """A dict-backed fetcher with optional per-URL response queues."""
 
@@ -285,6 +309,30 @@ class DictFetcher:
         if isinstance(answer, list):
             return answer.pop(0)
         return answer
+
+
+class UnreachableFetcher(DictFetcher):
+    """A dict-backed fetcher whose named URLs fail in transport."""
+
+    def __init__(
+        self,
+        responses: Mapping[str, Response | list[Response]],
+        unreachable: frozenset[str],
+    ) -> None:
+        super().__init__(responses)
+        self.unreachable = unreachable
+
+    def get(
+        self,
+        url: str,
+        *,
+        headers: Mapping[str, str] | None = None,
+        method: str = "GET",
+    ) -> Response:
+        if url in self.unreachable:
+            self.calls.append((url, headers, method))
+            raise FetchError(url, "connection refused")
+        return super().get(url, headers=headers, method=method)
 
 
 def _committed_tooling_text() -> str:
@@ -1042,6 +1090,20 @@ class PinContracts(unittest.TestCase):
         assert isinstance(image, BuiltImagePin)
         return WatchBuiltImagePin("images.postgres", "images.lock", image)
 
+    def _pypi_pin(self) -> PypiProjectPin:
+        result = load_image_lock_text(BUILT_TWO_KIND_IMAGE_LOCK_TEXT)
+        self.assertTrue(result.ok)
+        assert result.lock is not None
+        image = result.lock.images[0]
+        self.assertIsInstance(image, BuiltImagePin)
+        assert isinstance(image, BuiltImagePin)
+        return PypiProjectPin(
+            "images.postgres.build_args.PYPI_VERSION",
+            "images.lock",
+            image,
+            "PYPI_VERSION",
+        )
+
     def test_built_base_pin_is_always_a_proposal(self) -> None:
         pin = self._built_pin()
         reference = parse_reference(pin.image.base)
@@ -1120,6 +1182,57 @@ class PinContracts(unittest.TestCase):
             pin.argument,
         )
         self.assertIsNone(current_pin.resolve(current))
+
+    def test_pypi_project_pin_proposes_newest_release(self) -> None:
+        result = load_image_lock_text(BUILT_TWO_KIND_IMAGE_LOCK_TEXT)
+        self.assertTrue(result.ok)
+        assert result.lock is not None
+        image = result.lock.images[0]
+        self.assertIsInstance(image, BuiltImagePin)
+        assert isinstance(image, BuiltImagePin)
+        watch = image.watch["PYPI_VERSION"]
+        self.assertIsInstance(watch, PypiWatch)
+        assert isinstance(watch, PypiWatch)
+        pin = PypiProjectPin(
+            "images.postgres.build_args.PYPI_VERSION",
+            "images.lock",
+            image,
+            "PYPI_VERSION",
+        )
+        candidate = "9000.0.1"
+        url = f"{pypi.PYPI_INDEX_ROOT}/{watch.project}/"
+        fetcher = DictFetcher(
+            {url: response(_pypi_reply(watch.project, pin.current(), candidate))}
+        )
+        bump = pin.resolve(fetcher)
+        self.assertIsNotNone(bump)
+        bump = cast(Bump, bump)
+        self.assertEqual(
+            bump.changes,
+            (
+                Change(
+                    pin.key_paths[0],
+                    pin.current(),
+                    candidate,
+                ),
+            ),
+        )
+        self.assertTrue(bump.proposal)
+        self.assertEqual(bump.upstream_url, pypi.project_page(watch.project, candidate))
+        self.assertEqual(fetcher.calls, [(url, {"Accept": pypi.PYPI_ACCEPT}, "GET")])
+
+    def test_pypi_project_pin_is_current_at_the_loaded_value(self) -> None:
+        pin = self._pypi_pin()
+        watch = pin.image.watch[pin.argument]
+        self.assertIsInstance(watch, PypiWatch)
+        assert isinstance(watch, PypiWatch)
+        url = f"{pypi.PYPI_INDEX_ROOT}/{watch.project}/"
+        reply = {
+            "meta": {"api-version": "1.0"},
+            "versions": [pin.current()],
+            "files": [{"filename": f"{watch.project}-{pin.current()}.tar.gz"}],
+        }
+        self.assertIsNone(pin.resolve(DictFetcher({url: response(reply)})))
 
     def test_registry_image_pin(self) -> None:
         old = "sha256:" + "a" * 64
@@ -1395,6 +1508,34 @@ class PinContracts(unittest.TestCase):
         )
         self.assertEqual(pins[2].id, "host.registry_image")
 
+    def test_built_pin_registry_places_both_watch_kinds_in_lock_order(self) -> None:
+        image_result = load_image_lock_text(BUILT_TWO_KIND_IMAGE_LOCK_TEXT)
+        host_result = load_host_lock(ROOT / "host.lock")
+        models_result = load_models_lock(ROOT / "models.lock")
+        self.assertTrue(image_result.ok)
+        self.assertTrue(host_result.ok)
+        self.assertTrue(models_result.ok)
+        assert image_result.lock is not None
+        assert host_result.lock is not None
+        assert models_result.lock is not None
+        pins = pin_registry(
+            image_result.lock,
+            host_result.lock,
+            models_result.lock,
+            _committed_provenance(),
+        )
+        self.assertEqual(
+            [pin.id for pin in pins[:3]],
+            [
+                "images.postgres",
+                "images.postgres.build_args.PGBACKREST_VERSION",
+                "images.postgres.build_args.PYPI_VERSION",
+            ],
+        )
+        self.assertIsInstance(pins[1], AptPackagePin)
+        self.assertIsInstance(pins[2], PypiProjectPin)
+        self.assertEqual(pins[3].id, "host.registry_image")
+
     def test_model_registry_keeps_profiles_in_order_and_ids_distinct(self) -> None:
         image_result = load_image_lock_text(IMAGE_LOCK_TEXT)
         host_result = load_host_lock(ROOT / "host.lock")
@@ -1434,6 +1575,11 @@ class PinContracts(unittest.TestCase):
             built.image,
             "PGBACKREST_VERSION",
         )
+        pypi_pin = self._pypi_pin()
+        pypi_watch = pypi_pin.image.watch[pypi_pin.argument]
+        self.assertIsInstance(pypi_watch, PypiWatch)
+        assert isinstance(pypi_watch, PypiWatch)
+        pypi_url = f"{pypi.PYPI_INDEX_ROOT}/{pypi_watch.project}/"
         registry = RegistryImagePin(
             "host.registry_image",
             "host.lock",
@@ -1460,6 +1606,22 @@ class PinContracts(unittest.TestCase):
             (image, image.resolve(self._registry_responses(image.image.source, ["1.0", "1.1"], "sha256:" + "b" * 64))),
             (built, built.resolve(self._registry_responses(built.image.base, ["1.0", "1.1"], "sha256:" + "d" * 64))),
             (apt, apt.resolve(DictFetcher({APT_INDEX: response(APT_PACKAGES)}))),
+            (
+                pypi_pin,
+                pypi_pin.resolve(
+                    DictFetcher(
+                        {
+                            pypi_url: response(
+                                _pypi_reply(
+                                    pypi_watch.project,
+                                    pypi_pin.current(),
+                                    "9000.0.1",
+                                )
+                            )
+                        }
+                    )
+                ),
+            ),
             (registry, registry.resolve(self._registry_responses(registry.image, ["9000.0.0", "9000.0.1"], "sha256:" + "b" * 64))),
             (runner, runner.resolve(self._release_fetcher(
                 "actions/runner",
@@ -1491,6 +1653,11 @@ class PinContracts(unittest.TestCase):
                 } | {block.key_path for block in bump.blocks}
                 self.assertTrue(paths <= set(pin.key_paths), (pin.id, paths))
 
+    def test_pypi_pin_id_is_in_the_watched_vocabulary(self) -> None:
+        pypi_pin = self._pypi_pin()
+        vocabulary = notes.build_vocabulary((pypi_pin,), "")
+        self.assertEqual(vocabulary.namespace(pypi_pin.id), "watched")
+
 
 class PatchContracts(unittest.TestCase):
     IMAGE_TEXT = (
@@ -1516,6 +1683,81 @@ class PatchContracts(unittest.TestCase):
             replace_scalar(
                 self.IMAGE_TEXT, "images.missing.digest", "sha256:" + "f" * 64
             )
+
+    def test_pypi_bump_changes_one_value_and_inputs_digest(self) -> None:
+        text = BUILT_TWO_KIND_IMAGE_LOCK_TEXT
+        result = load_image_lock_text(text)
+        self.assertTrue(result.ok)
+        assert result.lock is not None
+        image = result.lock.images[0]
+        self.assertIsInstance(image, BuiltImagePin)
+        assert isinstance(image, BuiltImagePin)
+        old = image.build_args["PYPI_VERSION"]
+        new = "9000.0.1"
+        path = "images.postgres.build_args.PYPI_VERSION"
+        bump = Bump(
+            path,
+            "images.lock",
+            (Change(path, old, new),),
+            "https://example.invalid/release",
+            True,
+        )
+        patched = apply_bump(text, bump)
+        self.assertEqual(
+            patched,
+            text.replace(
+                f"      PYPI_VERSION: {old}\n",
+                f"      PYPI_VERSION: {new}\n",
+            ),
+        )
+        patched_result = load_image_lock_text(patched)
+        self.assertTrue(patched_result.ok)
+        assert patched_result.lock is not None
+        patched_image = patched_result.lock.images[0]
+        self.assertIsInstance(patched_image, BuiltImagePin)
+        assert isinstance(patched_image, BuiltImagePin)
+        dockerfile = b"FROM fictitious-base\n"
+        self.assertNotEqual(
+            compute_inputs_digest(
+                patched_image.base_digest, patched_image.build_args, dockerfile
+            ),
+            compute_inputs_digest(image.base_digest, image.build_args, dockerfile),
+        )
+
+    def test_pypi_two_segment_and_digit_values_are_quoted(self) -> None:
+        text = BUILT_TWO_KIND_IMAGE_LOCK_TEXT
+        result = load_image_lock_text(text)
+        self.assertTrue(result.ok)
+        assert result.lock is not None
+        image = result.lock.images[0]
+        self.assertIsInstance(image, BuiltImagePin)
+        assert isinstance(image, BuiltImagePin)
+        old = image.build_args["PYPI_VERSION"]
+        path = "images.postgres.build_args.PYPI_VERSION"
+        for new in ("9000.1", "90001231"):
+            with self.subTest(new=new):
+                bump = Bump(
+                    path,
+                    "images.lock",
+                    (Change(path, old, new),),
+                    "https://example.invalid/release",
+                    True,
+                )
+                patched = apply_bump(text, bump)
+                self.assertEqual(
+                    patched,
+                    text.replace(
+                        f"      PYPI_VERSION: {old}\n",
+                        f'      PYPI_VERSION: "{new}"\n',
+                    ),
+                )
+                patched_result = load_image_lock_text(patched)
+                self.assertTrue(patched_result.ok)
+                assert patched_result.lock is not None
+                patched_image = patched_result.lock.images[0]
+                self.assertIsInstance(patched_image, BuiltImagePin)
+                assert isinstance(patched_image, BuiltImagePin)
+                self.assertEqual(patched_image.build_args["PYPI_VERSION"], new)
 
     def test_replace_block_handles_nested_added_removed_and_quoted_paths(self) -> None:
         old_only = (
@@ -2432,6 +2674,32 @@ class CliContracts(unittest.TestCase):
             {"/repo/models.lock", "/repo/requirements-dev.txt"},
         )
 
+    def test_pypi_project_proposal_is_a_dry_run_row(self) -> None:
+        image_result = load_image_lock_text(BUILT_TWO_KIND_IMAGE_LOCK_TEXT)
+        assert image_result.lock is not None
+        image = image_result.lock.images[0]
+        assert isinstance(image, BuiltImagePin)
+        watch = image.watch["PYPI_VERSION"]
+        assert isinstance(watch, PypiWatch)
+        pin_id = "images.postgres.build_args.PYPI_VERSION"
+        current = image.build_args["PYPI_VERSION"]
+        candidate = "9000.0.1"
+        url = f"{pypi.PYPI_INDEX_ROOT}/{watch.project}/"
+        fetcher = DictFetcher(
+            {url: response(_pypi_reply(watch.project, current, candidate))}
+        )
+        host = PinWatchHost(image_text=BUILT_TWO_KIND_IMAGE_LOCK_TEXT)
+        result, stdout, stderr = _cli_output(
+            host,
+            fetcher,
+            ["--only", pin_id, "--dry-run"],
+        )
+        self.assertEqual(result, 0, stderr)
+        self.assertIn(
+            f"{pin_id}: would opened — {current} → {candidate} (proposal)",
+            stdout,
+        )
+
     def test_skill_watch_commit_only_is_unchanged_or_updated_after_main_moves(self) -> None:
         bump = self._matt_bump()
         patched = apply_bump(FICTITIOUS_PROVENANCE_TEXT, bump)
@@ -3200,6 +3468,54 @@ class CliContracts(unittest.TestCase):
         )
         body = next(c[1] for c in host.calls if c[0][:3] == ("gh", "pr", "create"))
         self.assertIn("This is a proposal", body or "")
+
+    def test_pypi_failure_is_a_row_and_the_run_continues(self) -> None:
+        image_result = load_image_lock_text(BUILT_TWO_KIND_IMAGE_LOCK_TEXT)
+        assert image_result.lock is not None
+        image = image_result.lock.images[0]
+        assert isinstance(image, BuiltImagePin)
+        watch = image.watch["PYPI_VERSION"]
+        assert isinstance(watch, PypiWatch)
+        pypi_url = f"{pypi.PYPI_INDEX_ROOT}/{watch.project}/"
+        driver_url = (
+            "https://developer.download.nvidia.com/compute/cuda/repos/"
+            f"{cast(HostLock, _COMMITTED_HOST_LOCK).driver.repo}/Packages"
+        )
+        driver_reply = response(f"Package: nvidia-driver-pinning-{NEXT_BRANCH}\n")
+        for label, fetcher in (
+            (
+                "unreachable",
+                UnreachableFetcher({driver_url: driver_reply}, frozenset({pypi_url})),
+            ),
+            (
+                "malformed",
+                DictFetcher(
+                    {pypi_url: response(b"{not JSON"), driver_url: driver_reply}
+                ),
+            ),
+        ):
+            with self.subTest(reply=label):
+                host = PinWatchHost(image_text=BUILT_TWO_KIND_IMAGE_LOCK_TEXT)
+                result, stdout, stderr = _cli_output(
+                    host,
+                    fetcher,
+                    [
+                        "--only",
+                        "images.postgres.build_args.PYPI_VERSION",
+                        "--only",
+                        "host.driver.branch",
+                        "--dry-run",
+                    ],
+                )
+                self.assertEqual(result, 1, stderr)
+                self.assertIn(
+                    "images.postgres.build_args.PYPI_VERSION: failed —", stdout
+                )
+                self.assertIn(
+                    f"host.driver.branch: would opened — {DRIVER_BRANCH} → "
+                    f"{NEXT_BRANCH} (proposal)",
+                    stdout,
+                )
 
     def test_loader_refusal_and_unknown_only(self) -> None:
         bad = PinWatchHost(

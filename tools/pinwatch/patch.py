@@ -6,6 +6,8 @@ from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
+import yaml  # type: ignore[import-untyped]
+
 from gideon.host import models
 from gideon.host.images import load_image_lock_text
 from gideon.host.images import render_errors as render_image_errors
@@ -56,7 +58,20 @@ def _render_scalar(old: str, new: str) -> str:
         quote = stripped[0]
         escaped = new.replace("\\", "\\\\").replace(quote, f"\\{quote}")
         return f"{quote}{escaped}{quote}"
-    return new
+    try:
+        old_value = yaml.safe_load(stripped)
+    except yaml.YAMLError:
+        return new
+    if not isinstance(old_value, str):
+        return new
+    try:
+        round_trips = yaml.safe_load(new) == new
+    except yaml.YAMLError:
+        round_trips = False
+    if round_trips:
+        return new
+    escaped = new.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
 
 
 @dataclass(frozen=True, slots=True)

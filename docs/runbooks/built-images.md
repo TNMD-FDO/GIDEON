@@ -11,9 +11,12 @@ does not rebuild.
 
 ## 1. When a build is due
 
-- A **pin-watch proposal** on a built pin: `images.postgres` (the stock base
-  moved) or `images.postgres.build_args.PGBACKREST_VERSION` (PGDG published a
-  newer pgBackRest). Its hosted checks are red by design until the rebuild.
+- A **pin-watch proposal** on a built pin: the base (`images.postgres`, the
+  stock base moved) or any watched build argument — one watched at an apt
+  index, as `images.postgres.build_args.PGBACKREST_VERSION` is (PGDG published
+  a newer pgBackRest), or one watched on PyPI (`pypi_project` in the lock's
+  `watch` entry; a newer stable release). Its hosted checks are red by design
+  until the rebuild.
 - A change under `images/<name>/` — the Dockerfile is a build input, so the
   lock's `inputs_digest` stops matching and the hosted checks go red.
 - A new built pin, written with `digest: unbuilt` and `inputs_digest: unbuilt`.
@@ -46,6 +49,22 @@ pull request: `git fetch origin && git checkout pin-watch/<pin id>`):
    (§2.1). The running stack moves at the next `sudo python3 -m gideon apply`:
    the store tier is recreated onto the new image, so Postgres restarts for
    about a minute — choose the moment.
+
+### Several proposals for one image
+
+An image with several watched arguments can have several proposals open at
+once, one pull request each. Complete them with one build:
+
+1. Check out one proposal's branch (`git checkout pin-watch/<pin id>`) and type
+   the other proposals' values into the image's `build_args` there, each as its
+   own pull request's title shows it (`old → new`).
+2. Build, check, and commit as in steps 1–4. When the build's own consistency
+   check fails because a dependency must move too (a new release requiring a
+   newer version of another watched argument), move that argument on the same
+   branch and build again. The pin watch judges the branch `completed` on the
+   proposal's own paths alone, so the extra move does not reopen it.
+3. Merge as in step 5. Leave the sibling pull requests open: the next pin-watch
+   run finds `main` carrying each one's value and withdraws it.
 
 ## 3. Reading the rows
 

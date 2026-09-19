@@ -65,7 +65,7 @@ GIDEON/
 ├── compose/                 # templates by service: caddy/, open-webui/ (permissions.yaml, general.yaml, functions/ — the two Filters and the branch gate, release content
 │                            #   never imported as a gideon module), postgres/, systemd/, prometheus/, blackbox/, grafana/
 ├── tests/                   # unittest-style classes run by pytest (§15); one test_<area>.py per module or command, plus:
-│   ├── fixtures/            # site/ (refusals); render/<example|second-office|no-gpu>/ (byte-stable renders); host/ (the recorded box, the runner's settings); pinwatch/ (the recorded hub replies); courts/ (a fictitious CSV and hand table, malformed maps, lockfiles)
+│   ├── fixtures/            # site/ (refusals); render/<example|second-office|no-gpu>/ (byte-stable renders); host/ (the recorded box, the runner's settings); pinwatch/ (the recorded hub and PyPI replies); courts/ (a fictitious CSV and hand table, malformed maps, lockfiles)
 │   ├── regenerate_render_fixtures.py   # rewrites fixtures/render deliberately (the drift test names it)
 │   └── contract/            # self-hosted-only modules, no test_ prefix, each with its throwaway stack's files beside it (archi/tests.md)
 ├── tools/                   # repository tooling, never the product (not in the release image); stdlib + gideon.host and gideon.guardrail only (archi/tools.md)

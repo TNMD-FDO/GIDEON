@@ -10,6 +10,7 @@ history at commit f06e83f. User-facing notes for every tag from `v0.2.0` live un
 `docs/release-notes/`, and `tests/test_release_records.py` holds this index
 complete, ordered, and dated from the release files.
 
+- [v0.2.10](docs/2-changelog/w3_v0.2.10.md) — 2026-09-19 — a PyPI watch kind for built pins (general-turn 10)
 - [v0.2.9](docs/2-changelog/w3_v0.2.9.md) — 2026-09-19 — the branch gate, its own Function (general-turn 04)
 - [v0.2.8](docs/2-changelog/w3_v0.2.8.md) — 2026-09-19 — gideon.guardrail, the shared judge (general-turn 03)
 - [v0.2.7](docs/2-changelog/w3_v0.2.7.md) — 2026-09-19 — the extraction grammar's first families (slice-2 01)
