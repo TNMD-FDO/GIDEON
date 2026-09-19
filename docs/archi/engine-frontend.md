@@ -38,3 +38,4 @@ The constants follow [`render-apply.md`](render-apply.md)'s rule: a reader opens
 
 - Cites: [`host.md`](host.md), [`render-apply.md`](render-apply.md), [`backup-restore.md`](backup-restore.md), [`stack.md`](stack.md), [`tests.md`](tests.md)
 - Cited by: the map's §§2, 8, 12, 13, 14, and 16
+- Beside it: [`../frontend-contract.md`](../frontend-contract.md), what General takes from the frontend once GIDEON owns its turn (ADR-0045); until the `general-turn` effort's cutover this leaf is the running mechanism's record

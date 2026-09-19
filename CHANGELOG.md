@@ -10,6 +10,7 @@ history at commit f06e83f. User-facing notes for every tag from `v0.2.0` live un
 `docs/release-notes/`, and `tests/test_release_records.py` holds this index
 complete, ordered, and dated from the release files.
 
+- [v0.2.4](docs/2-changelog/w3_v0.2.4.md) — 2026-09-18 — the overlap test's fake holds its read (slice-1 85)
 - [v0.2.3](docs/2-changelog/w3_v0.2.3.md) — 2026-09-18 — a frontend bump re-proves both modes (slice-1 41)
 - [v0.2.2](docs/2-changelog/w3_v0.2.2.md) — 2026-09-18 — the turn harness's unfiltered turn (slice-1 76)
 - [v0.2.1](docs/2-changelog/w3_v0.2.1.md) — 2026-09-18 — the box's install home is /opt/gideon (slice-1 84)

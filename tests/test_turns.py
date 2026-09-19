@@ -219,9 +219,16 @@ class Frontend:
         self.guardrail = guardrail
         self.modes = modes
         self._lock = threading.Lock()
+        # barrier=N holds N sessions in lockstep: no managed completion of a round
+        # is answered until all N are computed, nor any post-turn listing until all
+        # N are, the sign-ins', pre-turn, and cleanup listings taking no rendezvous.
         self._barrier = (
             threading.Barrier(barrier, timeout=5.0) if barrier is not None else None
         )
+        self._listing_barrier = (
+            threading.Barrier(barrier, timeout=5.0) if barrier is not None else None
+        )
+        self._posted = threading.local()
         self.chats: dict[str, dict[str, object]] = {}
         self.deleted_chats: list[tuple[str, dict[str, object]]] = []
         self.calls: list[tuple[str, str, object | None]] = []
@@ -440,6 +447,7 @@ class Frontend:
         credential: str | None,
     ) -> Response:
         barrier: threading.Barrier | None = None
+        held: Response | None = None
         with self._lock:
             self.calls.append((method, path, body))
             if path == "/api/v1/auths/signin":
@@ -461,8 +469,13 @@ class Frontend:
                     self.fail_listing_after_turn = False
                     return Response(500, {"detail": "listing failed"})
                 identifiers = [*self.chats, *self.vanished_chat_ids]
-                return Response(200, [{"id": identifier} for identifier in reversed(identifiers)])
-            if method == "POST" and path == "/api/chat/completions":
+                listing = Response(200, [{"id": identifier} for identifier in reversed(identifiers)])
+                if not getattr(self._posted, "completion", False):
+                    return listing
+                # The post-turn listing: computed now, answered once every session's is.
+                self._posted.completion = False
+                barrier, held = self._listing_barrier, listing
+            elif method == "POST" and path == "/api/chat/completions":
                 if not isinstance(body, dict):
                     return Response(400, {"detail": "bad body"})
                 if "user_message" not in body:
@@ -511,6 +524,8 @@ class Frontend:
                 else:
                     self._new_chat(body, mode)
                     barrier = self._barrier
+                if barrier is not None:
+                    self._posted.completion = True
             elif method == "GET" and path.startswith("/api/v1/chats/"):
                 chat_id = unquote(path.removeprefix("/api/v1/chats/"))
                 if self.fail_candidate_read_after_turn and self._turns_made:
@@ -532,7 +547,7 @@ class Frontend:
                 return Response(404, {"detail": "not found"})
         if barrier is not None:
             barrier.wait()
-        return Response(200, None)
+        return held if held is not None else Response(200, None)
 
     def stream(
         self,
