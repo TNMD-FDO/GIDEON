@@ -39,6 +39,9 @@ EXCLUDED_PREFIXES = (
     "tests/test_trip.py",  # bin/trip's tests
     "tests/test_release_export.py",  # bin/release-export's tests
     "eval/seed/prototype-qa",  # harvested QA data pending a CSA ruling
+    "eval/sets/eval-v1/judgments/queries.jsonl",  # harvest-derived judgment queries pending a CSA ruling
+    "tools/judgments",  # judgment intake tooling that loads the excluded flagger
+    "tests/test_judgments_intake.py",  # judgment intake's excluded tests
     ".github/workflows/acceptance.yml",  # the box acceptance workflow
     ".github/workflows/pin-watch.yml",  # the box pin-watch workflow
     ".github/dependabot.yml",  # Dependabot's development-repository trigger

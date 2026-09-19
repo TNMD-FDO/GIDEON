@@ -31,6 +31,9 @@ tests/test_worktree_remove.py export-ignore
 tests/test_trip.py export-ignore
 tests/test_release_export.py export-ignore
 eval/seed/prototype-qa/ export-ignore
+eval/sets/eval-v1/judgments/queries.jsonl export-ignore
+tools/judgments/ export-ignore
+tests/test_judgments_intake.py export-ignore
 .github/workflows/acceptance.yml export-ignore
 .github/workflows/pin-watch.yml export-ignore
 .github/dependabot.yml export-ignore
