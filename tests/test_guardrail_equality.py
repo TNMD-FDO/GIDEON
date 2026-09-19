@@ -21,13 +21,10 @@ FUNCTION_ONLY = frozenset(
         "asyncio",
         "STREAM_STATE_KEY",
         "SESSION_REFUSAL",
-        "BRANCH_REFUSAL",
         "EVAL_IDENTITY_EMAIL",
         "TASK_ID_KEY",
         "REPLACEMENT_MESSAGE_ID",
         "SessionRefusal",
-        "BranchRefusal",
-        "_is_preset",
         "_TEXT_KEYS",
         "_REASONING_KEYS",
         "_refusal_chunk",
@@ -46,12 +43,14 @@ FUNCTION_ONLY = frozenset(
         "Filter",
     }
 )
-# Every file naming the Function's file: its hook tests, the gate texts' and the
-# stamp's readers, the render's template, and this module.
+# Every file naming the Function's file: its hook tests, the branch gate's
+# inlet-order test, the gate texts' and the stamp's readers, the render's
+# template, and this module.
 HELD_FUNCTION_USERS = (
     "gideon/guardrail.py",
     "gideon/host/render/owui.py",
     "tests/test_arithmetic_guardrail.py",
+    "tests/test_branch_gate.py",
     "tests/test_citation_stamp.py",
     "tests/test_engine_verify.py",
     "tests/test_guardrail_equality.py",

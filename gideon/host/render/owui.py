@@ -35,12 +35,17 @@ PERMISSIONS_TEMPLATE: Final = "open-webui/permissions.yaml"
 GENERAL_TEMPLATE: Final = "open-webui/general.yaml"
 # The arithmetic guardrail's source (§16, ADR-0006): a standalone Filter file
 # the frontend runs and the tests import by path, rendered verbatim as the
-# manifest's one Function on every host — it references no engine, so the
+# manifest's Function on every host — it references no engine, so the
 # no-GPU acceptance VM and the CI contract stack push and read it back too.
 ARITHMETIC_GUARDRAIL_TEMPLATE: Final = "open-webui/functions/arithmetic_guardrail.py"
+# The branch gate's source (ADR-0045 (d), frontend contract row 8): an
+# inlet-only global Filter the frontend runs and the tests import by path,
+# rendered verbatim as a manifest Function on every host, refusing a user-role
+# request on a model row that is not a preset.
+BRANCH_GATE_TEMPLATE: Final = "open-webui/functions/branch_gate.py"
 # The citation stamp's source (§15, [06] item 16, ADR-0020): a standalone
 # outlet Filter the frontend runs and the tests import by path, rendered
-# verbatim as the manifest's second Function on every host — like the
+# verbatim as a manifest Function on every host — like the
 # guardrail it references no engine — and attached to General's record alone.
 CITATION_STAMP_TEMPLATE: Final = "open-webui/functions/citation_stamp.py"
 # Effectively permanent: chat rows, URLs, ticket 08's default-model value, and
@@ -54,6 +59,12 @@ GENERAL_PRESET_ID: Final = "gideon-general"
 # a path or an import from it (docs/research/owui-filter-function.md §8.3).
 ARITHMETIC_GUARDRAIL_ID: Final = "gideon-arithmetic-guardrail"
 ARITHMETIC_GUARDRAIL_NAME: Final = "GIDEON arithmetic guardrail"
+# Effectively permanent: the frontend contract's row 8 names it; the
+# hyphen-safe prefix follows the Function id rule.  Neither global Filter has
+# Valves, so the pinned frontend runs their inlets in id order and this one
+# after the guardrail's (docs/research/owui-filter-function.md §3.3, §8.3).
+BRANCH_GATE_ID: Final = "gideon-branch-gate"
+BRANCH_GATE_NAME: Final = "GIDEON branch gate"
 # Effectively permanent: ticket 39's cases and the frontend's General record
 # name this id; the hyphen-safe prefix follows the Function id rule
 # (docs/research/owui-filter-function.md §8.3).
@@ -64,6 +75,12 @@ ARITHMETIC_GUARDRAIL_DESCRIPTION: Final = (
     "The arithmetic guardrail (GIDEON spec §16): replaces any answer that computes or confirms "
     "a filing deadline, a Sentencing Guidelines range, or a release date or sentence credit with GIDEON's fixed refusal. Global on every model; pushed by gideon "
     "apply, which reverts any edit made here."
+)
+# Release text shown on the frontend's Functions page beside the record.
+BRANCH_GATE_DESCRIPTION: Final = (
+    "The branch gate (GIDEON spec §16): refuses a user's request to any model that is not one of "
+    "GIDEON's branches, such as the hidden base model, and sends the user to General. Global on "
+    "every model; pushed by gideon apply, which reverts any edit made here."
 )
 # Release text shown on the frontend's Functions page beside the record.
 CITATION_STAMP_DESCRIPTION: Final = (
@@ -775,6 +792,19 @@ def arithmetic_guardrail_function(inputs: RenderInputs) -> Mapping[str, object]:
     )
 
 
+def branch_gate_function(inputs: RenderInputs) -> Mapping[str, object]:
+    """Build the global branch gate row."""
+
+    return _function_row(
+        inputs,
+        BRANCH_GATE_TEMPLATE,
+        BRANCH_GATE_ID,
+        BRANCH_GATE_NAME,
+        BRANCH_GATE_DESCRIPTION,
+        True,
+    )
+
+
 def citation_stamp_function(inputs: RenderInputs) -> Mapping[str, object]:
     """Build the General-only citation stamp row."""
 
@@ -794,8 +824,8 @@ class ApplyManifestArtifact(Artifact):
     The model set holds the base model's own record and General's preset on a
     GPU host only: both follow the engine as the engine follows the no-GPU
     marker (ADR-0035), so a no-GPU host pushes neither.  The arithmetic
-    guardrail and citation stamp ride every host; the stamp is attached where
-    General's record is rendered.
+    guardrail, branch gate, and citation stamp ride every host; the stamp is
+    attached where General's record is rendered.
     """
 
     name = "open-webui-manifest"
@@ -804,6 +834,7 @@ class ApplyManifestArtifact(Artifact):
         PERMISSIONS_TEMPLATE,
         GENERAL_TEMPLATE,
         ARITHMETIC_GUARDRAIL_TEMPLATE,
+        BRANCH_GATE_TEMPLATE,
         CITATION_STAMP_TEMPLATE,
     )
 
@@ -839,7 +870,11 @@ class ApplyManifestArtifact(Artifact):
         document: Mapping[str, Any] = {
             "groups": groups,
             "identities": identities,
-            "functions": [arithmetic_guardrail_function(inputs), citation_stamp_function(inputs)],
+            "functions": [
+                arithmetic_guardrail_function(inputs),
+                branch_gate_function(inputs),
+                citation_stamp_function(inputs),
+            ],
             "models": (
                 []
                 if inputs.no_gpu

@@ -327,13 +327,13 @@ def main(
     if options.probe_inlet:
         try:
             gate_texts = classify.load_gate_texts(root)
-        except Exception:  # noqa: BLE001 - the precondition owns Function load failures.
+        except classify.GateTextUnavailable as exc:
             print_stage(
                 StageResult(
                     "preconditions",
                     False,
-                    "guardrail gate texts could not be loaded",
-                    f"Correct {root / classify.GUARDRAIL_FUNCTION}, then retry.",
+                    f"inlet gate text could not be loaded from {exc.path}",
+                    f"Correct {exc.path}, then retry.",
                 )
             )
             return 1

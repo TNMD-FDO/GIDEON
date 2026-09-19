@@ -24,22 +24,6 @@ SEED_DIR = ROOT / "eval/seed/guardrails"
 DEADLINE_SEED_PATH = SEED_DIR / "deadline-trap.yaml"
 SENTENCE_CREDIT_SEED_PATH = SEED_DIR / "sentence-credit.yaml"
 
-# These entry shapes mirror the preset/base record merge in
-# docs/research/owui-model-record.md §4.1; all ids are visibly fictitious.
-PRESET_ENTRY: dict[str, object] = {
-    "id": "a-preset",
-    "name": "a-preset",
-    "info": {"base_model_id": "a-base"},
-}
-BASE_ENTRY: dict[str, object] = {
-    "id": "a-base",
-    "name": "a-base",
-    "info": {"base_model_id": None},
-}
-META_ONLY_ENTRY: dict[str, object] = {"info": {"meta": {}}}
-NO_INFO_ENTRY: dict[str, object] = {"id": "a-unrecorded", "name": "a-unrecorded"}
-
-
 def load_filter():
     spec = importlib.util.spec_from_file_location("arithmetic_guardrail", FILTER_PATH)
     assert spec is not None and spec.loader is not None
@@ -169,7 +153,6 @@ class FakeStream:
             body,
             {"role": "user", "email": "person@example.invalid"},
             request_metadata,
-            PRESET_ENTRY,
         )
         return stream_filter, request_metadata
 
@@ -735,7 +718,7 @@ class Guidelines(unittest.TestCase):
     def test_inlet_stashes_both_families_figures(self) -> None:
         body = {"model": "gideon-general", "messages": [{"role": "user", "content": self.SUPPLYING_PROMPT}]}
         metadata: dict[str, object] = {"chat_id": "chat"}
-        FILTER.Filter().inlet(body, {"role": "user", "email": "person@example.invalid"}, metadata, PRESET_ENTRY)
+        FILTER.Filter().inlet(body, {"role": "user", "email": "person@example.invalid"}, metadata)
         state = metadata[FILTER.STREAM_STATE_KEY]
         assert isinstance(state, dict)
         self.assertEqual(
@@ -917,16 +900,12 @@ class Inlet(unittest.TestCase):
         self.body = {"messages": [{"role": "user", "content": "compute June 5, 2027"}]}
 
     def test_sessionless_user_is_refused(self) -> None:
-        for model_entry in (None, BASE_ENTRY):
-            with self.subTest(model_entry=model_entry), self.assertRaisesRegex(
-                FILTER.SessionRefusal, re.escape(FILTER.SESSION_REFUSAL)
-            ):
-                self.filter.inlet(
-                    self.body,
-                    {"role": "user", "email": "person@example.invalid"},
-                    {},
-                    model_entry,
-                )
+        with self.assertRaisesRegex(FILTER.SessionRefusal, re.escape(FILTER.SESSION_REFUSAL)):
+            self.filter.inlet(
+                self.body,
+                {"role": "user", "email": "person@example.invalid"},
+                {},
+            )
 
     def test_either_id_allows_user(self) -> None:
         for metadata in ({"session_id": "socket"}, {"chat_id": "chat"}, {"chat_id": "temporary:socket"}):
@@ -936,72 +915,27 @@ class Inlet(unittest.TestCase):
                         self.body,
                         {"role": "user", "email": "person@example.invalid"},
                         metadata,
-                        PRESET_ENTRY,
                     ),
                     self.body,
                 )
 
     def test_admin_and_eval_identity_pass_without_ids(self) -> None:
-        for model_entry in (BASE_ENTRY, None):
-            with self.subTest(model_entry=model_entry):
-                self.assertIs(
-                    self.filter.inlet(
-                        self.body,
-                        {"role": "admin", "email": "admin@example.invalid"},
-                        {},
-                        model_entry,
-                    ),
-                    self.body,
-                )
-                self.assertIs(
-                    self.filter.inlet(
-                        self.body,
-                        {"role": "user", "email": FILTER.EVAL_IDENTITY_EMAIL},
-                        {},
-                        model_entry,
-                    ),
-                    self.body,
-                )
-
-    def test_preset_entry_allows_user(self) -> None:
         self.assertIs(
             self.filter.inlet(
                 self.body,
-                {"role": "user", "email": "person@example.invalid"},
-                {"chat_id": "chat"},
-                PRESET_ENTRY,
+                {"role": "admin", "email": "admin@example.invalid"},
+                {},
             ),
             self.body,
         )
-
-    def test_non_preset_entries_are_refused(self) -> None:
-        entries: tuple[object, ...] = (
-            BASE_ENTRY,
-            META_ONLY_ENTRY,
-            NO_INFO_ENTRY,
-            {"info": {"base_model_id": ""}},
-            "a-base",
-            None,
-        )
-        for model_entry in entries:
-            with self.subTest(model_entry=model_entry), self.assertRaisesRegex(
-                FILTER.BranchRefusal, re.escape(FILTER.BRANCH_REFUSAL)
-            ):
-                self.filter.inlet(
-                    self.body,
-                    {"role": "user", "email": "person@example.invalid"},
-                    {"chat_id": "chat"},
-                    model_entry,
-                )
-
-    def test_session_gate_runs_before_branch_gate(self) -> None:
-        with self.assertRaisesRegex(FILTER.SessionRefusal, re.escape(FILTER.SESSION_REFUSAL)):
+        self.assertIs(
             self.filter.inlet(
                 self.body,
-                {"role": "user", "email": "person@example.invalid"},
+                {"role": "user", "email": FILTER.EVAL_IDENTITY_EMAIL},
                 {},
-                BASE_ENTRY,
-            )
+            ),
+            self.body,
+        )
 
     def test_missing_context_refuses(self) -> None:
         for user, metadata in ((None, {}), ({"role": "user"}, None)):
@@ -1026,8 +960,7 @@ class TripRecording(unittest.TestCase):
         for user, source, metadata in users:
             with self.subTest(user=user):
                 body = {"model": "branch-from-body", "messages": []}
-                model_entry = PRESET_ENTRY if user["role"] == "user" else None
-                FILTER.Filter().inlet(body, user, metadata, model_entry)
+                FILTER.Filter().inlet(body, user, metadata)
                 state = metadata[FILTER.STREAM_STATE_KEY]
                 self.assertIsInstance(state, dict)
                 assert isinstance(state, dict)
@@ -1177,6 +1110,9 @@ class BoundsAndHygiene(unittest.TestCase):
         self.assertFalse(hasattr(FILTER, "Valves"))
         self.assertFalse(hasattr(FILTER.Filter, "Valves"))
         self.assertFalse(hasattr(FILTER.Filter, "toggle"))
+        self.assertFalse(hasattr(FILTER, "BRANCH_REFUSAL"))
+        self.assertFalse(hasattr(FILTER, "BranchRefusal"))
+        self.assertFalse(hasattr(FILTER, "_is_preset"))
         self.assertTrue(hasattr(FILTER.Filter, "stream"))
         frontmatter = ast.get_docstring(tree) or ""
         self.assertIn("title:", frontmatter)
@@ -1199,10 +1135,9 @@ class BoundsAndHygiene(unittest.TestCase):
         )
         for phrase in ("filing deadline", "Sentencing Guidelines range", "release date", "sentence credit"):
             self.assertIn(phrase, ARITHMETIC_GUARDRAIL_DESCRIPTION)
-        self.assertEqual(FILTER.BRANCH_REFUSAL, "GIDEON answers only through one of its branches. Start a new chat and ask General.")
         self.assertEqual(
             tuple(inspect.signature(FILTER.Filter.inlet).parameters),
-            ("self", "body", "__user__", "__metadata__", "__model__"),
+            ("self", "body", "__user__", "__metadata__"),
         )
         self.assertEqual(tuple(inspect.signature(FILTER.Filter.stream).parameters), ("self", "event", "__metadata__"))
         self.assertEqual(tuple(inspect.signature(FILTER.Filter.outlet).parameters), ("self", "body", "__metadata__"))

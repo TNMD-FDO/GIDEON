@@ -847,14 +847,14 @@ def _run_probe(
     """Ticket 34's inlet-gate probe from the users seat, three rows.
 
     ``inlet-bare`` posts a completion carrying neither a session id nor a chat
-    id and expects the Function's session refusal on a 400 — refused before the
-    engine, a row and never a turn. ``inlet-chat-id`` adds the id of a chat
+    id and expects the guardrail Function's session refusal on a 400 — refused
+    before the engine, a row and never a turn. ``inlet-chat-id`` adds the id of a chat
     the account owns and expects the model's answer unreplaced: §16's recorded
     residual, judged and reported, never failed on its content.
     ``inlet-base-model`` reuses that owned chat with the base model and expects
-    the Function's branch refusal before the engine. Neither completion should create a
-    chat of its own; any that appears is deleted, and the owned chat is deleted
-    whatever happened. A request that fails is a failed row for whichever
+    the branch gate Function's refusal before the engine. Neither completion
+    should create a chat of its own; any that appears is deleted, and the owned
+    chat is deleted whatever happened. A request that fails is a failed row for whichever
     probe had not been reported, never a traceback.
     """
 
@@ -1831,8 +1831,13 @@ def run(
 
     The browser is closed and the output handed back whatever happened; a
     browser that does not close cleanly is a failed ``browser`` row and a
-    non-zero exit, never a traceback.
+    non-zero exit, never a traceback. ``gate_texts`` are the two inlet
+    gates' refusals the probe's rows compare; a probe spec without them is
+    the caller's error, refused before any sign-in.
     """
+
+    if spec.probe_inlet and gate_texts is None:
+        raise ValueError("a probe_inlet run needs the inlet gates' texts")
 
     io = host or RealHost()
     root = checkout or Path.cwd()

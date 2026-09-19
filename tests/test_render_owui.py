@@ -38,6 +38,10 @@ from gideon.host.render.owui import (
     AUDIT_LOG_FILE,
     BASE_MODEL_CAPABILITIES,
     BASE_MODEL_HIDDEN,
+    BRANCH_GATE_DESCRIPTION,
+    BRANCH_GATE_ID,
+    BRANCH_GATE_NAME,
+    BRANCH_GATE_TEMPLATE,
     BREAK_GLASS,
     CITATION_STAMP_DESCRIPTION,
     CITATION_STAMP_ID,
@@ -63,6 +67,7 @@ from gideon.host.render.owui import (
     ApplyManifestArtifact,
     OwuiEnvArtifact,
     arithmetic_guardrail_function,
+    branch_gate_function,
     citation_stamp_function,
     general_preset_record,
     general_texts,
@@ -452,7 +457,11 @@ class Manifest(unittest.TestCase):
         )
         self.assertEqual(
             document["functions"],
-            [arithmetic_guardrail_function(inputs(SECOND)), citation_stamp_function(inputs(SECOND))],
+            [
+                arithmetic_guardrail_function(inputs(SECOND)),
+                branch_gate_function(inputs(SECOND)),
+                citation_stamp_function(inputs(SECOND)),
+            ],
         )
         function = document["functions"][0]
         self.assertEqual(
@@ -471,7 +480,24 @@ class Manifest(unittest.TestCase):
                 "created_at": SYNC_ROW_CREATED_AT,
             },
         )
-        stamp = document["functions"][1]
+        gate = document["functions"][1]
+        self.assertEqual(
+            gate,
+            {
+                "id": BRANCH_GATE_ID,
+                "user_id": SYNC_ROW_USER_ID,
+                "name": BRANCH_GATE_NAME,
+                "type": "filter",
+                "content": inputs(SECOND).templates[BRANCH_GATE_TEMPLATE],
+                "meta": {"description": BRANCH_GATE_DESCRIPTION},
+                "valves": {},
+                "is_active": True,
+                "is_global": True,
+                "updated_at": SYNC_ROW_UPDATED_AT,
+                "created_at": SYNC_ROW_CREATED_AT,
+            },
+        )
+        stamp = document["functions"][2]
         self.assertEqual(
             stamp,
             {
@@ -631,6 +657,7 @@ class Manifest(unittest.TestCase):
             document["functions"],
             [
                 arithmetic_guardrail_function(inputs(no_gpu=True)),
+                branch_gate_function(inputs(no_gpu=True)),
                 citation_stamp_function(inputs(no_gpu=True)),
             ],
         )
@@ -642,12 +669,17 @@ class Manifest(unittest.TestCase):
                 document = yaml.safe_load(ApplyManifestArtifact().emit(rendered_inputs))
                 self.assertEqual(
                     document["functions"],
-                    [arithmetic_guardrail_function(rendered_inputs), citation_stamp_function(rendered_inputs)],
+                    [
+                        arithmetic_guardrail_function(rendered_inputs),
+                        branch_gate_function(rendered_inputs),
+                        citation_stamp_function(rendered_inputs),
+                    ],
                 )
 
     def test_filter_functions_refuse_syntax_errors_with_template_and_line(self) -> None:
         for template, builder in (
             (ARITHMETIC_GUARDRAIL_TEMPLATE, arithmetic_guardrail_function),
+            (BRANCH_GATE_TEMPLATE, branch_gate_function),
             (CITATION_STAMP_TEMPLATE, citation_stamp_function),
         ):
             with self.subTest(template=template):
@@ -665,6 +697,7 @@ class Manifest(unittest.TestCase):
     def test_filter_functions_refuse_a_missing_template(self) -> None:
         for template, builder in (
             (ARITHMETIC_GUARDRAIL_TEMPLATE, arithmetic_guardrail_function),
+            (BRANCH_GATE_TEMPLATE, branch_gate_function),
             (CITATION_STAMP_TEMPLATE, citation_stamp_function),
         ):
             with self.subTest(template=template):

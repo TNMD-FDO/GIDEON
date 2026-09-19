@@ -26,6 +26,7 @@ from gideon.host.owui import (
 )
 from gideon.host.render.owui import (
     ARITHMETIC_GUARDRAIL_ID,
+    BRANCH_GATE_ID,
     BREAK_GLASS,
     CITATION_STAMP_ID,
     EVAL_IDENTITY,
@@ -570,7 +571,7 @@ class Bootstrap(unittest.TestCase):
         self.assertEqual(report.removed_groups, ("stray",))
         self.assertEqual(
             [item["id"] for item in frontend.functions],
-            [ARITHMETIC_GUARDRAIL_ID, CITATION_STAMP_ID],
+            [ARITHMETIC_GUARDRAIL_ID, BRANCH_GATE_ID, CITATION_STAMP_ID],
         )
         expected_models = manifest()["models"]
         assert isinstance(expected_models, list)
@@ -903,7 +904,7 @@ class Manifest(unittest.TestCase):
         assert isinstance(functions, list)
         self.assertEqual(
             [function["id"] for function in functions],
-            [ARITHMETIC_GUARDRAIL_ID, CITATION_STAMP_ID],
+            [ARITHMETIC_GUARDRAIL_ID, BRANCH_GATE_ID, CITATION_STAMP_ID],
         )
         groups = document["groups"]
         assert isinstance(groups, list)

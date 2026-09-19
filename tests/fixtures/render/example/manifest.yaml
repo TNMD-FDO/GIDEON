@@ -89,7 +89,7 @@ files:
     owners:
       - "open-webui"
   "open-webui/manifest.yaml":
-    sha256: "8730309f54420f5cea0386355cdb3dbf8c8f00aba50894eab7707496eee06a46"
+    sha256: "c9c9130a9cc79d2b9c8be73db4e741e42e01bb6e8f0221525f7766da565c47cb"
     mode: "0644"
     owners: []
   "searxng/settings.yml":

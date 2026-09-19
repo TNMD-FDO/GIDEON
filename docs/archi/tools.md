@@ -18,7 +18,7 @@
 
 ## Tooling on the box
 
-The build tool, pin watch, acceptance harness, turn harness, and evidence redaction run with system Python and `python3-yaml`, importing `gideon.host` and `gideon.guardrail` and nothing heavier (the turn harness also loads two Functions by path, release content and not modules: the guardrail's for its two inlet-gate texts under `--probe-inlet`, the citation stamp's for its tail). Browser mode alone runs from the dev venv: `tools/turns/chromium.py` imports Playwright inside its launch function. The gate uses the dev venv, imports only the standard library, and never runs on box units. The acceptance harness also needs the `kvm` target state; it and the turn harness run as root through `sudo` and hand output back through `tools/ownership.py`.
+The build tool, pin watch, acceptance harness, turn harness, and evidence redaction run with system Python and `python3-yaml`, importing `gideon.host` and `gideon.guardrail` and nothing heavier (the turn harness also loads three Functions by path, release content and not modules: under `--probe-inlet` the guardrail's for the session refusal and the branch gate's for the branch refusal, and the citation stamp's for its tail). Browser mode alone runs from the dev venv: `tools/turns/chromium.py` imports Playwright inside its launch function. The gate uses the dev venv, imports only the standard library, and never runs on box units. The acceptance harness also needs the `kvm` target state; it and the turn harness run as root through `sudo` and hand output back through `tools/ownership.py`.
 
 ## Footprints
 

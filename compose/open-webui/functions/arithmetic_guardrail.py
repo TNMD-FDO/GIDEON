@@ -1,5 +1,5 @@
 """title: GIDEON arithmetic guardrail
-version: 10
+version: 11
 description: Enforces the no-model-arithmetic rule for filing deadlines, Sentencing Guidelines ranges, and sentence credit or release dates.
 """
 
@@ -36,8 +36,9 @@ description: Enforces the no-model-arithmetic rule for filing deadlines, Sentenc
 # frontend's rewriter replaces over the whole file — the word "from" followed
 # by utils, apps, main, or config — since a rewritten comment would make the
 # stored content differ from the manifest's (docs/research/owui-filter-function.md
-# §4.2).  Its inlet holds two transport-only gates — the session gate and the
-# branch gate — and neither reads a message (slice-1 tickets 09 and 43).
+# §4.2).  Its inlet holds one transport-only gate, the session gate, which
+# reads no message (slice-1 ticket 09); the branch rule is the
+# gideon-branch-gate Function's (slice-1 ticket 43, general-turn ticket 04).
 import asyncio
 import re
 from collections.abc import Callable, Mapping
@@ -695,10 +696,6 @@ SENTENCE_CREDIT_REFUSAL = (
 # window (the outlet's replacement reaches the window alone).
 SESSION_REFUSAL = (
     "GIDEON answers only through its chat window. Open a chat and ask there."
-)
-# The inlet's refusal for a user-role request that names no preset branch.
-BRANCH_REFUSAL = (
-    "GIDEON answers only through one of its branches. Start a new chat and ask General."
 )
 # The evaluation identity (render/owui.py's EVAL_IDENTITY; a test holds the
 # two equal): the one user-role account whose API calls the inlet lets through.
@@ -1762,28 +1759,6 @@ class TripRow:
 
 class SessionRefusal(Exception):
     """The fixed refusal for a user request outside the chat window."""
-
-
-class BranchRefusal(Exception):
-    """The fixed refusal for a user request outside a preset branch."""
-
-
-def _is_preset(model_entry: object) -> bool:
-    """Return whether a model entry carries a non-empty base-model id."""
-
-    # The entry is the process cache's discovered model; ``info`` is the record
-    # merged onto it (with ``params`` deleted). A discovered model without a
-    # record has no ``info`` in GIDEON's environment, or only ``meta`` if the
-    # frontend's dormant default-metadata merge is enabled; the OpenAI router
-    # swaps a preset for its base only after the Filters have run. This rule
-    # therefore reads only ``info.base_model_id`` and never ``id`` or ``name``.
-    if not isinstance(model_entry, Mapping):
-        return False
-    info = model_entry.get("info")
-    if not isinstance(info, Mapping):
-        return False
-    base_model_id = info.get("base_model_id")
-    return isinstance(base_model_id, str) and bool(base_model_id)
 
 
 def _compiled(
@@ -3141,7 +3116,6 @@ class Filter:
         body: object,
         __user__: Mapping[str, object] | None = None,
         __metadata__: Mapping[str, object] | None = None,
-        __model__: Mapping[str, object] | None = None,
     ) -> object:
         if not isinstance(__user__, Mapping) or not isinstance(__metadata__, Mapping):
             raise SessionRefusal(SESSION_REFUSAL)
@@ -3169,8 +3143,6 @@ class Filter:
             and not __metadata__.get("chat_id")
         ):
             raise SessionRefusal(SESSION_REFUSAL)
-        if role == "user" and not _is_preset(__model__):
-            raise BranchRefusal(BRANCH_REFUSAL)
         return body
 
     def stream(self, event: object, __metadata__: object = None) -> object:

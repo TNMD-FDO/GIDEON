@@ -7,10 +7,10 @@ no ``test_`` prefix so the hosted pytest run never collects it.  It brings up
 a throwaway Compose project (Postgres + Open WebUI on loopback) in production
 order — Postgres, ``stores.converge``, then the frontend — adds a Function by
 hand, pushes the rendered example manifest with ``owui.bootstrap``, and
-proves the hand Function is gone, the two rendered Filter Functions (the
-arithmetic guardrail and the citation stamp), both model records with
+proves the hand Function is gone, the rendered Filter Functions (the
+arithmetic guardrail, branch gate, and citation stamp), both model records with
 General's attachment key, groups, and keys match, and a further push changes
-nothing. Both Functions are hand-edited, toggled, and removed through the
+nothing. The rendered Functions are hand-edited, toggled, and removed through the
 frontend routes, General's attachment key is hand-dropped, and the next
 desired-state push restores all of it.
 
@@ -48,6 +48,7 @@ from gideon.host.render.owui import (
     ALLOWED_ENDPOINTS,
     ARITHMETIC_GUARDRAIL_ID,
     BASE_MODEL_CAPABILITIES,
+    BRANCH_GATE_ID,
     BREAK_GLASS,
     CITATION_STAMP_ID,
     EVAL_IDENTITY,
@@ -305,12 +306,18 @@ class ApplyManifestContract(unittest.TestCase):
         functions = document["functions"]
         assert isinstance(functions, list)
         expected_ids = [function["id"] for function in functions]
-        self.assertEqual(expected_ids, [ARITHMETIC_GUARDRAIL_ID, CITATION_STAMP_ID])
+        self.assertEqual(
+            expected_ids,
+            [ARITHMETIC_GUARDRAIL_ID, BRANCH_GATE_ID, CITATION_STAMP_ID],
+        )
 
         listing = admin.request("GET", "/api/v1/functions/")
         self.assertEqual(listing.status, 200, listing.body)
         assert isinstance(listing.body, list)
-        self.assertEqual([row["id"] for row in listing.body], expected_ids)
+        # A set: the pinned list route's order follows neither the ids nor the
+        # push (measured at general-turn ticket 04), and the inlets' running
+        # order is the frontend's own per-request sort by (priority, id).
+        self.assertEqual(sorted(row["id"] for row in listing.body), sorted(expected_ids))
 
         for expected in functions:
             assert isinstance(expected, dict)
@@ -435,7 +442,8 @@ class ApplyManifestContract(unittest.TestCase):
         document = self.manifest()
         functions = document["functions"]
         assert isinstance(functions, list)
-        function = functions[0]
+        functions_by_id = {function["id"]: function for function in functions}
+        function = functions_by_id[ARITHMETIC_GUARDRAIL_ID]
         assert isinstance(function, dict)
         function_edit = session.request(
             "POST",
@@ -455,7 +463,27 @@ class ApplyManifestContract(unittest.TestCase):
         )
         self.assertEqual(globally_toggled.status, 200, globally_toggled.body)
 
-        stamp_function = functions[1]
+        gate_function = functions_by_id[BRANCH_GATE_ID]
+        assert isinstance(gate_function, dict)
+        gate_edit = session.request(
+            "POST",
+            f"/api/v1/functions/id/{BRANCH_GATE_ID}/update",
+            {
+                **gate_function,
+                "content": "class Filter:\n    pass\n",
+            },
+        )
+        self.assertEqual(gate_edit.status, 200, gate_edit.body)
+        gate_toggled = session.request(
+            "POST", f"/api/v1/functions/id/{BRANCH_GATE_ID}/toggle"
+        )
+        self.assertEqual(gate_toggled.status, 200, gate_toggled.body)
+        gate_globally_toggled = session.request(
+            "POST", f"/api/v1/functions/id/{BRANCH_GATE_ID}/toggle/global"
+        )
+        self.assertEqual(gate_globally_toggled.status, 200, gate_globally_toggled.body)
+
+        stamp_function = functions_by_id[CITATION_STAMP_ID]
         assert isinstance(stamp_function, dict)
         stamp_edit = session.request(
             "POST",
@@ -501,6 +529,10 @@ class ApplyManifestContract(unittest.TestCase):
             "DELETE", f"/api/v1/functions/id/{ARITHMETIC_GUARDRAIL_ID}/delete"
         )
         self.assertEqual(removed.status, 200, removed.body)
+        removed_gate = session.request(
+            "DELETE", f"/api/v1/functions/id/{BRANCH_GATE_ID}/delete"
+        )
+        self.assertEqual(removed_gate.status, 200, removed_gate.body)
         removed_stamp = session.request(
             "DELETE", f"/api/v1/functions/id/{CITATION_STAMP_ID}/delete"
         )

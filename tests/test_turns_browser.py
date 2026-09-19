@@ -1064,7 +1064,7 @@ class BrowserTurnIntegration(TestCase):
         frontend = FakeFrontend()
         page = FakePage(frontend, drains=self._drains())
         with patch(
-            "tools.turns.cli.classify.load_gate_texts",
+            "tools.turns.classify._load_function",
             side_effect=RuntimeError("private gate text"),
         ):
             code, stdout, _stderr, _frontend, _host = self._run(
@@ -1073,7 +1073,8 @@ class BrowserTurnIntegration(TestCase):
         function_path = ROOT / classify.GUARDRAIL_FUNCTION
         self.assertEqual(code, 1)
         self.assertIn(
-            "preconditions: refuse — guardrail gate texts could not be loaded", stdout
+            f"preconditions: refuse — inlet gate text could not be loaded from {function_path}",
+            stdout,
         )
         self.assertIn(f"Correct {function_path}, then retry.", stdout)
         self.assertNotIn("private gate text", stdout)
@@ -1258,6 +1259,68 @@ class BrowserTurnIntegration(TestCase):
                 self.assertIn(expected, output.getvalue())
                 self.assertIn(expected_fix, output.getvalue())
                 self.assertIn(str(ROOT / "models.lock"), host.read_paths)
+
+    def test_probe_gate_load_failure_is_a_precondition_row_with_its_fix(self) -> None:
+        frontend = FakeFrontend()
+        page = FakePage(frontend)
+        gate_path = ROOT / classify.BRANCH_GATE_FUNCTION
+        load_function = classify._load_function
+
+        def broken_gate(path: Path, name: str) -> object:
+            if path == gate_path:
+                raise ImportError("broken gate")
+            return load_function(path, name)
+
+        with patch("tools.turns.classify._load_function", side_effect=broken_gate):
+            code, stdout, _stderr, _frontend, _host = self._run(
+                page=page, args=["--probe-inlet"]
+            )
+        self.assertEqual(code, 1)
+        self.assertIn(
+            f"preconditions: refuse — inlet gate text could not be loaded from {gate_path}",
+            stdout,
+        )
+        self.assertIn(f"Correct {gate_path}, then retry.", stdout)
+        self.assertNotIn("broken gate", stdout)
+        self.assertNotIn("signin:", stdout)
+
+    def test_run_without_probe_never_loads_the_gate_texts(self) -> None:
+        frontend = FakeFrontend()
+        page = FakePage(frontend, drains=self._drains())
+        with patch(
+            "tools.turns.cli.classify.load_gate_texts",
+            side_effect=AssertionError("gate opened without probe"),
+        ) as load_gate_texts:
+            code, stdout, _stderr, _frontend, _host = self._run(page=page, args=[])
+        self.assertEqual(code, 0)
+        self.assertIn("summary: ok", stdout)
+        load_gate_texts.assert_not_called()
+
+    def test_run_entry_refuses_a_probe_without_a_gate_before_signin(self) -> None:
+        spec = run.RunSpec(
+            cases=ROOT / "tests/test_turns_browser.py",
+            repeat=1,
+            stream=False,
+            out=None,
+            force=False,
+            dry_run=False,
+            sentinel="fictitious-sentinel",
+            probe_inlet=True,
+        )
+
+        def client_factory(**_kwargs: object) -> Client:
+            raise AssertionError("signin reached without a gate")
+
+        with self.assertRaisesRegex(ValueError, "inlet gates' texts"):
+            run.run(
+                spec,
+                cases=(),
+                password="fictitious-password",
+                guardrail=object(),
+                gate_texts=None,
+                client_factory=client_factory,
+                now=lambda: datetime(2026, 9, 5, 12, 0, tzinfo=UTC),
+            )
 
     def test_trust_ca_row_runs_before_launch_and_failure_blocks_factory(self) -> None:
         host = self._host()
