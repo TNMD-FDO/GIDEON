@@ -1,0 +1,6 @@
+source:
+  file: "courts-2099-01-02.csv.bz2"
+  date: "2099-01-02"
+  sha256: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  rows: 0
+  levels: {scotus: 0, circuit: 0, district: 0, state_supreme: 0, state_appellate: 0, other: 0}

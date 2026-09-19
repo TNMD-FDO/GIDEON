@@ -1,0 +1,235 @@
+states:
+  AL: {name: Fixture AL, circuit: ca11}
+  AK: {name: Fixture AK, circuit: ca9}
+  AZ: {name: Fixture AZ, circuit: ca9}
+  AR: {name: Fixture AR, circuit: ca8}
+  CA: {name: Fixture CA, circuit: ca9}
+  CO: {name: Fixture CO, circuit: ca10}
+  CT: {name: Fixture CT, circuit: ca2}
+  DE: {name: Fixture DE, circuit: ca3}
+  FL: {name: Fixture FL, circuit: ca11}
+  GA: {name: Fixture GA, circuit: ca11}
+  HI: {name: Fixture HI, circuit: ca9}
+  ID: {name: Fixture ID, circuit: ca9}
+  IL: {name: Fixture IL, circuit: ca7}
+  IN: {name: Fixture IN, circuit: ca7}
+  IA: {name: Fixture IA, circuit: ca8}
+  KS: {name: Fixture KS, circuit: ca10}
+  KY: {name: Fixture KY, circuit: ca6}
+  LA: {name: Fixture LA, circuit: ca5}
+  ME: {name: Fixture ME, circuit: ca1}
+  MD: {name: Fixture MD, circuit: ca4}
+  MA: {name: Fixture MA, circuit: ca1}
+  MI: {name: Fixture MI, circuit: ca6}
+  MN: {name: Fixture MN, circuit: ca8}
+  MS: {name: Fixture MS, circuit: ca5}
+  MO: {name: Fixture MO, circuit: ca8}
+  MT: {name: Fixture MT, circuit: ca9}
+  NE: {name: Fixture NE, circuit: ca8}
+  NV: {name: Fixture NV, circuit: ca9}
+  NH: {name: Fixture NH, circuit: ca1}
+  NJ: {name: Fixture NJ, circuit: ca3}
+  NM: {name: Fixture NM, circuit: ca10}
+  NY: {name: Fixture NY, circuit: ca2}
+  NC: {name: Fixture NC, circuit: ca4}
+  ND: {name: Fixture ND, circuit: ca8}
+  OH: {name: Fixture OH, circuit: ca6}
+  OK: {name: Fixture OK, circuit: ca10}
+  OR: {name: Fixture OR, circuit: ca9}
+  PA: {name: Fixture PA, circuit: ca3}
+  RI: {name: Fixture RI, circuit: ca1}
+  SC: {name: Fixture SC, circuit: ca4}
+  SD: {name: Fixture SD, circuit: ca8}
+  TN: {name: Fixture TN, circuit: ca6}
+  TX: {name: Fixture TX, circuit: ca5}
+  UT: {name: Fixture UT, circuit: ca10}
+  VT: {name: Fixture VT, circuit: ca2}
+  VA: {name: Fixture VA, circuit: ca4}
+  WA: {name: Fixture WA, circuit: ca9}
+  WV: {name: Fixture WV, circuit: ca4}
+  WI: {name: Fixture WI, circuit: ca7}
+  WY: {name: Fixture WY, circuit: ca10}
+  DC: {name: Fixture DC, circuit: cadc}
+  AS: {name: Fixture AS, circuit: null}
+  GU: {name: Fixture GU, circuit: ca9}
+  MP: {name: Fixture MP, circuit: ca9}
+  PR: {name: Fixture PR, circuit: ca1}
+  VI: {name: Fixture VI, circuit: ca3}
+
+federal:
+  scotus: null
+  ca1: null
+  ca2: null
+  ca3: null
+  ca4: null
+  ca5: null
+  ca6: null
+  ca7: null
+  ca8: null
+  ca9: null
+  ca10: null
+  ca11: null
+  cadc: null
+  cafc: null
+  akd: AK
+  almd: AL
+  alnd: AL
+  alsd: AL
+  ared: AR
+  arwd: AR
+  azd: AZ
+  cacd: CA
+  caed: CA
+  cand: CA
+  casd: CA
+  cod: CO
+  ctd: CT
+  dcd: DC
+  ded: DE
+  flmd: FL
+  flnd: FL
+  flsd: FL
+  gamd: GA
+  gand: GA
+  gasd: GA
+  gud: GU
+  hid: HI
+  idd: ID
+  iand: IA
+  iasd: IA
+  ilcd: IL
+  ilnd: IL
+  ilsd: IL
+  innd: IN
+  insd: IN
+  ksd: KS
+  kyed: KY
+  kywd: KY
+  laed: LA
+  lamd: LA
+  lawd: LA
+  mad: MA
+  mdd: MD
+  med: ME
+  mied: MI
+  miwd: MI
+  mnd: MN
+  moed: MO
+  mowd: MO
+  msnd: MS
+  mssd: MS
+  mtd: MT
+  nced: NC
+  ncmd: NC
+  ncwd: NC
+  ndd: ND
+  ned: NE
+  nhd: NH
+  njd: NJ
+  nmd: NM
+  nmid: MP
+  nvd: NV
+  nyed: NY
+  nynd: NY
+  nysd: NY
+  nywd: NY
+  ohnd: OH
+  ohsd: OH
+  oked: OK
+  oknd: OK
+  okwd: OK
+  ord: OR
+  paed: PA
+  pamd: PA
+  pawd: PA
+  prd: PR
+  rid: RI
+  scd: SC
+  sdd: SD
+  tned: TN
+  tnmd: TN
+  tnwd: TN
+  txed: TX
+  txnd: TX
+  txsd: TX
+  txwd: TX
+  utd: UT
+  vaed: VA
+  vawd: VA
+  vid: VI
+  vtd: VT
+  waed: WA
+  wawd: WA
+  wyd: WY
+  wied: WI
+  wiwd: WI
+  wvnd: WV
+  wvsd: WV
+
+state_courts:
+  fx-sup-al: AL
+  fx-sup-ak: AK
+  fx-sup-az: AZ
+  fx-sup-ar: AR
+  fx-sup-ca: CA
+  fx-sup-co: CO
+  fx-sup-ct: CT
+  fx-sup-de: DE
+  fx-sup-fl: FL
+  fx-sup-ga: GA
+  fx-sup-hi: HI
+  fx-sup-id: ID
+  fx-sup-il: IL
+  fx-sup-in: IN
+  fx-sup-ia: IA
+  fx-sup-ks: KS
+  fx-sup-ky: KY
+  fx-sup-la: LA
+  fx-sup-me: ME
+  fx-sup-md: MD
+  fx-sup-ma: MA
+  fx-sup-mi: MI
+  fx-sup-mn: MN
+  fx-sup-ms: MS
+  fx-sup-mo: MO
+  fx-sup-mt: MT
+  fx-sup-ne: NE
+  fx-sup-nv: NV
+  fx-sup-nh: NH
+  fx-sup-nj: NJ
+  fx-sup-nm: NM
+  fx-sup-ny: NY
+  fx-sup-nc: NC
+  fx-sup-nd: ND
+  fx-sup-oh: OH
+  fx-sup-ok: OK
+  fx-sup-or: OR
+  fx-sup-pa: PA
+  fx-sup-ri: RI
+  fx-sup-sc: SC
+  fx-sup-sd: SD
+  fx-sup-tn: TN
+  fx-sup-tx: TX
+  fx-sup-ut: UT
+  fx-sup-vt: VT
+  fx-sup-va: VA
+  fx-sup-wa: WA
+  fx-sup-wv: WV
+  fx-sup-wi: WI
+  fx-sup-wy: WY
+  fx-sup-dc: DC
+  fx-ts-as: AS
+  fx-ts-gu: GU
+  fx-ts-mp: MP
+  fx-ts-pr: PR
+  fx-ts-vi: VI
+  fx-app-al: AL
+  fx-app-gu: GU
+  fx-correct-sup: AL
+
+unplaced:
+  fx-unplaced: Fixture court has no single state
+
+corrections:
+  fx-correct-sup: {code: S, reason: "fixture correction onto state supreme"}
+  fx-correct-other: {code: ST, reason: "fixture correction off state levels"}

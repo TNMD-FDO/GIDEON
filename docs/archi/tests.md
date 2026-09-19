@@ -29,4 +29,4 @@ A tripwire holds a repo-wide contract; a subsystem's own modules are listed in i
 ## Cross-references
 
 - Cites: [`host.md`](host.md), [`render-apply.md`](render-apply.md), [`engine-frontend.md`](engine-frontend.md), [`backup-restore.md`](backup-restore.md), [`stack.md`](stack.md), [`tools.md`](tools.md)
-- Cited by: the map's §§2, 6, 8, 12, 15, and 16
+- Cited by: the map's §§2, 4, 6, 8, 11, 12, 15, and 16

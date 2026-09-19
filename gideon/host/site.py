@@ -164,7 +164,10 @@ FIELD_REGISTRY: Final[tuple[FieldSpec, ...]] = (
         "jurisdiction.states",
         kind="string list",
         required=True,
-        description="State identifiers used to expand appellate courts.",
+        description=(
+            "CourtListener ids of each home state's court of last resort, "
+            "expanded to that state's appellate courts through courts.yaml."
+        ),
     ),
     _field(
         "auth.ldap.host",

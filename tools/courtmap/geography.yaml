@@ -1,0 +1,354 @@
+# Authority: 28 U.S.C. § 41 supplies the circuit assignments; 28 U.S.C. §§ 81–131
+# supplies the federal district list. Add an entry to the remaining sections only
+# when the generator refuses, or when a row's upstream code is reviewed as a
+# defect: a correction names the code the row should carry and why, and may move
+# a row off a state level (a trial court or a board coded as appellate) as well
+# as onto one. Every other row's level follows its upstream code, dead courts
+# included.
+states:
+  AL: {name: Alabama, circuit: ca11}
+  AK: {name: Alaska, circuit: ca9}
+  AZ: {name: Arizona, circuit: ca9}
+  AR: {name: Arkansas, circuit: ca8}
+  CA: {name: California, circuit: ca9}
+  CO: {name: Colorado, circuit: ca10}
+  CT: {name: Connecticut, circuit: ca2}
+  DE: {name: Delaware, circuit: ca3}
+  FL: {name: Florida, circuit: ca11}
+  GA: {name: Georgia, circuit: ca11}
+  HI: {name: Hawaii, circuit: ca9}
+  ID: {name: Idaho, circuit: ca9}
+  IL: {name: Illinois, circuit: ca7}
+  IN: {name: Indiana, circuit: ca7}
+  IA: {name: Iowa, circuit: ca8}
+  KS: {name: Kansas, circuit: ca10}
+  KY: {name: Kentucky, circuit: ca6}
+  LA: {name: Louisiana, circuit: ca5}
+  ME: {name: Maine, circuit: ca1}
+  MD: {name: Maryland, circuit: ca4}
+  MA: {name: Massachusetts, circuit: ca1}
+  MI: {name: Michigan, circuit: ca6}
+  MN: {name: Minnesota, circuit: ca8}
+  MS: {name: Mississippi, circuit: ca5}
+  MO: {name: Missouri, circuit: ca8}
+  MT: {name: Montana, circuit: ca9}
+  NE: {name: Nebraska, circuit: ca8}
+  NV: {name: Nevada, circuit: ca9}
+  NH: {name: New Hampshire, circuit: ca1}
+  NJ: {name: New Jersey, circuit: ca3}
+  NM: {name: New Mexico, circuit: ca10}
+  NY: {name: New York, circuit: ca2}
+  NC: {name: North Carolina, circuit: ca4}
+  ND: {name: North Dakota, circuit: ca8}
+  OH: {name: Ohio, circuit: ca6}
+  OK: {name: Oklahoma, circuit: ca10}
+  OR: {name: Oregon, circuit: ca9}
+  PA: {name: Pennsylvania, circuit: ca3}
+  RI: {name: Rhode Island, circuit: ca1}
+  SC: {name: South Carolina, circuit: ca4}
+  SD: {name: South Dakota, circuit: ca8}
+  TN: {name: Tennessee, circuit: ca6}
+  TX: {name: Texas, circuit: ca5}
+  UT: {name: Utah, circuit: ca10}
+  VT: {name: Vermont, circuit: ca2}
+  VA: {name: Virginia, circuit: ca4}
+  WA: {name: Washington, circuit: ca9}
+  WV: {name: West Virginia, circuit: ca4}
+  WI: {name: Wisconsin, circuit: ca7}
+  WY: {name: Wyoming, circuit: ca10}
+  DC: {name: District of Columbia, circuit: cadc}
+  AS: {name: American Samoa, circuit: null}
+  GU: {name: Guam, circuit: ca9}
+  MP: {name: Northern Mariana Islands, circuit: ca9}
+  PR: {name: Puerto Rico, circuit: ca1}
+  VI: {name: U.S. Virgin Islands, circuit: ca3}
+
+federal:
+  scotus: null
+  ca1: null
+  ca2: null
+  ca3: null
+  ca4: null
+  ca5: null
+  ca6: null
+  ca7: null
+  ca8: null
+  ca9: null
+  ca10: null
+  ca11: null
+  cadc: null
+  cafc: null
+  akd: AK
+  almd: AL
+  alnd: AL
+  alsd: AL
+  ared: AR
+  arwd: AR
+  azd: AZ
+  cacd: CA
+  caed: CA
+  cand: CA
+  casd: CA
+  cod: CO
+  ctd: CT
+  dcd: DC
+  ded: DE
+  flmd: FL
+  flnd: FL
+  flsd: FL
+  gamd: GA
+  gand: GA
+  gasd: GA
+  gud: GU
+  hid: HI
+  idd: ID
+  iand: IA
+  iasd: IA
+  ilcd: IL
+  ilnd: IL
+  ilsd: IL
+  innd: IN
+  insd: IN
+  ksd: KS
+  kyed: KY
+  kywd: KY
+  laed: LA
+  lamd: LA
+  lawd: LA
+  mad: MA
+  mdd: MD
+  med: ME
+  mied: MI
+  miwd: MI
+  mnd: MN
+  moed: MO
+  mowd: MO
+  msnd: MS
+  mssd: MS
+  mtd: MT
+  nced: NC
+  ncmd: NC
+  ncwd: NC
+  ndd: ND
+  ned: NE
+  nhd: NH
+  njd: NJ
+  nmd: NM
+  nmid: MP
+  nvd: NV
+  nyed: NY
+  nynd: NY
+  nysd: NY
+  nywd: NY
+  ohnd: OH
+  ohsd: OH
+  oked: OK
+  oknd: OK
+  okwd: OK
+  ord: OR
+  paed: PA
+  pamd: PA
+  pawd: PA
+  prd: PR
+  rid: RI
+  scd: SC
+  sdd: SD
+  tned: TN
+  tnmd: TN
+  tnwd: TN
+  txed: TX
+  txnd: TX
+  txsd: TX
+  txwd: TX
+  utd: UT
+  vaed: VA
+  vawd: VA
+  vid: VI
+  vtd: VT
+  waed: WA
+  wawd: WA
+  wyd: WY
+  wied: WI
+  wiwd: WI
+  wvnd: WV
+  wvsd: WV
+
+state_courts:
+  alaska: AK
+  alaskactapp: AK
+  ala: AL
+  alacivapp: AL
+  alacrimapp: AL
+  alactapp: AL
+  ark: AR
+  arkctapp: AR
+  amsamoa: AS
+  ariz: AZ
+  arizctapp: AZ
+  cal: CA
+  calappdeptsuper: CA
+  calctapp: CA
+  calctapp1d: CA
+  calctapp2d: CA
+  calctapp3d: CA
+  calctapp4d: CA
+  calctapp5d: CA
+  calctapp6d: CA
+  colo: CO
+  coloctapp: CO
+  conn: CT
+  connappct: CT
+  dc: DC
+  del: DE
+  delorphct: DE
+  fla: FL
+  fladistctapp: FL
+  fladistctapp1: FL
+  fladistctapp2: FL
+  fladistctapp3: FL
+  fladistctapp4: FL
+  fladistctapp5: FL
+  fladistctapp6: FL
+  ga: GA
+  gactapp: GA
+  guam: GU
+  haw: HI
+  hawapp: HI
+  iowa: IA
+  iowactapp: IA
+  idaho: ID
+  idahoctapp: ID
+  ill: IL
+  illappct: IL
+  ind: IN
+  indctapp: IN
+  kan: KS
+  kanctapp: KS
+  ky: KY
+  kyctapp: KY
+  kyctapphigh: KY
+  la: LA
+  lactapp: LA
+  lacterrapp: LA
+  mass: MA
+  massappct: MA
+  massdistctapp: MA
+  md: MD
+  mdch: MD
+  mdctspecapp: MD
+  me: ME
+  mich: MI
+  michchanct: MI
+  michctapp: MI
+  minn: MN
+  minnctapp: MN
+  mo: MO
+  moctapp: MO
+  moctapped: MO
+  moctappsd: MO
+  moctappwd: MO
+  nmariana: MP
+  miss: MS
+  missctapp: MS
+  mont: MT
+  nc: NC
+  ncctapp: NC
+  nd: ND
+  ndctapp: ND
+  neb: NE
+  nebctapp: NE
+  nh: NH
+  nj: NJ
+  njch: NJ
+  njcirctatlantic: NJ
+  njcirctbergen: NJ
+  njcirctburlingt: NJ
+  njcirctcamden: NJ
+  njcirctcapemay: NJ
+  njcircthudson: NJ
+  njcirctmonmouth: NJ
+  njcirctmorris: NJ
+  njcirctocean: NJ
+  njcirctpassaic: NJ
+  njcirctsomerset: NJ
+  njsuperctappdiv: NJ
+  nm: NM
+  nmctapp: NM
+  nev: NV
+  nevapp: NV
+  ny: NY
+  nyappdiv: NY
+  nyappterm: NY
+  nychanct: NY
+  nyoytermct: NY
+  ohctapp1: OH
+  ohio: OH
+  ohioctapp: OH
+  okla: OK
+  oklacivapp: OK
+  oklacrimapp: OK
+  or: OR
+  orctapp: OR
+  pa: PA
+  pacommwct: PA
+  pasuperct: PA
+  prapp: PR
+  prsupreme: PR
+  ri: RI
+  sc: SC
+  scctapp: SC
+  sd: SD
+  tenn: TN
+  tenncrimapp: TN
+  tennctapp: TN
+  tennsuperct: TN
+  tex: TX
+  texapp: TX
+  texcrimapp: TX
+  txctapp1: TX
+  txctapp10: TX
+  txctapp11: TX
+  txctapp12: TX
+  txctapp13: TX
+  txctapp13A: TX
+  txctapp13B: TX
+  txctapp14: TX
+  txctapp15: TX
+  txctapp2: TX
+  txctapp3: TX
+  txctapp4: TX
+  txctapp5: TX
+  txctapp6: TX
+  txctapp7: TX
+  txctapp8: TX
+  txctapp9: TX
+  utah: UT
+  utahctapp: UT
+  va: VA
+  vactapp: VA
+  virginislands: VI
+  vt: VT
+  wash: WA
+  washctapp: WA
+  wis: WI
+  wisctapp: WI
+  wva: WV
+  wvactapp: WV
+  wyo: WY
+unplaced:
+  dakotasup: The Territory of Dakota, ended 1889
+corrections:
+  connsuperct: {code: ST, reason: "Connecticut's trial court of general jurisdiction, coded SA upstream"}
+  delch: {code: ST, reason: "Delaware's trial court of equity, coded SA upstream"}
+  delsuperct: {code: ST, reason: "Delaware's trial court of general jurisdiction, coded SA upstream"}
+  massdistct: {code: ST, reason: "a Massachusetts trial court, coded SA upstream"}
+  masssuperct: {code: ST, reason: "Massachusetts' trial court of general jurisdiction, coded SA upstream"}
+  masstaxbd: {code: SS, reason: "an administrative board, not a court of appeal, coded SA upstream"}
+  ncsuperct: {code: ST, reason: "North Carolina's trial court of general jurisdiction, coded SA upstream"}
+  nyhospcommn: {code: SS, reason: "an administrative commission, not a court, coded SA upstream"}
+  ohctapp1: {code: SA, reason: "Court of Appeals of Ohio, First District; the code is blank upstream"}
+  oklacrimapp: {code: S, reason: "Oklahoma's court of last resort in criminal cases (Okla. Const. art. VII § 4), coded SA upstream"}
+  risuperct: {code: ST, reason: "Rhode Island's trial court of general jurisdiction, coded SA upstream"}
+  superctguam: {code: TT, reason: "Guam's trial court of general jurisdiction, coded TA upstream"}
+  texjpml: {code: SS, reason: "a panel assigning pretrial proceedings, not a court of appeal, coded SA upstream"}
+  vtsuperct: {code: ST, reason: "Vermont's trial court of general jurisdiction, coded SA upstream"}

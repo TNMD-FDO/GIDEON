@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from enum import Enum
 
+from gideon.host.courts import CourtMap
 from gideon.host.egress import EgressAllowlist
 from gideon.host.lock import HostLock
 from gideon.host.models import GIGABYTE, ModelsLock
@@ -47,6 +48,7 @@ class PreflightContext:
     models: ModelsLock
     site: SiteConfig
     egress: EgressAllowlist
+    courts: CourtMap
     no_gpu: bool = False
     build_box: bool = False
 

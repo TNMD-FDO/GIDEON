@@ -1,0 +1,8 @@
+source:
+  file: null
+  date: null
+  sha256: null
+  rows: null
+  levels: {scotus: 0, circuit: 0, district: 0, state_supreme: 0, state_appellate: 0, other: 1}
+courts:
+  fixture: {circuit: null, state: null, level: null, name: null}

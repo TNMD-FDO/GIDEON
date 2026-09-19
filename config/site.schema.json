@@ -209,7 +209,7 @@
           "type": "array"
         },
         "states": {
-          "description": "State identifiers used to expand appellate courts.",
+          "description": "CourtListener ids of each home state's court of last resort, expanded to that state's appellate courts through courts.yaml.",
           "items": {
             "type": "string"
           },

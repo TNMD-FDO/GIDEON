@@ -15,6 +15,7 @@ from gideon.host.checks import (
     PreflightContext,
     Severity,
 )
+from gideon.host.courts import CourtMap
 from gideon.host.nogpu import BUILD_BOX_PATH, NO_GPU_PATH, NOT_BUILD_BOX_DETAIL
 from gideon.host.preflight import run_preflight
 from gideon.host.steps import CheckResult, Disposition, ProvisionContext, Step
@@ -25,10 +26,12 @@ ROOT = Path(__file__).resolve().parents[1]
 HOST_LOCK_PATH = ROOT / "host.lock"
 EGRESS_PATH = ROOT / "config/egress.yaml"
 MODELS_LOCK_PATH = ROOT / "models.lock"
+COURTS_PATH = ROOT / "courts.yaml"
 EXAMPLE_SITE = (ROOT / "config/site.example.yaml").read_text()
 HOST_LOCK_TEXT = HOST_LOCK_PATH.read_text()
 EGRESS_TEXT = EGRESS_PATH.read_text()
 MODELS_LOCK_TEXT = MODELS_LOCK_PATH.read_text()
+COURTS_TEXT = COURTS_PATH.read_text()
 
 
 class FakeHost:
@@ -39,10 +42,12 @@ class FakeHost:
         *,
         files: dict[str, str] | None = None,
         commands: Mapping[tuple[str, ...], subprocess.CompletedProcess[str]] | None = None,
+        read_errors: Mapping[str, OSError] | None = None,
         euid: int = 0,
     ) -> None:
         self.files = files or {}
         self.commands = dict(commands or {})
+        self.read_errors = dict(read_errors or {})
         self.euid = euid
         self.calls: list[tuple[str, ...]] = []
 
@@ -64,6 +69,8 @@ class FakeHost:
     def read_text(self, path: PathLike, *, encoding: str = "utf-8") -> str:
         del encoding
         key = os.fspath(path)
+        if key in self.read_errors:
+            raise self.read_errors[key]
         if key in self.files:
             return self.files[key]
         return Path(key).read_text()
@@ -170,6 +177,8 @@ def preflight(
     models_path: PathLike | None = None,
     files: Mapping[str, str] | None = None,
     commands: Mapping[tuple[str, ...], subprocess.CompletedProcess[str]] | None = None,
+    read_errors: Mapping[str, OSError] | None = None,
+    courts_path: PathLike | None = None,
 ) -> tuple[int, str, str]:
     stdout = io.StringIO()
     stderr = io.StringIO()
@@ -178,9 +187,12 @@ def preflight(
         str(HOST_LOCK_PATH): HOST_LOCK_TEXT,
         str(EGRESS_PATH): EGRESS_TEXT,
         str(MODELS_LOCK_PATH): MODELS_LOCK_TEXT,
+        str(COURTS_PATH): COURTS_TEXT,
     }
     default_files.update(files or {})
-    io_host = host or FakeHost(files=default_files, commands=commands)
+    io_host = host or FakeHost(
+        files=default_files, commands=commands, read_errors=read_errors
+    )
     with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
         code = run_preflight(
             None,
@@ -189,6 +201,7 @@ def preflight(
             checks=checks if checks is not None else [],
             site_path=site_path,
             models_path=models_path,
+            courts_path=courts_path,
         )
     return code, stdout.getvalue(), stderr.getvalue()
 
@@ -233,6 +246,53 @@ class Refusals(unittest.TestCase):
         self.assertEqual(out, "")
         self.assertIn("Unknown key 'unknown'", error)
         self.assertTrue(error.rstrip().endswith("docs/archi/host.md."))
+
+    def test_missing_court_map_refuses_before_check_rows(self) -> None:
+        path = "/nonexistent-gideon-test/courts.yaml"
+        code, out, error = preflight(courts_path=path)
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertIn("court map is missing", error)
+        self.assertTrue(error.rstrip().endswith("docs/archi/host.md."))
+
+    def test_unreadable_court_map_refuses_before_check_rows(self) -> None:
+        path = os.fspath(COURTS_PATH)
+        code, out, error = preflight(
+            read_errors={path: PermissionError("test permission")}
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertIn("court map is unreadable due to permissions", error)
+        self.assertTrue(error.rstrip().endswith("docs/archi/host.md."))
+
+    def test_malformed_court_map_refuses_before_check_rows(self) -> None:
+        path = "/tmp/gideon-test-courts.yaml"
+        code, out, error = preflight(
+            courts_path=path,
+            files={path: "unknown: true\n"},
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertIn("Unknown key 'unknown'", error)
+        self.assertTrue(error.rstrip().endswith("docs/archi/host.md."))
+
+    def test_good_court_map_reaches_a_check(self) -> None:
+        class ContextCheck(PreflightCheck):
+            name = "context-courts"
+            summary = "observe the court map"
+
+            def __init__(self) -> None:
+                self.courts: CourtMap | None = None
+
+            def run(self, context: PreflightContext) -> CheckReport:
+                self.courts = context.courts
+                return CheckReport(Severity.PASS, "court map reached check")
+
+        check = ContextCheck()
+        code, out, error = preflight(checks=[check])
+        self.assertEqual(code, 0, error)
+        self.assertIn("court map reached check", out)
+        self.assertIsNotNone(check.courts)
 
 
 class PhaseA(unittest.TestCase):

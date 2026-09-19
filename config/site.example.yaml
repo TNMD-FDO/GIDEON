@@ -18,10 +18,10 @@ office:
 hostname: gideon.example.org      # Caddy, WEBUI_URL, certificate subject
 lan_cidrs: [192.0.2.0/24]         # ufw allow-list for 443 (and 22); one or more CIDRs
 
-# Home courts for ranking and labels. Pulls nothing into the corpus: the corpus
-# lockfile's courts[] decides what is ingested; every id here must be in it
-# (preflight refuses otherwise). CourtListener ids; one circuit; lists for
-# districts and states (a state expands to its appellate courts via courts.yaml).
+# Home courts for ranking and labels, pulling nothing into the corpus: its lockfile's
+# courts[] decides what is ingested (preflight refuses a circuit or district missing
+# from it, warns for a state with no court in it). CourtListener ids in courts.yaml:
+# one circuit; districts; states, each a court of last resort expanded to its appellate courts.
 jurisdiction: {circuit: ca6, districts: [tnmd], states: [tenn]}
 
 auth:

@@ -1,0 +1,2 @@
+source:
+  nested: {courts: [ca6, fixture-unknown]}

@@ -1,7 +1,7 @@
-"""Checks judged against the release artifacts: the locks now, courts.yaml when it ships."""
+"""Checks judged against release artifacts, including the court map."""
 
 import re
-from collections.abc import Collection, Mapping
+from collections.abc import Collection
 from dataclasses import dataclass
 from subprocess import CompletedProcess
 
@@ -13,12 +13,16 @@ from gideon.host.checks import (
     Severity,
     format_gb,
 )
+from gideon.host.courts import CourtMap
 from gideon.host.models import GIGABYTE, select_profile
 from gideon.host.report import Problem
 from gideon.host.steps import ProvisionContext, package_version
 
-_JURISDICTION_INERT = "courts.yaml and the corpus lockfile ship with slices 2–3"
-_JURISDICTION_FIX = "Correct the jurisdiction identifiers using the §3.6 step 0 checklist, then re-run preflight."
+_JURISDICTION_FIX = (
+    "Correct the jurisdiction key in /etc/gideon/site.yaml; courts.yaml lists "
+    "every court id with its level; re-run preflight."
+)
+_LOCKFILE_FIX = "Add the missing court id to the corpus lockfile's courts[]; then re-run preflight."
 _DRIVER_FIX = "Install the lock-pinned NVIDIA driver, then re-run preflight."
 _KERNEL_FIX = "Reconcile the running kernel with the release evidence, then re-run preflight."
 _PROFILE_FIX = (
@@ -31,65 +35,96 @@ _KIBIBYTE = 1024
 _VERSION = re.compile(r"\d+(?:\.\d+){0,3}")
 
 
-class JurisdictionCheck(PreflightCheck):
-    """Validate site court ids when corpus court data is supplied.
+def _judge_leaf(court_map: CourtMap, leaf: str, identifier: str, level: str) -> str | None:
+    """Return why *identifier* cannot stand in *leaf*, or ``None`` when it resolves at *level*."""
 
-    *court_map* is courts.yaml's shape (a state id → the court ids it expands
-    to) and *courts* the installed lockfile's flat ``courts[]`` set — the
-    interim injection seams until both artifacts land with slices 2–3.
-    A state id absent from the map is an unknown id (refuse); a known state
-    whose expansion is not fully installed is the §1.5 warn row.
+    court = court_map.court(identifier)
+    if court is None:
+        return f"{leaf} {identifier!r} (nearest {court_map.nearest_id(identifier, level)!r})"
+    if court.level == level:
+        return None
+    problem = f"{leaf} {identifier!r} is a {court.level} court, not a {level}"
+    if court.level == "state_appellate":
+        supreme = [
+            court_id
+            for court_id in court_map.appellate_courts(court.state or "")
+            if court_map.courts[court_id].level == "state_supreme"
+        ]
+        problem += " (its state's court of last resort: " + ", ".join(map(repr, supreme)) + ")"
+    return problem
+
+
+class JurisdictionCheck(PreflightCheck):
+    """Validate each site jurisdiction leaf against the committed court map.
+
+    Every id must sit in courts.yaml at its leaf's level (§3.4). The corpus
+    lockfile's ``courts[]`` rules ([35] item 6) judge ``lockfile_courts``, the
+    one seam, which the registry leaves ``None`` until slice 3 installs a
+    lockfile; the pass row then says those rules were not judged.
     """
 
     name = "jurisdiction"
-    summary = "validate configured jurisdiction against corpus court data"
+    summary = "validate configured jurisdiction against the court map"
 
-    def __init__(
-        self,
-        court_map: Mapping[str, Collection[str]] | None = None,
-        courts: Collection[str] | None = None,
-    ) -> None:
-        self.court_map = court_map
-        self.courts = courts
+    def __init__(self, lockfile_courts: Collection[str] | None = None) -> None:
+        self.lockfile_courts = lockfile_courts
 
     def run(self, context: PreflightContext) -> CheckReport:
-        if self.court_map is None or self.courts is None:
-            return CheckReport(Severity.INERT, _JURISDICTION_INERT)
-        ids = set(self.courts)
         jurisdiction = context.site.jurisdiction
-        missing: list[str] = []
-        if jurisdiction.circuit not in ids:
-            missing.append(f"circuit {jurisdiction.circuit!r}")
-        missing.extend(
-            f"district {district!r}"
-            for district in jurisdiction.districts
-            if district not in ids
-        )
-        missing.extend(
-            f"state {state!r}"
-            for state in jurisdiction.states
-            if state not in self.court_map
-        )
-        if missing:
+        leaves = [
+            ("circuit", jurisdiction.circuit, "circuit"),
+            *(("district", district, "district") for district in jurisdiction.districts),
+            *(("state", state, "state_supreme") for state in jurisdiction.states),
+        ]
+        problems = [
+            problem
+            for leaf, identifier, level in leaves
+            if (problem := _judge_leaf(context.courts, leaf, identifier, level)) is not None
+        ]
+        if problems:
             return CheckReport(
                 Severity.REFUSE,
-                "unknown jurisdiction id(s): " + ", ".join(missing),
+                "invalid jurisdiction: " + "; ".join(problems),
                 _JURISDICTION_FIX,
+            )
+        if self.lockfile_courts is None:
+            return CheckReport(
+                Severity.PASS,
+                f"{len(leaves)} jurisdiction id(s) resolved in courts.yaml; the corpus "
+                "lockfile's courts[] rules are not judged until a lockfile is installed",
+            )
+
+        installed = set(self.lockfile_courts)
+        absent = [
+            f"{leaf} {identifier!r}"
+            for leaf, identifier, _ in leaves
+            if leaf != "state" and identifier not in installed
+        ]
+        if absent:
+            return CheckReport(
+                Severity.REFUSE,
+                "not in the corpus lockfile's courts[]: " + ", ".join(absent),
+                _LOCKFILE_FIX,
             )
         pending = [
             state
             for state in jurisdiction.states
-            if not ids.issuperset(self.court_map[state])
+            if not installed.intersection(
+                context.courts.appellate_courts(context.courts.courts[state].state or "")
+            )
         ]
         if pending:
-            rendered = ", ".join(repr(state) for state in pending)
             return CheckReport(
                 Severity.WARN,
-                f"states[] courts not yet in the corpus: {rendered}; "
-                "the state tier is inert until a derived cut adds them",
+                "no court of state " + ", ".join(map(repr, pending))
+                + " is in the corpus lockfile's courts[]; the state tier is inert "
+                "until a derived cut adds them",
                 "Follow the derived-cut runbook section (§8.7) when state courts are wanted.",
             )
-        return CheckReport(Severity.PASS, "configured jurisdiction ids are all present")
+        return CheckReport(
+            Severity.PASS,
+            f"{len(leaves)} jurisdiction id(s) resolved in courts.yaml and the corpus lockfile",
+        )
 
 
 @dataclass(frozen=True, slots=True)

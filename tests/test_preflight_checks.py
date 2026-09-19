@@ -26,6 +26,7 @@ from gideon.host.checks.network import (
     PortsCheck,
 )
 from gideon.host.checks.services import BackupSshCheck, LdapCheck, SmtpCheck
+from gideon.host.courts import Court, CourtMap, CourtSource
 from gideon.host.egress import EgressAllowlist, EgressGroup, EgressHost
 from gideon.host.ldap import ldapsearch_argv
 from gideon.host.lock import load_host_lock
@@ -40,6 +41,30 @@ LOCK = _LOCK
 _MODELS = load_models_lock("models.lock").lock
 assert _MODELS is not None
 MODELS = _MODELS
+
+COURTS = CourtMap(
+    source=CourtSource(
+        file="courts-2099-01-02.csv.bz2",
+        date="2099-01-02",
+        sha256="f" * 64,
+        rows=5,
+        levels={
+            "scotus": 0,
+            "circuit": 1,
+            "district": 1,
+            "state_supreme": 1,
+            "state_appellate": 1,
+            "other": 0,
+        },
+    ),
+    courts={
+        "fx-circuit": Court("fx-circuit", "fx-circuit", None, "circuit", "Fictitious Circuit"),
+        "fx-district": Court("fx-district", "fx-circuit", "TN", "district", "Fictitious District"),
+        "fx-state": Court("fx-state", "fx-circuit", "TN", "state_supreme", "Fictitious Supreme Court"),
+        "fx-app": Court("fx-app", "fx-circuit", "TN", "state_appellate", "Fictitious Appellate Court"),
+        "fx-other": Court("fx-other", None, None, "other", "Fictitious Other Court"),
+    },
+)
 
 SITE_TEMPLATE = """\
 office:
@@ -69,6 +94,20 @@ def make_site(*, states: str = "", smtp_user: str | None = None, extra: str = ""
         states=states,
         smtp_user_line=f"    user: {smtp_user}\n" if smtp_user is not None else "",
         extra=extra,
+    )
+    host = FakeHost(files={"/tmp/site.yaml": text})
+    result = load_site(Path("/tmp/site.yaml"), host=host)
+    assert result.config is not None, render_errors(result.errors)
+    return result.config
+
+
+def make_jurisdiction_site(
+    *, circuit: str = "fx-circuit", district: str = "fx-district", states: str = ""
+):
+    text = SITE_TEMPLATE.format(states=states, smtp_user_line="", extra="")
+    text = text.replace(
+        "circuit: ca6, districts: [tnmd]",
+        f"circuit: {circuit}, districts: [{district}]",
     )
     host = FakeHost(files={"/tmp/site.yaml": text})
     result = load_site(Path("/tmp/site.yaml"), host=host)
@@ -197,6 +236,7 @@ def context(
     site=None,
     lock=None,
     models=None,
+    courts=None,
     *,
     no_gpu: bool = False,
 ) -> PreflightContext:
@@ -206,6 +246,7 @@ def context(
         models=models or MODELS,
         site=site or make_site(),
         egress=ALLOWLIST,
+        courts=courts or COURTS,
         no_gpu=no_gpu,
     )
 
@@ -309,6 +350,7 @@ class Egress(unittest.TestCase):
             models=MODELS,
             site=make_site(),
             egress=allowlist,
+            courts=COURTS,
             no_gpu=False,
         )
         report = EgressCheck().run(preflight_context)
@@ -955,51 +997,104 @@ class Smtp(unittest.TestCase):
 
 
 class Jurisdiction(unittest.TestCase):
-    COURT_MAP: ClassVar[dict[str, tuple[str, ...]]] = {
-        "tenn": ("tennctapp", "tenncrimapp")
-    }
-
-    def test_without_court_data_the_check_is_inert(self) -> None:
-        report = JurisdictionCheck().run(context(FakeHost()))
-        self.assertEqual(report.severity, Severity.INERT)
-        self.assertIn("slices 2–3", report.detail)
-
     def test_known_ids_pass(self) -> None:
-        report = JurisdictionCheck({}, {"ca6", "tnmd"}).run(context(FakeHost()))
+        report = JurisdictionCheck().run(
+            context(FakeHost(), site=make_jurisdiction_site(), courts=COURTS)
+        )
         self.assertEqual(report.severity, Severity.PASS)
+        self.assertIn("2 jurisdiction id(s) resolved", report.detail)
+        self.assertIn("courts[] rules are not judged", report.detail)
+
+    def test_no_lockfile_pass_names_the_unjudged_rules(self) -> None:
+        report = JurisdictionCheck().run(
+            context(FakeHost(), site=make_jurisdiction_site())
+        )
+        self.assertEqual(report.severity, Severity.PASS)
+        self.assertIn("rules are not judged until a lockfile is installed", report.detail)
 
     def test_unknown_district_refuses_naming_it(self) -> None:
-        report = JurisdictionCheck({}, {"ca6"}).run(context(FakeHost()))
+        site = make_jurisdiction_site(district="fx-distrct")
+        report = JurisdictionCheck().run(context(FakeHost(), site=site))
         self.assertEqual(report.severity, Severity.REFUSE)
-        self.assertIn("tnmd", report.detail)
+        self.assertIn("district 'fx-distrct' (nearest 'fx-district')", report.detail)
 
     def test_unknown_state_refuses_naming_it(self) -> None:
         """§1.5 refuse table: an unknown jurisdiction id — states included."""
 
-        site = make_site(states="tennn")
-        report = JurisdictionCheck(self.COURT_MAP, {"ca6", "tnmd"}).run(
-            context(FakeHost(), site=site)
-        )
+        site = make_jurisdiction_site(states="fx-stte")
+        report = JurisdictionCheck().run(context(FakeHost(), site=site))
         self.assertEqual(report.severity, Severity.REFUSE)
-        self.assertIn("tennn", report.detail)
+        self.assertIn("state 'fx-stte' (nearest 'fx-state')", report.detail)
+
+    def test_every_bad_id_is_reported_together(self) -> None:
+        site = make_jurisdiction_site(
+            circuit="fx-circut", district="fx-distrct", states="fx-stte"
+        )
+        report = JurisdictionCheck().run(context(FakeHost(), site=site))
+        self.assertEqual(report.severity, Severity.REFUSE)
+        for identifier in ("fx-circut", "fx-distrct", "fx-stte"):
+            self.assertIn(identifier, report.detail)
+
+    def test_wrong_circuit_level_refuses_naming_both_levels(self) -> None:
+        site = make_jurisdiction_site(circuit="fx-district")
+        report = JurisdictionCheck().run(context(FakeHost(), site=site))
+        self.assertEqual(report.severity, Severity.REFUSE)
+        self.assertIn("circuit 'fx-district' is a district court, not a circuit", report.detail)
+
+    def test_wrong_district_level_refuses_naming_both_levels(self) -> None:
+        site = make_jurisdiction_site(district="fx-circuit")
+        report = JurisdictionCheck().run(context(FakeHost(), site=site))
+        self.assertEqual(report.severity, Severity.REFUSE)
+        self.assertIn("district 'fx-circuit' is a circuit court, not a district", report.detail)
+
+    def test_wrong_state_level_names_the_state_supreme_court(self) -> None:
+        site = make_jurisdiction_site(states="fx-app")
+        report = JurisdictionCheck().run(context(FakeHost(), site=site))
+        self.assertEqual(report.severity, Severity.REFUSE)
+        self.assertIn("state 'fx-app' is a state_appellate court, not a state_supreme", report.detail)
+        self.assertIn("(its state's court of last resort: 'fx-state')", report.detail)
+
+    def test_map_refusal_fix_names_the_site_key_and_map(self) -> None:
+        site = make_jurisdiction_site(district="fx-missing")
+        report = JurisdictionCheck().run(context(FakeHost(), site=site))
+        self.assertEqual(report.severity, Severity.REFUSE)
+        self.assertIn("/etc/gideon/site.yaml", report.fix)
+        self.assertIn("courts.yaml lists every court id with its level", report.fix)
+        self.assertTrue(report.fix.endswith("re-run preflight."))
 
     def test_state_without_installed_courts_warns_naming_the_runbook(self) -> None:
         """§1.5 warn table: a known state whose courts are not yet in courts[]."""
 
-        site = make_site(states="tenn")
-        report = JurisdictionCheck(self.COURT_MAP, {"ca6", "tnmd"}).run(
+        site = make_jurisdiction_site(states="fx-state")
+        report = JurisdictionCheck({"fx-circuit", "fx-district"}).run(
             context(FakeHost(), site=site)
         )
         self.assertEqual(report.severity, Severity.WARN)
-        self.assertIn("tenn", report.detail)
+        self.assertIn("fx-state", report.detail)
         self.assertIn("§8.7", report.fix)
 
     def test_state_with_installed_courts_passes(self) -> None:
-        site = make_site(states="tenn")
+        site = make_jurisdiction_site(states="fx-state")
         report = JurisdictionCheck(
-            self.COURT_MAP, {"ca6", "tnmd", "tennctapp", "tenncrimapp"}
+            {"fx-circuit", "fx-district", "fx-app"}
         ).run(context(FakeHost(), site=site))
         self.assertEqual(report.severity, Severity.PASS)
+
+    def test_missing_circuit_in_lockfile_refuses(self) -> None:
+        site = make_jurisdiction_site(states="fx-state")
+        report = JurisdictionCheck({"fx-district", "fx-app"}).run(
+            context(FakeHost(), site=site)
+        )
+        self.assertEqual(report.severity, Severity.REFUSE)
+        self.assertIn("not in the corpus lockfile's courts[]: circuit 'fx-circuit'", report.detail)
+
+    def test_missing_district_in_lockfile_refuses(self) -> None:
+        site = make_jurisdiction_site(states="fx-state")
+        report = JurisdictionCheck({"fx-circuit", "fx-app"}).run(
+            context(FakeHost(), site=site)
+        )
+        self.assertEqual(report.severity, Severity.REFUSE)
+        self.assertIn("not in the corpus lockfile's courts[]: district 'fx-district'", report.detail)
 
 
 UNAME = ("uname", "-m")

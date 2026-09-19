@@ -1,4 +1,8 @@
-"""The two-phase host preflight runner."""
+"""The two-phase host preflight runner and its release-artifact refusals.
+
+Preflight refuses before running checks when the host lock, models lock, egress
+allowlist, court map, or site cannot be read and validated.
+"""
 
 import sys
 from collections.abc import Sequence
@@ -13,6 +17,8 @@ from gideon.host.checks import (
     PreflightContext,
     Severity,
 )
+from gideon.host.courts import default_courts_path, load_court_map
+from gideon.host.courts import render_errors as render_courts_errors
 from gideon.host.egress import load_egress_allowlist
 from gideon.host.egress import render_errors as render_egress_errors
 from gideon.host.lock import load_host_lock
@@ -124,6 +130,7 @@ def run_preflight(
     steps: Sequence[Step] | None = None,
     checks: Sequence[PreflightCheck] | None = None,
     egress_path: PathLike | None = None,
+    courts_path: PathLike | None = None,
 ) -> int:
     """Run provisioning checks and install-time checks without applying state."""
 
@@ -142,16 +149,20 @@ def run_preflight(
     actual_egress_path = (
         root / "config/egress.yaml" if egress_path is None else egress_path
     )
+    actual_courts_path = default_courts_path() if courts_path is None else courts_path
 
     lock_result = load_host_lock(actual_lock_path, host=io)
     models_result = load_models_lock(actual_models_path, host=io)
     egress_result = load_egress_allowlist(actual_egress_path, host=io)
+    courts_result = load_court_map(actual_courts_path, host=io)
     if lock_result.errors:
         print(render_lock_errors(lock_result.errors), file=sys.stderr)
     if models_result.errors:
         print(render_models_errors(models_result.errors), file=sys.stderr)
     if egress_result.errors:
         print(render_egress_errors(egress_result.errors), file=sys.stderr)
+    if courts_result.errors:
+        print(render_courts_errors(courts_result.errors), file=sys.stderr)
     if (
         lock_result.errors
         or lock_result.lock is None
@@ -159,6 +170,8 @@ def run_preflight(
         or models_result.lock is None
         or egress_result.errors
         or egress_result.allowlist is None
+        or courts_result.errors
+        or courts_result.court_map is None
     ):
         return 1
 
@@ -185,6 +198,7 @@ def run_preflight(
         models=models_result.lock,
         site=site_result.config,
         egress=egress_result.allowlist,
+        courts=courts_result.court_map,
         no_gpu=nogpu.is_no_gpu_host(io),
         build_box=nogpu.is_build_box(io),
     )

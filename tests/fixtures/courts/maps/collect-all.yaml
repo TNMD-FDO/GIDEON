@@ -1,0 +1,16 @@
+unexpected: true
+source:
+  file: "courts-2099-01-02.csv.bz2"
+  date: "2099-02-03"
+  sha256: short
+  rows: 3
+  levels:
+    scotus: -1
+    circuit: 0
+    district: 0
+    state_supreme: 0
+    state_appellate: 0
+    other: 0
+    stray: 1
+courts:
+  fixture: {circuit: bad-circuit, state: ZZ, level: invalid, name: 7, extra: true}
