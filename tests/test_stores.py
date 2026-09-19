@@ -17,12 +17,14 @@ SECRETS = {
     "/etc/gideon/secrets/postgres_gideon_password": "gid'eon-pw\n",
     "/etc/gideon/secrets/postgres_gideon_audit_password": "audit-pw\n",
     "/etc/gideon/secrets/postgres_gideon_ro_metrics_password": "metrics-pw\n",
+    "/etc/gideon/secrets/postgres_gideon_eval_password": "eval-pw\n",
 }
 MIGRATIONS = {
     f"{ROOT}/migrations/0001_audit_log.sql": (ROOT / "migrations/0001_audit_log.sql").read_text(),
     f"{ROOT}/migrations/0002_metrics_reader.sql": (ROOT / "migrations/0002_metrics_reader.sql").read_text(),
     f"{ROOT}/migrations/0003_guardrail_trips.sql": (ROOT / "migrations/0003_guardrail_trips.sql").read_text(),
-    f"{ROOT}/migrations/0004_second.sql": "CREATE TABLE second (id int);\n",
+    f"{ROOT}/migrations/0004_eval_runs.sql": (ROOT / "migrations/0004_eval_runs.sql").read_text(),
+    f"{ROOT}/migrations/0005_second.sql": "CREATE TABLE second (id int);\n",
     f"{ROOT}/migrations/README.md": "not a migration",
 }
 
@@ -130,17 +132,17 @@ class Converge(unittest.TestCase):
         host = FakeHost(server, {**SECRETS, **MIGRATIONS})
         report = converge(host, RENDERED, root=ROOT)
         self.assertTrue(report.ok, report.problem)
-        self.assertEqual(report.created_roles, ("openwebui", "gideon", "gideon_audit", "gideon_ro_metrics"))
+        self.assertEqual(report.created_roles, ("openwebui", "gideon", "gideon_audit", "gideon_ro_metrics", "gideon_eval"))
         self.assertEqual(report.created_databases, ("openwebui", "gideon"))
         self.assertEqual(
             report.applied_migrations,
-            ("0001_audit_log", "0002_metrics_reader", "0003_guardrail_trips", "0004_second"),
+            ("0001_audit_log", "0002_metrics_reader", "0003_guardrail_trips", "0004_eval_runs", "0005_second"),
         )
 
         argvs = [call[0] for call in host.calls]
         self.assertEqual(argvs[0], psql("postgres", "postgres", *QUERY))
         role_statements = [call for call in host.calls if call[1] and "CREATE ROLE" in call[1]]
-        self.assertEqual([call[0] for call in role_statements], [psql("postgres", "postgres", *STATEMENT)] * 4)
+        self.assertEqual([call[0] for call in role_statements], [psql("postgres", "postgres", *STATEMENT)] * 5)
         gideon_sql = role_statements[1][1] or ""
         self.assertIn("\\set pw 'gid''eon-pw'\n", gideon_sql)
         self.assertIn("CREATE ROLE gideon LOGIN PASSWORD :'pw';", gideon_sql)
@@ -150,13 +152,14 @@ class Converge(unittest.TestCase):
             self.assertNotIn("eon-pw", joined)
             self.assertNotIn("audit-pw", joined)
             self.assertNotIn("metrics-pw", joined)
+            self.assertNotIn("eval-pw", joined)
         database_statements = [call[1] for call in host.calls if call[1] and "CREATE DATABASE" in call[1]]
         self.assertEqual(database_statements, ["CREATE DATABASE openwebui OWNER openwebui;\n", "CREATE DATABASE gideon OWNER gideon;\n"])
         # Every migration-side call runs as gideon in gideon; the version row rides in the same transaction.
         self.assertIn(psql("gideon", "gideon", *STATEMENT), argvs)
         self.assertIn(psql("gideon", "gideon", *QUERY), argvs)
         migration_runs = [call for call in host.calls if call[0] == psql("gideon", "gideon", *MIGRATION)]
-        self.assertEqual(len(migration_runs), 4)
+        self.assertEqual(len(migration_runs), 5)
         self.assertTrue((migration_runs[0][1] or "").startswith("-- §19.4"))
         self.assertTrue((migration_runs[0][1] or "").endswith("INSERT INTO schema_migrations (version) VALUES ('0001_audit_log');\n"))
         metrics_migration = next(call[1] or "" for call in migration_runs if "0002_metrics_reader" in (call[1] or ""))
@@ -190,7 +193,7 @@ class Converge(unittest.TestCase):
 
     def test_existing_role_password_is_never_altered(self) -> None:
         server = FreshServer()
-        server.roles.extend(("gideon", "gideon_ro_metrics"))
+        server.roles.extend(("gideon", "gideon_ro_metrics", "gideon_eval"))
         host = FakeHost(server, {**SECRETS, **MIGRATIONS})
         report = converge(host, RENDERED, root=ROOT)
         self.assertTrue(report.ok, report.problem)
@@ -243,17 +246,17 @@ class Converge(unittest.TestCase):
 
         report = converge(FakeHost(respond, {**SECRETS, **MIGRATIONS}), RENDERED, root=ROOT)
         self.assertFalse(report.ok)
-        self.assertIn("0004_second.sql", report.problem or "")
-        self.assertIn("0004_second.sql", report.fix)
-        self.assertEqual(report.applied_migrations, ("0001_audit_log", "0002_metrics_reader", "0003_guardrail_trips"))
-        self.assertEqual(server.versions, ["0001_audit_log", "0002_metrics_reader", "0003_guardrail_trips"])
+        self.assertIn("0005_second.sql", report.problem or "")
+        self.assertIn("0005_second.sql", report.fix)
+        self.assertEqual(report.applied_migrations, ("0001_audit_log", "0002_metrics_reader", "0003_guardrail_trips", "0004_eval_runs"))
+        self.assertEqual(server.versions, ["0001_audit_log", "0002_metrics_reader", "0003_guardrail_trips", "0004_eval_runs"])
 
     def test_applied_versions_are_skipped_and_names_are_lexical(self) -> None:
         server = FreshServer()
         server.versions.append("0001_audit_log")
         host = FakeHost(server, {**SECRETS, **MIGRATIONS})
         report = converge(host, RENDERED, root=ROOT)
-        self.assertEqual(report.applied_migrations, ("0002_metrics_reader", "0003_guardrail_trips", "0004_second"))
+        self.assertEqual(report.applied_migrations, ("0002_metrics_reader", "0003_guardrail_trips", "0004_eval_runs", "0005_second"))
 
     def test_missing_migrations_directory_refuses(self) -> None:
         report = converge(FakeHost(FreshServer(), SECRETS), RENDERED, root=ROOT)
@@ -295,4 +298,45 @@ class Migration0003(unittest.TestCase):
         self.assertIn("CHECK (source IN ('user', 'eval'))", text)
         self.assertNotIn("GRANT UPDATE", text)
         self.assertNotIn("GRANT DELETE", text)
+        self.assertNotIn("schema_migrations", text)
+
+
+class Migration0004(unittest.TestCase):
+    def test_eval_tables_are_partitioned_and_append_only(self) -> None:
+        text = MIGRATIONS[f"{ROOT}/migrations/0004_eval_runs.sql"]
+        self.assertIn("CREATE TABLE eval_runs", text)
+        self.assertIn("PARTITION BY RANGE (started_at)", text)
+        self.assertIn("PRIMARY KEY (run_id, started_at)", text)
+        self.assertIn("CREATE TABLE eval_results", text)
+        self.assertIn("PARTITION BY RANGE (run_started_at)", text)
+        self.assertIn("PRIMARY KEY (run_id, case_id, repeat, run_started_at)", text)
+        self.assertIn("CHECK (stack IN ('production', 'ci'))", text)
+        self.assertIn("'smoke', 'nightly', 'weekly-off', 'decision'", text)
+        self.assertIn("'candidate', 'engine-verify', 'manual'", text)
+        self.assertEqual(text.count("CHECK (verdict IN ('pass', 'fail'))"), 2)
+        self.assertIn("repeats integer NOT NULL CHECK (repeats >= 1)", text)
+        self.assertIn("repeat integer NOT NULL CHECK (repeat >= 1)", text)
+        self.assertIn("overrides jsonb NOT NULL DEFAULT '{}'::jsonb", text)
+
+    def test_partition_functions_are_hardened_and_grants_are_minimal(self) -> None:
+        text = MIGRATIONS[f"{ROOT}/migrations/0004_eval_runs.sql"]
+        self.assertEqual(text.count("SECURITY DEFINER"), 2)
+        self.assertEqual(text.count("SET search_path = pg_catalog, public"), 2)
+        self.assertIn("public.%I PARTITION OF public.eval_runs", text)
+        self.assertIn("public.%I PARTITION OF public.eval_results", text)
+        self.assertEqual(text.count("to_char(month_start, 'YYYYMM')"), 2)
+        self.assertIn("ALTER FUNCTION eval_runs_ensure_partition(timestamptz) OWNER TO gideon;", text)
+        self.assertIn("ALTER FUNCTION eval_results_ensure_partition(timestamptz) OWNER TO gideon;", text)
+        self.assertEqual(text.count("REVOKE ALL ON FUNCTION"), 2)
+        self.assertEqual(text.count("GRANT EXECUTE ON FUNCTION"), 2)
+        self.assertIn("GRANT USAGE ON SCHEMA public TO gideon_eval;", text)
+        self.assertIn("GRANT INSERT ON TABLE eval_runs TO gideon_eval;", text)
+        self.assertIn("GRANT INSERT ON TABLE eval_results TO gideon_eval;", text)
+        self.assertIn("GRANT SELECT ON TABLE eval_runs TO gideon_ro_metrics;", text)
+        self.assertIn("GRANT SELECT ON TABLE eval_results TO gideon_ro_metrics;", text)
+        self.assertNotIn("GRANT UPDATE", text)
+        self.assertNotIn("GRANT DELETE", text)
+        self.assertNotIn("GRANT SELECT ON TABLE eval_runs TO gideon_eval", text)
+        self.assertNotIn("GRANT SELECT ON TABLE eval_results TO gideon_eval", text)
+        self.assertNotIn("REFERENCES", text)
         self.assertNotIn("schema_migrations", text)

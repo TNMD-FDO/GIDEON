@@ -80,6 +80,7 @@ SECRET_REGISTRY: Final[tuple[GeneratedSecret, ...]] = (
     GeneratedSecret("gideon_eval_password", "password", False, "GIDEON evaluation identity", "account"),
     GeneratedSecret("grafana_admin_password", "password", True, "break-glass Grafana administrator", "seeded"),
     GeneratedSecret("postgres_gideon_ro_metrics_password", "password", False, "metrics reader database role", "role"),
+    GeneratedSecret("postgres_gideon_eval_password", "password", False, "eval-run writer database role", "role"),
     GeneratedSecret("engine_api_key", "password", False, "the engine's API key (gideon-generator)", "rewrite"),
     GeneratedSecret("searxng_secret_key", "password", False, "SearXNG's signing key", "rewrite"),
     GeneratedSecret("gideon_admin_api_key", "minted", False, "apply and reconcile", "remint"),

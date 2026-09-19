@@ -1286,4 +1286,4 @@ class NewStages(unittest.TestCase):
         host = ApplyHost(commands, base_files())
         code, out, _ = apply(host)
         self.assertEqual(code, 0, out)
-        self.assertIn("stores: ok — created roles: openwebui, gideon, gideon_audit, gideon_ro_metrics; created databases: openwebui, gideon; applied migrations: 0001_audit_log", out)
+        self.assertIn("stores: ok — created roles: openwebui, gideon, gideon_audit, gideon_ro_metrics, gideon_eval; created databases: openwebui, gideon; applied migrations: 0001_audit_log", out)

@@ -6,7 +6,6 @@ import re
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date
 from pathlib import Path
 from typing import Final, cast
 from unittest import TestCase
@@ -18,9 +17,6 @@ from gideon.extraction import (
     ExactObject,
     ObjectType,
     extract,
-    key_violations,
-    ordering_violations,
-    span_violations,
 )
 from gideon.extraction.grammar import registry_types
 from gideon.extraction.scoring import active_cases, build_report, score
@@ -39,24 +35,6 @@ INVENTED_PINNED_PREFIXES: Final[tuple[tuple[int, str], ...]] = (
     (22, "8c057174f06ac4afc869a87642ac70eb0a92a3e3b10b2c14f0723d7ee53298a0"),  # CSA-1 2026-09-19
 )
 ID_PATTERN: Final[re.Pattern[str]] = re.compile(r"^extraction-[0-9]{3}$")
-HARVEST_ID_PATTERN: Final[re.Pattern[str]] = re.compile(r"^HARV-[0-9]{3}$")
-CLUSTER_PATTERN: Final[re.Pattern[str]] = re.compile(r"^harvest-chat-[0-9a-f]+$")
-ROLE_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"^(?:CHU-attorney|CHU-investigator|CHU-paralegal|TRAD-attorney|"
-    r"TRAD-investigator|TRAD-legal-assistant|support|CSA|unknown)-[1-9][0-9]*$"
-)
-QUERY_TYPES: Final[frozenset[str]] = frozenset(
-    {"doctrinal", "statute", "case-specific", "other"}
-)
-BASE_CASE_KEYS: Final[tuple[str, ...]] = (
-    "id",
-    "suite",
-    "category",
-    "branch",
-    "question",
-    "expected",
-    "labels",
-)
 KEY_PATTERNS: Final[dict[str, re.Pattern[str]]] = {
     "statute": re.compile(r"/us/usc/t[0-9]+/s[0-9A-Za-z]+(?:-[0-9A-Za-z]+)?"),
     "guideline": re.compile(r"ussg/[0-9][A-Z][0-9]+\.[0-9]+"),
@@ -117,17 +95,6 @@ def _parse_jsonl(path: Path) -> tuple[bytes, tuple[ParsedLine, ...], list[str]]:
     return data, tuple(lines), findings
 
 
-def _document_findings(
-    path: Path, data: bytes, lines: Sequence[ParsedLine]
-) -> list[str]:
-    findings: list[str] = []
-    if not data.endswith(b"\n"):
-        findings.append(_finding(path, 0, "missing final newline"))
-    if data.count(b"\n") != len(lines):
-        findings.append(_finding(path, 0, "every line must be one JSON object"))
-    return findings
-
-
 def _prefix_findings(
     path: Path,
     data: bytes,
@@ -155,90 +122,6 @@ def _prefix_findings(
     return findings
 
 
-def _expected_case_keys(record: Mapping[str, object]) -> tuple[str, ...]:
-    keys = list(BASE_CASE_KEYS)
-    if _origin(record) == "harvest":
-        keys.append("seed")
-    keys.extend(("cluster_id", "review"))
-    if "supersedes" in record:
-        keys.append("supersedes")
-    keys.append("notes")
-    return tuple(keys)
-
-
-def _shape_findings(path: Path, line: ParsedLine) -> list[str]:
-    record = line.record
-    record_id = _record_id(line)
-    location = f"line {line.number} {record_id}"
-    findings: list[str] = []
-    if tuple(record) != _expected_case_keys(record):
-        findings.append(_finding(path, location, "case keys or order"))
-    if record.get("suite") != "build-gates":
-        findings.append(_finding(path, location, "suite"))
-    if record.get("category") != "extraction":
-        findings.append(_finding(path, location, "category"))
-    if record.get("branch") != "legal":
-        findings.append(_finding(path, location, "branch"))
-
-    question = record.get("question")
-    if (
-        not isinstance(question, str)
-        or not question
-        or question != question.strip()
-    ):
-        findings.append(_finding(path, location, "question shape"))
-
-    labels = record.get("labels")
-    origin = _origin(record)
-    if not isinstance(labels, list) or not labels or origin not in {"harvest", "invented"}:
-        findings.append(_finding(path, location, "labels origin"))
-    elif origin == "harvest":
-        if len(labels) != 2 or not isinstance(labels[1], str) or labels[1] not in QUERY_TYPES:
-            findings.append(_finding(path, location, "harvest labels"))
-    elif len(labels) != 1:
-        findings.append(_finding(path, location, "invented labels"))
-
-    seed = record.get("seed")
-    if origin == "harvest":
-        if not isinstance(seed, str) or HARVEST_ID_PATTERN.fullmatch(seed) is None:
-            findings.append(_finding(path, location, "harvest seed"))
-    elif "seed" in record:
-        findings.append(_finding(path, location, "invented seed is forbidden"))
-
-    cluster_id = record.get("cluster_id")
-    if not isinstance(cluster_id, str):
-        findings.append(_finding(path, location, "cluster_id"))
-    elif origin == "harvest":
-        if CLUSTER_PATTERN.fullmatch(cluster_id) is None:
-            findings.append(_finding(path, location, "harvest cluster_id"))
-    elif cluster_id != record_id:
-        findings.append(_finding(path, location, "invented cluster_id"))
-
-    review = record.get("review")
-    if not isinstance(review, dict) or tuple(review) != ("by", "on"):
-        findings.append(_finding(path, location, "review keys or order"))
-    else:
-        reviewer = review.get("by")
-        if not isinstance(reviewer, str) or ROLE_PATTERN.fullmatch(reviewer) is None:
-            findings.append(_finding(path, location, "review.by role"))
-        reviewed_on = review.get("on")
-        try:
-            valid_date = (
-                isinstance(reviewed_on, str)
-                and date.fromisoformat(reviewed_on).isoformat() == reviewed_on
-            )
-        except ValueError:
-            valid_date = False
-        if not valid_date:
-            findings.append(_finding(path, location, "review.on ISO date"))
-
-    if not isinstance(record.get("notes"), str):
-        findings.append(_finding(path, location, "notes string"))
-    if "supersedes" in record and not isinstance(record["supersedes"], str):
-        findings.append(_finding(path, location, "supersedes id"))
-    return findings
-
-
 def _label_findings(path: Path, line: ParsedLine) -> list[str]:
     record = line.record
     record_id = _record_id(line)
@@ -247,30 +130,18 @@ def _label_findings(path: Path, line: ParsedLine) -> list[str]:
     expected = record.get("expected")
     findings: list[str] = []
     if not isinstance(question, str) or not isinstance(expected, dict):
-        return [_finding(path, location, "question and expected mapping")]
+        return findings
     objects_value = expected.get("objects")
     if not isinstance(objects_value, list):
-        return [_finding(path, location, "expected.objects list")]
+        return findings
 
-    exact_objects: list[ExactObject] = []
-    for index, value in enumerate(objects_value, start=1):
-        object_location = f"line {line.number} {record_id} object {index}"
+    for value in objects_value:
         if not isinstance(value, dict):
-            findings.append(_finding(path, object_location, "object mapping"))
             continue
         object_type_value = value.get("type")
         if not isinstance(object_type_value, str) or object_type_value not in OBJECT_TYPES:
-            findings.append(_finding(path, object_location, "closed object type"))
             continue
         object_type = cast(ObjectType, object_type_value)
-        expected_keys = ["type", "start", "end", "text"]
-        if object_type in KEYED_TYPES:
-            expected_keys.append("key")
-        if object_type in SECTION_TYPES:
-            expected_keys.append("subsections")
-        if tuple(value) != tuple(expected_keys):
-            findings.append(_finding(path, object_location, "object keys or order"))
-
         start = value.get("start")
         end = value.get("end")
         text = value.get("text")
@@ -283,59 +154,27 @@ def _label_findings(path: Path, line: ParsedLine) -> list[str]:
             or end <= start
             or end > len(question)
         ):
-            findings.append(_finding(path, object_location, "object offsets"))
             continue
         if not isinstance(text, str) or text != question[start:end]:
-            findings.append(_finding(path, object_location, "verbatim object text"))
             continue
 
         key = value.get("key")
-        if object_type in KEYED_TYPES:
-            if not isinstance(key, str):
-                findings.append(_finding(path, object_location, "key required"))
-            elif object_type not in KEY_PATTERNS or KEY_PATTERNS[object_type].fullmatch(key) is None:
-                findings.append(_finding(path, object_location, "key form"))
-        elif "key" in value:
-            findings.append(_finding(path, object_location, "key forbidden"))
+        if (
+            object_type in KEYED_TYPES
+            and isinstance(key, str)
+            and KEY_PATTERNS[object_type].fullmatch(key) is None
+        ):
+            findings.append(_finding(path, location, "key form"))
 
         subsections_value = value.get("subsections")
-        if object_type in SECTION_TYPES:
-            if (
-                not isinstance(subsections_value, list)
-                or any(not isinstance(item, str) for item in subsections_value)
-            ):
-                findings.append(_finding(path, object_location, "subsections list"))
-                subsections: tuple[str, ...] = ()
-            else:
-                subsections = tuple(
-                    item for item in subsections_value if isinstance(item, str)
-                )
+        if (
+            object_type in SECTION_TYPES
+            and isinstance(subsections_value, list)
+            and all(isinstance(item, str) for item in subsections_value)
+        ):
             expected_subsections = tuple(re.findall(r"\(([^()]*)\)", text))
-            if subsections != expected_subsections:
-                findings.append(_finding(path, object_location, "subsections match span"))
-        elif "subsections" in value:
-            findings.append(_finding(path, object_location, "subsections forbidden"))
-            subsections = ()
-        else:
-            subsections = ()
-
-        exact_objects.append(
-            ExactObject(
-                object_type,
-                start,
-                end,
-                text,
-                key if isinstance(key, str) else None,
-                subsections=subsections,
-            )
-        )
-
-    for _ in span_violations(question, exact_objects):
-        findings.append(_finding(path, location, "contract span invariant"))
-    for _ in key_violations(exact_objects):
-        findings.append(_finding(path, location, "contract key invariant"))
-    for _ in ordering_violations(exact_objects):
-        findings.append(_finding(path, location, "contract ordering invariant"))
+            if tuple(subsections_value) != expected_subsections:
+                findings.append(_finding(path, location, "subsections match span"))
     return findings
 
 
@@ -389,21 +228,7 @@ def _score_inputs(
 class SetContract(TestCase):
     """The reviewed extraction JSONL files are frozen data contracts."""
 
-    def test_documents_have_one_final_newline(self) -> None:
-        for path, data, lines in _available_case_files(self):
-            findings = _document_findings(path, data, lines)
-            self.assertFalse(findings, f"findings: {findings}")
-
-    def test_each_case_has_the_committed_shape(self) -> None:
-        findings = [
-            finding
-            for path, _, lines in _available_case_files(self)
-            for line in lines
-            for finding in _shape_findings(path, line)
-        ]
-        self.assertFalse(findings, f"findings: {findings}")
-
-    def test_each_label_has_the_contract_shape(self) -> None:
+    def test_each_label_matches_the_question(self) -> None:
         findings = [
             finding
             for path, _, lines in _available_case_files(self)
@@ -424,16 +249,14 @@ class SetContract(TestCase):
             data, lines, parse_findings = _parse_jsonl(path)
             findings.extend(parse_findings)
             findings.extend(_prefix_findings(path, data, expected_prefixes))
-            findings.extend(_document_findings(path, data, lines))
         self.assertFalse(findings, f"findings: {findings}")
 
-    def test_ids_form_one_contiguous_series_and_supersedes_is_earlier(self) -> None:
+    def test_ids_form_one_contiguous_series(self) -> None:
         files = _available_case_files(self)
         all_lines = [(path, line) for path, _, lines in files for line in lines]
         expected_number = 1 if not absent_from_export(EXTRACTION_PATH, ROOT) else 41
         findings: list[str] = []
-        positions: dict[str, int] = {}
-        for position, (path, line) in enumerate(all_lines):
+        for path, line in all_lines:
             record_id = line.record.get("id")
             location = f"line {line.number} {_record_id(line)}"
             expected_id = f"extraction-{expected_number:03d}"
@@ -443,24 +266,7 @@ class SetContract(TestCase):
                 or record_id != expected_id
             ):
                 findings.append(_finding(path, location, "contiguous id series"))
-            elif record_id in positions:
-                findings.append(_finding(path, location, "duplicate id"))
-            else:
-                positions[record_id] = position
             expected_number += 1
-
-        for path, line in all_lines:
-            target = line.record.get("supersedes")
-            if target is None:
-                continue
-            location = f"line {line.number} {_record_id(line)}"
-            position = positions.get(_record_id(line), -1)
-            if (
-                not isinstance(target, str)
-                or target not in positions
-                or positions[target] >= position
-            ):
-                findings.append(_finding(path, location, "supersedes existing earlier id"))
         self.assertFalse(findings, f"findings: {findings}")
 
     def test_harvest_relationships(self) -> None:

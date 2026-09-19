@@ -24,6 +24,12 @@ def _stub(args: argparse.Namespace) -> int:
     return 1
 
 
+def _run_eval(args: argparse.Namespace) -> int:
+    from gideon.evaluation import command
+
+    return host_cli._guarded("eval run", command.run_eval, args)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="gideon",
@@ -183,10 +189,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     eval_ = commands.add_parser("eval", help="evaluation suites (§18)")
     eval_sub = eval_.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)
-    eval_run = eval_sub.add_parser("run", help="run the eval suites")
+    eval_run = eval_sub.add_parser("run", help="run the eval suites (§18)")
     eval_run.add_argument("--decision", action="store_true", help="a decision run")
     eval_run.add_argument("--force", action="store_true", help="run despite a dirty state")
-    eval_run.set_defaults(handler=_stub, command_path="eval run")
+    eval_run.add_argument(
+        "--slice",
+        metavar="NAME",
+        help="frozen slice to run (§18.6)",
+    )
+    eval_run.add_argument(
+        "--set",
+        metavar="DIR",
+        help="eval set version directory (§18.6)",
+    )
+    eval_run.set_defaults(handler=_run_eval, command_path="eval run")
 
     backup = commands.add_parser("backup", help="backup set, off-box push, drill (§19)")
     backup_sub = backup.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)

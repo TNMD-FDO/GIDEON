@@ -26,7 +26,6 @@ STUBS = [
     ["index", "gc"],
     ["index", "report"],
     ["registry", "gc"],
-    ["eval", "run"],
     ["audit", "query"],
     ["retention", "sweep"],
 ]
@@ -40,6 +39,22 @@ class Help(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 0)
         for name in TOP_LEVEL:
             self.assertIn(name, out.getvalue())
+
+    def test_eval_help_names_the_set_and_slice_contract(self) -> None:
+        group = io.StringIO()
+        with contextlib.redirect_stdout(group), self.assertRaises(SystemExit) as ctx:
+            main(["eval", "--help"])
+        self.assertEqual(ctx.exception.code, 0)
+        self.assertIn("§18", group.getvalue())
+
+        command = io.StringIO()
+        with contextlib.redirect_stdout(command), self.assertRaises(SystemExit) as ctx:
+            main(["eval", "run", "--help"])
+        self.assertEqual(ctx.exception.code, 0)
+        self.assertIn("--slice NAME", command.getvalue())
+        self.assertIn("--set DIR", command.getvalue())
+        self.assertIn("§18", command.getvalue())
+        self.assertIn("§18.6", command.getvalue())
 
 
 class Stubs(unittest.TestCase):

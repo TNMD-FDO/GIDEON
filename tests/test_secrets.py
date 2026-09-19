@@ -106,6 +106,7 @@ class Registry(unittest.TestCase):
                 "gideon_eval_password",
                 "grafana_admin_password",
                 "postgres_gideon_ro_metrics_password",
+                "postgres_gideon_eval_password",
                 "engine_api_key",
                 "searxng_secret_key",
             ],
@@ -115,6 +116,10 @@ class Registry(unittest.TestCase):
             [secret.name for secret in SECRET_REGISTRY if secret.print_once],
             ["gideon_admin_password", "grafana_admin_password"],
         )
+        eval_secret = next(secret for secret in SECRET_REGISTRY if secret.name == "postgres_gideon_eval_password")
+        self.assertEqual(eval_secret.kind, "password")
+        self.assertFalse(eval_secret.print_once)
+        self.assertEqual(eval_secret.rotation, "role")
         self.assertTrue(all(secret.consumer for secret in SECRET_REGISTRY))
 
         engine = next(secret for secret in SECRET_REGISTRY if secret.name == "engine_api_key")
@@ -136,6 +141,7 @@ class Registry(unittest.TestCase):
                 "gideon_eval_password": "account",
                 "grafana_admin_password": "seeded",
                 "postgres_gideon_ro_metrics_password": "role",
+                "postgres_gideon_eval_password": "role",
                 "engine_api_key": "rewrite",
                 "searxng_secret_key": "rewrite",
                 "gideon_admin_api_key": "remint",

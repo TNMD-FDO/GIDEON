@@ -88,6 +88,7 @@ class ConsumerMap(unittest.TestCase):
         self.assertEqual(gpu["webui_secret_key"], SecretConsumers(("open-webui",), ()))
         self.assertEqual(gpu["postgres_gideon_audit_password"], SecretConsumers(("open-webui",), ()))
         self.assertEqual(gpu["postgres_gideon_ro_metrics_password"], SecretConsumers(("grafana", "postgres-exporter"), ()))
+        self.assertEqual(consumers_of(inputs(), "postgres_gideon_eval_password"), SecretConsumers((), ()))
         self.assertEqual(gpu["tls_key"], SecretConsumers(("caddy",), ()))
         self.assertEqual(gpu["ldap_bind_password"], SecretConsumers(("grafana",), ("open-webui",)))
         self.assertEqual(gpu["searxng_secret_key"], SecretConsumers((), ("searxng",)))

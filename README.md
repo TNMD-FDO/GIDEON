@@ -8,7 +8,7 @@ assistant, on one box the office controls. Built by TNMD-FDO (the Office of
 the Federal Public Defender, Middle District of Tennessee) and designed from
 day one for distribution: clone a tag, edit `site.yaml`, run one script.
 
-**Status:** 0.x — slice 0 (platform) complete at `v0.1.0`, the clean-VM acceptance at minor tags its standing proof; slice 1 (General) complete at `v0.2.0`, with no user on the box until go-live (ADR-0044); slice 2 (eval harness) under way toward `v0.3.0`; this tree is `v0.2.10`.
+**Status:** 0.x — slice 0 (platform) complete at `v0.1.0`, the clean-VM acceptance at minor tags its standing proof; slice 1 (General) complete at `v0.2.0`, with no user on the box until go-live (ADR-0044); slice 2 (eval harness) under way toward `v0.3.0`; this tree is `v0.2.11`.
 What each release changed is in [`CHANGELOG.md`](CHANGELOG.md), the index over `docs/2-changelog/`, one file per release. Later-slice commands still print "not implemented".
 
 ## Install
@@ -126,6 +126,7 @@ Paths under `.scratch/` are the development repository's work tracker, committed
 | The evidence redaction (one function replacing every office value the site registry's marked leaves declare with its site-key placeholder — the acceptance harness's transcripts and stored messages pass through it, and `python3 -m tools.redact --site /etc/gideon/site.yaml < draft > asset` is the same function over a session's transcript on the box, the office-values tripwire the check that the step was taken) | [`tools/redact/`](tools/redact/) · [`tests/test_office_values.py`](tests/test_office_values.py) |
 | The engine-verify sample (the corpus-independent cases `sudo python3 -m gideon engine verify` runs after install, upgrade, or any engine or driver change: the needle, the structured case, the smoke, and the frontend section's two deadline-trap positives and one trip case; a case superseded, never edited) | [`eval/engine-verify/`](eval/engine-verify/) · [Research note](docs/research/vllm-engine-verify-requests.md) |
 | The extraction grammar and its set (the exact objects in a question — U.S.C. sections, Guidelines ids, Federal Rules, and the bare section and bare rule that are found and never resolved — as versioned, bounded, standard-library patterns; the labelled cases, never edited, that gate each landed type's precision and recall in the hosted checks) | [`gideon/extraction/`](gideon/extraction/) · [`eval/sets/eval-v1/build-gates/`](eval/sets/eval-v1/build-gates/) · [`tests/test_extraction_set.py`](tests/test_extraction_set.py) |
+| The eval run (`sudo python3 -m gideon eval run --slice extraction` on the box, from the release checkout on the system Python: the set loaded and digested, the slice scored, the run and its per-case results recorded as kept events, the gate's verdict the exit code; `--set <dir>` runs a set outside the release and records nothing) | [`gideon/evaluation/`](gideon/evaluation/) · [`eval/sets/eval-v1/slices/`](eval/sets/eval-v1/slices/) · [`migrations/0004_eval_runs.sql`](migrations/0004_eval_runs.sql) · [ADR-0046](docs/adr/0046-gideon-eval-runs-from-the-host-checkout-on-the-standard-library.md) |
 | Forward-only migrations (the `gideon` database) | [`migrations/`](migrations/) |
 | The live frontend, built-image, and search-sentinel contracts (self-hosted CI only) | [`tests/contract/`](tests/contract/) |
 
