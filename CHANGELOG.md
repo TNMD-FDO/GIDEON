@@ -10,6 +10,7 @@ history at commit f06e83f. User-facing notes for every tag from `v0.2.0` live un
 `docs/release-notes/`, and `tests/test_release_records.py` holds this index
 complete, ordered, and dated from the release files.
 
+- [v0.2.7](docs/2-changelog/w3_v0.2.7.md) — 2026-09-19 — the extraction grammar's first families (slice-2 01)
 - [v0.2.6](docs/2-changelog/w3_v0.2.6.md) — 2026-09-19 — the judgment set's queries file (slice-2 07)
 - [v0.2.5](docs/2-changelog/w3_v0.2.5.md) — 2026-09-19 — courts.yaml and the jurisdiction check (slice-2 03)
 - [v0.2.4](docs/2-changelog/w3_v0.2.4.md) — 2026-09-18 — the overlap test's fake holds its read (slice-1 85)

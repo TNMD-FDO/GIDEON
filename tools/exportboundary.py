@@ -42,6 +42,7 @@ EXCLUDED_PREFIXES = (
     "eval/sets/eval-v1/judgments/queries.jsonl",  # harvest-derived judgment queries pending a CSA ruling
     "tools/judgments",  # judgment intake tooling that loads the excluded flagger
     "tests/test_judgments_intake.py",  # judgment intake's excluded tests
+    "eval/sets/eval-v1/build-gates/extraction.jsonl",  # the labelled harvest questions pending the same ruling
     ".github/workflows/acceptance.yml",  # the box acceptance workflow
     ".github/workflows/pin-watch.yml",  # the box pin-watch workflow
     ".github/dependabot.yml",  # Dependabot's development-repository trigger

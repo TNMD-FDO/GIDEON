@@ -11,7 +11,7 @@ requires-python = ">=3.12"
 dynamic = ["version"]
 
 [tool.setuptools]
-packages = ["gideon", "gideon.host"]
+packages = ["gideon", "gideon.host", "gideon.extraction"]
 
 [tool.setuptools.dynamic]
 # The version lives in exactly one place; TRIP-init and TRIP-3 bump it there.
