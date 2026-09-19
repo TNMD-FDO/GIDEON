@@ -12,13 +12,16 @@ from typing import Any, Final
 from tools.turns import browser
 from tools.turns.cases import Case
 
-_FILTER_RELATIVE_PATH: Final[str] = "compose/open-webui/functions/arithmetic_guardrail.py"
-# The citation stamp's Filter sits beside the guardrail's in the checkout.
-_STAMP_FILE: Final[str] = "citation_stamp.py"
+# The guardrail's Function keeps the two inlet-gate texts, ticket 09's to retire.
+GUARDRAIL_FUNCTION: Final[str] = "compose/open-webui/functions/arithmetic_guardrail.py"
+# The citation stamp's Function, under the checkout this module runs from.
+_STAMP_PATH: Final[Path] = (
+    Path(__file__).resolve().parents[2] / "compose/open-webui/functions/citation_stamp.py"
+)
 # The fixes name the record's home: the runner says where it is, or how to keep one.
 _FIX: Final[str] = (
     "Read {record}; a leak is a guardrail gap in "
-    "compose/open-webui/functions/arithmetic_guardrail.py, a positive answered "
+    "gideon/guardrail.py, a positive answered "
     "without a decline is a model behaviour to record on the ticket, and a case "
     "expecting answered that reads declined is the model's own refusal of the "
     "question, a false refusal to record on the ticket."
@@ -151,7 +154,7 @@ class OfflineHit:
 
 @dataclass(frozen=True, slots=True)
 class OfflineJudgement:
-    """The Filter verdict, figures, and raw pattern matches for one answer."""
+    """The guardrail judge's verdict, figures, and raw pattern matches for one answer."""
 
     family: str | None
     pattern_id: str | None
@@ -184,6 +187,14 @@ class LiveVerdict:
     refused_index: int | None = None
     refused_at: float | None = None
     ended_at: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class GateTexts:
+    """The two inlet-gate texts the guardrail Function keeps alone."""
+
+    session_refusal: str
+    branch_refusal: str
 
 
 def _normalise_whitespace(text: str) -> str:
@@ -223,7 +234,7 @@ def _judge_answer(
 ) -> object | None:
     """Judge a complete answer, or the newly extended floor window of a painted one.
 
-    The answer is the one text judged: the reasoning is withheld by the Filter
+    The answer is the one text judged: the reasoning is withheld by the guardrail
     and never judged, so the block a seat sees is the withholding check's
     business (``LiveEntry.block_text``), never the judge's.
     """
@@ -512,10 +523,11 @@ def offline_field(judgement: OfflineJudgement) -> str:
     return f"{verdict}; unsupplied: {counts or 'none'}"
 
 
-def load_guardrail(checkout: str | Path) -> ModuleType:
-    """Import the rendered Filter by path, using the test loader's recipe."""
+def load_gate_texts(checkout: str | Path) -> GateTexts:
+    """Read the two inlet-gate texts from the checkout's guardrail Function."""
 
-    return _load_function(Path(checkout) / _FILTER_RELATIVE_PATH, "arithmetic_guardrail")
+    function = _load_function(Path(checkout) / GUARDRAIL_FUNCTION, "arithmetic_guardrail_gate_texts")
+    return GateTexts(function.SESSION_REFUSAL, function.BRANCH_REFUSAL)
 
 
 def _load_function(path: Path, name: str) -> ModuleType:
@@ -574,7 +586,7 @@ _stamp_tails: dict[Path, str] = {}
 def own_length(guardrail: Any, content: str) -> int:
     """The model's own character count: a trailing citation stamp is the product's."""
 
-    path = Path(guardrail.__file__).with_name(_STAMP_FILE)
+    path = _STAMP_PATH
     if path not in _stamp_tails:
         stamp = _load_function(path, "citation_stamp")
         _stamp_tails[path] = str(stamp.STAMP_SEPARATOR) + str(stamp.CITATION_STAMP)
@@ -665,7 +677,7 @@ def stream_verdict(
 ) -> StreamVerdict:
     """Judge every released prefix in stream order; the first trip is the verdict.
 
-    A delta extends one of two texts. Each field is judged over the Filter's
+    A delta extends one of two texts. Each field is judged over the guardrail's
     bounded floor since its previously judged length; the offset is the length
     of the extended text at the trip, never any of its characters.
     """

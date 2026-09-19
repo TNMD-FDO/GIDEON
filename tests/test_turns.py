@@ -22,6 +22,7 @@ from zoneinfo import ZoneInfo
 
 import yaml  # type: ignore[import-untyped]
 
+from gideon import guardrail
 from gideon.host import owuiturn
 from gideon.host.owui import Client, OwuiError, Response
 from gideon.host.render.owui import EVAL_IDENTITY, GENERAL_PRESET_ID
@@ -645,7 +646,7 @@ class TurnHarness(TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.guardrail = classify.load_guardrail(ROOT)
+        cls.guardrail = guardrail
 
     def test_signin_body_turn_body_readback_and_replaced_attribution(self) -> None:
         frontend = Frontend(self.guardrail, {"replaced": "replaced"})
@@ -880,7 +881,7 @@ class TurnHarness(TestCase):
         self.assertIn("answered: ok — answered; block present; expect answered", stdout)
         self.assertIn("leak: refuse — leak (", stdout)
         self.assertIn("expect recorded", stdout)
-        self.assertIn("compose/open-webui/functions/arithmetic_guardrail.py", stdout)
+        self.assertIn("gideon/guardrail.py", stdout)
         self.assertEqual(frontend.chats, {})
 
     def test_an_errored_turn_is_cleaned_up_and_an_unidentified_one_is_left(self) -> None:

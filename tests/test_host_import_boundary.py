@@ -11,6 +11,9 @@ rules, checked against the AST so nothing has to be imported to be caught:
   heavier dependencies later without dragging them onto the bare-host path.
 - ``gideon/host/`` is self-contained: **every** import, at any depth,
   resolves to the standard library, ``yaml``, or the checked set itself.
+- Shared package modules (currently ``gideon/guardrail.py``) obey the
+  module-level rule: their imports resolve to the standard library, ``yaml``,
+  or the checked set itself.
 """
 
 import ast
@@ -24,6 +27,7 @@ PACKAGE = REPO_ROOT / "gideon"
 ENTRY_CHAIN = frozenset(
     {PACKAGE / "__init__.py", PACKAGE / "__main__.py", PACKAGE / "cli.py"}
 )
+SHARED_MODULES = frozenset({PACKAGE / "guardrail.py"})
 ALLOWED_EXTERNAL = frozenset(sys.stdlib_module_names) | {"yaml"}
 
 
@@ -93,7 +97,7 @@ def absolute_targets(node: ast.stmt, importer: Path) -> list[str]:
 
 
 def violations(files: frozenset[Path], *, module_level_only: bool) -> list[str]:
-    allowed_files = ENTRY_CHAIN | host_files()
+    allowed_files = ENTRY_CHAIN | host_files() | SHARED_MODULES
     problems = []
     for path in sorted(files):
         tree = ast.parse(path.read_text(), filename=str(path))
@@ -122,6 +126,8 @@ class ImportBoundary(unittest.TestCase):
         # Guard against a rename quietly emptying the checked set.
         for path in ENTRY_CHAIN:
             self.assertTrue(path.is_file(), f"missing from entry chain: {path}")
+        for path in SHARED_MODULES:
+            self.assertTrue(path.is_file(), f"missing from shared modules: {path}")
         self.assertTrue(host_files(), "gideon/host/ has no Python files")
 
     def test_entry_chain_module_level_imports(self) -> None:
@@ -129,3 +135,6 @@ class ImportBoundary(unittest.TestCase):
 
     def test_host_subtree_is_self_contained(self) -> None:
         self.assertEqual(violations(host_files(), module_level_only=False), [])
+
+    def test_shared_modules_are_module_level_self_contained(self) -> None:
+        self.assertEqual(violations(SHARED_MODULES, module_level_only=True), [])

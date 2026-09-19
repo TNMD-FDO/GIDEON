@@ -1,12 +1,10 @@
 """The direct serving-engine verification command (§6.7)."""
 
 import argparse
-import importlib.util
 import json
 import math
 import re
 import subprocess
-import sys
 import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping
@@ -16,6 +14,7 @@ from typing import Any, Final
 
 import yaml  # type: ignore[import-untyped]
 
+from gideon import guardrail
 from gideon.host import (
     apply,
     enginesample,
@@ -35,7 +34,6 @@ from gideon.host.render.engine import (
     ENGINE_SERVICE_NAME,
 )
 from gideon.host.render.owui import (
-    ARITHMETIC_GUARDRAIL_TEMPLATE,
     EVAL_IDENTITY,
     EVAL_PASSWORD_SECRET,
     GENERAL_PRESET_ID,
@@ -49,10 +47,6 @@ _ROOT_FIX: Final[str] = "Run sudo python3 -m gideon engine verify."
 _APPLY_FIX: Final[str] = "Run sudo python3 -m gideon apply, then retry."
 _SAMPLE_FIX: Final[str] = (
     "Edit eval/engine-verify/sample.yaml, then re-run sudo python3 -m gideon engine verify."
-)
-_FILTER_FIX: Final[str] = (
-    "Correct compose/open-webui/functions/arithmetic_guardrail.py, then re-run "
-    "sudo python3 -m gideon render."
 )
 _FRONTEND_DELETE_FIX: Final[str] = (
     "Check the eval account's chat list in the frontend, then retry."
@@ -332,30 +326,6 @@ def _last_stderr_line(stderr: str) -> str:
 
     lines = [line.strip() for line in stderr.splitlines() if line.strip()]
     return lines[-1][:_STDERR_LIMIT] if lines else ""
-
-
-def _load_filter(checkout: Path) -> Any | Problem:
-    path = checkout / "compose" / ARITHMETIC_GUARDRAIL_TEMPLATE
-    spec = importlib.util.spec_from_file_location("gideon_engine_verify_guardrail", path)
-    if spec is None or spec.loader is None:
-        return Problem("guardrail Filter could not be loaded", _FILTER_FIX)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    try:
-        spec.loader.exec_module(module)
-    except Exception:  # noqa: BLE001  # a rendered Filter refusal is one row
-        return Problem("guardrail Filter could not be loaded", _FILTER_FIX)
-    lag = getattr(module, "LAG_CHARS", None)
-    if type(lag) is not int or lag <= 0:
-        return Problem("guardrail Filter has no usable lag bounds", _FILTER_FIX)
-    refusals = getattr(module, "REFUSALS", None)
-    if (
-        not isinstance(refusals, tuple)
-        or not refusals
-        or not all(isinstance(refusal, str) and refusal for refusal in refusals)
-    ):
-        return Problem("guardrail Filter has no refusal set", _FILTER_FIX)
-    return module
 
 
 def _error_message(reply: EngineReply) -> str:
@@ -798,7 +768,6 @@ def _smoke_check(
     sample: enginesample.Sample,
     served_name: str,
     engine_fix: str,
-    lag_chars: int,
 ) -> CheckOutcome:
     body: Mapping[str, object] = {
         "model": served_name,
@@ -863,8 +832,8 @@ def _smoke_check(
             figures,
         )
     implied = {
-        "lag": lag_chars / chars_per_second if chars_per_second > 0 else 0.0,
-        "restatement": 2 * lag_chars / chars_per_second if chars_per_second > 0 else 0.0,
+        "lag": guardrail.LAG_CHARS / chars_per_second if chars_per_second > 0 else 0.0,
+        "restatement": 2 * guardrail.LAG_CHARS / chars_per_second if chars_per_second > 0 else 0.0,
     }
     figures["implied_lag_seconds"] = implied
 
@@ -886,9 +855,9 @@ def _smoke_check(
 
 
 def _frontend_outcome(
-    module: Any, stored: owuiturn.StoredTurn, prompt: str
+    stored: owuiturn.StoredTurn, prompt: str
 ) -> tuple[str | None, str | None]:
-    """Classify one stored frontend answer with the loaded guardrail Filter."""
+    """Classify one stored frontend answer with the package's guardrail judge."""
 
     if stored.problem is not None:
         return None, None
@@ -899,18 +868,18 @@ def _frontend_outcome(
     if not isinstance(content, str) or not content.strip():
         return None, None
 
-    trip = module.judge_message(assistant, [stored.user or {}, assistant], 1)
+    trip = guardrail.judge_message(assistant, [stored.user or {}, assistant], 1)
     if trip is not None:
         return "leak", trip.pattern_id
 
-    prompt_dates = module.normalized_dates(prompt)
+    prompt_dates = guardrail.normalized_dates(prompt)
     stored_dates: set[str] = set()
-    for text in module.rendered_texts(assistant):
-        stored_dates.update(module.normalized_dates(text))
+    for text in guardrail.rendered_texts(assistant):
+        stored_dates.update(guardrail.normalized_dates(text))
     if not stored_dates.issubset(prompt_dates):
         return "computed", None
 
-    refusals = tuple(_normalised(refusal) for refusal in module.REFUSALS)
+    refusals = tuple(_normalised(refusal) for refusal in guardrail.REFUSALS)
     if any(_normalised(content).endswith(refusal) for refusal in refusals):
         # The frontend keeps the pre-outlet text as originalContent only when the
         # outlet changed it; a stream trip leaves nothing to keep, or a released
@@ -984,7 +953,6 @@ def _frontend_case(
     *,
     role: str,
     run_token: str,
-    module: Any,
     frontend_fix: str,
 ) -> CheckOutcome:
     name = f"{FRONTEND_ROW_PREFIX}{case.id}"
@@ -1025,7 +993,7 @@ def _frontend_case(
         else:
             figures["stored"] = True
             figures["finished"] = stored.problem is None
-            outcome, pattern = _frontend_outcome(module, stored, prompt)
+            outcome, pattern = _frontend_outcome(stored, prompt)
             figures["outcome"] = outcome
             figures["leak_pattern"] = pattern
             if outcome is None:
@@ -1068,7 +1036,6 @@ def _frontend_checks(
     *,
     sample: enginesample.Sample,
     password: str,
-    module: Any,
     run_token: str,
     frontend_fix: str,
 ) -> Iterator[CheckOutcome]:
@@ -1100,7 +1067,6 @@ def _frontend_checks(
             case,
             role=role,
             run_token=run_token,
-            module=module,
             frontend_fix=frontend_fix,
         )
 
@@ -1246,11 +1212,6 @@ def run_engine_verify(
         return 1
     eval_password = password_result.value
 
-    filter_module = _load_filter(checkout)
-    if isinstance(filter_module, Problem):
-        show(_failed("preconditions", filter_module.problem, filter_module.fix))
-        return 1
-
     try:
         audit_problem = audit_api.probe(io, rendered_dir)
     except OSError:
@@ -1264,8 +1225,7 @@ def run_engine_verify(
             "preconditions",
             True,
             f"root, site, rendered engine, profile {selected.name}, window {window}, "
-            f"sample {sample.sha256[:12]}, eval password, guardrail Filter, and "
-            "audit writer are ready",
+            f"sample {sample.sha256[:12]}, eval password, and audit writer are ready",
             "",
         )
     )
@@ -1322,7 +1282,6 @@ def run_engine_verify(
             sample=sample,
             served_name=served_name,
             engine_fix=engine_fix,
-            lag_chars=filter_module.LAG_CHARS,
         )
     )
 
@@ -1338,7 +1297,6 @@ def run_engine_verify(
         frontend_factory,
         sample=sample,
         password=eval_password,
-        module=filter_module,
         run_token=run_id.hex[:8],
         frontend_fix=_frontend_fix(rendered_dir),
     ):

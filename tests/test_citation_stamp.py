@@ -12,10 +12,12 @@ from unittest.mock import patch
 
 import yaml  # type: ignore[import-untyped]
 
+from gideon import guardrail
+
 ROOT = Path(__file__).resolve().parent.parent
 FILTER_PATH = ROOT / "compose/open-webui/functions/citation_stamp.py"
 SEED_PATH = ROOT / "eval/seed/general/citation-stamp.yaml"
-GUARDRAIL_PATH = ROOT / "compose/open-webui/functions/arithmetic_guardrail.py"
+FUNCTION_PATH = ROOT / "compose/open-webui/functions/arithmetic_guardrail.py"
 
 
 def load_module(path: Path, name: str) -> Any:
@@ -28,7 +30,7 @@ def load_module(path: Path, name: str) -> Any:
 
 
 FILTER: Any = load_module(FILTER_PATH, "citation_stamp")
-GUARDRAIL: Any = load_module(GUARDRAIL_PATH, "citation_stamp_guardrail")
+FUNCTION: Any = load_module(FUNCTION_PATH, "citation_stamp_guardrail")
 TAIL: str = FILTER.STAMP_SEPARATOR + FILTER.CITATION_STAMP
 
 
@@ -317,6 +319,6 @@ class BoundsAndHygiene(unittest.TestCase):
         self.assertEqual(tuple(inspect.signature(FILTER.Filter.outlet).parameters), ("self", "body"))
 
     def test_refusals_and_the_stamp_are_not_citations(self) -> None:
-        for text in (GUARDRAIL.DEADLINE_REFUSAL, GUARDRAIL.SESSION_REFUSAL, FILTER.CITATION_STAMP):
+        for text in (guardrail.DEADLINE_REFUSAL, FUNCTION.SESSION_REFUSAL, FILTER.CITATION_STAMP):
             with self.subTest(text=text[:40]):
                 self.assertIsNone(FILTER.detect(text))

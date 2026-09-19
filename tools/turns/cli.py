@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Final
 from zoneinfo import ZoneInfo
 
+from gideon import guardrail
 from gideon.host import models, owui, secrets, site, tls
 from gideon.host.render.owui import EVAL_PASSWORD_SECRET, GENERAL_PRESET_ID
 from gideon.host.report import Problem, StageResult, print_stage
@@ -322,19 +323,20 @@ def main(
             return 1
         password_value = password.value
 
-    filter_path = root / "compose/open-webui/functions/arithmetic_guardrail.py"
-    try:
-        guardrail = classify.load_guardrail(root)
-    except Exception as exc:  # noqa: BLE001 - the precondition owns import failures.
-        print_stage(
-            StageResult(
-                "preconditions",
-                False,
-                f"guardrail could not be loaded from {filter_path}: {type(exc).__name__}: {exc}",
-                f"Correct {filter_path}, then retry.",
+    gate_texts: classify.GateTexts | None = None
+    if options.probe_inlet:
+        try:
+            gate_texts = classify.load_gate_texts(root)
+        except Exception:  # noqa: BLE001 - the precondition owns Function load failures.
+            print_stage(
+                StageResult(
+                    "preconditions",
+                    False,
+                    "guardrail gate texts could not be loaded",
+                    f"Correct {root / classify.GUARDRAIL_FUNCTION}, then retry.",
+                )
             )
-        )
-        return 1
+            return 1
 
     loaded_cases = cases.load_cases(options.cases)
     if not isinstance(loaded_cases, cases.CaseSet):
@@ -537,6 +539,7 @@ def main(
         cases=case_values,
         password=password_value,
         guardrail=guardrail,
+        gate_texts=gate_texts,
         client_factory=chosen_factory,
         now=selected_now,
         monotonic=monotonic,

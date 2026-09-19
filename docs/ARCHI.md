@@ -16,7 +16,7 @@ GIDEON is a fully local legal AI system for federal defender offices: corpus-gro
 |---|---|
 | [`archi/host.md`](archi/host.md) | the host platform: the site model and schema, provision and its steps, the image store's home, preflight and its checks, the three locks and the profile's memory table, host state, the no-GPU and build-box modes, the office clock, the CI runner step |
 | [`archi/render-apply.md`](archi/render-apply.md) | render and apply: the rendered tree, secrets and their rotation, the release constants, the search rig's rendered files, the memory limits, the weights tree |
-| [`archi/engine-frontend.md`](archi/engine-frontend.md) | the engine and the frontend's runtime: the engine service and the frontend's connection, the two model records, the frontend client and the managed turn, the two Filters and the trip's row, `engine verify` and its sample |
+| [`archi/engine-frontend.md`](archi/engine-frontend.md) | the engine and the frontend's runtime: the engine service and the frontend's connection, the two model records, the frontend client and the managed turn, the two Filters, the guardrail's judge (`gideon/guardrail.py`), and the trip's row, `engine verify` and its sample |
 | [`archi/backup-restore.md`](archi/backup-restore.md) | the backup set and its commands, restore, install, upgrade and rollback |
 | [`archi/stack.md`](archi/stack.md) | ingress and TLS, the registry mirror, observability and alerting, reconcile and the audit writer |
 | [`archi/tools.md`](archi/tools.md) | the pin watch and the research notes' pin bindings, the build tool, the acceptance harness and its full-restore form, the turn harness and its browser mode, the evidence redaction, the gate, and the export boundary list; their interpreters and footprints |
@@ -51,6 +51,7 @@ GIDEON/
 │   ├── __main__.py          # python3 -m gideon → sys.exit(main())
 │   ├── cli.py               # build_parser() + main(): the whole §20.2 surface
 │   ├── extraction/          # the exact-object contract, the extraction grammar, its measure — stdlib only (archi/eval.md)
+│   ├── guardrail.py         # the arithmetic guardrail's judge (§9's third set); the Function's copy held equal until general-turn ticket 09
 │   └── host/                # bare-host subtree: stdlib + yaml ONLY (§9)
 │       ├── cli.py · sysio.py · report.py · stages.py   # the handlers, the injectable Host seam, the refusal and row shapes, run_stage (§8, §10, §14)
 │       ├── lock.py · images.py · models.py · egress.py · courts.py · site.py · site_schema.py · nogpu.py   # the committed-artifact loaders, the schema emitter, the no-GPU marker
@@ -67,7 +68,7 @@ GIDEON/
 │   ├── fixtures/            # site/ (refusals); render/<example|second-office|no-gpu>/ (byte-stable renders); host/ (the recorded box, the runner's settings); pinwatch/ (the recorded hub replies); courts/ (a fictitious CSV and hand table, malformed maps, lockfiles)
 │   ├── regenerate_render_fixtures.py   # rewrites fixtures/render deliberately (the drift test names it)
 │   └── contract/            # self-hosted-only modules, no test_ prefix, each with its throwaway stack's files beside it (archi/tests.md)
-├── tools/                   # repository tooling, never the product (not in the release image); stdlib + gideon.host only (archi/tools.md)
+├── tools/                   # repository tooling, never the product (not in the release image); stdlib + gideon.host and gideon.guardrail only (archi/tools.md)
 │   ├── pinwatch/ · imagebuild/ · acceptance/ · turns/ · redact/ · courtmap/   # the pin watch (hosted CI); the build tool, the clean-VM harness, the turn harness's two drivers, the evidence redaction (the box); the court map generator (by hand)
 │   ├── ownership.py         # the sudo hand-back (--out and the bytecode caches) the two harnesses share
 │   └── gate.py · cycles.py · tracker.py · judgments/ · exportboundary.py   # the gate, the cycles record, tracker board, and judgment set's intake (development repository), the export list — the dev venv
@@ -151,7 +152,7 @@ One row per leaf, each command with its module:
 |---|---|
 | `host provision` (`host/provision.py`) · `preflight` (`host/preflight.py`) | [`archi/host.md`](archi/host.md) |
 | `render [--diff]` (`host/render/`) · `apply` (`host/apply.py`) · `secrets rotate <name>` (`host/rotate.py`) · `models pull` (`host/weights.py`) | [`archi/render-apply.md`](archi/render-apply.md) |
-| `engine verify` (`host/engine.py`) · the frontend client (`host/owui.py`, `host/owuiturn.py`) · the two Filters (`compose/open-webui/functions/`) | [`archi/engine-frontend.md`](archi/engine-frontend.md) |
+| `engine verify` (`host/engine.py`) · the frontend client (`host/owui.py`, `host/owuiturn.py`) · the two Filters (`compose/open-webui/functions/`) and the guardrail's judge (`gideon/guardrail.py`) | [`archi/engine-frontend.md`](archi/engine-frontend.md) |
 | `backup run` and `backup push` (`host/backup.py`) · `backup drill` (`host/drill.py`) · `restore` (`host/restore.py`) · `install` (`host/install.py`) · `upgrade <tag>` and `upgrade --rollback` (`host/upgrade.py`) | [`archi/backup-restore.md`](archi/backup-restore.md) |
 | `alerts test` (`host/alerts.py`) · `users reconcile [--now]` (`host/users.py`) · `tls reload` (`host/tls.py`) · `registry mirror [--to]` (`host/registry.py`) | [`archi/stack.md`](archi/stack.md) |
 | `python3 -m tools.gate [TEST_PATH ...]` · `python3 -m tools.imagebuild` · `sudo python3 -m tools.acceptance` · `sudo python3 -m tools.turns [--browser]` · `python3 -m tools.pinwatch` and its `.notes`, `.hub`, and `.bumped` · `python3 -m tools.redact --site <file>` · `python3 -m tools.courtmap --csv <file>`, each the module under `tools/` it names | [`archi/tools.md`](archi/tools.md) |
@@ -161,10 +162,11 @@ One row per leaf, each command with its module:
 
 ## 9. The Bare-Host Import Boundary
 
-The seam that makes §1.9 step 3 possible: `sudo python3 -m gideon host provision` runs on a bare Ubuntu Server install where only the stdlib and `python3-yaml` exist. `tests/test_host_import_boundary.py` enforces it **at the AST level** (nothing is imported to be checked), with two rules:
+The seam that makes §1.9 step 3 possible: `sudo python3 -m gideon host provision` runs on a bare Ubuntu Server install where only the stdlib and `python3-yaml` exist. `tests/test_host_import_boundary.py` enforces it **at the AST level** (nothing is imported to be checked), with three rules:
 
 1. **Entry chain** (`gideon/__init__.py`, `__main__.py`, `cli.py`): *module-level* imports resolve only to the stdlib, `yaml`, or the checked set itself. Function-level imports are exempt — the documented mechanism for non-host commands to grow heavy dependencies later.
 2. **Host subtree** (`gideon/host/**`): **every** import, at any depth, resolves to the stdlib, `yaml`, or the checked set. No exemptions.
+3. **Shared modules** (`gideon/guardrail.py`, which `host/engine.py` and General's service both call): the entry chain's rule — the trip writer's import of the Postgres driver sits inside the function no host path calls.
 
 CI runs this test as its own named step so a violation is legible in the Actions UI. Anything the host path and the rest of the product both need must itself live in the checked set.
 

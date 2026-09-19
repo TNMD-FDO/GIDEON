@@ -7,7 +7,8 @@
 A tripwire holds a repo-wide contract; a subsystem's own modules are listed in its leaf.
 
 - `test_cli_surface.py` — the §20.2 surface; `STUBS` shrinks as commands land.
-- `test_host_import_boundary.py` — the seam (§9), AST-level.
+- `test_host_import_boundary.py` — the seam (§9), AST-level: the entry chain, the host subtree, and the shared modules.
+- `test_guardrail_equality.py` — until general-turn ticket 09 deletes it with the Function: `gideon/guardrail.py`'s top-level statements equal the guardrail Function's less its named Function-only set, compared as syntax trees with neither file imported, no name bound twice in either, and the held list of files under `tools/`, `tests/`, and `gideon/` that name the Function's path.
 - `test_lock_coupling.py` — no module under `tests/` embeds a value the pin watch can move, whole-token, comments included: the three locks' values and the skills' record when present.
 - `test_toolchain_pins.py` — the two toolchain copies no install reads, held to `requirements-dev.txt`: `pin-watch.yml`'s PyYAML install line and the Playwright constant `tools/turns/chromium.py` names; the module states no version. The ruff, mypy, and pytest pins have no copy: CI installs from the file.
 - `test_evidence_hygiene.py` — every text asset under the development repository's `.scratch/` free of a complete age secret key and of a print-once line carrying a value other than `<redacted>`.

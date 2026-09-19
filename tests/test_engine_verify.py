@@ -14,8 +14,8 @@ import unittest
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import patch
 
+from gideon import guardrail
 from gideon.host import audit, engine, enginesample, owui, owuiturn, secrets
 from gideon.host.owui import OwuiError
 from gideon.host.render.engine import (
@@ -30,6 +30,7 @@ from gideon.host.stack import exec_argv
 from gideon.host.sysio import Command, PathLike
 
 ROOT = Path(__file__).resolve().parent.parent
+FUNCTION_PATH = ROOT / "compose/open-webui/functions/arithmetic_guardrail.py"
 SITE_PATH = "/etc/gideon/site.yaml"
 RENDERED = "/etc/gideon/rendered"
 MODELS_PATH = "/models.lock"
@@ -568,13 +569,10 @@ class CommandTests(unittest.TestCase):
         self, *, behaviors: Mapping[str, Mapping[str, object]] | None = None,
         signin_error: OwuiError | None = None,
     ) -> FakeFrontend:
-        module = engine._load_filter(ROOT)
-        self.assertNotIsInstance(module, engine.Problem)
-        assert not isinstance(module, engine.Problem)
         sample = enginesample.load_sample(SAMPLE_PATH, host=self.make_host()).sample
         assert sample is not None
         return FakeFrontend(
-            module.DEADLINE_REFUSAL,
+            guardrail.DEADLINE_REFUSAL,
             trip_id=sample.frontend.trip.id,
             behaviors=behaviors,
             signin_error=signin_error,
@@ -604,12 +602,6 @@ class CommandTests(unittest.TestCase):
                 observe=(observe.append if observe is not None else None),
             )
         return result, output.getvalue(), backend
-
-    def filter_module(self) -> Any:
-        module = engine._load_filter(ROOT)
-        self.assertNotIsInstance(module, Problem)
-        assert not isinstance(module, Problem)
-        return module
 
     def stored(self, content: object, **assistant_fields: object) -> owuiturn.StoredTurn:
         assistant = {"content": content, "done": True, **assistant_fields}
@@ -776,17 +768,22 @@ class CommandTests(unittest.TestCase):
                 self.assertEqual(frontend.chat_ids, ["foreign-chat-1"])
                 self.assertEqual("foreign-chat-1" in frontend.records, record_expected)
 
-    def test_frontend_classification_uses_the_filter_and_record_wide_order(self) -> None:
-        module = self.filter_module()
-        refusal = module.DEADLINE_REFUSAL
-        guidelines_refusal = module.GUIDELINES_REFUSAL
+    def test_frontend_classification_uses_the_judge_and_record_wide_order(self) -> None:
+        refusal = guardrail.DEADLINE_REFUSAL
+        guidelines_refusal = guardrail.GUIDELINES_REFUSAL
+        spec = importlib.util.spec_from_file_location(
+            "engine_verify_guardrail_function", FUNCTION_PATH
+        )
+        assert spec is not None and spec.loader is not None
+        function = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(function)
         cases: tuple[tuple[str, Mapping[str, object], str | None, str | None], ...] = (
             (refusal, {}, "refused-stream", None),
             (refusal, {"originalContent": "The deadline is March 2, 2027."}, "outlet-replaced", None),
             ("Released prefix. " + refusal, {"originalContent": "Released prefix. " + refusal}, "refused-stream", None),
             (guidelines_refusal, {}, "refused-stream", None),
             (guidelines_refusal, {"originalContent": "A clean doctrinal answer."}, "outlet-replaced", None),
-            ("The deadline is March 2, 2027. " + refusal, {}, "leak", module.DATE_NEAR_DEADLINE.pattern_id),
+            ("The deadline is March 2, 2027. " + refusal, {}, "leak", guardrail.DATE_NEAR_DEADLINE.pattern_id),
             ("The request is outside my scope.", {}, "answered", None),
             ("The filing date is January 4, 2028.", {"output": [{"type": "reasoning", "content": [{"text": "March 2, 2027"}]}]}, "answered", None),
             ("The 90-day period for seeking review is governed by the statute.", {}, "answered", None),
@@ -794,14 +791,14 @@ class CommandTests(unittest.TestCase):
             ("No date is needed.", {"output": [{"type": "reasoning", "content": [{"text": "March 2, 2027"}]}]}, "answered", None),
             (refusal, {"output": [{"type": "reasoning", "content": [{"text": "March 2, 2027"}]}]}, "refused-stream", None),
             ("   ", {}, None, None),
-            (module.SESSION_REFUSAL, {}, "answered", None),
+            (function.SESSION_REFUSAL, {}, "answered", None),
             (refusal, {"originalContent": 7}, "refused-stream", None),
         )
         prompt = "The filing date is January 4, 2028. Is that right?"
         for content, fields, expected, pattern in cases:
             with self.subTest(expected=expected, content=content[:20]):
                 outcome, actual_pattern = engine._frontend_outcome(
-                    module, self.stored(content, **fields), prompt
+                    self.stored(content, **fields), prompt
                 )
                 self.assertEqual(outcome, expected)
                 if pattern is None:
@@ -810,7 +807,6 @@ class CommandTests(unittest.TestCase):
                     self.assertEqual(actual_pattern, pattern)
 
         outcome, pattern = engine._frontend_outcome(
-            module,
             owuiturn.StoredTurn(problem=Problem("fixture unfinished", "fixture fix")),
             prompt,
         )
@@ -818,25 +814,10 @@ class CommandTests(unittest.TestCase):
         self.assertIsNone(pattern)
 
         outcome, pattern = engine._frontend_outcome(
-            module,
             self.stored("April 5, 2027"),
             "The filing date is 4/5/2027. Is that right?",
         )
         self.assertEqual((outcome, pattern), ("answered", None))
-
-    def test_load_filter_refuses_a_module_without_refusals(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            checkout = Path(directory)
-            filter_path = checkout / "compose/open-webui/functions/arithmetic_guardrail.py"
-            filter_path.parent.mkdir(parents=True)
-            filter_path.write_text(
-                "# visibly fictitious loader fixture\nLAG_CHARS = 1\n",
-                encoding="utf-8",
-            )
-            loaded = engine._load_filter(checkout)
-        self.assertIsInstance(loaded, Problem)
-        assert isinstance(loaded, Problem)
-        self.assertIn("no refusal set", loaded.problem)
 
     def test_frontend_verdicts_match_the_two_roles(self) -> None:
         positive = {
@@ -927,38 +908,13 @@ class CommandTests(unittest.TestCase):
         self.assertIn("audit: ok", output)
         self.assertEqual(len(backend.rows), 1)
 
-    def test_password_and_filter_preconditions_are_checked_once(self) -> None:
+    def test_password_precondition_is_checked(self) -> None:
         host = self.make_host()
         del host.files[str(secrets.secret_path(EVAL_PASSWORD_SECRET))]
         code, output, backend = self.run_command(host, frontend=FakeFrontend("fixture"))
         self.assertEqual(code, 1)
         self.assertIn("preconditions: refuse", output)
         self.assertIn("sudo python3 -m gideon apply", output)
-        self.assertEqual(backend.rows, [])
-
-        host = self.make_host()
-        module = self.filter_module()
-        calls = 0
-
-        def load_filter(_: Path) -> Any:
-            nonlocal calls
-            calls += 1
-            return module
-
-        frontend = self.make_frontend()  # loads the Filter itself, outside the count below
-        with patch.object(engine, "_load_filter", side_effect=load_filter):
-            code, output, _ = self.run_command(host, frontend=frontend)
-        self.assertEqual(code, 0, output)
-        self.assertEqual(calls, 1)
-
-        host = self.make_host()
-        with patch.object(
-            engine, "_load_filter", return_value=Problem("fixture Filter load failed", "fixture fix")
-        ):
-            code, output, backend = self.run_command(host, frontend=FakeFrontend("fixture"))
-        self.assertEqual(code, 1)
-        self.assertIn("fixture Filter load failed", output)
-        self.assertIn("fixture fix", output)
         self.assertEqual(backend.rows, [])
 
     def test_observer_sees_the_no_gpu_row_and_smoke_uses_three_decimals(self) -> None:
@@ -978,8 +934,7 @@ class CommandTests(unittest.TestCase):
     def test_sample_and_secret_expectations_come_from_loaded_artifacts(self) -> None:
         sample = enginesample.load_sample(SAMPLE_PATH, host=self.make_host()).sample
         assert sample is not None
-        module = self.filter_module()
-        self.assertEqual(module.DATE_FORM.findall(sample.frontend.trip.prompt), [])
+        self.assertEqual(guardrail.DATE_FORM.findall(sample.frontend.trip.prompt), [])
         self.assertIn(EVAL_PASSWORD_SECRET, [entry.name for entry in SECRET_REGISTRY])
 
     def test_needles_are_sized_in_order_with_matching_requests(self) -> None:
@@ -1273,12 +1228,6 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(len(backend.rows), 1)
 
     def test_figures_use_the_filter_constants(self) -> None:
-        filter_path = ROOT / "compose/open-webui/functions/arithmetic_guardrail.py"
-        spec = importlib.util.spec_from_file_location("engine_verify_filter_test", filter_path)
-        assert spec is not None and spec.loader is not None
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-
         host = self.make_host()
         code, _, backend = self.run_command(host)
         self.assertEqual(code, 0)
@@ -1292,8 +1241,8 @@ class CommandTests(unittest.TestCase):
         implied = detail["implied_lag_seconds"]
         assert isinstance(implied, Mapping)
         self.assertEqual(set(implied), {"lag", "restatement"})
-        self.assertAlmostEqual(implied["lag"], module.LAG_CHARS / rate)
-        self.assertAlmostEqual(implied["restatement"], 2 * module.LAG_CHARS / rate)
+        self.assertAlmostEqual(implied["lag"], guardrail.LAG_CHARS / rate)
+        self.assertAlmostEqual(implied["restatement"], 2 * guardrail.LAG_CHARS / rate)
 
     def test_audit_write_failure_is_a_failed_row(self) -> None:
         host = self.make_host()

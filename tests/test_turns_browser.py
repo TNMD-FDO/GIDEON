@@ -16,6 +16,7 @@ from unittest import TestCase
 from unittest.mock import patch
 from urllib.parse import unquote
 
+from gideon import guardrail
 from gideon.host import models, site, tls
 from gideon.host.owui import Client, OwuiError, Response
 from gideon.host.report import Problem
@@ -557,9 +558,9 @@ class FakeFrontend:
         self.token = "browser-session-token"
         self.chats: dict[str, dict[str, object]] = {}
         self.calls: list[tuple[str, str, object | None, str | None]] = []
-        guardrail = classify.load_guardrail(ROOT)
-        self.session_refusal = guardrail.SESSION_REFUSAL
-        self.branch_refusal = guardrail.BRANCH_REFUSAL
+        gate_texts = classify.load_gate_texts(ROOT)
+        self.session_refusal = gate_texts.session_refusal
+        self.branch_refusal = gate_texts.branch_refusal
         self.base_model_id: str | None = None
         self.base_model_status = 400
         self.base_model_detail = self.branch_refusal
@@ -1059,6 +1060,24 @@ class BrowserTurnIntegration(TestCase):
         self.assertEqual(base_record["body"]["detail"], frontend.branch_refusal)
         self.assertIn(str(ROOT / "models.lock"), host.read_paths)
 
+    def test_probe_gate_text_loader_failure_is_content_free(self) -> None:
+        frontend = FakeFrontend()
+        page = FakePage(frontend, drains=self._drains())
+        with patch(
+            "tools.turns.cli.classify.load_gate_texts",
+            side_effect=RuntimeError("private gate text"),
+        ):
+            code, stdout, _stderr, _frontend, _host = self._run(
+                page=page, args=["--probe-inlet"]
+            )
+        function_path = ROOT / classify.GUARDRAIL_FUNCTION
+        self.assertEqual(code, 1)
+        self.assertIn(
+            "preconditions: refuse — guardrail gate texts could not be loaded", stdout
+        )
+        self.assertIn(f"Correct {function_path}, then retry.", stdout)
+        self.assertNotIn("private gate text", stdout)
+
     def test_inlet_probe_reports_a_computed_residual_without_failing(self) -> None:
         frontend = FakeFrontend()
         frontend.chat_probe_content = "the deadline is June 5, 2027"
@@ -1494,7 +1513,6 @@ class BrowserTurnIntegration(TestCase):
         self.assertTrue(classify.live_fails(verdict, False))
 
     def test_refusal_predicate_accepts_a_stream_suffix_and_rejects_a_prefix(self) -> None:
-        guardrail = classify.load_guardrail(ROOT)
         is_refusal = classify.refusal_test(guardrail)
         for refusal in guardrail.REFUSALS:
             with self.subTest(refusal=refusal):
@@ -1502,7 +1520,6 @@ class BrowserTurnIntegration(TestCase):
                 self.assertFalse(is_refusal("safe doctrinal prefix"))
 
     def test_clean_stream_refusal_records_its_first_and_last_painted_times(self) -> None:
-        guardrail = classify.load_guardrail(ROOT)
         refusal = guardrail.DEADLINE_REFUSAL
         watch = browser._Watch(
             classify.live_judge(guardrail, "Explain the general doctrine."),
@@ -1526,7 +1543,6 @@ class BrowserTurnIntegration(TestCase):
         )
 
     def test_stream_prefix_refusal_keeps_trip_on_screen_at_end(self) -> None:
-        guardrail = classify.load_guardrail(ROOT)
         refusal = guardrail.DEADLINE_REFUSAL
         answer = "the deadline is June 5, 2027"
         watch = browser._Watch(
@@ -1546,7 +1562,6 @@ class BrowserTurnIntegration(TestCase):
         self.assertIn("replaced at 0.2s, on screen at end", classify.live_field(verdict))
 
     def test_flash_fails_under_the_shared_stream_policy(self) -> None:
-        guardrail = classify.load_guardrail(ROOT)
         refusal = guardrail.DEADLINE_REFUSAL
         page = FakePage(
             FakeFrontend(),
@@ -1587,7 +1602,6 @@ class BrowserTurnIntegration(TestCase):
         self.assertIn("replaced at 0.5s", stdout)
 
     def test_live_judge_judges_the_answer_and_withholds_the_block(self) -> None:
-        guardrail = classify.load_guardrail(ROOT)
         judge = classify.live_judge(
             guardrail, "I calculated the § 2255 deadline as June 5, 2027. Is that correct?"
         )
@@ -1619,7 +1633,6 @@ class BrowserTurnIntegration(TestCase):
         self.assertTrue(classify.live_fails(verdict, run.STREAM_LEAK_FAILS))
 
     def test_live_judge_resets_since_for_a_non_extending_re_render(self) -> None:
-        guardrail = classify.load_guardrail(ROOT)
         prompt = "Explain the AEDPA deadline under these dates."
         judge = classify.live_judge(guardrail, prompt)
         watch = browser._Watch(judge, classify.refusal_test(guardrail))

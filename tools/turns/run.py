@@ -840,18 +840,19 @@ def _run_probe(
     client: Client,
     spec: RunSpec,
     guardrail: Any,
+    gate_texts: classify.GateTexts,
     host: Host,
     emit: Callable[[StageResult], None],
 ) -> ProbeOutcome:
     """Ticket 34's inlet-gate probe from the users seat, three rows.
 
     ``inlet-bare`` posts a completion carrying neither a session id nor a chat
-    id and expects the Filter's session refusal on a 400 — refused before the
+    id and expects the Function's session refusal on a 400 — refused before the
     engine, a row and never a turn. ``inlet-chat-id`` adds the id of a chat
     the account owns and expects the model's answer unreplaced: §16's recorded
     residual, judged and reported, never failed on its content.
     ``inlet-base-model`` reuses that owned chat with the base model and expects
-    the branch refusal before the engine. Neither completion should create a
+    the Function's branch refusal before the engine. Neither completion should create a
     chat of its own; any that appears is deleted, and the owned chat is deleted
     whatever happened. A request that fails is a failed row for whichever
     probe had not been reported, never a traceback.
@@ -880,7 +881,7 @@ def _run_probe(
             bare.problem is None
             and bare.status == 400
             and isinstance(bare.body, Mapping)
-            and bare.body.get("detail") == guardrail.SESSION_REFUSAL
+            and bare.body.get("detail") == gate_texts.session_refusal
         )
         report(
             _probe_row(
@@ -964,7 +965,7 @@ def _run_probe(
             base.problem is None
             and base.status == 400
             and isinstance(base.body, Mapping)
-            and base.body.get("detail") == guardrail.BRANCH_REFUSAL
+            and base.body.get("detail") == gate_texts.branch_refusal
         )
         report(
             _probe_row(
@@ -1597,6 +1598,7 @@ def _run_cases(
     origin: str,
     window: str,
     guardrail: Any,
+    gate_texts: classify.GateTexts | None,
     now: Callable[[], datetime],
     monotonic: Callable[[], float],
     host: Host,
@@ -1685,7 +1687,8 @@ def _run_cases(
     probe_turns = 0
     probe_records: dict[str, dict[str, object]] = {}
     if spec.probe_inlet:
-        probe = _run_probe(client, spec, guardrail, host, emit)
+        assert gate_texts is not None
+        probe = _run_probe(client, spec, guardrail, gate_texts, host, emit)
         probe_turns = probe.turns
         probe_records = probe.records
         bookkeeping.misses += probe.misses
@@ -1816,6 +1819,7 @@ def run(
     window: str = "",
     password: str,
     guardrail: Any,
+    gate_texts: classify.GateTexts | None = None,
     client_factory: Callable[..., Client],
     now: Callable[[], datetime],
     monotonic: Callable[[], float] = time.monotonic,
@@ -1895,6 +1899,7 @@ def run(
             origin=origin,
             window=window,
             guardrail=guardrail,
+            gate_texts=gate_texts,
             now=now,
             monotonic=monotonic,
             host=io,
