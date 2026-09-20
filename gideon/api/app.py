@@ -13,27 +13,24 @@ from starlette.routing import BaseRoute, Match, Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .auth import BearerAuthMiddleware
+from .relay import UPSTREAM_ERROR, CompletionRelay
 from .settings import Settings
 from .upstream import EngineClient
 
 _HEALTH_PATH = "/health"
 _MODELS_PATH = "/v1/models"
+_COMPLETIONS_PATH = "/v1/chat/completions"
 _REQUEST_LOG = logging.getLogger("gideon.api.request")
-_UPSTREAM_ERROR = {
-    "error": {
-        "message": "The upstream engine is unavailable.",
-        "type": "server_error",
-        "param": None,
-        "code": "upstream_unavailable",
-    }
-}
-
 
 _UNMATCHED = "-"
 
 
 class RequestLogMiddleware:
-    """Log method, route template, status, and elapsed seconds without content."""
+    """Log method, route template, status, and elapsed seconds without content.
+
+    A response that never started logs ``-`` for its status, and a caller that
+    left before the response finished adds ``disconnected``.
+    """
 
     def __init__(self, app: ASGIApp, routes: Sequence[BaseRoute]) -> None:
         self.app = app
@@ -50,25 +47,40 @@ class RequestLogMiddleware:
         if scope["type"] != "http" or scope.get("path") == _HEALTH_PATH:
             await self.app(scope, receive, send)
             return
-        status = 500
+        status: int | None = None
+        response_finished = False
+        disconnected = False
         started = time.perf_counter()
 
         async def capture(message: Message) -> None:
-            nonlocal status
+            nonlocal response_finished, status
             if message["type"] == "http.response.start":
                 status = int(message["status"])
             await send(message)
+            if message["type"] == "http.response.body" and not message.get("more_body", False):
+                response_finished = True
+
+        async def capture_receive() -> Message:
+            nonlocal disconnected
+            message = await receive()
+            if message["type"] == "http.disconnect" and not response_finished:
+                disconnected = True
+            return message
 
         try:
-            await self.app(scope, receive, capture)
+            await self.app(scope, capture_receive, capture)
+        except Exception:
+            status = 500
+            raise
         finally:
             elapsed = time.perf_counter() - started
             _REQUEST_LOG.info(
-                "%s %s %d %.3fs",
+                "%s %s %s %.3fs%s",
                 scope.get("method", ""),
                 self._template(scope),
-                status,
+                "-" if status is None else status,
                 elapsed,
+                " disconnected" if disconnected else "",
             )
 
 
@@ -83,7 +95,7 @@ async def models(request: Request) -> Response:
 
     result = await request.app.state.engine.list_models()
     if result is None:
-        return JSONResponse(_UPSTREAM_ERROR, status_code=502)
+        return JSONResponse(UPSTREAM_ERROR, status_code=502)
     headers = {}
     if result.content_type is not None:
         headers["content-type"] = result.content_type
@@ -109,6 +121,9 @@ def create_app(
     routes = [
         Route(_HEALTH_PATH, health, methods=["GET"]),
         Route(_MODELS_PATH, models, methods=["GET"]),
+        # An instance, not a function: Starlette calls a non-function endpoint
+        # as an ASGI application, which is the relay's shape.
+        Route(_COMPLETIONS_PATH, CompletionRelay(), methods=["POST"]),
     ]
     app = Starlette(routes=routes, lifespan=lifespan)
     app.add_middleware(BearerAuthMiddleware, key=settings.api_key, health_path=_HEALTH_PATH)

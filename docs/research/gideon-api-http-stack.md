@@ -554,6 +554,20 @@ already established, with the exact `AuthenticationMiddleware`/
 `GUARDED_PREFIX` source, in `docs/research/vllm-engine-service.md` §1 (not
 re-derived here).
 
+**Addendum, 2026-09-19 — the engine's own in-stream error shape** (read at the
+pin during ticket 02's `TRIP-1` discovery; recorded here so an engine bump's
+re-read meets it). An error raised *after* a chat-completion stream has begun
+cannot change the status that is already on the wire, so
+`vllm/entrypoints/openai/chat_completion/serving.py:835-842` at `v0.27.1`
+emits the error object as one `data:` event and then the end marker
+`data: [DONE]`, ending the body cleanly. This is the shape `gideon-api`'s
+relay copies for its own mid-stream failure (`gideon/api/relay.py`: a blank
+line closing any event the failure cut in half, then the fixed
+`upstream_unavailable` object as one `data:` event, then the end marker), and
+it is the shape the pinned frontend reads — `docs/research/owui-stream-hook.md`
+§8 item 3. A bump that changes it changes both the relay's failure path and
+the frontend's reading of it, so this paragraph is the one to re-read.
+
 ---
 
 ## 6. The frontend as the service's client, Open WebUI v0.11.3
