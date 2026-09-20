@@ -10,6 +10,11 @@ history at commit f06e83f. User-facing notes for every tag from `v0.2.0` live un
 `docs/release-notes/`, and `tests/test_release_records.py` holds this index
 complete, ordered, and dated from the release files.
 
+- [v0.2.21](docs/2-changelog/w3_v0.2.21.md) — 2026-09-20 — the partial-reference test portable to the export
+- [v0.2.20](docs/2-changelog/w3_v0.2.20.md) — 2026-09-20 — the served name off the box's site file
+- [v0.2.19](docs/2-changelog/w3_v0.2.19.md) — 2026-09-20 — the turn harness's service door (general-turn 05)
+- [v0.2.18](docs/2-changelog/w3_v0.2.18.md) — 2026-09-20 — the judge grades and never gates (slice-2 06)
+- [v0.2.17](docs/2-changelog/w3_v0.2.17.md) — 2026-09-19 — the reference run and regression list (slice-2 05)
 - [v0.2.16](docs/2-changelog/w3_v0.2.16.md) — 2026-09-19 — a pool in, packets out, grades in (slice-2 08)
 - [v0.2.15](docs/2-changelog/w3_v0.2.15.md) — 2026-09-19 — a completion streamed and whole (general-turn 02)
 - [v0.2.14](docs/2-changelog/w3_v0.2.14.md) — 2026-09-19 — slice-2 02 — the grammar's remaining families and the variants

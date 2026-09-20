@@ -23,7 +23,7 @@ from zoneinfo import ZoneInfo
 import yaml  # type: ignore[import-untyped]
 
 from gideon import guardrail
-from gideon.host import owuiturn
+from gideon.host import models, owuiturn, site
 from gideon.host.owui import Client, OwuiError, Response
 from gideon.host.render.owui import EVAL_IDENTITY, GENERAL_PRESET_ID
 from gideon.host.report import Problem
@@ -36,7 +36,8 @@ SEED_PATH = ROOT / "eval/seed/guardrails/deadline-trap.yaml"
 GUIDELINES_SEED_PATH = ROOT / "eval/seed/guardrails/guidelines-range.yaml"
 SENTENCE_CREDIT_SEED_PATH = ROOT / "eval/seed/guardrails/sentence-credit.yaml"
 SITE_PATH = Path("/etc/gideon/site.yaml")
-SITE_TEXT = (ROOT / "config/site.example.yaml").read_text(encoding="utf-8")
+SITE_SOURCE = ROOT / "config/site.example.yaml"
+SITE_TEXT = SITE_SOURCE.read_text(encoding="utf-8")
 PASSWORD = "test-evaluation-password"
 TOKEN = "test-session-token"
 FIXED_NOW = datetime(2026, 9, 5, 12, 0, tzinfo=UTC)
@@ -173,6 +174,69 @@ class FakeHost:
 
     def geteuid(self) -> int:
         return self.euid
+
+
+class EngineHost(FakeHost):
+    """A fake host whose engine exec computes the direct completion body."""
+
+    def __init__(self, modes: dict[str, str]) -> None:
+        super().__init__(password=None)
+        self.files[str(ROOT / "models.lock")] = (ROOT / "models.lock").read_text(
+            encoding="utf-8"
+        )
+        self.files[str(ROOT / "host.lock")] = (ROOT / "host.lock").read_text(
+            encoding="utf-8"
+        )
+        self.files[str(ROOT / "images.lock")] = (ROOT / "images.lock").read_text(
+            encoding="utf-8"
+        )
+        self.files["/etc/gideon/rendered/compose.yaml"] = (
+            "services:\n  gideon-generator:\n"
+        )
+        self.modes = modes
+        self.engine_calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def run(self, argv: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        input_text = kwargs.get("input")
+        if not isinstance(input_text, str):
+            return super().run(argv, **kwargs)
+        command = [str(value) for value in cast(Any, argv)]
+        body = cast(dict[str, object], json.loads(input_text))
+        self.engine_calls.append((command, body))
+        messages = cast(list[dict[str, str]], body["messages"])
+        prompt = messages[-1]["content"]
+        case_id = _tagged_case_id(prompt)
+        mode = self.modes.get(case_id, "offline-clean")
+        if mode == "offline-status":
+            status = 503
+            response: object = {"detail": "completion unavailable"}
+        elif mode == "offline-no-content":
+            status = 200
+            response = {"id": "bare-no-content", "choices": [{"message": {}}]}
+        else:
+            status = 200
+            if mode == "offline-trip":
+                content = "The filing deadline is March 2, 2027."
+            elif mode == "offline-restatement":
+                content = prompt.split("\n\n[turn harness ", 1)[0]
+            else:
+                content = "A clean doctrinal answer."
+            response = {
+                "id": f"bare-{len(self.engine_calls)}",
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": content},
+                    }
+                ],
+            }
+        stdout = (
+            json.dumps(response)
+            + f"\n@gideon-engine-verify http_code={status} "
+            "time_starttransfer=0.01 time_total=0.02\n"
+        )
+        return subprocess.CompletedProcess(command, 0, stdout, "")
 
 
 class FakeClient(Client):
@@ -628,10 +692,25 @@ def _run_file(
             if factory is _USE_FAKE_FACTORY
             else cast(Callable[..., Client] | None, factory)
         )
+        effective_args = list(args or [])
+        # General's instruction is loaded from the checkout's render inputs,
+        # which this fake host does not carry, so the CLI-level unfiltered runs
+        # drop it; that the instruction rides and what it looks like on the
+        # wire is held by test_unfiltered_engine_body_uses_route_served_name_
+        # and_instruction, which drives the driver directly.
+        if "--unfiltered" in effective_args and "--no-instruction" not in effective_args:
+            effective_args.append("--no-instruction")
+        selected_host = (
+            host
+            if host is not None
+            else EngineHost(frontend.modes)
+            if "--unfiltered" in effective_args
+            else FakeHost()
+        )
         with redirect_stdout(stdout), redirect_stderr(stderr):
             code = cli.main(
-                [str(path), *(args or [])],
-                host=cast(Host, host if host is not None else FakeHost()),
+                [str(path), *effective_args],
+                host=cast(Host, selected_host),
                 client_factory=selected_factory,
                 now=now or (lambda: FIXED_NOW),
                 monotonic=monotonic or time.monotonic,
@@ -1066,7 +1145,7 @@ class TurnHarness(TestCase):
         )
         with TemporaryDirectory() as directory:
             output = Path(directory) / "out"
-            host = FakeHost()
+            host = EngineHost(frontend.modes)
             code, stdout, stderr = _run_file(
                 frontend,
                 text,
@@ -1086,21 +1165,31 @@ class TurnHarness(TestCase):
 
             completion_calls = [
                 call
-                for call in frontend.calls
-                if call[0] == "POST" and call[1] == "/api/chat/completions"
+                for call in host.engine_calls
+                if call[1].get("stream") is False
             ]
             self.assertEqual(len(completion_calls), 3)
-            for _method, _path, body in completion_calls:
-                self.assertIsInstance(body, dict)
-                assert isinstance(body, dict)
-                self.assertEqual(body["model"], GENERAL_PRESET_ID)
+            # The site the fake Host serves at SITE_PATH is SITE_TEXT's, so the
+            # assertion reads the committed example and never the box's own file.
+            loaded_site = site.load_site(SITE_SOURCE)
+            assert loaded_site.config is not None
+            loaded_models = models.load_models_lock(ROOT / "models.lock")
+            assert loaded_models.lock is not None
+            profile = models.select_profile(
+                loaded_models.lock, loaded_site.config.hardware_profile
+            )
+            assert not isinstance(profile, Problem)
+            generator = profile.model("generator")
+            assert generator is not None
+            for _command, body in completion_calls:
+                self.assertEqual(body["model"], generator.serve.served_name)
                 self.assertFalse(body["stream"])
                 self.assertNotIn("chat_id", body)
                 self.assertNotIn("session_id", body)
-                self.assertNotIn("user_message", body)
                 self.assertEqual(list(body), ["model", "stream", "messages"])
-                self.assertEqual(body["messages"][0]["role"], "user")
-                self.assertRegex(body["messages"][0]["content"], r"\[turn harness [0-9a-f]{8} ")
+                messages = cast(list[dict[str, str]], body["messages"])
+                self.assertEqual(messages[0]["role"], "user")
+                self.assertRegex(messages[0]["content"], r"\[turn harness [0-9a-f]{8} ")
 
             records = _records(host, output)
             self.assertEqual(set(records), {"trip", "clean", "restated"})
@@ -1150,6 +1239,38 @@ class TurnHarness(TestCase):
             self.assertEqual(run_record["summary"]["errors"], 0)
             self.assertEqual(sum(run_record["summary"]["tripped"].values()), 2)
 
+    def test_unfiltered_engine_body_uses_route_served_name_and_instruction(self) -> None:
+        host = EngineHost({})
+        driver = run.UnfilteredTurnDriver(
+            cast(Host, host),
+            "/etc/gideon/rendered",
+            model="served-engine",
+            instruction="General's rendered instruction",
+        )
+        prompt = "tagged prompt\n\n[turn harness deadbeef body]"
+        outcome = driver.turn(
+            cases.Case("body", "tagged prompt", "answered"),
+            prompt,
+            now=lambda: FIXED_NOW,
+            monotonic=time.monotonic,
+            ids_before=frozenset(),
+            row_name="body",
+        )
+
+        self.assertIsNone(outcome.problem)
+        self.assertEqual(len(host.engine_calls), 1)
+        command, body = host.engine_calls[0]
+        self.assertIn("/v1/chat/completions", " ".join(command))
+        self.assertEqual(body["model"], "served-engine")
+        self.assertFalse(body["stream"])
+        self.assertEqual(
+            body["messages"],
+            [
+                {"role": "system", "content": "General's rendered instruction"},
+                {"role": "user", "content": prompt},
+            ],
+        )
+
     def test_unfiltered_ignores_a_positive_expectation_and_counts_selected_set(self) -> None:
         text = (
             "family: test\npattern_set_version: 1\ncases:\n"
@@ -1162,9 +1283,11 @@ class TurnHarness(TestCase):
         )
         with TemporaryDirectory() as directory:
             output = Path(directory) / "out"
+            host = EngineHost(frontend.modes)
             code, stdout, _ = _run_file(
                 frontend,
                 text,
+                host=host,
                 args=["--unfiltered", "--case", "positive", "--out", str(output)],
             )
         self.assertEqual(code, 0)
@@ -1172,8 +1295,8 @@ class TurnHarness(TestCase):
         self.assertIn("positive: ok — clean", stdout)
         self.assertNotIn("control:", stdout)
         self.assertEqual(
-            [call[1] for call in frontend.calls if call[1] == "/api/chat/completions"],
-            ["/api/chat/completions"],
+            len(host.engine_calls),
+            1,
         )
 
     def test_unfiltered_errors_are_status_only_and_no_content(self) -> None:
@@ -1206,69 +1329,22 @@ class TurnHarness(TestCase):
         self.assertIn("summary: ok — 2 turns", stdout)
 
         frontend = Frontend(self.guardrail, {})
+        host = EngineHost(frontend.modes)
         code, stdout, _ = _run_file(
             frontend,
             "cases:\n  - id: dry\n    prompt: hidden\n    expect: answered\n",
+            host=host,
             args=["--unfiltered", "--out", "/tmp/dry-turns", "--dry-run"],
         )
         self.assertEqual(code, 0)
         self.assertIn("mode: unfiltered", stdout)
-        self.assertEqual(frontend.calls, [])
-
-    def test_unfiltered_sentinel_cleanup_and_foreign_chat(self) -> None:
-        frontend = Frontend(self.guardrail, {"both": "offline-both"})
-        code, stdout, _ = _run_file(
-            frontend,
-            "cases:\n  - id: both\n    prompt: hidden\n    expect: answered\n",
-            args=["--unfiltered", "--out", "/tmp/both-turns"],
-        )
-        self.assertEqual(code, 0)
-        self.assertIn("both: ok — clean; unsupplied: none; 1 chats stored, 1 deleted", stdout)
-        self.assertIn("cleanup: ok — 1 chats stored, 1 deleted", stdout)
-        self.assertEqual([chat_id for chat_id, _ in frontend.deleted_chats], ["bare/1"])
-        self.assertEqual(set(frontend.chats), {"foreign/1"})
-
-    def test_unfiltered_partial_cleanup_names_undeleted_chat(self) -> None:
-        frontend = Frontend(self.guardrail, {"two": "offline-two-tagged"})
-        frontend.refuse_deletion_ids.add("bare/2")
-        code, stdout, _ = _run_file(
-            frontend,
-            "cases:\n  - id: two\n    prompt: hidden\n    expect: answered\n",
-            args=["--unfiltered", "--out", "/tmp/two-turns"],
-        )
-        self.assertEqual(code, 1)
-        self.assertIn("2 chats stored, 1 deleted", stdout)
-        self.assertIn("bare/2", stdout)
-        self.assertEqual([chat_id for chat_id, _ in frontend.deleted_chats], ["bare/1"])
-
-    def test_unfiltered_watch_failures_keep_completion_and_judgement(self) -> None:
-        for label, mode, attribute in (
-            ("listing", "offline-clean", "fail_listing_after_turn"),
-            ("candidate", "offline-stored", "fail_candidate_read_after_turn"),
-        ):
-            with self.subTest(label=label), TemporaryDirectory() as directory:
-                frontend = Frontend(self.guardrail, {label: mode})
-                setattr(frontend, attribute, True)
-                output = Path(directory) / "out"
-                host = FakeHost()
-                code, stdout, _ = _run_file(
-                    frontend,
-                    f"cases:\n  - id: {label}\n    prompt: hidden\n    expect: answered\n",
-                    host=host,
-                    args=["--unfiltered", "--out", str(output)],
-                )
-                self.assertEqual(code, 1)
-                self.assertIn(f"{label}: refuse — clean; unsupplied: none", stdout)
-                self.assertIn("unverified", stdout)
-                record = _records(host, output)[label]
-                self.assertIsNotNone(record["body"])
-                self.assertIsNotNone(record["judgement"])
+        self.assertEqual(host.engine_calls, [])
 
     def test_unfiltered_record_write_failure_is_an_error_summary(self) -> None:
         frontend = Frontend(self.guardrail, {"write": "offline-clean"})
         with TemporaryDirectory() as directory:
             output = Path(directory) / "out"
-            host = FakeHost()
+            host = EngineHost(frontend.modes)
             host.refuse_paths.add(str(output / "write.json"))
             code, stdout, _ = _run_file(
                 frontend,
@@ -1292,18 +1368,21 @@ class TurnHarness(TestCase):
         for args, expected in refusals:
             with self.subTest(expected=expected):
                 frontend = Frontend(self.guardrail, {})
+                host = EngineHost(frontend.modes)
                 code, stdout, _ = _run_file(
                     frontend,
                     "cases:\n  - id: one\n    prompt: hidden\n    expect: answered\n",
+                    host=host,
                     args=["--unfiltered", *args],
                 )
                 self.assertEqual(code, 1)
                 self.assertIn("preconditions: refuse", stdout)
                 self.assertIn(expected, stdout)
-                self.assertEqual(frontend.calls, [])
+                self.assertEqual(host.engine_calls, [])
 
     def test_unfiltered_selected_search_is_refused_before_signin(self) -> None:
         frontend = Frontend(self.guardrail, {})
+        host = EngineHost(frontend.modes)
         text = (
             "cases:\n"
             "  - id: plain\n    prompt: p\n    expect: answered\n"
@@ -1312,12 +1391,13 @@ class TurnHarness(TestCase):
         code, stdout, _ = _run_file(
             frontend,
             text,
+            host=host,
             args=["--unfiltered", "--case", "searched", "--out", "/tmp/search-turns"],
         )
         self.assertEqual(code, 1)
         self.assertIn("search cases run in the managed API mode", stdout)
         self.assertIn("--case", stdout)
-        self.assertEqual(frontend.calls, [])
+        self.assertEqual(host.engine_calls, [])
 
     def test_case_selection_reports_unknown_and_retired_ids_together(self) -> None:
         frontend = Frontend(self.guardrail, {})
@@ -1388,10 +1468,12 @@ class TurnHarness(TestCase):
             for index in range(9)
         )
         frontend = Frontend(self.guardrail, {"case-8": "offline-clean"})
+        host = EngineHost(frontend.modes)
         office = datetime(2026, 9, 8, 12, 0, tzinfo=UTC)
         code, stdout, _ = _run_file(
             frontend,
             cases_text,
+            host=host,
             now=lambda: office,
             args=["--unfiltered", "--case", "case-8", "--out", "/tmp/guard-turns"],
         )
@@ -1401,9 +1483,9 @@ class TurnHarness(TestCase):
         self.assertEqual(
             len(
                 [
-                    call
-                    for call in frontend.calls
-                    if call[0] == "POST" and call[1] == "/api/chat/completions"
+                    body
+                    for _command, body in host.engine_calls
+                    if body.get("stream") is False
                 ]
             ),
             1,

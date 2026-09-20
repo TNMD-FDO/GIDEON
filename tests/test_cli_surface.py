@@ -56,6 +56,13 @@ class Help(unittest.TestCase):
         self.assertIn("§18", command.getvalue())
         self.assertIn("§18.6", command.getvalue())
 
+        reference = io.StringIO()
+        with contextlib.redirect_stdout(reference), self.assertRaises(SystemExit) as ctx:
+            main(["eval", "reference", "--help"])
+        self.assertEqual(ctx.exception.code, 0)
+        self.assertIn("--run ID", reference.getvalue())
+        self.assertIn("§18.6", reference.getvalue())
+
 
 class Stubs(unittest.TestCase):
     def test_every_stub_refuses_as_not_implemented(self) -> None:

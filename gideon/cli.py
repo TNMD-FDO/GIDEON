@@ -30,6 +30,12 @@ def _run_eval(args: argparse.Namespace) -> int:
     return host_cli._guarded("eval run", command.run_eval, args)
 
 
+def _run_reference(args: argparse.Namespace) -> int:
+    from gideon.evaluation import reference_command
+
+    return host_cli._guarded("eval reference", reference_command.run_reference, args)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="gideon",
@@ -203,6 +209,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="eval set version directory (§18.6)",
     )
     eval_run.set_defaults(handler=_run_eval, command_path="eval run")
+    eval_reference = eval_sub.add_parser(
+        "reference", help="write a reference from a recorded run (§18.6)"
+    )
+    eval_reference.add_argument(
+        "--run",
+        required=True,
+        metavar="ID",
+        help="recorded evaluation run id (§18.6)",
+    )
+    eval_reference.set_defaults(handler=_run_reference, command_path="eval reference")
 
     backup = commands.add_parser("backup", help="backup set, off-box push, drill (§19)")
     backup_sub = backup.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)

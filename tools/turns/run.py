@@ -1,4 +1,4 @@
-"""Run each case as a managed turn, record it, and remove its chats."""
+"""Run each case through one of the harness's turn drivers."""
 
 import concurrent.futures
 import json
@@ -10,15 +10,15 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Final, Protocol
+from typing import Any, Final, Protocol, cast
 
-from gideon.host import owui, owuiturn
+from gideon.host import engine, owui, owuiturn
 from gideon.host.owui import Client
 from gideon.host.render.owui import EVAL_IDENTITY, GENERAL_PRESET_ID
 from gideon.host.report import Problem, StageResult, print_stage
-from gideon.host.sysio import Host, RealHost
+from gideon.host.sysio import Host, PathLike, RealHost
 from tools.ownership import restore_ownership, sudo_ids
-from tools.turns import browser, chromium, classify, session
+from tools.turns import browser, chromium, classify, door, session
 from tools.turns.cases import CASE_KINDS, Case
 
 # A managed turn waits for the frontend to finish the engine, outlet, and
@@ -55,6 +55,7 @@ def _unverified_fix(account: str) -> str:
 
 
 _RECORD_FIX: Final[str] = "Check the --out directory's disk and permissions, then retry."
+_RENDERED_DIR: Final[str] = "/etc/gideon/rendered"
 
 
 
@@ -77,15 +78,16 @@ class RunSpec:
     concurrent: int = 1
     unfiltered: bool = False
     case_ids: tuple[str, ...] = ()
+    service: bool = False
+    instruction: bool = True
 
 
 @dataclass(frozen=True, slots=True)
 class UnfilteredTurn:
-    """The bare completion and the stored-chat watch for one unfiltered turn."""
+    """The bare engine completion decoded by the direct driver."""
 
-    status: int
+    status: int | None
     body: object | None
-    watch: session.ChatWatch
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,21 +123,22 @@ class TurnRow:
     session: int
     started: float | None
     offline_kind: str | None = None
-    stored_deleted: tuple[str, ...] = ()
-    stored_not_deleted: tuple[str, ...] = ()
 
 
 class TurnDriver(Protocol):
-    """The mode-specific sign-in and turn behind the one per-case loop.
+    """The mode-specific opening and turn behind the one per-case loop.
 
-    ``signin`` returns the ``signin`` row's detail and leaves the driver holding
-    its client; ``turn`` makes one turn and returns what the loop judges. The
-    loop keeps each turn's before-listing, the classification, the
-    judgement, the record, and the deletion — nothing of that is a driver's.
+    ``signin`` returns the opening row's detail; ``turn`` makes one turn and
+    returns what the loop judges. The loop keeps each turn's classification,
+    judgement, record, and (where applicable) deletion — nothing of that is a
+    driver's.
     """
 
     @property
-    def client(self) -> Client: ...
+    def opening_row(self) -> str: ...
+
+    @property
+    def keeps_chats(self) -> bool: ...
 
     @property
     def account(self) -> str: ...
@@ -159,6 +162,17 @@ class TurnDriver(Protocol):
     ) -> TurnOutcome: ...
 
 
+class FrontendTurnDriver(TurnDriver, Protocol):
+    """A driver whose turns run through a signed-in frontend session.
+
+    ``client`` is here and not on ``TurnDriver`` because a chat-less driver
+    has no session to hold: the loop reads it only where ``keeps_chats``.
+    """
+
+    @property
+    def client(self) -> Client: ...
+
+
 class ApiTurnDriver:
     """Drive the existing managed-turn API path behind the turn seam."""
 
@@ -172,6 +186,14 @@ class ApiTurnDriver:
         self._password = password
         self._model = model
         self._client: Client | None = None
+
+    @property
+    def opening_row(self) -> str:
+        return "signin"
+
+    @property
+    def keeps_chats(self) -> bool:
+        return True
 
     @property
     def client(self) -> Client:
@@ -263,19 +285,49 @@ class ApiTurnDriver:
         )
 
 
-class UnfilteredTurnDriver(ApiTurnDriver):
-    """Drive one bare non-streaming completion: the eval identity's sign-in, no stored chat."""
+class UnfilteredTurnDriver:
+    """Drive one bare non-streaming completion directly through the engine."""
 
     def __init__(
         self,
-        client_factory: Callable[..., Client],
-        password: str,
+        io: Host,
+        rendered_dir: PathLike,
         *,
-        model: str = GENERAL_PRESET_ID,
-        sentinel: str,
+        model: str,
+        instruction: str | None,
     ) -> None:
-        super().__init__(client_factory, password, model)
-        self._sentinel = sentinel
+        self._io = io
+        self._rendered_dir = rendered_dir
+        self._model = model
+        self._instruction = instruction
+
+    @property
+    def opening_row(self) -> str:
+        return "door"
+
+    @property
+    def keeps_chats(self) -> bool:
+        return False
+
+    @property
+    def account(self) -> str:
+        return EVAL_IDENTITY.username
+
+    def observe(self) -> None:
+        """The direct engine path has no screen to observe."""
+
+    @property
+    def observation(self) -> browser.Observation | None:
+        return None
+
+    def signin(self) -> str:
+        """State the door: the engine's models route is not callable from here.
+
+        ``call_engine``'s script posts, so there is no listing to probe the
+        served name against; the first case's failure carries the fix instead.
+        """
+
+        return f"engine door; served model {self._model}, unprobed"
 
     def turn(
         self,
@@ -287,30 +339,112 @@ class UnfilteredTurnDriver(ApiTurnDriver):
         ids_before: frozenset[str],
         row_name: str,
     ) -> TurnOutcome:
-        del case, now, row_name
+        del case, now, ids_before, row_name
         started = monotonic()
-        response = session.post_unfiltered(self.client, self._model, prompt)
-        elapsed = monotonic() - started
-        watch = session.watch_chats(
-            self.client,
-            ids_before=ids_before,
-            sentinel=self._sentinel,
+        body = door.completion_body(
+            served_name=self._model,
+            prompt=prompt,
+            instruction=self._instruction,
+            stream=False,
         )
+        response = engine.call_engine(
+            self._io,
+            self._rendered_dir,
+            path="/v1/chat/completions",
+            body=body,
+            max_time=int(TURN_TIMEOUT_SECONDS),
+        )
+        elapsed = monotonic() - started
         problem = response.problem
-        if problem is None and response.status != 200:
-            problem = Problem(
-                f"Open WebUI returned HTTP {response.status}.", session.LOGS_FIX
-            )
-        if problem is None and classify.probe_answer(response.body) is None:
-            problem = Problem("completion has no string content.", session.LOGS_FIX)
         return TurnOutcome(
             chat_id=None,
             assistant=None,
             user=None,
             elapsed=elapsed,
             problem=problem,
-            candidates=watch.candidates,
-            extras=UnfilteredTurn(response.status, response.body, watch),
+            extras=UnfilteredTurn(response.status, response.json),
+            started=started,
+        )
+
+
+class ServiceTurnDriver:
+    """Drive one completion through the API service door."""
+
+    def __init__(
+        self,
+        io: Host,
+        rendered_dir: PathLike,
+        *,
+        model: str,
+        instruction: str | None,
+        stream: bool = False,
+    ) -> None:
+        self._io = io
+        self._rendered_dir = rendered_dir
+        self._model = model
+        self._instruction = instruction
+        self._stream = stream
+
+    @property
+    def opening_row(self) -> str:
+        return "door"
+
+    @property
+    def keeps_chats(self) -> bool:
+        return False
+
+    @property
+    def account(self) -> str:
+        return EVAL_IDENTITY.username
+
+    def observe(self) -> None:
+        """The service door has no screen to observe."""
+
+    @property
+    def observation(self) -> browser.Observation | None:
+        return None
+
+    def signin(self) -> str:
+        """Probe the service models route for the opening ``door`` row."""
+
+        result = door.probe(
+            self._io,
+            self._rendered_dir,
+            served_name=self._model,
+            max_time=TURN_TIMEOUT_SECONDS,
+        )
+        if result.problem is not None:
+            raise owui.OwuiError(result.problem.problem, result.problem.fix)
+        return result.detail
+
+    def turn(
+        self,
+        case: Case,
+        prompt: str,
+        *,
+        now: Callable[[], datetime],
+        monotonic: Callable[[], float],
+        ids_before: frozenset[str],
+        row_name: str,
+    ) -> TurnOutcome:
+        del case, now, ids_before, row_name
+        started = monotonic()
+        reply = door.complete(
+            self._io,
+            self._rendered_dir,
+            served_name=self._model,
+            prompt=prompt,
+            instruction=self._instruction,
+            stream=self._stream,
+            max_time=TURN_TIMEOUT_SECONDS,
+        )
+        return TurnOutcome(
+            chat_id=None,
+            assistant=None,
+            user=None,
+            elapsed=reply.elapsed,
+            problem=reply.problem,
+            extras=reply,
             started=started,
         )
 
@@ -348,6 +482,14 @@ class BrowserTurnDriver:
         self._out = out
         self._client: Client | None = None
         self._observation: browser.Observation | None = None
+
+    @property
+    def opening_row(self) -> str:
+        return "signin"
+
+    @property
+    def keeps_chats(self) -> bool:
+        return True
 
     @property
     def client(self) -> Client:
@@ -623,6 +765,62 @@ def _case_record(
     }
 
 
+def _service_record(
+    case: Case,
+    spec: RunSpec,
+    *,
+    session_number: int,
+    prompt: str,
+    reply: door.DoorReply | None,
+    assistant: Mapping[str, object] | None,
+    verdict: classify.Verdict | None,
+    checks: Mapping[str, bool],
+    elapsed: float | None,
+    problem: Problem | None,
+    stream_verdict: classify.StreamVerdict | None,
+) -> dict[str, object]:
+    """Build the service row's safe record, retaining answer text only in --out."""
+
+    answer = assistant.get("content") if assistant is not None else None
+    stream = None
+    if reply is not None and reply.is_stream:
+        stream = {
+            "deltas": [
+                list(delta)
+                for event in reply.events
+                for delta in event.deltas
+            ],
+            "first_offset": reply.events[0].offset if reply.events else None,
+            "verdict": (
+                {
+                    "clean": stream_verdict.clean,
+                    "pattern_id": stream_verdict.pattern_id,
+                    "offset": stream_verdict.offset,
+                }
+                if stream_verdict is not None
+                else None
+            ),
+            "problem": _problem_data(reply.problem),
+        }
+    record = {
+        "case": _case_data(case),
+        "sentinel": spec.sentinel,
+        "session": session_number,
+        "started": None,
+        "identity": "eval",
+        "prompt": prompt,
+        "status": reply.status if reply is not None else None,
+        "answer": answer,
+        "verdict": _verdict_data(verdict),
+        "checks": dict(checks),
+        "elapsed": elapsed,
+        "problem": _problem_data(problem),
+    }
+    if stream is not None:
+        record["stream"] = stream
+    return record
+
+
 def _offline_data(
     judgement: classify.OfflineJudgement | None,
 ) -> dict[str, object] | None:
@@ -662,9 +860,7 @@ def _unfiltered_record(
     judgement: classify.OfflineJudgement | None,
     problem: Problem | None,
     elapsed: float | None,
-    deletions: Mapping[str, Problem | None],
 ) -> dict[str, object]:
-    watch = turn.watch if turn is not None else session.ChatWatch((), 0)
     return {
         "case": _case_data(case),
         "sentinel": spec.sentinel,
@@ -675,18 +871,6 @@ def _unfiltered_record(
         "body": turn.body if turn is not None else None,
         "elapsed": elapsed,
         "judgement": _offline_data(judgement),
-        "watch": {
-            "candidates": watch.candidates,
-            "stored_ids": list(watch.stored_ids),
-            "problem": _problem_data(watch.problem),
-        },
-        "deletions": {
-            chat_id: {
-                "deleted": deletion is None,
-                "problem": _problem_data(deletion),
-            }
-            for chat_id, deletion in deletions.items()
-        },
         "problem": _problem_data(problem),
     }
 
@@ -1022,6 +1206,7 @@ def _summary_counts(
     stream_counts: Mapping[str, int] | None = None,
     extra_turns: int = 0,
     offline_counts: Mapping[str, int] | None = None,
+    replayed: bool = True,
 ) -> dict[str, object]:
     if offline_counts is not None:
         return {
@@ -1035,8 +1220,11 @@ def _summary_counts(
             "errors": offline_counts.get("error", 0),
         }
     # A turn is a row: every case row, plus every replay and the probe's call;
-    # the guard's engine-call count lives in cli.py.
-    replays = sum(stream_counts.values()) if stream_counts is not None else 0
+    # the guard's engine-call count lives in cli.py. A streamed door row is not
+    # a replay — it is the case's one call — so ``replayed`` is false there.
+    replays = (
+        sum(stream_counts.values()) if replayed and stream_counts is not None else 0
+    )
     summary: dict[str, object] = {
         "turns": sum(totals.values()) + replays + extra_turns,
         "misses": misses,
@@ -1059,6 +1247,7 @@ def _summary_detail(
     stream_counts: Mapping[str, int] | None = None,
     extra_turns: int = 0,
     offline_counts: Mapping[str, int] | None = None,
+    replayed: bool = True,
 ) -> str:
     if offline_counts is not None:
         tripped = ", ".join(
@@ -1072,7 +1261,9 @@ def _summary_detail(
             f"clean {offline_counts.get('clean', 0)}; "
             f"errors {offline_counts.get('error', 0)}"
         )
-    replays = sum(stream_counts.values()) if stream_counts is not None else 0
+    replays = (
+        sum(stream_counts.values()) if replayed and stream_counts is not None else 0
+    )
     parts = [f"{sum(totals.values()) + replays + extra_turns} turns"]
     labels = {"positive": "positives", "control": "controls", "case": "cases"}
     for kind in CASE_KINDS:
@@ -1159,7 +1350,6 @@ class _Bookkeeping:
     counts: dict[str, dict[str, int]]
     offline_counts: dict[str, int] = field(default_factory=dict)
     deleted: int = 0
-    stored: int = 0
     not_deleted: list[str] = field(default_factory=list)
     unverified: list[str] = field(default_factory=list)
     misses: int = 0
@@ -1185,9 +1375,6 @@ class _Bookkeeping:
             self.offline_counts[row.offline_kind] = (
                 self.offline_counts.get(row.offline_kind, 0) + 1
             )
-        self.stored += len(row.stored_deleted) + len(row.stored_not_deleted)
-        self.deleted += len(row.stored_deleted)
-        self.not_deleted.extend(row.stored_not_deleted)
         if row.deleted:
             self.deleted += 1
         elif row.chat_id is not None:
@@ -1238,6 +1425,154 @@ class _Bookkeeping:
                     )
             self.absorb(finalized)
             emit(finalized.result)
+
+
+def _run_service_turn(
+    spec: RunSpec,
+    *,
+    driver: TurnDriver,
+    guardrail: Any,
+    case: Case,
+    session_number: int,
+    row_name: str,
+    now: Callable[[], datetime],
+    monotonic: Callable[[], float],
+) -> TurnRow:
+    """Run one service completion and judge its stored-message shape."""
+
+    prompt = ""
+    reply: door.DoorReply | None = None
+    assistant: Mapping[str, object] | None = None
+    answer: str | None = None
+    verdict: classify.Verdict | None = None
+    verdict_kind: str | None = None
+    checks: dict[str, bool] = {}
+    problem: Problem | None = None
+    elapsed: float | None = None
+    started: float | None = None
+    stream_verdict: classify.StreamVerdict | None = None
+    stream_kind: str | None = None
+    deltas: tuple[tuple[str, str], ...] = ()
+    result: StageResult
+    try:
+        prompt = session.prompt_text(case.id, spec.sentinel, case.prompt)
+        outcome = driver.turn(
+            case,
+            prompt,
+            now=now,
+            monotonic=monotonic,
+            ids_before=frozenset(),
+            row_name=row_name,
+        )
+        elapsed = outcome.elapsed
+        started = outcome.started
+        problem = outcome.problem
+        if isinstance(outcome.extras, door.DoorReply):
+            reply = outcome.extras
+        elif problem is None:
+            problem = Problem("service turn response is missing", _turn_fix(spec))
+        if problem is None and reply is not None:
+            deltas = tuple(
+                delta for event in reply.events for delta in event.deltas
+            )
+            assistant = door.stored_message(reply)
+            content = assistant.get("content") if assistant is not None else None
+            if assistant is None or not isinstance(content, str):
+                assistant = None
+                problem = Problem(
+                    "service completion has no assistant message", _turn_fix(spec)
+                )
+            else:
+                answer = content
+        if problem is not None or assistant is None or answer is None:
+            detail = problem.problem if problem is not None else "service turn is missing"
+            if spec.stream:
+                stream_kind = "error"
+            result = StageResult(
+                row_name,
+                False,
+                f"turn error: {detail}"
+                + (f"; {elapsed:.2f}s" if elapsed is not None else ""),
+                # A door problem names the act that repairs it — the service's
+                # logs and an apply, or `secrets rotate` for a refused key —
+                # which is worth more than a record that may not exist.
+                problem.fix if problem is not None else _turn_fix(spec),
+            )
+        else:
+            # The prompt as sent is the turn's user message: the guardrail reads
+            # it for the figures the answer may restate, so a door row and a
+            # frontend row, which judges the stored user message, class alike.
+            verdict = classify.classify(
+                guardrail, assistant, {"role": "user", "content": prompt}
+            )
+            judgement = classify.judge_case(
+                case, verdict, answer, record=_record_home(spec)
+            )
+            checks = dict(judgement.checks)
+            verdict_kind = verdict.kind
+            stream_detail = ""
+            stream_failed = False
+            if spec.stream:
+                stream_verdict = classify.stream_verdict(guardrail, deltas, prompt)
+                if stream_verdict.clean:
+                    stream_kind = "clean"
+                    stream_detail = "; stream clean"
+                else:
+                    stream_kind = "leak"
+                    stream_detail = (
+                        f"; stream leak@{stream_verdict.pattern_id} at "
+                        f"{stream_verdict.offset} chars"
+                    )
+                    stream_failed = STREAM_LEAK_FAILS
+            result = StageResult(
+                row_name,
+                judgement.ok and not stream_failed,
+                f"{judgement.detail}{stream_detail}; "
+                + (f"{elapsed:.2f}s" if elapsed is not None else "elapsed unavailable"),
+                _turn_fix(spec) if stream_failed else judgement.fix,
+            )
+    except owui.OwuiError as exc:
+        problem = Problem(exc.problem, exc.fix)
+        result = StageResult(
+            row_name,
+            False,
+            f"turn error: {exc.problem}",
+            _turn_fix(spec),
+        )
+    except Exception as exc:  # noqa: BLE001 - the case boundary owns the traceback.
+        result = _internal_error(row_name, exc, _turn_fix(spec))
+        problem = Problem(result.detail, result.fix)
+
+    record = (
+        _service_record(
+            case,
+            spec,
+            session_number=session_number,
+            prompt=prompt,
+            reply=reply,
+            assistant=assistant,
+            verdict=verdict,
+            checks=checks,
+            elapsed=elapsed,
+            problem=problem,
+            stream_verdict=stream_verdict,
+        )
+        if spec.out is not None
+        else None
+    )
+    return TurnRow(
+        result=result,
+        record=record,
+        kind=case.kind,
+        verdict_kind=verdict_kind,
+        missed=not result.ok,
+        chat_id=None,
+        deleted=False,
+        unverified=False,
+        stream_kind=stream_kind,
+        session=session_number,
+        started=started,
+    )
 
 
 def _run_turn(
@@ -1434,7 +1769,6 @@ def _run_turn(
 def _run_unfiltered_turn(
     spec: RunSpec,
     *,
-    client: Client,
     driver: TurnDriver,
     guardrail: Any,
     case: Case,
@@ -1443,28 +1777,23 @@ def _run_unfiltered_turn(
     now: Callable[[], datetime],
     monotonic: Callable[[], float],
 ) -> TurnRow:
-    """Run one bare completion, judge it offline, and clean up proven chats."""
+    """Run one bare engine completion and judge its decoded body offline."""
 
     prompt = ""
     turn: UnfilteredTurn | None = None
-    watch = session.ChatWatch((), 0)
     judgement: classify.OfflineJudgement | None = None
     problem: Problem | None = None
     elapsed: float | None = None
     started: float | None = None
-    deletions: dict[str, Problem | None] = {}
-    stored_deleted: list[str] = []
-    stored_not_deleted: list[str] = []
 
     try:
-        ids_before = owuiturn.chat_ids(client)
         prompt = session.prompt_text(case.id, spec.sentinel, case.prompt)
         outcome = driver.turn(
             case,
             prompt,
             now=now,
             monotonic=monotonic,
-            ids_before=ids_before,
+            ids_before=frozenset(),
             row_name=row_name,
         )
         elapsed = outcome.elapsed
@@ -1472,38 +1801,22 @@ def _run_unfiltered_turn(
         problem = outcome.problem
         if isinstance(outcome.extras, UnfilteredTurn):
             turn = outcome.extras
-            watch = turn.watch
         elif problem is None:
             problem = Problem("unfiltered turn response is missing.", _turn_fix(spec))
         if problem is None and turn is not None:
             answer = classify.probe_answer(turn.body)
-            if answer is None:
+            if turn.status != 200:
+                problem = Problem(f"engine returned HTTP {turn.status}.", _turn_fix(spec))
+            elif answer is None:
                 problem = Problem("completion has no string content.", _turn_fix(spec))
             else:
-                judgement = classify.offline_judgement(
-                    guardrail, answer, prompt
-                )
+                judgement = classify.offline_judgement(guardrail, answer, prompt)
     except owui.OwuiError as exc:
         problem = Problem(exc.problem, exc.fix)
     except Exception as exc:  # noqa: BLE001 - the case boundary owns the traceback.
         problem = Problem(
             f"internal error: {type(exc).__name__}: {exc}", _turn_fix(spec)
         )
-    finally:
-        for chat_id in watch.stored_ids:
-            try:
-                deletion = owuiturn.delete_chat(client, chat_id)
-            except Exception:  # noqa: BLE001 - cleanup must reach its row.
-                deletion = Problem(
-                    "chat deletion raised an internal error",
-                    _cleanup_fix(driver.account),
-                )
-            deletions[chat_id] = deletion
-            if deletion is None:
-                stored_deleted.append(chat_id)
-            else:
-                stored_not_deleted.append(chat_id)
-
     offline_kind = (
         judgement.family if judgement is not None and judgement.family is not None else "clean"
     )
@@ -1518,28 +1831,8 @@ def _run_unfiltered_turn(
         )
     else:
         detail = classify.offline_field(judgement)
-        if watch.stored_ids:
-            detail += (
-                f"; {len(watch.stored_ids)} chats stored, "
-                f"{len(stored_deleted)} deleted"
-            )
         detail += f"; {elapsed:.2f}s" if elapsed is not None else "; elapsed unavailable"
-        if stored_not_deleted:
-            result = StageResult(
-                row_name,
-                False,
-                detail,
-                _cleanup_fix(driver.account),
-            )
-        elif watch.problem is not None:
-            result = StageResult(
-                row_name,
-                False,
-                detail,
-                _unverified_fix(driver.account),
-            )
-        else:
-            result = StageResult(row_name, True, detail, "")
+        result = StageResult(row_name, True, detail, "")
 
     record = (
         _unfiltered_record(
@@ -1551,7 +1844,6 @@ def _run_unfiltered_turn(
             judgement=judgement,
             problem=problem,
             elapsed=elapsed,
-            deletions=deletions,
         )
         if spec.out is not None
         else None
@@ -1564,13 +1856,11 @@ def _run_unfiltered_turn(
         missed=not result.ok,
         chat_id=None,
         deleted=False,
-        unverified=watch.problem is not None,
+        unverified=False,
         stream_kind=None,
         session=session_number,
         started=started,
         offline_kind=offline_kind,
-        stored_deleted=tuple(stored_deleted),
-        stored_not_deleted=tuple(stored_not_deleted),
     )
 
 
@@ -1588,7 +1878,15 @@ def _arguments(spec: RunSpec) -> dict[str, object]:
         "trust_ca": spec.trust_ca,
         "unfiltered": spec.unfiltered,
         "case_ids": list(spec.case_ids),
+        "service": spec.service,
+        "instruction": spec.instruction,
     }
+
+
+def _frontend_client(driver: TurnDriver) -> Client:
+    """The signed-in client of a chat-keeping driver, the only kind that holds one."""
+
+    return cast(FrontendTurnDriver, driver).client
 
 
 def _run_cases(
@@ -1618,15 +1916,15 @@ def _run_cases(
     try:
         for driver in drivers:
             signin_details.append(driver.signin())
-        client = first_driver.client
     except owui.OwuiError as exc:
-        emit(StageResult("signin", False, exc.problem, exc.fix))
+        emit(StageResult(first_driver.opening_row, False, exc.problem, exc.fix))
         return 1
+    client = _frontend_client(first_driver) if first_driver.keeps_chats else None
     # Under --concurrent the first session's detail, prefixed with the count.
     signin_detail = signin_details[0]
     if len(drivers) > 1:
         signin_detail = f"{len(drivers)} sessions {signin_detail}"
-    emit(StageResult("signin", True, signin_detail, ""))
+    emit(StageResult(first_driver.opening_row, True, signin_detail, ""))
     observation = first_driver.observe()
     if isinstance(observation, Problem):
         emit(StageResult("observe", False, observation.problem, observation.fix))
@@ -1651,22 +1949,45 @@ def _run_cases(
         origin=monotonic() if len(drivers) > 1 else None,
     )
     units = _units(cases, spec.repeat)
-    run_turn = _run_unfiltered_turn if spec.unfiltered else _run_turn
 
     def run_session(session_number: int) -> None:
         driver = drivers[session_number - 1]
         for case, repetition in _session_units(units, session_number):
-            row = run_turn(
-                spec,
-                client=driver.client,
-                driver=driver,
-                guardrail=guardrail,
-                case=case,
-                session_number=session_number,
-                row_name=_row_name(case, repetition, session_number, spec),
-                now=now,
-                monotonic=monotonic,
-            )
+            if spec.service:
+                row = _run_service_turn(
+                    spec,
+                    driver=driver,
+                    guardrail=guardrail,
+                    case=case,
+                    session_number=session_number,
+                    row_name=_row_name(case, repetition, session_number, spec),
+                    now=now,
+                    monotonic=monotonic,
+                )
+            elif spec.unfiltered:
+                row = _run_unfiltered_turn(
+                    spec,
+                    driver=driver,
+                    guardrail=guardrail,
+                    case=case,
+                    session_number=session_number,
+                    row_name=_row_name(case, repetition, session_number, spec),
+                    now=now,
+                    monotonic=monotonic,
+                )
+            else:
+                assert client is not None
+                row = _run_turn(
+                    spec,
+                    client=client,
+                    driver=driver,
+                    guardrail=guardrail,
+                    case=case,
+                    session_number=session_number,
+                    row_name=_row_name(case, repetition, session_number, spec),
+                    now=now,
+                    monotonic=monotonic,
+                )
             bookkeeping.finalise(row, spec=spec, host=host, emit=emit)
 
     if len(drivers) == 1:
@@ -1688,6 +2009,7 @@ def _run_cases(
     probe_records: dict[str, dict[str, object]] = {}
     if spec.probe_inlet:
         assert gate_texts is not None
+        assert client is not None
         probe = _run_probe(client, spec, guardrail, gate_texts, host, emit)
         probe_turns = probe.turns
         probe_records = probe.records
@@ -1699,10 +2021,16 @@ def _run_cases(
     reported_offline = bookkeeping.offline_counts if spec.unfiltered else None
     summary_args = (bookkeeping.totals, bookkeeping.counts, bookkeeping.misses, reported_stream)
     summary_counts = _summary_counts(
-        *summary_args, extra_turns=probe_turns, offline_counts=reported_offline
+        *summary_args,
+        extra_turns=probe_turns,
+        offline_counts=reported_offline,
+        replayed=not spec.service,
     )
     summary_detail = _summary_detail(
-        *summary_args, extra_turns=probe_turns, offline_counts=reported_offline
+        *summary_args,
+        extra_turns=probe_turns,
+        offline_counts=reported_offline,
+        replayed=not spec.service,
     )
     summary_ok = (
         bookkeeping.offline_counts["error"] == 0
@@ -1717,39 +2045,33 @@ def _run_cases(
             "" if summary_ok else "Read the failed rows above.",
         )
     )
-    cleanup_ok = not bookkeeping.not_deleted and not bookkeeping.unverified
-    if cleanup_ok:
-        cleanup_detail = (
-            f"{bookkeeping.stored} chats stored, {bookkeeping.deleted} deleted"
-            if spec.unfiltered
-            else f"{bookkeeping.deleted} chats deleted"
-        )
-        emit(StageResult("cleanup", True, cleanup_detail, ""))
-    else:
-        details = (
-            [f"{bookkeeping.stored} chats stored, {bookkeeping.deleted} deleted"]
-            if spec.unfiltered
-            else []
-        )
-        if bookkeeping.not_deleted:
-            details.append(
-                f"{len(bookkeeping.not_deleted)} chats not deleted: "
-                f"{', '.join(sorted(bookkeeping.not_deleted))}"
+    cleanup_ok = True
+    if first_driver.keeps_chats:
+        cleanup_ok = not bookkeeping.not_deleted and not bookkeeping.unverified
+        if cleanup_ok:
+            cleanup_detail = f"{bookkeeping.deleted} chats deleted"
+            emit(StageResult("cleanup", True, cleanup_detail, ""))
+        else:
+            details: list[str] = []
+            if bookkeeping.not_deleted:
+                details.append(
+                    f"{len(bookkeeping.not_deleted)} chats not deleted: "
+                    f"{', '.join(sorted(bookkeeping.not_deleted))}"
+                )
+            if bookkeeping.unverified:
+                details.append(
+                    f"cleanup unverified for {', '.join(bookkeeping.unverified)}"
+                )
+            emit(
+                StageResult(
+                    "cleanup",
+                    False,
+                    "; ".join(details),
+                    _cleanup_fix(first_driver.account)
+                    if bookkeeping.not_deleted
+                    else _unverified_fix(first_driver.account),
+                )
             )
-        if bookkeeping.unverified:
-            details.append(
-                f"cleanup unverified for {', '.join(bookkeeping.unverified)}"
-            )
-        emit(
-            StageResult(
-                "cleanup",
-                False,
-                "; ".join(details),
-                _cleanup_fix(first_driver.account)
-                if bookkeeping.not_deleted
-                else _unverified_fix(first_driver.account),
-            )
-        )
     requests_ok = True
     if spec.browser and browser_setup is not None:
         request_counts = browser_setup.request_log.counts()
@@ -1825,6 +2147,8 @@ def run(
     monotonic: Callable[[], float] = time.monotonic,
     host: Host | None = None,
     checkout: Path | None = None,
+    rendered_dir: PathLike = _RENDERED_DIR,
+    instruction_text: str | None = None,
     browser_setup: BrowserSetup | None = None,
 ) -> int:
     """Sign in, run every repeated case, record it, and hand ownership back.
@@ -1849,13 +2173,24 @@ def run(
             io.mkdir(output, mode=0o755, parents=True, exist_ok=True)
             output_ready = True
         drivers: tuple[TurnDriver, ...]
-        if spec.unfiltered:
+        if spec.service:
+            drivers = tuple(
+                ServiceTurnDriver(
+                    io,
+                    rendered_dir,
+                    model=spec.model,
+                    instruction=instruction_text,
+                    stream=spec.stream,
+                )
+                for _ in range(spec.concurrent)
+            )
+        elif spec.unfiltered:
             drivers = (
                 UnfilteredTurnDriver(
-                    client_factory,
-                    password,
+                    io,
+                    rendered_dir,
                     model=spec.model,
-                    sentinel=spec.sentinel,
+                    instruction=instruction_text,
                 ),
             )
         elif spec.browser:

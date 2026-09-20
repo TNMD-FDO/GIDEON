@@ -11,17 +11,22 @@ import sys
 import tempfile
 import unittest
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
 
+import gideon
 from gideon.cli import main
-from gideon.evaluation import command
+from gideon.evaluation import command, judge, reference
 from gideon.evaluation.evalset import SET_ROOT, LoadedSet, load_set
-from gideon.evaluation.extraction_slice import SliceResult, run_extraction
+from gideon.evaluation.extraction_slice import run_extraction
+from gideon.evaluation.results import CaseResult, RunContext, SliceResult
+from gideon.evaluation.slices import SLICE_RUNNERS
 from gideon.extraction import KEYED_TYPES, SECTION_TYPES, ExactObject, extract
 from gideon.extraction.scoring import MIN_RECALL
+from gideon.host.sysio import Host
 
 ROOT = Path(__file__).resolve().parents[1]
 EVALUATION = ROOT / "gideon" / "evaluation"
@@ -82,18 +87,18 @@ class EvalHost:
         raise NotImplementedError
 
     def exists(self, path: str | os.PathLike[str]) -> bool:
-        if os.fspath(path) == str(ROOT / ".git"):
+        if Path(path).name == ".git":
             return not self.no_git
         return Path(path).exists()
 
     def listdir(self, path: str | os.PathLike[str]) -> list[str]:
-        raise NotImplementedError
+        return os.listdir(path)
 
     def unlink(self, path: str | os.PathLike[str], *, missing_ok: bool = False) -> None:
         raise NotImplementedError
 
     def stat(self, path: str | os.PathLike[str]) -> os.stat_result:
-        raise NotImplementedError
+        return Path(path).stat()
 
     def chmod(self, path: str | os.PathLike[str], mode: int) -> None:
         raise NotImplementedError
@@ -120,15 +125,92 @@ def _invoke(argv: list[str], **run_kwargs: Any) -> tuple[int, str, str]:
     return code, stdout.getvalue(), stderr.getvalue()
 
 
-def _run_kwargs(host: EvalHost) -> dict[str, Any]:
+def _run_kwargs(
+    host: EvalHost,
+    *,
+    checkout: Path = ROOT,
+    court_path: Path | None = None,
+) -> dict[str, Any]:
     return {
         "host": host,
-        "checkout_root": ROOT,
+        "checkout_root": checkout,
         "rendered_dir": "/tmp/evaluation-rendered",
         "site_path": ROOT / "config" / "site.example.yaml",
         "clock": lambda: NOW,
         "run_id_factory": lambda: RUN_ID,
+        "court_path": ROOT / "courts.yaml" if court_path is None else court_path,
     }
+
+
+def _reference_checkout(directory: str) -> Path:
+    checkout = Path(directory) / "checkout"
+    checkout.mkdir()
+    shutil.copytree(ROOT / "eval", checkout / "eval")
+    # The release's own reference is not carried in: a temporary checkout is
+    # absent until the case under test writes one.
+    shutil.rmtree(checkout / "eval" / "reference", ignore_errors=True)
+    shutil.copy(ROOT / "courts.yaml", checkout / "courts.yaml")
+    return checkout
+
+
+def _reference_files(
+    checkout: Path,
+    loaded: Any,
+    results: tuple[Any, ...],
+    *,
+    eval_set_version: str | None = None,
+    reference_verdicts: Mapping[str, reference.Verdict] | None = None,
+) -> None:
+    verdicts = {result.case_id: cast(reference.Verdict, result.verdict) for result in results}
+    if reference_verdicts is not None:
+        verdicts = dict(reference_verdicts)
+    version = loaded.version if eval_set_version is None else eval_set_version
+    for list_name, ids in loaded.slice_lists["extraction"].items():
+        value = reference.ReferenceFile(
+            format=reference.FORMAT_VERSION,
+            product_version=gideon.__version__,
+            corpus_lockfile=None,
+            eval_set_version=version,
+            hardware_profile="fictitious-profile",
+            tag=f"v{gideon.__version__}",
+            slice="extraction",
+            list=list_name,
+            repeats=1,
+            set_digest=loaded.digest,
+            cases={case_id: verdicts[case_id] for case_id in ids if case_id in verdicts},
+        )
+        path = checkout / reference.REFERENCE_ROOT / "extraction" / f"{list_name}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(reference.serialize_reference(value), encoding="utf-8")
+
+
+def _changed_result(loaded: Any, changes: Mapping[str, str]) -> SliceResult:
+    clean = run_extraction(loaded, "extraction", _run_context())
+    return replace(
+        clean,
+        results=tuple(
+            replace(result, verdict=changes.get(result.case_id, result.verdict))
+            for result in clean.results
+        ),
+    )
+
+
+def _assert_comparison_lines(
+    test: unittest.TestCase, stdout: str, outcome: str | None = None
+) -> None:
+    """The release's whitelist reads exactly one of each line.
+
+    *outcome* is pinned only where the case is about the comparison; a case
+    about the rows runs against the real checkout, whose committed reference
+    moves with the set, and asserts the counts alone.
+    """
+
+    reference_lines = [line for line in stdout.splitlines() if line.startswith("reference: ")]
+    verdict_lines = [line for line in stdout.splitlines() if line.startswith("verdict ")]
+    test.assertEqual(len(reference_lines), 1, reference_lines)
+    if outcome is not None:
+        test.assertEqual(reference_lines, [f"reference: {outcome}"])
+    test.assertEqual(len(verdict_lines), 1)
 
 
 def _expected_object(obj: ExactObject) -> dict[str, object]:
@@ -152,6 +234,22 @@ def _runner_case(case_id: str, question: str, expected: list[dict[str, object]])
         "expected": {"objects": expected},
         "labels": ["invented"],
     }
+
+
+def _run_context() -> RunContext:
+    return RunContext(cast(Host, EvalHost()), "/tmp/evaluation-rendered", None, None, 1, lambda _line: None)
+
+
+def _case_metrics(result: CaseResult) -> Mapping[str, Mapping[str, int]]:
+    return cast(Mapping[str, Mapping[str, int]], result.metrics)
+
+
+def _expected_objects(case: Mapping[str, object]) -> list[object]:
+    expected = case.get("expected")
+    if not isinstance(expected, Mapping):
+        return []
+    objects = expected.get("objects")
+    return cast(list[object], objects) if isinstance(objects, list) else []
 
 
 class Runner(unittest.TestCase):
@@ -187,19 +285,20 @@ class Runner(unittest.TestCase):
             {cast(str, case["id"]): case for case in cases},
             ("case-a", "case-b", "case-c"),
             {"extraction": ("case-a", "case-b", "case-c")},
+            {"extraction": {"cases": ("case-a", "case-b", "case-c")}},
             "fictitious-digest",
         )
 
-        result = run_extraction(loaded, "extraction")
+        result = run_extraction(loaded, "extraction", _run_context())
         by_id = {case.case_id: case for case in result.results}
         self.assertEqual(tuple(case.case_id for case in result.results), ("case-a", "case-b", "case-c"))
         self.assertEqual(by_id["case-a"].verdict, "pass")
-        self.assertEqual(by_id["case-a"].metrics["statute"], {"hits": 1, "false_hits": 0, "misses": 0})
+        self.assertEqual(_case_metrics(by_id["case-a"])["statute"], {"hits": 1, "false_hits": 0, "misses": 0})
         self.assertEqual(by_id["case-b"].verdict, "fail")
-        self.assertEqual(by_id["case-b"].metrics["statute"]["false_hits"], 1)
+        self.assertEqual(_case_metrics(by_id["case-b"])["statute"]["false_hits"], 1)
         self.assertEqual(by_id["case-c"].verdict, "pass")
-        self.assertEqual(by_id["case-c"].metrics["state_code"], {"hits": 0, "false_hits": 0, "misses": 1})
-        self.assertGreaterEqual(by_id["case-a"].latency_ms, 0.0)
+        self.assertEqual(_case_metrics(by_id["case-c"])["state_code"], {"hits": 0, "false_hits": 0, "misses": 1})
+        self.assertGreaterEqual(cast(float, by_id["case-a"].latency_ms), 0.0)
 
 
 class Command(unittest.TestCase):
@@ -216,6 +315,7 @@ class Command(unittest.TestCase):
         self.assertEqual(rows, tuple(sorted(rows)))
         self.assertIn(f"record: ok — run {RUN_ID} recorded", stdout)
         self.assertIn("gate: ok", stdout)
+        _assert_comparison_lines(self, stdout)
         writes = [input for argv, input in host.calls if argv[0] == "docker" and input != "SELECT 1;\n"]
         self.assertEqual(len(writes), 1)
         self.assertIn("INSERT INTO eval_runs", writes[0] or "")
@@ -237,11 +337,30 @@ class Command(unittest.TestCase):
         clean = load_set(ROOT / SET_ROOT).loaded
         self.assertIsNotNone(clean)
         assert clean is not None
-        clean_score = run_extraction(clean, "extraction").score
-        scored_type = next(value for value in clean_score.by_type.values() if value.hits)
-        labels = scored_type.hits + scored_type.misses
+        clean_result = run_extraction(clean, "extraction", _run_context())
+        scored_case = next(
+            result
+            for result in clean_result.results
+            if any(metric["hits"] for metric in _case_metrics(result).values())
+        )
+        scored_type = next(
+            object_type
+            for object_type, metric in _case_metrics(scored_case).items()
+            if metric["hits"]
+        )
+        hits = sum(
+            _case_metrics(result)[scored_type]["hits"]
+            for result in clean_result.results
+            if scored_type in _case_metrics(result)
+        )
+        misses = sum(
+            _case_metrics(result)[scored_type]["misses"]
+            for result in clean_result.results
+            if scored_type in _case_metrics(result)
+        )
+        labels = hits + misses
         added = 0
-        while scored_type.hits / (labels + added) >= MIN_RECALL:
+        while hits / (labels + added) >= MIN_RECALL:
             added += 1
         active = set(clean.active_ids)
         target_ids = tuple(case_id for case_id in clean.slices["extraction"] if case_id in active)[:added]
@@ -249,17 +368,14 @@ class Command(unittest.TestCase):
         landed_keys = {
             value["type"]: value["key"]
             for case in clean.cases_by_id.values()
-            if isinstance(case.get("expected"), dict)
-            for value in cast(
-                list[object], cast(dict[str, object], case["expected"])["objects"]
-            )
+            for value in _expected_objects(case)
             if isinstance(value, dict)
             and isinstance(value.get("type"), str)
             and isinstance(value.get("key"), str)
         }
 
         with tempfile.TemporaryDirectory() as directory:
-            copied = Path(directory) / "eval-v1"
+            copied = Path(directory) / clean.version
             shutil.copytree(ROOT / SET_ROOT, copied)
             for path in sorted(copied.rglob("*.jsonl")):
                 records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
@@ -272,14 +388,14 @@ class Command(unittest.TestCase):
                     record["question"] = question + marker
                     start = len(question) + 1
                     object_value: dict[str, object] = {
-                        "type": scored_type.type,
+                        "type": scored_type,
                         "start": start,
                         "end": start + len(marker) - 1,
                         "text": marker[1:],
                     }
-                    if scored_type.type in KEYED_TYPES:
-                        object_value["key"] = landed_keys[scored_type.type]
-                    if scored_type.type in SECTION_TYPES:
+                    if scored_type in KEYED_TYPES:
+                        object_value["key"] = landed_keys[scored_type]
+                    if scored_type in SECTION_TYPES:
                         object_value["subsections"] = []
                     record["expected"]["objects"].append(object_value)
                     changed = True
@@ -297,24 +413,24 @@ class Command(unittest.TestCase):
         self.assertEqual(stderr, "")
         self.assertIn("gate: refuse", stdout)
         self.assertIn("record: ok — skipped", stdout)
+        _assert_comparison_lines(self, stdout)
 
     def test_failing_release_run_is_recorded_before_gate(self) -> None:
         host = EvalHost()
         loaded = load_set(ROOT / SET_ROOT).loaded
         assert loaded is not None
-        clean = run_extraction(loaded, "extraction")
-        failing_score = clean.score.__class__(
-            clean.score.by_type,
-            clean.score.by_origin,
-            clean.score.unlanded_label_counts,
-            clean.score.misses,
-            clean.score.false_hits,
-            False,
-        )
+        clean = run_extraction(loaded, "extraction", _run_context())
         failing_result = SliceResult(
-            failing_score,
+            False,
             clean.report,
-            (clean.results[0].__class__(clean.results[0].case_id, "fail", clean.results[0].metrics, clean.results[0].latency_ms),
+            (CaseResult(
+                clean.results[0].case_id,
+                clean.results[0].repeat,
+                "fail",
+                clean.results[0].metrics,
+                clean.results[0].judge,
+                clean.results[0].latency_ms,
+            ),
              *clean.results[1:]),
         )
         with patch.object(command, "_run_slice", return_value=failing_result):
@@ -324,13 +440,181 @@ class Command(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("record: ok — run", stdout)
         self.assertIn("gate: refuse", stdout)
+        _assert_comparison_lines(self, stdout)
         write_sql = next(input for argv, input in host.calls if argv[0] == "docker" and input != "SELECT 1;\n")
         self.assertIn("\\set run_verdict 'fail'", write_sql or "")
         self.assertIn("\\set result_0_verdict 'fail'", write_sql or "")
 
+    def test_regression_fails_gate_and_names_id_after_recording_fail(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = _reference_checkout(directory)
+            loaded = load_set(checkout / SET_ROOT).loaded
+            assert loaded is not None
+            clean = run_extraction(loaded, "extraction", _run_context())
+            target = next(result.case_id for result in clean.results if result.verdict == "pass")
+            _reference_files(checkout, loaded, clean.results)
+            host = EvalHost()
+            failing = _changed_result(loaded, {target: "fail"})
+            with patch.object(command, "_run_slice", return_value=failing):
+                code, stdout, stderr = _invoke(
+                    ["eval", "run", "--slice", "extraction"],
+                    **_run_kwargs(host, checkout=checkout),
+                )
+            write_sql = next(
+                input for argv, input in host.calls if argv[0] == "docker" and input != "SELECT 1;\n"
+            )
+        self.assertEqual(code, 1)
+        self.assertEqual(stderr, "")
+        _assert_comparison_lines(self, stdout, "regressed")
+        self.assertIn(target, stdout)
+        self.assertLess(stdout.index("record: ok — run"), stdout.index("gate: refuse"))
+        self.assertIn("\\set run_verdict 'fail'", write_sql or "")
+
+    def test_other_version_refuses_after_record_with_writer_fix(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = _reference_checkout(directory)
+            loaded = load_set(checkout / SET_ROOT).loaded
+            assert loaded is not None
+            clean = run_extraction(loaded, "extraction", _run_context())
+            _reference_files(
+                checkout,
+                loaded,
+                clean.results,
+                eval_set_version="eval-v-fictitious-other",
+            )
+            host = EvalHost()
+            code, stdout, stderr = _invoke(
+                ["eval", "run", "--slice", "extraction"],
+                **_run_kwargs(host, checkout=checkout),
+            )
+            write_sql = next(
+                input for argv, input in host.calls if argv[0] == "docker" and input != "SELECT 1;\n"
+            )
+        self.assertEqual(code, 1)
+        self.assertEqual(stderr, "")
+        _assert_comparison_lines(self, stdout, "other-version")
+        self.assertLess(stdout.index("record: ok — run"), stdout.index("gate: refuse"))
+        self.assertIn(f"eval reference --run {RUN_ID}", stdout)
+        # A refused comparison judges nothing, so the row carries the slice
+        # gate's verdict alone — the first run of a new set version is the one
+        # the new reference is written from, and it must not record as fail.
+        self.assertIn("\\set run_verdict 'pass'", write_sql or "")
+
+    def test_malformed_reference_refuses_with_restore_fix(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = _reference_checkout(directory)
+            loaded = load_set(checkout / SET_ROOT).loaded
+            assert loaded is not None
+            clean = run_extraction(loaded, "extraction", _run_context())
+            _reference_files(checkout, loaded, clean.results)
+            path = next((checkout / reference.REFERENCE_ROOT / "extraction").glob("*.json"))
+            path.write_text(path.read_text(encoding="utf-8") + " ", encoding="utf-8")
+            host = EvalHost()
+            code, stdout, stderr = _invoke(
+                ["eval", "run", "--slice", "extraction"],
+                **_run_kwargs(host, checkout=checkout),
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("canonical serialization", stderr)
+        _assert_comparison_lines(self, stdout, "malformed")
+        self.assertIn(reference.SLICE_REPAIR_FIX, stdout)
+        self.assertNotIn("eval reference --run", stdout)
+
+    def test_bounds_and_regression_fixes_are_in_bounds_first_order(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = _reference_checkout(directory)
+            loaded = load_set(checkout / SET_ROOT).loaded
+            assert loaded is not None
+            clean = run_extraction(loaded, "extraction", _run_context())
+            target = next(result.case_id for result in clean.results if result.verdict == "pass")
+            _reference_files(checkout, loaded, clean.results)
+            failing = _changed_result(loaded, {target: "fail"})
+            failing = replace(failing, verdict=False)
+            with patch.object(command, "_run_slice", return_value=failing):
+                code, stdout, stderr = _invoke(
+                    ["eval", "run", "--slice", "extraction"],
+                    **_run_kwargs(EvalHost(), checkout=checkout),
+                )
+        self.assertEqual(code, 1)
+        self.assertEqual(stderr, "")
+        _assert_comparison_lines(self, stdout, "regressed")
+        self.assertLess(
+            stdout.index("Review the miss and false hit lines"),
+            stdout.index(reference.REGRESSION_FIX),
+        )
+
+    def test_no_reference_says_so_and_the_bounds_decide_alone(self) -> None:
+        """Criterion 3: the absence is stated and never changes the exit code."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = _reference_checkout(directory)
+            self.assertFalse((checkout / "eval" / "reference" / "extraction").exists())
+            host = EvalHost()
+            code, stdout, stderr = _invoke(
+                ["eval", "run", "--slice", "extraction"],
+                **_run_kwargs(host, checkout=checkout),
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr, "")
+        _assert_comparison_lines(self, stdout, "absent")
+        self.assertIn("gate: ok", stdout)
+        self.assertIn("no reference for extraction", stdout)
+
+    def test_stale_reference_keeps_exit_zero_and_names_rerecord(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = _reference_checkout(directory)
+            loaded = load_set(checkout / SET_ROOT).loaded
+            assert loaded is not None
+            clean = run_extraction(loaded, "extraction", _run_context())
+            target = next(result.case_id for result in clean.results if result.verdict == "pass")
+            reference_verdicts = {
+                result.case_id: cast(reference.Verdict, "fail" if result.case_id == target else result.verdict)
+                for result in clean.results
+            }
+            _reference_files(
+                checkout,
+                loaded,
+                clean.results,
+                reference_verdicts=reference_verdicts,
+            )
+            code, stdout, stderr = _invoke(
+                ["eval", "run", "--slice", "extraction"],
+                **_run_kwargs(EvalHost(), checkout=checkout),
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr, "")
+        _assert_comparison_lines(self, stdout, "stale")
+        self.assertIn(f"re-record with gideon eval reference --run {RUN_ID}", stdout)
+
+    def test_set_run_still_compares_against_release_checkout_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = _reference_checkout(directory)
+            loaded = load_set(checkout / SET_ROOT).loaded
+            assert loaded is not None
+            copied = Path(directory) / "set-copy" / loaded.version
+            copied.parent.mkdir()
+            shutil.copytree(checkout / SET_ROOT, copied)
+            clean = run_extraction(loaded, "extraction", _run_context())
+            target = next(result.case_id for result in clean.results if result.verdict == "pass")
+            _reference_files(checkout, loaded, clean.results)
+            host = EvalHost()
+            failing = _changed_result(loaded, {target: "fail"})
+            with patch.object(command, "_run_slice", return_value=failing):
+                code, stdout, stderr = _invoke(
+                    ["eval", "run", "--slice", "extraction", "--set", str(copied)],
+                    **_run_kwargs(host, checkout=checkout),
+                )
+        self.assertEqual(code, 1)
+        self.assertEqual(stderr, "")
+        _assert_comparison_lines(self, stdout, "regressed")
+        self.assertIn(target, stdout)
+        self.assertIn("record: ok — skipped", stdout)
+
     def test_set_is_never_recorded(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            copied = Path(directory) / "eval-v1"
+            loaded = load_set(ROOT / SET_ROOT).loaded
+            assert loaded is not None
+            copied = Path(directory) / loaded.version
             shutil.copytree(ROOT / SET_ROOT, copied)
             host = EvalHost()
             code, stdout, _ = _invoke(
@@ -348,6 +632,7 @@ class Command(unittest.TestCase):
         )
         self.assertEqual(code, 0)
         self.assertIn("rows were not written", stdout)
+        _assert_comparison_lines(self, stdout)
         self.assertEqual([argv[0] for argv, _ in host.calls], ["docker"])
 
     def test_failed_write_refuses_and_gate_is_still_last(self) -> None:
@@ -358,6 +643,7 @@ class Command(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("record: refuse", stdout)
         self.assertIn("gate: ok", stdout)
+        _assert_comparison_lines(self, stdout)
         self.assertLess(stdout.index("record:"), stdout.index("gate:"))
 
     def test_git_provenance_is_bound_and_dirty_state_is_recorded(self) -> None:
@@ -367,6 +653,7 @@ class Command(unittest.TestCase):
         )
         self.assertEqual(code, 0)
         self.assertIn("record: ok", stdout)
+        _assert_comparison_lines(self, stdout)
         git_calls = [argv for argv, _ in host.calls if argv[0] == "git"]
         self.assertEqual(len(git_calls), 2)
         for argv in git_calls:
@@ -377,10 +664,11 @@ class Command(unittest.TestCase):
 
     def test_no_git_entry_records_both_provenance_values_as_null_without_git(self) -> None:
         host = EvalHost(no_git=True)
-        code, _stdout, _ = _invoke(
+        code, stdout, _ = _invoke(
             ["eval", "run", "--slice", "extraction"], **_run_kwargs(host)
         )
         self.assertEqual(code, 0)
+        _assert_comparison_lines(self, stdout)
         self.assertFalse(any(argv[0] == "git" for argv, _ in host.calls))
         write_sql = next(input for argv, input in host.calls if argv[0] == "docker" and input != "SELECT 1;\n")
         self.assertIn("NULL, NULL, :'set_digest'", write_sql or "")
@@ -394,6 +682,7 @@ class Command(unittest.TestCase):
                 )
                 self.assertEqual(code, 1)
                 self.assertIn("record: refuse", stdout)
+                _assert_comparison_lines(self, stdout)
                 self.assertFalse(
                     any(argv[0] == "docker" and input != "SELECT 1;\n" for argv, input in host.calls)
                 )
@@ -411,6 +700,49 @@ class Command(unittest.TestCase):
                 code, stdout, stderr = _invoke(argv, **_run_kwargs(EvalHost()))
                 self.assertEqual(code, 1)
                 self.assertIn("Fix:", stderr if stderr else stdout)
+                self.assertNotIn("reference:", stdout)
+
+    def test_refused_load_prints_no_reference_line(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            missing_courts = Path(directory) / "missing-courts.yaml"
+            code, stdout, stderr = _invoke(
+                ["eval", "run", "--slice", "extraction"],
+                **_run_kwargs(EvalHost(), court_path=missing_courts),
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("Fix:", stderr if stderr else stdout)
+        self.assertNotIn("reference:", stdout)
+
+    def test_missing_runner_prints_no_reference_line(self) -> None:
+        with patch.object(command, "SLICE_RUNNERS", {}):
+            code, stdout, stderr = _invoke(
+                ["eval", "run", "--slice", "extraction"], **_run_kwargs(EvalHost())
+            )
+        self.assertEqual(code, 1)
+        # An empty stderr keeps the crash guard's own Fix line from passing this.
+        self.assertEqual(stderr, "")
+        self.assertIn("run: refuse — no runner serves slice 'extraction'", stdout)
+        self.assertIn("Fix:", stdout)
+        self.assertNotIn("reference:", stdout)
+
+
+class SliceRegistry(unittest.TestCase):
+    """Every registered slice names a prompt that exists and a reference it reads."""
+
+    def test_judge_prompts_are_registered(self) -> None:
+        for slice_name, spec in SLICE_RUNNERS.items():
+            if spec.judge_prompt is not None:
+                with self.subTest(slice_name=slice_name):
+                    self.assertIn(spec.judge_prompt, judge.PROMPT_REGISTRY)
+
+    def test_every_committed_reference_is_one_eval_run_compares(self) -> None:
+        committed = sorted(
+            path.name for path in (ROOT / reference.REFERENCE_ROOT).iterdir() if path.is_dir()
+        )
+        self.assertIn("extraction", committed)
+        for slice_name in committed:
+            with self.subTest(slice_name=slice_name):
+                self.assertTrue(SLICE_RUNNERS[slice_name].compares_reference)
 
 
 class Imports(unittest.TestCase):

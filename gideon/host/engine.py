@@ -160,6 +160,15 @@ class CheckOutcome:
     figures: Mapping[str, object]
 
 
+@dataclass(frozen=True, slots=True)
+class EngineTarget:
+    """The selected engine profile, served model, and context window."""
+
+    profile_name: str
+    served_model_name: str
+    window: int
+
+
 def _failed(name: str, detail: str, fix: str) -> StageResult:
     return StageResult(name, False, detail, fix)
 
@@ -477,7 +486,7 @@ def _size_needle(
     return _Sizing(messages, count, candidate_blocks, rounds, None)
 
 
-def _completion_values(
+def completion_values(
     reply: EngineReply,
 ) -> tuple[str | None, str | None, int | None, int | None]:
     """A non-streaming reply's content, finish reason, prompt tokens, and completion tokens."""
@@ -567,7 +576,7 @@ def _needle_check(
         detail, fix = _status_failure(reply, engine_fix)
         return CheckOutcome(name, False, detail, fix, figures)
 
-    content, finish_reason, usage_prompt_tokens, completion_tokens = _completion_values(reply)
+    content, finish_reason, usage_prompt_tokens, completion_tokens = completion_values(reply)
     figures.update(
         completion_tokens=completion_tokens,
         finish_reason=finish_reason,
@@ -672,7 +681,7 @@ def _structured_check(
         detail, fix = _status_failure(reply, engine_fix)
         return CheckOutcome("structured", False, detail, fix, figures)
 
-    content, finish_reason, prompt_tokens, completion_tokens = _completion_values(reply)
+    content, finish_reason, prompt_tokens, completion_tokens = completion_values(reply)
     figures.update(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
@@ -1091,6 +1100,55 @@ def _audit_detail(
     }
 
 
+def resolve_engine_target(
+    io: Host,
+    rendered_dir: PathLike,
+    *,
+    hardware_profile: str,
+    models_path: PathLike,
+    sleep: Callable[[float], None],
+) -> EngineTarget | Problem:
+    """Resolve the rendered, pinned, and currently healthy engine target."""
+
+    rendered = _rendered_has_engine(io, rendered_dir)
+    if rendered is not True:
+        detail = rendered if isinstance(rendered, str) else "rendered Compose has no engine service"
+        return Problem(detail, _APPLY_FIX)
+
+    models_result = models.load_models_lock(models_path, host=io)
+    if models_result.errors or models_result.lock is None:
+        fix = models_result.errors[0].fix if models_result.errors else _MODELS_FIX
+        return Problem(models.render_errors(models_result.errors), fix)
+    selected = models.select_profile(models_result.lock, hardware_profile)
+    if isinstance(selected, Problem):
+        return selected
+    generator = selected.model("generator")
+    if generator is None:
+        return Problem(
+            f"models.lock profile '{selected.name}' has no generator pin",
+            _MODELS_FIX,
+        )
+    window = generator.serve.flags.get("max-model-len")
+    if type(window) is not int or window <= 0:
+        return Problem(
+            "models.lock generator pin has no usable max-model-len flag",
+            _MODELS_FIX,
+        )
+
+    ready, detail, service = apply.wait_for_services(
+        io,
+        rendered_dir,
+        (ENGINE_SERVICE_NAME,),
+        sleep,
+        exact=False,
+        require_healthy=True,
+        attempts=1,
+    )
+    if not ready:
+        return Problem(detail, stack.logs_fix(rendered_dir, service))
+    return EngineTarget(selected.name, generator.serve.served_name, window)
+
+
 def run_engine_verify(
     args: argparse.Namespace,
     *,
@@ -1143,53 +1201,15 @@ def run_engine_verify(
         return 1
     config = site_result.config
 
-    rendered = _rendered_has_engine(io, rendered_dir)
-    if rendered is not True:
-        detail = rendered if isinstance(rendered, str) else "rendered Compose has no engine service"
-        show(_failed("preconditions", detail, _APPLY_FIX))
-        return 1
-
-    models_result = models.load_models_lock(actual_models, host=io)
-    if models_result.errors or models_result.lock is None:
-        fix = models_result.errors[0].fix if models_result.errors else _MODELS_FIX
-        show(_failed("preconditions", models.render_errors(models_result.errors), fix))
-        return 1
-    selected = models.select_profile(models_result.lock, config.hardware_profile)
-    if isinstance(selected, Problem):
-        show(_failed("preconditions", selected.problem, selected.fix))
-        return 1
-    generator = selected.model("generator")
-    if generator is None:
-        show(
-            _failed(
-                "preconditions",
-                f"models.lock profile '{selected.name}' has no generator pin",
-                _MODELS_FIX,
-            )
-        )
-        return 1
-    window = generator.serve.flags.get("max-model-len")
-    if type(window) is not int or window <= 0:
-        show(
-            _failed(
-                "preconditions",
-                "models.lock generator pin has no usable max-model-len flag",
-                _MODELS_FIX,
-            )
-        )
-        return 1
-
-    ready, detail, service = apply.wait_for_services(
+    engine_target = resolve_engine_target(
         io,
         rendered_dir,
-        (ENGINE_SERVICE_NAME,),
-        sleep,
-        exact=False,
-        require_healthy=True,
-        attempts=1,
+        hardware_profile=config.hardware_profile,
+        models_path=actual_models,
+        sleep=sleep,
     )
-    if not ready:
-        show(_failed("preconditions", detail, stack.logs_fix(rendered_dir, service)))
+    if isinstance(engine_target, Problem):
+        show(_failed("preconditions", engine_target.problem, engine_target.fix))
         return 1
 
     sample_result = enginesample.load_sample(actual_sample, host=io)
@@ -1224,14 +1244,15 @@ def run_engine_verify(
         StageResult(
             "preconditions",
             True,
-            f"root, site, rendered engine, profile {selected.name}, window {window}, "
+            f"root, site, rendered engine, profile {engine_target.profile_name}, window {engine_target.window}, "
             f"sample {sample.sha256[:12]}, eval password, and audit writer are ready",
             "",
         )
     )
 
     engine_fix = _engine_fix(rendered_dir)
-    served_name = generator.serve.served_name
+    served_name = engine_target.served_model_name
+    window = engine_target.window
     checks: list[CheckOutcome] = []
 
     def record(outcome: CheckOutcome) -> None:
@@ -1311,7 +1332,7 @@ def run_engine_verify(
         kb_ids=(),
         detail=_audit_detail(
             "ok" if all(check.ok for check in checks) else "failed",
-            selected.name,
+            engine_target.profile_name,
             served_name,
             window,
             sample.sha256,

@@ -172,6 +172,14 @@ class OrderAndProvenance(unittest.TestCase):
             self.assertEqual(left.cases_by_file, right.cases_by_file)
             self.assertEqual(left.cases_by_id, right.cases_by_id)
             self.assertEqual(left.slices, right.slices)
+            self.assertEqual(left.slice_lists, right.slice_lists)
+            self.assertEqual(
+                left.slice_lists,
+                {
+                    "a-slice": {"cases": ("extraction-001",)},
+                    "z-slice": {"cases": ("extraction-002",)},
+                },
+            )
             self.assertEqual(left.active_ids, right.active_ids)
             self.assertEqual(left.digest, right.digest)
 
@@ -236,6 +244,16 @@ class OrderAndProvenance(unittest.TestCase):
             )
         )
         self.assertEqual(result.loaded.slices["extraction"], extraction_ids)
+        judge_ids = tuple(
+            sorted(
+                case["id"]
+                for file, cases in result.loaded.cases_by_file.items()
+                if file.startswith("judge/")
+                for case in cases
+                if isinstance(case["id"], str)
+            )
+        )
+        self.assertEqual(result.loaded.slices["judge-triples"], judge_ids)
 
 
 def _judgment_case(case_id: str = "judgments-001", question: str = SENTINEL) -> dict[str, object]:
@@ -249,6 +267,22 @@ def _judgment_case(case_id: str = "judgments-001", question: str = SENTINEL) -> 
         "cluster_id": case_id,
         "notes": "",
         "review": {"by": "CSA-1", "on": "2026-09-19", "accepted_flags": []},
+    }
+
+
+def _triple_case(case_id: str = "judge-001", question: str = SENTINEL) -> dict[str, object]:
+    return {
+        "id": case_id,
+        "suite": "judge",
+        "category": "triples",
+        "branch": "legal",
+        "question": question,
+        "expected": {"answer": "The reference answer.", "band": [1, 2]},
+        "candidate": "The candidate answer.",
+        "labels": ["invented", "partial"],
+        "cluster_id": case_id,
+        "review": {"by": "CSA-1", "on": "2026-09-19"},
+        "notes": "",
     }
 
 
@@ -330,6 +364,43 @@ class ShapeRefusals(unittest.TestCase):
                 record = json.loads(_case("extraction-001"))
                 mutate(record)
                 self._assert_case_finding(record, expected=expected)
+
+    def test_triple_shape_rejects_expected_answer_band_candidate_and_labels(self) -> None:
+        cases: list[tuple[str, object]] = [
+            ("expected keys", {"answer": "The reference answer."}),
+            ("expected.answer", {"answer": "", "band": [1, 2]}),
+            ("expected.band", {"answer": "The reference answer.", "band": [3, 1]}),
+            ("candidate", ""),
+            ("labels", ["invented"]),
+            ("labels", ["not-invented", "faithful"]),
+            ("labels", ["invented", "not-a-kind"]),
+        ]
+        for expected, value in cases:
+            with self.subTest(expected=expected):
+                record = _triple_case()
+                if expected.startswith("expected"):
+                    record["expected"] = value
+                elif expected == "candidate":
+                    record["candidate"] = value
+                else:
+                    record["labels"] = value
+                self._assert_case_finding(
+                    record,
+                    path="judge/triples.jsonl",
+                    expected=expected,
+                )
+
+    def test_clean_triple_shape_loads_without_extraction_object_findings(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "eval-v9"
+            _write(
+                root,
+                "judge/triples.jsonl",
+                json.dumps(_triple_case(), separators=(",", ":")),
+            )
+            _write(root, "slices/judge-triples/triples.ids", "judge-001")
+            result = load_set(root)
+            self.assertTrue(result.ok, result.findings)
 
     def test_extraction_shape_rejects_question_labels_seed_cluster_review_notes_and_supersedes(self) -> None:
         cases: list[tuple[str, str, object]] = [

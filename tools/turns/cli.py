@@ -10,8 +10,13 @@ from typing import Final
 from zoneinfo import ZoneInfo
 
 from gideon import guardrail
-from gideon.host import models, owui, secrets, site, tls
-from gideon.host.render.owui import EVAL_PASSWORD_SECRET, GENERAL_PRESET_ID
+from gideon.host import models, nogpu, owui, secrets, site, tls
+from gideon.host.render import command as render_command
+from gideon.host.render.owui import (
+    EVAL_PASSWORD_SECRET,
+    GENERAL_PRESET_ID,
+    general_texts,
+)
 from gideon.host.report import Problem, StageResult, print_stage
 from gideon.host.sysio import Host, PathLike, RealHost
 from tools.turns import browser, cases, chromium, classify
@@ -26,6 +31,7 @@ from tools.turns.run import (
 )
 
 DEFAULT_SITE_PATH: Final[Path] = Path("/etc/gideon/site.yaml")
+_RENDERED_DIR: Final[str] = "/etc/gideon/rendered"
 _SITE_FIX: Final[str] = "Correct /etc/gideon/site.yaml, then retry."
 _ROOT_FIX: Final[str] = "Run sudo python3 -m tools.turns <cases>, then retry."
 _BROWSER_ROOT_FIX: Final[str] = (
@@ -61,6 +67,36 @@ _UNFILTERED_CONCURRENT_FIX: Final[str] = (
 _UNFILTERED_OUT_FIX: Final[str] = "Pass --out <dir> when using --unfiltered, then retry."
 _UNFILTERED_SEARCH_FIX: Final[str] = (
     "Select the file's other cases with --case, then retry."
+)
+_SERVICE_BROWSER_FIX: Final[str] = (
+    "Drop --browser when using --service, then retry."
+)
+_SERVICE_PROBE_FIX: Final[str] = (
+    "Drop --probe-inlet when using --service, then retry."
+)
+_SERVICE_TRUST_FIX: Final[str] = (
+    "Drop --trust-ca when using --service, then retry."
+)
+_SERVICE_UNFILTERED_FIX: Final[str] = (
+    "Drop --unfiltered when using --service, then retry."
+)
+_NO_INSTRUCTION_FIX: Final[str] = (
+    "Pass --service or --unfiltered with --no-instruction, then retry."
+)
+_DIRECT_SEARCH_FIX: Final[str] = (
+    "Select cases without search, then retry."
+)
+_DIRECT_SOURCES_FIX: Final[str] = (
+    "Select cases without a sources expectation, then retry."
+)
+_GPU_MODE_FIX: Final[str] = (
+    f"Remove {nogpu.NO_GPU_PATH} on a GPU host, then retry."
+)
+_RENDERED_FIX: Final[str] = (
+    "Run sudo python3 -m gideon render, then retry."
+)
+_RENDER_INPUTS_FIX: Final[str] = (
+    "Correct the checkout's render inputs, then retry."
 )
 _BROWSER_ONLY_FIX: Final[str] = "Pass --browser with this flag, then retry."
 _LAUNCH_FIX: Final[str] = (
@@ -104,6 +140,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--out", type=Path, metavar="DIR")
     parser.add_argument("--case", action="append", default=[], metavar="ID")
     parser.add_argument("--unfiltered", action="store_true")
+    parser.add_argument("--service", action="store_true")
+    parser.add_argument("--no-instruction", action="store_true")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     return parser
@@ -172,6 +210,32 @@ def _unfiltered_refusal(
     return None
 
 
+def _service_refusal(options: argparse.Namespace) -> StageResult | None:
+    """Refuse service-only conflicts before reading host state or case files."""
+
+    if options.service:
+        conflicts = (
+            (options.browser, "--browser", _SERVICE_BROWSER_FIX),
+            (options.probe_inlet, "--probe-inlet", _SERVICE_PROBE_FIX),
+            (options.trust_ca, "--trust-ca", _SERVICE_TRUST_FIX),
+            (options.unfiltered, "--unfiltered", _SERVICE_UNFILTERED_FIX),
+        )
+        for present, flag, fix in conflicts:
+            if present:
+                return StageResult(
+                    "preconditions", False, f"--service is not available with {flag}", fix
+                )
+        return None
+    if options.no_instruction and not options.unfiltered:
+        return StageResult(
+            "preconditions",
+            False,
+            "--no-instruction requires --service or --unfiltered",
+            _NO_INSTRUCTION_FIX,
+        )
+    return None
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -186,9 +250,17 @@ def main(
     """Parse the command, judge the preconditions as one row, then run the cases."""
 
     options = _parser().parse_args(argv)
+    refused_direct_flag = _service_refusal(options)
+    if refused_direct_flag is not None:
+        print_stage(refused_direct_flag)
+        return 1
     io = host or RealHost()
     root = checkout or Path(__file__).resolve().parents[2]
     output = options.out.resolve() if options.out is not None else None
+    # The modes that call a GIDEON service directly, so they read the served
+    # name and General's instruction instead of the frontend's preset and
+    # need no eval password. Both modes now call a GIDEON service directly.
+    direct_mode = options.service or options.unfiltered
     if options.unfiltered:
         refused_flag = _unfiltered_refusal(options, output)
         if refused_flag is not None:
@@ -252,8 +324,30 @@ def main(
         print_stage(StageResult("preconditions", False, detail, _SITE_FIX))
         return 1
 
+    if direct_mode and nogpu.is_no_gpu_host(io):
+        print_stage(
+            StageResult(
+                "preconditions",
+                False,
+                "direct service modes are unavailable on a no-GPU host",
+                _GPU_MODE_FIX,
+            )
+        )
+        return 1
+    if direct_mode and not io.exists(Path(_RENDERED_DIR) / "compose.yaml"):
+        print_stage(
+            StageResult(
+                "preconditions",
+                False,
+                "the rendered tree is unavailable",
+                _RENDERED_FIX,
+            )
+        )
+        return 1
+
     base_model: str | None = None
-    if options.probe_inlet:
+    served_model: str | None = None
+    if options.probe_inlet or direct_mode:
         models_result = models.load_models_lock(root / "models.lock", host=io)
         if models_result.errors or models_result.lock is None:
             fix = models_result.errors[0].fix if models_result.errors else _MODELS_FIX
@@ -285,7 +379,43 @@ def main(
                 )
             )
             return 1
-        base_model = generator.serve.served_name
+        served_model = generator.serve.served_name
+        if options.probe_inlet:
+            base_model = served_model
+
+    instruction: str | None = None
+    if direct_mode and not options.no_instruction:
+        loaded_render_inputs = render_command.load_render_inputs(
+            io,
+            site_path=site_path,
+            lock_path=root / "host.lock",
+            images_path=root / "images.lock",
+            models_path=root / "models.lock",
+            root=root,
+            command="tools.turns",
+        )
+        if loaded_render_inputs is None:
+            print_stage(
+                StageResult(
+                    "preconditions",
+                    False,
+                    "render inputs are unavailable",
+                    _RENDER_INPUTS_FIX,
+                )
+            )
+            return 1
+        try:
+            instruction = general_texts(loaded_render_inputs[0]).system_prompt
+        except (TypeError, ValueError) as exc:
+            print_stage(
+                StageResult(
+                    "preconditions",
+                    False,
+                    f"General instruction is unavailable: {exc}",
+                    _RENDER_INPUTS_FIX,
+                )
+            )
+            return 1
 
     if options.browser:
         password_problem = chromium.password_file_problem(io)
@@ -308,6 +438,8 @@ def main(
             if problem is not None:
                 print_stage(StageResult("preconditions", False, problem.problem, problem.fix))
                 return 1
+    elif direct_mode:
+        password_value = ""
     else:
         password = secrets.read_secret(io, EVAL_PASSWORD_SECRET)
         if not password.ok or password.value is None:
@@ -374,20 +506,40 @@ def main(
             )
         )
         return 1
+    if options.service and loaded_cases.searched:
+        print_stage(
+            StageResult(
+                "preconditions",
+                False,
+                "search cases are not available with --service",
+                _DIRECT_SEARCH_FIX,
+            )
+        )
+        return 1
+    # The door's own refusal, not every direct mode's: a searched case and a
+    # sources expectation both read the frontend's record, which it never has.
+    if options.service and any(case.sources != "any" for case in loaded_cases.cases):
+        print_stage(
+            StageResult(
+                "preconditions",
+                False,
+                "sources expectations are not available with --service",
+                _DIRECT_SOURCES_FIX,
+            )
+        )
+        return 1
 
     case_values = loaded_cases.cases
     selected_now = now or _utc_now
-    case_turns = (
-        len(case_values)
-        * options.repeat
-        * options.concurrent
-        * (2 if options.stream else 1)
-    )
+    stream_turns = 1 if options.service else (2 if options.stream else 1)
+    case_turns = len(case_values) * options.repeat * options.concurrent * stream_turns
     turns = case_turns + (1 if options.probe_inlet else 0)
     if options.browser:
         engine_calls = case_turns * BROWSER_ENGINE_CALLS_PER_TURN + (
             1 if options.probe_inlet else 0
         )
+    elif options.service:
+        engine_calls = case_turns
     else:
         engine_calls = (
             case_turns
@@ -471,7 +623,12 @@ def main(
         if shows_calls:
             print(f"engine calls: {engine_calls}{engine_call_fragment}")
         print(f"window: {window_detail}")
-        print(f"model: {GENERAL_PRESET_ID}")
+        if direct_mode:
+            assert served_model is not None
+            instruction_state = "on" if instruction is not None else "off"
+            print(f"model: {served_model} (instruction: {instruction_state})")
+        else:
+            print(f"model: {GENERAL_PRESET_ID}")
         print(f"output directory: {output if output is not None else 'none'}")
         if options.probe_inlet:
             print(f"probe: inlet gate ({base_model})")
@@ -484,6 +641,8 @@ def main(
             print(f"playwright: {chromium.PLAYWRIGHT_VERSION}")
         elif options.unfiltered:
             print("mode: unfiltered")
+        elif options.service:
+            print("mode: service")
         return 0
 
     chosen_factory = client_factory or owui.ingress_client_factory(
@@ -530,8 +689,11 @@ def main(
         probe_inlet=options.probe_inlet,
         trust_ca=options.trust_ca,
         base_model=base_model,
+        model=served_model if direct_mode and served_model is not None else GENERAL_PRESET_ID,
         unfiltered=options.unfiltered,
         case_ids=tuple(case.id for case in case_values) if options.case else (),
+        service=options.service,
+        instruction=not options.no_instruction,
     )
     selected_now = now or _utc_now
     return run(
@@ -545,6 +707,7 @@ def main(
         monotonic=monotonic,
         host=io,
         checkout=root,
+        instruction_text=instruction,
         origin=loaded_cases.origin,
         window=window_detail,
         browser_setup=browser_setup,

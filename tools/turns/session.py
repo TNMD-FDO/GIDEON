@@ -10,7 +10,6 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Final
 
-from gideon.host import owuiturn
 from gideon.host.owui import Client, OwuiError
 from gideon.host.owuiturn import COMPLETIONS_PATH, LOGS_FIX
 from gideon.host.report import Problem
@@ -32,20 +31,19 @@ class StreamCapture:
 
 
 @dataclass(frozen=True, slots=True)
+class StreamPayload:
+    """The delta fields in one engine payload, or its safe parse problem."""
+
+    deltas: tuple[tuple[str, str], ...] = ()
+    problem: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ProbeResponse:
     """One non-streaming inlet probe response, including only request failures as problems."""
 
     status: int
     body: object | None
-    problem: Problem | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class ChatWatch:
-    """The stored chats proven to carry this run's sentinel, or a lookup problem."""
-
-    stored_ids: tuple[str, ...]
-    candidates: int
     problem: Problem | None = None
 
 
@@ -99,12 +97,6 @@ def new_chat(client: Client, model: str) -> str:
 
 def probe_bare(client: Client, model: str, prompt: str) -> ProbeResponse:
     """Probe the inlet without a session or chat id."""
-
-    return _probe(client, _bare_body(model, prompt))
-
-
-def post_unfiltered(client: Client, model: str, prompt: str) -> ProbeResponse:
-    """Post one unfiltered turn without a session or chat id."""
 
     return _probe(client, _bare_body(model, prompt))
 
@@ -171,37 +163,11 @@ def raw_stream(
             except OwuiError as exc:
                 problem = Problem(exc.problem, LOGS_FIX)
                 break
-            try:
-                decoded = json.loads(payload)
-            except (TypeError, json.JSONDecodeError):
-                problem = Problem("Open WebUI stream carried invalid JSON.", LOGS_FIX)
+            parsed = parse_stream_payload(payload)
+            if parsed.problem is not None:
+                problem = Problem(parsed.problem, LOGS_FIX)
                 break
-            if not isinstance(decoded, Mapping):
-                problem = Problem(
-                    "Open WebUI stream carried a non-object payload.", LOGS_FIX
-                )
-                break
-            if "error" in decoded:
-                problem = Problem("the stream carried an error", LOGS_FIX)
-                break
-            choices = decoded.get("choices")
-            if not isinstance(choices, list) or not choices:
-                problem = Problem("Open WebUI stream carried no choices.", LOGS_FIX)
-                break
-            choice = choices[0]
-            if not isinstance(choice, Mapping):
-                problem = Problem("Open WebUI stream carried an invalid choice.", LOGS_FIX)
-                break
-            delta = choice.get("delta")
-            if not isinstance(delta, Mapping):
-                problem = Problem("Open WebUI stream carried no delta.", LOGS_FIX)
-                break
-            reasoning = delta.get("reasoning")
-            if isinstance(reasoning, str) and reasoning:
-                deltas.append(("reasoning", reasoning))
-            content = delta.get("content")
-            if isinstance(content, str) and content:
-                deltas.append(("content", content))
+            deltas.extend(parsed.deltas)
     except OwuiError as exc:
         problem = Problem(exc.problem, LOGS_FIX)
     finally:
@@ -214,49 +180,42 @@ def raw_stream(
     return StreamCapture(tuple(deltas), elapsed, problem)
 
 
+def parse_stream_payload(payload: object) -> StreamPayload:
+    """Extract ordered reasoning and content deltas from one engine payload."""
+
+    if not isinstance(payload, (str, bytes, bytearray)):
+        return StreamPayload(problem="the stream carried invalid JSON")
+    try:
+        decoded = json.loads(payload)
+    except json.JSONDecodeError:
+        return StreamPayload(problem="the stream carried invalid JSON")
+    if not isinstance(decoded, Mapping):
+        return StreamPayload(problem="the stream carried a non-object payload")
+    if "error" in decoded:
+        return StreamPayload(problem="the stream carried an error")
+    choices = decoded.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return StreamPayload(problem="the stream carried no choices")
+    choice = choices[0]
+    if not isinstance(choice, Mapping):
+        return StreamPayload(problem="the stream carried an invalid choice")
+    delta = choice.get("delta")
+    if not isinstance(delta, Mapping):
+        return StreamPayload(problem="the stream carried no delta")
+    deltas: list[tuple[str, str]] = []
+    reasoning = delta.get("reasoning")
+    if isinstance(reasoning, str) and reasoning:
+        deltas.append(("reasoning", reasoning))
+    content = delta.get("content")
+    if isinstance(content, str) and content:
+        deltas.append(("content", content))
+    return StreamPayload(tuple(deltas))
+
+
 def sentinel_fragment(sentinel: str) -> str:
     """Return the sentinel-bearing prefix shared by sent prompts and chat reads."""
 
     return f"[turn harness {sentinel} "
-
-
-def _has_sentinel(messages: Mapping[str, object], fragment: str) -> bool:
-    for message in messages.values():
-        if not isinstance(message, Mapping):
-            continue
-        content = message.get("content")
-        if isinstance(content, str) and fragment in content:
-            return True
-    return False
-
-
-def watch_chats(
-    client: Client, *, ids_before: frozenset[str], sentinel: str
-) -> ChatWatch:
-    """Find the chats new since ``ids_before`` that carry this run's sentinel.
-
-    Never raises: a failed listing or candidate read is the value's problem,
-    the ids proven before it kept, so the caller keeps its completed turn.
-    A candidate gone between the listing and its read is skipped.
-    """
-
-    try:
-        candidate_ids = sorted(owuiturn.chat_ids(client) - ids_before)
-    except OwuiError as exc:
-        return ChatWatch((), 0, Problem(exc.problem, exc.fix))
-
-    fragment = sentinel_fragment(sentinel)
-    stored_ids: list[str] = []
-    candidates = 0
-    for chat_id in candidate_ids:
-        candidates += 1
-        try:
-            messages = owuiturn.candidate_messages(client, chat_id)
-        except OwuiError as exc:
-            return ChatWatch(tuple(stored_ids), candidates, Problem(exc.problem, exc.fix))
-        if messages is not None and _has_sentinel(messages, fragment):
-            stored_ids.append(chat_id)
-    return ChatWatch(tuple(stored_ids), candidates)
 
 
 def prompt_text(case_id: str, sentinel: str, prompt: str) -> str:

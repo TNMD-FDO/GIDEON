@@ -1,12 +1,14 @@
 """Load and validate versioned evaluation sets and their frozen slices.
 
 An extraction case is a harvest, an invented, or a variant case; a variant
-names its parent, carries the parent's cluster, and retires with it.
+names its parent, carries the parent's cluster, and retires with it. A judge
+triple is an invented reference-and-candidate grading case.
 """
 
 import hashlib
 import json
 import re
+import sys
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date
@@ -37,6 +39,7 @@ _VERSION_PATTERN: Final[re.Pattern[str]] = re.compile(r"eval-v[0-9]+")
 _EXTRACTION_ID: Final[re.Pattern[str]] = re.compile(r"extraction-[0-9]{3}")
 _VARIANT_AXIS: Final[re.Pattern[str]] = re.compile(r"[a-z]+(?:-[a-z]+)*@[1-9][0-9]*")
 JUDGMENT_ID_PATTERN: Final[re.Pattern[str]] = re.compile(r"judgments-[0-9]{3,}")
+_TRIPLE_ID: Final[re.Pattern[str]] = re.compile(r"judge-[0-9]{3}")
 _HARVEST_ID: Final[re.Pattern[str]] = re.compile(r"HARV-[0-9]{3}")
 _EXTRACTION_CLUSTER: Final[re.Pattern[str]] = re.compile(r"harvest-chat-[0-9a-f]+")
 _JUDGMENT_CLUSTER: Final[re.Pattern[str]] = re.compile(r"harvest-chat-[A-Za-z0-9_-]+")
@@ -73,6 +76,10 @@ class ShapeSpec:
                 keys.extend(("seed", "cluster_id", "review"))
             else:
                 keys.extend(("cluster_id", "review"))
+            if "supersedes" in record:
+                keys.append("supersedes")
+            keys.append("notes")
+        elif self.category == "triples":
             if "supersedes" in record:
                 keys.append("supersedes")
             keys.append("notes")
@@ -118,6 +125,26 @@ SHAPE_REGISTRY: Final[Mapping[tuple[str, str], ShapeSpec]] = {
         _JUDGMENT_CLUSTER,
         ("by", "on", "accepted_flags"),
     ),
+    ("judge", "triples"): ShapeSpec(
+        "judge",
+        "triples",
+        (
+            "id",
+            "suite",
+            "category",
+            "branch",
+            "question",
+            "expected",
+            "candidate",
+            "labels",
+            "cluster_id",
+            "review",
+        ),
+        {"suite": "judge", "category": "triples", "branch": "legal"},
+        _TRIPLE_ID,
+        _TRIPLE_ID,
+        ("by", "on"),
+    ),
 }
 
 
@@ -147,6 +174,7 @@ class LoadedSet:
     cases_by_id: Mapping[str, Case]
     active_ids: tuple[str, ...]
     slices: Mapping[str, tuple[str, ...]]
+    slice_lists: Mapping[str, Mapping[str, tuple[str, ...]]]
     digest: str
 
 
@@ -162,6 +190,13 @@ class EvalSetLoadResult:
         """Whether loading produced a set without findings."""
 
         return self.loaded is not None and not self.findings
+
+
+def print_findings(findings: Iterable[Finding]) -> None:
+    """Print every finding on stderr, one per line, in the reported order."""
+
+    for finding in findings:
+        print(finding.text(), file=sys.stderr)
 
 
 def _relative(root: Path, path: Path) -> str:
@@ -337,6 +372,34 @@ def _validate_extraction_objects(
         )
 
 
+def _validate_triple_fields(
+    record: Case,
+    file: str,
+    case_id: str | None,
+    line: int,
+    findings: list[Finding],
+) -> None:
+    expected = record.get("expected")
+    if not isinstance(expected, dict) or tuple(expected) != ("answer", "band"):
+        findings.append(Finding(file, case_id, line, "expected keys or order", _CASE_FIX))
+    else:
+        answer = expected["answer"]
+        if not isinstance(answer, str) or not answer.strip():
+            findings.append(Finding(file, case_id, line, "expected.answer", _CASE_FIX))
+        band = expected["band"]
+        if not (
+            isinstance(band, list)
+            and len(band) == 2
+            and all(_int(value) and 0 <= value <= 3 for value in band)
+            and band[0] <= band[1]
+        ):
+            findings.append(Finding(file, case_id, line, "expected.band", _CASE_FIX))
+
+    candidate = record.get("candidate")
+    if not isinstance(candidate, str) or not candidate.strip():
+        findings.append(Finding(file, case_id, line, "candidate", _CASE_FIX))
+
+
 def _validate_shape(
     root: Path,
     path: Path,
@@ -392,7 +455,7 @@ def _validate_shape(
             or _VARIANT_AXIS.fullmatch(labels[1]) is None
         ):
             findings.append(Finding(relative, case_id, line, "variant labels", _CASE_FIX))
-    else:
+    elif spec.category == "judgments":
         if len(labels) < 2:
             findings.append(Finding(relative, case_id, line, "labels", _CASE_FIX))
         else:
@@ -405,6 +468,13 @@ def _validate_shape(
                 findings.append(Finding(relative, case_id, line, "labels.query_type", _CASE_FIX))
             if origin == "chu-written" and len(labels) != 2:
                 findings.append(Finding(relative, case_id, line, "labels", _CASE_FIX))
+    elif spec.category == "triples" and (
+        len(labels) != 2
+        or origin != "invented"
+        or not isinstance(labels[1], str)
+        or labels[1] not in {"faithful", "wrong", "partial", "unsourced-length"}
+    ):
+        findings.append(Finding(relative, case_id, line, "labels", _CASE_FIX))
 
     seed = record.get("seed")
     if origin == "harvest":
@@ -458,11 +528,13 @@ def _validate_shape(
                             _CASE_FIX,
                         )
                     )
-    else:
+    elif spec.category == "extraction":
         if isinstance(question, str):
             _validate_extraction_objects(
                 question, record.get("expected"), relative, case_id, line, findings
             )
+    elif spec.category == "triples":
+        _validate_triple_fields(record, relative, case_id, line, findings)
 
 
 def _read_cases(
@@ -509,8 +581,13 @@ def _read_slices(
     directories: Iterable[Path],
     findings: list[Finding],
     files: dict[str, bytes],
-) -> tuple[dict[str, tuple[str, ...]], dict[str, dict[str, tuple[str, int]]]]:
+) -> tuple[
+    dict[str, tuple[str, ...]],
+    dict[str, dict[str, tuple[str, ...]]],
+    dict[str, dict[str, tuple[str, int]]],
+]:
     slices: dict[str, tuple[str, ...]] = {}
+    slice_lists: dict[str, dict[str, tuple[str, ...]]] = {}
     locations: dict[str, dict[str, tuple[str, int]]] = {}
     for directory in directories:
         slice_name = directory.name
@@ -524,6 +601,7 @@ def _read_slices(
             findings.append(Finding(_relative(root, directory), None, 0, "slice directory has no id list", _SLICE_FIX))
             continue
         ids: list[str] = []
+        lists: dict[str, tuple[str, ...]] = {}
         seen: dict[str, tuple[str, int]] = {}
         for path in paths:
             relative = _relative(root, path)
@@ -535,6 +613,7 @@ def _read_slices(
             except UnicodeDecodeError as exc:
                 findings.append(Finding(relative, None, 1, f"line is not UTF-8 ({exc})", _SLICE_FIX))
                 continue
+            list_ids: list[str] = []
             for number, case_id in enumerate(text.splitlines(), start=1):
                 if case_id in seen:
                     previous_file, previous_line = seen[case_id]
@@ -550,9 +629,12 @@ def _read_slices(
                 else:
                     seen[case_id] = (relative, number)
                     ids.append(case_id)
+                    list_ids.append(case_id)
+            lists[path.stem] = tuple(sorted(list_ids))
         slices[slice_name] = tuple(sorted(ids))
+        slice_lists[slice_name] = lists
         locations[slice_name] = seen
-    return slices, locations
+    return slices, slice_lists, locations
 
 
 def _set_digest(files: Mapping[str, bytes]) -> str:
@@ -671,7 +753,9 @@ def load_set(root: str | Path, court_ids: Iterable[str] | None = None) -> EvalSe
     cases_by_file, occurrences = _read_cases(
         set_root, case_paths, court_id_set, findings, files
     )
-    slices, slice_locations = _read_slices(set_root, slice_directories, findings, files)
+    slices, slice_lists, slice_locations = _read_slices(
+        set_root, slice_directories, findings, files
+    )
 
     cases_by_id: dict[str, Case] = {}
     first_occurrence: dict[str, tuple[str, int]] = {}
@@ -719,6 +803,7 @@ def load_set(root: str | Path, court_ids: Iterable[str] | None = None) -> EvalSe
             cases_by_id=cases_by_id,
             active_ids=tuple(sorted(set(cases_by_id) - retired)),
             slices=slices,
+            slice_lists=slice_lists,
             digest=_set_digest(files),
         )
     )

@@ -35,7 +35,7 @@ The constants follow [`render-apply.md`](render-apply.md)'s rule: a reader opens
 
 - `gideon/api/upstream.py` — the connection and read bounds for the engine client, and the completion's own longer read bound (httpx's read bound is per network read, so a completion silent until it is finished needs it).
 - `gideon/api/__main__.py` — uvicorn's graceful-shutdown bound.
-- `gideon/host/render/api.py` — the service, image, secret, route, port, mount, working-directory, source, and probe identities shared by Compose, Prometheus, and Grafana.
+- `gideon/host/render/api.py` — the service, image, secret, route, port, mount, working-directory, source, and probe identities shared by Compose, Prometheus, and Grafana, and the three forwarded user-header names (`X-OpenWebUI-User-Name`, `-Email`, `-Role`) that the turn harness's service door fills for the eval identity; no rendered artifact reads them yet, so they move no byte and are outside `API_SOURCES`.
 
 ## Tests
 

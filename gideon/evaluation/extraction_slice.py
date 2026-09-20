@@ -2,33 +2,14 @@
 
 import time
 from collections import Counter
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
-from typing import Final, cast
+from collections.abc import Mapping
+from typing import cast
 
 from gideon.evaluation.evalset import Case, LoadedSet
+from gideon.evaluation.results import CaseResult, RunContext, SliceResult
 from gideon.extraction import ExactObject
 from gideon.extraction.grammar import extract, registry_types
 from gideon.extraction.scoring import SetScore, build_report, score
-
-
-@dataclass(frozen=True, slots=True)
-class CaseResult:
-    """The content-free result for one active case."""
-
-    case_id: str
-    verdict: str
-    metrics: Mapping[str, Mapping[str, int]]
-    latency_ms: float
-
-
-@dataclass(frozen=True, slots=True)
-class SliceResult:
-    """The extraction score, report, and per-case results."""
-
-    score: SetScore
-    report: str
-    results: tuple[CaseResult, ...]
 
 
 def _objects(case: Case) -> tuple[Mapping[str, object], ...]:
@@ -76,9 +57,10 @@ def _type_counts(
     return metrics, "fail" if failed else "pass"
 
 
-def run_extraction(eval_set: LoadedSet, slice_name: str) -> SliceResult:
+def run_extraction(eval_set: LoadedSet, slice_name: str, context: RunContext) -> SliceResult:
     """Run the extraction measure for *slice_name* in deterministic id order."""
 
+    del context
     ids = eval_set.slices[slice_name]
     active = set(eval_set.active_ids)
     cases = tuple(eval_set.cases_by_id[case_id] for case_id in ids if case_id in active)
@@ -98,10 +80,7 @@ def run_extraction(eval_set: LoadedSet, slice_name: str) -> SliceResult:
     for case in cases:
         case_id = cast(str, case["id"])
         metrics, verdict = _type_counts(case, extracted[case_id], result, landed)
-        case_results.append(CaseResult(case_id, verdict, metrics, latencies[case_id]))
-    return SliceResult(result, build_report(result), tuple(case_results))
-
-
-SLICE_RUNNERS: Final[Mapping[str, Callable[[LoadedSet, str], SliceResult]]] = {
-    "extraction": run_extraction
-}
+        case_results.append(
+            CaseResult(case_id, 1, verdict, metrics, judge=None, latency_ms=latencies[case_id])
+        )
+    return SliceResult(result.verdict, build_report(result), tuple(case_results))
