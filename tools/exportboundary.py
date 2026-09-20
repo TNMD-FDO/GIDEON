@@ -43,6 +43,7 @@ EXCLUDED_PREFIXES = (
     "tools/judgments",  # judgment intake tooling that loads the excluded flagger
     "tests/test_judgments_intake.py",  # judgment intake's excluded tests
     "eval/sets/eval-v1/build-gates/extraction.jsonl",  # the labelled harvest questions pending the same ruling
+    "eval/sets/eval-v1/build-gates/extraction-variants.jsonl",  # the harvest questions' variants, pending the same ruling
     "eval/sets/eval-v1/slices/extraction/harvest.ids",  # the harvest slice ids must leave with their excluded cases
     ".github/workflows/acceptance.yml",  # the box acceptance workflow
     ".github/workflows/pin-watch.yml",  # the box pin-watch workflow

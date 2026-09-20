@@ -1,4 +1,8 @@
-"""Load and validate versioned evaluation sets and their frozen slices."""
+"""Load and validate versioned evaluation sets and their frozen slices.
+
+An extraction case is a harvest, an invented, or a variant case; a variant
+names its parent, carries the parent's cluster, and retires with it.
+"""
 
 import hashlib
 import json
@@ -31,6 +35,7 @@ _SLICE_FIX: Final[str] = "Correct the named slice id list, then retry."
 _READ_FIX: Final[str] = "Restore the eval set from the release checkout, then retry."
 _VERSION_PATTERN: Final[re.Pattern[str]] = re.compile(r"eval-v[0-9]+")
 _EXTRACTION_ID: Final[re.Pattern[str]] = re.compile(r"extraction-[0-9]{3}")
+_VARIANT_AXIS: Final[re.Pattern[str]] = re.compile(r"[a-z]+(?:-[a-z]+)*@[1-9][0-9]*")
 _JUDGMENT_ID: Final[re.Pattern[str]] = re.compile(r"judgments-[0-9]{3,}")
 _HARVEST_ID: Final[re.Pattern[str]] = re.compile(r"HARV-[0-9]{3}")
 _EXTRACTION_CLUSTER: Final[re.Pattern[str]] = re.compile(r"harvest-chat-[0-9a-f]+")
@@ -62,7 +67,9 @@ class ShapeSpec:
 
         keys = list(self.base_keys)
         if self.category == "extraction":
-            if origin == "harvest":
+            if origin == "variant":
+                keys.extend(("parent", "cluster_id", "review"))
+            elif origin == "harvest":
                 keys.extend(("seed", "cluster_id", "review"))
             else:
                 keys.extend(("cluster_id", "review"))
@@ -371,7 +378,7 @@ def _validate_shape(
         findings.append(Finding(relative, case_id, line, "labels", _CASE_FIX))
         return
     if spec.category == "extraction":
-        if origin not in {"harvest", "invented"}:
+        if origin not in {"harvest", "invented", "variant"}:
             findings.append(Finding(relative, case_id, line, "labels origin", _CASE_FIX))
         elif origin == "harvest" and (
             len(labels) != 2 or not isinstance(labels[1], str) or labels[1] not in _QUERY_TYPES
@@ -379,6 +386,12 @@ def _validate_shape(
             findings.append(Finding(relative, case_id, line, "harvest labels", _CASE_FIX))
         elif origin == "invented" and len(labels) != 1:
             findings.append(Finding(relative, case_id, line, "invented labels", _CASE_FIX))
+        elif origin == "variant" and (
+            len(labels) != 2
+            or not isinstance(labels[1], str)
+            or _VARIANT_AXIS.fullmatch(labels[1]) is None
+        ):
+            findings.append(Finding(relative, case_id, line, "variant labels", _CASE_FIX))
     else:
         if len(labels) < 2:
             findings.append(Finding(relative, case_id, line, "labels", _CASE_FIX))
@@ -400,13 +413,18 @@ def _validate_shape(
     elif "seed" in record:
         findings.append(Finding(relative, case_id, line, "seed forbidden", _CASE_FIX))
 
+    if origin == "variant":
+        parent = record.get("parent")
+        if not isinstance(parent, str) or _EXTRACTION_ID.fullmatch(parent) is None:
+            findings.append(Finding(relative, case_id, line, "parent", _CASE_FIX))
+
     cluster_id = record.get("cluster_id")
     if not isinstance(cluster_id, str):
         findings.append(Finding(relative, case_id, line, "cluster_id", _CASE_FIX))
     elif origin == "harvest":
         if spec.cluster_pattern.fullmatch(cluster_id) is None:
             findings.append(Finding(relative, case_id, line, "cluster_id", _CASE_FIX))
-    elif cluster_id != case_id:
+    elif origin != "variant" and cluster_id != case_id:
         findings.append(Finding(relative, case_id, line, "cluster_id", _CASE_FIX))
 
     if not isinstance(record.get("notes"), str):
@@ -591,6 +609,49 @@ def _supersedes_findings(
     return superseded
 
 
+def _parent_findings(
+    occurrences: Iterable[tuple[str, int, Case]],
+    cases_by_id: Mapping[str, Case],
+    findings: list[Finding],
+) -> None:
+    """Refuse a variant whose parent is absent, later, variant, or differently clustered."""
+
+    claims = (
+        (relative, line, case_id, parent, case)
+        for relative, line, case in occurrences
+        for case_id, parent in ((_case_id(case), case.get("parent")),)
+        if case_id is not None and _origin(case) == "variant" and isinstance(parent, str)
+    )
+    for relative, line, case_id, parent, case in sorted(
+        claims,
+        key=lambda claim: (_series(claim[2]) or ("", 0), claim[2]),
+    ):
+        case_series = _series(case_id)
+        parent_case = cases_by_id.get(parent)
+        rule = None
+        if parent_case is None:
+            rule = "parent names no case"
+        else:
+            parent_series = _series(parent)
+            if (
+                case_series is None
+                or parent_series is None
+                or parent_series[0] != case_series[0]
+                or parent_series[1] >= case_series[1]
+            ):
+                rule = "parent names no earlier case of its id series"
+            elif _origin(parent_case) == "variant":
+                rule = "parent names a variant"
+            elif (
+                isinstance(case.get("cluster_id"), str)
+                and isinstance(parent_case.get("cluster_id"), str)
+                and case["cluster_id"] != parent_case["cluster_id"]
+            ):
+                rule = "cluster_id differs from the parent's"
+        if rule is not None:
+            findings.append(Finding(relative, case_id, line, rule, _CASE_FIX))
+
+
 def load_set(root: str | Path, court_ids: Iterable[str] | None = None) -> EvalSetLoadResult:
     """Load every suite case and frozen slice below *root*, or every finding."""
 
@@ -634,6 +695,7 @@ def load_set(root: str | Path, court_ids: Iterable[str] | None = None) -> EvalSe
         cases_by_id[case_id] = case
 
     superseded = _supersedes_findings(occurrences, cases_by_id, findings)
+    _parent_findings(occurrences, cases_by_id, findings)
     for slice_name, ids in slices.items():
         for case_id in ids:
             if case_id not in cases_by_id:
@@ -643,12 +705,19 @@ def load_set(root: str | Path, court_ids: Iterable[str] | None = None) -> EvalSe
     ordered_findings = tuple(sorted(findings, key=_finding_sort_key))
     if ordered_findings:
         return EvalSetLoadResult(findings=ordered_findings)
+    # A case whose parent is retired is retired; the loader refuses a variant of
+    # a variant, so the rule is one step deep and equals the scorer's transitive one.
+    retired = superseded | {
+        case_id
+        for case_id, case in cases_by_id.items()
+        if isinstance(case.get("parent"), str) and case["parent"] in superseded
+    }
     return EvalSetLoadResult(
         loaded=LoadedSet(
             version=set_root.name,
             cases_by_file=cases_by_file,
             cases_by_id=cases_by_id,
-            active_ids=tuple(sorted(set(cases_by_id) - superseded)),
+            active_ids=tuple(sorted(set(cases_by_id) - retired)),
             slices=slices,
             digest=_set_digest(files),
         )

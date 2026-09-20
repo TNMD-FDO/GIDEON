@@ -15,8 +15,14 @@ A keyed type always carries its authority's permanent key, at section level
 - ``court_rule`` — the USLM path of its set, ``/us/usc/t18a/courtRules/Crim/rule<N>``
   and ``/us/usc/t28a/courtRules/{Civil,App,Evid}/rule<N>``;
 - ``regulation`` — ``cfr/<title>/<section>``; ``habeas_rule`` —
-  ``rules/2254/rule<N>`` or ``rules/2255/rule<N>``; ``scotus_rule`` —
-  ``rules/scotus/rule<N>``; ``appendix_statute`` — its USLM appendix path.
+  ``rules/2254/rule<N>`` or ``rules/2255/rule<N>``; ``scotus_rule`` — its
+  rule-level key, ``rules/scotus/rule<N>``; a dotted paragraph designator is
+  carried in ``subsections`` in order (``14.1(a)`` becomes ``("1", "a")``),
+  the one type whose designator is not parenthesised; ``appendix_statute`` —
+  its USLM appendix path from the title/ordinal table, and a compilation
+  outside that table is no object.
+
+The ``docket`` object is the number alone and never carries a key.
 
 The parenthesised designators after a section (``(b)(1)``) are inside the
 span and carried beside the key as ``subsections`` (``("b", "1")``), in order
@@ -26,9 +32,10 @@ comparison folds case, because a U.S.C. section's letter cannot be derived
 from the text (``3663A`` against ``78j``), so the key carries it as typed.
 
 A ``bare_section`` (a section with no title) and a ``bare_rule`` (a rule
-number with no rule set) never carry a key: the text does not state the
-authority, and deterministic code never guesses one (ADR-0006) — ``Rule 41``
-is a rule of three sets.
+number with no rule set, including the unnamed habeas form ``Habeas Rule 6``)
+never carry a key: the text does not state the authority, and deterministic
+code never guesses one (ADR-0006) — ``Habeas Rule 6``, beside ``Rule 41``,
+names no set.
 """
 
 
@@ -142,4 +149,3 @@ def ordering_violations(
             violations.append(obj)
         previous = obj
     return tuple(violations)
-

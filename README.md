@@ -8,7 +8,7 @@ assistant, on one box the office controls. Built by TNMD-FDO (the Office of
 the Federal Public Defender, Middle District of Tennessee) and designed from
 day one for distribution: clone a tag, edit `site.yaml`, run one script.
 
-**Status:** 0.x — slice 0 (platform) complete at `v0.1.0`, the clean-VM acceptance at minor tags its standing proof; slice 1 (General) complete at `v0.2.0`, with no user on the box until go-live (ADR-0044); slice 2 (eval harness) under way toward `v0.3.0`; this tree is `v0.2.13`.
+**Status:** 0.x — slice 0 (platform) complete at `v0.1.0`, the clean-VM acceptance at minor tags its standing proof; slice 1 (General) complete at `v0.2.0`, with no user on the box until go-live (ADR-0044); slice 2 (eval harness) under way toward `v0.3.0`; this tree is `v0.2.14`.
 What each release changed is in [`CHANGELOG.md`](CHANGELOG.md), the index over `docs/2-changelog/`, one file per release. Later-slice commands still print "not implemented".
 
 ## Install
@@ -77,7 +77,7 @@ python3 -m gideon --help
 
 `gideon host …`, `preflight`, `render`, `apply`, `secrets rotate`, `tls reload`, `registry mirror`, and `users reconcile` run from the checkout on a bare Ubuntu Server install using only the standard library and `python3-yaml` (spec §1.5, §3.6 — render runs before any image is pulled) — a boundary CI enforces. `render`, `apply`, `secrets rotate`, `tls reload`, and `users reconcile` need root; `registry mirror` needs Docker access; `alerts test` needs root and a converged `apply`. A host without a GPU is provisioned once with `sudo python3 -m gideon host provision --no-gpu`; every later command reads that declaration. TNMD's box is declared once with `sudo python3 -m gideon host provision --build-box`. `users reconcile` reports until given `--now`, and a rendered systemd timer runs it nightly.
 
-The development toolchain is the five pins in `requirements-dev.txt` — never the product's, which installs nothing from PyPI — in an untracked project venv:
+The development toolchain is `requirements-dev.txt` — the five toolchain pins and, beside them, a copy of the `gideon` image's dependency set so mypy and the unit suite see the service's imports; never the product's path, which installs nothing from PyPI — in an untracked project venv:
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt

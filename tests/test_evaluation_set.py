@@ -5,7 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from gideon.evaluation.evalset import SET_ROOT, Finding, load_set
+from gideon.evaluation.evalset import SET_ROOT, Finding, LoadedSet, load_set
+from gideon.extraction.scoring import active_cases
 from gideon.host.courts import load_court_map
 from tools.exportboundary import absent_from_export
 
@@ -51,6 +52,39 @@ def _harvest_extraction_case(case_id: str = "extraction-001") -> dict[str, objec
         "review": {"by": "CSA-1", "on": "2026-09-19"},
         "notes": "",
     }
+
+
+def _variant_case(
+    case_id: str = "extraction-002",
+    parent: str = "extraction-001",
+    axis: str = "sign-present@1",
+    cluster_id: str | None = None,
+) -> dict[str, object]:
+    return {
+        "id": case_id,
+        "suite": "build-gates",
+        "category": "extraction",
+        "branch": "legal",
+        "question": SENTINEL,
+        "expected": {"objects": []},
+        "labels": ["variant", axis],
+        "parent": parent,
+        "cluster_id": parent if cluster_id is None else cluster_id,
+        "review": {"by": "CSA-1", "on": "2026-09-19"},
+        "notes": "",
+    }
+
+
+def _write_cases(root: Path, records: tuple[dict[str, object], ...]) -> None:
+    lines = [json.dumps(record, separators=(",", ":")) for record in records]
+    _write(root, "build-gates/cases.jsonl", "\n".join(lines))
+
+
+def _scorer_active_ids(loaded: LoadedSet) -> tuple[str, ...]:
+    """The scorer's active set as sorted ids, the loader's held equal to it."""
+
+    files = tuple(loaded.cases_by_file.values())
+    return tuple(sorted(str(case["id"]) for case in active_cases(files)))
 
 
 class Refusals(unittest.TestCase):
@@ -249,6 +283,25 @@ class ShapeRefusals(unittest.TestCase):
             self.assertIn(expected, rendered)
             self.assertNotIn(SENTINEL, rendered)
 
+    def _assert_relational_finding(
+        self,
+        records: tuple[dict[str, object], ...],
+        *,
+        case_id: str,
+        expected: str,
+    ) -> None:
+        """A relational rule needs the whole file, so the set is planted, not one case."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "eval-v9"
+            _write_cases(root, records)
+            result = load_set(root)
+            self.assertIsNone(result.loaded)
+            rendered = "\n".join(finding.text() for finding in result.findings)
+            self.assertIn(f"cases.jsonl:id {case_id}", rendered)
+            self.assertIn(expected, rendered)
+            self.assertNotIn(SENTINEL, rendered)
+
     def test_version_directory_must_be_eval_vn(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "eval-v-test"
@@ -313,6 +366,90 @@ class ShapeRefusals(unittest.TestCase):
         review = harvest.pop("review")
         harvest["review"] = review
         self._assert_case_finding(harvest, expected="case keys or order")
+
+    def test_variant_shape_rejects_key_order_labels_seed_and_invented_parent(self) -> None:
+        # parent belongs between labels and cluster_id; re-inserting it puts it last.
+        record = _variant_case()
+        record["parent"] = record.pop("parent")
+        self._assert_case_finding(record, expected="case keys or order")
+
+        for labels in (["variant"], ["variant", "bad axis"]):
+            with self.subTest(labels=labels):
+                record = _variant_case()
+                record["labels"] = labels
+                self._assert_case_finding(record, expected="variant labels")
+
+        record = _variant_case()
+        record["seed"] = "HARV-001"
+        self._assert_case_finding(record, expected="seed forbidden")
+
+        record = _variant_case()
+        record["parent"] = 1
+        self._assert_case_finding(record, expected="parent")
+
+        invented = json.loads(_case("extraction-001"))
+        invented["parent"] = "extraction-000"
+        self._assert_case_finding(invented, expected="case keys or order")
+
+    def test_variant_parent_relationships_are_refused(self) -> None:
+        self._assert_case_finding(
+            _variant_case(parent="extraction-999"), expected="parent names no case"
+        )
+
+        self._assert_relational_finding(
+            (
+                _variant_case(case_id="extraction-001", parent="extraction-002"),
+                json.loads(_case("extraction-002")),
+            ),
+            case_id="extraction-001",
+            expected="parent names no earlier case of its id series",
+        )
+        self._assert_relational_finding(
+            (
+                json.loads(_case("extraction-001")),
+                _variant_case(),
+                _variant_case(case_id="extraction-003", parent="extraction-002"),
+            ),
+            case_id="extraction-003",
+            expected="parent names a variant",
+        )
+        self._assert_relational_finding(
+            (json.loads(_case("extraction-001")), _variant_case(cluster_id="other-cluster")),
+            case_id="extraction-002",
+            expected="cluster_id differs from the parent's",
+        )
+
+    def test_valid_variant_over_valid_parent_loads_clean(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "eval-v9"
+            _write_cases(root, (json.loads(_case("extraction-001")), _variant_case()))
+            result = load_set(root)
+            self.assertTrue(result.ok, result.findings)
+
+    def test_active_ids_match_scorer_for_a_parent_chain(self) -> None:
+        # A superseded parent, its variant, the successor, and the successor's variant.
+        records = (
+            json.loads(_case("extraction-001")),
+            _variant_case(),
+            json.loads(_superseding("extraction-003", "extraction-001")),
+            _variant_case(case_id="extraction-004", parent="extraction-003"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "eval-v9"
+            _write_cases(root, records)
+            result = load_set(root)
+            self.assertTrue(result.ok, result.findings)
+            assert result.loaded is not None
+            self.assertEqual(result.loaded.active_ids, ("extraction-003", "extraction-004"))
+            self.assertEqual(result.loaded.active_ids, _scorer_active_ids(result.loaded))
+
+    def test_committed_active_ids_match_scorer(self) -> None:
+        court_map = load_court_map(ROOT / "courts.yaml").court_map
+        assert court_map is not None
+        result = load_set(ROOT / SET_ROOT, court_map.courts)
+        self.assertTrue(result.ok, result.findings)
+        assert result.loaded is not None
+        self.assertEqual(result.loaded.active_ids, _scorer_active_ids(result.loaded))
 
     def test_judgment_shape_rejects_fields_and_review_contract(self) -> None:
         cases = [

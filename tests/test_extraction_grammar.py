@@ -17,7 +17,7 @@ from gideon.extraction import (
     ordering_violations,
     span_violations,
 )
-from gideon.extraction.grammar import PATTERN_REGISTRY
+from gideon.extraction.grammar import PATTERN_BUILDERS, PATTERN_REGISTRY, _candidates
 
 ROOT = Path(__file__).resolve().parent.parent
 EXTRACTION = ROOT / "gideon" / "extraction"
@@ -181,7 +181,7 @@ class Grammar(unittest.TestCase):
     """The first bounded grammar families and their exact-object results."""
 
     def test_version_and_titled_section_shape(self) -> None:
-        self.assertEqual(GRAMMAR_VERSION, 1)
+        self.assertEqual(GRAMMAR_VERSION, 2)
         source = "[FICTIONAL TEST ONLY] 18 U.S. Code § 2511(2)(c)."
         start = source.index("18 U.S.")
         end = source.index(").", start) + 1
@@ -309,6 +309,337 @@ class Grammar(unittest.TestCase):
                 self.assertEqual(objects[0].key, key)
                 self.assertEqual(objects[0].pattern_id, "rules/set-and-number@1")
 
+    def test_supreme_court_rule_forms_and_designators(self) -> None:
+        cases = (
+            ("Sup. Ct. R. 13", "rules/scotus/rule13", ()),
+            ("Sup.Ct.R. 13", "rules/scotus/rule13", ()),
+            ("sUp. cT. rUlE 13", "rules/scotus/rule13", ()),
+            ("Supreme Court Rule 13", "rules/scotus/rule13", ()),
+            (
+                "Rule 10 of the Rules of the Supreme Court",
+                "rules/scotus/rule10",
+                (),
+            ),
+            ("Sup. Ct. R. 14.1(a)", "rules/scotus/rule14", ("1", "a")),
+            (
+                "Rule 15.6 of the Rules of the Supreme Court",
+                "rules/scotus/rule15",
+                ("6",),
+            ),
+        )
+        for citation, key, subsections in cases:
+            source = f"[FICTIONAL TEST ONLY] {citation}."
+            start = source.index(citation)
+            with self.subTest(citation):
+                self.assertEqual(
+                    _signature(extract(source)),
+                    (
+                        (
+                            "scotus_rule",
+                            start,
+                            start + len(citation),
+                            key,
+                            subsections,
+                            "rules/scotus-number@1",
+                        ),
+                    ),
+                )
+
+    def test_federal_and_supreme_rules_keep_their_types(self) -> None:
+        cases = (
+            (
+                "[FICTIONAL TEST ONLY] Fed. R. Crim. P. 32.1 and Sup. Ct. R. 13.",
+                (
+                    ("court_rule", "Fed. R. Crim. P. 32.1", "/us/usc/t18a/courtRules/Crim/rule32.1"),
+                    ("scotus_rule", "Sup. Ct. R. 13", "rules/scotus/rule13"),
+                ),
+            ),
+            (
+                "[FICTIONAL TEST ONLY] Supreme Court Rule 13 and Rule 4 of the Federal Rules of Criminal Procedure.",
+                (
+                    ("scotus_rule", "Supreme Court Rule 13", "rules/scotus/rule13"),
+                    ("court_rule", "Rule 4 of the Federal Rules of Criminal Procedure", "/us/usc/t18a/courtRules/Crim/rule4"),
+                ),
+            ),
+        )
+        for source, expected in cases:
+            with self.subTest(source):
+                self.assertEqual(
+                    tuple((obj.type, obj.text, obj.key) for obj in extract(source)),
+                    expected,
+                )
+
+    def test_rule_number_alone_stays_a_bare_rule(self) -> None:
+        source = "[FICTIONAL TEST ONLY] Rule 13 alone."
+        start = source.index("Rule")
+        self.assertEqual(
+            _signature(extract(source)),
+            (
+                (
+                    "bare_rule",
+                    start,
+                    start + len("Rule 13"),
+                    None,
+                    (),
+                    "rules/bare-number@1",
+                ),
+            ),
+        )
+
+    def test_habeas_rule_forms_keys_and_subsections(self) -> None:
+        cases = (
+            (
+                "Rule 6 of the Rules Governing Section 2254 Cases",
+                "rules/2254/rule6",
+                (),
+            ),
+            (
+                "Rule 12(a) of the Rules Governing § 2255 Proceedings",
+                "rules/2255/rule12",
+                ("a",),
+            ),
+            ("§ 2254 Rule 6", "rules/2254/rule6", ()),
+            ("Section 2255 Rule 8(c)", "rules/2255/rule8", ("c",)),
+            ("Section 2255 Rule 8.1(c)", "rules/2255/rule8.1", ("c",)),
+        )
+        for citation, key, subsections in cases:
+            source = f"[FICTIONAL TEST ONLY] {citation}."
+            start = source.index(citation)
+            with self.subTest(citation):
+                self.assertEqual(
+                    _signature(extract(source)),
+                    (
+                        (
+                            "habeas_rule",
+                            start,
+                            start + len(citation),
+                            key,
+                            subsections,
+                            "rules/habeas-set-and-number@1",
+                        ),
+                    ),
+                )
+
+    def test_habeas_and_federal_rules_keep_their_types(self) -> None:
+        cases = (
+            (
+                "[FICTIONAL TEST ONLY] Rule 6 of the Rules Governing Section 2254 Cases and Fed. R. Crim. P. 41(b).",
+                ("habeas_rule", "Rule 6 of the Rules Governing Section 2254 Cases"),
+                ("court_rule", "Fed. R. Crim. P. 41(b)"),
+            ),
+            (
+                "[FICTIONAL TEST ONLY] Fed. R. Crim. P. 41(b) and Rule 6 of the Rules Governing Section 2254 Cases.",
+                ("court_rule", "Fed. R. Crim. P. 41(b)"),
+                ("habeas_rule", "Rule 6 of the Rules Governing Section 2254 Cases"),
+            ),
+        )
+        for source, first, second in cases:
+            with self.subTest(source):
+                self.assertEqual(
+                    tuple((obj.type, obj.text) for obj in extract(source)),
+                    (first, second),
+                )
+
+    def test_unnamed_habeas_rule_is_a_bare_rule(self) -> None:
+        source = "[FICTIONAL TEST ONLY] Habeas Rule 6(a)."
+        start = source.index("Habeas")
+        self.assertEqual(
+            _signature(extract(source)),
+            (
+                (
+                    "bare_rule",
+                    start,
+                    start + len("Habeas Rule 6(a)"),
+                    None,
+                    ("a",),
+                    "rules/habeas-unnamed-set@1",
+                ),
+            ),
+        )
+
+    def test_cfr_sections_lists_ranges_and_part_cites(self) -> None:
+        cases = (
+            ("21 C.F.R. § 1308.11(d)", "cfr/21/1308.11", ("d",)),
+            ("28 CFR 2.20", "cfr/28/2.20", ()),
+            ("17 C.F.R. § 240.10b-5", "cfr/17/240.10b-5", ()),
+        )
+        for citation, key, subsections in cases:
+            source = f"[FICTIONAL TEST ONLY] {citation}."
+            start = source.index(citation)
+            with self.subTest(citation):
+                self.assertEqual(
+                    _signature(extract(source)),
+                    (
+                        (
+                            "regulation",
+                            start,
+                            start + len(citation),
+                            key,
+                            subsections,
+                            "cfr/titled-section@1",
+                        ),
+                    ),
+                )
+
+        list_source = "[FICTIONAL TEST ONLY] 28 C.F.R. §§ 523.42(c) and 523.44(d)."
+        list_start = list_source.index("28 C.F.R.")
+        second_start = list_source.index("523.44")
+        self.assertEqual(
+            _signature(extract(list_source)),
+            (
+                (
+                    "regulation",
+                    list_start,
+                    list_source.index(" and", list_start),
+                    "cfr/28/523.42",
+                    ("c",),
+                    "cfr/titled-list-member@1",
+                ),
+                (
+                    "regulation",
+                    second_start,
+                    second_start + len("523.44(d)"),
+                    "cfr/28/523.44",
+                    ("d",),
+                    "cfr/titled-list-member@1",
+                ),
+            ),
+        )
+
+        range_source = "[FICTIONAL TEST ONLY] 28 C.F.R. §§ 523.40-523.44."
+        range_start = range_source.index("28 C.F.R.")
+        range_right = range_source.index("523.44")
+        self.assertEqual(
+            _signature(extract(range_source)),
+            (
+                (
+                    "regulation",
+                    range_start,
+                    range_right - 1,
+                    "cfr/28/523.40",
+                    (),
+                    "cfr/titled-list-member@1",
+                ),
+                (
+                    "regulation",
+                    range_right,
+                    range_right + len("523.44"),
+                    "cfr/28/523.44",
+                    (),
+                    "cfr/titled-list-member@1",
+                ),
+            ),
+        )
+        self.assertEqual(extract("[FICTIONAL TEST ONLY] 28 C.F.R. pt. 2."), ())
+
+    def test_bare_dotted_sections_require_a_marker(self) -> None:
+        cases = (
+            ("§ 1308.11", ()),
+            ("§ 571.61(a)(2)", ("a", "2")),
+        )
+        for citation, subsections in cases:
+            source = f"[FICTIONAL TEST ONLY] {citation}."
+            start = source.index(citation)
+            with self.subTest(citation):
+                self.assertEqual(
+                    _signature(extract(source)),
+                    (
+                        (
+                            "bare_section",
+                            start,
+                            start + len(citation),
+                            None,
+                            subsections,
+                            "usc/bare-section@2",
+                        ),
+                    ),
+                )
+        self.assertEqual(extract("[FICTIONAL TEST ONLY] 1308.11(a)."), ())
+        guideline = "[FICTIONAL TEST ONLY] § 2B1.1(b)(1)."
+        self.assertEqual(extract(guideline)[0].type, "guideline")
+
+    def test_appendix_forms_use_the_table_and_decline_unknown_compilations(self) -> None:
+        cases = (
+            ("18 U.S.C. app. 3 § 6", "/us/usc/t18a/pl/96/456/s6", ()),
+            ("18 U.S.C. app. 2, § 9(1)", "/us/usc/t18a/pl/91/538/s9", ("1",)),
+            ("18 U.S.C. App. III § 4", "/us/usc/t18a/pl/96/456/s4", ()),
+            ("18 U.S.C. App. II, § 9(1)", "/us/usc/t18a/pl/91/538/s9", ("1",)),
+        )
+        for citation, key, subsections in cases:
+            source = f"[FICTIONAL TEST ONLY] {citation}."
+            start = source.index(citation)
+            with self.subTest(citation):
+                self.assertEqual(
+                    _signature(extract(source)),
+                    (
+                        (
+                            "appendix_statute",
+                            start,
+                            start + len(citation),
+                            key,
+                            subsections,
+                            "usc/appendix-section@1",
+                        ),
+                    ),
+                )
+
+        for citation in (
+            "5 U.S.C. App. 3 § 6(a)(4)",
+            "5 U.S.C. App. III, § 6(a)(4)",
+        ):
+            with self.subTest(citation):
+                self.assertEqual(extract(f"[FICTIONAL TEST ONLY] {citation}."), ())
+
+    def test_docket_forms_markers_and_declines(self) -> None:
+        district_cases = (
+            "3:21-cr-00123",
+            "Case No. 3:21-cv-12345-ABCD-EF-GHIJ-2",
+        )
+        for citation in district_cases:
+            source = f"[FICTIONAL TEST ONLY] {citation}."
+            number = citation if citation[0].isdigit() else citation[citation.index("3:") :]
+            start = source.index(number)
+            with self.subTest(citation):
+                self.assertEqual(
+                    _signature(extract(source)),
+                    (
+                        (
+                            "docket",
+                            start,
+                            start + len(number),
+                            None,
+                            (),
+                            "docket/district@1",
+                        ),
+                    ),
+                )
+
+        for marker in ("No.", "Case No.", "Docket No.", "Dkt."):
+            source = f"[FICTIONAL TEST ONLY] {marker} 21-5123."
+            start = source.index("21-5123")
+            with self.subTest(marker):
+                self.assertEqual(
+                    _signature(extract(source)),
+                    (
+                        (
+                            "docket",
+                            start,
+                            start + len("21-5123"),
+                            None,
+                            (),
+                            "docket/marked-number@1",
+                        ),
+                    ),
+                )
+
+        for source in (
+            "[FICTIONAL TEST ONLY] Pub. L. No. 115-391.",
+            "[FICTIONAL TEST ONLY] 21-5123.",
+            "[FICTIONAL TEST ONLY] 39-17-417.",
+        ):
+            with self.subTest(source):
+                self.assertEqual(extract(source), ())
+
     def test_bare_sections_have_subsections_or_cues_and_no_keys(self) -> None:
         source = "[FICTIONAL TEST ONLY] under 2254 and 3663A apply."
         first_start = source.index("2254")
@@ -322,7 +653,7 @@ class Grammar(unittest.TestCase):
                     first_start + 4,
                     None,
                     (),
-                    "usc/bare-section@1",
+                    "usc/bare-section@2",
                 ),
                 (
                     "bare_section",
@@ -330,7 +661,7 @@ class Grammar(unittest.TestCase):
                     second_start + 5,
                     None,
                     (),
-                    "usc/bare-section@1",
+                    "usc/bare-section@2",
                 ),
             ),
         )
@@ -400,18 +731,38 @@ class Grammar(unittest.TestCase):
 
     def test_declines_and_no_object_text(self) -> None:
         cases = (
-            "[FICTIONAL TEST ONLY] 28 C.F.R. § 2.20.",
             "[FICTIONAL TEST ONLY] Tenn. Code Ann. § 39-17-417.",
-            "[FICTIONAL TEST ONLY] 18 U.S.C. app. 3 § 6.",
-            "[FICTIONAL TEST ONLY] Rule 4 of the Rules Governing Section 2254 Cases.",
-            "[FICTIONAL TEST ONLY] Supreme Court Rule 13.",
-            "[FICTIONAL TEST ONLY] Sup. Ct. R. 13.",
             "[FICTIONAL TEST ONLY] 2024-2025 report, 30 days, and $95,000.",
         )
         for case_id, source in enumerate(cases):
             with self.subTest(case_id):
                 self.assertEqual(extract(source), ())
         self.assertEqual(extract(""), ())
+
+    def test_supreme_rule_declines_become_objects(self) -> None:
+        cases = (
+            (
+                "[FICTIONAL TEST ONLY] Supreme Court Rule 13.",
+                "Supreme Court Rule 13",
+            ),
+            ("[FICTIONAL TEST ONLY] Sup. Ct. R. 13.", "Sup. Ct. R. 13"),
+        )
+        for source, citation in cases:
+            start = source.index(citation)
+            with self.subTest(source):
+                self.assertEqual(
+                    _signature(extract(source)),
+                    (
+                        (
+                            "scotus_rule",
+                            start,
+                            start + len(citation),
+                            "rules/scotus/rule13",
+                            (),
+                            "rules/scotus-number@1",
+                        ),
+                    ),
+                )
 
     def test_resolution_is_deterministic_and_contract_valid(self) -> None:
         for case_id, source in UNIT_TEXTS:
@@ -442,14 +793,60 @@ class Grammar(unittest.TestCase):
         self.assertEqual(extract("[FICTIONAL TEST ONLY] defendants under 21 years old."), ())
         source = "[FICTIONAL TEST ONLY] a 2254 court and Supreme Court Rule 13."
         self.assertEqual(
-            tuple((obj.type, obj.start) for obj in extract(source)),
-            (("bare_section", source.index("2254")),),
+            _signature(extract(source)),
+            (
+                (
+                    "bare_section",
+                    source.index("2254"),
+                    source.index("2254") + len("2254"),
+                    None,
+                    (),
+                    "usc/bare-section@2",
+                ),
+                (
+                    "scotus_rule",
+                    source.index("Supreme Court Rule 13"),
+                    source.index("Supreme Court Rule 13") + len("Supreme Court Rule 13"),
+                    "rules/scotus/rule13",
+                    (),
+                    "rules/scotus-number@1",
+                ),
+            ),
         )
 
-    def test_the_habeas_rules_both_names_decline(self) -> None:
+    def test_registry_builders_and_candidate_precedence_follow_registry(self) -> None:
+        positions = {pattern.id: position for position, pattern in enumerate(PATTERN_REGISTRY)}
+        self.assertEqual(set(positions), set(PATTERN_BUILDERS))
+        sources = tuple(text for _, text in UNIT_TEXTS) + (
+            "[FICTIONAL TEST ONLY] Sup. Ct. R. 13.",
+        )
+        for source in sources:
+            for candidate in _candidates(source):
+                pattern_id = candidate.objects[0].pattern_id
+                if not isinstance(pattern_id, str):
+                    self.fail("candidate object must carry its pattern id")
+                self.assertEqual(candidate.precedence, positions[pattern_id])
+
+    def test_the_habeas_rules_both_names_emit_objects(self) -> None:
         for name in ("Section 2254 Cases", "Section 2255 Proceedings", "§ 2255 Proceedings"):
+            source = f"[FICTIONAL TEST ONLY] Rule 6 of the Rules Governing {name}."
+            start = source.index("Rule")
+            end = source.index(".", start)
+            title = "2254" if "2254" in name else "2255"
             with self.subTest(name):
-                self.assertEqual(extract(f"[FICTIONAL TEST ONLY] Rule 6 of the Rules Governing {name}."), ())
+                self.assertEqual(
+                    _signature(extract(source)),
+                    (
+                        (
+                            "habeas_rule",
+                            start,
+                            end,
+                            f"rules/{title}/rule6",
+                            (),
+                            "rules/habeas-set-and-number@1",
+                        ),
+                    ),
+                )
 
     def test_review_round_one_spans(self) -> None:
         cases = (

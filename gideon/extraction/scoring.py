@@ -4,10 +4,12 @@ The measure is pure: case mappings (the set's JSONL shape, one sequence per
 file) and the objects extracted from each active case's question go in, a
 :class:`SetScore` comes out; nothing here opens a file.  The active set comes
 first: a case another case's ``supersedes`` names is retired and contributes
-no hit, miss, or false hit.  A hit is the same type, the same offsets, equal
-``subsections``, and an equal key under :func:`keys_equal`; any other
-extracted object is a false hit and any unmatched label a miss, so a right
-span with a wrong key or wrong subsections is both.
+no hit, miss, or false hit, and so, transitively, is a case whose ``parent``
+is retired, so a corrected parent takes its variants with it.  A hit is the
+same type, the same offsets, equal ``subsections``, and an equal key under
+:func:`keys_equal`; any other extracted object is a false hit and any
+unmatched label a miss, so a right span with a wrong key or wrong
+subsections is both.
 
 The landed types are an argument: the caller passes the types the grammar's
 registry declares, never the types an extraction returned, so a family that
@@ -74,11 +76,22 @@ class _Counts:
 
 
 def active_cases(files: Sequence[Sequence[Case]]) -> tuple[Case, ...]:
-    """Return the cases of every file that no case's ``supersedes`` names."""
+    """Return the cases no ``supersedes`` names and whose ``parent`` is active."""
 
     cases = tuple(case for file in files for case in file)
-    retired = {case["supersedes"] for case in cases if "supersedes" in case}
-    return tuple(case for case in cases if case["id"] not in retired)
+    superseded = {case["supersedes"] for case in cases if "supersedes" in case}
+    parents = {case["id"]: case["parent"] for case in cases if "parent" in case}
+
+    def retired(case_id: str) -> bool:
+        seen: set[str] = set()
+        while case_id not in superseded:
+            if case_id in seen or case_id not in parents:
+                return False
+            seen.add(case_id)
+            case_id = parents[case_id]
+        return True
+
+    return tuple(case for case in cases if not retired(case["id"]))
 
 
 def _label_object(label: Mapping[str, Any]) -> ExactObject:

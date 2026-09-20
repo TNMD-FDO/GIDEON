@@ -7,5 +7,7 @@ lines or comments, and ends with a final newline.
 
 The `extraction` slice is split at the export boundary. `harvest.ids` selects
 the harvest-derived cases and leaves with `extraction.jsonl`; `invented.ids`
-selects the invented cases that remain in an exported tree. A superseded case
-stays in its id list because the loader decides which case is active.
+selects the invented cases that remain in an exported tree. A variant's id joins
+the list on its parent's side of the boundary, so each list covers two case
+files. A superseded case stays in its id list because the loader decides which
+case is active.

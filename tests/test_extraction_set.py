@@ -3,6 +3,7 @@
 import hashlib
 import json
 import re
+import warnings
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -19,22 +20,61 @@ from gideon.extraction import (
     extract,
 )
 from gideon.extraction.grammar import registry_types
-from gideon.extraction.scoring import active_cases, build_report, score
+from gideon.extraction.scoring import SetScore, active_cases, build_report, score
 from tools.exportboundary import absent_from_export
+from tools.variants.axes import AXES
 
 ROOT: Final[Path] = Path(__file__).resolve().parents[1]
 EXTRACTION_PATH: Final[Path] = Path("eval/sets/eval-v1/build-gates/extraction.jsonl")
 INVENTED_PATH: Final[Path] = Path(
     "eval/sets/eval-v1/build-gates/extraction-invented.jsonl"
 )
+EXTRACTION_VARIANTS_PATH: Final[Path] = Path(
+    "eval/sets/eval-v1/build-gates/extraction-variants.jsonl"
+)
+INVENTED_VARIANTS_PATH: Final[Path] = Path(
+    "eval/sets/eval-v1/build-gates/extraction-invented-variants.jsonl"
+)
+SERIES_PATH: Final[Path] = Path("eval/sets/eval-v1/build-gates/series.txt")
+"""The id series' files in order: the one record of which file a new id joins."""
+
 HARVEST_PATH: Final[Path] = Path("eval/seed/prototype-qa/harvest.jsonl")
 EXTRACTION_PINNED_PREFIXES: Final[tuple[tuple[int, str], ...]] = (
     (40, "dc1e0c928f1860cf7ae068e1ff96fd7418c5d03da2a449a175da26833f2d462e"),  # CSA-1 2026-09-19
 )
+EXTRACTION_VARIANTS_PINNED_PREFIXES: Final[tuple[tuple[int, str], ...]] = (
+    (41, "b7db2d316bab4e354bd66efd77bee94e9316a361b64636778aaa3cba3f07ba3a"),  # CSA-1 2026-09-19
+)
 INVENTED_PINNED_PREFIXES: Final[tuple[tuple[int, str], ...]] = (
     (22, "8c057174f06ac4afc869a87642ac70eb0a92a3e3b10b2c14f0723d7ee53298a0"),  # CSA-1 2026-09-19
+    (55, "3437b4b9e536c67c1a4e909a695afe0c3696fdc04514f0515f0af50c5b020c6e"),  # CSA-1 2026-09-19
 )
+INVENTED_VARIANTS_PINNED_PREFIXES: Final[tuple[tuple[int, str], ...]] = (
+    (218, "cbdbec3e0ff9464f844d4c82d29e9c86ce2fb7c31687a2c58885ec0e65398156"),  # CSA-1 2026-09-19
+)
+AXIS_IDS: Final[frozenset[str]] = frozenset(axis.axis_id for axis in AXES)
+
+
+class ExtractionResidualWarning(UserWarning):
+    """An allowed scorer residual, identified without question text."""
+
+
+def _warn_residuals(result: SetScore) -> None:
+    """Raise one warning per residual the bounds allowed: ids, types, offsets."""
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("default", ExtractionResidualWarning)
+        for finding in (*result.misses, *result.false_hits):
+            warnings.warn(
+                f"{finding.case_id} {finding.type} {finding.start}:{finding.end}",
+                ExtractionResidualWarning,
+                stacklevel=2,
+            )
+
+
 ID_PATTERN: Final[re.Pattern[str]] = re.compile(r"^extraction-[0-9]{3}$")
+SCOTUS_PARAGRAPH: Final[re.Pattern[str]] = re.compile(r"[0-9]+[.]([0-9]+)")
+"""A Supreme Court Rule's dotted paragraph, its first ``subsections`` entry."""
 KEY_PATTERNS: Final[dict[str, re.Pattern[str]]] = {
     "statute": re.compile(r"/us/usc/t[0-9]+/s[0-9A-Za-z]+(?:-[0-9A-Za-z]+)?"),
     "guideline": re.compile(r"ussg/[0-9][A-Z][0-9]+\.[0-9]+"),
@@ -173,6 +213,9 @@ def _label_findings(path: Path, line: ParsedLine) -> list[str]:
             and all(isinstance(item, str) for item in subsections_value)
         ):
             expected_subsections = tuple(re.findall(r"\(([^()]*)\)", text))
+            paragraph = SCOTUS_PARAGRAPH.search(text)
+            if object_type == "scotus_rule" and paragraph is not None:
+                expected_subsections = (paragraph.group(1), *expected_subsections)
             if tuple(subsections_value) != expected_subsections:
                 findings.append(_finding(path, location, "subsections match span"))
     return findings
@@ -194,29 +237,35 @@ def _read_harvest(path: Path) -> tuple[dict[str, Mapping[str, object]], list[str
     return records, findings
 
 
+def _series_paths() -> tuple[Path, ...]:
+    """The case files series.txt names, in its order; the file list has one home."""
+
+    directory = SERIES_PATH.parent
+    return tuple(directory / name for name in (ROOT / SERIES_PATH).read_text().split())
+
+
 def _available_case_files(
     test_case: TestCase,
 ) -> tuple[tuple[Path, bytes, tuple[ParsedLine, ...]], ...]:
     files: list[tuple[Path, bytes, tuple[ParsedLine, ...]]] = []
-    if not absent_from_export(EXTRACTION_PATH, ROOT):
-        data, lines, parse_findings = _parse_jsonl(EXTRACTION_PATH)
+    for path in _series_paths():
+        if absent_from_export(path, ROOT):
+            continue
+        data, lines, parse_findings = _parse_jsonl(path)
         test_case.assertFalse(parse_findings, f"findings: {parse_findings}")
-        files.append((EXTRACTION_PATH, data, lines))
-    data, lines, parse_findings = _parse_jsonl(INVENTED_PATH)
-    test_case.assertFalse(parse_findings, f"findings: {parse_findings}")
-    files.append((INVENTED_PATH, data, lines))
+        files.append((path, data, lines))
     return tuple(files)
 
 
 def _score_inputs(
     test_case: TestCase,
     *,
-    invented_only: bool = False,
+    public_only: bool = False,
 ) -> tuple[tuple[tuple[dict[str, object], ...], ...], dict[str, tuple[ExactObject, ...]]]:
     files = tuple(
         tuple(line.record for line in lines)
         for path, _, lines in _available_case_files(test_case)
-        if not invented_only or path == INVENTED_PATH
+        if not public_only or path in {INVENTED_PATH, INVENTED_VARIANTS_PATH}
     )
     active = active_cases(files)
     extracted = {
@@ -240,11 +289,13 @@ class SetContract(TestCase):
     def test_each_file_is_pinned_by_an_append_only_prefix(self) -> None:
         prefixes = (
             (INVENTED_PATH, INVENTED_PINNED_PREFIXES),
+            (INVENTED_VARIANTS_PATH, INVENTED_VARIANTS_PINNED_PREFIXES),
             (EXTRACTION_PATH, EXTRACTION_PINNED_PREFIXES),
+            (EXTRACTION_VARIANTS_PATH, EXTRACTION_VARIANTS_PINNED_PREFIXES),
         )
         findings: list[str] = []
         for path, expected_prefixes in prefixes:
-            if path == EXTRACTION_PATH and absent_from_export(path, ROOT):
+            if absent_from_export(path, ROOT):
                 continue
             data, lines, parse_findings = _parse_jsonl(path)
             findings.extend(parse_findings)
@@ -253,20 +304,61 @@ class SetContract(TestCase):
 
     def test_ids_form_one_contiguous_series(self) -> None:
         files = _available_case_files(self)
-        all_lines = [(path, line) for path, _, lines in files for line in lines]
-        expected_number = 1 if not absent_from_export(EXTRACTION_PATH, ROOT) else 41
         findings: list[str] = []
-        for path, line in all_lines:
-            record_id = line.record.get("id")
-            location = f"line {line.number} {_record_id(line)}"
-            expected_id = f"extraction-{expected_number:03d}"
-            if (
-                not isinstance(record_id, str)
-                or ID_PATTERN.fullmatch(record_id) is None
-                or record_id != expected_id
-            ):
-                findings.append(_finding(path, location, "contiguous id series"))
-            expected_number += 1
+        numbers: list[int] = []
+        for path, _, lines in files:
+            previous = 0
+            for line in lines:
+                record_id = line.record.get("id")
+                location = f"line {line.number} {_record_id(line)}"
+                if not isinstance(record_id, str) or ID_PATTERN.fullmatch(record_id) is None:
+                    findings.append(_finding(path, location, "id form"))
+                    continue
+                number = int(record_id.removeprefix("extraction-"))
+                if number <= previous:
+                    findings.append(_finding(path, location, "ids rise within a file"))
+                previous = number
+                numbers.append(number)
+
+        # series.txt's order is the order ids were minted in, not ascending, so the
+        # one series is contiguous over the union: from 1 here, from 41 in an export.
+        first = 41 if absent_from_export(EXTRACTION_PATH, ROOT) else 1
+        if sorted(numbers) != list(range(first, first + len(numbers))):
+            findings.append(_finding(INVENTED_PATH, 0, "one contiguous id series"))
+        self.assertFalse(findings, f"findings: {findings}")
+
+    def test_variant_axes_are_registered(self) -> None:
+        files = _available_case_files(self)
+        findings: list[str] = []
+        for path, _, lines in files:
+            if path not in {INVENTED_VARIANTS_PATH, EXTRACTION_VARIANTS_PATH}:
+                continue
+            for line in lines:
+                labels = line.record.get("labels")
+                axis = labels[1] if isinstance(labels, list) and len(labels) > 1 else None
+                if not isinstance(axis, str) or axis not in AXIS_IDS:
+                    findings.append(
+                        _finding(path, f"line {line.number} {_record_id(line)}", "variant axis")
+                    )
+        self.assertFalse(findings, f"findings: {findings}")
+
+    def test_variant_files_follow_the_parent_boundary(self) -> None:
+        """A variant sits in the file on its parent's side: no harvest text in a public one."""
+
+        by_path = {path: lines for path, _, lines in _available_case_files(self)}
+        findings: list[str] = []
+        pairs = (
+            (INVENTED_VARIANTS_PATH, INVENTED_PATH),
+            (EXTRACTION_VARIANTS_PATH, EXTRACTION_PATH),
+        )
+        for variant_path, parent_path in pairs:
+            if variant_path not in by_path or parent_path not in by_path:
+                continue
+            parent_ids = {line.record.get("id") for line in by_path[parent_path]}
+            for line in by_path[variant_path]:
+                if line.record.get("parent") not in parent_ids:
+                    location = f"line {line.number} {_record_id(line)}"
+                    findings.append(_finding(variant_path, location, "variant parent boundary"))
         self.assertFalse(findings, f"findings: {findings}")
 
     def test_harvest_relationships(self) -> None:
@@ -331,6 +423,11 @@ class SetContract(TestCase):
         floor_table: dict[ObjectType, int] = {
             "guideline": 10,
             "court_rule": 10,
+            "regulation": 10,
+            "habeas_rule": 10,
+            "scotus_rule": 10,
+            "appendix_statute": 10,
+            "docket": 10,
             "bare_rule": 10,
             "statute": 5,
             "bare_section": 5,
@@ -349,12 +446,14 @@ class SetContract(TestCase):
     def test_registry_gate_over_available_files(self) -> None:
         files, extracted = _score_inputs(self)
         result = score(files, extracted, registry_types())
+        _warn_residuals(result)
         print(build_report(result), end="")
         self.assertTrue(result.verdict, build_report(result))
 
-    def test_registry_gate_over_invented_file(self) -> None:
-        files, extracted = _score_inputs(self, invented_only=True)
+    def test_registry_gate_over_public_files(self) -> None:
+        files, extracted = _score_inputs(self, public_only=True)
         result = score(files, extracted, registry_types())
+        _warn_residuals(result)
         print(build_report(result), end="")
         self.assertTrue(result.verdict, build_report(result))
 
@@ -366,6 +465,17 @@ class SetContract(TestCase):
                 self.assertIn(object_type, result.by_type)
                 self.assertTrue(result.by_type[object_type].gated)
 
+    def test_residual_warning_is_bounded_to_id_type_and_offsets(self) -> None:
+        case = _case("fictional-residual", [_label("state_code", 4, 12)])
+        result = score([[case]], {}, registry_types())
+        with self.assertWarns(ExtractionResidualWarning) as raised:
+            _warn_residuals(result)
+        self.assertEqual(
+            str(raised.warning),
+            "fictional-residual state_code 4:12",
+        )
+        self.assertNotIn(case["question"], str(raised.warning))
+
 
 def _case(
     identifier: str,
@@ -373,6 +483,7 @@ def _case(
     *,
     origin: str = "invented",
     supersedes: str | None = None,
+    parent: str | None = None,
 ) -> dict[str, object]:
     case: dict[str, object] = {
         "id": identifier,
@@ -382,6 +493,8 @@ def _case(
     }
     if supersedes is not None:
         case["supersedes"] = supersedes
+    if parent is not None:
+        case["parent"] = parent
     return case
 
 
@@ -501,6 +614,70 @@ class Scorer(TestCase):
         self.assertEqual(result.by_type["statute"].misses, 0)
         self.assertEqual(result.by_type["statute"].false_hits, 0)
         self.assertEqual({finding.case_id for finding in result.false_hits}, set())
+
+    def test_variant_is_ignored_with_a_superseded_parent(self) -> None:
+        parent = _case("fictional-parent", [])
+        replacement = _case("fictional-replacement", [], supersedes="fictional-parent")
+        variant = _case("fictional-variant", [], origin="variant", parent="fictional-parent")
+        result = score(
+            [[parent, replacement, variant]],
+            {"fictional-variant": (_object("statute", 4, 12),)},
+            ("statute",),
+        )
+        self.assertEqual(result.by_type["statute"].false_hits, 0)
+        self.assertEqual(result.by_type["statute"].misses, 0)
+
+    def test_retired_parent_chain_retires_variants_transitively(self) -> None:
+        original = _case("fictional-original", [], supersedes="fictional-parent")
+        parent = _case("fictional-parent", [], parent="fictional-original")
+        variant = _case("fictional-variant", [], origin="variant", parent="fictional-parent")
+        child = _case("fictional-child", [], origin="variant", parent="fictional-variant")
+        result = score(
+            [[original, parent, variant, child]],
+            {
+                "fictional-parent": (_object("statute", 1, 2),),
+                "fictional-variant": (_object("statute", 2, 3),),
+                "fictional-child": (_object("statute", 3, 4),),
+            },
+            ("statute",),
+        )
+        self.assertEqual(result.by_type["statute"].false_hits, 0)
+
+    def test_variant_parenting_works_across_two_files(self) -> None:
+        parent = _case("fictional-parent", [_label("statute", 4, 12)], origin="harvest")
+        variant = _case(
+            "fictional-variant",
+            [_label("statute", 4, 12)],
+            origin="variant",
+            parent="fictional-parent",
+        )
+        result = score(
+            [[parent], [variant]],
+            {
+                "fictional-parent": (_object("statute", 4, 12),),
+                "fictional-variant": (_object("statute", 4, 12),),
+            },
+            ("statute",),
+        )
+        self.assertEqual(result.by_type["statute"].hits, 2)
+
+    def test_successor_parent_variant_is_counted(self) -> None:
+        old_parent = _case("fictional-old-parent", [])
+        new_parent = _case(
+            "fictional-new-parent", [], supersedes="fictional-old-parent"
+        )
+        variant = _case(
+            "fictional-new-variant",
+            [_label("statute", 4, 12)],
+            origin="variant",
+            parent="fictional-new-parent",
+        )
+        result = score(
+            [[old_parent, new_parent], [variant]],
+            {"fictional-new-variant": (_object("statute", 4, 12),)},
+            ("statute",),
+        )
+        self.assertEqual(result.by_type["statute"].hits, 1)
 
     def test_landed_type_with_no_label_fails(self) -> None:
         result = score(
