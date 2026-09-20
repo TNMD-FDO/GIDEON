@@ -2420,7 +2420,7 @@ class PullRequestContracts(unittest.TestCase):
         self.assertIn("bring the checkout that runs provision to the merged commit", body)
         self.assertIn("sudo python3 -m gideon host provision", body)
         self.assertIn("thirty days", body)
-        self.assertIn("office-services-setup.md", body)
+        self.assertIn("ci-runner.md", body)
         driver = Bump(
             "host.driver.branch",
             "host.lock",

@@ -38,5 +38,5 @@
 
 ## Cross-references
 
-- *Cites*: [`stack.md`](stack.md) (the kept-event tables, the roles, the audit writer), [`tests.md`](tests.md) (the export boundary's skip rule, the judgment set's queries test), [`tools.md`](tools.md) (the export boundary list), [`workflow-tools.md`](workflow-tools.md) (the judgment set's intake).
+- *Cites*: [`stack.md`](stack.md) (the kept-event tables, the roles, the audit writer), [`tests.md`](tests.md) (the export boundary's skip rule, the judgment set's queries test), [`tools.md`](tools.md) (the export boundary list), `workflow-tools.md` (the judgment set's intake).
 - *Cited by*: the map's §2, §4, §8, §12, and §13.

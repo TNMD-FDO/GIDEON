@@ -45,10 +45,9 @@ exposure comes here.
 
 ## What happens next
 
-The CSAs acknowledge the report on the advisory. It becomes a ticket in the
-development repository's private tracker, referenced by the advisory's
-identifier and carrying no detail a public reader could use. The fix is
-developed there, ships as a tag every office upgrades to with
+The CSAs acknowledge the report on the advisory and track it privately under
+the advisory's identifier, so no detail a public reader could use appears
+anywhere until the fix ships. It ships as a tag every office upgrades to with
 `./upgrade.sh <tag>`, and the advisory is published with that tag, crediting
 the reporter unless they decline. No response time is promised.
 

@@ -199,19 +199,17 @@ provision) and `--keep` leaves the VM defined and running: the harness prints
 its address, and the run's SSH key and known-hosts file stay under
 `/var/lib/libvirt/images/gideon-acceptance/<name>/`; the next run tears a
 same-named leftover down first, along with the sink's firewall rule. The runner is permitted to invoke the harness
-by the one sudoers line documented in `office-services-setup.md` §6; it is
-already root-equivalent through the docker group, never runs pull-request code,
-and the line names one checkout module. Hardening waits for the public flip
-(ADR-0031).
+by the one sudoers line the `gh-runner` provision step converges; it is already
+root-equivalent through the docker group, never runs pull-request code, and the
+line names one checkout module.
 
 Acceptance runs happen at minor tags only: the TRIP-3 `acceptance-run` block
 runs against the local tag before the push, then `.github/workflows/acceptance.yml`
 runs the pushed tag and stores the transcripts as an artifact. Patch tags never
 run the harness. A tag can name any commit its pusher can reach, so the
-workflow's trust is who may create a `v*` tag, not anything in the tag's tree:
-the development repository's collaborator list (the two CSAs), the `v*`
-ruleset of `office-services-setup.md` §6 guarding the public repository's
-tags an office clones (tickets 22 and 57). This cadence is the CSA ruling superseding §2.5's every-tag
+workflow's trust is the two CSAs who may create a `v*` tag where it runs, not
+anything in the tag's tree: a `v*` ruleset guards the tags an office clones
+(tickets 22 and 57). This cadence is the CSA ruling superseding §2.5's every-tag
 wording; the harness pass is also the ruling's proof for §22.1, superseding its
 two-CSA by-hand exercise. The corresponding spec-gap comments are recorded on
 ticket 08.
@@ -249,7 +247,7 @@ made the second of these visible.
 
 **The `v0.1.0` run.** `sudo python3 -m tools.acceptance v0.1.0` against the local tag on TNMD's box, 2026-09-03T21:28:56-05:00 to 2026-09-03T21:34:41-05:00, before the push: every stage ok, exit 0 — the VM installed to its URL, `alerts test` delivered through the sink, the four rehearsal legs on `v0.1.1-rc.1`, the push and the target restore, verify at release 0.1.0 by the applied record and the checkout's `--version`, sixteen authenticated TLS messages, thirteen transcripts, the VM torn down. The record is `08-acceptance-v0.1.0/`; the pushed tag's own run in `acceptance.yml` is the standing one.
 
-**The CI record.** The pushed tag's own run (https://github.com/TNMD-FDO/GIDEON-dev/actions/runs/33830159940) refused at `boot`: the workflow named `--out acceptance-out` relative to the runner's workspace, and libvirt opens the console log by path from its own working directory — every local run had used an absolute `--out`. The same root run left root-owned `__pycache__` directories under the workspace's `tools/`, and the next `ci` run's `mirror-images` job failed at its checkout on them (`git clean` cannot unlink them as the runner's account). Hotfix `v0.1.1`: an absolute `--out` whatever is typed, no bytecode written after the harness's entry point, the checkout's caches handed back with the transcripts, and a `workflow_dispatch` on `acceptance.yml` with a full-history checkout; the three directories were removed from the workspace by hand once. The standing record is the dispatched run against `v0.1.0` from the fixed `main`, https://github.com/TNMD-FDO/GIDEON-dev/actions/runs/33831089332, 2026-09-04T02:51:53Z to 2026-09-04T02:57:48Z, every stage ok, the transcripts its `acceptance-v0.1.0` artifact, and the workspace held nothing root-owned after it. A red tag run whose cause is the harness or the workflow, not the tag's tree, is re-made this way: `gh workflow run acceptance.yml -f ref=v<x.y.0>`.
+**The CI record.** The pushed tag's own run (33830159940) refused at `boot`: the workflow named `--out acceptance-out` relative to the runner's workspace, and libvirt opens the console log by path from its own working directory — every local run had used an absolute `--out`. The same root run left root-owned `__pycache__` directories under the workspace's `tools/`, and the next `ci` run's `mirror-images` job failed at its checkout on them (`git clean` cannot unlink them as the runner's account). Hotfix `v0.1.1`: an absolute `--out` whatever is typed, no bytecode written after the harness's entry point, the checkout's caches handed back with the transcripts, and a `workflow_dispatch` on `acceptance.yml` with a full-history checkout; the three directories were removed from the workspace by hand once. The standing record is the dispatched run against `v0.1.0` from the fixed `main`, 33831089332, 2026-09-04T02:51:53Z to 2026-09-04T02:57:48Z, every stage ok, the transcripts its `acceptance-v0.1.0` artifact, and the workspace held nothing root-owned after it. A red tag run whose cause is the harness or the workflow, not the tag's tree, is re-made this way: `gh workflow run acceptance.yml -f ref=v<x.y.0>`.
 
 **The `v0.2.0` run.** Both forms against the local tag on TNMD's box, from the release's worktree, before the push: `sudo python3 -m tools.acceptance v0.2.0`, 2026-09-18T09:15:55-05:00 to 09:36:47, 1252 s, every stage ok, exit 0 — the no-GPU install, `alerts test` through the sink, the four rehearsal legs on `v0.2.1-rc.1`, the push and the target restore, verify at release 0.2.0, sixteen authenticated TLS messages and thirteen transcripts; then `--full-restore` of the box's newest set (release 0.1.81), to 09:56:57, 1196 s, every stage ok, exit 0, the run directory 155 GB at its peak. The box itself then upgraded 0.1.82 → 0.2.0 by `upgrade`, from the checkout still on `main` at 0.1.82, 09:57:36 to 10:03:26, with `engine-verify` ok in the sequence. The records are `.scratch/slice-1/assets/18-acceptance-v0.2.0/`, `18-acceptance-restore-v0.2.0/`, and `18-on-box.txt`; the pushed tag's own two-step run in `acceptance.yml` is the standing one.
 

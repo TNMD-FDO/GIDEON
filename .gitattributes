@@ -40,3 +40,8 @@ eval/sets/eval-v1/slices/extraction/harvest.ids export-ignore
 .github/workflows/pin-watch.yml export-ignore
 .github/dependabot.yml export-ignore
 bin/ export-ignore
+docs/archi/workflow-tools.md export-ignore
+docs/runbooks/pin-watch-app-setup.md export-ignore
+docs/runbooks/ci-runner.md export-ignore
+tests/test_export_names.py export-ignore
+README.dev.md export-ignore

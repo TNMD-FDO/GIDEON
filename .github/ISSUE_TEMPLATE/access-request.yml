@@ -1,13 +1,12 @@
-name: Development access request
-description: Ask for access to the private development repository to contribute.
+name: Contribution request
+description: Ask to contribute to GIDEON; contribution is by invitation.
 title: "[Access]: "
 body:
   - type: markdown
     attributes:
       value: |
-        GIDEON is developed in the private `TNMD-FDO/GIDEON-dev`. The public
-        repository carries the application alone. A pull request here is not
-        merged. A CSA decides each request and answers on the issue.
+        Contribution is by invitation. A CSA decides each request and answers
+        on the issue.
 
         Do not paste any site-file value, secret, chat, matter, or client text.
         Use placeholders and synthetic text throughout this request.
@@ -42,5 +41,5 @@ body:
           required: true
         - label: This is not a vulnerability report; a vulnerability goes through SECURITY.md, never an issue.
           required: true
-        - label: I dedicate this request and any contribution made in the development repository to the public domain under the CC0 1.0 Universal dedication, waiving all copyright and related rights I hold in it, worldwide (CONTRIBUTING.md).
+        - label: I dedicate this request and any contribution I make to GIDEON to the public domain under the CC0 1.0 Universal dedication, waiving all copyright and related rights I hold in it, worldwide (CONTRIBUTING.md).
           required: true

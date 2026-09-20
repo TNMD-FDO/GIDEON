@@ -1,7 +1,7 @@
 """The public repository's export boundary (slice-1 tickets 56 and 79).
 
 The public repository receives a ``git archive`` of each release tag; the
-paths listed here stay in the development repository. ``.gitattributes``
+paths listed here are omitted from the archive. ``.gitattributes``
 mirrors the list as ``export-ignore`` lines and ``tests/test_export_boundary.py``
 holds the two equal. A whole test that reads an excluded path skips in an
 exported tree by ``in_export_tree``; a single read uses ``absent_from_export``.
@@ -48,6 +48,11 @@ EXCLUDED_PREFIXES = (
     ".github/workflows/pin-watch.yml",  # the box pin-watch workflow
     ".github/dependabot.yml",  # Dependabot's development-repository trigger
     "bin",  # the development lifecycle launcher, naming excluded paths
+    "docs/archi/workflow-tools.md",  # the export-omitted workflow leaf
+    "docs/runbooks/pin-watch-app-setup.md",  # the pin-watch setup runbook
+    "docs/runbooks/ci-runner.md",  # the self-hosted runner runbook
+    "tests/test_export_names.py",  # the exported-text tripwire
+    "README.dev.md",  # the private documentation index
 )
 
 

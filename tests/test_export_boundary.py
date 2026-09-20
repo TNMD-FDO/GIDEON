@@ -28,6 +28,7 @@ TEXT_RULE_EXEMPT = (
     "tools/pinwatch",
 )
 _TEXT_ROOTS = (Path("gideon"), Path("compose"), Path("config"), Path("tools"))
+_TEXT_FILES = (Path(".github/workflows/ci.yml"), Path("README.md"))
 _SKIP_DIRECTORIES = {
     ".git",
     ".venv",
@@ -167,7 +168,7 @@ def rule_archive(root: Path) -> list[Finding]:
 def _text_files(root: Path) -> tuple[Path, ...]:
     paths: list[Path] = []
     candidates = [root / path for path in _TEXT_ROOTS]
-    candidates.append(root / ".github/workflows/ci.yml")
+    candidates.extend(root / path for path in _TEXT_FILES)
     for candidate in candidates:
         if candidate.is_file():
             if not is_excluded(candidate.relative_to(root).as_posix()):
@@ -203,7 +204,11 @@ def _text_pattern(root: Path, prefix: str) -> re.Pattern[str]:
 
 
 def rule_text(root: Path) -> list[Finding]:
-    """Find excluded paths named by text in the scoped kept source files."""
+    """Find excluded paths named by text in the scoped kept source files.
+
+    The scope is the source roots plus the two single files ci.yml and README.md,
+    which holds the README to naming no path the export omits.
+    """
 
     findings: list[Finding] = []
     patterns = {prefix: _text_pattern(root, prefix) for prefix in EXCLUDED_PREFIXES}
@@ -438,6 +443,23 @@ class SeededTrees(unittest.TestCase):
         self.assertIn("Remove or retarget", items[0].fix)
         self.assertEqual(items[1].path, Path("tools/sibling.py"))
         self.assertEqual(items[1].line, 1)
+
+    def test_text_reports_excluded_prefix_in_readme(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "README.md").write_text(
+                "The tracker is .scratch/, committed despite the name.\n"
+                "See README.dev.md for the private half.\n"
+                "Nothing here names an omitted path.\n",
+                encoding="utf-8",
+            )
+            items = rule_text(root)
+        self.assertEqual(
+            [(item.path.as_posix(), item.line) for item in items],
+            [("README.md", 1), ("README.md", 2)],
+        )
+        self.assertIn(".scratch", items[0].problem)
+        self.assertIn("README.dev.md", items[1].problem)
 
     def test_links_reports_excluded_target(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

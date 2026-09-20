@@ -27,7 +27,7 @@ The arithmetic guardrail's Filter whole — its stream hook and outlet, its per-
 
 ## 4. The layers left
 
-Each is a dependency this contract still holds, with the event that would move it; none is owed, and none adds to `general-turn`'s build. The development repository carries them as dated lines in the open slice's notes, moved forward whole at each slice's close until a split or a triage acts.
+Each is a dependency this contract still holds, with the event that would move it; none is owed, and none adds to `general-turn`'s build. The open slice's notes carry them as dated lines, moved forward whole at each slice's close until a split or a triage acts.
 
 1. **General as the connection's own row.** The pinned frontend applies a model row's `params` with or without a base, so General could be the record on the service's own model id with no hidden base beneath it, and the branch gate (row 8) would have nothing to refuse. Unread on the pin: what the task calls then receive, how the row's capabilities behave on the chat path, and what becomes of the versioned preset id. Trigger: a triage once the cutover lands and the gate is the last Function.
 2. **General's instruction.** The preset's `params.system`, injected by the frontend, is what makes the model General (row 4); a second frontend would get the raw model, judged and stamped but without the instructed refusals. The service owning the instruction, and with it the record of which instruction answered a chat, closes that. Trigger: triaged with layer 1.

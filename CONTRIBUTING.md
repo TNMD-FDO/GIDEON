@@ -27,20 +27,11 @@ public issue or pull request.
 
 ## How the work is organized
 
-- The build spec is `.scratch/greenfield-spec/spec.md`; the vocabulary is
-  the development repository's `CONTEXT.md`; decisions are recorded in
-  `docs/adr/`.
-- The work tracker is `.scratch/` — committed markdown, authoritative despite
-  the name (see `docs/agents/issue-tracker.md`) — in the development
-  repository, `TNMD-FDO/GIDEON-dev`, which is private; the public
-  `TNMD-FDO/GIDEON` receives a filtered export of every tag.
-- How a person works the tracker — the reading order, one worked cycle, the
-  tracker's shapes, the first-day constraints — is in the development
-  repository's `docs/agents/onboarding.md`.
-- A contribution is made in `TNMD-FDO/GIDEON-dev`. Request access through the
-  public repository's [access-request issue form](https://github.com/TNMD-FDO/GIDEON/issues/new?template=access-request.yml);
-  a CSA decides each request. A pull request on the public repository is not
-  merged because the export overwrites `main`.
+- Decisions are recorded in `docs/adr/`.
+- Contribution is by invitation through the [access-request
+  issue form](https://github.com/TNMD-FDO/GIDEON/issues/new?template=access-request.yml);
+  a CSA decides each request under this document's dedication. This repository
+  receives one commit per release, so a pull request here is not merged.
 - Trunk-based development: `main` is always deployable, feature branches are
   short-lived, every slice ends in a tagged release (spec §2.1, §22). Bump
   pull requests come from the pin watch (`pin-watch/*` branches, ADR-0031)

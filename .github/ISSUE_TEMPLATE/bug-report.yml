@@ -9,8 +9,7 @@ body:
       value: |
         Do not report a vulnerability here. Report it privately as
         [SECURITY.md](https://github.com/TNMD-FDO/GIDEON/security/policy)
-        says. Bugs are triaged by the CSAs into the development repository's
-        private tracker, and the outcome is reported on the issue.
+        says. Bugs are triaged by the CSAs, who answer on the issue.
 
         Do not paste any site-file value, secret, chat, matter, or client text.
         Use placeholders and synthetic text throughout this report.

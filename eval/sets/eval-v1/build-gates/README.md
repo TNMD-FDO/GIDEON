@@ -6,7 +6,7 @@ A case is one message to the Legal chat and every exact object in it, labelled b
 
 The cases live one JSON object per line in two files beside this page:
 
-- `extraction.jsonl` — the forty prototype-harvest questions, one case per harvest record in the harvest's id order, a record with no object a case like any other. It stays in the development repository until the CSAs rule on publishing harvest-derived material, so a public tree has this page and not the file.
+- `extraction.jsonl` — the forty prototype-harvest questions, one case per harvest record in the harvest's id order, a record with no object a case like any other. The export omits it until the CSAs rule on publishing harvest-derived material, so a public tree has this page and not the file.
 - `extraction-invented.jsonl` — questions written for the set, attorney-style and invented whole: no client, matter, or office value, and nothing derived from the harvest. They carry the forms the harvest lacks — Guidelines ids, the Federal Rules, a rule with no set — and questions with no object at all, so every landed type has labels in every tree. The public tree keeps it, and the gate runs over it alone there.
 
 ## The rule

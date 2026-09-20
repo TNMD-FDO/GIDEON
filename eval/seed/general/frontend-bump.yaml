@@ -1,8 +1,8 @@
 # Slice-1 ticket 41's frontend-bump cases: the two-mode proof of an
-# `images.open-webui` bump, the pin-watch review's §5 frontend-bump bullet
-# (docs/runbooks/pin-watch-app-setup.md).  Ticket 34's three turns hold the
-# refused, recorded, and not-confirmed shapes, each `block: any` stated since
-# a replacement stores no reasoning block and a decline stores one; direct-01,
+# `images.open-webui` bump, the pin-watch review's frontend-bump bullet.
+# Ticket 34's three turns hold the refused, recorded, and not-confirmed
+# shapes, each `block: any` stated since a replacement stores no reasoning
+# block and a decline stores one; direct-01,
 # confirm-01, and control-02 are the seed's three shapes with its
 # expectations; cancel-force-02 is the one case that reaches the stream hook's
 # trip and the frontend's Stop path.  Every prompt is invented, taken from

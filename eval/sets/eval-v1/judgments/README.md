@@ -2,7 +2,7 @@
 
 ## What a query is
 
-A query is a real question as a person would put it to the Legal chat — the judgment set's unit (§18.4(a)). Thirty-eight derive from the prototype harvest and ten are written by the CHU attorney. They live one JSON object per line in `queries.jsonl` beside this page, which stays in the development repository until the CSAs rule on publishing harvest-derived material; that is why a public tree has this page and not the file.
+A query is a real question as a person would put it to the Legal chat — the judgment set's unit (§18.4(a)). Thirty-eight derive from the prototype harvest and ten are written by the CHU attorney. They live one JSON object per line in `queries.jsonl` beside this page, which the export omits until the CSAs rule on publishing harvest-derived material; that is why a public tree has this page and not the file.
 
 ## The rule
 
@@ -49,7 +49,7 @@ petition filed after the example deadline?
 What did the court hold in State v. Example about the invented doctrine?
 ```
 
-A question may span lines; they are joined by one space. Run from the development repository:
+A question may span lines; they are joined by one space. The intake is omitted from the export with the queries file; run from a checkout:
 
 ```text
 python3 -m tools.judgments.intake <questions file> --dry-run

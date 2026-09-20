@@ -340,7 +340,7 @@ def body_for(
             "it. GitHub queues a runner with updates off no jobs past thirty days "
             "of a release, and none at all once a critical security update is out, "
             "so land both inside that window "
-            "(`docs/runbooks/office-services-setup.md` §6)."
+            "(`docs/runbooks/ci-runner.md`, the upgrade path)."
         )
     if bump.proposal and bump.lock not in SKILL_RECORDS:
         lines.append("")

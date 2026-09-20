@@ -7,6 +7,8 @@ vary for multibyte text. Reference-style links are not scanned: this contract
 covers inline links only, which is every link the map, the leaves, and the glossary use.
 The four documentation classes read their caps and warnings from the one
 machine-readable line in docs/ARCHI-rules.md.
+An excluded leaf under docs/archi/ is exempt from the map's index when a _Leaf_
+link in CONTEXT.md routes to it; a §2 row that indexes one is a finding.
 """
 
 from __future__ import annotations
@@ -363,8 +365,31 @@ def _indexed_leaves(root: Path, section: str) -> set[Path]:
     return indexed
 
 
+def _context_routed_leaves(root: Path) -> set[Path] | None:
+    context_path = root / GLOSSARY_PATH
+    if not context_path.is_file():
+        return None
+    archi_path = (root / LEAVES_PATH).resolve()
+    routed: set[Path] = set()
+    for target in _link_targets(context_path.read_text(encoding="utf-8")):
+        target_path = target.split("#", 1)[0]
+        if not target_path.endswith(".md"):
+            continue
+        resolved = (context_path.parent / unquote(target_path)).resolve()
+        try:
+            resolved.relative_to(archi_path)
+        except ValueError:
+            continue
+        routed.add(resolved)
+    return routed
+
+
 def rule_index(root: Path) -> list[Finding]:
-    """Find leaves and §2 rows that are absent from the other side."""
+    """Find leaves and §2 rows that are absent from the other side.
+
+    An excluded leaf is exempt when a CONTEXT.md link routes to it, and a §2 row
+    that indexes an excluded leaf is a finding on the map.
+    """
 
     map_path = root / MAP_PATH
     if not map_path.is_file():
@@ -381,6 +406,7 @@ def rule_index(root: Path) -> list[Finding]:
         ]
 
     indexed = _indexed_leaves(root, _section_two(map_path.read_text(encoding="utf-8")))
+    context_routed = _context_routed_leaves(root)
     files = set(_archi_files(root))
     findings: list[Finding] = []
     non_md_files = {path for path in files if path.suffix != ".md"}
@@ -395,6 +421,12 @@ def rule_index(root: Path) -> list[Finding]:
         )
 
     md_files = {path for path in files if path.suffix == ".md"}
+    excluded_md_files = {
+        path
+        for path in md_files
+        if is_excluded(_relative(root, path).as_posix())
+    }
+    kept_md_files = md_files - excluded_md_files
     for path in sorted(indexed - md_files):
         findings.append(
             _finding(
@@ -404,7 +436,17 @@ def rule_index(root: Path) -> list[Finding]:
                 f"Create {_relative(root, path)} or remove its row from docs/ARCHI.md §2.",
             )
         )
-    for path in sorted(md_files - indexed):
+    for path in sorted(indexed & excluded_md_files):
+        relative = _relative(root, path)
+        findings.append(
+            _finding(
+                root,
+                map_path,
+                f"§2 indexes excluded leaf {relative}",
+                f"Remove {relative}'s row from docs/ARCHI.md §2.",
+            )
+        )
+    for path in sorted(kept_md_files - indexed):
         findings.append(
             _finding(
                 root,
@@ -413,6 +455,17 @@ def rule_index(root: Path) -> list[Finding]:
                 f"Add {_relative(root, path)}'s row to docs/ARCHI.md §2.",
             )
         )
+    if context_routed is not None:
+        for path in sorted(excluded_md_files - context_routed):
+            relative = _relative(root, path)
+            findings.append(
+                _finding(
+                    root,
+                    path,
+                    "excluded leaf is not routed from CONTEXT.md",
+                    f"Add a _Leaf_ link through /domain-modeling in CONTEXT.md to {relative}.",
+                )
+            )
     return findings
 
 
@@ -609,6 +662,62 @@ class Budget(unittest.TestCase):
 
 
 class Index(unittest.TestCase):
+    def _seed_index(
+        self,
+        root: Path,
+        *,
+        map_links: str = "",
+        context_links: str | None = None,
+        leaf_name: str = "workflow-tools.md",
+    ) -> None:
+        map_path = root / MAP_PATH
+        map_path.parent.mkdir(parents=True)
+        map_path.write_text(f"## 2. Index\n{map_links}## 3. Next\n", encoding="utf-8")
+        leaf_path = root / LEAVES_PATH / leaf_name
+        leaf_path.parent.mkdir(parents=True)
+        leaf_path.write_text("leaf", encoding="utf-8")
+        if context_links is not None:
+            (root / GLOSSARY_PATH).write_text(context_links, encoding="utf-8")
+
+    def test_excluded_leaf_routed_by_glossary_is_exempt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._seed_index(
+                root,
+                context_links="_Leaf_: [workflow](docs/archi/workflow-tools.md)\n",
+            )
+            self.assertEqual(rule_index(root), [])
+
+    def test_excluded_leaf_without_glossary_route_is_a_finding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._seed_index(root, context_links="")
+            items = rule_index(root)
+            self.assertEqual([item.path for item in items], [LEAVES_PATH / "workflow-tools.md"])
+            self.assertIn("_Leaf_", items[0].fix)
+            self.assertIn("CONTEXT.md", items[0].fix)
+
+    def test_map_row_for_excluded_leaf_is_a_finding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._seed_index(
+                root,
+                map_links="- [workflow](archi/workflow-tools.md)\n",
+                context_links="_Leaf_: [workflow](docs/archi/workflow-tools.md)\n",
+            )
+            items = rule_index(root)
+            self.assertEqual([item.path for item in items], [MAP_PATH])
+            self.assertIn("excluded leaf", items[0].problem)
+            self.assertIn("Remove", items[0].fix)
+
+    def test_kept_leaf_without_map_row_remains_a_finding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._seed_index(root, leaf_name="present.md")
+            items = rule_index(root)
+            self.assertEqual([item.path for item in items], [LEAVES_PATH / "present.md"])
+            self.assertIn("not indexed", items[0].problem)
+
     def test_rows_leaves_and_file_suffixes_must_match(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
