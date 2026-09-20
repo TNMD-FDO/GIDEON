@@ -103,3 +103,7 @@ groups:
       probe_url: https://apt.postgresql.org/pub/repos/apt/
     - host: deb.debian.org
       probe_url: https://deb.debian.org/debian/
+    - host: pypi.org
+      probe_url: https://pypi.org/
+    - host: files.pythonhosted.org
+      probe_url: https://files.pythonhosted.org/

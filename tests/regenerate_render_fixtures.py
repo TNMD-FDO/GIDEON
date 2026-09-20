@@ -17,6 +17,7 @@ FIXED_SECRETS = {
     "engine_api_key": "engine-api-key",
     "searxng_secret_key": "searxng-secret-key",
 }
+FIXED_API_SOURCES_DIGEST = "sha256:" + "0" * 64
 
 def _loaded[T](value: T | None, errors: object) -> T:
     if value is None:
@@ -82,6 +83,7 @@ def main() -> None:
                 ),
             },
             checkout="/opt/gideon",
+            api_sources_digest=FIXED_API_SOURCES_DIGEST,
             no_gpu=no_gpu,
             build_box=build_box,
         )

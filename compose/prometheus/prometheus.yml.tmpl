@@ -26,6 +26,7 @@ $gpu_jobs
     static_configs:
       - targets: [cadvisor:8080]
 $search_jobs
+$api_jobs
   - job_name: ingress
     metrics_path: /probe
     params:

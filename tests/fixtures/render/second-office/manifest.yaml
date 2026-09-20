@@ -3,18 +3,19 @@ release: "fixture"
 inputs:
   site_sha256: "0515e1b8d467d98b5ed1762ba2fbb2b18d9595d364fdd894d043dbce3cf7d716"
   host_lock_sha256: "6207481c43821eb63a08f39174cc4045201e1a51e339c520418b60a32bc4dfd5"
-  models_lock_sha256: "69db04fe2802598b1a11f95afe88cb6f91c6fcb5edeb23c0d2b0fd7253b84fd5"
+  models_lock_sha256: "aa1065d07eab91115c3cd77cbdb3c7974b6cc5746c2c95994f8e2c905534b4c7"
   hardware_profile: "2x96v-256d"
   images_lock_version: 1
+  api_sources_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
   no_gpu: false
   build_box: false
 files:
   compose.yaml:
-    sha256: "2def805dc161c924e6e47b5dfb4368385111359ab44dd00f75a87c8f068666f2"
+    sha256: "a102fead85b66037f75dbc4ca6aebad6d1f4fac1c721ab751cc348a11807e945"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
-    sha256: "3ccfea49d3389d02d45487432296d74594e31a9fde558272aa02733b0b29bab5"
+    sha256: "f648e44e99c9b882732a4ea228a6963377a5c227d8aad95a21c7c1b4457ed1c2"
     mode: "0644"
     owners:
       - "prometheus"
@@ -54,7 +55,7 @@ files:
     owners:
       - "grafana"
   "grafana/provisioning/alerting/rules.yaml":
-    sha256: "3b8456e0ef2b82329e1ceb5866905efbc5188044386a83c5c99de51a53ba64ca"
+    sha256: "7d40574f012709b9ff9a50b1a326f01f7fafda12819de0727d145dbab54f88e1"
     mode: "0644"
     owners:
       - "grafana"
@@ -132,8 +133,9 @@ services:
   postgres: "4a590ddadb50388c39df40b7b3ea5fc7f5b2cf2d683a5fc05b85fd92dc546669"
   open-webui: "15f99bdd955fb5124a5f3856bbe41e5524d0fe806be6a3cfee29499cc9192a14"
   gideon-generator: "7e6fb8478dc880dc237408c62456aa742b2612de5c2bb1e2882ad65d8eaf800b"
+  gideon-api: "f50896e7c51a07a4a35be3a31f0e55f77be9f315d3e7c7a33e07e16193f731e6"
   dcgm-exporter: "2500bba775db3bda0b62a98a323e4c6bf1fbc02e5544752ba0e5f25c21cdb1fa"
   postgres-exporter: "d36e03785dee0d52e65763c1d7f6dda2c4c09b17c129d7e8439fe5994338bfe7"
   cadvisor: "3eef1969696a19143af4ac661101740caa88ab9382214f7298a0188e6f2c9e95"
   blackbox-exporter: "5b3942cc5a72cac952fe8085233662b727ad6e9ee6caf933d7f4590572db8024"
-top_level: "80da2104bbc0f314a36f30f89c3fc75a5df40f011deeed069916646d0e8dd4ee"
+top_level: "84eef6f0a0073142f5ac209cb7ddb30909350945489946efef2b04a4c6d78e41"

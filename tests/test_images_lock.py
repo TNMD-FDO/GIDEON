@@ -163,6 +163,7 @@ class CommittedLock(unittest.TestCase):
                 "cadvisor",
                 "blackbox-exporter",
                 "postgres",
+                "gideon",
             ],
         )
         for pin in result.lock.images:

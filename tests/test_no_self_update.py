@@ -21,6 +21,8 @@ SELF_UPDATE_SWITCHES: Mapping[str, Mapping[str, str]] = {
         "VLLM_NO_USAGE_STATS": "1",
         "DO_NOT_TRACK": "1",
     },
+    # The API image has no update check or telemetry.
+    "gideon-api": {},
     # Caddy 2 has no update check or telemetry.
     "caddy": {},
     # PostgreSQL has no update check or telemetry.

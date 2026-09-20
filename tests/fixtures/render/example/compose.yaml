@@ -371,6 +371,42 @@ services:
     networks:
       - "gideon"
     mem_limit: 32000000000
+  gideon-api:
+    image: "ghcr.io/tnmd-fdo/gideon@sha256:7adb7f738f11d396e63b739955f758e5a795fa54fbaf7904a1237274f6e11d8a"
+    restart: "unless-stopped"
+    environment:
+      GIDEON_ENGINE_URL: "http://gideon-generator:8000/v1"
+      GIDEON_ENGINE_API_KEY_FILE: "/run/secrets/engine_api_key"
+      GIDEON_API_KEY_FILE: "/run/secrets/gideon_api_key"
+      GIDEON_API_PORT: "8000"
+      TZ: "America/Chicago"
+    command:
+      - "python"
+      - "-m"
+      - "gideon.api"
+    working_dir: "/opt/gideon-src"
+    volumes:
+      - "/opt/gideon/gideon:/opt/gideon-src/gideon:ro"
+    group_add:
+      - "4242"
+    secrets:
+      - "engine_api_key"
+      - "gideon_api_key"
+    labels:
+      org.gideon.api-sources-digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    healthcheck:
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).read()"
+      interval: "30s"
+      timeout: "5s"
+      retries: 3
+      start_period: "30s"
+    networks:
+      - "gideon"
+    mem_limit: 1000000000
   searxng:
     image: "ghcr.io/tnmd-fdo/searxng@sha256:1dab138ea70a8ceb4d1c182f5c8f256088406c1742b99e279976157dbe1e9759"
     restart: "unless-stopped"
@@ -483,3 +519,5 @@ secrets:
     file: "/etc/gideon/secrets/postgres_gideon_audit_password"
   engine_api_key:
     file: "/etc/gideon/secrets/engine_api_key"
+  gideon_api_key:
+    file: "/etc/gideon/secrets/gideon_api_key"

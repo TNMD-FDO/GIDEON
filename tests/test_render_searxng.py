@@ -16,6 +16,7 @@ from gideon.host.images import load_image_lock
 from gideon.host.lock import load_host_lock
 from gideon.host.models import HardwareProfile, load_models_lock, select_profile
 from gideon.host.render import ARTIFACTS, RenderInputs, render_all
+from gideon.host.render.api import API_SERVICE_NAME
 from gideon.host.render.command import (
     AppliedManifest,
     compose_digests,
@@ -81,6 +82,7 @@ def inputs(site_path: Path = EXAMPLE, **overrides: object) -> RenderInputs:
         release="fixture",
         secrets=dict(SECRETS),
         checkout="/opt/gideon",
+        api_sources_digest="sha256:" + "0" * 64,
     )
     return replace(base, **overrides)  # type: ignore[arg-type]
 
@@ -250,7 +252,8 @@ class Artifacts(unittest.TestCase):
 class Service(unittest.TestCase):
     def test_present_iff_search_is_on_after_the_frontend_and_the_engine(self) -> None:
         gpu = service_names(inputs())
-        self.assertEqual(gpu.index(SEARXNG_SERVICE_NAME), gpu.index(ENGINE_SERVICE_NAME) + 1)
+        self.assertEqual(gpu.index(API_SERVICE_NAME), gpu.index(ENGINE_SERVICE_NAME) + 1)
+        self.assertEqual(gpu.index(SEARXNG_SERVICE_NAME), gpu.index(API_SERVICE_NAME) + 1)
         self.assertEqual(gpu.index(ENGINE_SERVICE_NAME), gpu.index("open-webui") + 1)
         no_gpu = service_names(inputs(no_gpu=True))
         self.assertEqual(no_gpu.index(SEARXNG_SERVICE_NAME), no_gpu.index("open-webui") + 1)

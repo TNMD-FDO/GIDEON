@@ -10,6 +10,7 @@ from gideon.host.render import (
     VerbatimArtifact,
     substitute_template,
 )
+from gideon.host.render.api import API_JOB_NAME, api_enabled
 from gideon.host.render.engine import ENGINE_JOB_NAME
 from gideon.host.render.searxng import SEARXNG_JOB_NAME, search_enabled
 
@@ -33,6 +34,8 @@ HOST_UNIT_RULE_TEMPLATE: Final = "grafana/provisioning/alerting/host-unit-rule.y
 # `up`, which the blackbox exporter keeps at 1 while the probe itself fails,
 # so each probe has a `probe_success` rule of its own.
 SEARCH_RULE_TEMPLATE: Final = "grafana/provisioning/alerting/search-probe-rule.yaml.tmpl"
+# The API probe's rule, rendered while the GPU-only API service is present.
+API_RULE_TEMPLATE: Final = "grafana/provisioning/alerting/api-probe-rule.yaml.tmpl"
 # The local break-glass administrator (§19.5); the password is the generated
 # print-once secret `grafana_admin_password`.
 GRAFANA_ADMIN_USER: Final = "grafana-admin"
@@ -182,6 +185,7 @@ class GrafanaRulesArtifact(Artifact):
         ENGINE_RULE_TEMPLATE,
         HOST_UNIT_RULE_TEMPLATE,
         SEARCH_RULE_TEMPLATE,
+        API_RULE_TEMPLATE,
     )
 
     def emit(self, inputs: RenderInputs) -> str:
@@ -211,6 +215,11 @@ class GrafanaRulesArtifact(Artifact):
             if search_enabled(inputs)
             else ""
         )
+        api_rule = (
+            substitute_template(inputs, API_RULE_TEMPLATE, {"api_job": API_JOB_NAME})
+            if api_enabled(inputs.no_gpu)
+            else ""
+        )
         # The placeholder's own line ends the block, so the build box's file
         # keeps today's bytes; every other host carries an empty line there.
         host_unit_rule = (
@@ -224,6 +233,7 @@ class GrafanaRulesArtifact(Artifact):
             {
                 "drill_threshold": drill_overdue_seconds(inputs.site.backup.drill_interval),
                 "search_rules": search_rule,
+                "api_rules": api_rule,
                 "gpu_rules": engine_rule + driver_rule,
                 "host_unit_rules": host_unit_rule,
                 "engine_job": ENGINE_JOB_NAME,

@@ -33,6 +33,7 @@ from gideon.host.models import (
     select_profile,
 )
 from gideon.host.render import ARTIFACTS, RenderInputs, render_all
+from gideon.host.render.api import API_JOB_NAME, api_health_url
 from gideon.host.render.caddy import CaddyfileArtifact
 from gideon.host.render.command import (
     AppliedManifest,
@@ -199,6 +200,7 @@ def inputs(site_path: Path = EXAMPLE, **overrides: object) -> RenderInputs:
             ),
         },
         checkout="/opt/gideon",
+        api_sources_digest="sha256:" + "0" * 64,
     )
     return replace(base, **overrides)  # type: ignore[arg-type]
 
@@ -356,6 +358,8 @@ class Compose(unittest.TestCase):
         self.assertNotIn("dcgm-exporter", service_names(inputs(no_gpu=True)))
         self.assertIn(ENGINE_SERVICE_NAME, service_names(inputs()))
         self.assertNotIn(ENGINE_SERVICE_NAME, service_names(inputs(no_gpu=True)))
+        self.assertIn("gideon-api", service_names(inputs()))
+        self.assertNotIn("gideon-api", service_names(inputs(no_gpu=True)))
         # The images apply pulls follow the rendered services, one per service.
         gpu_images = service_images(inputs())
         no_gpu_images = service_images(inputs(no_gpu=True))
@@ -874,12 +878,13 @@ class PrometheusConfig(unittest.TestCase):
             ("ingress", "http_2xx_ca", "https://caddy/"),
             ("frontend", "http_2xx", "http://open-webui:8080/health"),
             (SEARXNG_JOB_NAME, "http_2xx", searxng_health_url()),
+            (API_JOB_NAME, "http_2xx", api_health_url()),
         ):
             self.assertIn(f"job_name: {job}", text)
             self.assertIn(f"module: [{module}]", text)
             self.assertIn(f"targets: [{target}]", text)
-        self.assertEqual(text.count("target_label: __param_target"), 3)
-        self.assertEqual(text.count("replacement: blackbox-exporter:9115"), 3)
+        self.assertEqual(text.count("target_label: __param_target"), 4)
+        self.assertEqual(text.count("replacement: blackbox-exporter:9115"), 4)
 
     def test_missing_template_is_named(self) -> None:
         with self.assertRaises(ValueError) as ctx:
@@ -895,6 +900,9 @@ class PrometheusConfig(unittest.TestCase):
         self.assertIn(engine_metrics_target(), gpu_text)
         self.assertNotIn("job_name: dcgm", no_gpu_text)
         self.assertNotIn("dcgm-exporter:9400", no_gpu_text)
+        self.assertIn(f"job_name: {API_JOB_NAME}", gpu_text)
+        self.assertIn(api_health_url(), gpu_text)
+        self.assertNotIn(f"job_name: {API_JOB_NAME}", no_gpu_text)
         self.assertNotIn(f"job_name: {ENGINE_JOB_NAME}", no_gpu_text)
         self.assertNotIn(ENGINE_SERVICE_NAME, no_gpu_text)
 
@@ -1098,6 +1106,7 @@ def checkout_files() -> dict[str, str]:
             for path in TEMPLATE_PATHS
         },
         SITE: EXAMPLE.read_text(),
+        str(ROOT / "gideon/api/__init__.py"): (ROOT / "gideon/api/__init__.py").read_text(),
         "/etc/gideon/secrets/ldap_bind_password": "bind-$-'\"#password",
         "/etc/gideon/secrets/postgres_openwebui_password": "postgres-openwebui-password",
         "/etc/gideon/secrets/gideon_admin_password": "gideon-admin-password",

@@ -1,6 +1,7 @@
 # Building a GIDEON image (CSA runbook material)
 
-Ticket 16. GIDEON's own images — today `postgres`, Postgres 18 plus pgBackRest —
+Ticket 16. GIDEON's own images — `postgres`, Postgres 18 plus pgBackRest, and
+`gideon`, the Python service image —
 are built **on the box, never by CI**: a build is not byte-reproducible, so
 `images.lock` records the digest that was actually pushed, and the hosted checks
 prove the lock is self-consistent (`inputs_digest` recomputed from the base
@@ -50,6 +51,13 @@ pull request: `git fetch origin && git checkout pin-watch/<pin id>`):
    the store tier is recreated onto the new image, so Postgres restarts for
    about a minute — choose the moment.
 
+The `gideon` build follows the same five steps with `python3 -m tools.imagebuild
+gideon`. Its smoke runs Python's `importlib.metadata.version` over the ten
+image packages after importing `starlette`, `uvicorn`, and `httpx`; `--check`
+repeats that smoke against the recorded built digest. The image is the
+`gideon-api` interpreter and dependency set, while the applying checkout is
+mounted into the running container.
+
 ### Several proposals for one image
 
 An image with several watched arguments can have several proposals open at
@@ -72,6 +80,8 @@ once, one pull request each. Complete them with one build:
   repository under its own tag; a rebuild starts FROM it, so a build needs no
   egress for the base.
 - `postgres: present` — the built digest the lock names is in the registry.
+- `gideon/base: present | mirrored` and `gideon: present` have the same
+  meanings for the service image and its built digest.
 - `postgres: failed — … Fix: Build and push it with …` — build per §2, or,
   after a `/data/registry` loss, restore the registry from the backup set
   (`sudo python3 -m gideon restore --from staging`, or `--from target`;
@@ -84,9 +94,10 @@ once, one pull request each. Complete them with one build:
 
 ## 4. Egress
 
-The base comes from the loopback registry. Inside the build, apt reaches
-`apt.postgresql.org` and `deb.debian.org` — the allowlist's `image-build`
-group (`config/egress.yaml`), probed by the tool before it builds and never by
+The bases come from the loopback registry. Inside the builds, apt reaches
+`apt.postgresql.org` and `deb.debian.org`, and the `gideon` build reaches
+`pypi.org` and `files.pythonhosted.org` — the allowlist's `image-build` group
+(`config/egress.yaml`), probed by the tool before it builds and never by
 preflight, because an office never builds. Behind `egress_proxy` the tool
 passes Docker's predefined proxy build arguments, which Docker keeps out of
 the image history and cache.

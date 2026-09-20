@@ -20,6 +20,7 @@ from gideon.host.images import load_image_lock
 from gideon.host.models import HardwareProfile
 from gideon.host.owui import Response
 from gideon.host.render import ARTIFACTS
+from gideon.host.render.api import API_SERVICE_NAME
 from gideon.host.render.command import run_render
 from gideon.host.render.engine import ENGINE_SERVICE_NAME
 from gideon.host.secrets import SECRET_REGISTRY, SECRETS_DIR
@@ -207,13 +208,14 @@ def ps_rows(*rows: Mapping[str, str]) -> str:
 _FIXTURE_SERVICES: tuple[str, ...] = tuple(
     yaml.safe_load((ROOT / "tests/fixtures/render/example/compose.yaml").read_text())["services"]
 )
-_HEALTHCHECKED = frozenset({"postgres", "open-webui", ENGINE_SERVICE_NAME})
+_HEALTHCHECKED = frozenset({"postgres", "open-webui", ENGINE_SERVICE_NAME, API_SERVICE_NAME})
 
 
 def running_rows(
     *,
     include_dcgm: bool = True,
     include_engine: bool = True,
+    include_api: bool = True,
     include_searxng: bool = True,
 ) -> str:
     services = tuple(
@@ -221,6 +223,7 @@ def running_rows(
         for service in _FIXTURE_SERVICES
         if (include_dcgm or service != "dcgm-exporter")
         and (include_engine or service != ENGINE_SERVICE_NAME)
+        and (include_api or service != API_SERVICE_NAME)
         and (include_searxng or service != "searxng")
     )
     return ps_rows(
@@ -515,6 +518,7 @@ def base_files(site: Path = EXAMPLE) -> dict[str, str]:
             ROOT / "migrations" / "0001_audit_log.sql"
         ).read_text(),
         SITE: site.read_text(),
+        str(ROOT / "gideon/api/__init__.py"): (ROOT / "gideon/api/__init__.py").read_text(),
         CERT: "cert",
         "/etc/gideon/ca.pem": "ca",
     }
@@ -747,9 +751,14 @@ class EngineRotation(RealStack):
         self.assertIn((path, 0, 4242), host.chown_calls)
         calls = argv_calls(host)[baseline_calls:]
         self.assertEqual(calls.count(force_recreate(ENGINE_SERVICE_NAME)), 1)
+        self.assertEqual(calls.count(force_recreate(API_SERVICE_NAME)), 1)
         self.assertEqual(calls.count(force_recreate("open-webui")), 1)
         self.assertLess(
             calls.index(force_recreate(ENGINE_SERVICE_NAME)),
+            calls.index(force_recreate(API_SERVICE_NAME)),
+        )
+        self.assertLess(
+            calls.index(force_recreate(API_SERVICE_NAME)),
             calls.index(force_recreate("open-webui")),
         )
         self.assertEqual(
@@ -948,7 +957,12 @@ class OtherRotations(RealStack):
     def test_no_gpu_engine_key_is_a_no_write_skip(self) -> None:
         host = self.new_host()
         host.files[os.fspath(nogpu.NO_GPU_PATH)] = "declared\n"
-        host.commands[PS] = done(PS, stdout=running_rows(include_dcgm=False, include_engine=False))
+        host.commands[PS] = done(
+            PS,
+            stdout=running_rows(
+                include_dcgm=False, include_engine=False, include_api=False
+            ),
+        )
         code, _out, err = run_apply_once(host)
         self.assertEqual((code, err), (0, ""))
         baseline_writes = len(host.writes)

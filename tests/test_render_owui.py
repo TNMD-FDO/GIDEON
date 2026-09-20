@@ -127,6 +127,7 @@ def inputs(site_path: Path = EXAMPLE, **overrides: object) -> RenderInputs:
         release="fixture",
         secrets=dict(SECRETS),
         checkout="/opt/gideon",
+        api_sources_digest="sha256:" + "0" * 64,
     )
     return replace(base, **overrides)  # type: ignore[arg-type]
 
@@ -911,6 +912,7 @@ class ComposeShape(unittest.TestCase):
                 "postgres_gideon_ro_metrics_password",
                 "postgres_gideon_audit_password",
                 "engine_api_key",
+                "gideon_api_key",
             },
         )
         for secret in SECRETS.values():
@@ -998,6 +1000,7 @@ class CommandSecrets(unittest.TestCase):
             str(ROOT / "images.lock"): (ROOT / "images.lock").read_text(),
             str(ROOT / "models.lock"): (ROOT / "models.lock").read_text(),
             "/etc/gideon/site.yaml": EXAMPLE.read_text(),
+            str(ROOT / "gideon/api/__init__.py"): (ROOT / "gideon/api/__init__.py").read_text(),
         }
         for name in TEMPLATE_PATHS:
             files[str(ROOT / "compose" / name)] = (ROOT / "compose" / name).read_text()

@@ -108,6 +108,7 @@ class Registry(unittest.TestCase):
                 "postgres_gideon_ro_metrics_password",
                 "postgres_gideon_eval_password",
                 "engine_api_key",
+                "gideon_api_key",
                 "searxng_secret_key",
             ],
         )
@@ -126,6 +127,10 @@ class Registry(unittest.TestCase):
         self.assertEqual(engine.kind, "password")
         self.assertFalse(engine.print_once)
         self.assertEqual(engine.consumer, "the engine's API key (gideon-generator)")
+        api = next(secret for secret in SECRET_REGISTRY if secret.name == "gideon_api_key")
+        self.assertEqual(api.kind, "password")
+        self.assertFalse(api.print_once)
+        self.assertEqual(api.consumer, "the gideon-api connection key (gideon-api)")
 
     def test_every_entry_has_the_release_rotation_class(self) -> None:
         classes = {secret.name: secret.rotation for secret in SECRET_REGISTRY}
@@ -143,6 +148,7 @@ class Registry(unittest.TestCase):
                 "postgres_gideon_ro_metrics_password": "role",
                 "postgres_gideon_eval_password": "role",
                 "engine_api_key": "rewrite",
+                "gideon_api_key": "rewrite",
                 "searxng_secret_key": "rewrite",
                 "gideon_admin_api_key": "remint",
                 "gideon_eval_api_key": "remint",
@@ -152,6 +158,7 @@ class Registry(unittest.TestCase):
             ROTATABLE_NAMES,
             {
                 "engine_api_key",
+                "gideon_api_key",
                 "webui_secret_key",
                 "searxng_secret_key",
                 "gideon_admin_api_key",

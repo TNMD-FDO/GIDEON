@@ -8,10 +8,20 @@ from gideon.host import weights
 from gideon.host.images import ImagePin, RegistryTarget, parse_registry, reference
 from gideon.host.models import GIGABYTE, HardwareProfile, ModelPin
 from gideon.host.render import Artifact, RenderInputs
+from gideon.host.render.api import (
+    API_HEALTH_PATH,
+    API_IMAGE_NAME,
+    API_MOUNT_TARGET,
+    API_SECRET_NAME,
+    API_SERVICE_NAME,
+    API_WORKING_DIRECTORY,
+    api_enabled,
+)
 from gideon.host.render.engine import (
     ENGINE_PORT,
     ENGINE_SECRET_NAME,
     ENGINE_SERVICE_NAME,
+    engine_base_url,
 )
 from gideon.host.render.grafana import DASHBOARDS_MOUNT, GRAFANA_ADMIN_USER
 from gideon.host.render.owui import PERMISSIONS_TEMPLATE, owui_environment
@@ -98,6 +108,22 @@ SEARXNG_HEALTHCHECK: Final[Mapping[str, object]] = {
         "-O",
         "/dev/null",
         f"http://127.0.0.1:{SEARXNG_PORT}/healthz",
+    ],
+    "interval": "30s",
+    "timeout": "5s",
+    "retries": 3,
+    "start_period": "30s",
+}
+# The API image carries Python but no curl, so its healthcheck uses the
+# standard-library client; these are SearXNG's starting bounds. exempt: the
+# service is expected to become ready in a second or two.
+API_HEALTHCHECK: Final[Mapping[str, object]] = {
+    "test": [
+        "CMD",
+        "python",
+        "-c",
+        "import urllib.request; urllib.request.urlopen("
+        f"'http://127.0.0.1:{ENGINE_PORT}{API_HEALTH_PATH}', timeout=4).read()",
     ],
     "interval": "30s",
     "timeout": "5s",
@@ -266,6 +292,48 @@ def searxng_service(
             f"/etc/gideon/rendered/searxng/logging.json:{SEARXNG_LOGGING_PATH}:ro",
         ],
         "healthcheck": dict(SEARXNG_HEALTHCHECK),
+        "networks": ["gideon"],
+    }
+
+
+def api_service(inputs: RenderInputs, target: RegistryTarget) -> Mapping[str, object]:
+    """Build the API service from the applying checkout's mounted package.
+
+    It has no ports: callers reach it on the Compose network. The read-only
+    mount is the tree that applied this render, and the label is what causes
+    the service to be recreated when its declared code moves.
+    """
+
+    if not inputs.checkout:
+        raise ValueError(
+            "Render input checkout is empty; the gideon-api service needs the "
+            "release checkout's absolute path. Re-run render with a checkout."
+        )
+    if not inputs.api_sources_digest:
+        raise ValueError(
+            "Render input api_sources_digest is empty; the gideon-api service's "
+            "label needs the digest of its declared sources. Re-run render from a "
+            "release checkout, whose loader gathers it."
+        )
+    return {
+        "image": reference(target, image_pin(inputs, API_IMAGE_NAME)),
+        "restart": "unless-stopped",
+        "environment": {
+            "GIDEON_ENGINE_URL": engine_base_url(),
+            "GIDEON_ENGINE_API_KEY_FILE": f"/run/secrets/{ENGINE_SECRET_NAME}",
+            "GIDEON_API_KEY_FILE": f"/run/secrets/{API_SECRET_NAME}",
+            "GIDEON_API_PORT": str(ENGINE_PORT),
+            "TZ": inputs.site.office.timezone,
+        },
+        "command": ["python", "-m", "gideon.api"],
+        "working_dir": API_WORKING_DIRECTORY,
+        "volumes": [
+            f"{inputs.checkout}/gideon:{API_MOUNT_TARGET}:ro",
+        ],
+        "group_add": [str(inputs.facts.service_gid)],
+        "secrets": [ENGINE_SECRET_NAME, API_SECRET_NAME],
+        "labels": {"org.gideon.api-sources-digest": inputs.api_sources_digest},
+        "healthcheck": dict(API_HEALTHCHECK),
         "networks": ["gideon"],
     }
 
@@ -599,7 +667,12 @@ def _compose_document(inputs: RenderInputs) -> Mapping[str, object]:
     # both directions, before the marker and the site gate which ones this
     # host runs: the lock is release content, complete everywhere, so a no-GPU
     # host or a search-off site refuses the same lock a GPU host would.
-    known_services = (*services, ENGINE_SERVICE_NAME, SEARXNG_SERVICE_NAME)
+    known_services = (
+        *services,
+        ENGINE_SERVICE_NAME,
+        SEARXNG_SERVICE_NAME,
+        API_SERVICE_NAME,
+    )
     unknown_services = tuple(
         row.service for row in inputs.profile.memory if row.service not in known_services
     )
@@ -622,6 +695,7 @@ def _compose_document(inputs: RenderInputs) -> Mapping[str, object]:
             f"{names}. Add {rows} to models.lock, then re-run render."
         )
     engine = None if inputs.no_gpu else engine_service(inputs, target)
+    api = api_service(inputs, target) if api_enabled(inputs.no_gpu) else None
 
     ordered: dict[str, object] = {}
     for name, service in services.items():
@@ -629,6 +703,8 @@ def _compose_document(inputs: RenderInputs) -> Mapping[str, object]:
         if name == "open-webui":
             if engine is not None:
                 ordered[ENGINE_SERVICE_NAME] = engine
+            if api is not None:
+                ordered[API_SERVICE_NAME] = api
             if search_enabled(inputs):
                 ordered[SEARXNG_SERVICE_NAME] = searxng_service(inputs, target)
     services = ordered
@@ -637,6 +713,10 @@ def _compose_document(inputs: RenderInputs) -> Mapping[str, object]:
         secrets[ENGINE_SECRET_NAME] = {
             "file": f"/etc/gideon/secrets/{ENGINE_SECRET_NAME}"
         }
+        if api is not None:
+            secrets[API_SECRET_NAME] = {
+                "file": f"/etc/gideon/secrets/{API_SECRET_NAME}"
+            }
     else:
         # No engine and no GPU exporter are rendered on a no-GPU host; their
         # pins stay required and mirrored, but the existing exporter entry is

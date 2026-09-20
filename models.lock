@@ -82,6 +82,8 @@ profiles:
         gb: 5
       blackbox-exporter:
         gb: 1
+      gideon-api:
+        gb: 1
     # The chunk guards (§7.7) arrive with index build (ticket 58's).
     models:
       # The generator (§5.1, ADR-0009): GPU 0, whole card, one deployment at the

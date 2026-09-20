@@ -1,8 +1,9 @@
 # The development and CI toolchain — never the product's. ci.yml's checks job and a
 # fresh .venv (docs/4-unit-tests/TESTING.md) install this file, and
-# tests/test_toolchain_pins.py holds the PyYAML and Playwright copies to it. The product never
-# installs from PyPI: the bare-host path is the standard library and the box's
-# python3-yaml (spec §1.5). Exact pins only; moved by a person, never the pin watch.
+# tests/test_toolchain_pins.py holds the PyYAML, Playwright, and image copies to it. The
+# box never installs from PyPI: the bare-host path is the standard library and the box's
+# python3-yaml (spec §1.5), and the service's set is built into its image. Exact pins
+# only; the toolchain moved by a person, never the pin watch.
 ruff==0.16.5
 mypy==2.3.1
 pytest==9.1.1
@@ -13,3 +14,17 @@ PyYAML==6.0.3
 # alone so mypy sees its types; no browser is downloaded here. Its version is also
 # tools/turns/chromium.py's PLAYWRIGHT_VERSION (the box-side check); they move together.
 playwright==1.62.0
+# The gideon image's dependency set (images.lock's gideon build arguments), here so
+# mypy and the unit suite see the service's imports. Never installed on the box;
+# tests/test_toolchain_pins.py holds each equal to its lock argument, and the
+# pin watch moves the lock, this copy following in the rebuild's commit.
+starlette==1.6.0
+uvicorn==0.53.0
+httpx==0.28.1
+anyio==4.15.1
+httpcore==1.0.9
+h11==0.16.0
+certifi==2026.7.22
+idna==3.20
+click==8.5.0
+typing_extensions==4.16.0

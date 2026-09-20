@@ -46,7 +46,7 @@ public issue or pull request.
   pull requests come from the pin watch (`pin-watch/*` branches, ADR-0031)
   and are merged by a human, never auto-merged — a merge is a release
   decision.
-- GIDEON's own images (`images/<name>/Dockerfile`, the built pins in
+- GIDEON's own images (`postgres` and `gideon`; `images/<name>/Dockerfile`, the built pins in
   `images.lock`) are built on the box, never by CI. A change under `images/`
   or to a built pin's inputs needs the rebuild in
   `docs/runbooks/built-images.md` before the commit —

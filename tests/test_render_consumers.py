@@ -73,6 +73,7 @@ def inputs(site_path: Path = EXAMPLE, **overrides: object) -> RenderInputs:
             **({"proxy_auth": "proxy-user:proxy-password"} if site_path == SECOND else {}),
         },
         checkout="/opt/gideon",
+        api_sources_digest="sha256:" + "0" * 64,
     )
     return replace(base, **overrides)  # type: ignore[arg-type]
 
@@ -83,8 +84,10 @@ class ConsumerMap(unittest.TestCase):
         second = secret_consumers(inputs(SECOND))
         no_gpu = secret_consumers(inputs(no_gpu=True))
 
-        self.assertEqual(gpu["engine_api_key"], SecretConsumers(("gideon-generator",), ("open-webui",)))
+        self.assertEqual(gpu["engine_api_key"], SecretConsumers(("gideon-generator", "gideon-api"), ("open-webui",)))
+        self.assertEqual(gpu["gideon_api_key"], SecretConsumers(("gideon-api",), ()))
         self.assertEqual(no_gpu.get("engine_api_key"), None)
+        self.assertEqual(no_gpu.get("gideon_api_key"), None)
         self.assertEqual(gpu["webui_secret_key"], SecretConsumers(("open-webui",), ()))
         self.assertEqual(gpu["postgres_gideon_audit_password"], SecretConsumers(("open-webui",), ()))
         self.assertEqual(gpu["postgres_gideon_ro_metrics_password"], SecretConsumers(("grafana", "postgres-exporter"), ()))

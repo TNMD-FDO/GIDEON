@@ -67,7 +67,7 @@ class CommittedArtifact(unittest.TestCase):
         assert group is not None
         self.assertEqual(
             [entry.host for entry in group.hosts],
-            ["apt.postgresql.org", "deb.debian.org"],
+            ["apt.postgresql.org", "deb.debian.org", "pypi.org", "files.pythonhosted.org"],
         )
         for entry in group.hosts:
             self.assertTrue(entry.probe_url.startswith("https://"))

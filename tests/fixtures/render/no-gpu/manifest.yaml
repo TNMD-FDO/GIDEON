@@ -3,9 +3,10 @@ release: "fixture"
 inputs:
   site_sha256: "e7639086e85d038bc7ca7ec4cb820614d5027ced5f9b76065fe7cbf98a844791"
   host_lock_sha256: "6207481c43821eb63a08f39174cc4045201e1a51e339c520418b60a32bc4dfd5"
-  models_lock_sha256: "69db04fe2802598b1a11f95afe88cb6f91c6fcb5edeb23c0d2b0fd7253b84fd5"
+  models_lock_sha256: "aa1065d07eab91115c3cd77cbdb3c7974b6cc5746c2c95994f8e2c905534b4c7"
   hardware_profile: "2x96v-256d"
   images_lock_version: 1
+  api_sources_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
   no_gpu: true
   build_box: false
 files:
@@ -14,7 +15,7 @@ files:
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
-    sha256: "3aa458cd49bc9aee9c6010b43456adbc6504d0a80b0465cd98ae2d7922b7bd52"
+    sha256: "8441192afa40b659094bb4ddcacc2ea9c115bcbabd619c75dd7b99a34fd6e26e"
     mode: "0644"
     owners:
       - "prometheus"
@@ -54,7 +55,7 @@ files:
     owners:
       - "grafana"
   "grafana/provisioning/alerting/rules.yaml":
-    sha256: "37d8168e6683ef84cdda160dbee6cb4c533a8c012ddf0eed8140fce67b677486"
+    sha256: "5c813b09da64ded213e4864bb112c416e1455694269c3e71a9901e8b4ab4c753"
     mode: "0644"
     owners:
       - "grafana"

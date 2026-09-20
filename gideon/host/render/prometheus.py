@@ -3,6 +3,7 @@
 from typing import Final
 
 from gideon.host.render import Artifact, RenderInputs, substitute_template
+from gideon.host.render.api import API_JOB_NAME, api_enabled, api_health_url
 from gideon.host.render.engine import ENGINE_JOB_NAME, engine_metrics_target
 from gideon.host.render.searxng import (
     SEARXNG_JOB_NAME,
@@ -43,6 +44,23 @@ _SEARCH_JOBS: Final = (
     "      - target_label: __address__\n"
     "        replacement: blackbox-exporter:9115"
 )
+# The template's $api_jobs line: one blackbox probe of the API service's
+# health endpoint, rendered on every GPU host where the service renders.
+_API_JOBS: Final = (
+    f"  - job_name: {API_JOB_NAME}\n"
+    "    metrics_path: /probe\n"
+    "    params:\n"
+    "      module: [http_2xx]\n"
+    "    static_configs:\n"
+    f"      - targets: [{api_health_url()}]\n"
+    "    relabel_configs:\n"
+    "      - source_labels: [__address__]\n"
+    "        target_label: __param_target\n"
+    "      - source_labels: [__param_target]\n"
+    "        target_label: instance\n"
+    "      - target_label: __address__\n"
+    "        replacement: blackbox-exporter:9115"
+)
 
 
 class PrometheusConfigArtifact(Artifact):
@@ -60,6 +78,7 @@ class PrometheusConfigArtifact(Artifact):
             {
                 "gpu_jobs": "" if inputs.no_gpu else _GPU_JOBS,
                 "search_jobs": _SEARCH_JOBS if search_enabled(inputs) else "",
+                "api_jobs": _API_JOBS if api_enabled(inputs.no_gpu) else "",
             },
         )
 

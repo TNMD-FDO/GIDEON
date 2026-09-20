@@ -14,6 +14,7 @@ from gideon.host.images import load_image_lock
 from gideon.host.lock import load_host_lock, load_host_lock_text
 from gideon.host.models import HardwareProfile, load_models_lock, select_profile
 from gideon.host.render import ARTIFACTS, RenderInputs, VerbatimArtifact, render_all
+from gideon.host.render.api import API_JOB_NAME
 from gideon.host.render.engine import ENGINE_JOB_NAME
 from gideon.host.render.facts import HostFacts
 from gideon.host.render.grafana import (
@@ -64,6 +65,7 @@ def inputs(site_path: Path = EXAMPLE, **overrides: object) -> RenderInputs:
         release="fixture",
         secrets={},
         checkout="/opt/gideon",
+        api_sources_digest="sha256:" + "0" * 64,
     )
     return replace(base, **overrides)  # type: ignore[arg-type]
 
@@ -354,6 +356,7 @@ class Alerting(unittest.TestCase):
             "gideon-driver-drift",
             "gideon-engine-down",
             "gideon-heartbeat",
+            "gideon-api-probe-failing",
         }
         for site_path, build_box in (
             (EXAMPLE, False),
@@ -373,6 +376,10 @@ class Alerting(unittest.TestCase):
                 self.assertEqual(set(rules), expected_uids | expected_host_rule | search_rule)
                 if search_rule:
                     self.assertIn('probe_success{job="search"}', rules["gideon-search-probe-failing"]["data"][0]["model"]["expr"])
+                self.assertIn(
+                    f'probe_success{{job="{API_JOB_NAME}"}}',
+                    rules["gideon-api-probe-failing"]["data"][0]["model"]["expr"],
+                )
                 for rule in rules.values():
                     self.assertIn(rule["condition"], {item["refId"] for item in rule["data"]})
                     self.assertFalse(rule["isPaused"])

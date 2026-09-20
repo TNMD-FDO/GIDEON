@@ -22,6 +22,7 @@ from gideon.host.lock import render_errors as render_lock_errors
 from gideon.host.models import load_models_lock, select_profile
 from gideon.host.models import render_errors as render_models_errors
 from gideon.host.render import ARTIFACTS, RenderedSet, RenderInputs, render_all
+from gideon.host.render.api import API_SOURCES
 from gideon.host.render.compose import (
     compose_top_level,
     service_blocks,
@@ -43,6 +44,10 @@ _RENDERED_DIR: Final = "/etc/gideon/rendered"
 _ROOT_FIX: Final = "Run gideon render as root, for example with sudo."
 _TEMPLATE_FIX: Final = (
     "Restore the release checkout's compose template, then re-run render."
+)
+_API_SOURCE_FIX: Final = (
+    "A checkout without it is not a release tree: restore the path from the "
+    "release, then re-run render."
 )
 _FOREIGN_FIX: Final = (
     "Remove or move the foreign file(s), then re-run render."
@@ -130,6 +135,42 @@ def load_templates(host: Host, root: PathLike) -> Mapping[str, str]:
     return templates
 
 
+def gather_api_sources_digest(
+    host: Host, root: PathLike, sources: Iterable[str] = API_SOURCES
+) -> str:
+    """Digest the service's declared sources by checkout-relative path and text.
+
+    A declared source is a package directory, walked, or one module file;
+    bytecode caches are skipped, so only the code the container imports moves
+    the digest and, through the block's label, recreates the service.
+    """
+
+    checkout = Path(root)
+    files: dict[str, str] = {}
+
+    def collect(path: Path) -> None:
+        mode = host.stat(path).st_mode
+        if stat.S_ISDIR(mode):
+            for name in host.listdir(path):
+                if name != "__pycache__":
+                    collect(path / name)
+        elif stat.S_ISREG(mode) and path.suffix != ".pyc":
+            files[path.relative_to(checkout).as_posix()] = host.read_text(path)
+
+    for source in sources:
+        try:
+            collect(checkout / source)
+        except (OSError, UnicodeError) as exc:
+            raise ValueError(
+                f"the declared service source {source} is missing or unreadable "
+                f"under {checkout} ({exc})"
+            ) from exc
+    digest = hashlib.sha256()
+    for relative, text in sorted(files.items()):
+        digest.update(f"{relative}\0{text}\0".encode())
+    return f"sha256:{digest.hexdigest()}"
+
+
 def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -207,6 +248,7 @@ def _manifest_mapping(
             "models_lock_sha256": _sha256(models_lock_text),
             "hardware_profile": inputs.profile.name,
             "images_lock_version": inputs.images.version,
+            "api_sources_digest": inputs.api_sources_digest,
             "no_gpu": inputs.no_gpu,
             "build_box": inputs.build_box,
         },
@@ -525,6 +567,11 @@ def load_render_inputs(
     if isinstance(profile, Problem):
         print(_refusal(profile.problem, profile.fix, command), file=sys.stderr)
         return None
+    try:
+        api_sources_digest = gather_api_sources_digest(io, root, API_SOURCES)
+    except ValueError as exc:
+        print(_refusal(exc, _API_SOURCE_FIX, command), file=sys.stderr)
+        return None
     secrets: dict[str, str] = {}
     names = list(OWUI_SECRET_NAMES)
     if site_search_enabled(site_result.config):
@@ -580,6 +627,7 @@ def load_render_inputs(
             release=gideon.__version__,
             secrets=secrets,
             checkout=os.fspath(root),
+            api_sources_digest=api_sources_digest,
             no_gpu=no_gpu,
             build_box=build_box,
         ),

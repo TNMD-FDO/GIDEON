@@ -10,6 +10,7 @@ history at commit f06e83f. User-facing notes for every tag from `v0.2.0` live un
 `docs/release-notes/`, and `tests/test_release_records.py` holds this index
 complete, ordered, and dated from the release files.
 
+- [v0.2.12](docs/2-changelog/w3_v0.2.12.md) — 2026-09-19 — gideon-api in the stack (general-turn 01)
 - [v0.2.11](docs/2-changelog/w3_v0.2.11.md) — 2026-09-19 — eval run records a run (slice-2 04)
 - [v0.2.10](docs/2-changelog/w3_v0.2.10.md) — 2026-09-19 — a PyPI watch kind for built pins (general-turn 10)
 - [v0.2.9](docs/2-changelog/w3_v0.2.9.md) — 2026-09-19 — the branch gate, its own Function (general-turn 04)

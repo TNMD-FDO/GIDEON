@@ -156,6 +156,7 @@ def render_inputs() -> RenderInputs:
             "searxng_secret_key": "searxng-secret-key",
         },
         checkout="/opt/gideon",
+        api_sources_digest="sha256:" + "0" * 64,
     )
 
 

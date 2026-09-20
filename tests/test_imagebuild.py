@@ -19,7 +19,7 @@ from gideon.host.images import (
     load_image_lock_text,
 )
 from gideon.host.sysio import Command, PathLike
-from tools.imagebuild.build import BuildPlan, Smoke, build_plan
+from tools.imagebuild.build import SMOKE, BuildPlan, Smoke, build_plan
 from tools.imagebuild.cli import main
 from tools.pinwatch.fetch import FetchError, Response
 
@@ -258,7 +258,43 @@ class BuildPlans(unittest.TestCase):
             plan.build_argv,
             next(iter(build_commands())),
         )
-        self.assertEqual(plan.smoke, Smoke(("pgbackrest", "version"), "PGBACKREST_VERSION"))
+        self.assertEqual(plan.smoke, Smoke(("pgbackrest", "version"), ("PGBACKREST_VERSION",)))
+
+    def test_gideon_smoke_imports_direct_packages_and_reports_all_versions(self) -> None:
+        smoke = SMOKE["gideon"]
+
+        self.assertEqual(smoke.argv[:2], ("python", "-c"))
+        self.assertEqual(
+            smoke.version_args,
+            (
+                "STARLETTE_VERSION",
+                "UVICORN_VERSION",
+                "HTTPX_VERSION",
+                "ANYIO_VERSION",
+                "HTTPCORE_VERSION",
+                "H11_VERSION",
+                "CERTIFI_VERSION",
+                "IDNA_VERSION",
+                "CLICK_VERSION",
+                "TYPING_EXTENSIONS_VERSION",
+            ),
+        )
+        for package in ("starlette", "uvicorn", "httpx"):
+            self.assertIn(f"import {package}", smoke.argv[2])
+        for package in (
+            "starlette",
+            "uvicorn",
+            "httpx",
+            "anyio",
+            "httpcore",
+            "h11",
+            "certifi",
+            "idna",
+            "click",
+            "typing_extensions",
+        ):
+            self.assertIn(f'"{package}"', smoke.argv[2])
+        self.assertIn("importlib.metadata.version", smoke.argv[2])
 
 
 PROXY = {

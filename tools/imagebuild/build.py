@@ -19,14 +19,38 @@ from tools.pinwatch.pins import Bump, Change
 
 @dataclass(frozen=True, slots=True)
 class Smoke:
-    """The executable and lock argument used to smoke-test one image."""
+    """The executable and lock arguments used to smoke-test one image."""
 
     argv: tuple[str, ...]
-    version_arg: str
+    version_args: tuple[str, ...]
+
+
+_GIDEON_SMOKE_SCRIPT: Final[str] = (
+    "import importlib.metadata\n"
+    "import starlette\n"
+    "import uvicorn\n"
+    "import httpx\n"
+    "for package in (\"starlette\", \"uvicorn\", \"httpx\", \"anyio\", "
+    "\"httpcore\", \"h11\", \"certifi\", \"idna\", \"click\", "
+    "\"typing_extensions\"):\n"
+    "    print(package, importlib.metadata.version(package))\n"
+)
 
 
 SMOKE: Final[Mapping[str, Smoke]] = {
-    "postgres": Smoke(("pgbackrest", "version"), "PGBACKREST_VERSION"),
+    "postgres": Smoke(("pgbackrest", "version"), ("PGBACKREST_VERSION",)),
+    "gideon": Smoke(("python", "-c", _GIDEON_SMOKE_SCRIPT), (
+        "STARLETTE_VERSION",
+        "UVICORN_VERSION",
+        "HTTPX_VERSION",
+        "ANYIO_VERSION",
+        "HTTPCORE_VERSION",
+        "H11_VERSION",
+        "CERTIFI_VERSION",
+        "IDNA_VERSION",
+        "CLICK_VERSION",
+        "TYPING_EXTENSIONS_VERSION",
+    )),
 }
 
 
@@ -200,10 +224,13 @@ def _smoke(
     smoke: Smoke,
     environment: Mapping[str, str],
 ) -> BuildResult | None:
-    value = pin.build_args.get(smoke.version_arg)
-    if value is None:
+    missing_args = tuple(name for name in smoke.version_args if name not in pin.build_args)
+    if missing_args:
         return BuildResult(
-            problem=f"smoke argument {smoke.version_arg} is absent from build_args",
+            problem=(
+                "smoke arguments "
+                f"{', '.join(missing_args)} are absent from build_args"
+            ),
             fix=_BUILD_FIX.format(name=pin.name, registry="the selected registry"),
         )
     result = host.run(_smoke_argv(image, smoke), env=_child_env(environment))
@@ -215,12 +242,14 @@ def _smoke(
             fix=_DOCKER_ACCESS_FIX,
             refusal=True,
         )
-    expected = value.split("-", 1)[0]
+    expected = tuple(pin.build_args[name].split("-", 1)[0] for name in smoke.version_args)
+    missing_versions = tuple(value for value in expected if value not in result.stdout)
     detail = command_detail(result)
-    if result.returncode != 0 or expected not in result.stdout:
+    if result.returncode != 0 or missing_versions:
         return BuildResult(
             problem=(
-                f"smoke failed: {detail}; expected {expected!r} in output; "
+                f"smoke failed: {detail}; expected {', '.join(repr(value) for value in expected)} "
+                f"in output, missing {', '.join(repr(value) for value in missing_versions)}; "
                 "the push did not happen"
             ),
             fix="Correct the image build or smoke command, then retry.",

@@ -82,3 +82,47 @@ images:
         package: pgbackrest
     inputs_digest: sha256:a2bc701e38ece034985f160849718fd2cd31b248ce06020799c7a075e2e4aa01
     digest: sha256:8f7b5321069a4d783752e99d0350eb448ec67406bb9b691ab30c622dab017ea3
+  # GIDEON's shared Python runtime for the gideon-api and future gideon-worker
+  # roles. Its dependencies are pinned as build arguments; the service package
+  # is mounted by Compose rather than copied into this image. Resolved on the
+  # box with `skopeo inspect` on 2026-09-19. A dependency or base bump is
+  # completed by the box build, then the requirements-dev.txt copy moves in the
+  # same commit.
+  gideon:
+    build: images/gideon
+    base: docker.io/library/python:3.14-slim-trixie
+    base_digest: sha256:caaf356f40667c496d405780745b9ac25771c189a51dfcc42430d531ea09f8a2
+    build_args:
+      STARLETTE_VERSION: 1.6.0
+      UVICORN_VERSION: 0.53.0
+      HTTPX_VERSION: 0.28.1
+      ANYIO_VERSION: 4.15.1
+      HTTPCORE_VERSION: 1.0.9
+      H11_VERSION: 0.16.0
+      CERTIFI_VERSION: 2026.7.22
+      IDNA_VERSION: "3.20"
+      CLICK_VERSION: 8.5.0
+      TYPING_EXTENSIONS_VERSION: 4.16.0
+    watch:
+      STARLETTE_VERSION:
+        pypi_project: starlette
+      UVICORN_VERSION:
+        pypi_project: uvicorn
+      HTTPX_VERSION:
+        pypi_project: httpx
+      ANYIO_VERSION:
+        pypi_project: anyio
+      HTTPCORE_VERSION:
+        pypi_project: httpcore
+      H11_VERSION:
+        pypi_project: h11
+      CERTIFI_VERSION:
+        pypi_project: certifi
+      IDNA_VERSION:
+        pypi_project: idna
+      CLICK_VERSION:
+        pypi_project: click
+      TYPING_EXTENSIONS_VERSION:
+        pypi_project: typing-extensions
+    inputs_digest: sha256:7e2c122e4f06e17b28515e7a3e73dd7a0259d8f423b3477c66d1371d9cab1805
+    digest: sha256:7adb7f738f11d396e63b739955f758e5a795fa54fbaf7904a1237274f6e11d8a

@@ -80,6 +80,8 @@ profiles:
         gb: 5
       blackbox-exporter:
         gb: 1
+      gideon-api:
+        gb: 1
     models:
       generator:
         repo: example/fixture
@@ -216,6 +218,7 @@ class CommittedLock(unittest.TestCase):
                 MemoryRow("postgres-exporter", 1, None),
                 MemoryRow("cadvisor", 5, None),
                 MemoryRow("blackbox-exporter", 1, None),
+                MemoryRow("gideon-api", 1, None),
             ),
         )
         self.assertEqual(profile.memory_row("gideon-generator"), MemoryRow("gideon-generator", 32, "generator"))

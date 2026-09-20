@@ -27,6 +27,7 @@ from gideon.host.images import load_image_lock
 from gideon.host.models import HardwareProfile, load_models_lock
 from gideon.host.owui import Response
 from gideon.host.render import ARTIFACTS
+from gideon.host.render.api import API_SERVICE_NAME
 from gideon.host.render.command import run_render
 from gideon.host.render.compose import ENGINE_READY_SECONDS
 from gideon.host.render.engine import ENGINE_SERVICE_NAME
@@ -133,13 +134,14 @@ def ps_rows(*rows: Mapping[str, str]) -> str:
 _FIXTURE_SERVICES: tuple[str, ...] = tuple(
     yaml.safe_load((ROOT / "tests/fixtures/render/example/compose.yaml").read_text())["services"]
 )
-_HEALTHCHECKED = frozenset({"postgres", "open-webui", ENGINE_SERVICE_NAME})
+_HEALTHCHECKED = frozenset({"postgres", "open-webui", ENGINE_SERVICE_NAME, API_SERVICE_NAME})
 
 
 def running_rows(
     *,
     include_dcgm: bool = True,
     include_engine: bool = True,
+    include_api: bool = True,
     include_searxng: bool = True,
     omit: frozenset[str] = frozenset(),
     states: Mapping[str, str] | None = None,
@@ -153,6 +155,7 @@ def running_rows(
         for service in _FIXTURE_SERVICES
         if (include_dcgm or service != "dcgm-exporter")
         and (include_engine or service != ENGINE_SERVICE_NAME)
+        and (include_api or service != API_SERVICE_NAME)
         and (include_searxng or service != "searxng")
         and service not in omit
     )
@@ -414,6 +417,7 @@ def base_files(site: Path = EXAMPLE) -> dict[str, str]:
         },
         str(ROOT / "migrations" / "0001_audit_log.sql"): (ROOT / "migrations" / "0001_audit_log.sql").read_text(),
         SITE: site.read_text(),
+        str(ROOT / "gideon/api/__init__.py"): (ROOT / "gideon/api/__init__.py").read_text(),
         CERT: "cert",
         "/etc/gideon/secrets/tls_key": "<never read>",
         "/etc/gideon/secrets/ldap_bind_password": "bind-password",
@@ -1075,7 +1079,10 @@ class NoGpuModeSwitch(unittest.TestCase):
         host = ApplyHost(healthy_commands(), base_files())
         host.files[os.fspath(nogpu.NO_GPU_PATH)] = "declared\n"
         host.commands[PS] = done(
-            PS, stdout=running_rows(include_dcgm=False, include_engine=False)
+            PS,
+            stdout=running_rows(
+                include_dcgm=False, include_engine=False, include_api=False
+            ),
         )
         sleeps: list[float] = []
         code, out, _ = apply(host, sleep_calls=sleeps)
@@ -1091,7 +1098,10 @@ class NoGpuModeSwitch(unittest.TestCase):
         self.assertEqual(code, 0, out)
         host.files[os.fspath(nogpu.NO_GPU_PATH)] = "declared\n"
         host.commands[PS] = done(
-            PS, stdout=running_rows(include_dcgm=False, include_engine=False)
+            PS,
+            stdout=running_rows(
+                include_dcgm=False, include_engine=False, include_api=False
+            ),
         )
         host.calls.clear()
 

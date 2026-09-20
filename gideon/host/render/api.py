@@ -1,0 +1,42 @@
+"""The ``gideon-api`` service's identity as its clients see it.
+
+The Compose block in ``render/compose.py``, the blackbox job in
+``render/prometheus.py``, and the probe rule in ``render/grafana.py`` share
+these names, as ``render/engine.py`` holds the engine's, so neither observer
+imports the document builder. The service listens on the engine's port number
+so the frontend's connection moves to it by hostname alone (ticket 09).
+``API_SOURCES`` is the code the container imports from the mounted checkout:
+its digest is the block's label, so a change there recreates the service and
+nothing else.
+"""
+
+from typing import Final
+
+from gideon.host.render.engine import ENGINE_PORT
+
+API_SERVICE_NAME: Final[str] = "gideon-api"
+API_IMAGE_NAME: Final[str] = "gideon"
+API_SECRET_NAME: Final[str] = "gideon_api_key"
+API_JOB_NAME: Final[str] = "api"
+API_HEALTH_PATH: Final[str] = "/health"
+API_MOUNT_TARGET: Final[str] = "/opt/gideon-src/gideon"
+API_WORKING_DIRECTORY: Final[str] = "/opt/gideon-src"
+API_SOURCES: Final[tuple[str, ...]] = ("gideon/api",)
+
+
+def api_base_url() -> str:
+    """Return the API's OpenAI-compatible base URL."""
+
+    return f"http://{API_SERVICE_NAME}:{ENGINE_PORT}/v1"
+
+
+def api_health_url() -> str:
+    """Return the API's Compose-network health endpoint."""
+
+    return f"http://{API_SERVICE_NAME}:{ENGINE_PORT}{API_HEALTH_PATH}"
+
+
+def api_enabled(no_gpu: bool) -> bool:
+    """Return whether the API belongs in this host's rendered stack."""
+
+    return not no_gpu

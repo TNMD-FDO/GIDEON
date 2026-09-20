@@ -38,12 +38,6 @@ def built(name: str) -> BuiltImagePin:
     return pin
 
 
-# The committed postgres pin is built (ticket 16): the mirror probes its base
-# and its built digest, both derived from the loaded lock.
-POSTGRES_BASE_DIGEST = built("postgres").base_digest
-POSTGRES_DIGEST = built("postgres").digest
-
-
 CADDY_SOURCE = mirrored("caddy").source
 CADDY_REPOSITORY, CADDY_TAG = CADDY_SOURCE.rsplit(":", 1)
 LOOPBACK_REF = f"127.0.0.1:5000/caddy@{DIGEST}"
@@ -64,6 +58,14 @@ LOCK_IMAGES = tuple(
     (pin.name, pin.digest, pin.source)
     for pin in _COMMITTED_LOCK.images
     if isinstance(pin, MirroredImagePin)
+)
+# Each built pin is probed twice, its base under the base's tag then its own
+# digest, in lock order — derived, so a new built pin never moves this.
+BUILT_PROBES = tuple(
+    (pin.name, digest)
+    for pin in _COMMITTED_LOCK.images
+    if isinstance(pin, BuiltImagePin)
+    for digest in (pin.base_digest, pin.digest)
 )
 BUILT_BASE_DIGEST = "sha256:" + "a" * 64
 BUILT_DIGEST = "sha256:" + "b" * 64
@@ -272,7 +274,7 @@ class Mirroring(unittest.TestCase):
         code, out, err = mirror(host, to="127.0.0.1:5000")
         self.assertEqual((code, err), (0, ""), out)
         self.assertIn(f"caddy: mirrored — {LOOPBACK_REF}\n", out)
-        # Every other mirrored pin is probed once in lock order, then the
+        # Every other mirrored pin is probed once in lock order, then each
         # built pin's base and digest — derived, so a new pin never moves this.
         self.assertEqual(
             argv_calls(host),
@@ -286,8 +288,10 @@ class Mirroring(unittest.TestCase):
                     for name, digest, _source in LOCK_IMAGES
                     if name != "caddy"
                 ),
-                image_probe("127.0.0.1:5000", "postgres", POSTGRES_BASE_DIGEST),
-                image_probe("127.0.0.1:5000", "postgres", POSTGRES_DIGEST),
+                *(
+                    image_probe("127.0.0.1:5000", name, digest)
+                    for name, digest in BUILT_PROBES
+                ),
             ],
         )
 
