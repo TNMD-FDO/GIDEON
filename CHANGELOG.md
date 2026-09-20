@@ -10,6 +10,7 @@ history at commit f06e83f. User-facing notes for every tag from `v0.2.0` live un
 `docs/release-notes/`, and `tests/test_release_records.py` holds this index
 complete, ordered, and dated from the release files.
 
+- [v0.2.16](docs/2-changelog/w3_v0.2.16.md) — 2026-09-19 — a pool in, packets out, grades in (slice-2 08)
 - [v0.2.15](docs/2-changelog/w3_v0.2.15.md) — 2026-09-19 — a completion streamed and whole (general-turn 02)
 - [v0.2.14](docs/2-changelog/w3_v0.2.14.md) — 2026-09-19 — slice-2 02 — the grammar's remaining families and the variants
 - [v0.2.13](docs/2-changelog/w3_v0.2.13.md) — 2026-09-19 — the public tree points only at itself (slice-1 86)

@@ -36,11 +36,11 @@ _READ_FIX: Final[str] = "Restore the eval set from the release checkout, then re
 _VERSION_PATTERN: Final[re.Pattern[str]] = re.compile(r"eval-v[0-9]+")
 _EXTRACTION_ID: Final[re.Pattern[str]] = re.compile(r"extraction-[0-9]{3}")
 _VARIANT_AXIS: Final[re.Pattern[str]] = re.compile(r"[a-z]+(?:-[a-z]+)*@[1-9][0-9]*")
-_JUDGMENT_ID: Final[re.Pattern[str]] = re.compile(r"judgments-[0-9]{3,}")
+JUDGMENT_ID_PATTERN: Final[re.Pattern[str]] = re.compile(r"judgments-[0-9]{3,}")
 _HARVEST_ID: Final[re.Pattern[str]] = re.compile(r"HARV-[0-9]{3}")
 _EXTRACTION_CLUSTER: Final[re.Pattern[str]] = re.compile(r"harvest-chat-[0-9a-f]+")
 _JUDGMENT_CLUSTER: Final[re.Pattern[str]] = re.compile(r"harvest-chat-[A-Za-z0-9_-]+")
-_ROLE: Final[re.Pattern[str]] = re.compile(
+ROLE_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"(?:CHU-attorney|CHU-investigator|CHU-paralegal|TRAD-attorney|"
     r"TRAD-investigator|TRAD-legal-assistant|support|CSA|unknown)-[1-9][0-9]*"
 )
@@ -114,7 +114,7 @@ SHAPE_REGISTRY: Final[Mapping[tuple[str, str], ShapeSpec]] = {
             "review",
         ),
         {"suite": "judgments", "category": "judgments", "branch": "legal"},
-        _JUDGMENT_ID,
+        JUDGMENT_ID_PATTERN,
         _JUDGMENT_CLUSTER,
         ("by", "on", "accepted_flags"),
     ),
@@ -243,7 +243,7 @@ def _validate_review(
         findings.append(Finding(file, case_id, line, "review keys or order", _CASE_FIX))
         return
     reviewer = review.get("by")
-    if not isinstance(reviewer, str) or _ROLE.fullmatch(reviewer) is None:
+    if not isinstance(reviewer, str) or ROLE_PATTERN.fullmatch(reviewer) is None:
         findings.append(Finding(file, case_id, line, "review.by role", _CASE_FIX))
     if not _valid_date(review.get("on")):
         findings.append(Finding(file, case_id, line, "review.on ISO date", _CASE_FIX))

@@ -34,7 +34,81 @@ Two records yield no query: `HARV-014`, a prompt-writing request, and `HARV-017`
 
 ## Where grades come from
 
-Nothing here is graded yet. Grades come through slice-2 ticket 08's grading kit: packets built outside the tree from a pool of candidate passages per query, one attorney per query, graded on UMBRELA's 0–3 scale; the pools come from slice 3's sample index. The judgments file lands beside this one.
+Grades come through the **grading kit** (slice-2 ticket 08): a **pool** of candidate passages goes in, one **packet** per query per grader comes out, the graders return small **grades files**, and the intake appends the **judgments file** beside this page. The pools come from slice 3's sample index; until it exists the kit is exercised over an invented fixture. Packets, their manifest, and returned grades files are built **outside any checkout** and are never committed — the one committed product is the judgments file.
+
+A passage is identified by its **gold-evidence coordinates** — source id, canonical-text SHA-256, and a code-point offset range (§18.6, [21] Q9) — and never by a chunk id, because Phase A's E11 re-chunks the corpus and a grade must survive it.
+
+### The pool file
+
+The contract slice 3's pool builder writes to: UTF-8 JSONL kept outside the checkout, one line per query, keys `query_id` and `passages` and no others. Each passage carries `source_id`, `sha256`, `start`, `end`, `caption`, `text`, and an optional `provenance` object. `provenance` is where a pool may keep a passage's legs, ranks, and scores; the builder checks only that it is an object and never reads into it, which is the mechanism behind "no packet shows a score, a rank, or which leg found a passage".
+
+The file is checked whole, every finding reported at once, each located by line, query id, and passage ordinal alone: the query id is a known active id and appears once; the coordinates are valid by `gideon/evaluation/judgments.py`'s rule; `end − start` equals the length of `text` **in code points**; the caption is non-empty and one line; and no coordinate repeats within a query. Pool size is reported per query and never bounded — twenty to twenty-five is a starting value (ADR-0017).
+
+### The packet and the grades file
+
+A packet is one query for one grader: a self-contained HTML page, no external reference of any kind, showing the role id, the query id, the question, a graded-of-total count, and per passage its ordinal, caption, text, and four grade buttons. It shows no coordinates and no provenance. Its passage order is the SHA-256 of the query id with the passage's coordinates, so both readers of a double-graded query see one order and a pool shuffled on input yields byte-identical packets. Progress survives a closed tab through the browser's storage, every access guarded so the page works without it.
+
+Each grader's folder holds `00-instructions.html` — the scale with one worked example per grade, drawn from a published case — and one `<query id>.html` per packet, with `manifest.json` beside the folders. The manifest is content-free: the packet format number, the queries file's SHA-256, a canonical pool digest, the roster, and per packet its query id, grader, assessment, digest, and coordinates in display order.
+
+The **packet digest** binds what the reader saw — the format number, the query id, the grader, the assessment, the question, and each passage's coordinates, caption, and text in display order — so a changed question, caption, passage, order, or assessment changes the digest and an old grades file is refused rather than joined.
+
+What comes back is `grades-<query id>-<role id>.txt`: a first line `packet: <query id> <role id> <digest prefix>`, the prefix the digest's first sixteen hex characters, then one `<ordinal> <grade>` line per passage. It carries no text of any kind, so it can travel by any route, and is simple enough to type by hand; the intake tolerates a byte order mark, CRLF, blank lines, and a colon or tab between ordinal and grade.
+
+### The judgments file
+
+`judgments/judgments.jsonl` under the set root, its shape owned by `gideon/evaluation/judgments.py`. Each line's keys, in this order:
+
+- `query_id` — the judgments id pattern, resolving to an active query.
+- `source_id`, `sha256`, `start`, `end` — the gold-evidence coordinates; `sha256` sixty-four lowercase hex, `0 ≤ start < end`.
+- `grade` — an integer 0–3 on UMBRELA's scale: 0 irrelevant, 1 related but does not answer, 2 partly answers, 3 answers.
+- `grader` — an **attorney role id**, `CHU-attorney-N` or `TRAD-attorney-N`, never a name.
+- `assessment` — `primary` or `second`. Primary lines are the yardstick; second lines exist for κ.
+
+A (query, coordinates, grader) triple appears once, and there is at most one `primary` and one `second` line per (query, coordinates). A line carries nothing of a passage, a question, or a person. A grade is never edited: §0.2's supersede rule governs, and the first correction needed opens a ticket that adds a superseding form.
+
+Agreement is Cohen's κ, unweighted over the four grades and again with grades collapsed at relevant = grade ≥ 2 (recall@50's line), primary against second, pooled over every passage both graded. It is computed from the file's own lines, so it is recomputable at any time.
+
+### Building packets, for a CSA
+
+Put the pool file outside any checkout, then run from a checkout:
+
+```text
+python3 -m tools.judgments.packets <pool file> --out <dir> --grader CHU-attorney-1 --grader TRAD-attorney-1
+```
+
+Name every grader with a repeated `--grader`; flag order does not matter, since the roster is sorted. A grader must be an attorney role id, and the roster must hold at least one CHU and at least one TRAD attorney (§18.4(a)). Queries with a pool are split evenly, `chu-written` queries dealt first to the CHU attorneys, and ⌈n ∕ 10⌉ of them drawn for a second reader. The run prints a row per stage, then the queries with and without a pool, the packets per grader, and the double-graded query ids — ids and counts only, never a question or a passage.
+
+The refusals, each printed with its fix:
+
+- **the pool file is inside the checkout**, **cannot be read**, or **is not UTF-8** — move it outside and save it as UTF-8.
+- **the output directory is inside the checkout**, or **is not empty** — choose an empty directory outside; a build is never merged into an existing one.
+- **a grader role id is malformed**, **repeated**, or **not an attorney role id** — give unique CHU and TRAD attorney role ids.
+- **the grader roster lacks a CHU attorney** or **lacks a TRAD attorney** — add one of the missing unit.
+- **the pool has findings** — every finding is printed above the refusal with its line, query id, and passage ordinal; correct the pool file and run again.
+
+Give each grader their own folder and the instruction page with it. Keep the manifest: the intake cannot join grades without it.
+
+### Taking grades back, for a CSA
+
+```text
+python3 -m tools.judgments.grades <manifest> <grades file> [<grades file> …] --dry-run
+python3 -m tools.judgments.grades <manifest> <grades file> [<grades file> …]
+```
+
+The intake reads the manifest and the grades files and opens no file holding a question or a passage. Each grades file is one packet and one unit: a run is **all or nothing**, so any refusal appends nothing and exits 1, with every packet's row printed first so all the problems are visible at once. Fix the named files and run again. `--dry-run` prints the same rows, summary, and κ lines and writes nothing.
+
+The refusals, each naming the packet by query id and role id and carrying ordinals and grades only:
+
+- **the first line is not a packet header** — the file must begin `packet: <query id> <role id> <digest prefix>`.
+- **the packet is not in the manifest** — the grades file belongs to another build; use the manifest that built it.
+- **the packet digest prefix does not match the manifest** — the packets were rebuilt from another pool; return the grades file from this build, or rebuild and regrade.
+- **ordinal N has no grade** — every passage is graded before a packet comes back.
+- **grade N is outside 0 to 3** — the scale is 0, 1, 2, 3.
+- **ordinal N is not in the packet** or **is given twice** — correct the line.
+- **the packet lines are already in the judgments file** — a packet is taken in once; a regrade is not an edit (§0.2).
+- **the judgments file has findings** — restore it before appending.
+
+A successful run appends lines ordered by query id, grader, then coordinates, and prints the count appended, the file's line count and SHA-256, and both κ lines with their pair count, query count, and the role ids that contributed pairs. Where there is no pair, or no variation, the line says so in words and prints no number.
 
 ## The intake, for a CSA
 

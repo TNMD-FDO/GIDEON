@@ -42,6 +42,7 @@ EXCLUDED_PREFIXES = (
     "eval/sets/eval-v1/judgments/queries.jsonl",  # harvest-derived judgment queries pending a CSA ruling
     "tools/judgments",  # judgment intake tooling that loads the excluded flagger
     "tests/test_judgments_intake.py",  # judgment intake's excluded tests
+    "tests/test_judgments_kit.py",  # judgment packet and grades intake tests
     "eval/sets/eval-v1/build-gates/extraction.jsonl",  # the labelled harvest questions pending the same ruling
     "eval/sets/eval-v1/build-gates/extraction-variants.jsonl",  # the harvest questions' variants, pending the same ruling
     "eval/sets/eval-v1/slices/extraction/harvest.ids",  # the harvest slice ids must leave with their excluded cases

@@ -199,7 +199,7 @@ How the skeleton becomes the product, per §22 (sequence normative, calendar not
 |---|---|---|---|
 | 0 Platform | `v0.1.0` | **Complete**, declared done on the tracker at `v0.1.33` — the leaves' inventories are the record; its open follow-ons are the board's | `host`, `render-apply`, `engine-frontend`, `backup-restore`, `stack`, `tools`, `tests` |
 | 1 General | `v0.2.0` | **Complete** at `v0.2.0`, the pre-launch release, with no user on the box until go-live (ADR-0044) — the leaves' slice-1 rows are the record; its open follow-ons are the board's | `host` (the profile and its memory table), `render-apply`, `engine-frontend`, `stack`, `tools`, `tests` |
-| 2 Eval harness | `v0.3.0` | **In progress** — the `extraction` slice frozen and measured, stdlib alone (ADR-0046); what remains: the reference run [05], the judge and grading kit [06], [08]–[10], the turn harness and the suites [11]–[15], decision and nightly runs and their board [16]–[18], the sibling stack [19]–[20], the graders [21] | `eval` |
+| 2 Eval harness | `v0.3.0` | **In progress** — the `extraction` slice frozen and measured, stdlib alone (ADR-0046); what remains: the reference run [05], the judge and its metrics [06], [09]–[10], the turn harness and the suites [11]–[15], decision and nightly runs and their board [16]–[18], the sibling stack [19]–[20], the graders [21] | `eval` |
 | 3 Corpus + tranche 1 | `v0.4.0` | corpus/index commands, parsers, chunker, the worker `caselaw` path | `corpus` |
 | 4 Research go-live | `v0.5.0` | the `/turn` service: plan → retrieve → gate → render (§§11–13) | `turn` |
 
