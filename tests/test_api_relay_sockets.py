@@ -12,6 +12,7 @@ from typing import Any, cast
 
 import uvicorn
 
+from gideon import guardrail
 from gideon.api.app import create_app
 from gideon.api.settings import Settings
 
@@ -20,12 +21,104 @@ ENGINE_KEY = "fixture-engine-key"
 _WAIT_SECONDS = 3.0
 _POLL_SECONDS = 0.05
 _STREAM_CONTENT_TYPE = "text/event-stream; charset=utf-8"
+_STREAM_ENVELOPE: dict[str, object] = {
+    "id": "fixture-stream",
+    "object": "chat.completion.chunk",
+    "created": 1_700_000_000,
+    "model": "fixture-model",
+}
+_STREAM_CONTENT_DELTAS = (
+    "This neutral socket fixture explains a fictional record without calculating anything. "
+    * 8,
+    "This second socket fixture paragraph remains descriptive and safe. " * 8,
+)
+_STREAM_ANSWER = "".join(_STREAM_CONTENT_DELTAS)
+
+
+def _chunk_event(
+    delta: dict[str, object], *, finish_reason: str | None = None
+) -> bytes:
+    event = dict(_STREAM_ENVELOPE)
+    event["choices"] = [
+        {
+            "index": 0,
+            "delta": delta,
+            "finish_reason": finish_reason,
+        }
+    ]
+    return (
+        b"data: "
+        + json.dumps(event, separators=(",", ":")).encode("utf-8")
+        + b"\n\n"
+    )
+
+
+def _usage_event() -> bytes:
+    event = dict(_STREAM_ENVELOPE)
+    event["choices"] = []
+    event["usage"] = {"prompt_tokens": 3, "completion_tokens": 4}
+    return (
+        b"data: "
+        + json.dumps(event, separators=(",", ":")).encode("utf-8")
+        + b"\n\n"
+    )
+
+
 _STREAM_EVENTS = (
-    b'data: {"id":"fixture-stream","choices":[{"delta":{"role":"assistant"}}]}\n\n',
-    b'data: {"id":"fixture-stream","choices":[{"delta":{"content":"fixture answer"}}]}\n\n',
-    b'data: {"id":"fixture-stream","choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+    _chunk_event({"role": "assistant"}),
+    _chunk_event({"content": _STREAM_CONTENT_DELTAS[0]}),
+    _chunk_event({"content": _STREAM_CONTENT_DELTAS[1]}),
+    _chunk_event({}, finish_reason="stop"),
+    _usage_event(),
     b"data: [DONE]\n\n",
 )
+# The trailing padding matters: the window decides a sentence only once enough
+# text has arrived behind it, so without it this stream would trip at a finish
+# chunk the stub never sends.
+_TRIP_PADDING = "Neutral socket fixture text. " * 20
+_TRIP_EVENTS = (
+    _chunk_event({"role": "assistant"}),
+    _chunk_event({"content": _TRIP_PADDING}),
+    _chunk_event({"content": "The deadline is June 5, 2027."}),
+    _chunk_event({"content": _TRIP_PADDING}),
+)
+
+
+def _parse_event(body: bytes) -> dict[str, object] | str:
+    payload = body.removeprefix(b"data: ").removesuffix(b"\n\n")
+    if payload == b"[DONE]":
+        return "[DONE]"
+    parsed = json.loads(payload)
+    if not isinstance(parsed, dict):
+        raise AssertionError("fixture event is not an object")
+    return parsed
+
+
+def _event_content(event: dict[str, object] | str) -> str:
+    if isinstance(event, str):
+        return ""
+    choices = event.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return ""
+    choice = choices[0]
+    if not isinstance(choice, dict):
+        return ""
+    delta = choice.get("delta")
+    if not isinstance(delta, dict):
+        return ""
+    content = delta.get("content")
+    return content if isinstance(content, str) else ""
+
+
+def _read_event(response: http.client.HTTPResponse) -> dict[str, object] | str:
+    body = bytearray()
+    while not body.endswith(b"\n\n"):
+        body.extend(response.read(1))
+    return _parse_event(bytes(body))
+
+
+def _read_events(body: bytes) -> list[dict[str, object] | str]:
+    return [_parse_event(part + b"\n\n") for part in body.split(b"\n\n") if part]
 
 
 def _state_event(state: dict[str, object], name: str) -> threading.Event:
@@ -79,6 +172,16 @@ class StubHandler(BaseHTTPRequestHandler):
         _state_event(self.state, "stream_timed_out").set()
         return False
 
+    def _wait_for_peer_closed(self) -> bool:
+        deadline = time.monotonic() + _WAIT_SECONDS
+        while time.monotonic() < deadline:
+            if self._peer_closed():
+                _state_event(self.state, "peer_closed").set()
+                return True
+            time.sleep(_POLL_SECONDS)
+        _state_event(self.state, "stream_timed_out").set()
+        return False
+
     def _stream_completion(self) -> None:
         self.send_response(200)
         self.send_header("Content-Type", _STREAM_CONTENT_TYPE)
@@ -94,6 +197,25 @@ class StubHandler(BaseHTTPRequestHandler):
                 self._write_chunk(event)
             self.wfile.write(b"0\r\n\r\n")
             self.wfile.flush()
+        except OSError:
+            _state_event(self.state, "peer_closed").set()
+        finally:
+            _state_event(self.state, "stream_finished").set()
+
+    def _stream_trip_completion(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", _STREAM_CONTENT_TYPE)
+        self.send_header("Transfer-Encoding", "chunked")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+        try:
+            self._write_chunk(_TRIP_EVENTS[0])
+            _state_event(self.state, "first_event").set()
+            if not self._wait_for_second_event():
+                return
+            for event in _TRIP_EVENTS[1:]:
+                self._write_chunk(event)
+            self._wait_for_peer_closed()
         except OSError:
             _state_event(self.state, "peer_closed").set()
         finally:
@@ -130,7 +252,10 @@ class StubHandler(BaseHTTPRequestHandler):
             self._send(404, b"not found\n", "text/plain; charset=utf-8")
             return
         if body.get("stream") is True:
-            self._stream_completion()
+            if body.get("trip") is True:
+                self._stream_trip_completion()
+            else:
+                self._stream_completion()
         else:
             self._whole_completion()
 
@@ -251,15 +376,38 @@ class ApiRelaySockets(unittest.TestCase):
     def test_stream_flushes_first_event_before_second_gate(self) -> None:
         connection, response = self._stream_request()
         try:
-            first = response.read(len(_STREAM_EVENTS[0]))
-            self.assertEqual(first, _STREAM_EVENTS[0])
+            first = _read_event(response)
+            self.assertEqual(first, _parse_event(_STREAM_EVENTS[0]))
             self.assertEqual(response.status, 200)
             self.assertEqual(response.getheader("Content-Type"), _STREAM_CONTENT_TYPE)
             self.assertIsNone(response.getheader("Content-Length"))
             self.assertFalse(_state_event(self.stub_state, "second_event").is_set())
 
             _state_event(self.stub_state, "second_event").set()
-            self.assertEqual(response.read(), b"".join(_STREAM_EVENTS[1:]))
+            events = [first, *_read_events(response.read())]
+            self.assertEqual(len(events), len(_STREAM_EVENTS))
+            self.assertEqual(
+                "".join(_event_content(event) for event in events), _STREAM_ANSWER
+            )
+            for event in events:
+                if isinstance(event, dict):
+                    # The usage chunk carries its own key beside the envelope.
+                    expected = dict(_STREAM_ENVELOPE)
+                    if event.get("choices") == []:
+                        expected["usage"] = {"prompt_tokens": 3, "completion_tokens": 4}
+                    self.assertEqual(
+                        {key: value for key, value in event.items() if key != "choices"},
+                        expected,
+                    )
+            finish = events[3]
+            self.assertIsInstance(finish, dict)
+            assert isinstance(finish, dict)
+            finish_choices = finish["choices"]
+            self.assertIsInstance(finish_choices, list)
+            assert isinstance(finish_choices, list)
+            self.assertEqual(finish_choices[0]["finish_reason"], "stop")
+            self.assertEqual(events[4], _parse_event(_STREAM_EVENTS[4]))
+            self.assertEqual(events[5], "[DONE]")
             self.assertTrue(_state_event(self.stub_state, "stream_finished").wait(_WAIT_SECONDS))
             self.assertFalse(_state_event(self.stub_state, "stream_timed_out").is_set())
         finally:
@@ -267,13 +415,47 @@ class ApiRelaySockets(unittest.TestCase):
 
     def test_client_close_reaches_stub_while_stream_is_gated(self) -> None:
         connection, response = self._stream_request()
-        first = response.read(len(_STREAM_EVENTS[0]))
-        self.assertEqual(first, _STREAM_EVENTS[0])
+        first = _read_event(response)
+        self.assertEqual(first, _parse_event(_STREAM_EVENTS[0]))
         connection.close()
 
         self.assertTrue(_state_event(self.stub_state, "peer_closed").wait(_WAIT_SECONDS))
         self.assertFalse(_state_event(self.stub_state, "second_event").is_set())
         self.assertFalse(_state_event(self.stub_state, "stream_timed_out").is_set())
+
+    def test_trip_closes_engine_before_client_reads_refusal(self) -> None:
+        connection = self._connection()
+        body = json.dumps(
+            {"stream": True, "trip": True, "messages": [{"content": "fixture prompt"}]},
+            separators=(",", ":"),
+        ).encode("utf-8")
+        connection.request(
+            "POST",
+            "/v1/chat/completions",
+            body=body,
+            headers={
+                "Authorization": f"Bearer {API_KEY}",
+                "Content-Type": "application/json",
+            },
+        )
+        response = connection.getresponse()
+        try:
+            first = _read_event(response)
+            self.assertEqual(first, _parse_event(_TRIP_EVENTS[0]))
+            _state_event(self.stub_state, "second_event").set()
+            # The engine's connection ends while the refusal is still unread by
+            # this client: the fall is the service's close, never the caller's.
+            self.assertTrue(_state_event(self.stub_state, "peer_closed").wait(_WAIT_SECONDS))
+            self.assertFalse(_state_event(self.stub_state, "stream_timed_out").is_set())
+
+            events = [first, *_read_events(response.read())]
+            self.assertEqual(events[-1], "[DONE]")
+            self.assertIn(
+                guardrail.DEADLINE_FAMILY.refusal,
+                "".join(_event_content(event) for event in events),
+            )
+        finally:
+            connection.close()
 
 
 if __name__ == "__main__":

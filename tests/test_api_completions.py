@@ -10,9 +10,12 @@ from typing import Any, cast
 import httpx
 from starlette.types import Message, Scope
 
+from gideon import guardrail
+from gideon.api import judged
 from gideon.api.app import create_app
 from gideon.api.relay import UPSTREAM_ERROR
 from gideon.api.settings import Settings
+from gideon.api.sse import DONE_EVENT
 from gideon.api.upstream import (
     UPSTREAM_COMPLETION_READ_TIMEOUT_SECONDS,
     UPSTREAM_READ_TIMEOUT_SECONDS,
@@ -25,12 +28,110 @@ _ASGI_WAIT_SECONDS = 1.0
 # The application task has already finished wherever this bound is used, so a
 # message that has not arrived by now never will.
 _SILENCE_SECONDS = 0.05
+_STREAM_ENVELOPE: dict[str, object] = {
+    "id": "fixture-stream",
+    "object": "chat.completion.chunk",
+    "created": 1_700_000_000,
+    "model": "fixture-model",
+}
+_STREAM_CONTENT_DELTAS = (
+    "This neutral fixture paragraph explains a fictional record without calculating anything. "
+    * 8,
+    "This second neutral fixture paragraph keeps the answer descriptive and safe. " * 8,
+)
+_STREAM_ANSWER = "".join(_STREAM_CONTENT_DELTAS)
+
+
+def _chunk_event(
+    delta: Mapping[str, object], *, finish_reason: str | None = None
+) -> bytes:
+    event = dict(_STREAM_ENVELOPE)
+    event["choices"] = [
+        {
+            "index": 0,
+            "delta": dict(delta),
+            "finish_reason": finish_reason,
+        }
+    ]
+    return (
+        b"data: "
+        + json.dumps(event, separators=(",", ":")).encode("utf-8")
+        + b"\n\n"
+    )
+
+
+def _usage_event() -> bytes:
+    event = dict(_STREAM_ENVELOPE)
+    event["choices"] = []
+    event["usage"] = {"prompt_tokens": 3, "completion_tokens": 4}
+    return (
+        b"data: "
+        + json.dumps(event, separators=(",", ":")).encode("utf-8")
+        + b"\n\n"
+    )
+
+
 _STREAM_EVENTS = (
-    b'data: {"id":"fixture-stream","delta":{"role":"assistant"}}\n\n',
-    b'data: {"id":"fixture-stream","delta":{"content":"fixture answer"}}\n\n',
-    b'data: {"id":"fixture-stream","delta":{},"finish_reason":"stop"}\n\n',
+    _chunk_event({"role": "assistant"}),
+    _chunk_event({"content": _STREAM_CONTENT_DELTAS[0]}),
+    _chunk_event({"content": _STREAM_CONTENT_DELTAS[1]}),
+    _chunk_event({}, finish_reason="stop"),
+    _usage_event(),
     b"data: [DONE]\n\n",
 )
+_TRIP_PADDING = "Neutral fixture text. " * 20
+# The window decides a sentence only once enough text has arrived behind it, so
+# the padding after the date is what makes this a trip mid-stream rather than
+# one at a finish chunk. The two events after it are the ones the relay must
+# never read: on a trip it stops reading and closes the engine.
+_TRIP_UNREAD = "This held text must never reach the caller. " * 20
+_TRIP_EVENTS = (
+    _chunk_event({"role": "assistant"}),
+    _chunk_event({"content": _TRIP_PADDING}),
+    _chunk_event({"content": "The deadline is June 5, 2027."}),
+    _chunk_event({"content": _TRIP_PADDING}),
+    _chunk_event({"content": _TRIP_UNREAD}),
+    _chunk_event({}, finish_reason="stop"),
+)
+_TRIP_RELEASED = 4
+
+
+def _parse_event(body: bytes) -> dict[str, object] | str:
+    payload = body.removeprefix(b"data: ").removesuffix(b"\n\n")
+    if payload == DONE_EVENT.encode("utf-8"):
+        return DONE_EVENT
+    parsed = json.loads(payload)
+    if not isinstance(parsed, dict):
+        raise AssertionError("fixture event is not an object")
+    return parsed
+
+
+def _first_choice(event: Mapping[str, object]) -> Mapping[str, object]:
+    choices = event.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise AssertionError("fixture event has no choice")
+    choice = choices[0]
+    if not isinstance(choice, Mapping):
+        raise AssertionError("fixture choice is not an object")
+    return choice
+
+
+def _event_content(event: dict[str, object] | str) -> str:
+    if isinstance(event, str):
+        return ""
+    choices = event.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return ""
+    choice = _first_choice(event)
+    delta = choice.get("delta")
+    if not isinstance(delta, Mapping):
+        return ""
+    content = delta.get("content")
+    return content if isinstance(content, str) else ""
+
+
+def _event_envelope(event: Mapping[str, object]) -> dict[str, object]:
+    return {key: value for key, value in event.items() if key != "choices"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,9 +366,34 @@ class ApiCompletions(unittest.TestCase):
             start, bodies, stream = asyncio.run(self.gated_stream("text/event-stream"))
 
         self.assertEqual(start["status"], 200)
+        events = [_parse_event(self.message_body(message)) for message in bodies[:-1]]
+        self.assertEqual(len(events), len(_STREAM_EVENTS))
+        first = events[0]
+        self.assertIsInstance(first, dict)
+        assert isinstance(first, dict)
+        first_choice = _first_choice(first)
+        self.assertEqual(first_choice["index"], 0)
+        self.assertEqual(first_choice["delta"], {"role": "assistant"})
+        self.assertIsNone(first_choice["finish_reason"])
+        self.assertEqual(_event_envelope(first), _STREAM_ENVELOPE)
         self.assertEqual(
-            [self.message_body(message) for message in bodies[:-1]], list(_STREAM_EVENTS)
+            "".join(_event_content(event) for event in events), _STREAM_ANSWER
         )
+        expected_events = [_parse_event(body) for body in _STREAM_EVENTS]
+        for event, expected in zip(events, expected_events, strict=True):
+            if isinstance(event, dict):
+                self.assertIsInstance(expected, dict)
+                assert isinstance(expected, dict)
+                self.assertEqual(_event_envelope(event), _event_envelope(expected))
+        finish = events[3]
+        self.assertIsInstance(finish, dict)
+        assert isinstance(finish, dict)
+        self.assertEqual(_first_choice(finish)["finish_reason"], "stop")
+        usage = events[4]
+        self.assertIsInstance(usage, dict)
+        assert isinstance(usage, dict)
+        self.assertEqual(usage, _parse_event(_STREAM_EVENTS[4]))
+        self.assertEqual(events[5], DONE_EVENT)
         self.assertEqual(self.message_body(bodies[-1]), b"")
         self.assertTrue(all(message["more_body"] for message in bodies[:-1]))
         self.assertFalse(bodies[-1]["more_body"])
@@ -363,7 +489,9 @@ class ApiCompletions(unittest.TestCase):
             await session.next_message()
             stream.release(0)
             first = await session.next_message()
-            self.assertEqual(self.message_body(first), _STREAM_EVENTS[0])
+            self.assertEqual(
+                _parse_event(self.message_body(first)), _parse_event(_STREAM_EVENTS[0])
+            )
             session.disconnect()
             await session.wait_for_application()
             with self.assertRaises(TimeoutError):
@@ -455,31 +583,33 @@ class ApiCompletions(unittest.TestCase):
             for index in range(len(stream.chunks)):
                 stream.release(index)
                 messages.append(await session.next_message())
-            # The break, the error event, the end marker, and the final message.
+            # The settled tail, the break, the error event, and the end marker.
             for _ in range(4):
                 messages.append(await session.next_message())
+            messages.append(await session.next_message())
         return messages, stream, failure
 
     def test_mid_stream_failure_ends_with_fixed_error_events_and_logs_class(self) -> None:
         with self.assertLogs("gideon.api.relay", level="WARNING") as captured:
             messages, stream, failure = asyncio.run(self.failed_stream())
 
-        error_event = (
-            b"data: "
-            + json.dumps(UPSTREAM_ERROR, separators=(",", ":")).encode("utf-8")
-            + b"\n\n"
-        )
         self.assertEqual(messages[0]["type"], "http.response.start")
         self.assertEqual(
-            [self.message_body(message) for message in messages[1:3]],
-            list(_STREAM_EVENTS[:2]),
+            _parse_event(self.message_body(messages[1])),
+            _parse_event(_STREAM_EVENTS[0]),
         )
-        self.assertEqual(self.message_body(messages[3]), b"\n\n")
-        self.assertEqual(self.message_body(messages[4]), error_event)
-        self.assertEqual(self.message_body(messages[5]), b"data: [DONE]\n\n")
-        self.assertEqual(self.message_body(messages[6]), b"")
-        self.assertTrue(all(message["more_body"] for message in messages[1:6]))
-        self.assertFalse(messages[6]["more_body"])
+        released = _parse_event(self.message_body(messages[2]))
+        settled_tail = _parse_event(self.message_body(messages[3]))
+        self.assertEqual(
+            _event_content(released) + _event_content(settled_tail),
+            _STREAM_CONTENT_DELTAS[0],
+        )
+        self.assertEqual(self.message_body(messages[4]), b"\n\n")
+        self.assertEqual(_parse_event(self.message_body(messages[5])), UPSTREAM_ERROR)
+        self.assertEqual(_parse_event(self.message_body(messages[6])), DONE_EVENT)
+        self.assertEqual(self.message_body(messages[7]), b"")
+        self.assertTrue(all(message["more_body"] for message in messages[1:7]))
+        self.assertFalse(messages[7]["more_body"])
         self.assertTrue(stream.closed)
         self.assertEqual(len(captured.output), 1)
         self.assertIn(type(failure).__name__, captured.output[0])
@@ -491,6 +621,108 @@ class ApiCompletions(unittest.TestCase):
             ENGINE_KEY,
         ):
             self.assertNotIn(secret, captured.output[0])
+
+    async def first_event_failure(self) -> tuple[list[Message], GatedStream]:
+        stream = GatedStream((b"data: not-json\n\n",))
+
+        def engine(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=stream,
+                request=request,
+            )
+
+        app = create_app(self.settings(), transport=httpx.MockTransport(engine))
+        async with ASGISession(
+            app,
+            "POST",
+            "/v1/chat/completions",
+            b'{"stream":true,"prompt":"fixture prompt secret"}',
+            {"Authorization": f"Bearer {API_KEY}"},
+            "2.4",
+        ) as session:
+            messages = [await session.next_message()]
+            stream.release(0)
+            for _ in range(4):
+                messages.append(await session.next_message())
+        return messages, stream
+
+    def test_first_event_failure_sends_only_envelope_free_trip_payloads(self) -> None:
+        messages, stream = asyncio.run(self.first_event_failure())
+
+        events = [_parse_event(self.message_body(message)) for message in messages[1:4]]
+        self.assertEqual(len(events), 3)
+        self.assertTrue(stream.closed)
+        for event in events[:2]:
+            self.assertIsInstance(event, dict)
+            assert isinstance(event, dict)
+            self.assertEqual(set(event), {"object", "choices"})
+            self.assertEqual(event["object"], "chat.completion.chunk")
+        self.assertEqual(events[2], DONE_EVENT)
+        self.assertEqual(self.message_body(messages[4]), b"")
+        self.assertNotIn(
+            b"not-json",
+            b"".join(
+                self.message_body(message)
+                for message in messages
+                if "body" in message
+            ),
+        )
+
+    async def trip_stream(self) -> tuple[list[Message], GatedStream]:
+        stream = GatedStream(_TRIP_EVENTS)
+
+        def engine(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=stream,
+                request=request,
+            )
+
+        app = create_app(self.settings(), transport=httpx.MockTransport(engine))
+        async with ASGISession(
+            app,
+            "POST",
+            "/v1/chat/completions",
+            b'{"stream":true,"prompt":"fixture prompt secret"}',
+            {"Authorization": f"Bearer {API_KEY}"},
+            "2.4",
+        ) as session:
+            messages = [await session.next_message()]
+            for index in range(_TRIP_RELEASED):
+                stream.release(index)
+            while messages[-1].get("more_body", True):
+                messages.append(await session.next_message())
+        return messages, stream
+
+    def test_trip_closes_upstream_before_refusal_body_is_sent(self) -> None:
+        messages, stream = asyncio.run(self.trip_stream())
+
+        bodies = [self.message_body(message) for message in messages[1:]]
+        events = [_parse_event(body) for body in bodies[:-1]]
+        # The refusal is the first payload after the close: the last three
+        # events are the refusal delta, the finish chunk, and the end marker.
+        self.assertTrue(stream.closed)
+        self.assertEqual(events[-1], DONE_EVENT)
+        finish = events[-2]
+        assert isinstance(finish, dict)
+        self.assertEqual(_first_choice(finish)["finish_reason"], "stop")
+        self.assertEqual(_first_choice(finish)["delta"], {})
+        refusal = events[-3]
+        assert isinstance(refusal, dict)
+        released = "".join(_event_content(event) for event in events[:-3])
+        self.assertGreater(len(released), 0)
+        self.assertEqual(
+            _event_content(refusal),
+            guardrail.REFUSAL_SEPARATOR + guardrail.DEADLINE_FAMILY.refusal,
+        )
+        # The relay stopped reading: the two events the stub still held never
+        # reached the caller, and neither did the date the window caught.
+        self.assertNotIn(_TRIP_UNREAD, released)
+        self.assertNotIn("June 5, 2027", released)
+        self.assertEqual(bodies[-1], b"")
 
     def test_whole_completion_is_returned_intact_with_a_length(self) -> None:
         completion = b'{"id":"fixture-completion","choices":[]}'
@@ -521,7 +753,7 @@ class ApiCompletions(unittest.TestCase):
 
         def engine(request: httpx.Request) -> httpx.Response:
             calls.append(request)
-            return httpx.Response(200, content=b"fixture completion", request=request)
+            return httpx.Response(200, content=b'{"choices":[]}', request=request)
 
         response = self.request(
             httpx.MockTransport(engine),
@@ -540,6 +772,92 @@ class ApiCompletions(unittest.TestCase):
         self.assertEqual(request.headers["authorization"], f"Bearer {ENGINE_KEY}")
         self.assertEqual(request.headers["content-type"], "application/json; charset=utf-8")
         self.assertNotIn("x-caller-header", request.headers)
+
+    def test_tripped_whole_completion_has_its_judged_content_length(self) -> None:
+        completion = {
+            "id": "fixture-whole",
+            "object": "chat.completion",
+            "created": 1_700_000_000,
+            "model": "fixture-model",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "The deadline is June 5, 2027.",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 6},
+        }
+        engine_body = json.dumps(completion, separators=(",", ":")).encode()
+
+        def engine(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                content=engine_body,
+                request=request,
+            )
+
+        response = self.request(
+            httpx.MockTransport(engine),
+            body=b'{"messages":[{"role":"user","content":"Explain a fictitious legal rule."}]}',
+            headers={"Authorization": f"Bearer {API_KEY}"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.headers[b"content-length"], str(len(response.body)).encode()
+        )
+        self.assertEqual(response.headers[b"content-type"], b"application/json")
+        parsed = json.loads(response.body)
+        self.assertEqual(
+            parsed["choices"][0]["message"]["content"],
+            guardrail.DEADLINE_FAMILY.refusal,
+        )
+        self.assertEqual(parsed["choices"][0]["finish_reason"], "stop")
+        self.assertEqual(parsed["usage"], completion["usage"])
+        self.assertNotIn(b"June 5, 2027", response.body)
+
+    def test_unjudgeable_whole_completion_is_a_fixed_502_without_engine_bytes(self) -> None:
+        engine_body = b'{"engine_secret":"fixture engine bytes","choices":[{"message":{"content":7}}]}'
+
+        def engine(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                content=engine_body,
+                request=request,
+            )
+
+        with self.assertLogs("gideon.api.relay", level="WARNING") as captured:
+            response = self.request(
+                httpx.MockTransport(engine),
+                body=b'{"stream":false,"messages":[{"role":"user","content":"short fictitious chat"}]}',
+                headers={"Authorization": f"Bearer {API_KEY}"},
+            )
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.headers[b"content-type"], b"application/json")
+        self.assertEqual(json.loads(response.body), judged.UNJUDGED_ERROR)
+        self.assertNotIn(b"fixture engine bytes", response.body)
+        # The failure is named by exception class alone: no engine byte and no
+        # prompt text reaches the log line.
+        self.assertEqual(len(captured.output), 1)
+        self.assertIn("TypeError", captured.output[0])
+        for secret in ("fixture engine bytes", "short fictitious chat"):
+            self.assertNotIn(secret, captured.output[0])
+
+    def test_first_event_failure_logs_the_exception_class_alone(self) -> None:
+        with self.assertLogs("gideon.api.relay", level="WARNING") as captured:
+            asyncio.run(self.first_event_failure())
+
+        self.assertEqual(len(captured.output), 1)
+        self.assertIn("JSONDecodeError", captured.output[0])
+        for secret in ("not-json", "fixture prompt secret"):
+            self.assertNotIn(secret, captured.output[0])
 
     def test_engine_error_status_and_body_pass_through(self) -> None:
         error_body = b'{"error":{"message":"fixture refusal"}}'
@@ -631,7 +949,7 @@ class ApiCompletions(unittest.TestCase):
             timeouts[request.url.path] = timeout
             if request.url.path == "/v1/models":
                 return httpx.Response(200, json={"data": []}, request=request)
-            return httpx.Response(200, content=b"fixture completion", request=request)
+            return httpx.Response(200, content=b'{"choices":[]}', request=request)
 
         transport = httpx.MockTransport(engine)
         completion = self.request(

@@ -762,6 +762,66 @@ class ServiceDoor(unittest.TestCase):
         self.assertEqual(code, 0, stderr)
         self.assertIn(f"replacement: ok — {expected.kind}", stdout)
 
+    @staticmethod
+    def _service_arguments(streamed: bool) -> tuple[str, ...]:
+        arguments = ("--service", "--no-instruction")
+        return (*arguments, "--stream") if streamed else arguments
+
+    def test_refusal_without_released_prefix_is_the_stored_replacement_class(self) -> None:
+        refusal = str(guardrail.REFUSALS[0])
+        self.assertNotIn(guardrail.REFUSAL_SEPARATOR, refusal)
+        expected = classify.classify(
+            guardrail,
+            {"content": refusal, "output": []},
+            {"role": "user", "content": "plain"},
+        )
+        stream_expected = classify.stream_verdict(
+            guardrail,
+            (("content", refusal),),
+            "plain",
+        )
+        self.assertTrue(stream_expected.clean)
+        for streamed in (False, True):
+            with self.subTest(stream=streamed), tempfile.TemporaryDirectory() as directory:
+                cases_path = Path(directory) / "cases.yaml"
+                _case_file(
+                    cases_path,
+                    [{"id": "replacement-alone", "prompt": "plain", "expect": "refused"}],
+                )
+                host = (
+                    FakeHost(stream_deltas=(("content", refusal),))
+                    if streamed
+                    else FakeHost(answer=refusal)
+                )
+                code, stdout, stderr = _run_service(
+                    host, cases_path, arguments=self._service_arguments(streamed)
+                )
+                self.assertEqual(code, 0, stderr)
+                self.assertIn(f"replacement-alone: ok — {expected.kind}", stdout)
+                if streamed:
+                    self.assertIn("stream clean", stdout)
+
+    def test_content_only_stream_and_whole_body_pass_the_withheld_check(self) -> None:
+        answer = "A plain answer."
+        for streamed in (False, True):
+            with self.subTest(stream=streamed), tempfile.TemporaryDirectory() as directory:
+                cases_path = Path(directory) / "cases.yaml"
+                _case_file(
+                    cases_path,
+                    [{"id": "content-only", "prompt": "plain", "expect": "answered"}],
+                )
+                host = (
+                    FakeHost(stream_deltas=(("content", answer),))
+                    if streamed
+                    else FakeHost(answer=answer)
+                )
+                code, stdout, stderr = _run_service(
+                    host, cases_path, arguments=self._service_arguments(streamed)
+                )
+                self.assertEqual(code, 0, stderr)
+                self.assertIn("withheld ok", stdout)
+                self.assertNotIn("withheld red", stdout)
+
     def test_stream_leak_fails_the_row_under_the_shared_policy(self) -> None:
         prompt, answer = _seed_case("direct-01")
         expected = classify.stream_verdict(
@@ -785,6 +845,8 @@ class ServiceDoor(unittest.TestCase):
         )
         self.assertIn("summary: refuse", stdout)
 
+    # This is the check's own tripwire, no longer today's state: it plants a
+    # fake wire carrying reasoning and proves the door turns red if it leaks.
     def test_reasoning_on_the_wire_fails_the_withheld_check(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             cases_path = Path(directory) / "cases.yaml"
