@@ -115,14 +115,23 @@ def _run(
 
 
 def sync(host: Host, root: Path) -> None:
-    """Fetch main and all pin-watch remote branches exactly once."""
+    """Fetch main and all pin-watch remote branches exactly once.
 
+    A shallow checkout, the hosted runner's default, is completed by the same
+    fetch: ``branch_state`` counts ``origin/main..origin/<branch>``, and over a
+    cut history that count is the branch's whole fetched ancestry, which reads
+    an untouched proposal as a person's commits (standing ticket 19).
+    """
+
+    shallow = _run(host, root, ["git", "rev-parse", "--is-shallow-repository"])
+    depth = ["--unshallow"] if shallow.stdout.strip() == "true" else []
     _run(
         host,
         root,
         [
             "git",
             "fetch",
+            *depth,
             "origin",
             "main",
             "+refs/heads/pin-watch/*:refs/remotes/origin/pin-watch/*",

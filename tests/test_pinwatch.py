@@ -2000,6 +2000,7 @@ class PinWatchHost:
         main_commit: str = "main",
         branch_head: str = "branch-head",
         rev_list_count: int | str = 1,
+        shallow: bool = False,
     ) -> None:
         self.prs = json.dumps(prs or [])
         self.image_text = image_text or IMAGE_LOCK_TEXT
@@ -2020,6 +2021,7 @@ class PinWatchHost:
         self.main_commit = main_commit
         self.branch_head = branch_head
         self.rev_list_count = str(rev_list_count)
+        self.shallow = shallow
         self.calls: list[tuple[tuple[str, ...], str | None]] = []
         self.files: dict[str, str] = {
             "/repo/models.lock": (ROOT / "models.lock").read_text(),
@@ -2058,6 +2060,10 @@ class PinWatchHost:
         if command[:3] == ("git", "rev-list", "--count"):
             return subprocess.CompletedProcess(
                 command, 0, self.rev_list_count + "\n", ""
+            )
+        if command == ("git", "rev-parse", "--is-shallow-repository"):
+            return subprocess.CompletedProcess(
+                command, 0, ("true" if self.shallow else "false") + "\n", ""
             )
         if command[:4] == ("git", "rev-parse", "--verify", "--quiet"):
             return subprocess.CompletedProcess(
@@ -2972,7 +2978,7 @@ class CliContracts(unittest.TestCase):
         self.assertIn("→", stdout)
         commands = [call[0] for call in host.calls]
         self.assertEqual(
-            commands[6:13],
+            commands[7:14],
             [
                 ("git", "checkout", "-B", "pin-watch/images.caddy", "origin/main"),
                 (sys.executable, "tests/regenerate_render_fixtures.py"),
@@ -3304,6 +3310,7 @@ class CliContracts(unittest.TestCase):
         self.assertEqual(
             [call[0][:2] for call in host.calls],
             [
+                ("git", "rev-parse"),
                 ("git", "fetch"),
                 ("git", "show"),
                 ("git", "show"),
@@ -3311,6 +3318,9 @@ class CliContracts(unittest.TestCase):
                 ("git", "show"),
                 ("gh", "pr"),
             ],
+        )
+        self.assertEqual(
+            host.calls[0][0], ("git", "rev-parse", "--is-shallow-repository")
         )
         self.assertEqual(
             [
@@ -3326,7 +3336,7 @@ class CliContracts(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            host.calls[0][0],
+            host.calls[1][0],
             (
                 "git",
                 "fetch",
@@ -3334,6 +3344,47 @@ class CliContracts(unittest.TestCase):
                 "main",
                 "+refs/heads/pin-watch/*:refs/remotes/origin/pin-watch/*",
             ),
+        )
+
+    def test_shallow_checkout_is_completed_by_the_one_fetch(self) -> None:
+        # The hosted runner's depth-1 checkout: over a cut history
+        # ``origin/main..origin/<branch>`` counts the branch's whole fetched
+        # ancestry and read an untouched proposal as completed (standing
+        # ticket 19).
+        host = PinWatchHost(shallow=True)
+        result, _, _ = _cli_output(
+            host,
+            self._caddy_fetcher("1.0", self.CURRENT_DIGEST),
+            ["--only", "images.caddy"],
+        )
+        self.assertEqual(result, 0)
+        fetches = [call[0] for call in host.calls if call[0][:2] == ("git", "fetch")]
+        self.assertEqual(
+            fetches,
+            [
+                (
+                    "git",
+                    "fetch",
+                    "--unshallow",
+                    "origin",
+                    "main",
+                    "+refs/heads/pin-watch/*:refs/remotes/origin/pin-watch/*",
+                )
+            ],
+        )
+
+    def test_unreadable_shallow_state_refuses_before_the_fetch(self) -> None:
+        host = PinWatchHost()
+        host.fail_once[("git", "rev-parse", "--is-shallow-repository")] = "not a repo"
+        result, _, stderr = _cli_output(
+            host,
+            self._caddy_fetcher("1.0", self.CURRENT_DIGEST),
+            ["--only", "images.caddy"],
+        )
+        self.assertEqual(result, 1)
+        self.assertIn("git rev-parse --is-shallow-repository", stderr)
+        self.assertFalse(
+            [call for call in host.calls if call[0][:2] == ("git", "fetch")]
         )
 
     def test_declined_versus_reopened(self) -> None:

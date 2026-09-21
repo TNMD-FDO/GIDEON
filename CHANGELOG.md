@@ -10,6 +10,7 @@ history at commit f06e83f. User-facing notes for every tag from `v0.2.0` live un
 `docs/release-notes/`, and `tests/test_release_records.py` holds this index
 complete, ordered, and dated from the release files.
 
+- [v0.2.23](docs/2-changelog/w3_v0.2.23.md) — 2026-09-20 — the pin watch completes a shallow checkout
 - [v0.2.22](docs/2-changelog/w3_v0.2.22.md) — 2026-09-20 — the service judges every answer (general-turn 06)
 - [v0.2.21](docs/2-changelog/w3_v0.2.21.md) — 2026-09-20 — the partial-reference test portable to the export
 - [v0.2.20](docs/2-changelog/w3_v0.2.20.md) — 2026-09-20 — the served name off the box's site file
