@@ -14,6 +14,6 @@ __pycache__/
 .ruff_cache/
 # python3 -m tools.tracker generates the board page beside committed .scratch/BOARD.md
 .scratch/BOARD.html
-# the dev venv: the primary's directory, or a worktree's link to it
+# the dev venv: a worktree's link to the primary, or its own directory
 .venv
 *.egg-info/

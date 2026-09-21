@@ -1,11 +1,19 @@
 """In-process ASGI-level contracts for the streamed and whole completion relay."""
 
 import asyncio
+import contextlib
 import json
+import logging
+import sys
+import tempfile
+import threading
+import types
 import unittest
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, cast
+from pathlib import Path
+from typing import Any, Literal, cast
+from unittest.mock import patch
 
 import httpx
 from starlette.types import Message, Scope
@@ -20,10 +28,17 @@ from gideon.api.upstream import (
     UPSTREAM_COMPLETION_READ_TIMEOUT_SECONDS,
     UPSTREAM_READ_TIMEOUT_SECONDS,
 )
+from gideon.host.render.api import (
+    API_USER_EMAIL_HEADER,
+    API_USER_NAME_HEADER,
+    API_USER_ROLE_HEADER,
+)
 
 API_KEY = "fixture-api-key"
 ENGINE_KEY = "fixture-engine-key"
 ENGINE_URL = "http://fixture-engine/v1"
+SOURCE_HEADER = "X-Fixture-Source"
+EVAL_IDENTITY = "eval@example.invalid"
 _ASGI_WAIT_SECONDS = 1.0
 # The application task has already finished wherever this bound is used, so a
 # message that has not arrived by now never will.
@@ -80,6 +95,7 @@ _STREAM_EVENTS = (
     b"data: [DONE]\n\n",
 )
 _TRIP_PADDING = "Neutral fixture text. " * 20
+_TRIP_ANSWER = "The deadline is June 5, 2027."
 # The window decides a sentence only once enough text has arrived behind it, so
 # the padding after the date is what makes this a trip mid-stream rather than
 # one at a finish chunk. The two events after it are the ones the relay must
@@ -88,12 +104,49 @@ _TRIP_UNREAD = "This held text must never reach the caller. " * 20
 _TRIP_EVENTS = (
     _chunk_event({"role": "assistant"}),
     _chunk_event({"content": _TRIP_PADDING}),
-    _chunk_event({"content": "The deadline is June 5, 2027."}),
+    _chunk_event({"content": _TRIP_ANSWER}),
     _chunk_event({"content": _TRIP_PADDING}),
     _chunk_event({"content": _TRIP_UNREAD}),
     _chunk_event({}, finish_reason="stop"),
 )
 _TRIP_RELEASED = 4
+_TRIP_PROMPT = "Explain a fictitious legal rule."
+_TRIP_REQUEST_BODY = json.dumps(
+    {
+        "stream": True,
+        "model": "fixture-model",
+        "messages": [{"role": "user", "content": _TRIP_PROMPT}],
+    },
+    separators=(",", ":"),
+).encode()
+_WHOLE_TRIP_REQUEST_BODY = _TRIP_REQUEST_BODY.replace(b'"stream":true', b'"stream":false')
+_TRIP_CHOICE = {
+    "index": 0,
+    "message": {"role": "assistant", "content": _TRIP_ANSWER},
+    "finish_reason": "stop",
+}
+_SENTINEL_HEADERS = {
+    API_USER_NAME_HEADER: "sentinel-name-7f3c",
+    API_USER_EMAIL_HEADER: "sentinel-email-7f3c@example.invalid",
+    API_USER_ROLE_HEADER: "sentinel-role-7f3c",
+    "X-OpenWebUI-User-Id": "sentinel-user-id-7f3c",
+    "X-OpenWebUI-Chat-Id": "sentinel-chat-id-7f3c",
+}
+
+
+def whole_completion(choices: Sequence[object]) -> bytes:
+    """Build a compact fixture body with the choices under test."""
+
+    return json.dumps(
+        {
+            "id": "fixture-whole",
+            "object": "chat.completion",
+            "created": 1_700_000_000,
+            "model": "fixture-model",
+            "choices": choices,
+        },
+        separators=(",", ":"),
+    ).encode()
 
 
 def _parse_event(body: bytes) -> dict[str, object] | str:
@@ -187,6 +240,114 @@ class GatedStream(httpx.AsyncByteStream):
         self.closed = True
 
 
+class TripConnection:
+    """Record the writer's insert without making the API wait for it."""
+
+    def __init__(
+        self,
+        rows: list[tuple[str, str, str, str]],
+        row_written: threading.Event,
+    ) -> None:
+        self.rows = rows
+        self.row_written = row_written
+
+    def __enter__(self) -> "TripConnection":
+        return self
+
+    def __exit__(self, *args: object) -> Literal[False]:
+        return False
+
+    def execute(self, statement: str, parameters: object = None) -> None:
+        del statement
+        if parameters is None:
+            return
+        if (
+            not isinstance(parameters, tuple)
+            or len(parameters) != 4
+            or not all(isinstance(value, str) for value in parameters)
+        ):
+            raise AssertionError("writer parameters are not one content-free row")
+        self.rows.append(cast(tuple[str, str, str, str], parameters))
+        self.row_written.set()
+
+
+@contextlib.contextmanager
+def trip_driver(connect: Callable[..., object]) -> Iterator[None]:
+    """Install the writer's injected driver and temporary password file."""
+
+    with tempfile.TemporaryDirectory() as directory:
+        password_path = Path(directory) / "password"
+        password_path.write_text("fixture-trip-password\n", encoding="utf-8")
+        driver = types.ModuleType(guardrail.TRIP_DRIVER_MODULE)
+        driver.connect = connect  # type: ignore[attr-defined]
+        with (
+            patch.object(guardrail, "TRIP_PASSWORD_PATH", str(password_path)),
+            patch.dict(sys.modules, {guardrail.TRIP_DRIVER_MODULE: driver}),
+        ):
+            yield
+
+
+class CapturedLogs(logging.Handler):
+    """Collect root and relay records at DEBUG without changing production logging."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.DEBUG)
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+@contextlib.contextmanager
+def capture_logs() -> Iterator[CapturedLogs]:
+    """Capture relay and root records, including DEBUG, for data-discipline checks."""
+
+    handler = CapturedLogs()
+    root = logging.getLogger()
+    relay = logging.getLogger("gideon.api.relay")
+    root_level = root.level
+    relay_level = relay.level
+    root.addHandler(handler)
+    relay.addHandler(handler)
+    root.setLevel(logging.DEBUG)
+    relay.setLevel(logging.DEBUG)
+    try:
+        yield handler
+    finally:
+        root.removeHandler(handler)
+        relay.removeHandler(handler)
+        root.setLevel(root_level)
+        relay.setLevel(relay_level)
+
+
+def waiting_connect(
+    started: threading.Event, released: threading.Event
+) -> Callable[..., object]:
+    """Return a bounded writer connect that the test releases during cleanup."""
+
+    def connect(**kwargs: object) -> TripConnection:
+        del kwargs
+        started.set()
+        released.wait(_ASGI_WAIT_SECONDS)
+        return TripConnection([], threading.Event())
+
+    return connect
+
+
+@contextlib.contextmanager
+def signal_dispatch(started: threading.Event) -> Iterator[None]:
+    """Signal the synchronous dispatch before preserving its daemon behavior."""
+
+    original = guardrail.dispatch_trip_row
+
+    def dispatch(row: guardrail.TripRow) -> None:
+        started.set()
+        original(row)
+
+    with patch.object(guardrail, "dispatch_trip_row", side_effect=dispatch):
+        yield
+
+
 class PendingEngine:
     """Hold an upstream answer until cancellation and record that cancellation."""
 
@@ -214,7 +375,7 @@ class ASGISession:
         method: str,
         path: str,
         body: bytes,
-        headers: Mapping[str, str] | None,
+        headers: Mapping[str, str] | Sequence[tuple[str, str]] | None,
         spec_version: str,
     ) -> None:
         self.app = app
@@ -223,6 +384,11 @@ class ASGISession:
             {"type": "http.request", "body": body, "more_body": False}
         )
         self.outgoing: asyncio.Queue[Message] = asyncio.Queue()
+        header_pairs = (
+            headers.items()
+            if isinstance(headers, Mapping)
+            else () if headers is None else headers
+        )
         self.scope: Scope = {
             "type": "http",
             "asgi": {"version": "3.0", "spec_version": spec_version},
@@ -235,7 +401,7 @@ class ASGISession:
             "root_path": "",
             "headers": [
                 (name.lower().encode("ascii"), value.encode("utf-8"))
-                for name, value in (headers or {}).items()
+                for name, value in header_pairs
             ],
             "client": ("fixture-client", 1234),
             "server": ("fixture-api", 8000),
@@ -283,8 +449,16 @@ class ASGISession:
 
 
 class ApiCompletions(unittest.TestCase):
+    # The header the service is configured to decide on. It is deliberately not
+    # one of the five the frontend forwards, so every case here proves the relay
+    # reads the configured name; the sentinel case sets it to the email header
+    # the render configures in production, where a value is actually read.
+    source_header: str = SOURCE_HEADER
+
     def settings(self) -> Settings:
-        return Settings(ENGINE_URL, ENGINE_KEY, API_KEY, 8000)
+        return Settings(
+            ENGINE_URL, ENGINE_KEY, API_KEY, 8000, self.source_header, EVAL_IDENTITY
+        )
 
     def request(
         self,
@@ -293,7 +467,7 @@ class ApiCompletions(unittest.TestCase):
         path: str = "/v1/chat/completions",
         *,
         body: bytes = b'{"messages":[]}',
-        headers: Mapping[str, str] | None = None,
+        headers: Mapping[str, str] | Sequence[tuple[str, str]] | None = None,
         spec_version: str = "2.4",
     ) -> ASGIResponse:
         async def run() -> ASGIResponse:
@@ -360,6 +534,249 @@ class ApiCompletions(unittest.TestCase):
     @staticmethod
     def message_body(message: Message) -> bytes:
         return cast(bytes, message["body"])
+
+    @staticmethod
+    def expected_row(source: str) -> tuple[str, str, str, str]:
+        supplied, confirmation = guardrail.message_context(
+            [{"role": "user", "content": _TRIP_PROMPT}], 1
+        )
+        expected = guardrail.judge_rendered(
+            (_TRIP_ANSWER,),
+            _TRIP_ANSWER,
+            supplied,
+            frozenset(confirmation),
+        )
+        if not isinstance(expected, guardrail.Trip):
+            raise AssertionError("fixture answer stopped tripping")
+        return ("fixture-model", expected.family, expected.pattern_id, source)
+
+    @staticmethod
+    def response_body(messages: Sequence[Message]) -> bytes:
+        return b"".join(
+            cast(bytes, message["body"])
+            for message in messages
+            if message["type"] == "http.response.body"
+        )
+
+    def whole_trip_response(
+        self,
+        engine_body: bytes | None = None,
+        headers: Mapping[str, str] | Sequence[tuple[str, str]] | None = None,
+    ) -> ASGIResponse:
+        body = whole_completion([_TRIP_CHOICE]) if engine_body is None else engine_body
+
+        def engine(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                content=body,
+                request=request,
+            )
+
+        return self.request(
+            httpx.MockTransport(engine),
+            body=_WHOLE_TRIP_REQUEST_BODY,
+            headers=headers,
+        )
+
+    def trip_response_bytes(self, streamed: bool) -> tuple[int, bytes]:
+        headers = {
+            "Authorization": f"Bearer {API_KEY}",
+            SOURCE_HEADER: EVAL_IDENTITY,
+        }
+        if streamed:
+            messages, _ = asyncio.run(self.trip_stream(headers=headers))
+            return int(messages[0]["status"]), self.response_body(messages)
+        response = self.whole_trip_response(headers=headers)
+        return response.status_code, response.body
+
+    @staticmethod
+    def recording_connect(
+        rows: list[tuple[str, str, str, str]], row_written: threading.Event
+    ) -> Callable[..., object]:
+        def connect(**kwargs: object) -> TripConnection:
+            del kwargs
+            return TripConnection(rows, row_written)
+
+        return connect
+
+    def test_trip_row_has_branch_family_pattern_and_source_on_both_paths(self) -> None:
+        headers = {
+            "Authorization": f"Bearer {API_KEY}",
+            SOURCE_HEADER: EVAL_IDENTITY,
+        }
+        for streamed in (True, False):
+            with self.subTest(path="stream" if streamed else "whole"):
+                rows: list[tuple[str, str, str, str]] = []
+                row_written = threading.Event()
+                with trip_driver(self.recording_connect(rows, row_written)):
+                    if streamed:
+                        messages, _ = asyncio.run(self.trip_stream(headers=headers))
+                        status = int(messages[0]["status"])
+                    else:
+                        response = self.whole_trip_response(headers=headers)
+                        status = response.status_code
+                    self.assertTrue(row_written.wait(_ASGI_WAIT_SECONDS))
+                self.assertEqual(status, 200)
+                self.assertEqual(rows, [self.expected_row("eval")])
+
+    def test_whole_trip_records_once_for_multiple_choices_and_unjudged_tail(self) -> None:
+        cases = (
+            (
+                "two tripping choices",
+                [_TRIP_CHOICE, dict(_TRIP_CHOICE, index=1)],
+                200,
+                False,
+            ),
+            (
+                "trip then unjudgeable choice",
+                [_TRIP_CHOICE, {"index": 1}],
+                502,
+                True,
+            ),
+        )
+        for name, choices, status, unjudged in cases:
+            with self.subTest(case=name):
+                rows: list[tuple[str, str, str, str]] = []
+                row_written = threading.Event()
+                with trip_driver(self.recording_connect(rows, row_written)):
+                    response = self.whole_trip_response(
+                        whole_completion(choices),
+                        headers={
+                            "Authorization": f"Bearer {API_KEY}",
+                            SOURCE_HEADER: EVAL_IDENTITY,
+                        },
+                    )
+                    self.assertTrue(row_written.wait(_ASGI_WAIT_SECONDS))
+                self.assertEqual(response.status_code, status)
+                self.assertEqual(rows, [self.expected_row("eval")])
+                if unjudged:
+                    self.assertEqual(response.body, json.dumps(judged.UNJUDGED_ERROR, separators=(",", ":")).encode())
+
+    def test_source_header_values_reach_rows_only_as_eval_or_user(self) -> None:
+        cases = (
+            ("exact", SOURCE_HEADER, (EVAL_IDENTITY,), "eval"),
+            ("case-folded", SOURCE_HEADER, (EVAL_IDENTITY.upper(),), "eval"),
+            ("padded", SOURCE_HEADER, (f"  {EVAL_IDENTITY}  ",), "eval"),
+            ("absent", None, (), "user"),
+            ("empty", SOURCE_HEADER, ("",), "user"),
+            ("repeated", SOURCE_HEADER, (EVAL_IDENTITY, EVAL_IDENTITY), "user"),
+            ("another identity", SOURCE_HEADER, ("other@example.invalid",), "user"),
+            ("different header", "X-Other-Header", (EVAL_IDENTITY,), "user"),
+        )
+        for name, header_name, values, source in cases:
+            with self.subTest(case=name):
+                request_headers: list[tuple[str, str]] = [
+                    ("Authorization", f"Bearer {API_KEY}")
+                ]
+                if header_name is not None:
+                    request_headers.extend((header_name, value) for value in values)
+                rows: list[tuple[str, str, str, str]] = []
+                row_written = threading.Event()
+                with trip_driver(self.recording_connect(rows, row_written)):
+                    response = self.whole_trip_response(headers=request_headers)
+                    self.assertTrue(row_written.wait(_ASGI_WAIT_SECONDS))
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(rows, [self.expected_row(source)])
+
+    def test_writer_failure_or_waiting_connect_never_changes_the_answer(self) -> None:
+        for streamed in (True, False):
+            with self.subTest(path="stream" if streamed else "whole"):
+                rows: list[tuple[str, str, str, str]] = []
+                row_written = threading.Event()
+                with trip_driver(self.recording_connect(rows, row_written)):
+                    expected_status, expected_body = self.trip_response_bytes(streamed)
+
+                def raising_connect(**kwargs: object) -> object:
+                    del kwargs
+                    raise RuntimeError("fixture writer connection refused")
+
+                with trip_driver(raising_connect):
+                    status, body = self.trip_response_bytes(streamed)
+                self.assertEqual((status, body), (expected_status, expected_body))
+
+                started = threading.Event()
+                dispatch_started = threading.Event()
+                released = threading.Event()
+
+                try:
+                    with signal_dispatch(dispatch_started), trip_driver(
+                        waiting_connect(started, released)
+                    ):
+                        status, body = self.trip_response_bytes(streamed)
+                        self.assertTrue(dispatch_started.wait(_ASGI_WAIT_SECONDS))
+                        self.assertTrue(started.wait(_ASGI_WAIT_SECONDS))
+                        self.assertFalse(released.is_set())
+                        self.assertEqual((status, body), (expected_status, expected_body))
+                finally:
+                    released.set()
+
+    def test_forwarded_header_sentinels_stay_out_of_logs_rows_responses_and_engine(self) -> None:
+        calls: list[httpx.Request] = []
+        rows: list[tuple[str, str, str, str]] = []
+        row_written = threading.Event()
+
+        def engine(request: httpx.Request) -> httpx.Response:
+            calls.append(request)
+            if len(calls) == 1:
+                return httpx.Response(200, content=whole_completion([]), request=request)
+            if len(calls) == 2:
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "application/json"},
+                    content=whole_completion([_TRIP_CHOICE]),
+                    request=request,
+                )
+            if len(calls) == 3:
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "application/json"},
+                    content=whole_completion([{"index": 0}]),
+                    request=request,
+                )
+            raise httpx.ConnectError("fixture upstream failure", request=request)
+
+        headers = [("Authorization", f"Bearer {API_KEY}"), *_SENTINEL_HEADERS.items()]
+        with (
+            # The production configuration: the service decides on the email
+            # header, so the sentinel under it is a value the relay really reads
+            # and the leak paths below are exercised rather than vacuous.
+            patch.object(self, "source_header", API_USER_EMAIL_HEADER),
+            trip_driver(self.recording_connect(rows, row_written)),
+            capture_logs() as captured,
+        ):
+            responses = [
+                self.request(httpx.MockTransport(engine), headers=headers),
+                self.request(
+                    httpx.MockTransport(engine),
+                    body=_WHOLE_TRIP_REQUEST_BODY,
+                    headers=headers,
+                ),
+                self.request(
+                    httpx.MockTransport(engine),
+                    body=_WHOLE_TRIP_REQUEST_BODY,
+                    headers=headers,
+                ),
+                self.request(httpx.MockTransport(engine), headers=headers),
+            ]
+            self.assertTrue(row_written.wait(_ASGI_WAIT_SECONDS))
+
+        self.assertEqual([response.status_code for response in responses], [200, 200, 502, 502])
+        self.assertEqual(len(rows), 2)
+        for sentinel in _SENTINEL_HEADERS.values():
+            for row in rows:
+                self.assertNotIn(sentinel, repr(row))
+            for response in responses:
+                self.assertNotIn(sentinel.encode(), response.body)
+            for request in calls:
+                self.assertNotIn(sentinel.encode(), request.content)
+                self.assertNotIn(sentinel, "\n".join(request.headers.values()))
+            for record in captured.records:
+                # getMessage covers the message and its arguments; a record can
+                # also carry a traceback, which is where an exception built from
+                # a header value would surface.
+                self.assertNotIn(sentinel, record.getMessage())
+                self.assertNotIn(sentinel, logging.Formatter().format(record))
 
     def test_stream_is_relayed_in_order_before_next_upstream_chunk(self) -> None:
         with self.assertLogs("gideon.api.request", level="INFO") as captured:
@@ -670,7 +1087,11 @@ class ApiCompletions(unittest.TestCase):
             ),
         )
 
-    async def trip_stream(self) -> tuple[list[Message], GatedStream]:
+    async def trip_stream(
+        self,
+        *,
+        headers: Mapping[str, str] | Sequence[tuple[str, str]] | None = None,
+    ) -> tuple[list[Message], GatedStream]:
         stream = GatedStream(_TRIP_EVENTS)
 
         def engine(request: httpx.Request) -> httpx.Response:
@@ -686,8 +1107,10 @@ class ApiCompletions(unittest.TestCase):
             app,
             "POST",
             "/v1/chat/completions",
-            b'{"stream":true,"prompt":"fixture prompt secret"}',
-            {"Authorization": f"Bearer {API_KEY}"},
+            _TRIP_REQUEST_BODY,
+            headers
+            if headers is not None
+            else {"Authorization": f"Bearer {API_KEY}"},
             "2.4",
         ) as session:
             messages = [await session.next_message()]

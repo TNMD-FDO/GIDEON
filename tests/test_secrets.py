@@ -131,6 +131,15 @@ class Registry(unittest.TestCase):
         self.assertEqual(api.kind, "password")
         self.assertFalse(api.print_once)
         self.assertEqual(api.consumer, "the gideon-api connection key (gideon-api)")
+        audit = next(
+            secret
+            for secret in SECRET_REGISTRY
+            if secret.name == "postgres_gideon_audit_password"
+        )
+        self.assertEqual(
+            audit.consumer,
+            "audit writer database role, frontend guardrail trip writer, and gideon-api trip writer",
+        )
 
     def test_every_entry_has_the_release_rotation_class(self) -> None:
         classes = {secret.name: secret.rotation for secret in SECRET_REGISTRY}

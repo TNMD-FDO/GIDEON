@@ -725,6 +725,18 @@ class Command(unittest.TestCase):
         self.assertIn("Fix:", stdout)
         self.assertNotIn("reference:", stdout)
 
+    def test_ranked_flag_refuses_for_extraction(self) -> None:
+        host = EvalHost()
+        code, stdout, stderr = _invoke(
+            ["eval", "run", "--slice", "extraction", "--ranked", "/tmp/fictitious-ranked.jsonl"],
+            **_run_kwargs(host),
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(stderr, "")
+        self.assertIn("ranked: refuse", stdout)
+        self.assertIn("Remove --ranked", stdout)
+        self.assertFalse(any(argv[0] == "docker" for argv, _input in host.calls))
+
 
 class SliceRegistry(unittest.TestCase):
     """Every registered slice names a prompt that exists and a reference it reads."""
@@ -743,6 +755,19 @@ class SliceRegistry(unittest.TestCase):
         for slice_name in committed:
             with self.subTest(slice_name=slice_name):
                 self.assertTrue(SLICE_RUNNERS[slice_name].compares_reference)
+
+    def test_takes_ranked_is_boolean_and_only_judgments_takes_one(self) -> None:
+        for slice_name, spec in SLICE_RUNNERS.items():
+            with self.subTest(slice_name=slice_name):
+                self.assertIs(type(spec.takes_ranked), bool)
+        self.assertTrue(SLICE_RUNNERS["judgments"].takes_ranked)
+        self.assertTrue(
+            all(
+                not spec.takes_ranked
+                for slice_name, spec in SLICE_RUNNERS.items()
+                if slice_name != "judgments"
+            )
+        )
 
 
 class Imports(unittest.TestCase):

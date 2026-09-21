@@ -16,10 +16,14 @@ from gideon.evaluation.judgments import (
     KAPPA_NO_VARIATION,
     Judgment,
     JudgmentReadResult,
+    LocatedJudgment,
     agreement,
+    coordinate_findings,
+    parse_bytes,
     path_for,
     read,
     serialize,
+    validate_line,
 )
 
 
@@ -221,6 +225,64 @@ class Shape(TestCase):
 
 class Serialization(TestCase):
     """The JSONL serializer and reader preserve the committed bytes."""
+
+    def test_bytes_parse_matches_read_and_keeps_line_numbers(self) -> None:
+        records = tuple(
+            Judgment(
+                query_id=f"judgments-{index:03d}",
+                source_id=f"fictional/source-{index}",
+                sha256=f"{index:064x}",
+                start=index,
+                end=index + 1,
+                grade=index % 4,
+                grader="CHU-attorney-1",
+                assessment="primary",
+            )
+            for index in range(1, 4)
+        )
+        data = b"".join(serialize(record).encode("utf-8") for record in records)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "eval-v-fictional"
+            path = path_for(root)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+            parsed = parse_bytes(data, path.as_posix())
+            read_result = read(path)
+
+        self.assertTrue(parsed.ok)
+        self.assertEqual(parsed.findings, read_result.findings)
+        self.assertEqual(
+            tuple(located.record for located in parsed.records),
+            read_result.records,
+        )
+        self.assertEqual(
+            tuple(located.line for located in parsed.records),
+            (1, 2, 3),
+        )
+        self.assertEqual(
+            parsed.records,
+            tuple(LocatedJudgment(index, record) for index, record in enumerate(records, 1)),
+        )
+
+    def test_coordinate_helper_is_the_validation_rule(self) -> None:
+        base = _record()
+        self.assertEqual(coordinate_findings(base), ())
+        cases: tuple[tuple[str, object, str], ...] = (
+            ("source_id", "fictional source", "source_id"),
+            ("sha256", "A" * 64, "sha256"),
+            ("start", True, "start"),
+            ("end", False, "end"),
+            ("start", 4, "coordinates"),
+        )
+        for field, value, expected in cases:
+            with self.subTest(field=field):
+                record = dict(base)
+                record[field] = value
+                self.assertEqual(
+                    tuple(finding.rule for finding in coordinate_findings(record)),
+                    (expected,),
+                )
+                self.assertEqual(validate_line(record), coordinate_findings(record))
 
     def test_serialize_then_read_is_byte_stable(self) -> None:
         records = tuple(

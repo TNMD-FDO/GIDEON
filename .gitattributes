@@ -21,11 +21,15 @@ docs/release-notes/TEMPLATE.md export-ignore
 docs/box-ledger.md export-ignore
 tools/tracker.py export-ignore
 tools/cycles.py export-ignore
+tools/archi.py export-ignore
 tests/test_tracker.py export-ignore
 tests/test_cycles.py export-ignore
+tests/test_archi.py export-ignore
 tests/test_skills_vendored.py export-ignore
 tests/test_evidence_hygiene.py export-ignore
 tests/test_release_git.py export-ignore
+tests/test_export_tree_check.py export-ignore
+tests/test_venv_build.py export-ignore
 tests/test_worktree_claim.py export-ignore
 tests/test_worktree_remove.py export-ignore
 tests/test_trip.py export-ignore
@@ -39,6 +43,7 @@ tests/test_judgments_kit.py export-ignore
 eval/sets/eval-v1/build-gates/extraction.jsonl export-ignore
 eval/sets/eval-v1/build-gates/extraction-variants.jsonl export-ignore
 eval/sets/eval-v1/slices/extraction/harvest.ids export-ignore
+eval/sets/eval-v1/slices/judgments/ export-ignore
 eval/reference/extraction/harvest.json export-ignore
 .github/workflows/acceptance.yml export-ignore
 .github/workflows/pin-watch.yml export-ignore

@@ -72,7 +72,7 @@ SECRET_REGISTRY: Final[tuple[GeneratedSecret, ...]] = (
         "postgres_gideon_audit_password",
         "password",
         False,
-        "audit writer database role and frontend guardrail trip writer",
+        "audit writer database role, frontend guardrail trip writer, and gideon-api trip writer",
         "role",
     ),
     GeneratedSecret("webui_secret_key", "password", False, "Open WebUI session signing", "rewrite"),

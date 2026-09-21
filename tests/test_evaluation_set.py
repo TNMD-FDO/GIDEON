@@ -1,11 +1,14 @@
 """Eval-set loading contracts from spec §18.6."""
 
+import hashlib
 import json
 import tempfile
 import unittest
 from pathlib import Path
 
+from gideon.evaluation import judgments
 from gideon.evaluation.evalset import SET_ROOT, Finding, LoadedSet, load_set
+from gideon.evaluation.judgments import Judgment, serialize
 from gideon.extraction.scoring import active_cases
 from gideon.host.courts import load_court_map
 from tools.exportboundary import absent_from_export
@@ -87,6 +90,44 @@ def _scorer_active_ids(loaded: LoadedSet) -> tuple[str, ...]:
     return tuple(sorted(str(case["id"]) for case in active_cases(files)))
 
 
+def _judgment(query_id: str = "judgments-001", grade: int = 2) -> Judgment:
+    return Judgment(
+        query_id=query_id,
+        source_id="fictional/source-1",
+        sha256="a" * 64,
+        start=0,
+        end=4,
+        grade=grade,
+        grader="CHU-attorney-1",
+        assessment="primary",
+    )
+
+
+def _write_judgment(root: Path, record: Judgment) -> None:
+    _write(root, judgments.JUDGMENTS_PATH.as_posix(), serialize(record).rstrip("\n"))
+
+
+def _digest_model(root: Path) -> str:
+    """Recompute the loader's sorted relative-path and bytes-digest contract."""
+
+    suites = tuple(
+        path for path in root.iterdir() if path.is_dir() and path.name != "slices"
+    )
+    paths = [path for suite in suites for path in suite.rglob("*.jsonl") if path.is_file()]
+    slices = root / "slices"
+    if slices.is_dir():
+        paths.extend(path for path in slices.rglob("*.ids") if path.is_file())
+    digest = hashlib.sha256()
+    for path in sorted(paths, key=lambda candidate: candidate.relative_to(root).as_posix()):
+        relative = path.relative_to(root).as_posix()
+        bytes_digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(bytes_digest.encode("ascii"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
 class Refusals(unittest.TestCase):
     """Loader refusals name only content-free locations and fixes."""
 
@@ -141,6 +182,144 @@ class Refusals(unittest.TestCase):
             locations = [(finding.file, finding.line or 0) for finding in findings]
             self.assertEqual(locations, sorted(locations))
             self.assertEqual(len(findings), 2)
+
+    def test_judgments_file_is_not_loaded_as_a_case_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "eval-v9"
+            _write(
+                root,
+                "judgments/queries.jsonl",
+                json.dumps(_judgment_case(), separators=(",", ":")),
+            )
+            _write_judgment(root, _judgment())
+            result = load_set(root)
+
+            self.assertTrue(result.ok, result.findings)
+            assert result.loaded is not None
+            self.assertEqual(tuple(result.loaded.cases_by_file), ("judgments/queries.jsonl",))
+            self.assertEqual(result.loaded.judgments, (_judgment(),))
+
+    def test_unknown_judgment_query_is_a_finding_by_line(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "eval-v9"
+            _write(
+                root,
+                "judgments/queries.jsonl",
+                json.dumps(_judgment_case(), separators=(",", ":")),
+            )
+            _write_judgment(root, _judgment("judgments-999"))
+            result = load_set(root)
+
+            self.assertIsNone(result.loaded)
+            findings = [
+                finding
+                for finding in result.findings
+                if finding.rule == "query_id names no case"
+            ]
+            self.assertEqual(
+                [(finding.file, finding.line) for finding in findings],
+                [(judgments.JUDGMENTS_PATH.as_posix(), 1)],
+            )
+
+    def test_superseded_judgment_query_is_a_finding_by_line(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "eval-v9"
+            first = _judgment_case("judgments-001")
+            successor = _judgment_case("judgments-002")
+            successor["supersedes"] = "judgments-001"
+            _write(
+                root,
+                "judgments/queries.jsonl",
+                "\n".join(
+                    json.dumps(record, separators=(",", ":"))
+                    for record in (first, successor)
+                ),
+            )
+            _write_judgment(root, _judgment("judgments-001"))
+            result = load_set(root)
+
+            self.assertIsNone(result.loaded)
+            findings = [
+                finding
+                for finding in result.findings
+                if finding.rule == "query_id names a superseded case"
+            ]
+            self.assertEqual(
+                [(finding.file, finding.line) for finding in findings],
+                [(judgments.JUDGMENTS_PATH.as_posix(), 1)],
+            )
+
+    def test_other_suite_judgment_query_is_a_finding_by_line(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "eval-v9"
+            _write(root, "build-gates/cases.jsonl", _case("judgments-003"))
+            _write_judgment(root, _judgment("judgments-003"))
+            result = load_set(root)
+
+            self.assertIsNone(result.loaded)
+            findings = [
+                finding
+                for finding in result.findings
+                if finding.rule == "query_id names a case of another suite"
+            ]
+            self.assertEqual(
+                [(finding.file, finding.line) for finding in findings],
+                [(judgments.JUDGMENTS_PATH.as_posix(), 1)],
+            )
+
+    def test_malformed_judgment_grade_is_one_judgments_finding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "eval-v9"
+            _write(
+                root,
+                "judgments/queries.jsonl",
+                json.dumps(_judgment_case(), separators=(",", ":")),
+            )
+            record = json.loads(serialize(_judgment()))
+            record["grade"] = "fictional-grade"
+            _write(
+                root,
+                judgments.JUDGMENTS_PATH.as_posix(),
+                json.dumps(record, separators=(",", ":")),
+            )
+            result = load_set(root)
+
+            self.assertIsNone(result.loaded)
+            findings = tuple(result.findings)
+            self.assertEqual(len(findings), 1)
+            self.assertEqual(
+                (findings[0].file, findings[0].line, findings[0].rule),
+                (judgments.JUDGMENTS_PATH.as_posix(), 1, "grade"),
+            )
+
+    def test_missing_final_newline_is_the_judgments_finding_alone(self) -> None:
+        """One fault is one finding: the loader defers to the module's words."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "eval-v9"
+            _write(
+                root,
+                "judgments/queries.jsonl",
+                json.dumps(_judgment_case(), separators=(",", ":")),
+            )
+            _write(
+                root,
+                judgments.JUDGMENTS_PATH.as_posix(),
+                serialize(_judgment()).rstrip("\n"),
+                final_newline=False,
+            )
+            result = load_set(root)
+            expected = judgments.parse_bytes(
+                (root / judgments.JUDGMENTS_PATH).read_bytes(),
+                judgments.JUDGMENTS_PATH.as_posix(),
+            ).findings
+
+            self.assertIsNone(result.loaded)
+            self.assertEqual(
+                tuple(finding.rule for finding in expected),
+                ("file has no final newline",),
+            )
+            self.assertEqual(tuple(result.findings), expected)
 
 
 class OrderAndProvenance(unittest.TestCase):
@@ -226,6 +405,48 @@ class OrderAndProvenance(unittest.TestCase):
             self.assertNotEqual(before.digest, after.digest)
             self.assertNotEqual(before.slices, after.slices)
 
+    def test_judgment_grade_byte_changes_the_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "eval-v9"
+            _write(
+                root,
+                "judgments/queries.jsonl",
+                json.dumps(_judgment_case(), separators=(",", ":")),
+            )
+            _write_judgment(root, _judgment(grade=2))
+            before = load_set(root).loaded
+            self.assertIsNotNone(before)
+            _write_judgment(root, _judgment(grade=3))
+            after = load_set(root).loaded
+            self.assertIsNotNone(after)
+            assert before is not None and after is not None
+            self.assertNotEqual(before.digest, after.digest)
+
+    def test_loader_digest_matches_model_without_and_with_judgments(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            without = Path(directory) / "without" / "eval-v9"
+            _write(
+                without,
+                "judgments/queries.jsonl",
+                json.dumps(_judgment_case(), separators=(",", ":")),
+            )
+            loaded_without = load_set(without).loaded
+            self.assertIsNotNone(loaded_without)
+            assert loaded_without is not None
+            self.assertEqual(loaded_without.digest, _digest_model(without))
+
+            with_file = Path(directory) / "with" / "eval-v9"
+            _write(
+                with_file,
+                "judgments/queries.jsonl",
+                json.dumps(_judgment_case(), separators=(",", ":")),
+            )
+            _write_judgment(with_file, _judgment())
+            loaded_with = load_set(with_file).loaded
+            self.assertIsNotNone(loaded_with)
+            assert loaded_with is not None
+            self.assertEqual(loaded_with.digest, _digest_model(with_file))
+
     def test_committed_set_loads_clean_in_whatever_tree_holds_it(self) -> None:
         court_map = load_court_map(ROOT / "courts.yaml").court_map
         assert court_map is not None
@@ -254,6 +475,21 @@ class OrderAndProvenance(unittest.TestCase):
             )
         )
         self.assertEqual(result.loaded.slices["judge-triples"], judge_ids)
+        # The judgments slice leaves with the queries it names, so the set holds
+        # it exactly where the boundary keeps that file.
+        queries_absent = absent_from_export(SET_ROOT / "judgments" / "queries.jsonl", ROOT)
+        self.assertEqual("judgments" in result.loaded.slices, not queries_absent)
+        if not queries_absent:
+            query_ids = tuple(
+                sorted(
+                    case["id"]
+                    for file, cases in result.loaded.cases_by_file.items()
+                    if file.startswith("judgments/")
+                    for case in cases
+                    if isinstance(case["id"], str)
+                )
+            )
+            self.assertEqual(result.loaded.slices["judgments"], query_ids)
 
 
 def _judgment_case(case_id: str = "judgments-001", question: str = SENTINEL) -> dict[str, object]:

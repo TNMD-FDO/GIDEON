@@ -4,7 +4,7 @@ import argparse
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,7 +12,7 @@ from typing import Final
 from uuid import uuid4
 
 import gideon
-from gideon.evaluation import record, reference, window
+from gideon.evaluation import ranked, rankmetrics, record, reference, window
 from gideon.evaluation.evalset import (
     SET_ROOT,
     EvalSetLoadResult,
@@ -31,9 +31,6 @@ _COMMAND: Final[str] = "eval run"
 _FLAG_FIX: Final[str] = "Run gideon eval run --slice extraction; decision runs land in slice-2 ticket 16."
 _SLICE_FIX: Final[str] = "Run gideon eval run --slice extraction."
 _LOAD_FIX: Final[str] = "Correct every listed eval-set finding, then retry."
-_RECORD_ROOT_FIX: Final[str] = (
-    "Run sudo python3 -m gideon eval run --slice extraction as root with the stack up, then retry."
-)
 _NO_GPU_FIX: Final[str] = "Run the evaluation on a GPU host, then retry."
 
 
@@ -209,7 +206,7 @@ def _reference_gate(
                 f"Run sudo python3 -m gideon eval reference --run {run_id} as root with the stack up, then retry."
             )
         else:
-            fixes.append(_RECORD_ROOT_FIX)
+            fixes.append(_record_root_fix(slice_name, slice_spec))
     elif comparison.outcome == "malformed":
         fixes.append(reference.SLICE_REPAIR_FIX)
 
@@ -271,6 +268,22 @@ def _provenance(
 
 def _engine_root_fix(slice_name: str) -> str:
     return f"Run sudo python3 -m gideon eval run --slice {slice_name}, then retry."
+
+
+def _record_root_fix(slice_name: str, slice_spec: SliceSpec) -> str:
+    ranked_flag = " --ranked <file>" if slice_spec.takes_ranked else ""
+    return (
+        f"Run sudo python3 -m gideon eval run --slice {slice_name}{ranked_flag} "
+        "as root with the stack up, then retry."
+    )
+
+
+def _ranked_required_fix(slice_name: str) -> str:
+    return f"Run gideon eval run --slice {slice_name} --ranked <file>, then retry."
+
+
+def _ranked_forbidden_fix(slice_name: str) -> str:
+    return f"Remove --ranked when running --slice {slice_name}, then retry."
 
 
 def _engine_preconditions(
@@ -410,6 +423,7 @@ def _record(
     gate_verdict: bool,
     slice_spec: SliceSpec,
     prepared: _EnginePreconditions | None,
+    overrides: Mapping[str, object] = {},
 ) -> _RecordOutcome:
     """Write the run and its results.
 
@@ -438,7 +452,7 @@ def _record(
                     "record",
                     True,
                     f"skipped — no database reachable; rows were not written ({probe_problem})",
-                    _RECORD_ROOT_FIX,
+                    _record_root_fix(slice_name, slice_spec),
                 )
             )
             return _RecordOutcome(True, False)
@@ -483,7 +497,7 @@ def _record(
         generation_id=None,
         kind="manual",
         slice=slice_name,
-        overrides={},
+        overrides=overrides,
         repeats=slice_spec.repeats,
         git_sha=git_sha,
         git_dirty=git_dirty,
@@ -594,6 +608,57 @@ def _run_body(
         )
         return 1
 
+    ranked_lists: Mapping[str, tuple[rankmetrics.Coordinates, ...]] | None = None
+    run_overrides: Mapping[str, object] = {}
+    ranked_path = getattr(args, "ranked", None)
+    if slice_spec.takes_ranked:
+        if not isinstance(ranked_path, str) or not ranked_path:
+            print_stage(
+                StageResult(
+                    "ranked",
+                    False,
+                    f"slice {slice_name} requires --ranked",
+                    _ranked_required_fix(slice_name),
+                )
+            )
+            return 1
+        active_ids = set(loaded.active_ids)
+        allowed_ids = tuple(case_id for case_id in selected if case_id in active_ids)
+        ranked_result = ranked.read(ranked_path, allowed_ids)
+        if not ranked_result.ok:
+            print_findings(ranked_result.findings)
+            print_stage(
+                StageResult("ranked", False, "ranked file refused", ranked.RANKED_FIX)
+            )
+            return 1
+        assert ranked_result.ranked is not None and ranked_result.sha256 is not None
+        ranked_lists = ranked_result.ranked
+        run_overrides = {
+            "judgments": {
+                "definition": rankmetrics.DEFINITION_ID,
+                "ranked_sha256": ranked_result.sha256,
+            }
+        }
+        passage_count = sum(len(values) for values in ranked_lists.values())
+        print_stage(
+            StageResult(
+                "ranked",
+                True,
+                f"{len(ranked_lists)} queries, {passage_count} passages, SHA-256 {ranked_result.sha256}",
+                "",
+            )
+        )
+    elif ranked_path is not None:
+        print_stage(
+            StageResult(
+                "ranked",
+                False,
+                f"slice {slice_name} does not take --ranked",
+                _ranked_forbidden_fix(slice_name),
+            )
+        )
+        return 1
+
     engine_preconditions: _EnginePreconditions | None = None
     if slice_spec.reaches_engine:
         engine_preconditions = _engine_preconditions(
@@ -622,6 +687,7 @@ def _run_body(
         judge_prompt_id=slice_spec.judge_prompt,
         repeats=slice_spec.repeats,
         progress=print,
+        ranked=ranked_lists,
     )
     slice_result = _run_slice(slice_spec, loaded, slice_name, context)
     # A repeated slice returns one result per case AND repeat, so counting the
@@ -670,6 +736,7 @@ def _run_body(
         gate_verdict=recorded_verdict,
         slice_spec=slice_spec,
         prepared=engine_preconditions,
+        overrides=run_overrides,
     )
     if comparison is None:
         gate_ok = _gate(slice_result, slice_spec)

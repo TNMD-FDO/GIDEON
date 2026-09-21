@@ -1,6 +1,11 @@
+---
+commands: [alerts test, users reconcile, tls reload, registry mirror]
+modules: [gideon/host/tls.py, gideon/host/registry.py, gideon/host/grafana.py, gideon/host/alerts.py, gideon/host/users.py, gideon/host/audit.py]
+---
+
 # The stack: ingress, registry, observability, and reconcile — architecture leaf
 
-**Read this when** implementing `tls reload`, `registry mirror`, `alerts test`, `users reconcile`, observability, or audit; the owning modules are `gideon/host/tls.py`, `gideon/host/registry.py`, `gideon/host/grafana.py`, `gideon/host/alerts.py`, `gideon/host/users.py`, `gideon/host/audit.py`, and their tests. The map is [`../ARCHI.md`](../ARCHI.md); its §8 table names every command's leaf.
+**Read this when** implementing `tls reload`, `registry mirror`, `alerts test`, `users reconcile`, observability, or audit; the map is [`../ARCHI.md`](../ARCHI.md); its §8 table names every command's leaf.
 
 ## Inventory
 
@@ -36,4 +41,4 @@ The alert thresholds and the engine rule's pending period (`render/grafana.py`),
 ## Cross-references
 
 - Cites: [`host.md`](host.md), [`render-apply.md`](render-apply.md), [`engine-frontend.md`](engine-frontend.md), [`backup-restore.md`](backup-restore.md), [`tests.md`](tests.md)
-- Cited by: the map's §§2, 8, 12, and 16
+- Cited by: the map's §§2, 8, and 12, and [`security.md`](security.md)

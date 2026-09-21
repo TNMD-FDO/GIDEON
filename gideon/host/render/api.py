@@ -5,6 +5,9 @@ The Compose block in ``render/compose.py``, the blackbox job in
 these names, as ``render/engine.py`` holds the engine's, so neither observer
 imports the document builder. The service listens on the engine's port number
 so the frontend's connection moves to it by hostname alone (ticket 09).
+The API Compose block reads the email header name through ``API_SOURCE_HEADER``
+when it renders the service's source setting; it is the one rendered artifact
+that reads a forwarded header name.
 ``API_SOURCES`` is the code the container imports from the mounted checkout,
 including the shared guardrail judge: its digest is the block's label, so a
 change there recreates the service and nothing else.
@@ -22,6 +25,7 @@ API_HEALTH_PATH: Final[str] = "/health"
 API_USER_NAME_HEADER: Final[str] = "X-OpenWebUI-User-Name"
 API_USER_EMAIL_HEADER: Final[str] = "X-OpenWebUI-User-Email"
 API_USER_ROLE_HEADER: Final[str] = "X-OpenWebUI-User-Role"
+API_SOURCE_HEADER: Final[str] = API_USER_EMAIL_HEADER
 API_MOUNT_TARGET: Final[str] = "/opt/gideon-src/gideon"
 API_WORKING_DIRECTORY: Final[str] = "/opt/gideon-src"
 API_SOURCES: Final[tuple[str, ...]] = ("gideon/api", "gideon/guardrail.py")

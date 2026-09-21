@@ -263,6 +263,30 @@ class WriteRows(unittest.TestCase):
         self.assertTrue(result_insert.rstrip().endswith("NULL);"))
         self.assertNotIn("result_0_latency_ms", sql)
 
+    def test_metrics_and_nested_overrides_round_trip_through_bindings(self) -> None:
+        metrics = {"figure": 0.625, "undefined": None}
+        overrides = {
+            "judgments": {
+                "definition": "judgments@fixture",
+                "ranked_sha256": "f" * 64,
+            }
+        }
+        host = FakeHost()
+        self.assertIsNone(
+            record.write_rows(
+                host,
+                RENDERED,
+                run_row(overrides=overrides),
+                (result_row("case", metrics=metrics),),
+            )
+        )
+        sql = host.calls[0][1]
+        assert sql is not None
+        run_value = json.loads(read_psql_set(next(line for line in sql.splitlines() if line.startswith("\\set overrides ")), "overrides"))
+        result_value = json.loads(read_psql_set(next(line for line in sql.splitlines() if line.startswith("\\set result_0_metrics ")), "result_0_metrics"))
+        self.assertEqual(run_value, overrides)
+        self.assertEqual(result_value, metrics)
+
     def test_failed_write_reports_only_the_exit_status(self) -> None:
         problem = record.write_rows(FakeHost(rc=1), RENDERED, run_row(), ())
         self.assertEqual(problem, "eval writer failed: exit 1")

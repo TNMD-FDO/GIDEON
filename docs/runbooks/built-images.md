@@ -37,9 +37,10 @@ pull request: `git fetch origin && git checkout pin-watch/<pin id>`):
    in `images.lock`, and regenerates `tests/fixtures/render/`. Files it writes
    stay owned by you (ownership is restored after `sudo`). A failed smoke
    check pushes nothing and leaves the lock untouched.
-3. `python3 -m tools.imagebuild postgres --to 127.0.0.1:5000 --check` — proves
+3. `sudo python3 -m tools.imagebuild postgres --to 127.0.0.1:5000 --check` — proves
    the registry's image against the lock: digest present, labels equal the
-   lock's inputs, smoke check passes. The self-hosted CI runs the same check
+   lock's inputs, smoke check passes. It pulls, so it needs the Docker access the
+   build has. The self-hosted CI runs the same check
    after every merge (`tests/contract/built_images.py`).
 4. Commit `images.lock` and `tests/fixtures/render/` on the branch and push.
    The hosted checks go green; the next pin-watch run reports the branch
@@ -52,9 +53,11 @@ pull request: `git fetch origin && git checkout pin-watch/<pin id>`):
    about a minute — choose the moment.
 
 The `gideon` build follows the same five steps with `python3 -m tools.imagebuild
-gideon`. Its smoke runs Python's `importlib.metadata.version` over the ten
-image packages after importing `starlette`, `uvicorn`, and `httpx`; `--check`
-repeats that smoke against the recorded built digest. The image is the
+gideon`. Its smoke runs Python's `importlib.metadata.version` over the twelve
+image packages after importing `starlette`, `uvicorn`, `httpx`, and `psycopg`,
+and refuses unless the driver loads on the binary libpq implementation and its
+two distributions report the same version — one build argument installs both
+wheels; `--check` repeats that smoke against the recorded built digest. The image is the
 `gideon-api` interpreter and dependency set, while the applying checkout is
 mounted into the running container.
 

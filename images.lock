@@ -87,7 +87,9 @@ images:
   # is mounted by Compose rather than copied into this image. Resolved on the
   # box with `skopeo inspect` on 2026-09-19. A dependency or base bump is
   # completed by the box build, then the requirements-dev.txt copy moves in the
-  # same commit.
+  # same commit. One argument feeds the driver's two wheels because the two
+  # projects release in lockstep and a half-bump would be silent under this
+  # writer.
   gideon:
     build: images/gideon
     base: docker.io/library/python:3.14-slim-trixie
@@ -103,6 +105,7 @@ images:
       IDNA_VERSION: "3.20"
       CLICK_VERSION: 8.5.0
       TYPING_EXTENSIONS_VERSION: 4.16.0
+      PSYCOPG_VERSION: 3.3.6
     watch:
       STARLETTE_VERSION:
         pypi_project: starlette
@@ -124,5 +127,7 @@ images:
         pypi_project: click
       TYPING_EXTENSIONS_VERSION:
         pypi_project: typing-extensions
-    inputs_digest: sha256:7e2c122e4f06e17b28515e7a3e73dd7a0259d8f423b3477c66d1371d9cab1805
-    digest: sha256:7adb7f738f11d396e63b739955f758e5a795fa54fbaf7904a1237274f6e11d8a
+      PSYCOPG_VERSION:
+        pypi_project: psycopg
+    inputs_digest: sha256:890443bb983d9522f6a005d4548f160a63a5b61146e7952d88229714140cdbe1
+    digest: sha256:2baac5c2bff21a6762c478b99f79a953ded02579df0a65144eaa9ca9a2d85683

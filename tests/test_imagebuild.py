@@ -277,9 +277,10 @@ class BuildPlans(unittest.TestCase):
                 "IDNA_VERSION",
                 "CLICK_VERSION",
                 "TYPING_EXTENSIONS_VERSION",
+                "PSYCOPG_VERSION",
             ),
         )
-        for package in ("starlette", "uvicorn", "httpx"):
+        for package in ("starlette", "uvicorn", "httpx", "psycopg"):
             self.assertIn(f"import {package}", smoke.argv[2])
         for package in (
             "starlette",
@@ -292,9 +293,17 @@ class BuildPlans(unittest.TestCase):
             "idna",
             "click",
             "typing_extensions",
+            "psycopg",
+            "psycopg-binary",
         ):
             self.assertIn(f'"{package}"', smoke.argv[2])
         self.assertIn("importlib.metadata.version", smoke.argv[2])
+        self.assertIn('psycopg.pq.__impl__ != "binary"', smoke.argv[2])
+        self.assertIn(
+            'importlib.metadata.version("psycopg") '
+            '!= importlib.metadata.version("psycopg-binary")',
+            smoke.argv[2],
+        )
 
 
 PROXY = {

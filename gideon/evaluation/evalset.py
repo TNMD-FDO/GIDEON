@@ -13,7 +13,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Final, cast
+from typing import TYPE_CHECKING, Final, cast
 
 from gideon.extraction import (
     KEYED_TYPES,
@@ -25,6 +25,9 @@ from gideon.extraction import (
     ordering_violations,
     span_violations,
 )
+
+if TYPE_CHECKING:
+    from gideon.evaluation.judgments import Judgment
 
 type Case = dict[str, object]
 
@@ -176,6 +179,7 @@ class LoadedSet:
     slices: Mapping[str, tuple[str, ...]]
     slice_lists: Mapping[str, Mapping[str, tuple[str, ...]]]
     digest: str
+    judgments: tuple["Judgment", ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,12 +211,24 @@ def _finding_sort_key(finding: Finding) -> tuple[str, int, str, str]:
     return (finding.file, finding.line or 0, finding.id or "", finding.rule)
 
 
-def _file_paths(root: Path, suffix: str) -> tuple[Path, ...]:
+def _file_paths(root: Path, suffix: str, excluded_relative: str) -> tuple[Path, ...]:
+    """Every case file below *root*, less the one relative path named.
+
+    The judgments file shares the suite directory and the suffix with the
+    queries beside it, so it is skipped by its name: a suffix rule would take
+    a later case file with it.
+    """
+
     suites = sorted(
         (path for path in root.iterdir() if path.is_dir() and path.name != "slices"),
         key=lambda path: _relative(root, path),
     )
-    paths = [path for suite in suites for path in suite.rglob(f"*{suffix}") if path.is_file()]
+    paths = [
+        path
+        for suite in suites
+        for path in suite.rglob(f"*{suffix}")
+        if path.is_file() and _relative(root, path) != excluded_relative
+    ]
     return tuple(sorted(paths, key=lambda path: _relative(root, path)))
 
 
@@ -234,6 +250,8 @@ def _read_bytes(
     findings: list[Finding],
     files: dict[str, bytes],
     fix: str,
+    *,
+    check_final_newline: bool = True,
 ) -> bytes | None:
     relative = _relative(root, path)
     try:
@@ -242,7 +260,7 @@ def _read_bytes(
         findings.append(Finding(relative, None, 0, f"file cannot be read ({exc})", _READ_FIX))
         return None
     files[relative] = data
-    if not data.endswith(b"\n"):
+    if check_final_newline and not data.endswith(b"\n"):
         findings.append(Finding(relative, None, 0, "file has no final newline", fix))
     return data
 
@@ -737,14 +755,19 @@ def _parent_findings(
 def load_set(root: str | Path, court_ids: Iterable[str] | None = None) -> EvalSetLoadResult:
     """Load every suite case and frozen slice below *root*, or every finding."""
 
+    # judgments imports Finding and JUDGMENT_ID_PATTERN from this module; keep
+    # its import here so the loader does not create an import cycle.
+    from gideon.evaluation import judgments
+
     set_root = Path(root)
     findings: list[Finding] = []
     if _VERSION_PATTERN.fullmatch(set_root.name) is None:
         findings.append(Finding(set_root.as_posix(), None, 0, "set version must match eval-vN", _READ_FIX))
     court_id_set = None if court_ids is None else frozenset(court_ids)
+    judgments_file = judgments.JUDGMENTS_PATH.as_posix()
     files: dict[str, bytes] = {}
     try:
-        case_paths = _file_paths(set_root, ".jsonl")
+        case_paths = _file_paths(set_root, ".jsonl", judgments_file)
         slice_directories = _slice_dirs(set_root)
     except OSError as exc:
         findings.append(Finding(set_root.as_posix(), None, 0, f"set cannot be read ({exc})", _READ_FIX))
@@ -753,6 +776,24 @@ def load_set(root: str | Path, court_ids: Iterable[str] | None = None) -> EvalSe
     cases_by_file, occurrences = _read_cases(
         set_root, case_paths, court_id_set, findings, files
     )
+    located_judgments: tuple[judgments.LocatedJudgment, ...] = ()
+    judgments_path = set_root / judgments.JUDGMENTS_PATH
+    if judgments_path.is_file():
+        # The bytes join the digest's file map, so a changed grade moves the
+        # digest as a changed case does; the parse owns the final-newline
+        # finding, so the loader does not report the fault a second time.
+        data = _read_bytes(
+            set_root,
+            judgments_path,
+            findings,
+            files,
+            _CASE_FIX,
+            check_final_newline=False,
+        )
+        if data is not None:
+            parsed = judgments.parse_bytes(data, judgments_file)
+            findings.extend(parsed.findings)
+            located_judgments = parsed.records
     slices, slice_lists, slice_locations = _read_slices(
         set_root, slice_directories, findings, files
     )
@@ -786,9 +827,6 @@ def load_set(root: str | Path, court_ids: Iterable[str] | None = None) -> EvalSe
                 source_file, line = slice_locations[slice_name][case_id]
                 findings.append(Finding(source_file, case_id, line, "slice id resolves to no case", _SLICE_FIX))
 
-    ordered_findings = tuple(sorted(findings, key=_finding_sort_key))
-    if ordered_findings:
-        return EvalSetLoadResult(findings=ordered_findings)
     # A case whose parent is retired is retired; the loader refuses a variant of
     # a variant, so the rule is one step deep and equals the scorer's transitive one.
     retired = superseded | {
@@ -796,6 +834,32 @@ def load_set(root: str | Path, court_ids: Iterable[str] | None = None) -> EvalSe
         for case_id, case in cases_by_id.items()
         if isinstance(case.get("parent"), str) and case["parent"] in superseded
     }
+    # A grade is a yardstick only where its query is one the set still runs, so
+    # the resolution waits for the supersedes pass above.
+    for located in located_judgments:
+        query_id = located.record.query_id
+        judgment_case = cases_by_id.get(query_id)
+        if judgment_case is None:
+            rule = "query_id names no case"
+        elif query_id in retired:
+            rule = "query_id names a superseded case"
+        elif judgment_case.get("suite") != "judgments":
+            rule = "query_id names a case of another suite"
+        else:
+            continue
+        findings.append(
+            Finding(
+                judgments_file,
+                None,
+                located.line,
+                rule,
+                judgments.JUDGMENT_LINE_FIX,
+            )
+        )
+
+    ordered_findings = tuple(sorted(findings, key=_finding_sort_key))
+    if ordered_findings:
+        return EvalSetLoadResult(findings=ordered_findings)
     return EvalSetLoadResult(
         loaded=LoadedSet(
             version=set_root.name,
@@ -805,5 +869,6 @@ def load_set(root: str | Path, court_ids: Iterable[str] | None = None) -> EvalSe
             slices=slices,
             slice_lists=slice_lists,
             digest=_set_digest(files),
+            judgments=tuple(located.record for located in located_judgments),
         )
     )

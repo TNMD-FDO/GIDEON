@@ -16,3 +16,13 @@ The `judge-triples` slice selects the invented judge triples in
 `../judge/triples.jsonl`, which the runner grades in id order at its own repeat
 count. The slice stays on the kept side of the export boundary, as its cases are
 invented.
+
+The `judgments` slice selects the judgment set's queries in
+`../judgments/queries.jsonl`, one result per active query, scored against the
+judgments file by the `judgments@1` definition that `../judgments/README.md`
+states. Its one id list, `judgments/queries.ids`, leaves at the export boundary
+with the queries file it names: an id list resolving to no case is a loader
+finding, so it cannot stay where its cases go. In an exported tree the registry
+holds a `judgments` slice the set does not, and `eval run` answers that as it
+answers any unknown slice. The list changes only by append, as every frozen
+slice does; the ten CHU-written queries are the next append.

@@ -20,7 +20,7 @@ jobs:
       - name: Host import boundary (spec §1.5 — stdlib + yaml only)
         run: pytest tests/test_host_import_boundary.py
       - name: Gate
-        # ruff, mypy, then pytest, stopping at the first failure (tools/gate.py);
+        # Environment comparison, then ruff, mypy, and pytest, stopping at the first failure (tools/gate.py);
         # --all runs the cases marked slow that the local default skips.
         run: python -m tools.gate --all
 

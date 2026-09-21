@@ -14,6 +14,8 @@ class Settings:
     engine_api_key: str
     api_key: str
     port: int
+    source_header: str  # the forwarded header the trip's source is decided on
+    eval_identity: str  # the value under that header that reads as the eval identity
 
 
 def _required_environment(environ: Mapping[str, str], name: str) -> str:
@@ -51,4 +53,6 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         engine_api_key=_read_secret(values, "GIDEON_ENGINE_API_KEY_FILE"),
         api_key=_read_secret(values, "GIDEON_API_KEY_FILE"),
         port=port,
+        source_header=_required_environment(values, "GIDEON_SOURCE_HEADER"),
+        eval_identity=_required_environment(values, "GIDEON_EVAL_IDENTITY"),
     )

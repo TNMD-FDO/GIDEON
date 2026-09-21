@@ -53,8 +53,10 @@ class Help(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 0)
         self.assertIn("--slice NAME", command.getvalue())
         self.assertIn("--set DIR", command.getvalue())
+        self.assertIn("--ranked FILE", command.getvalue())
         self.assertIn("§18", command.getvalue())
         self.assertIn("§18.6", command.getvalue())
+        self.assertIn("§18.2", command.getvalue())
 
         reference = io.StringIO()
         with contextlib.redirect_stdout(reference), self.assertRaises(SystemExit) as ctx:

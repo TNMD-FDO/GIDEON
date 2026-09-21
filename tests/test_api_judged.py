@@ -2,9 +2,14 @@
 
 import json
 import re
+import sys
+import tempfile
+import threading
+import types
 import unittest
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
+from typing import Literal
 from unittest.mock import patch
 
 import pytest
@@ -15,6 +20,7 @@ from gideon.api.judged import (
     CHUNK_OBJECT,
     StreamMechanics,
     judge_completion,
+    source_for_header,
     stream_state_from_body,
 )
 from gideon.api.sse import (
@@ -160,8 +166,10 @@ def contains_key(value: object, key: str) -> bool:
     return False
 
 
-def state_for_prompt(prompt: str) -> guardrail.StreamState:
-    return stream_state_from_body(body_for_prompt(prompt))
+def state_for_prompt(
+    prompt: str, *, source: str = "user"
+) -> guardrail.StreamState:
+    return stream_state_from_body(body_for_prompt(prompt), source)
 
 
 def completion_body(choices: list[object], **extra: object) -> bytes:
@@ -318,7 +326,8 @@ class ApiJudged(unittest.TestCase):
         prompt = self.prompt_text(case)
         messages: list[object] = [{"role": "user", "content": prompt}]
         state = stream_state_from_body(
-            json.dumps({"model": "branch-from-body", "messages": messages}).encode()
+            json.dumps({"model": "branch-from-body", "messages": messages}).encode(),
+            "user",
         )
         supplied, contexts = guardrail.message_context(messages, len(messages))
         self.assertEqual(state.get("branch"), "branch-from-body")
@@ -331,15 +340,176 @@ class ApiJudged(unittest.TestCase):
 
         for body in (b"[]", b'{"model":"fixture-model","messages":{}}', b"not-json"):
             with self.subTest(body=body):
-                fallback = stream_state_from_body(body)
+                fallback = stream_state_from_body(body, "user")
                 self.assertEqual(fallback.get("supplied"), {})
                 self.assertEqual(fallback.get("confirmation"), [])
         self.assertEqual(
-            stream_state_from_body(b'{"model":"fixture-model","messages":{}}').get(
+            stream_state_from_body(b'{"model":"fixture-model","messages":{}}', "user").get(
                 "branch"
             ),
             "fixture-model",
         )
+
+    def test_source_for_header_returns_only_content_free_words(self) -> None:
+        eval_identity = "eval@example.invalid"
+        cases = (
+            ((eval_identity,), "eval", "exact value"),
+            (("EVAL@EXAMPLE.INVALID",), "eval", "different case"),
+            ((f"  {eval_identity}  ",), "eval", "surrounding spaces"),
+            ((), "user", "absent header"),
+            (("",), "user", "empty value"),
+            ((eval_identity, eval_identity), "user", "repeated header"),
+            (("other@example.invalid",), "user", "another identity"),
+        )
+        for values, expected, case in cases:
+            with self.subTest(case=case):
+                self.assertEqual(source_for_header(values, eval_identity), expected)
+
+        headers = {"X-Other-Header": (eval_identity,)}
+        self.assertEqual(
+            source_for_header(headers.get("X-Configured-Header", ()), eval_identity),
+            "user",
+        )
+
+    def test_request_state_carries_source_through_every_constructor_path(self) -> None:
+        bodies = (
+            b"not-json",
+            b"[]",
+            b'{"model":"fixture-model","messages":{}}',
+            body_for_prompt("Explain a visibly fictitious rule."),
+        )
+        for body in bodies:
+            with self.subTest(body=body):
+                self.assertEqual(stream_state_from_body(body, "eval")["source"], "eval")
+
+    def test_whole_trips_record_once_and_clear_after_unjudgeable_choice(self) -> None:
+        rows: list[object] = []
+        row_written = threading.Event()
+
+        class Connection:
+            def __enter__(self) -> "Connection":
+                return self
+
+            def __exit__(self, *args: object) -> Literal[False]:
+                return False
+
+            def execute(self, statement: str, parameters: object = None) -> None:
+                del statement
+                if parameters is not None:
+                    rows.append(parameters)
+                    row_written.set()
+
+        def connect(**kwargs: object) -> Connection:
+            del kwargs
+            return Connection()
+
+        class Driver(types.ModuleType):
+            connect: Callable[..., Connection]
+
+        driver = Driver(guardrail.TRIP_DRIVER_MODULE)
+        driver.connect = connect
+        trip_answer = "The deadline is June 5, 2027."
+        with tempfile.TemporaryDirectory() as directory:
+            password_path = Path(directory) / "password"
+            password_path.write_text("fixture-trip-password\n", encoding="utf-8")
+            _DISPATCH_PATCH.stop()
+            try:
+                with (
+                    patch.object(guardrail, "TRIP_PASSWORD_PATH", str(password_path)),
+                    patch.dict(sys.modules, {guardrail.TRIP_DRIVER_MODULE: driver}),
+                ):
+                    first_body = completion_body(
+                        [
+                            {
+                                "index": 0,
+                                "message": {"role": "assistant", "content": trip_answer},
+                            },
+                            {
+                                "index": 1,
+                                "message": {"role": "assistant", "content": trip_answer},
+                            },
+                        ]
+                    )
+                    first_state = state_for_prompt("Explain a fictitious rule.", source="eval")
+                    output, failure = judge_completion(first_body, first_state)
+                    self.assertIsNotNone(output)
+                    self.assertIsNone(failure)
+                    self.assertTrue(row_written.wait(1))
+                    row_written.clear()
+                    self.assertEqual(len(rows), 1)
+                    first_trip = first_state["trip"]
+                    self.assertIsInstance(first_trip, Mapping)
+                    assert isinstance(first_trip, Mapping)
+                    self.assertEqual(
+                        rows[0],
+                        (
+                            first_state["branch"],
+                            first_trip["family"],
+                            first_trip["pattern_id"],
+                            "eval",
+                        ),
+                    )
+
+                    second_state = state_for_prompt(
+                        "Explain another fictitious rule.", source="eval"
+                    )
+                    content = second_state["content"]
+                    self.assertIsInstance(content, dict)
+                    assert isinstance(content, dict)
+                    content["text"] = "held fixture text"
+                    content["constraints"] = [[1, 4]]
+                    second_body = completion_body(
+                        [
+                            {
+                                "index": 0,
+                                "message": {"role": "assistant", "content": trip_answer},
+                            },
+                            {"index": 1},
+                        ]
+                    )
+                    output, failure = judge_completion(second_body, second_state)
+                    self.assertIsNone(output)
+                    self.assertEqual(failure, "TypeError")
+                    self.assertTrue(row_written.wait(1))
+                    self.assertEqual(len(rows), 2)
+                    self.assertEqual(content["text"], "")
+                    self.assertEqual(content["constraints"], [])
+            finally:
+                _DISPATCH_PATCH.start()
+
+    def test_one_dispatch_per_request_whatever_trips_after_the_first(self) -> None:
+        # The writer's thread makes a row count a race; the dispatch itself is
+        # synchronous, so the guard is counted here and the row's values are
+        # read over the injected driver above.
+        trip_answer = "The deadline is June 5, 2027."
+        tripping_choice = {
+            "index": 0,
+            "message": {"role": "assistant", "content": trip_answer},
+        }
+        cases: tuple[tuple[str, list[object], bool], ...] = (
+            (
+                "two tripping choices",
+                [tripping_choice, dict(tripping_choice, index=1)],
+                True,
+            ),
+            ("a trip then an unjudgeable choice", [tripping_choice, {"index": 1}], False),
+        )
+        for case, choices, judged_output in cases:
+            with self.subTest(case=case):
+                dispatched: list[guardrail.TripRow] = []
+                with patch.object(guardrail, "dispatch_trip_row", dispatched.append):
+                    output, failure = judge_completion(
+                        completion_body(choices),
+                        state_for_prompt("Explain a fictitious rule.", source="eval"),
+                    )
+                self.assertEqual(len(dispatched), 1)
+                self.assertEqual(dispatched[0].source, "eval")
+                if judged_output:
+                    self.assertIsNotNone(output)
+                    self.assertIsNone(failure)
+                else:
+                    self.assertIsNone(output)
+                    self.assertIsNotNone(failure)
 
     def test_reasoning_and_unlisted_delta_fields_never_reach_downstream(self) -> None:
         for key in ("reasoning", "reasoning_content", "thinking", "fixture_hidden"):
@@ -795,7 +965,7 @@ class ApiJudged(unittest.TestCase):
                 "messages": [{"role": "user", "content": "short fictitious chat"}],
             }
         ).encode()
-        state = stream_state_from_body(request_body)
+        state = stream_state_from_body(request_body, "user")
         output, failure = judge_completion(
             completion_body(
                 [

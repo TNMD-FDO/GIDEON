@@ -1,6 +1,11 @@
+---
+commands: [backup run, backup push, backup drill, restore, install, upgrade]
+modules: [gideon/host/backup.py, gideon/host/backupset.py, gideon/host/restore.py, gideon/host/drill.py, gideon/host/install.py, gideon/host/upgrade.py]
+---
+
 # Backup, restore, install, and upgrade — architecture leaf
 
-**Read this when** implementing backup, restore, install, upgrade, or rollback; the owning modules are `gideon/host/backup.py`, `gideon/host/backupset.py`, `gideon/host/restore.py`, `gideon/host/drill.py`, `gideon/host/install.py`, `gideon/host/upgrade.py`, and their tests. The map is [`../ARCHI.md`](../ARCHI.md); its §8 table names every command's leaf.
+**Read this when** implementing backup, restore, install, upgrade, or rollback; the map is [`../ARCHI.md`](../ARCHI.md); its §8 table names every command's leaf.
 
 ## Inventory
 
@@ -31,4 +36,4 @@ The four timer calendars are release constants in `render/systemd.py`: [`render-
 ## Cross-references
 
 - Cites: [`host.md`](host.md), [`render-apply.md`](render-apply.md), [`engine-frontend.md`](engine-frontend.md), [`stack.md`](stack.md), [`tests.md`](tests.md)
-- Cited by: the map's §§2, 8, 11, 12, 13, 14, and 16
+- Cited by: the map's §§2, 8, 11, 12, 13, and 14, and [`security.md`](security.md)

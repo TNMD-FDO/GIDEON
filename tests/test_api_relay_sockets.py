@@ -18,6 +18,8 @@ from gideon.api.settings import Settings
 
 API_KEY = "fixture-api-key"
 ENGINE_KEY = "fixture-engine-key"
+SOURCE_HEADER = "X-Fixture-Source"
+EVAL_IDENTITY = "eval@example.invalid"
 _WAIT_SECONDS = 3.0
 _POLL_SECONDS = 0.05
 _STREAM_CONTENT_TYPE = "text/event-stream; charset=utf-8"
@@ -301,6 +303,8 @@ class ApiRelaySockets(unittest.TestCase):
             ENGINE_KEY,
             API_KEY,
             0,
+            SOURCE_HEADER,
+            EVAL_IDENTITY,
         )
         self.service_server = StartedServer(
             uvicorn.Config(

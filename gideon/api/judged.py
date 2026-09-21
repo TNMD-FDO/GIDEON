@@ -1,7 +1,7 @@
 """Judge streamed Chat Completions payloads without owning transport I/O."""
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from typing import Final
 
@@ -35,26 +35,38 @@ UNJUDGED_ERROR: Final[dict[str, object]] = {
 }
 
 
-def stream_state_from_body(body: bytes) -> guardrail.StreamState:
+def source_for_header(values: Sequence[str], eval_identity: str) -> str:
+    """Return the content-free source word for one forwarded header."""
+
+    if len(values) != 1:
+        return "user"
+    value = values[0].strip()
+    identity = eval_identity.strip()
+    if not value or not identity:
+        return "user"
+    return "eval" if value.casefold() == identity.casefold() else "user"
+
+
+def stream_state_from_body(body: bytes, source: str) -> guardrail.StreamState:
     """Build the stream's request context from the caller's JSON body."""
 
     try:
         parsed = json.loads(body)
     except Exception:  # noqa: BLE001 - unreadable request bodies use the strict empty stash.
-        return guardrail.StreamState({}, frozenset(), source="user")
+        return guardrail.StreamState({}, frozenset(), source=source)
     if not isinstance(parsed, dict):
-        return guardrail.StreamState({}, frozenset(), source="user")
+        return guardrail.StreamState({}, frozenset(), source=source)
 
     model = parsed.get("model")
     branch = model if isinstance(model, str) else None
     messages = parsed.get("messages")
     if not isinstance(messages, list):
-        return guardrail.StreamState({}, frozenset(), branch=branch, source="user")
+        return guardrail.StreamState({}, frozenset(), branch=branch, source=source)
     try:
         supplied, contexts = guardrail.message_context(messages, len(messages))
     except Exception:  # noqa: BLE001 - malformed context uses the strict empty stash.
         supplied, contexts = {}, frozenset()
-    return guardrail.StreamState(supplied, contexts, branch=branch, source="user")
+    return guardrail.StreamState(supplied, contexts, branch=branch, source=source)
 
 
 def judge_completion(
@@ -150,6 +162,8 @@ def _refusal_for(family: object) -> str:
 
 
 def _record_trip(state: guardrail.StreamState, trip: guardrail.Trip) -> None:
+    if state.get("trip") is not None:
+        return
     state["trip"] = {"family": trip.family, "pattern_id": trip.pattern_id}
     branch = state.get("branch")
     source = state.get("source")
@@ -162,14 +176,14 @@ def _record_trip(state: guardrail.StreamState, trip: guardrail.Trip) -> None:
 
 
 def _record_error_trip(state: guardrail.StreamState) -> None:
-    _record_trip(
-        state,
-        guardrail.Trip(guardrail.DEADLINE_FAMILY.name, guardrail.ERROR_PATTERN_ID),
-    )
     content = state.get("content")
     if isinstance(content, dict):
         content["text"] = ""
         content["constraints"] = []
+    _record_trip(
+        state,
+        guardrail.Trip(guardrail.DEADLINE_FAMILY.name, guardrail.ERROR_PATTERN_ID),
+    )
 
 
 class StreamMechanics:

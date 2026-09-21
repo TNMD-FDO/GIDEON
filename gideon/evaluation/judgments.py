@@ -27,7 +27,7 @@ ATTORNEY_ROLE_PATTERN: Final[re.Pattern[str]] = re.compile(
 _SOURCE_ID_PATTERN: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9._:/-]+")
 _SHA256_PATTERN: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
 _ASSESSMENTS: Final[frozenset[str]] = frozenset({"primary", "second"})
-_LINE_FIX: Final[str] = "Correct the judgments JSONL line, then retry."
+JUDGMENT_LINE_FIX: Final[str] = "Correct the judgments JSONL line, then retry."
 _FILE_FIX: Final[str] = "Restore the judgments JSONL file, then retry."
 KAPPA_NO_PAIRS: Final[Literal["no-pairs"]] = "no-pairs"
 KAPPA_NO_VARIATION: Final[Literal["no-variation"]] = "no-variation"
@@ -63,6 +63,33 @@ class JudgmentReadResult:
 
 
 @dataclass(frozen=True, slots=True)
+class LocatedJudgment:
+    """One valid judgment and its source line in the JSONL file."""
+
+    line: int
+    record: Judgment
+
+
+@dataclass(frozen=True, slots=True)
+class JudgmentParseResult:
+    """Every located judgment the bytes yielded, beside every finding.
+
+    Unlike ``JudgmentReadResult``, the records stand whatever the findings say:
+    the loader reports a malformed line and still resolves the query ids of the
+    lines that parsed, so one read of the file produces every finding at once.
+    """
+
+    records: tuple[LocatedJudgment, ...] = ()
+    findings: tuple[Finding, ...] = ()
+
+    @property
+    def ok(self) -> bool:
+        """Whether the bytes parsed without a finding."""
+
+        return not self.findings
+
+
+@dataclass(frozen=True, slots=True)
 class Agreement:
     """Cohen kappa values pooled over passages graded by both readers."""
 
@@ -72,7 +99,7 @@ class Agreement:
     relevant_kappa: KappaValue
 
 
-def _finding(file: str, line: int, rule: str, fix: str = _LINE_FIX) -> Finding:
+def _finding(file: str, line: int, rule: str, fix: str = JUDGMENT_LINE_FIX) -> Finding:
     """Build a content-free finding for a judgments file location."""
 
     return Finding(file, None, line, rule, fix)
@@ -82,24 +109,14 @@ def _integer(value: object) -> TypeGuard[int]:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-def validate_line(
-    value: object,
+def coordinate_findings(
+    value: Mapping[str, object],
     file: str = JUDGMENTS_PATH.as_posix(),
     line: int = 1,
 ) -> tuple[Finding, ...]:
-    """Validate one parsed JSON value without echoing any input value."""
-
-    if not isinstance(value, Mapping):
-        return (_finding(file, line, "line is not one JSON object"),)
+    """Validate the four gold-evidence coordinate fields without naming values."""
 
     findings: list[Finding] = []
-    if tuple(value) != JUDGMENT_KEYS:
-        findings.append(_finding(file, line, "keys or order"))
-
-    query_id = value.get("query_id")
-    if not isinstance(query_id, str) or JUDGMENT_ID_PATTERN.fullmatch(query_id) is None:
-        findings.append(_finding(file, line, "query_id pattern"))
-
     source_id = value.get("source_id")
     if (
         not isinstance(source_id, str)
@@ -122,6 +139,28 @@ def validate_line(
         findings.append(_finding(file, line, "end"))
     if start_ok and end_ok and not cast(int, start) < cast(int, end):
         findings.append(_finding(file, line, "coordinates"))
+    return tuple(findings)
+
+
+def validate_line(
+    value: object,
+    file: str = JUDGMENTS_PATH.as_posix(),
+    line: int = 1,
+) -> tuple[Finding, ...]:
+    """Validate one parsed JSON value without echoing any input value."""
+
+    if not isinstance(value, Mapping):
+        return (_finding(file, line, "line is not one JSON object"),)
+
+    findings: list[Finding] = []
+    if tuple(value) != JUDGMENT_KEYS:
+        findings.append(_finding(file, line, "keys or order"))
+
+    query_id = value.get("query_id")
+    if not isinstance(query_id, str) or JUDGMENT_ID_PATTERN.fullmatch(query_id) is None:
+        findings.append(_finding(file, line, "query_id pattern"))
+
+    findings.extend(coordinate_findings(value, file, line))
 
     grade = value.get("grade")
     if not _integer(grade) or not 0 <= grade <= 3:
@@ -153,12 +192,14 @@ def _record(value: Mapping[str, object]) -> Judgment:
     )
 
 
-def _coordinates(record: Judgment) -> tuple[str, str, int, int]:
+def coordinates(record: Judgment) -> tuple[str, str, int, int]:
+    """The record's gold-evidence coordinates, the metrics' key for a passage."""
+
     return record.source_id, record.sha256, record.start, record.end
 
 
 def _file_findings(
-    records: Iterable[tuple[int, Judgment]],
+    records: Iterable[LocatedJudgment],
     file: str,
 ) -> tuple[Finding, ...]:
     """Apply the cross-line uniqueness rules without naming record values."""
@@ -166,14 +207,16 @@ def _file_findings(
     findings: list[Finding] = []
     triples: set[tuple[str, tuple[str, str, int, int], str]] = set()
     assessments: set[tuple[str, tuple[str, str, int, int], str]] = set()
-    for line, record in records:
-        coordinates = _coordinates(record)
-        triple = (record.query_id, coordinates, record.grader)
+    for located in records:
+        line = located.line
+        record = located.record
+        located_coordinates = coordinates(record)
+        triple = (record.query_id, located_coordinates, record.grader)
         if triple in triples:
             findings.append(_finding(file, line, "query-coordinates-grader appears more than once"))
         else:
             triples.add(triple)
-        assessed = (record.query_id, coordinates, record.assessment)
+        assessed = (record.query_id, located_coordinates, record.assessment)
         if assessed in assessments:
             findings.append(_finding(file, line, "assessment appears more than once for coordinates"))
         else:
@@ -203,14 +246,10 @@ def _path_and_file(path: str | Path) -> tuple[Path, str]:
     return candidate, candidate.as_posix()
 
 
-def read(path: str | Path) -> JudgmentReadResult:
-    """Read a judgments file, or its set root, and collect all findings."""
-
-    file_path, file = _path_and_file(path)
-    try:
-        data = file_path.read_bytes()
-    except OSError:
-        return JudgmentReadResult(findings=(_finding(file, 0, "file cannot be read", _FILE_FIX),))
+def parse_bytes(
+    data: bytes, file: str = JUDGMENTS_PATH.as_posix()
+) -> JudgmentParseResult:
+    """Parse already-read judgments bytes and retain each valid record's line."""
 
     findings: list[Finding] = []
     if data and not data.endswith(b"\n"):
@@ -219,9 +258,9 @@ def read(path: str | Path) -> JudgmentReadResult:
         text = data.decode("utf-8")
     except UnicodeDecodeError:
         findings.append(_finding(file, 1, "file is not UTF-8", _FILE_FIX))
-        return JudgmentReadResult(findings=tuple(findings))
+        return JudgmentParseResult(findings=tuple(findings))
 
-    records: list[tuple[int, Judgment]] = []
+    records: list[LocatedJudgment] = []
     for line, line_text in enumerate(text.splitlines(), start=1):
         try:
             value = json.loads(line_text)
@@ -231,12 +270,34 @@ def read(path: str | Path) -> JudgmentReadResult:
         line_findings = validate_line(value, file, line)
         findings.extend(line_findings)
         if not line_findings and isinstance(value, Mapping):
-            records.append((line, _record(value)))
+            records.append(LocatedJudgment(line, _record(value)))
 
     findings.extend(_file_findings(records, file))
-    if findings:
-        return JudgmentReadResult(findings=tuple(sorted(findings, key=lambda item: (item.file, item.line or 0, item.rule))))
-    return JudgmentReadResult(records=tuple(record for _line, record in records))
+    return JudgmentParseResult(
+        records=tuple(records),
+        findings=tuple(
+            sorted(findings, key=lambda item: (item.file, item.line or 0, item.rule))
+        ),
+    )
+
+
+def read(path: str | Path) -> JudgmentReadResult:
+    """Read a judgments file, or its set root, and collect all findings."""
+
+    file_path, file = _path_and_file(path)
+    try:
+        data = file_path.read_bytes()
+    except OSError:
+        return JudgmentReadResult(
+            findings=(_finding(file, 0, "file cannot be read", _FILE_FIX),)
+        )
+
+    parsed = parse_bytes(data, file)
+    if parsed.findings:
+        return JudgmentReadResult(findings=parsed.findings)
+    return JudgmentReadResult(
+        records=tuple(located.record for located in parsed.records)
+    )
 
 
 def _kappa(pairs: Iterable[tuple[int, int]], *, collapsed: bool) -> KappaValue:
@@ -261,7 +322,7 @@ def agreement(records: Iterable[Judgment]) -> Agreement:
 
     by_coordinate: dict[tuple[str, tuple[str, str, int, int]], dict[str, int]] = {}
     for record in records:
-        key = (record.query_id, _coordinates(record))
+        key = (record.query_id, coordinates(record))
         by_coordinate.setdefault(key, {}).setdefault(record.assessment, record.grade)
 
     pairs: list[tuple[int, int]] = []

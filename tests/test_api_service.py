@@ -14,6 +14,8 @@ from gideon.api.settings import Settings, load_settings
 API_KEY = "fixture-api-key"
 ENGINE_KEY = "fixture-engine-key"
 ENGINE_URL = "http://fixture-engine/v1"
+SOURCE_HEADER = "X-Fixture-Source"
+EVAL_IDENTITY = "eval@example.invalid"
 
 
 def response_body(response: httpx.Response) -> dict[str, Any]:
@@ -24,7 +26,14 @@ def response_body(response: httpx.Response) -> dict[str, Any]:
 
 class ApiService(unittest.TestCase):
     def settings(self) -> Settings:
-        return Settings(ENGINE_URL, ENGINE_KEY, API_KEY, 8000)
+        return Settings(
+            ENGINE_URL,
+            ENGINE_KEY,
+            API_KEY,
+            8000,
+            SOURCE_HEADER,
+            EVAL_IDENTITY,
+        )
 
     def request(
         self,
@@ -181,6 +190,8 @@ class ApiService(unittest.TestCase):
                 "GIDEON_ENGINE_URL": ENGINE_URL,
                 "GIDEON_ENGINE_API_KEY_FILE": str(root / "engine-key"),
                 "GIDEON_API_PORT": "8000",
+                "GIDEON_SOURCE_HEADER": SOURCE_HEADER,
+                "GIDEON_EVAL_IDENTITY": EVAL_IDENTITY,
             }
             (root / "engine-key").write_text(ENGINE_KEY, encoding="utf-8")
             for path in (missing, empty):
@@ -189,6 +200,49 @@ class ApiService(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, str(path)) as context:
                         load_settings(environment)
                     self.assertNotIn(API_KEY, str(context.exception))
+
+    def test_source_settings_are_loaded_from_required_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "engine-key").write_text(ENGINE_KEY, encoding="utf-8")
+            (root / "api-key").write_text(API_KEY, encoding="utf-8")
+            settings = load_settings(
+                {
+                    "GIDEON_ENGINE_URL": ENGINE_URL,
+                    "GIDEON_ENGINE_API_KEY_FILE": str(root / "engine-key"),
+                    "GIDEON_API_KEY_FILE": str(root / "api-key"),
+                    "GIDEON_API_PORT": "8000",
+                    "GIDEON_SOURCE_HEADER": SOURCE_HEADER,
+                    "GIDEON_EVAL_IDENTITY": EVAL_IDENTITY,
+                }
+            )
+
+        self.assertEqual(settings.source_header, SOURCE_HEADER)
+        self.assertEqual(settings.eval_identity, EVAL_IDENTITY)
+
+    def test_missing_or_empty_source_settings_refuse(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "engine-key").write_text(ENGINE_KEY, encoding="utf-8")
+            (root / "api-key").write_text(API_KEY, encoding="utf-8")
+            common = {
+                "GIDEON_ENGINE_URL": ENGINE_URL,
+                "GIDEON_ENGINE_API_KEY_FILE": str(root / "engine-key"),
+                "GIDEON_API_KEY_FILE": str(root / "api-key"),
+                "GIDEON_API_PORT": "8000",
+                "GIDEON_SOURCE_HEADER": SOURCE_HEADER,
+                "GIDEON_EVAL_IDENTITY": EVAL_IDENTITY,
+            }
+            for variable in ("GIDEON_SOURCE_HEADER", "GIDEON_EVAL_IDENTITY"):
+                for value in (None, " \t"):
+                    with self.subTest(variable=variable, value=value):
+                        environment = dict(common)
+                        if value is None:
+                            del environment[variable]
+                        else:
+                            environment[variable] = value
+                        with self.assertRaisesRegex(ValueError, variable):
+                            load_settings(environment)
 
     def test_request_log_has_no_query_header_or_body_values(self) -> None:
         def engine(request: httpx.Request) -> httpx.Response:

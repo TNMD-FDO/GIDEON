@@ -110,6 +110,92 @@ The refusals, each naming the packet by query id and role id and carrying ordina
 
 A successful run appends lines ordered by query id, grader, then coordinates, and prints the count appended, the file's line count and SHA-256, and both κ lines with their pair count, query count, and the role ids that contributed pairs. Where there is no pair, or no variation, the line says so in words and prints no number.
 
+## What the grades measure
+
+### The ranked list
+
+The contract slice 3's retrieval driver writes to, and the door this suite is
+scored through until `/turn` with `stop_after: retrieve` arrives (slice 4). It
+mirrors the pool file less everything a packet needed: UTF-8 JSONL kept outside
+the checkout and never committed, one line per query, keys `query_id` and
+`ranked` and no others. Each entry of `ranked` carries `source_id`, `sha256`,
+`start`, and `end` and nothing else — no caption, no text, no score, no
+`provenance` — so the file is content-free by its shape and a `text` key is a
+refusal. Rank is list position, rank 1 first.
+
+The file is checked whole, every finding reported at once, each located by line,
+query id, and entry ordinal alone: the query id is of the judgments pattern,
+appears once, and names an active query of the slice; the coordinates are valid
+by `gideon/evaluation/judgments.py`'s rule; and no coordinate repeats within a
+query. A list may be empty. Length is never bounded — the metrics read the first
+fifty — and the run reports the file's SHA-256, which the run row keeps beside
+the definition id.
+
+Run it with `gideon eval run --slice judgments --ranked <file>`.
+
+### The metrics, `judgments@1`
+
+The definition's one home is the docstring of
+`gideon/evaluation/rankmetrics.py`; this section states it for a driver's
+author. A rule or threshold that changes takes the next `@N` rather than an edit,
+as a grammar pattern and a judge prompt do, so a run recorded under one
+definition is never paired with a run under another.
+
+**Meets.** A ranked chunk meets a judged passage when both carry the same
+`source_id` and the same `sha256`, and their half-open code-point ranges overlap
+by at least **half of the shorter of the two ranges**. A chunk inside a judged
+passage and a judged passage inside a larger chunk both meet at 1.0, which is
+what lets a re-chunked index be measured against grades given under another
+chunking; equal offsets in another source never meet. The threshold is a
+starting value (ADR-0017).
+
+**Crediting.** The list is walked from rank 1, and a judged passage is credited
+at most once. A chunk's gain is the highest grade among the not-yet-credited
+passages it meets, and that passage becomes credited; ties break by the larger
+overlap, then the lower coordinates. A chunk meeting only already-credited
+passages keeps its rank, counts as judged, and gains 0; one meeting no judged
+passage is unjudged and gains 0. So every gain is a distinct passage's grade,
+and a run cannot be paid twice for one passage it returned in two pieces.
+
+**The three figures**, each a **judged query's** — one with at least one primary
+grade. Only `primary` lines are read; `second` lines exist for κ alone.
+
+- **nDCG@10** — gain is the credited grade itself, the discount is
+  `log2(rank + 1)`, and the ideal ranking is the query's primary grades in
+  descending order, first ten. An unjudged passage holds its rank and gains 0,
+  which is trec_eval's and BEIR's definition.
+- **recall@50** — the relevant passages (grade 2 or more) met by at least one
+  chunk among ranks 1–50, over the query's relevant passages. Meeting alone
+  counts; crediting does not enter.
+- **Hole@10** — the unjudged chunks among ranks 1–10 over the chunks present
+  there. It qualifies nDCG@10's pessimism: a high hole means the ranking was
+  measured largely against passages nobody has graded.
+
+**An undefined figure is null**, enters no mean, and is reported by id: nDCG@10
+where the ideal is 0 (no grade above 0), recall@50 where no passage is relevant,
+Hole@10 for an empty list. A query with no grades yet is null on all three,
+Hole@10 included — counting its trivially whole hole would let the state of the
+grading, not the retriever, move the number while the set is graded a few
+queries at a time. Each mean is taken over the queries where its own figure is
+defined and prints that count, so the three populations differ at those edges.
+
+**Below twenty-five judged queries** the set detects regressions and ranks
+nothing, which the run's summary says whenever it applies.
+
+**Two known limits, stated and not solved.** A chunk that swallows two graded
+passages earns the higher grade alone, so a large-chunk arm cannot reach 1.0 on
+such a query; the gold-span crossing rate is the companion figure to read beside
+it. And a judged passage whose canonical text the index under test does not hold
+reads as not retrieved, since a ranked list states nothing about what that index
+holds: it deflates recall@50 and nDCG@10 without a word. That bites at a corpus
+bump or a canonicalizer change, not at Phase A, whose pools are drawn from the
+very index its arms are scored on. The drop rule of §18.6 arrives with the input
+that can prove absence, as this definition's next `@N`.
+
+The figures are reported and compared paired, and **never gated** (§18.3,
+ADR-0023). The slice's own verdict is coverage alone: it passes when every
+judged query was scored, and fails when one has no ranked list.
+
 ## The intake, for a CSA
 
 The CHU attorney's questions enter through the intake, which checks each for client or case material and appends the reviewed ones. Put them in a UTF-8 text file **outside the checkout** — the intake refuses one inside it — one question per paragraph, blank lines between, each paragraph's first line the review marker `# reviewed <role id> <YYYY-MM-DD>`, with `accept=<kind>[,<kind>…]` naming any soft flag kinds accepted for that question. An invented example:

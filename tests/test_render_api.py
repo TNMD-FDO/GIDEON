@@ -4,6 +4,7 @@ import hashlib
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 import yaml  # type: ignore[import-untyped]
 from test_render import DirHost, checkout_files, inputs
@@ -16,6 +17,8 @@ from gideon.host.render.api import (
     API_MOUNT_TARGET,
     API_SECRET_NAME,
     API_SERVICE_NAME,
+    API_SOURCE_HEADER,
+    API_USER_EMAIL_HEADER,
 )
 from gideon.host.render.command import (
     AppliedManifest,
@@ -25,6 +28,7 @@ from gideon.host.render.command import (
 )
 from gideon.host.render.compose import api_service, service_names
 from gideon.host.render.engine import ENGINE_SECRET_NAME
+from gideon.host.render.owui import EVAL_IDENTITY
 from gideon.host.sysio import PathLike
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -53,7 +57,13 @@ class ApiRender(unittest.TestCase):
         api = gpu_services[API_SERVICE_NAME]
         self.assertIn(API_SERVICE_NAME, service_names(gpu))
         self.assertIn(API_SECRET_NAME, gpu_document["secrets"])
-        self.assertEqual(api["secrets"], [ENGINE_SECRET_NAME, API_SECRET_NAME])
+        self.assertEqual(
+            api["secrets"],
+            [ENGINE_SECRET_NAME, API_SECRET_NAME, "postgres_gideon_audit_password"],
+        )
+        self.assertEqual(api["environment"]["GIDEON_SOURCE_HEADER"], API_SOURCE_HEADER)
+        self.assertEqual(api["environment"]["GIDEON_EVAL_IDENTITY"], EVAL_IDENTITY.email)
+        self.assertEqual(API_SOURCE_HEADER, API_USER_EMAIL_HEADER)
         self.assertNotIn("ports", api)
         self.assertNotIn("depends_on", api)
         self.assertEqual(
@@ -87,6 +97,10 @@ class ApiRender(unittest.TestCase):
         )
         self.assertNotIn(API_SERVICE_NAME, no_gpu_document["services"])
         self.assertNotIn(API_SECRET_NAME, no_gpu_document["secrets"])
+        self.assertEqual(
+            gpu_document["secrets"]["postgres_gideon_audit_password"],
+            no_gpu_document["secrets"]["postgres_gideon_audit_password"],
+        )
         self.assertNotIn(
             f"job_name: {API_JOB_NAME}",
             no_gpu_rendered.by_path["prometheus/prometheus.yml"].content,
@@ -123,6 +137,26 @@ class ApiRender(unittest.TestCase):
             service_names(moved),
             compose_digests(moved),
         )
+        self.assertEqual(judgment.services, (API_SERVICE_NAME,))
+        self.assertEqual(judgment.block, (API_SERVICE_NAME,))
+        self.assertEqual(judgment.files, ())
+        self.assertEqual(judgment.top_level, ())
+
+    def test_moving_the_api_settings_recreates_only_the_api_service_block(self) -> None:
+        original = inputs()
+        applied = applied_record(original)
+        moved_identity = replace(EVAL_IDENTITY, email="moved@gideon.invalid")
+        with (
+            patch("gideon.host.render.compose.API_SOURCE_HEADER", "X-Moved-Source"),
+            patch("gideon.host.render.compose.EVAL_IDENTITY", moved_identity),
+        ):
+            moved = render_all(original)
+            judgment = recreate_judgment(
+                moved,
+                applied,
+                service_names(original),
+                compose_digests(original),
+            )
         self.assertEqual(judgment.services, (API_SERVICE_NAME,))
         self.assertEqual(judgment.block, (API_SERVICE_NAME,))
         self.assertEqual(judgment.files, ())

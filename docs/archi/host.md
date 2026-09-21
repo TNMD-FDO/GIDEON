@@ -1,6 +1,11 @@
+---
+commands: [host provision, preflight]
+modules: [gideon/host/site.py, gideon/host/provision.py, gideon/host/preflight.py, gideon/host/lock.py, gideon/host/models.py, gideon/host/courts.py, gideon/host/nogpu.py]
+---
+
 # The host platform — architecture leaf
 
-**Read this when** implementing `host provision`, `preflight`, site and lock loading, or the no-GPU path; the owning modules are `gideon/host/site.py`, `gideon/host/provision.py`, `gideon/host/preflight.py`, `gideon/host/lock.py`, `gideon/host/models.py`, `gideon/host/courts.py`, `gideon/host/nogpu.py`, and their tests. The map is [`../ARCHI.md`](../ARCHI.md); its §8 table names every command's leaf.
+**Read this when** implementing `host provision`, `preflight`, site and lock loading, or the no-GPU path; the map is [`../ARCHI.md`](../ARCHI.md); its §8 table names every command's leaf.
 
 ## Inventory
 

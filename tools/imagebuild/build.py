@@ -30,9 +30,19 @@ _GIDEON_SMOKE_SCRIPT: Final[str] = (
     "import starlette\n"
     "import uvicorn\n"
     "import httpx\n"
+    "import psycopg\n"
+    "if psycopg.pq.__impl__ != \"binary\":\n"
+    "    raise SystemExit(\"psycopg is not using the binary libpq implementation\")\n"
+    # One build argument installs both driver wheels, so a pair at two versions
+    # means the image did not come from this Dockerfile's install line. The
+    # generic version check below reads each argument as a substring of the
+    # output, which one matching line would satisfy for both.
+    "if importlib.metadata.version(\"psycopg\") "
+    "!= importlib.metadata.version(\"psycopg-binary\"):\n"
+    "    raise SystemExit(\"psycopg and psycopg-binary are at different versions\")\n"
     "for package in (\"starlette\", \"uvicorn\", \"httpx\", \"anyio\", "
     "\"httpcore\", \"h11\", \"certifi\", \"idna\", \"click\", "
-    "\"typing_extensions\"):\n"
+    "\"typing_extensions\", \"psycopg\", \"psycopg-binary\"):\n"
     "    print(package, importlib.metadata.version(package))\n"
 )
 
@@ -50,6 +60,7 @@ SMOKE: Final[Mapping[str, Smoke]] = {
         "IDNA_VERSION",
         "CLICK_VERSION",
         "TYPING_EXTENSIONS_VERSION",
+        "PSYCOPG_VERSION",
     )),
 }
 

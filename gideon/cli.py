@@ -208,6 +208,11 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="DIR",
         help="eval set version directory (§18.6)",
     )
+    eval_run.add_argument(
+        "--ranked",
+        metavar="FILE",
+        help="ranked-list JSONL file for the judgments metrics (§18.2)",
+    )
     eval_run.set_defaults(handler=_run_eval, command_path="eval run")
     eval_reference = eval_sub.add_parser(
         "reference", help="write a reference from a recorded run (§18.6)"

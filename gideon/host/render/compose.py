@@ -14,6 +14,7 @@ from gideon.host.render.api import (
     API_MOUNT_TARGET,
     API_SECRET_NAME,
     API_SERVICE_NAME,
+    API_SOURCE_HEADER,
     API_WORKING_DIRECTORY,
     api_enabled,
 )
@@ -24,7 +25,11 @@ from gideon.host.render.engine import (
     engine_base_url,
 )
 from gideon.host.render.grafana import DASHBOARDS_MOUNT, GRAFANA_ADMIN_USER
-from gideon.host.render.owui import PERMISSIONS_TEMPLATE, owui_environment
+from gideon.host.render.owui import (
+    EVAL_IDENTITY,
+    PERMISSIONS_TEMPLATE,
+    owui_environment,
+)
 from gideon.host.render.pgbackrest import (
     PG_BACKREST_CONF_PATH,
     PGDATA,
@@ -323,6 +328,8 @@ def api_service(inputs: RenderInputs, target: RegistryTarget) -> Mapping[str, ob
             "GIDEON_ENGINE_API_KEY_FILE": f"/run/secrets/{ENGINE_SECRET_NAME}",
             "GIDEON_API_KEY_FILE": f"/run/secrets/{API_SECRET_NAME}",
             "GIDEON_API_PORT": str(ENGINE_PORT),
+            "GIDEON_SOURCE_HEADER": API_SOURCE_HEADER,
+            "GIDEON_EVAL_IDENTITY": EVAL_IDENTITY.email,
             "TZ": inputs.site.office.timezone,
         },
         "command": ["python", "-m", "gideon.api"],
@@ -331,7 +338,11 @@ def api_service(inputs: RenderInputs, target: RegistryTarget) -> Mapping[str, ob
             f"{inputs.checkout}/gideon:{API_MOUNT_TARGET}:ro",
         ],
         "group_add": [str(inputs.facts.service_gid)],
-        "secrets": [ENGINE_SECRET_NAME, API_SECRET_NAME],
+        "secrets": [
+            ENGINE_SECRET_NAME,
+            API_SECRET_NAME,
+            "postgres_gideon_audit_password",
+        ],
         "labels": {"org.gideon.api-sources-digest": inputs.api_sources_digest},
         "healthcheck": dict(API_HEALTHCHECK),
         "networks": ["gideon"],

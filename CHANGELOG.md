@@ -10,6 +10,9 @@ history at commit f06e83f. User-facing notes for every tag from `v0.2.0` live un
 `docs/release-notes/`, and `tests/test_release_records.py` holds this index
 complete, ordered, and dated from the release files.
 
+- [v0.2.26](docs/2-changelog/w4_v0.2.26.md) — 2026-09-21 — the gate checks its tree's pins (workflow 54)
+- [v0.2.25](docs/2-changelog/w3_v0.2.25.md) — 2026-09-20 — the service writes the trip row (general-turn 07)
+- [v0.2.24](docs/2-changelog/w3_v0.2.24.md) — 2026-09-20 — the judgments suite's three numbers (slice-2 09)
 - [v0.2.23](docs/2-changelog/w3_v0.2.23.md) — 2026-09-20 — the pin watch completes a shallow checkout
 - [v0.2.22](docs/2-changelog/w3_v0.2.22.md) — 2026-09-20 — the service judges every answer (general-turn 06)
 - [v0.2.21](docs/2-changelog/w3_v0.2.21.md) — 2026-09-20 — the partial-reference test portable to the export

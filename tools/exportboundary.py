@@ -29,11 +29,15 @@ EXCLUDED_PREFIXES = (
     "docs/box-ledger.md",  # the shared server's ledger
     "tools/tracker.py",  # the tracker board
     "tools/cycles.py",  # the cycles record
+    "tools/archi.py",  # the architecture index check
     "tests/test_tracker.py",  # the tracker board's tests
     "tests/test_cycles.py",  # the cycles record's tests
+    "tests/test_archi.py",  # the architecture index check's tests
     "tests/test_skills_vendored.py",  # the vendored-skills tripwire
     "tests/test_evidence_hygiene.py",  # the tracker assets' secret check
     "tests/test_release_git.py",  # bin/release-git's tests
+    "tests/test_export_tree_check.py",  # bin/export-tree-check's tests
+    "tests/test_venv_build.py",  # bin/venv-build's tests
     "tests/test_worktree_claim.py",  # bin/worktree-claim's tests
     "tests/test_worktree_remove.py",  # bin/worktree-remove's tests
     "tests/test_trip.py",  # bin/trip's tests
@@ -47,6 +51,7 @@ EXCLUDED_PREFIXES = (
     "eval/sets/eval-v1/build-gates/extraction.jsonl",  # the labelled harvest questions pending the same ruling
     "eval/sets/eval-v1/build-gates/extraction-variants.jsonl",  # the harvest questions' variants, pending the same ruling
     "eval/sets/eval-v1/slices/extraction/harvest.ids",  # the harvest slice ids must leave with their excluded cases
+    "eval/sets/eval-v1/slices/judgments",  # the judgments slice ids must leave with their excluded queries
     "eval/reference/extraction/harvest.json",  # the harvest reference must leave with its id list
     ".github/workflows/acceptance.yml",  # the box acceptance workflow
     ".github/workflows/pin-watch.yml",  # the box pin-watch workflow

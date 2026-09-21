@@ -16,6 +16,7 @@ from gideon.evaluation.results import RunContext, SliceResult
 from gideon.evaluation.slices import SLICE_RUNNERS
 from gideon.host import courts
 from gideon.host.sysio import Command, Host, PathLike
+from tools.exportboundary import absent_from_export
 
 ROOT = Path(__file__).resolve().parents[1]
 GATE_ATTRIBUTES: frozenset[str] = frozenset(
@@ -85,6 +86,15 @@ def _run_registered(
     output = engine_output(valid_content(score=score, reason=reason, modes=failure_modes))
     results: dict[str, SliceResult] = {}
     for slice_name, spec in SLICE_RUNNERS.items():
+        if slice_name not in loaded.slices:
+            # A registered slice the set lacks is the export boundary's doing
+            # and nothing else's: in the development tree every entry is driven,
+            # and an omission here must be one the boundary itself reports.
+            assert absent_from_export(SET_ROOT / "slices" / slice_name, ROOT), (
+                f"slice {slice_name} is registered but the set has no id list "
+                "for it, and the export boundary does not omit its directory"
+            )
+            continue
         progress: list[str] = []
         context = RunContext(
             cast(Host, StubHost(output)),
@@ -128,7 +138,9 @@ class Invariance(unittest.TestCase):
             failure_modes=("contradicts-reference",),
         )
         self.assertEqual(first_loaded.slices, second_loaded.slices)
-        for slice_name, spec in SLICE_RUNNERS.items():
+        self.assertEqual(set(first), set(second))
+        for slice_name in first:
+            spec = SLICE_RUNNERS[slice_name]
             with self.subTest(slice_name=slice_name):
                 first_result = first[slice_name]
                 second_result = second[slice_name]
@@ -156,7 +168,7 @@ class Invariance(unittest.TestCase):
         # must show the variation inside its judge field. A slice registered by
         # a later ticket is held to this on registration.
         judging = tuple(
-            name for name, spec in SLICE_RUNNERS.items() if spec.judge_prompt is not None
+            name for name in first if SLICE_RUNNERS[name].judge_prompt is not None
         )
         self.assertTrue(judging, "no judging slice is registered")
         for slice_name in judging:

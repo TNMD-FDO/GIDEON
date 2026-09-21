@@ -372,13 +372,15 @@ services:
       - "gideon"
     mem_limit: 32000000000
   gideon-api:
-    image: "ghcr.io/tnmd-fdo/gideon@sha256:7adb7f738f11d396e63b739955f758e5a795fa54fbaf7904a1237274f6e11d8a"
+    image: "ghcr.io/tnmd-fdo/gideon@sha256:2baac5c2bff21a6762c478b99f79a953ded02579df0a65144eaa9ca9a2d85683"
     restart: "unless-stopped"
     environment:
       GIDEON_ENGINE_URL: "http://gideon-generator:8000/v1"
       GIDEON_ENGINE_API_KEY_FILE: "/run/secrets/engine_api_key"
       GIDEON_API_KEY_FILE: "/run/secrets/gideon_api_key"
       GIDEON_API_PORT: "8000"
+      GIDEON_SOURCE_HEADER: "X-OpenWebUI-User-Email"
+      GIDEON_EVAL_IDENTITY: "gideon-eval@gideon.invalid"
       TZ: "America/Chicago"
     command:
       - "python"
@@ -392,6 +394,7 @@ services:
     secrets:
       - "engine_api_key"
       - "gideon_api_key"
+      - "postgres_gideon_audit_password"
     labels:
       org.gideon.api-sources-digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
     healthcheck:

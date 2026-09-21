@@ -3,6 +3,7 @@
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
+from gideon.evaluation.rankmetrics import Coordinates
 from gideon.host.sysio import Host, PathLike
 
 type JSONValue = None | bool | int | float | str | list[JSONValue] | Mapping[str, JSONValue]
@@ -59,3 +60,4 @@ class RunContext:
     judge_prompt_id: str | None
     repeats: int
     progress: Callable[[str], None]
+    ranked: Mapping[str, tuple[Coordinates, ...]] | None = None

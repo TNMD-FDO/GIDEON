@@ -123,7 +123,11 @@ def create_app(
         Route(_MODELS_PATH, models, methods=["GET"]),
         # An instance, not a function: Starlette calls a non-function endpoint
         # as an ASGI application, which is the relay's shape.
-        Route(_COMPLETIONS_PATH, CompletionRelay(), methods=["POST"]),
+        Route(
+            _COMPLETIONS_PATH,
+            CompletionRelay(settings.source_header, settings.eval_identity),
+            methods=["POST"],
+        ),
     ]
     app = Starlette(routes=routes, lifespan=lifespan)
     app.add_middleware(BearerAuthMiddleware, key=settings.api_key, health_path=_HEALTH_PATH)

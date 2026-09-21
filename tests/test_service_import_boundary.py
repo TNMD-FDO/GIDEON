@@ -11,9 +11,9 @@ from gideon.host.render.api import API_SOURCES
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PARENT_INITIALIZER = REPO_ROOT / "gideon/__init__.py"
-ALLOWED_DEPENDENCIES = frozenset({"starlette", "uvicorn", "httpx", "anyio"})
-# Ticket 07's release carries the trip writer driver and empties this allowance.
-DEFERRED_ONLY_MODULES = frozenset({guardrail.TRIP_DRIVER_MODULE})
+ALLOWED_DEPENDENCIES = frozenset(
+    {"starlette", "uvicorn", "httpx", "anyio", guardrail.TRIP_DRIVER_MODULE}
+)
 _FIX = (
     "Keep service imports at module level and limited to the standard library, "
     "the image dependencies, or the declared service package."
@@ -143,11 +143,7 @@ def import_violations(path: Path, source: str) -> list[str]:
         for dotted, display in targets:
             top = dotted.partition(".")[0]
             if top != "gideon":
-                if (
-                    top not in sys.stdlib_module_names
-                    and top not in ALLOWED_DEPENDENCIES
-                    and (module_level or dotted not in DEFERRED_ONLY_MODULES)
-                ):
+                if top not in sys.stdlib_module_names and top not in ALLOWED_DEPENDENCIES:
                     problems.append(
                         _error(
                             path,
@@ -230,18 +226,10 @@ class ServiceImportBoundary(unittest.TestCase):
             import_violations(path, "def deferred() -> None:\n    import httpx\n"), []
         )
 
-    def test_deferred_trip_driver_import_is_allowed(self) -> None:
-        path = REPO_ROOT / "gideon/api/app.py"
-        source = f"def deferred() -> None:\n    import {guardrail.TRIP_DRIVER_MODULE}\n"
-        self.assertEqual(import_violations(path, source), [])
-
-    def test_module_trip_driver_import_is_rejected(self) -> None:
+    def test_trip_driver_is_an_ordinary_image_dependency(self) -> None:
         path = REPO_ROOT / "gideon/api/app.py"
         source = f"import {guardrail.TRIP_DRIVER_MODULE}\n"
-        errors = import_violations(path, source)
-        self.assertTrue(errors)
-        self.assertIn("neither stdlib nor an allowed image dependency", errors[0])
-        self.assertIn("Fix:", errors[0])
+        self.assertEqual(import_violations(path, source), [])
 
     def test_parent_initializer_rejects_an_added_statement(self) -> None:
         source = PARENT_INITIALIZER.read_text() + "\nanswer = 1\n"

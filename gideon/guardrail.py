@@ -2740,10 +2740,10 @@ def write_trip_row(row: TripRow, connect: Callable[..., object] | None = None) -
         with open(TRIP_PASSWORD_PATH, encoding="utf-8") as password_file:
             password = password_file.read().rstrip("\r\n")
         if connect is None:
-            import psycopg  # type: ignore[import-not-found]
+            import psycopg
 
             connect = psycopg.connect
-        with connect(  # type: ignore[union-attr]
+        with connect(  # type: ignore[attr-defined]
             host=TRIP_DATABASE_HOST,
             port=TRIP_DATABASE_PORT,
             dbname=TRIP_DATABASE_NAME,
