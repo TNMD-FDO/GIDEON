@@ -18,7 +18,7 @@ BRANCH_GATE_FUNCTION: Final[str] = "compose/open-webui/functions/branch_gate.py"
 # The fixes name the record's home: the runner says where it is, or how to keep one.
 _FIX: Final[str] = (
     "Read {record}; a leak is a guardrail gap in "
-    "gideon/guardrail.py, a positive answered "
+    "gideon/guardrail/, a positive answered "
     "without a decline is a model behaviour to record on the ticket, and a case "
     "expecting answered that reads declined is the model's own refusal of the "
     "question, a false refusal to record on the ticket."

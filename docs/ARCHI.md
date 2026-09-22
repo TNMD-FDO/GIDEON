@@ -18,7 +18,7 @@ GIDEON is a fully local legal AI system for federal defender offices: corpus-gro
 | [`archi/render-apply.md`](archi/render-apply.md) | render and apply: the rendered tree, secrets and their rotation, the release constants, the search rig's rendered files, the memory limits, the weights tree |
 | [`archi/api.md`](archi/api.md) | the mounted `gideon-api` service: its routes, image, source digest, import boundary, and tests |
 | [`archi/improvement.md`](archi/improvement.md) | the ADR-0049 improvement loops: the committed trigger registry, its loader and states, and the proposal and later loop readers |
-| [`archi/engine-frontend.md`](archi/engine-frontend.md) | the engine and the frontend's runtime: the engine service and the frontend's connection, the two model records, the frontend client and the managed turn, the branch gate, the guardrail's judge (`gideon/guardrail.py`) and the trip's row, `engine verify` and its sample |
+| [`archi/engine-frontend.md`](archi/engine-frontend.md) | the engine and the frontend's runtime: the engine service and the frontend's connection, the two model records, the frontend client and the managed turn, the branch gate, the guardrail's judge (`gideon/guardrail/`) and the trip's row, `engine verify` and its sample |
 | [`archi/backup-restore.md`](archi/backup-restore.md) | the backup set and its commands, restore, install, upgrade and rollback |
 | [`archi/stack.md`](archi/stack.md) | ingress and TLS, the registry mirror, observability and alerting, reconcile and the audit writer |
 | [`archi/tools.md`](archi/tools.md) | the pin watch and the research notes' pin bindings, the build tool, the acceptance harness and its full-restore form, the turn harness, its browser mode and service door, the evidence redaction, the gate, and the export boundary list; their interpreters and footprints |
@@ -57,7 +57,8 @@ GIDEON/
 │   ├── api/                 # the mounted gideon-api service package (§17.1; archi/api.md)
 │   ├── evaluation/          # the eval-set loader, the slice registry and its runners, the judge, the quiet window, the recorder, the reference format, the two `eval` commands (archi/eval.md; the runners and the judge archi/eval-slices.md)
 │   ├── improvement/         # the ADR-0049 improvement loops: trigger registry and later readers (archi/improvement.md)
-│   ├── guardrail.py         # the arithmetic guardrail's judge (§9's third set); the judge's one home since general-turn ticket 09
+│   ├── guardrail/           # the arithmetic guardrail's judge, five modules (§9's third set; the judge's one home since general-turn ticket 09)
+│   │   └── grammar.py · families.py · judge.py · writer.py · window.py
 │   └── host/                # bare-host subtree: stdlib + yaml ONLY (§9)
 │       ├── cli.py · sysio.py · report.py · stages.py   # the handlers, the injectable Host seam, the refusal and row shapes, run_stage (§8, §10, §14)
 │       ├── lock.py · images.py · models.py · egress.py · courts.py · site.py · site_schema.py · nogpu.py   # the committed-artifact loaders, the schema emitter, the no-GPU marker
@@ -160,7 +161,7 @@ One row per leaf, each command with its module:
 |---|---|
 | `host provision` (`host/provision.py`) · `preflight` (`host/preflight.py`) | [`archi/host.md`](archi/host.md) |
 | `render [--diff]` (`host/render/`) · `apply` (`host/apply.py`) · `secrets rotate <name>` (`host/rotate.py`) · `models pull` (`host/weights.py`) | [`archi/render-apply.md`](archi/render-apply.md) |
-| `engine verify` (`host/engine.py`) · the frontend client (`host/owui.py`, `host/owuiturn.py`) · the branch gate (`compose/open-webui/functions/`) and the guardrail's judge (`gideon/guardrail.py`) | [`archi/engine-frontend.md`](archi/engine-frontend.md) |
+| `engine verify` (`host/engine.py`) · the frontend client (`host/owui.py`, `host/owuiturn.py`) · the branch gate (`compose/open-webui/functions/`) and the guardrail's judge (`gideon/guardrail/`) | [`archi/engine-frontend.md`](archi/engine-frontend.md) |
 | `backup run` and `backup push` (`host/backup.py`) · `backup drill` (`host/drill.py`) · `restore` (`host/restore.py`) · `install` (`host/install.py`) · `upgrade <tag>` and `upgrade --rollback` (`host/upgrade.py`) | [`archi/backup-restore.md`](archi/backup-restore.md) |
 | `alerts test` (`host/alerts.py`) · `users reconcile [--now]` (`host/users.py`) · `tls reload` (`host/tls.py`) · `registry mirror [--to]` (`host/registry.py`) | [`archi/stack.md`](archi/stack.md) |
 | `eval run --slice <name> [--set <dir>] [--ranked <file>]` (`evaluation/command.py`) · `eval reference --run <id>` (`evaluation/reference_command.py`) | [`archi/eval.md`](archi/eval.md) |
@@ -176,7 +177,7 @@ The seam that makes §1.9 step 3 possible: `sudo python3 -m gideon host provisio
 
 1. **Entry chain** (`gideon/__init__.py`, `__main__.py`, `cli.py`): *module-level* imports resolve only to the stdlib, `yaml`, or the checked set itself. Function-level imports are exempt — the documented mechanism for non-host commands to grow heavy dependencies later.
 2. **Host subtree** (`gideon/host/**`): **every** import, at any depth, resolves to the stdlib, `yaml`, or the checked set. No exemptions.
-3. **Shared modules** (`gideon/guardrail.py`, which `host/engine.py` and General's service both call): the entry chain's rule — the trip writer's import of the Postgres driver sits inside the function no host path calls.
+3. **Shared modules** (`gideon/guardrail/`, which `host/engine.py` and General's service both call): the entry chain's rule — the trip writer's import of the Postgres driver sits inside the function no host path calls.
 
 CI runs this test as its own named step so a violation is legible in the Actions UI. Anything the host path and the rest of the product both need must itself live in the checked set.
 

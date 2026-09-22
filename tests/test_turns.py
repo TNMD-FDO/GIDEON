@@ -943,7 +943,7 @@ class TurnHarness(TestCase):
         self.assertIn("answered: ok — answered; block present; expect answered", stdout)
         self.assertIn("leak: refuse — leak (", stdout)
         self.assertIn("expect recorded", stdout)
-        self.assertIn("gideon/guardrail.py", stdout)
+        self.assertIn("gideon/guardrail/", stdout)
         self.assertEqual(frontend.chats, {})
 
     def test_an_errored_turn_is_cleaned_up_and_an_unidentified_one_is_left(self) -> None:

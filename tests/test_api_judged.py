@@ -44,7 +44,7 @@ BASE_ENVELOPE: dict[str, object] = {
     "fixture_envelope": "preserved",
 }
 
-_DISPATCH_PATCH = patch.object(guardrail, "dispatch_trip_row", lambda row: None)
+_DISPATCH_PATCH = patch.object(guardrail.writer, "dispatch_trip_row", lambda row: None)
 
 
 def setUpModule() -> None:
@@ -444,7 +444,7 @@ class ApiJudged(unittest.TestCase):
             _DISPATCH_PATCH.stop()
             try:
                 with (
-                    patch.object(guardrail, "TRIP_PASSWORD_PATH", str(password_path)),
+                    patch.object(guardrail.writer, "TRIP_PASSWORD_PATH", str(password_path)),
                     patch.dict(sys.modules, {guardrail.TRIP_DRIVER_MODULE: driver}),
                 ):
                     first_body = completion_body(
@@ -526,7 +526,7 @@ class ApiJudged(unittest.TestCase):
         for case, choices, judged_output in cases:
             with self.subTest(case=case):
                 dispatched: list[guardrail.TripRow] = []
-                with patch.object(guardrail, "dispatch_trip_row", dispatched.append):
+                with patch.object(guardrail.writer, "dispatch_trip_row", dispatched.append):
                     output, failure = judge_completion(
                         completion_body(choices),
                         state_for_prompt("Explain a fictitious rule.", source="eval"),

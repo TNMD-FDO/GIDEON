@@ -954,7 +954,7 @@ class CommandSecrets(unittest.TestCase):
             str(ROOT / "models.lock"): (ROOT / "models.lock").read_text(),
             "/etc/gideon/site.yaml": EXAMPLE.read_text(),
             str(ROOT / "gideon/api/__init__.py"): (ROOT / "gideon/api/__init__.py").read_text(),
-            str(ROOT / "gideon/guardrail.py"): (ROOT / "gideon/guardrail.py").read_text(),
+            str(ROOT / "gideon/guardrail/__init__.py"): (ROOT / "gideon/guardrail/__init__.py").read_text(),
         }
         for name in TEMPLATE_PATHS:
             files[str(ROOT / "compose" / name)] = (ROOT / "compose" / name).read_text()

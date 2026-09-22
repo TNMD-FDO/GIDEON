@@ -11,7 +11,7 @@ rules, checked against the AST so nothing has to be imported to be caught:
   heavier dependencies later without dragging them onto the bare-host path.
 - ``gideon/host/`` is self-contained: **every** import, at any depth,
   resolves to the standard library, ``yaml``, or the checked set itself.
-- Shared package modules (currently ``gideon/guardrail.py``) obey the
+- Shared package modules (currently ``gideon/guardrail/``) obey the
   module-level rule: their imports resolve to the standard library, ``yaml``,
   or the checked set itself.
 """
@@ -27,7 +27,16 @@ PACKAGE = REPO_ROOT / "gideon"
 ENTRY_CHAIN = frozenset(
     {PACKAGE / "__init__.py", PACKAGE / "__main__.py", PACKAGE / "cli.py"}
 )
-SHARED_MODULES = frozenset({PACKAGE / "guardrail.py"})
+SHARED_MODULES = frozenset(
+    {
+        PACKAGE / "guardrail" / "__init__.py",
+        PACKAGE / "guardrail" / "grammar.py",
+        PACKAGE / "guardrail" / "families.py",
+        PACKAGE / "guardrail" / "judge.py",
+        PACKAGE / "guardrail" / "writer.py",
+        PACKAGE / "guardrail" / "window.py",
+    }
+)
 ALLOWED_EXTERNAL = frozenset(sys.stdlib_module_names) | {"yaml"}
 
 

@@ -317,9 +317,9 @@ def trip_driver(connect: Callable[..., object]) -> Iterator[None]:
         threads: list[threading.Thread] = []
         body_failed = True
         with (
-            patch.object(guardrail, "TRIP_PASSWORD_PATH", str(password_path)),
+            patch.object(guardrail.writer, "TRIP_PASSWORD_PATH", str(password_path)),
             patch.dict(sys.modules, {guardrail.TRIP_DRIVER_MODULE: driver}),
-            patch.object(guardrail, "Thread", partial(RecordingThread, threads)),
+            patch.object(guardrail.writer, "Thread", partial(RecordingThread, threads)),
         ):
             try:
                 yield
@@ -389,13 +389,13 @@ def waiting_connect(
 def signal_dispatch(started: threading.Event) -> Iterator[None]:
     """Signal the synchronous dispatch before preserving its daemon behavior."""
 
-    original = guardrail.dispatch_trip_row
+    original = guardrail.writer.dispatch_trip_row
 
     def dispatch(row: guardrail.TripRow) -> None:
         started.set()
         original(row)
 
-    with patch.object(guardrail, "dispatch_trip_row", side_effect=dispatch):
+    with patch.object(guardrail.writer, "dispatch_trip_row", side_effect=dispatch):
         yield
 
 

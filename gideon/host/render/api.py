@@ -28,7 +28,7 @@ API_USER_ROLE_HEADER: Final[str] = "X-OpenWebUI-User-Role"
 API_SOURCE_HEADER: Final[str] = API_USER_EMAIL_HEADER
 API_MOUNT_TARGET: Final[str] = "/opt/gideon-src/gideon"
 API_WORKING_DIRECTORY: Final[str] = "/opt/gideon-src"
-API_SOURCES: Final[tuple[str, ...]] = ("gideon/api", "gideon/guardrail.py")
+API_SOURCES: Final[tuple[str, ...]] = ("gideon/api", "gideon/guardrail")
 
 
 def api_base_url() -> str:

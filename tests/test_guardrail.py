@@ -2,7 +2,7 @@
 
 The tests moved whole from the former arithmetic guardrail module (general-turn
 ticket 03); ``FILTER`` names the service module so each moved test reads as it
-did there.
+did there. The writer's patched seams target ``FILTER.writer``.
 """
 
 import contextlib
@@ -10,6 +10,7 @@ import io
 import sys
 import tempfile
 import threading
+import types
 import unittest
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -28,7 +29,7 @@ SEED_DIR = ROOT / "eval/seed/guardrails"
 DEADLINE_SEED_PATH = SEED_DIR / "deadline-trap.yaml"
 SENTENCE_CREDIT_SEED_PATH = SEED_DIR / "sentence-credit.yaml"
 
-_DISPATCH_PATCH = patch.object(FILTER, "dispatch_trip_row", lambda row: None)
+_DISPATCH_PATCH = patch.object(FILTER.writer, "dispatch_trip_row", lambda row: None)
 
 
 def setUpModule() -> None:
@@ -1319,6 +1320,24 @@ class TripWriter(unittest.TestCase):
         family = FILTER.FAMILIES[0]
         return FILTER.TripRow("branch", family.name, family.patterns[0].pattern_id, "user")
 
+    def test_package_public_names_are_the_module_union(self) -> None:
+        modules = tuple(
+            value
+            for value in vars(FILTER).values()
+            if isinstance(value, types.ModuleType)
+            and value.__package__ == FILTER.__name__
+        )
+        self.assertEqual(len(modules), 5)
+        expected = {
+            name
+            for module in modules
+            for name in vars(module)
+            if not name.startswith("_")
+        }
+        expected.update(module.__name__.rsplit(".", 1)[-1] for module in modules)
+        actual = {name for name in vars(FILTER) if not name.startswith("_")}
+        self.assertEqual(actual, expected)
+
     def assert_silent(self, operation: Callable[[], object]) -> None:
         stdout = io.StringIO()
         stderr = io.StringIO()
@@ -1359,7 +1378,7 @@ class TripWriter(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             password_path = Path(directory) / "password"
             password_path.write_text(password + "\n", encoding="utf-8")
-            with patch.object(FILTER, "TRIP_PASSWORD_PATH", str(password_path)):
+            with patch.object(FILTER.writer, "TRIP_PASSWORD_PATH", str(password_path)):
                 self.assert_silent(lambda: FILTER.write_trip_row(row, connect=connect))
         self.assertEqual(
             connect_arguments,
@@ -1394,9 +1413,9 @@ class TripWriter(unittest.TestCase):
             password_path = Path(directory) / "password"
             password_path.write_text("temporary-trip-password\n", encoding="utf-8")
             missing_path = Path(directory) / "missing"
-            with patch.object(FILTER, "TRIP_PASSWORD_PATH", str(missing_path)):
+            with patch.object(FILTER.writer, "TRIP_PASSWORD_PATH", str(missing_path)):
                 self.assert_silent(lambda: FILTER.write_trip_row(row, connect=lambda **kwargs: None))
-            with patch.object(FILTER, "TRIP_PASSWORD_PATH", str(password_path)), patch.dict(
+            with patch.object(FILTER.writer, "TRIP_PASSWORD_PATH", str(password_path)), patch.dict(
                 sys.modules, {FILTER.TRIP_DRIVER_MODULE: None}
             ):
                 self.assert_silent(lambda: FILTER.write_trip_row(row))
@@ -1404,7 +1423,7 @@ class TripWriter(unittest.TestCase):
             def raising_connect(**kwargs: object) -> object:
                 raise RuntimeError("connection refused")
 
-            with patch.object(FILTER, "TRIP_PASSWORD_PATH", str(password_path)):
+            with patch.object(FILTER.writer, "TRIP_PASSWORD_PATH", str(password_path)):
                 self.assert_silent(lambda: FILTER.write_trip_row(row, connect=raising_connect))
 
             class FailingConnection:
@@ -1417,7 +1436,7 @@ class TripWriter(unittest.TestCase):
                 def execute(self, *args: object) -> None:
                     raise RuntimeError("statement failed")
 
-            with patch.object(FILTER, "TRIP_PASSWORD_PATH", str(password_path)):
+            with patch.object(FILTER.writer, "TRIP_PASSWORD_PATH", str(password_path)):
                 self.assert_silent(
                     lambda: FILTER.write_trip_row(row, connect=lambda **kwargs: FailingConnection())
                 )
@@ -1425,10 +1444,10 @@ class TripWriter(unittest.TestCase):
     def test_record_trip_swallowing_and_daemon_dispatch(self) -> None:
         trip = FILTER.Trip(FILTER.FAMILIES[0].name, FILTER.FAMILIES[0].patterns[0].pattern_id)
         normalized_rows: list[Any] = []
-        with patch.object(FILTER, "dispatch_trip_row", side_effect=normalized_rows.append):
+        with patch.object(FILTER.writer, "dispatch_trip_row", side_effect=normalized_rows.append):
             FILTER.record_trip(trip, None, "not-a-source")
         self.assertEqual(normalized_rows, [FILTER.TripRow(FILTER.UNKNOWN_BRANCH, trip.family, trip.pattern_id, "user")])
-        with patch.object(FILTER, "dispatch_trip_row", side_effect=RuntimeError("dispatch failed")):
+        with patch.object(FILTER.writer, "dispatch_trip_row", side_effect=RuntimeError("dispatch failed")):
             self.assertIsNone(FILTER.record_trip(trip, None, "not-a-source"))
 
         received: list[Any] = []
@@ -1443,7 +1462,7 @@ class TripWriter(unittest.TestCase):
         row = FILTER.TripRow("branch", "deadline", "pattern", "user")
         _DISPATCH_PATCH.stop()
         try:
-            with patch.object(FILTER, "write_trip_row", side_effect=write):
+            with patch.object(FILTER.writer, "write_trip_row", side_effect=write):
                 self.assertIsNone(FILTER.dispatch_trip_row(row))
                 self.assertTrue(completed.wait(1))
         finally:
