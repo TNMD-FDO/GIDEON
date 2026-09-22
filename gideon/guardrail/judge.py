@@ -151,7 +151,9 @@ def judge_text(
     before it is skipped; a hit ending within the restatement look-ahead of
     the end is undecided and skipped.  The result is then the first trip, or
     else the release constraints of the exempt hits: the hit and its
-    look-ahead, which the stream never splits.
+    look-ahead, which the stream never splits.  Those constraints also include
+    rejected matches' exclusion tails and rate-form hits, so the stream never
+    splits a hit from the context that decided it.
     """
 
     constraints: list[Constraint] = []
@@ -167,20 +169,38 @@ def judge_text(
                     # A hit of the pattern's exclusion that covers the match's
                     # start — the lead or the count the match begins with —
                     # makes the match another family's (or nobody's): no
-                    # trip, no constraint.  A hit deeper inside the match (a
-                    # second clause the deadline's greedy gap swallowed)
-                    # rejects nothing, so the earlier family keeps its trip.
+                    # trip.  When the hit reaches past the match, prefix mode
+                    # holds the match to the hit's end, so no release boundary
+                    # falls inside the context that rejected it (general-turn
+                    # ticket 12).  A hit deeper inside the
+                    # match (a second clause the deadline's greedy gap
+                    # swallowed) rejects nothing, so the earlier family keeps
+                    # its trip.
                     exclusion_start = max(0, match.start() - EXCLUSION_REACH_CHARS)
                     exclusion_end = min(len(text), match.end() + EXCLUSION_REACH_CHARS)
-                    excluded = any(
-                        exclusion_start + exclusion.start()
-                        <= match.start()
-                        < exclusion_start + exclusion.end()
-                        for exclusion in pattern.exclusion.finditer(
-                            text[exclusion_start:exclusion_end]
-                        )
+                    exclusion_hit = next(
+                        (
+                            exclusion
+                            for exclusion in pattern.exclusion.finditer(
+                                text[exclusion_start:exclusion_end]
+                            )
+                            if exclusion_start + exclusion.start()
+                            <= match.start()
+                            < exclusion_start + exclusion.end()
+                        ),
+                        None,
                     )
-                    if excluded:
+                    if exclusion_hit is not None:
+                        if (
+                            prefix
+                            and exclusion_start + exclusion_hit.end() > match.end()
+                        ):
+                            constraints.append(
+                                Constraint(
+                                    match.start(),
+                                    exclusion_start + exclusion_hit.end(),
+                                )
+                            )
                         continue
                 if match.end() <= since:
                     continue
@@ -201,6 +221,13 @@ def judge_text(
                             match.start(), match.end() + RESTATEMENT_LOOKAHEAD_CHARS
                         )
                     )
+            # The rate form's hits never trip: each holds a count to the rate
+            # phrase that rejects it.  A hit whose phrase is still arriving
+            # lies past the release point by the lag less the look-ahead, and
+            # the next call's longer span joins it in the window's active set.
+            if prefix and pattern.rate_form is not None:
+                for hit in pattern.rate_form.finditer(text):
+                    constraints.append(Constraint(hit.start(), hit.end()))
     return tuple(constraints) if prefix and constraints else None
 
 

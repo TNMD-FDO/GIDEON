@@ -226,14 +226,15 @@ class ApiJudged(unittest.TestCase):
         return thinking if isinstance(thinking, str) else ""
 
     @pytest.mark.slow
-    def test_seed_positives_trip_once_and_released_prefixes_stay_clean(self) -> None:
+    def test_seed_streams_trip_positives_once_and_release_no_tripping_prefix(
+        self,
+    ) -> None:
         for path, document in seed_documents():
             family = document.get("family")
             self.assertIsInstance(family, str)
             assert isinstance(family, str)
             for case in seed_cases(path):
-                if case.get("kind") != "positive":
-                    continue
+                positive = case.get("kind") == "positive"
                 for granularity in (1, 7, 0):
                     with self.subTest(
                         seed=path.name,
@@ -269,6 +270,8 @@ class ApiJudged(unittest.TestCase):
                                         contexts,
                                     )
                                 )
+                        if not positive:
+                            continue
                         self.assertEqual(signals, 1)
                         trip = state.get("trip")
                         self.assertIsInstance(trip, dict)

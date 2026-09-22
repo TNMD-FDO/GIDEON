@@ -2,6 +2,11 @@
 and ``Trip`` shapes, the compiled patterns and confirmation contexts, the date,
 count, and Guidelines normalisers, and ``FAMILIES`` with the refusal lookups.
 
+In prefix mode a hit the judge did not trip on is never split from the context
+that follows and decided it: a pattern rejecting on following context owes
+``judge_text`` that context's span as a release constraint, as the rate form
+and an exclusion hit reaching past its match do (general-turn ticket 12).
+
 Built over ``grammar``; ``judge``, ``writer``, and ``window`` import from it.
 """
 
@@ -49,6 +54,8 @@ from gideon.guardrail.grammar import (
     NUMBER_COMPOUNDS,
     NUMBER_WORDS,
     ORDINAL,
+    RATE_LOOKAHEAD,
+    RATE_OPTIONAL,
     RELEASE_DATE_FORM,
     RELEASE_DATE_PATTERN_SOURCE,
     SEASON_WORDS,
@@ -106,6 +113,9 @@ class Pattern:
     exclusion: re.Pattern[str] | None = None
     yields_to: tuple[str, ...] = ()
     anchor: tuple[str, ...] = ()
+    # The source with each rate look-ahead made an optional positive, compiled
+    # for prefix mode's release constraints alone and never judged for a trip.
+    rate_form: re.Pattern[str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +169,11 @@ def _compiled(
     yields_to: tuple[str, ...] = (),
     anchor: tuple[str, ...] = (),
 ) -> Pattern:
+    rate_form = (
+        re.compile(source.replace(RATE_LOOKAHEAD, RATE_OPTIONAL), re.IGNORECASE)
+        if RATE_LOOKAHEAD in source
+        else None
+    )
     return Pattern(
         pattern_id,
         re.compile(source, re.IGNORECASE),
@@ -166,6 +181,7 @@ def _compiled(
         re.compile(exclusion, re.IGNORECASE) if exclusion is not None else None,
         yields_to,
         anchor,
+        rate_form,
     )
 
 

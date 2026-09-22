@@ -1045,8 +1045,136 @@ class SentenceCredit(unittest.TestCase):
                     self.assertIsInstance(result, FILTER.Trip)
                     assert isinstance(result, FILTER.Trip)
                     self.assertEqual((result.family, result.pattern_id), expected)
+                # Undecided in prefix mode, the handed-off count trips nothing;
+                # the deadline match its exclusion rejects is held to the hit.
                 prefix_result = FILTER.judge_text(answer, prefix=True)
-                self.assertIsNone(prefix_result)
+                self.assertIsInstance(prefix_result, tuple)
+                assert isinstance(prefix_result, tuple)
+                self.assertIn(0, [constraint.start for constraint in prefix_result])
+
+    def test_rate_forms_are_derived_for_the_two_sentence_credit_count_patterns(self) -> None:
+        rate_patterns = [
+            pattern
+            for family in FILTER.FAMILIES
+            for pattern in family.patterns
+            if pattern.rate_form is not None
+        ]
+        self.assertEqual(
+            [pattern.pattern_id for pattern in rate_patterns],
+            [
+                "sentence-credit/credit-count@1",
+                "sentence-credit/time-to-serve@1",
+            ],
+        )
+        for family in FILTER.FAMILIES:
+            for pattern in family.patterns:
+                if pattern.pattern_id not in {item.pattern_id for item in rate_patterns}:
+                    self.assertIsNone(pattern.rate_form)
+
+        case = seed_case(SENTENCE_CREDIT_SEED_PATH, "rate-03")
+        answer = str(case["answer"])
+        credit_count = FILTER.SENTENCE_CREDIT_CREDIT_COUNT_PATTERN
+        rate_hits = list(credit_count.rate_form.finditer(answer))
+        self.assertEqual(len(rate_hits), 1)
+        self.assertTrue(rate_hits[0].group().endswith("for every"))
+
+        bold_rate = "**10 days of credit** for each 30 days"
+        bold_hits = list(credit_count.rate_form.finditer(bold_rate))
+        self.assertEqual(len(bold_hits), 1)
+        self.assertTrue(bold_hits[0].group().endswith("for each"))
+
+        no_rate = "A visibly fictitious record says 12 days of credit."
+        self.assertEqual(
+            [(hit.span(), hit.group()) for hit in credit_count.rate_form.finditer(no_rate)],
+            [(hit.span(), hit.group()) for hit in credit_count.regex.finditer(no_rate)],
+        )
+
+    def test_rate_form_holds_a_prefix_to_its_rate_phrase(self) -> None:
+        case = seed_case(SENTENCE_CREDIT_SEED_PATH, "rate-03")
+        answer = str(case["answer"])
+        rate_pattern = FILTER.SENTENCE_CREDIT_CREDIT_COUNT_PATTERN
+        rate_hit = next(rate_pattern.rate_form.finditer(answer))
+        expected = FILTER.Constraint(*rate_hit.span())
+
+        self.assertIsNone(FILTER.judge_text(answer))
+        self.assertEqual(FILTER.judge_text(answer, prefix=True), (expected,))
+        self.assertIsNone(FILTER.judge_rendered((answer,), answer))
+        self.assertEqual(
+            FILTER.judge_rendered((answer,), answer, prefix=True),
+            (expected,),
+        )
+
+        state = FILTER.StreamState({}, frozenset())
+        stream = FILTER.StreamCheck(state, "content", judge=FILTER.judge_rendered)
+        released = ""
+        released_lengths: list[int] = []
+        for character in answer:
+            released += stream.append(character)
+            if not released:
+                continue
+            released_lengths.append(len(released))
+            self.assertIsNone(FILTER.judge_rendered((released,), released))
+            self.assertFalse(rate_hit.start() < len(released) < rate_hit.end())
+        self.assertTrue(any(length >= rate_hit.end() for length in released_lengths))
+
+    def test_exclusion_tail_is_held_but_a_cap_before_the_count_is_not(self) -> None:
+        prompt = "A visibly fictitious worksheet supplies 30 days."
+        supplied = {
+            family.name: family.figures(prompt) for family in FILTER.FAMILIES
+        }
+        contexts: frozenset[str] = frozenset()
+        answer = "The worksheet states that you have 30 days of good time credit left."
+
+        self.assertIsNone(FILTER.judge_text(answer, supplied, contexts))
+        self.assertIsNone(
+            FILTER.judge_rendered((answer,), answer, supplied, contexts)
+        )
+
+        deadline_pattern = FILTER.DAYS_REMAINING_PATTERN
+        deadline_match = next(deadline_pattern.regex.finditer(answer))
+        exclusion_start = max(
+            0, deadline_match.start() - FILTER.EXCLUSION_REACH_CHARS
+        )
+        exclusion_end = min(
+            len(answer), deadline_match.end() + FILTER.EXCLUSION_REACH_CHARS
+        )
+        exclusion_hit = next(
+            hit
+            for hit in deadline_pattern.exclusion.finditer(
+                answer[exclusion_start:exclusion_end]
+            )
+            if exclusion_start + hit.start()
+            <= deadline_match.start()
+            < exclusion_start + hit.end()
+        )
+        tail = FILTER.Constraint(
+            deadline_match.start(), exclusion_start + exclusion_hit.end()
+        )
+        prefix_result = FILTER.judge_text(answer, supplied, contexts, prefix=True)
+        self.assertIsInstance(prefix_result, tuple)
+        assert isinstance(prefix_result, tuple)
+        self.assertIn(tail, prefix_result)
+
+        cap_answer = "A visibly fictitious cap says up to 30 days of good time."
+        cap_pattern = FILTER.SENTENCE_CREDIT_CREDIT_COUNT_PATTERN
+        cap_match = next(cap_pattern.regex.finditer(cap_answer))
+        cap_start = max(0, cap_match.start() - FILTER.EXCLUSION_REACH_CHARS)
+        cap_end = min(len(cap_answer), cap_match.end() + FILTER.EXCLUSION_REACH_CHARS)
+        cap_hit = next(
+            hit
+            for hit in cap_pattern.exclusion.finditer(cap_answer[cap_start:cap_end])
+            if cap_start + hit.start() <= cap_match.start() < cap_start + hit.end()
+        )
+        self.assertLessEqual(cap_start + cap_hit.end(), cap_match.end())
+        cap_result = FILTER.judge_text(
+            cap_answer, supplied, contexts, prefix=True
+        )
+        self.assertIsInstance(cap_result, tuple)
+        assert isinstance(cap_result, tuple)
+        self.assertNotIn(
+            FILTER.Constraint(cap_match.start(), cap_start + cap_hit.end()),
+            cap_result,
+        )
 
 
     def test_constructions_exempt_supplied_figures_but_trip_unsupplied_ones(self) -> None:
@@ -1500,13 +1628,17 @@ class BoundsAndHygiene(unittest.TestCase):
         ]
         for family in FILTER.FAMILIES:
             for pattern in family.patterns:
-                source = pattern.regex.pattern
-                self.assertNotRegex(source, r"(?:\*|\+|\{\d+,\})")
-                if pattern.exclusion is not None:
-                    self.assertNotRegex(pattern.exclusion.pattern, r"(?:\*|\+|\{\d+,\})")
-                for text in adversarial:
-                    for match in pattern.regex.finditer(text):
-                        self.assertLessEqual(len(match.group(0)), FILTER.MAX_MATCH_CHARS, (pattern.pattern_id, text[:40]))
+                for regex in (pattern.regex, pattern.rate_form, pattern.exclusion):
+                    if regex is None:
+                        continue
+                    self.assertNotRegex(regex.pattern, r"(?:\*|\+|\{\d+,\})")
+                    for text in adversarial:
+                        for match in regex.finditer(text):
+                            self.assertLessEqual(
+                                len(match.group(0)),
+                                FILTER.MAX_MATCH_CHARS,
+                                (pattern.pattern_id, text[:40]),
+                            )
         # The two maximal texts the resolver admits — the longest pair (a
         # prefixed level with "of", the spelled-out category with "of"), the
         # gaps at their bounds, the longest link, and the longest range — one
@@ -1562,8 +1694,7 @@ class BoundsAndHygiene(unittest.TestCase):
             "54 days per year and 54 days/year are rate examples.",
         )
         for pattern in FILTER.SENTENCE_CREDIT_FAMILY.patterns:
-            self.assertNotRegex(pattern.regex.pattern, r"(?:\*|\+|\{\d+,\})")
-            for regex in (pattern.regex, pattern.exclusion):
+            for regex in (pattern.regex, pattern.rate_form, pattern.exclusion):
                 if regex is not None:
                     self.assertNotRegex(regex.pattern, r"(?:\*|\+|\{\d+,\})")
             for text in sentence_adversarial:

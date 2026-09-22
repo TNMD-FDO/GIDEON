@@ -686,9 +686,11 @@ COUNT_UNITS = ("days", "day", "months", "month", "years", "year")
 # Underscore emphasis is a word character to the count's boundaries and is
 # not admitted — a recorded residual, never a shape this model writes.
 MARK = r"\x2a{0,2}"
-RATE_LOOKAHEAD = (
-    rf"(?!{MARK}\s{{0,3}}{MARK}(?:{_phrases(RATE_WORDS)})\b|{MARK}\s{{0,3}}/)"
-)
+# The optional positive is the look-ahead's rate-form twin: prefix mode uses it
+# to keep a count with the following rate phrase that decided not to trip.
+RATE_PHRASE = rf"{MARK}\s{{0,3}}{MARK}(?:{_phrases(RATE_WORDS)})\b|{MARK}\s{{0,3}}/"
+RATE_LOOKAHEAD = rf"(?!{RATE_PHRASE})"
+RATE_OPTIONAL = rf"(?:{RATE_PHRASE})?"
 DAY_UNITS = ("days", "day")
 
 
