@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.2.35](docs/release-notes/v0.2.35.md) — 2026-09-22 — the trigger registry (improvement 01)
 - [v0.2.34](docs/release-notes/v0.2.34.md) — 2026-09-22 — the changelog leaves the export (slice-1 87)
 - [v0.2.33](docs/release-notes/v0.2.33.md) — 2026-09-22 — no trip writer outlives its fixture (general-turn 14)
 - [v0.2.32](docs/release-notes/v0.2.32.md) — 2026-09-22 — pin watch reads a dash-joined tag suffix (GT 13)

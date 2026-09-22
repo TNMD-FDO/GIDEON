@@ -1,0 +1,34 @@
+# GIDEON's committed trigger registry. A state moves only by pull request
+# (ADR-0049): entries are watching, acted, or retired. Conditions use above,
+# at-least, or below, and `runs` counts releases the clause must hold in a row.
+# Thresholds are starting values; the format and its measures live in
+# docs/archi/improvement.md.
+version: 1
+
+triggers:
+  - id: judge-fallback
+    reopens: §18.4
+    register: M18
+    measure: unavailable
+    state: watching
+    condition:
+      figure: panel_disagreement_pct
+      op: above
+      value: 20
+      runs: 2
+    says: The synthesis panel disagrees with the judge above 20 % on two releases running.
+
+  - id: learned-components
+    reopens: §12.3
+    register: E20
+    measure: eval-set
+    state: watching
+    condition:
+      all:
+        - figure: judged_queries
+          op: at-least
+          value: 50
+        - figure: held_out_ids
+          op: at-least
+          value: 1
+    says: Learned or weighted fusion and the provisional reranker depths under §6.3 may be proposed when the judgment and held-out conditions hold, opening the effort under ADR-0049 rather than building it automatically.
