@@ -6,7 +6,7 @@ learn the created chat id (§2), the stored history contains the outlet's
 edits (§3), deletion reports a boolean (§4), omitting the background-task
 key avoids follow-up work (§5.1), and the session token is not endpoint-
 allowlisted (§7.2) in ``docs/research/owui-chat-routes-machine-caller.md``.
-Its three callers are ``tools.turns.run.ApiTurnDriver``, ``engine verify``'s
+Its three callers are ``gideon.evaluation.turns.run.ApiTurnDriver``, ``engine verify``'s
 frontend case, and ``tests/contract/search_sentinel.py``. Each identifies its
 own turn's chat through ``find_turn_chat`` — the one chat, among those new
 since the turn, whose stored ``history.messages`` holds both minted ids — and

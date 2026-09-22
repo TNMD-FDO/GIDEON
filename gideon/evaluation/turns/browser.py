@@ -8,8 +8,8 @@ from pathlib import Path
 from typing import Protocol
 from urllib.parse import unquote, urlsplit
 
+from gideon.evaluation.turns.session import LOGS_FIX
 from gideon.host.report import Problem
-from tools.turns.session import LOGS_FIX
 
 type Frame = Mapping[str, object]
 

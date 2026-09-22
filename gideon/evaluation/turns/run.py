@@ -12,14 +12,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final, Protocol, cast
 
+from gideon.evaluation.turns import browser, chromium, classify, door, session
+from gideon.evaluation.turns.cases import CASE_KINDS, Case
 from gideon.host import engine, owui, owuiturn
 from gideon.host.owui import Client
 from gideon.host.render.owui import EVAL_IDENTITY, GENERAL_PRESET_ID
 from gideon.host.report import Problem, StageResult, print_stage
 from gideon.host.sysio import Host, PathLike, RealHost
-from tools.ownership import restore_ownership, sudo_ids
-from tools.turns import browser, chromium, classify, door, session
-from tools.turns.cases import CASE_KINDS, Case
 
 # A managed turn waits for the frontend to finish the engine, outlet, and
 # persistence; the starting bound covers the observed longest turn.
@@ -2053,10 +2052,10 @@ def run(
     now: Callable[[], datetime],
     monotonic: Callable[[], float] = time.monotonic,
     host: Host | None = None,
-    checkout: Path | None = None,
     rendered_dir: PathLike = _RENDERED_DIR,
     instruction_text: str | None = None,
     browser_setup: BrowserSetup | None = None,
+    hand_back: Callable[[Host, Path], None] | None = None,
 ) -> int:
     """Sign in, run every repeated case, record it, and hand ownership back.
 
@@ -2071,7 +2070,6 @@ def run(
         raise ValueError("a probe_inlet run needs the inlet gates' texts")
 
     io = host or RealHost()
-    root = checkout or Path.cwd()
     output = spec.out
     output_ready = False
     code = 1
@@ -2170,8 +2168,6 @@ def run(
                         )
                     )
         finally:
-            if output_ready and output is not None:
-                owner = sudo_ids()
-                if owner is not None:
-                    restore_ownership(io, output, owner, checkout=root)
+            if output_ready and output is not None and hand_back is not None:
+                hand_back(io, output)
     return code

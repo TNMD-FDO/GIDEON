@@ -10,6 +10,17 @@ from typing import Final
 from zoneinfo import ZoneInfo
 
 from gideon import guardrail
+from gideon.evaluation import window
+from gideon.evaluation.turns import browser, cases, chromium, classify
+from gideon.evaluation.turns.run import (
+    BROWSER_ENGINE_CALLS_PER_TURN,
+    SMOKE_TURNS,
+    TURN_TIMEOUT_SECONDS,
+    BrowserSetup,
+    RunSpec,
+    new_sentinel,
+    run,
+)
 from gideon.host import models, nogpu, owui, secrets, site, tls
 from gideon.host.render import command as render_command
 from gideon.host.render.owui import (
@@ -19,16 +30,7 @@ from gideon.host.render.owui import (
 )
 from gideon.host.report import Problem, StageResult, print_stage
 from gideon.host.sysio import Host, PathLike, RealHost
-from tools.turns import browser, cases, chromium, classify
-from tools.turns.run import (
-    BROWSER_ENGINE_CALLS_PER_TURN,
-    SMOKE_TURNS,
-    TURN_TIMEOUT_SECONDS,
-    BrowserSetup,
-    RunSpec,
-    new_sentinel,
-    run,
-)
+from tools.ownership import restore_ownership, sudo_ids
 
 DEFAULT_SITE_PATH: Final[Path] = Path("/etc/gideon/site.yaml")
 _RENDERED_DIR: Final[str] = "/etc/gideon/rendered"
@@ -149,21 +151,6 @@ def _parser() -> argparse.ArgumentParser:
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
-
-
-def _window_judgement(clock: datetime, timezone_name: str) -> tuple[str, bool]:
-    """Return the quiet-window report and whether the clock is office hours."""
-
-    if clock.tzinfo is None or clock.utcoffset() is None:
-        clock = clock.replace(tzinfo=UTC)
-    local = clock.astimezone(ZoneInfo(timezone_name))
-    weekday = local.strftime("%A")
-    clock_text = local.strftime("%H:%M")
-    if weekday in {"Saturday", "Sunday"}:
-        return f"weekend ({weekday})", False
-    if local.hour >= 19 or local.hour < 6:
-        return f"inside the quiet window ({clock_text} {timezone_name}, {weekday})", False
-    return f"office hours ({clock_text} {timezone_name}, {weekday})", True
 
 
 def _out_refusal(io: Host, output: Path) -> int | None:
@@ -554,7 +541,8 @@ def main(
     )
     current = selected_now()
     timezone_name = loaded_site.config.office.timezone
-    window_judgement, office_hours = _window_judgement(current, timezone_name)
+    judgement = window.window_judgement(current, timezone_name)
+    office_hours = not judgement.inside
     if engine_calls > SMOKE_TURNS and office_hours and not options.force:
         local_time = current.astimezone(ZoneInfo(timezone_name))
         detail = (
@@ -572,7 +560,7 @@ def main(
             )
         )
         return 1
-    window_detail = window_judgement
+    window_detail = judgement.description
     if options.force and office_hours:
         window_detail += "; window overridden by --force"
     print_stage(
@@ -688,6 +676,12 @@ def main(
         instruction=not options.no_instruction,
     )
     selected_now = now or _utc_now
+
+    def hand_back(host: Host, output: Path) -> None:
+        owner = sudo_ids()
+        if owner is not None:
+            restore_ownership(host, output, owner, checkout=root)
+
     return run(
         spec,
         cases=case_values,
@@ -698,11 +692,11 @@ def main(
         now=selected_now,
         monotonic=monotonic,
         host=io,
-        checkout=root,
         instruction_text=instruction,
         origin=loaded_cases.origin,
         window=window_detail,
         browser_setup=browser_setup,
+        hand_back=hand_back,
     )
 
 

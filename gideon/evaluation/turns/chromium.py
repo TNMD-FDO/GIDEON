@@ -12,10 +12,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final, Literal
 from urllib.parse import urlsplit
 
+from gideon.evaluation.turns.browser import Page, PageDrain, PageError
 from gideon.host import tls
 from gideon.host.report import Problem
 from gideon.host.sysio import Host
-from tools.turns.browser import Page, PageDrain, PageError
 
 if TYPE_CHECKING:
     import playwright.sync_api

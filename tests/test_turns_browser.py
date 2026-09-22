@@ -17,11 +17,12 @@ from unittest.mock import patch
 from urllib.parse import unquote
 
 from gideon import guardrail
+from gideon.evaluation.turns import browser, chromium, classify, run
 from gideon.host import models, site, tls
 from gideon.host.owui import Client, OwuiError, Response
 from gideon.host.report import Problem
 from gideon.host.sysio import Command, PathLike
-from tools.turns import browser, chromium, classify, cli, run
+from tools.turns import cli
 
 ROOT = Path(__file__).resolve().parents[1]
 SITE_PATH = Path("/etc/gideon/site.yaml")
@@ -294,29 +295,33 @@ class BrowserSurface(TestCase):
         self.assertIsNone(chromium.browser_problem(host, chromium.BROWSERS_DIR))
 
     def test_turn_modules_keep_playwright_behind_the_browser_boundary(self) -> None:
-        turn_root = ROOT / "tools/turns"
-        for path in sorted(turn_root.glob("*.py")):
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            if path.name != "chromium.py":
-                for node in self._module_imports(tree):
-                    for target in self._import_targets(node):
-                        self.assertIn(
-                            target.partition(".")[0],
-                            ALLOWED_EXTERNAL | {"gideon", "tools"},
-                            f"{path}:{node.lineno} imports {target}",
-                        )
-                continue
-            for import_node in ast.walk(tree):
-                if not isinstance(import_node, (ast.Import, ast.ImportFrom)):
+        turn_roots = (
+            (ROOT / "gideon/evaluation/turns", ALLOWED_EXTERNAL | {"gideon"}),
+            (ROOT / "tools/turns", ALLOWED_EXTERNAL | {"gideon", "tools"}),
+        )
+        for turn_root, allowed_external in turn_roots:
+            for path in sorted(turn_root.glob("*.py")):
+                tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+                if path.name != "chromium.py":
+                    for node in self._module_imports(tree):
+                        for target in self._import_targets(node):
+                            self.assertIn(
+                                target.partition(".")[0],
+                                allowed_external,
+                                f"{path}:{node.lineno} imports {target}",
+                            )
                     continue
-                targets = self._import_targets(import_node)
-                if not any(target.partition(".")[0] == "playwright" for target in targets):
-                    continue
-                self.assertTrue(
-                    self._inside_function(tree, import_node)
-                    or self._inside_type_checking(tree, import_node),
-                    f"{path}:{import_node.lineno} imports Playwright outside its boundary",
-                )
+                for import_node in ast.walk(tree):
+                    if not isinstance(import_node, (ast.Import, ast.ImportFrom)):
+                        continue
+                    targets = self._import_targets(import_node)
+                    if not any(target.partition(".")[0] == "playwright" for target in targets):
+                        continue
+                    self.assertTrue(
+                        self._inside_function(tree, import_node)
+                        or self._inside_type_checking(tree, import_node),
+                        f"{path}:{import_node.lineno} imports Playwright outside its boundary",
+                    )
 
     @staticmethod
     def _import_targets(node: ast.stmt) -> list[str]:
@@ -1024,7 +1029,7 @@ class BrowserTurnIntegration(TestCase):
         frontend = FakeFrontend()
         page = FakePage(frontend, drains=self._drains())
         with patch(
-            "tools.turns.classify._load_function",
+            "gideon.evaluation.turns.classify._load_function",
             side_effect=RuntimeError("private gate text"),
         ):
             code, stdout, _stderr, _frontend, _host = self._run(
@@ -1088,7 +1093,7 @@ class BrowserTurnIntegration(TestCase):
         frontend = FakeFrontend()
         page = FakePage(frontend, drains=self._drains())
         with patch(
-            "tools.turns.run.session.probe_bare",
+            "gideon.evaluation.turns.run.session.probe_bare",
             side_effect=RuntimeError("probe broke"),
         ):
             code, stdout, _stderr, _frontend, _host = self._run(
@@ -1180,7 +1185,9 @@ class BrowserTurnIntegration(TestCase):
                 raise ImportError("broken gate")
             return load_function(path, name)
 
-        with patch("tools.turns.classify._load_function", side_effect=broken_gate):
+        with patch(
+            "gideon.evaluation.turns.classify._load_function", side_effect=broken_gate
+        ):
             code, stdout, _stderr, _frontend, _host = self._run(
                 page=page, args=["--probe-inlet"]
             )
@@ -1568,7 +1575,7 @@ class BrowserTurnIntegration(TestCase):
                 ),
             ),
         )
-        with patch("tools.turns.run.STREAM_LEAK_FAILS", False):
+        with patch("gideon.evaluation.turns.run.STREAM_LEAK_FAILS", False):
             code, stdout, _stderr, _frontend, _host = self._run(page=page, args=[])
         self.assertEqual(code, 0)
         self.assertIn("replaced at 0.5s", stdout)

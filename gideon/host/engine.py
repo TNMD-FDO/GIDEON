@@ -85,7 +85,7 @@ STRUCTURED_TIMEOUT_SECONDS: Final[int] = 180
 # exempt: acceptance bounds (ADR-0017).  The reasoning and JSON answer reserve.
 STRUCTURED_MAX_TOKENS: Final[int] = 2048
 # exempt: acceptance bounds (ADR-0017). The starting value is
-# tools/turns/run.py's TURN_TIMEOUT_SECONDS; ticket 52 measured 245 s of
+# gideon.evaluation.turns.run's TURN_TIMEOUT_SECONDS; ticket 52 measured 245 s of
 # thinking on one positive.
 FRONTEND_TURN_TIMEOUT_SECONDS: Final[int] = 600
 FRONTEND_ROW_PREFIX: Final[str] = "frontend-"

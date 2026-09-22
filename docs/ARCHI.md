@@ -35,7 +35,7 @@ The Compose project holds the services `render/compose.service_names` enumerates
 |---|---|---|
 | Python | ≥ 3.12 floor (Ubuntu 24.04 fallback, spec §1.2); the box runs the LTS `host.lock` names, whose Python is **3.14** | `pyproject.toml` `requires-python`; CI runs 3.14 |
 | Build backend | setuptools ≥ 77 | `pyproject.toml` |
-| ruff, mypy, pytest, PyYAML, Playwright — the dev and CI toolchain, never the product's | exact pins; ruff and mypy at the 3.12 floor with `check_untyped_defs` (`pyproject.toml`); PyYAML stands in for the box's `python3-yaml`; Playwright bundles the Chromium build `tools/turns/chromium.py` names — the headless shell alone on the box, the package in CI for mypy only and in the dev venv, never the box's system Python; a bump is Dependabot's proposal (§6), never the pin watch's | `requirements-dev.txt`; the two copies (`pin-watch.yml`'s install line, the Playwright constant) held equal by `tests/test_toolchain_pins.py` |
+| ruff, mypy, pytest, PyYAML, Playwright — the dev and CI toolchain, never the product's | exact pins; ruff and mypy at the 3.12 floor with `check_untyped_defs` (`pyproject.toml`); PyYAML stands in for the box's `python3-yaml`; Playwright bundles the Chromium build `gideon/evaluation/turns/chromium.py` names — the headless shell alone on the box, the package in CI for mypy only and in the dev venv, never the box's system Python; a bump is Dependabot's proposal (§6), never the pin watch's | `requirements-dev.txt`; the two copies (`pin-watch.yml`'s install line, the Playwright constant) held equal by `tests/test_toolchain_pins.py` |
 
 **Built images**: the two `images/<name>/Dockerfile` files are argument-driven (`ARG BASE` before `FROM`, one `ARG` per build input) and embed no version; the values live in `images.lock`'s built pins ([`archi/host.md`](archi/host.md)) and reach the build from `python3 -m tools.imagebuild` on the box.
 
@@ -55,7 +55,7 @@ GIDEON/
 │   ├── cli.py               # build_parser() + main(): the whole §20.2 surface
 │   ├── extraction/          # the exact-object contract, the extraction grammar, its measure — stdlib only (archi/eval-slices.md)
 │   ├── api/                 # the mounted gideon-api service package (§17.1; archi/api.md)
-│   ├── evaluation/          # the eval-set loader, the slice registry and its runners, the judge, the quiet window, the recorder, the reference format, the two `eval` commands (archi/eval.md; the runners and the judge archi/eval-slices.md)
+│   ├── evaluation/          # the eval-set loader, the slice registry and its runners, the judge, the quiet window, the recorder, the reference format, the two `eval` commands, and `turns/` — the turn harness's drivers, classifier, cases reader, browser seam and launcher, and door (archi/eval.md; the runners and the judge archi/eval-slices.md)
 │   ├── improvement/         # the ADR-0049 improvement loops: trigger registry and later readers (archi/improvement.md)
 │   ├── guardrail/           # the arithmetic guardrail's judge, five modules (§9's third set; the judge's one home since general-turn ticket 09)
 │   │   └── grammar.py · families.py · judge.py · writer.py · window.py
@@ -76,8 +76,8 @@ GIDEON/
 │   ├── fixtures/            # site/ (refusals); render/<example|second-office|no-gpu>/ (byte-stable renders); host/ (the recorded box, the runner's settings); pinwatch/ (the recorded hub and PyPI replies); courts/ (a fictitious CSV and hand table, malformed maps, lockfiles)
 │   ├── regenerate_render_fixtures.py   # rewrites fixtures/render deliberately (the drift test names it)
 │   └── contract/            # self-hosted-only modules, no test_ prefix, each with its throwaway stack's files beside it (archi/tests.md)
-├── tools/                   # repository tooling, never the product (not in the release image); stdlib + gideon.host, gideon.guardrail, gideon.api.stamp only (archi/tools.md)
-│   ├── pinwatch/ · imagebuild/ · acceptance/ · turns/ · redact/ · courtmap/   # the pin watch (hosted CI); the build tool, the clean-VM harness, the turn harness's three drivers, the evidence redaction (the box); the court map generator (by hand)
+├── tools/                   # repository tooling, never the product (not in the release image); stdlib + gideon.host, gideon.guardrail, gideon.api.stamp only, and gideon.evaluation for the turn harness (archi/tools.md)
+│   ├── pinwatch/ · imagebuild/ · acceptance/ · turns/ · redact/ · courtmap/   # the pin watch (hosted CI); the build tool, the clean-VM harness, the turn harness's entry, the evidence redaction (the box); the court map generator (by hand)
 │   ├── ownership.py         # the sudo hand-back (--out and the bytecode caches) the two harnesses share
 │   └── gate.py · environment.py · cycles.py · tracker.py · judgments/ · signoffs/ · variants/ · archi.py · exportboundary.py   # the gate, its pins comparison, the cycles record, the board, the judgment, sign-off, and variant kits, the architecture check, the export list — the dev venv
 ├── bin/                     # the lifecycle scripts — the cycle launcher, the guard's git as one plain command each, the public export; excluded from the export

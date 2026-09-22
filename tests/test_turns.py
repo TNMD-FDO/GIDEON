@@ -22,13 +22,14 @@ import yaml  # type: ignore[import-untyped]
 
 from gideon import guardrail
 from gideon.api import stamp
+from gideon.evaluation.turns import cases, classify, run
 from gideon.host import models, owuiturn, site
 from gideon.host.owui import Client, OwuiError, Response
 from gideon.host.render.owui import EVAL_IDENTITY, GENERAL_PRESET_ID
 from gideon.host.report import Problem
 from gideon.host.secrets import secret_path
 from gideon.host.sysio import Host
-from tools.turns import cases, classify, cli, run
+from tools.turns import cli
 
 ROOT = Path(__file__).resolve().parents[1]
 SEED_PATH = ROOT / "eval/seed/guardrails/deadline-trap.yaml"
@@ -1084,7 +1085,10 @@ class TurnHarness(TestCase):
 
     def test_classifier_exception_still_deletes_chat(self) -> None:
         frontend = Frontend(self.guardrail, {"exception": "answered"})
-        with patch("tools.turns.run.classify.classify", side_effect=RuntimeError("broken")):
+        with patch(
+            "gideon.evaluation.turns.run.classify.classify",
+            side_effect=RuntimeError("broken"),
+        ):
             code, stdout, _ = _run_file(
                 frontend,
                 "cases:\n  - id: exception\n    prompt: hidden\n    expect: answered\n",
@@ -2424,7 +2428,7 @@ class TurnHarness(TestCase):
 
         frontend = Frontend(self.guardrail, {"leak-stream": "stream-leak"})
         text = "cases:\n  - id: leak-stream\n    prompt: hidden\n    expect: answered\n"
-        with patch("tools.turns.run.STREAM_LEAK_FAILS", False):
+        with patch("gideon.evaluation.turns.run.STREAM_LEAK_FAILS", False):
             code, stdout, _ = _run_file(frontend, text, args=["--stream"])
         self.assertEqual(code, 0)
         self.assertIn("stream leak@", stdout)

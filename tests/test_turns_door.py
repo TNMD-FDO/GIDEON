@@ -24,6 +24,9 @@ from urllib.parse import quote
 import yaml  # type: ignore[import-untyped]
 
 from gideon import guardrail
+from gideon.evaluation.turns import classify, door, doorclient, session
+from gideon.evaluation.turns import run as run_module
+from gideon.evaluation.turns.cases import Case
 from gideon.host import models, site
 from gideon.host.render.api import (
     API_SECRET_NAME,
@@ -34,9 +37,7 @@ from gideon.host.render.api import (
 from gideon.host.render.owui import EVAL_IDENTITY
 from gideon.host.report import Problem
 from gideon.host.sysio import Command, PathLike
-from tools.turns import classify, cli, door, doorclient, session
-from tools.turns import run as run_module
-from tools.turns.cases import Case
+from tools.turns import cli
 
 ROOT = Path(__file__).resolve().parents[1]
 SITE_PATH = Path("/etc/gideon/site.yaml")
@@ -1006,6 +1007,6 @@ class ImportBoundary(unittest.TestCase):
         return targets - set(sys.stdlib_module_names)
 
     def test_client_has_no_external_import_and_planted_violation_is_caught(self) -> None:
-        source = (ROOT / "tools/turns/doorclient.py").read_text(encoding="utf-8")
+        source = (ROOT / "gideon/evaluation/turns/doorclient.py").read_text(encoding="utf-8")
         self.assertEqual(self.external_imports(source), set())
         self.assertEqual(self.external_imports("import yaml\n"), {"yaml"})

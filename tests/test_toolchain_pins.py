@@ -18,9 +18,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from gideon.evaluation.turns import chromium
 from gideon.host.images import BuiltImagePin, load_image_lock
 from tools.exportboundary import in_export_tree
-from tools.turns import chromium
 
 ROOT = Path(__file__).resolve().parent.parent
 REQUIREMENTS = Path("requirements-dev.txt")
@@ -85,7 +85,7 @@ class ToolchainCopies(unittest.TestCase):
             requirement(ROOT, "playwright"),
             chromium.PLAYWRIGHT_VERSION,
             "Fix: move requirements-dev.txt's playwright line and "
-            "tools/turns/chromium.py's PLAYWRIGHT_VERSION together",
+            "gideon/evaluation/turns/chromium.py's PLAYWRIGHT_VERSION together",
         )
 
     def test_readers_take_their_values_from_the_tree(self) -> None:

@@ -901,6 +901,12 @@ class Imports(unittest.TestCase):
                     continue
                 for name in names:
                     top = name.split(".", 1)[0]
+                    if (
+                        path == EVALUATION / "turns/chromium.py"
+                        and top == "playwright"
+                    ):
+                        # test_turns_browser.py owns the function-or-TYPE_CHECKING boundary.
+                        continue
                     self.assertTrue(
                         top in standard_library or top in {"yaml", "gideon"},
                         f"{path}: non-standard import {name}",

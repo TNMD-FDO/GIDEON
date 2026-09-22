@@ -13,11 +13,12 @@ are:
 * ``failure``: the client's exception class, without request or response text.
 
 This module parses both reply forms.  A stream ``data`` line is decoded into
-ordered ``(kind, text)`` deltas by :func:`tools.turns.session.parse_stream_payload`;
+ordered ``(kind, text)`` deltas by
+:func:`gideon.evaluation.turns.session.parse_stream_payload`;
 the enclosing ``DoorEvent`` keeps those deltas with their seconds-from-request
 start offset, and the ``end`` line keeps the ``[DONE]`` flag.  A successful
 reply is converted to the stored assistant-message shape consumed by
-:mod:`tools.turns.classify`.
+:mod:`gideon.evaluation.turns.classify`.
 """
 
 from __future__ import annotations
@@ -32,6 +33,8 @@ from pathlib import Path
 from typing import Final
 from urllib.parse import quote
 
+from gideon.evaluation.turns import session
+from gideon.evaluation.turns.doorclient import KEY_FILE_EXIT_CODE
 from gideon.host import stack
 from gideon.host.engine import RUN_TIMEOUT_MARGIN_SECONDS
 from gideon.host.render.api import (
@@ -45,8 +48,6 @@ from gideon.host.render.api import (
 from gideon.host.render.owui import EVAL_IDENTITY
 from gideon.host.report import Problem
 from gideon.host.sysio import Host, PathLike
-from tools.turns import session
-from tools.turns.doorclient import KEY_FILE_EXIT_CODE
 
 _CLIENT_INTERPRETER: Final[str] = "python3"
 _COMPLETIONS_PATH: Final[str] = "/chat/completions"

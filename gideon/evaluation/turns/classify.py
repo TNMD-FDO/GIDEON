@@ -10,8 +10,8 @@ from types import ModuleType
 from typing import Any, Final
 
 from gideon.api import stamp
-from tools.turns import browser
-from tools.turns.cases import Case
+from gideon.evaluation.turns import browser
+from gideon.evaluation.turns.cases import Case
 
 # The branch gate's Function keeps the branch refusal (general-turn ticket 04).
 BRANCH_GATE_FUNCTION: Final[str] = "compose/open-webui/functions/branch_gate.py"
