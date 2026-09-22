@@ -11,6 +11,7 @@ import types
 import unittest
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any, Literal, cast
 from unittest.mock import patch
@@ -43,6 +44,10 @@ _ASGI_WAIT_SECONDS = 1.0
 # The application task has already finished wherever this bound is used, so a
 # message that has not arrived by now never will.
 _SILENCE_SECONDS = 0.05
+# This fake connect must outlast ASGISession's per-message and application
+# bounds. It is finite because a synchronous dispatch freezes the event loop
+# until the fake connect returns, so no other timeout can end that wait.
+_WRITER_BLOCK_SECONDS = _ASGI_WAIT_SECONDS * 10
 _STREAM_ENVELOPE: dict[str, object] = {
     "id": "fixture-stream",
     "object": "chat.completion.chunk",
@@ -271,20 +276,63 @@ class TripConnection:
         self.row_written.set()
 
 
+class RecordingThread(threading.Thread):
+    """Record every writer thread started by one driver's patched seam."""
+
+    def __init__(
+        self,
+        threads: list[threading.Thread],
+        group: None = None,
+        target: Callable[..., object] | None = None,
+        name: str | None = None,
+        args: tuple[object, ...] = (),
+        kwargs: Mapping[str, object] | None = None,
+        *,
+        daemon: bool | None = None,
+    ) -> None:
+        self.threads = threads
+        super().__init__(
+            group=group,
+            target=target,
+            name=name,
+            args=args,
+            kwargs=kwargs,
+            daemon=daemon,
+        )
+
+    def start(self) -> None:
+        self.threads.append(self)
+        super().start()
+
+
 @contextlib.contextmanager
 def trip_driver(connect: Callable[..., object]) -> Iterator[None]:
-    """Install the writer's injected driver and temporary password file."""
+    """Install the driver and password file without outliving their patches."""
 
     with tempfile.TemporaryDirectory() as directory:
         password_path = Path(directory) / "password"
         password_path.write_text("fixture-trip-password\n", encoding="utf-8")
         driver = types.ModuleType(guardrail.TRIP_DRIVER_MODULE)
         driver.connect = connect  # type: ignore[attr-defined]
+        threads: list[threading.Thread] = []
+        body_failed = True
         with (
             patch.object(guardrail, "TRIP_PASSWORD_PATH", str(password_path)),
             patch.dict(sys.modules, {guardrail.TRIP_DRIVER_MODULE: driver}),
+            patch.object(guardrail, "Thread", partial(RecordingThread, threads)),
         ):
-            yield
+            try:
+                yield
+                body_failed = False
+            finally:
+                for thread in threads:
+                    thread.join(_ASGI_WAIT_SECONDS)
+                alive = sum(thread.is_alive() for thread in threads)
+                if not body_failed and alive:
+                    raise AssertionError(
+                        f"{alive} writer thread(s) still alive after "
+                        f"{_ASGI_WAIT_SECONDS} seconds"
+                    )
 
 
 class CapturedLogs(logging.Handler):
@@ -321,14 +369,17 @@ def capture_logs() -> Iterator[CapturedLogs]:
 
 
 def waiting_connect(
-    started: threading.Event, released: threading.Event
+    started: threading.Event,
+    released: threading.Event,
+    finished: threading.Event,
 ) -> Callable[..., object]:
-    """Return a bounded writer connect that the test releases during cleanup."""
+    """Return a bounded connect released after the answer and before the join."""
 
     def connect(**kwargs: object) -> TripConnection:
         del kwargs
         started.set()
-        released.wait(_ASGI_WAIT_SECONDS)
+        released.wait(_WRITER_BLOCK_SECONDS)
+        finished.set()
         return TripConnection([], threading.Event())
 
     return connect
@@ -698,18 +749,48 @@ class ApiCompletions(unittest.TestCase):
                 started = threading.Event()
                 dispatch_started = threading.Event()
                 released = threading.Event()
+                finished = threading.Event()
 
-                try:
-                    with signal_dispatch(dispatch_started), trip_driver(
-                        waiting_connect(started, released)
-                    ):
+                with signal_dispatch(dispatch_started), trip_driver(
+                    waiting_connect(started, released, finished)
+                ):
+                    try:
                         status, body = self.trip_response_bytes(streamed)
                         self.assertTrue(dispatch_started.wait(_ASGI_WAIT_SECONDS))
                         self.assertTrue(started.wait(_ASGI_WAIT_SECONDS))
-                        self.assertFalse(released.is_set())
+                        self.assertFalse(finished.is_set())
                         self.assertEqual((status, body), (expected_status, expected_body))
-                finally:
-                    released.set()
+                    finally:
+                        released.set()
+
+    def test_trip_driver_fails_when_writer_outlives_fixture(self) -> None:
+        started = threading.Event()
+        released = threading.Event()
+        finished = threading.Event()
+
+        def blocked_connect(**kwargs: object) -> TripConnection:
+            del kwargs
+            started.set()
+            released.wait(_WRITER_BLOCK_SECONDS)
+            finished.set()
+            return TripConnection([], threading.Event())
+
+        row = guardrail.TripRow(
+            "fixture-branch",
+            "fixture-family",
+            "fixture-pattern",
+            "user",
+        )
+        try:
+            with self.assertRaisesRegex(
+                AssertionError, r"1 writer thread\(s\) still alive after 1.0 seconds"
+            ), trip_driver(blocked_connect):
+                guardrail.dispatch_trip_row(row)
+                self.assertTrue(started.wait(_ASGI_WAIT_SECONDS))
+        finally:
+            released.set()
+
+        self.assertTrue(finished.wait(_ASGI_WAIT_SECONDS))
 
     def test_forwarded_header_sentinels_stay_out_of_logs_rows_responses_and_engine(self) -> None:
         calls: list[httpx.Request] = []
