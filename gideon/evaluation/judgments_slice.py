@@ -3,7 +3,7 @@
 from collections.abc import Mapping
 from typing import Final, cast
 
-from gideon.evaluation.evalset import LoadedSet
+from gideon.evaluation.evalset import LoadedSet, select_cases
 from gideon.evaluation.judgments import coordinates
 from gideon.evaluation.rankmetrics import (
     DEFINITION_ID,
@@ -95,8 +95,8 @@ def _report(
 def run_judgments(eval_set: LoadedSet, slice_name: str, context: RunContext) -> SliceResult:
     """Score active judgment queries in id order from primary grades only."""
 
-    active = set(eval_set.active_ids)
-    case_ids = tuple(sorted(case_id for case_id in eval_set.slices[slice_name] if case_id in active))
+    selected = select_cases(eval_set, slice_name)
+    case_ids = tuple(sorted(selected.counted))
     grouped: dict[str, list[GradedPassage]] = {}
     for judgment in eval_set.judgments:
         if judgment.assessment == "primary":

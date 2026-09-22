@@ -5,7 +5,7 @@ from collections import Counter
 from collections.abc import Mapping
 from typing import cast
 
-from gideon.evaluation.evalset import Case, LoadedSet
+from gideon.evaluation.evalset import Case, LoadedSet, select_cases
 from gideon.evaluation.results import CaseResult, RunContext, SliceResult
 from gideon.extraction import ExactObject
 from gideon.extraction.grammar import extract, registry_types
@@ -61,9 +61,8 @@ def run_extraction(eval_set: LoadedSet, slice_name: str, context: RunContext) ->
     """Run the extraction measure for *slice_name* in deterministic id order."""
 
     del context
-    ids = eval_set.slices[slice_name]
-    active = set(eval_set.active_ids)
-    cases = tuple(eval_set.cases_by_id[case_id] for case_id in ids if case_id in active)
+    selected = select_cases(eval_set, slice_name)
+    cases = tuple(eval_set.cases_by_id[case_id] for case_id in selected.counted)
     extracted: dict[str, tuple[ExactObject, ...]] = {}
     latencies: dict[str, float] = {}
     for case in cases:

@@ -24,7 +24,7 @@ JUDGMENT_KEYS: Final[tuple[str, ...]] = (
 ATTORNEY_ROLE_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"(?:CHU-attorney|TRAD-attorney)-[1-9][0-9]*"
 )
-_SOURCE_ID_PATTERN: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9._:/-]+")
+SOURCE_ID_PATTERN: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9._:/-]+")
 _SHA256_PATTERN: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
 _ASSESSMENTS: Final[frozenset[str]] = frozenset({"primary", "second"})
 JUDGMENT_LINE_FIX: Final[str] = "Correct the judgments JSONL line, then retry."
@@ -121,7 +121,7 @@ def coordinate_findings(
     if (
         not isinstance(source_id, str)
         or not 1 <= len(source_id) <= 200
-        or _SOURCE_ID_PATTERN.fullmatch(source_id) is None
+        or SOURCE_ID_PATTERN.fullmatch(source_id) is None
     ):
         findings.append(_finding(file, line, "source_id"))
 

@@ -25,6 +25,7 @@ from tools.exportboundary import absent_from_export
 ROOT = Path(__file__).resolve().parents[1]
 # This case reads no excluded file; it names one because the boundary moves the slice's shape.
 HARVEST_IDS_PATH = Path("eval/sets/eval-v1/slices/extraction/harvest.ids")
+RESEARCH_QA_CASES_PATH = Path("eval/sets/eval-v1/research-qa/harvest.jsonl")
 RUN_ID = "11111111-2222-4333-8444-555555555555"
 GIT_SHA = "a" * 40
 
@@ -128,6 +129,7 @@ def _loaded(checkout: Path):
 
 def _document(loaded, **overrides: object) -> dict[str, object]:
     result_verdicts = overrides.pop("result_verdicts", {})
+    result_rows = overrides.pop("results", None)
     results = [
         {
             "case_id": case_id,
@@ -156,7 +158,7 @@ def _document(loaded, **overrides: object) -> dict[str, object]:
         "verdict": "pass",
     }
     run.update(overrides)
-    return {"run": run, "results": results}
+    return {"run": run, "results": results if result_rows is None else result_rows}
 
 
 def _write_references(
@@ -262,6 +264,27 @@ class CheckRefusals(unittest.TestCase):
         self.assertIn("remove every reference file", stdout)
         self.assertFalse(host.writes)
 
+    def test_unsigned_result_refuses_with_signoff_fix(self) -> None:
+        if absent_from_export(RESEARCH_QA_CASES_PATH, ROOT):
+            self.skipTest("in an export the only sign-off-taking cases are absent, so none is unsigned")
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = _checkout(directory)
+            loaded = _loaded(checkout)
+            unsigned_id = next(iter(loaded.unsigned_ids))
+            document = _document(
+                loaded,
+                results=(
+                    {"case_id": unsigned_id, "repeat": 1, "verdict": "pass"},
+                ),
+            )
+            host = WriterHost(document)
+            code, stdout, _stderr = _invoke(host, checkout)
+        self.assertEqual(code, 1)
+        self.assertIn(unsigned_id, stdout)
+        self.assertIn("sign the case through the sign-off kit", stdout.lower())
+        self.assertIn("selects through the loader", stdout)
+        self.assertFalse(host.writes)
+
 
 class ReadRefusals(unittest.TestCase):
     """Reader failures stop before checks and preserve their problem/fix pair."""
@@ -360,6 +383,19 @@ class Writing(unittest.TestCase):
         self.assertEqual(before, after)
         for path in files:
             self.assertIn((path, owner.st_uid, owner.st_gid), host.chowns)
+
+    def test_clean_written_references_hold_no_unsigned_case(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = _checkout(directory)
+            loaded = _loaded(checkout)
+            host = WriterHost(_document(loaded))
+            code, _stdout, _stderr = _invoke(host, checkout)
+            files = sorted((checkout / reference.REFERENCE_ROOT / "extraction").glob("*.json"))
+            contents = tuple(path.read_text(encoding="utf-8") for path in files)
+        self.assertEqual(code, 0)
+        self.assertTrue(files)
+        for unsigned_id in loaded.unsigned_ids:
+            self.assertTrue(all(unsigned_id not in content for content in contents))
 
 
 class Imports(unittest.TestCase):

@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from typing import cast
 
 from gideon.evaluation import judge
-from gideon.evaluation.evalset import Case, LoadedSet
+from gideon.evaluation.evalset import Case, LoadedSet, select_cases
 from gideon.evaluation.results import CaseResult, JSONValue, RunContext, SliceResult
 
 
@@ -111,8 +111,8 @@ def run_judge_triples(eval_set: LoadedSet, slice_name: str, context: RunContext)
     assert context.judge_prompt_id is not None
     assert context.served_model_name is not None
     prompt = judge.PROMPT_REGISTRY[context.judge_prompt_id]
-    active = set(eval_set.active_ids)
-    case_ids = tuple(sorted(case_id for case_id in eval_set.slices[slice_name] if case_id in active))
+    selected = select_cases(eval_set, slice_name)
+    case_ids = tuple(sorted(selected.counted))
     bands: dict[str, tuple[int, int]] = {}
     inputs: dict[str, tuple[str, str, str]] = {}
     for case_id in case_ids:

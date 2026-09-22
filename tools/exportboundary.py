@@ -45,6 +45,7 @@ EXCLUDED_PREFIXES = (
     "tests/test_codex_rounds.py",  # the Codex rounds record's tests
     "eval/seed/prototype-qa",  # harvested QA data pending a CSA ruling
     "eval/sets/eval-v1/judgments/queries.jsonl",  # harvest-derived judgment queries pending a CSA ruling
+    "eval/sets/eval-v1/research-qa/harvest.jsonl",  # harvest-derived research questions pending the same ruling
     "tools/judgments",  # judgment intake tooling that loads the excluded flagger
     "tests/test_judgments_intake.py",  # judgment intake's excluded tests
     "tests/test_judgments_kit.py",  # judgment packet and grades intake tests

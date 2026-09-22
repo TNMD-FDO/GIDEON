@@ -2,7 +2,10 @@
 
 An extraction case is a harvest, an invented, or a variant case; a variant
 names its parent, carries the parent's cluster, and retires with it. A judge
-triple is an invented reference-and-candidate grading case.
+triple is an invented reference-and-candidate grading case. A research-qa case
+is one reviewed research question carrying no expected answer: its signed
+answer lives in the sign-offs file, and a case with no line there is unsigned —
+it loads, and a selection keeps it out of what a gate counts.
 """
 
 import hashlib
@@ -28,6 +31,7 @@ from gideon.extraction import (
 
 if TYPE_CHECKING:
     from gideon.evaluation.judgments import Judgment
+    from gideon.evaluation.signoffs import SignOff
 
 type Case = dict[str, object]
 
@@ -44,8 +48,20 @@ _VARIANT_AXIS: Final[re.Pattern[str]] = re.compile(r"[a-z]+(?:-[a-z]+)*@[1-9][0-
 JUDGMENT_ID_PATTERN: Final[re.Pattern[str]] = re.compile(r"judgments-[0-9]{3,}")
 _TRIPLE_ID: Final[re.Pattern[str]] = re.compile(r"judge-[0-9]{3}")
 _HARVEST_ID: Final[re.Pattern[str]] = re.compile(r"HARV-[0-9]{3}")
-_EXTRACTION_CLUSTER: Final[re.Pattern[str]] = re.compile(r"harvest-chat-[0-9a-f]+")
+_HARVEST_CLUSTER: Final[re.Pattern[str]] = re.compile(r"harvest-chat-[0-9a-f]+")
 _JUDGMENT_CLUSTER: Final[re.Pattern[str]] = re.compile(r"harvest-chat-[A-Za-z0-9_-]+")
+RESEARCH_QA_ID_PATTERN: Final[re.Pattern[str]] = re.compile(r"research-qa-[0-9]{3,}")
+_QUESTION_BASE_KEYS: Final[tuple[str, ...]] = (
+    "id",
+    "suite",
+    "category",
+    "branch",
+    "question",
+    "labels",
+    "cluster_id",
+    "notes",
+    "review",
+)
 ROLE_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"(?:CHU-attorney|CHU-investigator|CHU-paralegal|TRAD-attorney|"
     r"TRAD-investigator|TRAD-legal-assistant|support|CSA|unknown)-[1-9][0-9]*"
@@ -58,7 +74,16 @@ _QUERY_TYPES: Final[frozenset[str]] = frozenset(
 
 @dataclass(frozen=True, slots=True)
 class ShapeSpec:
-    """The ordered keys and fixed fields for one suite/category shape."""
+    """The ordered keys and fixed fields for one suite/category shape.
+
+    ``question_origins`` is the origin vocabulary of a shape whose case is one
+    reviewed research question, and empty for every other shape. Non-empty, it
+    carries that family's whole rule set — the one-line question, the origin,
+    wording, and query-type label form, the optional ``reference_date`` and
+    ``jurisdiction`` checked against the court map, and ``accepted_flags`` in
+    the review — so a shape registered later takes the rules by declaring its
+    vocabulary rather than by repeating four flags in lockstep.
+    """
 
     suite: str
     category: str
@@ -67,6 +92,14 @@ class ShapeSpec:
     id_pattern: re.Pattern[str]
     cluster_pattern: re.Pattern[str]
     review_keys: tuple[str, ...]
+    question_origins: tuple[str, ...] = ()
+    takes_signoff: bool = False
+
+    @property
+    def is_question_case(self) -> bool:
+        """Whether this shape's case is one reviewed research question."""
+
+        return bool(self.question_origins)
 
     def keys_for(self, record: Mapping[str, object], origin: str | None) -> tuple[str, ...]:
         """Return the exact key order allowed for *record*."""
@@ -106,27 +139,62 @@ SHAPE_REGISTRY: Final[Mapping[tuple[str, str], ShapeSpec]] = {
         ("id", "suite", "category", "branch", "question", "expected", "labels"),
         {"suite": "build-gates", "category": "extraction", "branch": "legal"},
         _EXTRACTION_ID,
-        _EXTRACTION_CLUSTER,
+        _HARVEST_CLUSTER,
         ("by", "on"),
     ),
     ("judgments", "judgments"): ShapeSpec(
         "judgments",
         "judgments",
-        (
-            "id",
-            "suite",
-            "category",
-            "branch",
-            "question",
-            "labels",
-            "cluster_id",
-            "notes",
-            "review",
-        ),
+        _QUESTION_BASE_KEYS,
         {"suite": "judgments", "category": "judgments", "branch": "legal"},
         JUDGMENT_ID_PATTERN,
         _JUDGMENT_CLUSTER,
         ("by", "on", "accepted_flags"),
+        question_origins=("harvest", "chu-written"),
+    ),
+    ("research-qa", "retrieval"): ShapeSpec(
+        "research-qa",
+        "retrieval",
+        _QUESTION_BASE_KEYS,
+        {"suite": "research-qa", "category": "retrieval", "branch": "legal"},
+        RESEARCH_QA_ID_PATTERN,
+        _HARVEST_CLUSTER,
+        ("by", "on", "accepted_flags"),
+        question_origins=("harvest",),
+        takes_signoff=True,
+    ),
+    ("research-qa", "synthesis"): ShapeSpec(
+        "research-qa",
+        "synthesis",
+        _QUESTION_BASE_KEYS,
+        {"suite": "research-qa", "category": "synthesis", "branch": "legal"},
+        RESEARCH_QA_ID_PATTERN,
+        _HARVEST_CLUSTER,
+        ("by", "on", "accepted_flags"),
+        question_origins=("harvest",),
+        takes_signoff=True,
+    ),
+    ("research-qa", "lookup"): ShapeSpec(
+        "research-qa",
+        "lookup",
+        _QUESTION_BASE_KEYS,
+        {"suite": "research-qa", "category": "lookup", "branch": "legal"},
+        RESEARCH_QA_ID_PATTERN,
+        _HARVEST_CLUSTER,
+        ("by", "on", "accepted_flags"),
+        question_origins=("harvest",),
+        takes_signoff=True,
+    ),
+    ("research-qa", "edition"): ShapeSpec(
+        "research-qa",
+        "edition",
+        _QUESTION_BASE_KEYS,
+        {"suite": "research-qa", "category": "edition", "branch": "legal"},
+        RESEARCH_QA_ID_PATTERN,
+        _HARVEST_CLUSTER,
+        ("by", "on", "accepted_flags"),
+        question_origins=("harvest",),
+        takes_signoff=True,
     ),
     ("judge", "triples"): ShapeSpec(
         "judge",
@@ -180,6 +248,22 @@ class LoadedSet:
     slice_lists: Mapping[str, Mapping[str, tuple[str, ...]]]
     digest: str
     judgments: tuple["Judgment", ...] = ()
+    signoffs: tuple["SignOff", ...] = ()
+    unsigned_ids: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True, slots=True)
+class Selection:
+    """The counted and unsigned active ids selected from one slice.
+
+    ``takes_signoff`` is whether the slice lists any active case whose shape
+    takes a sign-off at all, which is what decides that the run row prints its
+    exclusion clause — a fully signed slice still prints it, reading zero.
+    """
+
+    counted: tuple[str, ...]
+    unsigned: tuple[str, ...]
+    takes_signoff: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,12 +295,12 @@ def _finding_sort_key(finding: Finding) -> tuple[str, int, str, str]:
     return (finding.file, finding.line or 0, finding.id or "", finding.rule)
 
 
-def _file_paths(root: Path, suffix: str, excluded_relative: str) -> tuple[Path, ...]:
-    """Every case file below *root*, less the one relative path named.
+def _file_paths(root: Path, suffix: str, excluded_relatives: frozenset[str]) -> tuple[Path, ...]:
+    """Every case file below *root*, less the relative paths named.
 
-    The judgments file shares the suite directory and the suffix with the
-    queries beside it, so it is skipped by its name: a suffix rule would take
-    a later case file with it.
+    The judgments and sign-offs files share suite directories and the suffix
+    with case files, so they are skipped by name: a suffix rule would take a
+    later case file with them.
     """
 
     suites = sorted(
@@ -227,7 +311,7 @@ def _file_paths(root: Path, suffix: str, excluded_relative: str) -> tuple[Path, 
         path
         for suite in suites
         for path in suite.rglob(f"*{suffix}")
-        if path.is_file() and _relative(root, path) != excluded_relative
+        if path.is_file() and _relative(root, path) not in excluded_relatives
     ]
     return tuple(sorted(paths, key=lambda path: _relative(root, path)))
 
@@ -277,7 +361,19 @@ def _origin(record: Mapping[str, object]) -> str | None:
     return None
 
 
-def _valid_date(value: object) -> bool:
+def _shape_for(record: Mapping[str, object]) -> ShapeSpec | None:
+    """The registered shape for a record's suite and category, or ``None``."""
+
+    suite = record.get("suite")
+    category = record.get("category")
+    if not isinstance(suite, str) or not isinstance(category, str):
+        return None
+    return SHAPE_REGISTRY.get((suite, category))
+
+
+def valid_iso_date(value: object) -> bool:
+    """Whether *value* is an ISO date string equal to its own normal form."""
+
     try:
         return isinstance(value, str) and date.fromisoformat(value).isoformat() == value
     except ValueError:
@@ -298,9 +394,9 @@ def _validate_review(
     reviewer = review.get("by")
     if not isinstance(reviewer, str) or ROLE_PATTERN.fullmatch(reviewer) is None:
         findings.append(Finding(file, case_id, line, "review.by role", _CASE_FIX))
-    if not _valid_date(review.get("on")):
+    if not valid_iso_date(review.get("on")):
         findings.append(Finding(file, case_id, line, "review.on ISO date", _CASE_FIX))
-    if spec.category == "judgments":
+    if spec.is_question_case:
         flags = review.get("accepted_flags")
         if (
             not isinstance(flags, list)
@@ -428,9 +524,7 @@ def _validate_shape(
 ) -> None:
     relative = _relative(root, path)
     case_id = _case_id(record)
-    suite = record.get("suite")
-    category = record.get("category")
-    spec = SHAPE_REGISTRY.get((suite, category)) if isinstance(suite, str) and isinstance(category, str) else None
+    spec = _shape_for(record)
     if spec is None:
         findings.append(Finding(relative, case_id, line, "unknown suite/category shape", _CASE_FIX))
         return
@@ -449,7 +543,7 @@ def _validate_shape(
         not isinstance(question, str)
         or not question
         or question != question.strip()
-        or (spec.category == "judgments" and ("\n" in question or "\r" in question))
+        or (spec.is_question_case and ("\n" in question or "\r" in question))
     ):
         findings.append(Finding(relative, case_id, line, "question shape", _CASE_FIX))
 
@@ -473,12 +567,12 @@ def _validate_shape(
             or _VARIANT_AXIS.fullmatch(labels[1]) is None
         ):
             findings.append(Finding(relative, case_id, line, "variant labels", _CASE_FIX))
-    elif spec.category == "judgments":
+    elif spec.is_question_case:
         if len(labels) < 2:
             findings.append(Finding(relative, case_id, line, "labels", _CASE_FIX))
         else:
             wording = labels[1]
-            if origin not in {"harvest", "chu-written"}:
+            if origin not in spec.question_origins:
                 findings.append(Finding(relative, case_id, line, "labels.origin", _CASE_FIX))
             if wording not in {"verbatim", "rewritten"}:
                 findings.append(Finding(relative, case_id, line, "labels.wording", _CASE_FIX))
@@ -521,8 +615,8 @@ def _validate_shape(
         findings.append(Finding(relative, case_id, line, "supersedes string", _CASE_FIX))
     _validate_review(spec, record.get("review"), relative, case_id, line, findings)
 
-    if spec.category == "judgments":
-        if "reference_date" in record and not _valid_date(record["reference_date"]):
+    if spec.is_question_case:
+        if "reference_date" in record and not valid_iso_date(record["reference_date"]):
             findings.append(Finding(relative, case_id, line, "reference_date", _CASE_FIX))
         jurisdiction = record.get("jurisdiction")
         if "jurisdiction" in record and (
@@ -755,9 +849,9 @@ def _parent_findings(
 def load_set(root: str | Path, court_ids: Iterable[str] | None = None) -> EvalSetLoadResult:
     """Load every suite case and frozen slice below *root*, or every finding."""
 
-    # judgments imports Finding and JUDGMENT_ID_PATTERN from this module; keep
-    # its import here so the loader does not create an import cycle.
-    from gideon.evaluation import judgments
+    # judgments and signoffs import Finding from this module; keep their imports
+    # here so the loader does not create an import cycle.
+    from gideon.evaluation import judgments, signoffs
 
     set_root = Path(root)
     findings: list[Finding] = []
@@ -765,9 +859,10 @@ def load_set(root: str | Path, court_ids: Iterable[str] | None = None) -> EvalSe
         findings.append(Finding(set_root.as_posix(), None, 0, "set version must match eval-vN", _READ_FIX))
     court_id_set = None if court_ids is None else frozenset(court_ids)
     judgments_file = judgments.JUDGMENTS_PATH.as_posix()
+    signoffs_file = signoffs.SIGNOFFS_PATH.as_posix()
     files: dict[str, bytes] = {}
     try:
-        case_paths = _file_paths(set_root, ".jsonl", judgments_file)
+        case_paths = _file_paths(set_root, ".jsonl", frozenset({judgments_file, signoffs_file}))
         slice_directories = _slice_dirs(set_root)
     except OSError as exc:
         findings.append(Finding(set_root.as_posix(), None, 0, f"set cannot be read ({exc})", _READ_FIX))
@@ -794,6 +889,24 @@ def load_set(root: str | Path, court_ids: Iterable[str] | None = None) -> EvalSe
             parsed = judgments.parse_bytes(data, judgments_file)
             findings.extend(parsed.findings)
             located_judgments = parsed.records
+    located_signoffs: tuple[signoffs.LocatedSignOff, ...] = ()
+    signoffs_path = set_root / signoffs.SIGNOFFS_PATH
+    if signoffs_path.is_file():
+        # The bytes join the digest's file map, so a changed sign-off moves the
+        # digest as a changed case does; the parse owns the final-newline
+        # finding, so the loader does not report the fault a second time.
+        data = _read_bytes(
+            set_root,
+            signoffs_path,
+            findings,
+            files,
+            _CASE_FIX,
+            check_final_newline=False,
+        )
+        if data is not None:
+            parsed_signoffs = signoffs.parse_bytes(data, signoffs_file)
+            findings.extend(parsed_signoffs.findings)
+            located_signoffs = parsed_signoffs.records
     slices, slice_lists, slice_locations = _read_slices(
         set_root, slice_directories, findings, files
     )
@@ -857,18 +970,74 @@ def load_set(root: str | Path, court_ids: Iterable[str] | None = None) -> EvalSe
             )
         )
 
+    # A sign-off stands only where its case is one the set still runs and one
+    # whose shape takes a sign-off at all, so the resolution waits for the
+    # supersedes pass above as the judgments resolution does.
+    for signoff in located_signoffs:
+        case_id = signoff.record.case_id
+        signoff_case = cases_by_id.get(case_id)
+        spec = None if signoff_case is None else _shape_for(signoff_case)
+        if signoff_case is None:
+            rule = "case_id names no case"
+        elif case_id in retired:
+            rule = "case_id names a superseded case"
+        elif spec is None or not spec.takes_signoff:
+            rule = "case_id names a case whose shape takes no sign-off"
+        else:
+            continue
+        findings.append(
+            Finding(
+                signoffs_file,
+                None,
+                signoff.line,
+                rule,
+                signoffs.SIGNOFF_LINE_FIX,
+            )
+        )
+
     ordered_findings = tuple(sorted(findings, key=_finding_sort_key))
     if ordered_findings:
         return EvalSetLoadResult(findings=ordered_findings)
+    active_ids = tuple(sorted(set(cases_by_id) - retired))
+    signed_ids = frozenset(located.record.case_id for located in located_signoffs)
+    # Every case validated against a registered shape above, so a case whose
+    # shape is unknown cannot reach here: the loader returned its finding.
+    unsigned_ids = frozenset(
+        case_id
+        for case_id in active_ids
+        for spec in (_shape_for(cases_by_id[case_id]),)
+        if spec is not None and spec.takes_signoff and case_id not in signed_ids
+    )
     return EvalSetLoadResult(
         loaded=LoadedSet(
             version=set_root.name,
             cases_by_file=cases_by_file,
             cases_by_id=cases_by_id,
-            active_ids=tuple(sorted(set(cases_by_id) - retired)),
+            active_ids=active_ids,
             slices=slices,
             slice_lists=slice_lists,
             digest=_set_digest(files),
             judgments=tuple(located.record for located in located_judgments),
+            signoffs=tuple(located.record for located in located_signoffs),
+            unsigned_ids=unsigned_ids,
         )
+    )
+
+
+def select_cases(loaded: LoadedSet, slice_name: str) -> Selection:
+    """Split one slice's active ids into counted and unsigned cases."""
+
+    active_ids = set(loaded.active_ids)
+    counted: list[str] = []
+    unsigned: list[str] = []
+    takes_signoff = False
+    for case_id in loaded.slices[slice_name]:
+        if case_id not in active_ids:
+            continue
+        spec = _shape_for(loaded.cases_by_id[case_id])
+        takes_signoff = takes_signoff or (spec is not None and spec.takes_signoff)
+        target = unsigned if case_id in loaded.unsigned_ids else counted
+        target.append(case_id)
+    return Selection(
+        counted=tuple(counted), unsigned=tuple(unsigned), takes_signoff=takes_signoff
     )

@@ -26,7 +26,7 @@ modules: [gideon/extraction/, tools/variants/, gideon/evaluation/extraction_slic
 ## Commands
 
 - **`python3 -m tools.variants <parents> <variants> [--series <file>] [--series-file <file>] [--sheet | --write --reviewer <id> --on <date>]`** (§18.2; a development tool, never shipped and never imported by `gideon/`): with neither mode it *checks* — every committed variant re-derived from its parent line by line, a missing pair the exit code. `--sheet` prints the pairs for the human read; `--write` appends them, and only then, carrying the reviewer id and date it is given. Invariants: an axis edit is applied to the labelled objects alone and a variant that cannot preserve its parent's labels is refused rather than written; the ids come from the whole series, which `series.txt` beside the cases names, and a `--write` whose manifest names a file it cannot see refuses rather than mint an id twice.
-- `eval run`, whose `ranked` stage reads the ranked-list file and whose `run` stage calls a slice's runner, and `eval reference` are [`eval.md`](eval.md)'s.
+- `eval run`, whose `ranked` stage reads the ranked-list file and whose `run` stage calls a slice's runner, and `eval reference` are [`eval.md`](eval.md)'s. Every runner here takes its cases from the loader's one selection function rather than filtering a slice's ids for itself, so the unsigned rule is inherited and not remembered.
 
 ## Release constants by module
 

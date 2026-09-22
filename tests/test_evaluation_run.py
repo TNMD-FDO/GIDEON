@@ -19,17 +19,19 @@ from unittest.mock import patch
 
 import gideon
 from gideon.cli import main
-from gideon.evaluation import command, judge, reference
-from gideon.evaluation.evalset import SET_ROOT, LoadedSet, load_set
+from gideon.evaluation import command, judge, reference, signoffs
+from gideon.evaluation.evalset import SET_ROOT, LoadedSet, load_set, select_cases
 from gideon.evaluation.extraction_slice import run_extraction
 from gideon.evaluation.results import CaseResult, RunContext, SliceResult
 from gideon.evaluation.slices import SLICE_RUNNERS
 from gideon.extraction import KEYED_TYPES, SECTION_TYPES, ExactObject, extract
 from gideon.extraction.scoring import MIN_RECALL
 from gideon.host.sysio import Host
+from tools.exportboundary import absent_from_export
 
 ROOT = Path(__file__).resolve().parents[1]
 EVALUATION = ROOT / "gideon" / "evaluation"
+RESEARCH_QA_CASES_PATH = Path("eval/sets/eval-v1/research-qa/harvest.jsonl")
 
 
 NOW = datetime(2026, 9, 19, 12, 0, tzinfo=UTC)
@@ -238,6 +240,18 @@ def _runner_case(case_id: str, question: str, expected: list[dict[str, object]])
 
 def _run_context() -> RunContext:
     return RunContext(cast(Host, EvalHost()), "/tmp/evaluation-rendered", None, None, 1, lambda _line: None)
+
+
+def _passing_selection_runner(
+    loaded: LoadedSet, slice_name: str, context: RunContext
+) -> SliceResult:
+    del context
+    selection = select_cases(loaded, slice_name)
+    return SliceResult(
+        True,
+        "fictional runner report\n",
+        tuple(CaseResult(case_id, 1, "pass", {}) for case_id in selection.counted),
+    )
 
 
 def _case_metrics(result: CaseResult) -> Mapping[str, Mapping[str, int]]:
@@ -736,6 +750,105 @@ class Command(unittest.TestCase):
         self.assertIn("ranked: refuse", stdout)
         self.assertIn("Remove --ranked", stdout)
         self.assertFalse(any(argv[0] == "docker" for argv, _input in host.calls))
+
+    def test_signoff_slice_row_names_unsigned_count_and_zero(self) -> None:
+        if absent_from_export(RESEARCH_QA_CASES_PATH, ROOT):
+            self.skipTest("in an export the case this slice names is absent, so the set cannot load it")
+        slice_name = "research-qa-test"
+        replacement = dict(SLICE_RUNNERS)
+        replacement[slice_name] = replace(
+            SLICE_RUNNERS["extraction"],
+            compares_reference=False,
+            runner=_passing_selection_runner,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            copied = Path(directory) / "eval-v1"
+            shutil.copytree(ROOT / SET_ROOT, copied)
+            ids_path = copied / "slices" / slice_name / "cases.ids"
+            ids_path.parent.mkdir(parents=True)
+            ids_path.write_text("research-qa-001\n", encoding="utf-8")
+            with patch.object(command, "SLICE_RUNNERS", replacement):
+                unsigned_code, unsigned_stdout, unsigned_stderr = _invoke(
+                    ["eval", "run", "--slice", slice_name, "--set", str(copied)],
+                    **_run_kwargs(EvalHost()),
+                )
+            signoff_path = copied / signoffs.SIGNOFFS_PATH
+            signoff_path.parent.mkdir(parents=True, exist_ok=True)
+            signoff_path.write_text(
+                signoffs.serialize(
+                    signoffs.SignOff(
+                        "research-qa-001",
+                        "A fictional signed answer.",
+                        ("fictional/source-1",),
+                        "CHU-attorney-1",
+                        "2026-09-21",
+                    )
+                ),
+                encoding="utf-8",
+            )
+            with patch.object(command, "SLICE_RUNNERS", replacement):
+                signed_code, signed_stdout, signed_stderr = _invoke(
+                    ["eval", "run", "--slice", slice_name, "--set", str(copied)],
+                    **_run_kwargs(EvalHost()),
+                )
+        self.assertEqual(unsigned_code, 0)
+        self.assertEqual(unsigned_stderr, "")
+        self.assertIn("run: ok — 0 active cases evaluated, 1 unsigned excluded", unsigned_stdout)
+        self.assertEqual(signed_code, 0)
+        self.assertEqual(signed_stderr, "")
+        self.assertIn("run: ok — 1 active cases evaluated, 0 unsigned excluded", signed_stdout)
+
+    def test_runner_result_for_unsigned_case_refuses_before_record(self) -> None:
+        if absent_from_export(RESEARCH_QA_CASES_PATH, ROOT):
+            self.skipTest("in an export the only sign-off-taking cases are absent, so none is unsigned")
+        loaded = load_set(ROOT / SET_ROOT).loaded
+        self.assertIsNotNone(loaded)
+        assert loaded is not None
+        unsigned_id = min(loaded.unsigned_ids)
+        bad_result = SliceResult(
+            True,
+            "unsigned result report\n",
+            (CaseResult(unsigned_id, 1, "pass", {}, None, None),),
+        )
+        with patch.object(command, "_run_slice", return_value=bad_result):
+            code, stdout, stderr = _invoke(
+                ["eval", "run", "--slice", "extraction"], **_run_kwargs(EvalHost())
+            )
+        self.assertEqual(code, 1)
+        self.assertEqual(stderr, "")
+        self.assertIn(f"runner returned unsigned cases: {unsigned_id}", stdout)
+        self.assertIn("must select through the loader", stdout)
+        self.assertNotIn("record:", stdout)
+        self.assertNotIn("gate:", stdout)
+
+
+class RunnerSelection(unittest.TestCase):
+    """Every registered runner receives only the loader's counted cases."""
+
+    def test_every_registered_runner_excludes_a_planted_unsigned_case(self) -> None:
+        for slice_name, spec in SLICE_RUNNERS.items():
+            with self.subTest(slice_name=slice_name):
+                case_id = "extraction-001"
+                loaded = LoadedSet(
+                    version="eval-v-fictional",
+                    cases_by_file={"fictional/cases.jsonl": ({"id": case_id},)},
+                    cases_by_id={case_id: {"id": case_id}},
+                    active_ids=(case_id,),
+                    slices={slice_name: (case_id,)},
+                    slice_lists={},
+                    digest="fictional-digest",
+                    unsigned_ids=frozenset({case_id}),
+                )
+                context = RunContext(
+                    cast(Host, EvalHost()),
+                    "/tmp/fictitious-rendered",
+                    "fictitious-model",
+                    "synthesis@1",
+                    spec.repeats,
+                    lambda _line: None,
+                )
+                result = spec.runner(loaded, slice_name, context)
+                self.assertEqual(result.results, ())
 
 
 class SliceRegistry(unittest.TestCase):

@@ -25,6 +25,10 @@ _SUITE_WIDE_FIX: Final[str] = (
     "slice-2 tickets 12 and 13 choose one."
 )
 _WRITE_FIX: Final[str] = "Restore the release checkout's reference directory ownership, then retry."
+_UNSIGNED_FIX: Final[str] = (
+    "Sign the case through the sign-off kit or re-run once the runner selects "
+    "through the loader, then retry."
+)
 # The registry's compares_reference is the one switch: a reference eval run
 # never reads would be a committed file nothing holds.
 _NO_REFERENCE_FIX: Final[str] = (
@@ -106,6 +110,18 @@ def _check(
         current = reference.fold_repeats(run.results)
     except ValueError as exc:
         return Problem(f"recorded run has invalid results ({exc})", _READER_FIX)
+    unsigned_ids = tuple(
+        dict.fromkeys(
+            case_id
+            for case_id, _repeat, _verdict in run.results
+            if case_id in loaded.unsigned_ids
+        )
+    )
+    if unsigned_ids:
+        return Problem(
+            f"recorded run names unsigned cases: {' '.join(unsigned_ids)}",
+            _UNSIGNED_FIX,
+        )
     comparison = reference.compare_reference(reference_result.reference, current, loaded.version)
     if comparison.outcome == "regressed":
         count = len(comparison.regressed)

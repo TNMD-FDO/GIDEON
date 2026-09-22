@@ -20,6 +20,7 @@ from gideon.evaluation.evalset import (
     LoadedSet,
     load_set,
     print_findings,
+    select_cases,
 )
 from gideon.evaluation.results import RunContext, SliceResult
 from gideon.evaluation.slices import SLICE_RUNNERS, SliceSpec
@@ -32,6 +33,7 @@ _FLAG_FIX: Final[str] = "Run gideon eval run --slice extraction; decision runs l
 _SLICE_FIX: Final[str] = "Run gideon eval run --slice extraction."
 _LOAD_FIX: Final[str] = "Correct every listed eval-set finding, then retry."
 _NO_GPU_FIX: Final[str] = "Run the evaluation on a GPU host, then retry."
+_UNSIGNED_RESULT_FIX: Final[str] = "The runner must select through the loader, then retry."
 
 
 @dataclass(frozen=True, slots=True)
@@ -690,6 +692,26 @@ def _run_body(
         ranked=ranked_lists,
     )
     slice_result = _run_slice(slice_spec, loaded, slice_name, context)
+    selection = select_cases(loaded, slice_name)
+    # Any unsigned id, not the slice's alone: a runner that reached past its
+    # own selection must not put the case it found into a gate's count either.
+    unsigned_results = tuple(
+        dict.fromkeys(
+            result.case_id
+            for result in slice_result.results
+            if result.case_id in loaded.unsigned_ids
+        )
+    )
+    if unsigned_results:
+        print_stage(
+            StageResult(
+                "run",
+                False,
+                f"runner returned unsigned cases: {' '.join(unsigned_results)}",
+                _UNSIGNED_RESULT_FIX,
+            )
+        )
+        return 1
     # A repeated slice returns one result per case AND repeat, so counting the
     # results would call four gradings of two cases "four cases".
     if slice_spec.repeats == 1:
@@ -700,6 +722,8 @@ def _run_body(
             f"{len(slice_result.results)} gradings over {cases} active cases "
             f"at {slice_spec.repeats} repeats"
         )
+    if selection.takes_signoff:
+        run_detail += f", {len(selection.unsigned)} unsigned excluded"
     print_stage(StageResult("run", True, run_detail, ""))
     print(slice_result.report, end="")
 

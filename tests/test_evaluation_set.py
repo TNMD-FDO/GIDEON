@@ -5,10 +5,20 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from gideon.evaluation import judgments
-from gideon.evaluation.evalset import SET_ROOT, Finding, LoadedSet, load_set
+from gideon.evaluation import judgments, signoffs
+from gideon.evaluation.evalset import (
+    SET_ROOT,
+    SHAPE_REGISTRY,
+    Finding,
+    LoadedSet,
+    ShapeSpec,
+    load_set,
+    select_cases,
+)
 from gideon.evaluation.judgments import Judgment, serialize
+from gideon.evaluation.signoffs import SignOff
 from gideon.extraction.scoring import active_cases
 from gideon.host.courts import load_court_map
 from tools.exportboundary import absent_from_export
@@ -83,6 +93,11 @@ def _write_cases(root: Path, records: tuple[dict[str, object], ...]) -> None:
     _write(root, "build-gates/cases.jsonl", "\n".join(lines))
 
 
+def _write_research_cases(root: Path, records: tuple[dict[str, object], ...]) -> None:
+    lines = [json.dumps(record, separators=(",", ":")) for record in records]
+    _write(root, "research-qa/cases.jsonl", "\n".join(lines))
+
+
 def _scorer_active_ids(loaded: LoadedSet) -> tuple[str, ...]:
     """The scorer's active set as sorted ids, the loader's held equal to it."""
 
@@ -105,6 +120,39 @@ def _judgment(query_id: str = "judgments-001", grade: int = 2) -> Judgment:
 
 def _write_judgment(root: Path, record: Judgment) -> None:
     _write(root, judgments.JUDGMENTS_PATH.as_posix(), serialize(record).rstrip("\n"))
+
+
+def _research_qa_case(
+    case_id: str = "research-qa-001",
+    category: str = "retrieval",
+    question: str = SENTINEL,
+) -> dict[str, object]:
+    return {
+        "id": case_id,
+        "suite": "research-qa",
+        "category": category,
+        "branch": "legal",
+        "question": question,
+        "labels": ["harvest", "rewritten", "other"],
+        "seed": "HARV-001",
+        "cluster_id": "harvest-chat-abcdef",
+        "notes": "",
+        "review": {"by": "CSA-1", "on": "2026-09-21", "accepted_flags": []},
+    }
+
+
+def _signoff(
+    case_id: str = "research-qa-001", answer: str = "The fictional signed answer."
+) -> SignOff:
+    return SignOff(case_id, answer, ("fictional/source-1",), "CHU-attorney-1", "2026-09-21")
+
+
+def _write_signoffs(root: Path, records: tuple[SignOff, ...]) -> None:
+    _write(
+        root,
+        signoffs.SIGNOFFS_PATH.as_posix(),
+        "".join(signoffs.serialize(record) for record in records).rstrip("\n"),
+    )
 
 
 def _digest_model(root: Path) -> str:
@@ -405,6 +453,115 @@ class OrderAndProvenance(unittest.TestCase):
             self.assertNotEqual(before.digest, after.digest)
             self.assertNotEqual(before.slices, after.slices)
 
+    @staticmethod
+    def _non_signoff_shape() -> ShapeSpec:
+        base = SHAPE_REGISTRY[("research-qa", "retrieval")]
+        return ShapeSpec(
+            "research-qa",
+            "unsigned-test",
+            base.base_keys,
+            {"suite": "research-qa", "category": "unsigned-test", "branch": "legal"},
+            base.id_pattern,
+            base.cluster_pattern,
+            base.review_keys,
+            base.question_origins,
+            False,
+        )
+
+    def test_signoff_relational_findings_are_by_line(self) -> None:
+        first = _research_qa_case("research-qa-001")
+        successor = _research_qa_case("research-qa-002")
+        successor["supersedes"] = "research-qa-001"
+        other = _research_qa_case("research-qa-003", "unsigned-test")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "eval-v9"
+            _write_research_cases(root, (first, successor, other))
+            _write_signoffs(
+                root,
+                (
+                    _signoff("research-qa-999", answer=SENTINEL),
+                    _signoff("research-qa-001", answer=SENTINEL),
+                    _signoff("research-qa-003", answer=SENTINEL),
+                ),
+            )
+            with patch.dict(
+                SHAPE_REGISTRY,
+                {("research-qa", "unsigned-test"): self._non_signoff_shape()},
+            ):
+                result = load_set(root)
+        self.assertIsNone(result.loaded)
+        findings = tuple(
+            finding
+            for finding in result.findings
+            if finding.file == signoffs.SIGNOFFS_PATH.as_posix()
+        )
+        self.assertEqual(
+            tuple((finding.line, finding.rule) for finding in findings),
+            (
+                (1, "case_id names no case"),
+                (2, "case_id names a superseded case"),
+                (3, "case_id names a case whose shape takes no sign-off"),
+            ),
+        )
+        self.assertTrue(all(finding.fix == signoffs.SIGNOFF_LINE_FIX for finding in findings))
+        self.assertTrue(all(finding.id is None for finding in findings))
+        self.assertNotIn(SENTINEL, "\n".join(finding.text() for finding in findings))
+
+    def test_unsigned_ids_and_selection_cover_signed_retired_and_other_shapes(self) -> None:
+        records = [
+            _research_qa_case("research-qa-001"),
+            _research_qa_case("research-qa-002"),
+            _research_qa_case("research-qa-003"),
+            _research_qa_case("research-qa-004"),
+            _research_qa_case("research-qa-005", "unsigned-test"),
+        ]
+        records[3]["supersedes"] = "research-qa-003"
+        slice_ids = (
+            "research-qa-001",
+            "research-qa-002",
+            "research-qa-003",
+            "research-qa-004",
+            "research-qa-005",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "eval-v9"
+            _write_research_cases(root, tuple(records))
+            _write_signoffs(root, (_signoff("research-qa-001"),))
+            _write(root, "slices/demo/cases.ids", "\n".join(slice_ids))
+            with patch.dict(
+                SHAPE_REGISTRY,
+                {("research-qa", "unsigned-test"): self._non_signoff_shape()},
+            ):
+                result = load_set(root)
+                self.assertTrue(result.ok, result.findings)
+                assert result.loaded is not None
+                loaded = result.loaded
+                selection = select_cases(loaded, "demo")
+        self.assertEqual(
+            loaded.unsigned_ids, frozenset({"research-qa-002", "research-qa-004"})
+        )
+        self.assertEqual(
+            selection.counted,
+            ("research-qa-001", "research-qa-005"),
+        )
+        self.assertEqual(selection.unsigned, ("research-qa-002", "research-qa-004"))
+        self.assertTrue(selection.takes_signoff)
+        self.assertEqual(loaded.signoffs, (_signoff("research-qa-001"),))
+
+    def test_signoff_bytes_move_the_set_digest(self) -> None:
+        case = _research_qa_case()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "eval-v9"
+            _write_research_cases(root, (case,))
+            _write_signoffs(root, (_signoff(answer="First fictional answer."),))
+            before = load_set(root).loaded
+            _write_signoffs(root, (_signoff(answer="Second fictional answer."),))
+            after = load_set(root).loaded
+        self.assertIsNotNone(before)
+        self.assertIsNotNone(after)
+        assert before is not None and after is not None
+        self.assertNotEqual(before.digest, after.digest)
+
     def test_judgment_grade_byte_changes_the_digest(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "eval-v9"
@@ -490,6 +647,25 @@ class OrderAndProvenance(unittest.TestCase):
                 )
             )
             self.assertEqual(result.loaded.slices["judgments"], query_ids)
+        research_absent = absent_from_export(
+            SET_ROOT / "research-qa" / "harvest.jsonl", ROOT
+        )
+        self.assertEqual(
+            "research-qa/harvest.jsonl" in result.loaded.cases_by_file,
+            not research_absent,
+        )
+        if not research_absent:
+            research_ids = tuple(
+                sorted(
+                    case["id"]
+                    for file, cases in result.loaded.cases_by_file.items()
+                    if file == "research-qa/harvest.jsonl"
+                    for case in cases
+                    if isinstance(case["id"], str)
+                )
+            )
+            self.assertEqual(research_ids, tuple(f"research-qa-{i:03d}" for i in range(1, 39)))
+            self.assertEqual(result.loaded.unsigned_ids, frozenset(research_ids))
 
 
 def _judgment_case(case_id: str = "judgments-001", question: str = SENTINEL) -> dict[str, object]:
@@ -776,6 +952,31 @@ class ShapeRefusals(unittest.TestCase):
                 record = _judgment_case()
                 mutate(record)
                 self._assert_case_finding(record, path="judgments/queries.jsonl", expected=expected)
+
+    def test_research_qa_shapes_reject_the_judgment_rules_and_expected(self) -> None:
+        cases = [
+            ("keys", lambda value: value.update(extra=True)),
+            ("id pattern", lambda value: value.update(id="research-qa-01")),
+            ("labels.origin", lambda value: value.update(labels=["wrong", "rewritten", "other"])),
+            ("labels.wording", lambda value: value.update(labels=["harvest", "wrong", "other"])),
+            ("seed", lambda value: value.update(seed="HARV-nope")),
+            ("cluster_id", lambda value: value.update(cluster_id="other")),
+            ("notes", lambda value: value.update(notes=None)),
+            ("review keys", lambda value: value.update(review={"by": "CSA-1", "on": "2026-09-21"})),
+            ("review.accepted_flags", lambda value: value.update(review={"by": "CSA-1", "on": "2026-09-21", "accepted_flags": ["b", "a"]})),
+            ("question shape", lambda value: value.update(question=" " + SENTINEL)),
+            ("case keys", lambda value: value.update(expected={"answer": "not allowed"})),
+        ]
+        for category in ("retrieval", "synthesis", "lookup", "edition"):
+            for expected, mutate in cases:
+                with self.subTest(category=category, expected=expected):
+                    record = _research_qa_case(category=category)
+                    mutate(record)
+                    self._assert_case_finding(
+                        record,
+                        path="research-qa/cases.jsonl",
+                        expected=expected,
+                    )
 
     def test_judgment_fixed_fields_and_minimum_labels_are_checked(self) -> None:
         for field, value, expected in (
