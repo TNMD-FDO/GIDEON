@@ -25,6 +25,12 @@ KNOWN_TEMPLATE_HEADINGS: dict[int, tuple[str, ...]] = {
         "## Coverage",
         "## Next maintenance window",
     ),
+    3: (
+        "## What is new",
+        "## What was bumped",
+        "## Coverage",
+        "## Next maintenance window",
+    ),
 }
 # §21's practice rule, the sentence the pre-launch note carries verbatim (ADR-0043).
 PRACTICE_RULE = (
@@ -195,7 +201,10 @@ def note_findings(
                     f"add the required headings from {TEMPLATE} to {path} in order",
                 )
             )
-        for heading in required:
+        headings_to_check = list(required)
+        if note_template_version == 3 and "## Breaking" in headings:
+            headings_to_check.append("## Breaking")
+        for heading in headings_to_check:
             if not _section_text(text, heading):
                 findings.append(
                     _finding(
@@ -204,7 +213,7 @@ def note_findings(
                         f"write the section text beneath {heading} in {path}",
                     )
                 )
-        if note_template_version == 2:
+        if note_template_version >= 2:
             section_lines = _section_text(text, "## What was bumped").splitlines()
             is_none = (
                 len(section_lines) == 1
@@ -224,6 +233,35 @@ def note_findings(
                         path,
                         "section ## What was bumped does not match the pin-watch generator grammar",
                         f"paste the complete output of python3 -m tools.pinwatch.bumped into {path}",
+                    )
+                )
+
+        if note_template_version == 3:
+            breaking_heading = "## Breaking"
+            if breaking_heading in headings and "## What is new" in headings:
+                breaking_index = headings.index(breaking_heading)
+                new_index = headings.index("## What is new")
+                if breaking_index != new_index + 1:
+                    findings.append(
+                        _finding(
+                            path,
+                            "section ## Breaking must immediately follow ## What is new",
+                            f"move ## Breaking directly after ## What is new in {path}, following {TEMPLATE}",
+                        )
+                    )
+            if (
+                version is not None
+                and version.major >= 1
+                and version.minor == 0
+                and version.patch == 0
+                and not version.prerelease
+                and breaking_heading not in headings
+            ):
+                findings.append(
+                    _finding(
+                        path,
+                        "a major release note must carry section ## Breaking",
+                        f"add section ## Breaking from {TEMPLATE} to {path}",
                     )
                 )
 
@@ -297,11 +335,24 @@ def _good_note_v2() -> str:
     )
 
 
+# Template 3 fixture with the optional Breaking section in its required position.
+def _good_note_v3() -> str:
+    return (
+        "# GIDEON v0.2.0\n\n"
+        "Template: 3\n\n"
+        "## What is new\n\nA user-visible change.\n\n"
+        "## Breaking\n\nThere is no contract change for the office.\n\n"
+        "## What was bumped\n\nNo pin moved since v0.1.37.\n\n"
+        "## Coverage\n\nGeneral only; the Legal chat arrives at go-live on SCOTUS and the Sixth Circuit.\n\n"
+        "## Next maintenance window\n\nNo window is announced.\n"
+    )
+
+
 class ReleaseNoteTests(unittest.TestCase):
     """Test the release-note artifact and its durable contract from spec §21."""
 
     def test_template_contract(self) -> None:
-        """The committed template declares the newest version and exactly its required sections (§21)."""
+        """The committed template declares version 3 and exactly its required sections (§21)."""
 
         if absent_from_export(TEMPLATE.relative_to(ROOT), ROOT):
             self.skipTest("the release-note template is excluded from the public export")
@@ -370,6 +421,42 @@ class ReleaseNoteTests(unittest.TestCase):
             good_v2 = _good_note_v2().replace("# GIDEON v0.2.0", "# GIDEON v0.2.10")
             good_v2_path.write_text(good_v2, encoding="utf-8")
             self.assertEqual(note_findings(good_v2_path), [])
+            good_v3_path = root / "v0.2.12.md"
+            good_v3 = _good_note_v3().replace("# GIDEON v0.2.0", "# GIDEON v0.2.12")
+            good_v3_path.write_text(good_v3, encoding="utf-8")
+            self.assertEqual(note_findings(good_v3_path), [])
+            major_without_breaking = root / "v1.0.0.md"
+            major_without_breaking.write_text(
+                good_v3.replace("# GIDEON v0.2.12", "# GIDEON v1.0.0").replace(
+                    "## Breaking\n\nThere is no contract change for the office.\n\n", ""
+                ),
+                encoding="utf-8",
+            )
+            major_findings = note_findings(major_without_breaking)
+            self.assertTrue(
+                any("major release note must carry section ## Breaking" in finding for finding in major_findings),
+                major_findings,
+            )
+            wrong_position = root / "v0.2.13.md"
+            wrong_position.write_text(
+                good_v3.replace("# GIDEON v0.2.12", "# GIDEON v0.2.13").replace(
+                    "## Breaking\n\nThere is no contract change for the office.\n\n", ""
+                ).replace(
+                    "## Coverage", "## Breaking\n\nThere is no contract change for the office.\n\n## Coverage"
+                ),
+                encoding="utf-8",
+            )
+            position_findings = note_findings(wrong_position)
+            self.assertTrue(
+                any("section ## Breaking must immediately follow ## What is new" in finding for finding in position_findings),
+                position_findings,
+            )
+            template_2_major = root / "v2.0.0.md"
+            template_2_major.write_text(
+                _good_note_v2().replace("# GIDEON v0.2.0", "# GIDEON v2.0.0"),
+                encoding="utf-8",
+            )
+            self.assertEqual(note_findings(template_2_major), [])
             prose_v2_path = root / "v0.2.11.md"
             prose_v2 = good_v2.replace(
                 "No pin moved since v0.1.37.", "A prose summary of the changes."

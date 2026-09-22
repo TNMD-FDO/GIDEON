@@ -275,15 +275,14 @@ user-facing tag take one. Read its cost beforehand from `render --diff`'s
 recreate row; count on the whole stack only when `provision` or a rollback
 needs it. Before the window, send the release's note from
 `docs/release-notes/<tag>.md` to the users and inform the supervisor, both at
-least one working day ahead. The changelog under `docs/2-changelog/` is the
-engineering record; its `## Breaking` section is what the `version` stage below
-prints.
+least one working day ahead. The release note's `## Breaking` section is what
+the `version` stage below prints.
 
 | Stage | What happens | Fix on a refusal |
 |---|---|---|
 | `preconditions` | root, a valid site file, Docker Compose answering, the checkout a git work tree with a clean status, its owner resolved from the directory | commit or stash as the owner; re-run |
 | `fetch` | `git fetch --tags origin` as the owner; the tag must resolve to a commit. A failed fetch with the tag already present continues and says so | fetch by hand as the owner, then re-run |
-| `version` | the tag's tree must declare the version its name says; a lower version refuses (naming `upgrade --rollback` and `restore`); the same version is a re-run; **a different major prints the changelog's `## Breaking` section first and refuses without `--acknowledge-breaking`** | read the section, then re-run with the flag |
+| `version` | the tag's tree must declare the version its name says; a lower version refuses (naming `upgrade --rollback` and `restore`); the same version is a re-run; **a different major prints the release note's `## Breaking` section first and refuses without `--acknowledge-breaking`** | read the section, then re-run with the flag |
 | `preflight` | the current tree's preflight | correct the office service it names; re-run |
 | `backup` | the pre-upgrade set, `pre-<tag>`, a full set whose manifest must record the commit the checkout is leaving (rollback's way back). When the plain label exists from an attempt that never crossed the checkout, a suffixed `pre-<tag>-<timestamp>` set is taken (the earlier one may predate later writes). When the checkout already stands at the tag, an earlier attempt crossed it: the newest `pre-<tag>[-…]` set naming another release is **reused**, never re-taken | the backup's own rows carry the fix |
 | `audit-intent` | one `upgrade` row: from-version, to-tag, both commits, the set label | the Postgres service; re-run |

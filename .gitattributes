@@ -57,3 +57,4 @@ docs/runbooks/pin-watch-app-setup.md export-ignore
 docs/runbooks/ci-runner.md export-ignore
 tests/test_export_names.py export-ignore
 README.dev.md export-ignore
+docs/2-changelog/ export-ignore

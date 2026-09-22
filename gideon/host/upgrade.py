@@ -49,7 +49,7 @@ _VERSION_ASSIGNMENT_RE: Final = re.compile(
     r"^\s*__version__\s*=\s*([\"'])([^\"']+)\1\s*$", re.MULTILINE
 )
 _HEADING_RE: Final = re.compile(r"^#{1,6}\s+", re.MULTILINE)
-_NO_BREAKING: Final = "Breaking: changelog names none."
+_NO_BREAKING: Final = "Breaking: the release notes name none."
 _PRE_RELEASE_SET_SUFFIX: Final = re.compile(r"-\d{8}T\d{6}Z$")
 
 # The standing next step by where the run failed (plan §3): before the checkout
@@ -487,40 +487,50 @@ def _breaking_text(
     *,
     checkout: Path,
     owner: _CheckoutOwner,
+    current: Version,
     tag: str,
     version: Version,
 ) -> str:
-    suffix = f"_v{version}.md"
-    try:
-        listing = _run_git(
-            io,
-            checkout,
-            owner,
-            ("ls-tree", "--name-only", tag, "docs/2-changelog/"),
+    """The ``## Breaking`` sections of the release notes the cross passes.
+
+    Each crossed major's ``v<K>.0.0`` note, then the target's own when it is a
+    later minor or patch, read from the target tag's tree in version order.
+    There is no changelog fallback: a lower tag refuses before this reader, so
+    every target it sees is ``v1.0.0`` or later, whose major note the release
+    note contract requires; the changelog is internal and not exported.
+    """
+    note_versions = [
+        Version(major, 0, 0)
+        for major in range(current.major + 1, version.major + 1)
+    ]
+    if version.minor != 0 or version.patch != 0:
+        note_versions.append(version)
+    sections: list[str] = []
+    for note_version in note_versions:
+        try:
+            shown = _run_git(
+                io,
+                checkout,
+                owner,
+                ("show", f"{tag}:docs/release-notes/v{note_version}.md"),
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if shown.returncode != 0:
+            continue
+        lines = shown.stdout.splitlines()
+        start = next((index for index, line in enumerate(lines) if line.strip() == "## Breaking"), None)
+        if start is None:
+            continue
+        end = next(
+            (index for index in range(start + 1, len(lines)) if _HEADING_RE.match(lines[index])),
+            len(lines),
         )
-    except (OSError, subprocess.SubprocessError):
-        return _NO_BREAKING
-    if listing.returncode != 0:
-        return _NO_BREAKING
-    note = next((line.strip() for line in listing.stdout.splitlines() if line.strip().endswith(suffix)), None)
-    if note is None:
-        return _NO_BREAKING
-    try:
-        shown = _run_git(io, checkout, owner, ("show", f"{tag}:{note}"))
-    except (OSError, subprocess.SubprocessError):
-        return _NO_BREAKING
-    if shown.returncode != 0:
-        return _NO_BREAKING
-    lines = shown.stdout.splitlines()
-    start = next((index for index, line in enumerate(lines) if line.strip() == "## Breaking"), None)
-    if start is None:
-        return _NO_BREAKING
-    end = next(
-        (index for index in range(start + 1, len(lines)) if _HEADING_RE.match(lines[index])),
-        len(lines),
-    )
-    section = "\n".join(lines[start:end]).strip()
-    return section or _NO_BREAKING
+        section = "\n".join(lines[start:end]).strip()
+        if section:
+            sections.append(section)
+
+    return "\n\n".join(sections) or _NO_BREAKING
 
 
 def _version_stage(
@@ -573,11 +583,14 @@ def _version_stage(
             target_from_tag,
         )
     if target_from_tag.major != current.major:
+        # The release notes are the one reader of a major's Breaking section
+        # (see _breaking_text for why the changelog is not a second).
         print(
             _breaking_text(
                 io,
                 checkout=checkout,
                 owner=owner,
+                current=current,
                 tag=tag,
                 version=target_from_tag,
             )

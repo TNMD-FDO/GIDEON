@@ -20,7 +20,7 @@ modules: [tools/pinwatch/, tools/imagebuild/, tools/acceptance/, tools/turns/, t
 | the evidence redaction: `python3 -m tools.redact --site <file>`, stdin to stdout, on the box | `tools/redact/`, `tools/acceptance/{vm,smtpsink}.py`, `TRIP-2-implement`'s redaction rule | §2.6, §19.4, slice-1 tickets 54 and 55 |
 | the court map generator: `python3 -m tools.courtmap --csv <courts-YYYY-MM-DD.csv.bz2> [--check]` on the dev seat, by hand | `tools/courtmap/`, `tools/courtmap/geography.yaml` (the hand table), `courts.yaml` | §8.6, [18] item 10, slice-2 ticket 03 |
 | the gate, its environment comparison, and its mask: `python3 -m tools.gate [--all] [--masked] [TEST_PATH ...]` from any checkout's root | `tools/gate.py`, `tools/environment.py`, `tools/mask.py`, `.github/workflows/ci.yml` | §2.1, workflow tickets 42, 52, and 54 |
-| the export boundary: no command — the list `EXCLUDED_PREFIXES` and the predicates `is_excluded`, `in_export_tree`, and `absent_from_export` the tests import | `tools/exportboundary.py`, `.gitattributes`, `tests/test_export_boundary.py` | §2.6, slice-1 tickets 56, 79, and 86 |
+| the export boundary: no command — the list `EXCLUDED_PREFIXES` and the predicates `is_excluded`, `in_export_tree`, and `absent_from_export` the tests import | `tools/exportboundary.py`, `.gitattributes`, `tests/test_export_boundary.py` | §2.6, slice-1 tickets 56, 79, 86, and 87 |
 
 ## Tooling on the box
 

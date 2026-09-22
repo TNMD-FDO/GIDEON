@@ -37,6 +37,8 @@ HIGHER = f"v{CURRENT.major}.{CURRENT.minor}.{CURRENT.patch + 1}"
 HIGHER_PRE = f"{HIGHER}-rc.1"
 LOWER_PRE = f"v{CURRENT}-rc.1"
 NEXT_MAJOR = f"v{CURRENT.major + 1}.0.0"
+NEXT_MAJOR_PATCH = f"v{CURRENT.major + 1}.0.1"
+SECOND_MAJOR_PATCH = f"v{CURRENT.major + 2}.0.1"
 FORWARD_ROWS = [
     "preconditions", "fetch", "version", "preflight", "backup", "audit-intent",
     "checkout", "provision", "preflight", "apply", "verify", "engine-verify", "audit-applied",
@@ -116,7 +118,7 @@ class FakeHost:
         tag_present: bool = True,
         head: str = FROM_COMMIT,
         tree_version: str | None = None,
-        note: str | None = None,
+        notes: Mapping[str, str] | None = None,
         sets: Mapping[str, str] | None = None,
         applied_release: str | None = None,
         failing_child: str | None = None,
@@ -138,7 +140,7 @@ class FakeHost:
         self.tag_present = tag_present
         self.head = head
         self.tree_version = tree_version
-        self.note = note
+        self.notes = dict(notes or {})
         self.applied_release = applied_release
         self.failing_child = failing_child
         self.version_output = version_output
@@ -236,13 +238,11 @@ class FakeHost:
             self.tag = arguments[1].split(":", 1)[0]
             version = self.tree_version or self.tag.removeprefix("v")
             return completed(command, stdout=f'"""GIDEON."""\n\n__version__ = "{version}"\n')
-        if arguments[:2] == ("ls-tree", "--name-only"):
-            if self.note is None:
-                return completed(command, stdout="")
-            tag = arguments[2]
-            return completed(command, stdout=f"docs/2-changelog/w9_{tag}.md\n")
-        if arguments[0] == "show" and "docs/2-changelog/" in arguments[1]:
-            return completed(command, stdout=self.note or "")
+        if arguments[0] == "show" and ":docs/release-notes/" in arguments[1]:
+            path = arguments[1].split(":", 1)[1]
+            if path not in self.notes:
+                return completed(command, returncode=128)
+            return completed(command, stdout=self.notes[path])
         if arguments[:2] == ("checkout", "--detach"):
             self.head = TARGET_COMMIT
             return completed(command)
@@ -340,6 +340,10 @@ def rows_of(text: str) -> list[str]:
 
 def git_as_owner(*arguments: str) -> tuple[str, ...]:
     return ("sudo", "-u", OWNER, "git", *arguments)
+
+
+def release_note_path(tag: str) -> str:
+    return f"docs/release-notes/{tag}.md"
 
 
 class CommandRunner(unittest.TestCase):
@@ -491,10 +495,10 @@ class UpgradeTests(CommandRunner):
 
     def test_a_major_cross_prints_the_breaking_section_and_needs_the_flag(self) -> None:
         note = (
-            "# Changelog - Week 9\n\n## Changes\n\nEverything.\n\n## Breaking\n\n"
+            "# Release v9\n\n## What is new\n\nEverything.\n\n## Breaking\n\n"
             "The site key `office.short_name` is required.\n\n## Notes\n\nNone.\n"
         )
-        without = FakeHost(note=note)
+        without = FakeHost(notes={release_note_path(NEXT_MAJOR): note})
         code, out, _, runners, _ = self.run_upgrade(without, tag=NEXT_MAJOR)
         self.assertEqual(code, 1)
         self.assertIn("## Breaking\n\nThe site key `office.short_name` is required.", out)
@@ -503,16 +507,62 @@ class UpgradeTests(CommandRunner):
         self.assertIn(f"re-run upgrade {NEXT_MAJOR} --acknowledge-breaking", out)
         self.assertEqual(runners.calls, [])
 
-        with_flag = FakeHost(note=note, applied_release=NEXT_MAJOR.removeprefix("v"))
+        with_flag = FakeHost(
+            notes={release_note_path(NEXT_MAJOR): note},
+            applied_release=NEXT_MAJOR.removeprefix("v"),
+        )
         code, out, _, _, _ = self.run_upgrade(with_flag, tag=NEXT_MAJOR, acknowledge=True)
         self.assertEqual(code, 0, out)
         self.assertIn("The site key `office.short_name` is required.", out)
         self.assertEqual(rows_of(out), FORWARD_ROWS)
 
-        no_note = FakeHost()
-        code, out, _, _, _ = self.run_upgrade(no_note, tag=NEXT_MAJOR)
+        no_breaking = FakeHost(
+            notes={release_note_path(NEXT_MAJOR): "# Release\n\n## What is new\n\nNothing.\n"}
+        )
+        code, out, _, _, _ = self.run_upgrade(no_breaking, tag=NEXT_MAJOR)
         self.assertEqual(code, 1)
-        self.assertIn("changelog names none", out)
+        self.assertIn("Breaking: the release notes name none.", out)
+
+    def test_a_cross_to_a_later_patch_prints_the_major_release_note(self) -> None:
+        major_section = "The site key `office.short_name` is required."
+        major_note = f"# Release\n\n## Breaking\n\n{major_section}\n\n## Notes\n\nNone.\n"
+        host = FakeHost(notes={release_note_path(NEXT_MAJOR): major_note})
+
+        code, out, _, _, _ = self.run_upgrade(host, tag=NEXT_MAJOR_PATCH)
+
+        self.assertEqual(code, 1)
+        self.assertIn(f"## Breaking\n\n{major_section}", out)
+        self.assertIn(f"re-run upgrade {NEXT_MAJOR_PATCH} --acknowledge-breaking", out)
+        self.assertIn(
+            git_as_owner("show", f"{NEXT_MAJOR_PATCH}:docs/release-notes/{NEXT_MAJOR}.md"),
+            host.git_calls(),
+        )
+
+    def test_crossing_two_majors_prints_sections_in_release_order(self) -> None:
+        first = "The first major changes the site contract."
+        second = "The second major changes the storage contract."
+        target = "The patch release has one operator note."
+        notes = {
+            release_note_path(NEXT_MAJOR): f"## Breaking\n\n{first}\n\n## Notes\n",
+            release_note_path(f"v{CURRENT.major + 2}.0.0"): f"## Breaking\n\n{second}\n\n## Notes\n",
+            release_note_path(SECOND_MAJOR_PATCH): f"## Breaking\n\n{target}\n\n## Notes\n",
+        }
+        host = FakeHost(notes=notes)
+
+        code, out, _, _, _ = self.run_upgrade(host, tag=SECOND_MAJOR_PATCH)
+
+        self.assertEqual(code, 1)
+        self.assertLess(out.index(first), out.index(second))
+        self.assertLess(out.index(second), out.index(target))
+        self.assertIn(f"re-run upgrade {SECOND_MAJOR_PATCH} --acknowledge-breaking", out)
+
+    def test_a_major_cross_with_no_release_note_names_none(self) -> None:
+        host = FakeHost(notes={})
+
+        code, out, _, _, _ = self.run_upgrade(host, tag=NEXT_MAJOR)
+
+        self.assertEqual(code, 1)
+        self.assertIn("Breaking: the release notes name none.", out)
 
     def test_pre_upgrade_set_rule(self) -> None:
         plain = f"pre-{HIGHER}"

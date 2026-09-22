@@ -8,8 +8,8 @@ assistant, on one box the office controls. Built by TNMD-FDO (the Office of
 the Federal Public Defender, Middle District of Tennessee) and designed from
 day one for distribution: clone a tag, edit `site.yaml`, run one script.
 
-**Status:** 0.x — slice 0 (platform) complete at `v0.1.0`, the clean-VM acceptance at minor tags its standing proof; slice 1 (General) complete at `v0.2.0`, with no user on the box until go-live (ADR-0044); slice 2 (eval harness) under way toward `v0.3.0`; this tree is `v0.2.33`.
-What each release changed is in [`CHANGELOG.md`](CHANGELOG.md), the index over `docs/2-changelog/`, one file per release. Later-slice commands still print "not implemented".
+**Status:** 0.x — slice 0 (platform) complete at `v0.1.0`, the clean-VM acceptance at minor tags its standing proof; slice 1 (General) complete at `v0.2.0`, with no user on the box until go-live (ADR-0044); slice 2 (eval harness) under way toward `v0.3.0`; this tree is `v0.2.34`.
+What each release changed is in [`CHANGELOG.md`](CHANGELOG.md), one line per release; from `v0.2.0` each line links its release note. Later-slice commands still print "not implemented".
 
 ## Install
 
@@ -94,7 +94,7 @@ python3 -m tools.gate
 | What | Where |
 |---|---|
 | Decision records | [`docs/adr/`](docs/adr/) |
-| Changelog index (what each release changed; `upgrade` prints a major release's `## Breaking` section from the files it indexes) | [`CHANGELOG.md`](CHANGELOG.md) |
+| Changelog index (what each release changed; `upgrade` prints a major release's `## Breaking` section from its release note) | [`CHANGELOG.md`](CHANGELOG.md) |
 | Reporting a vulnerability | [`SECURITY.md`](SECURITY.md) |
 | How the code is built | [`docs/ARCHI.md`](docs/ARCHI.md) (the map) · [`docs/archi/`](docs/archi/) (one leaf per subsystem) |
 | Site file example + editor schema | [`config/site.example.yaml`](config/site.example.yaml) · [`config/site.schema.json`](config/site.schema.json) |
@@ -107,7 +107,7 @@ python3 -m tools.gate
 | GIDEON-built images (`postgres` and `gideon`; Dockerfiles with no pin in them; `python3 -m tools.imagebuild <name>` on the box builds, records, and `--check`s) | [`images/`](images/) · [`tools/imagebuild/`](tools/imagebuild/) · [`docs/runbooks/built-images.md`](docs/runbooks/built-images.md) |
 | The pin watch (one pull request per pin bump across the three product locks, the model pins and the skills' record included; `python3 -m tools.pinwatch --dry-run` from a checkout; `python3 -m tools.pinwatch.hub <repo>` prints a model's files block by hand; `python3 -m tools.pinwatch.bumped` generates the release note's "What was bumped" section) | [`tools/pinwatch/`](tools/pinwatch/) |
 | Rendered-config templates (Caddyfile, the frontend's permission set and General's texts, `pgbackrest.conf`, the reconcile, backup, drill, and verify-all units, the Prometheus and probe configuration, Grafana's LDAP, provisioning, alert rules — the search probe's among them — and the three boards; SearXNG's settings are built in code from the site file) | [`compose/`](compose/) |
-| Release notes (the user-facing note every tag from `v0.2.0` ships, written from the template at version 2, its "What was bumped" section pasted from the generator) | [`docs/release-notes/`](docs/release-notes/) |
+| Release notes (the user-facing note every tag from `v0.2.0` ships, written from the template at version 3, its "What was bumped" section pasted from the generator, and its `## Breaking` section at a major) | [`docs/release-notes/`](docs/release-notes/) |
 | Backup, restore, and the drill (what runs, first-time setup, reading the rows, total-loss recovery) | [`docs/runbooks/backup-restore.md`](docs/runbooks/backup-restore.md) · [`docs/runbooks/office-services-setup.md`](docs/runbooks/office-services-setup.md) §3 (the Synology) |
 | Observability and alerting (getting into Grafana, what pages and the fix for each, silencing, retention, inducing a page) | [`docs/runbooks/observability.md`](docs/runbooks/observability.md) · [`docs/runbooks/office-services-setup.md`](docs/runbooks/office-services-setup.md) §7 (the relay, the admins group, egress) |
 | Install, upgrade, and rollback (the receiving-office sequence, upgrading, rolling back, re-runs and every refusal's fix) | [`docs/runbooks/install-upgrade.md`](docs/runbooks/install-upgrade.md) · [`docs/runbooks/backup-restore.md`](docs/runbooks/backup-restore.md) §6 (the pre-upgrade set) |

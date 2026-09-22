@@ -1,4 +1,4 @@
-"""The public repository's export boundary (slice-1 tickets 56 and 79).
+"""The public repository's export boundary (slice-1 tickets 56, 79, and 87).
 
 The public repository receives a ``git archive`` of each release tag; the
 paths listed here are omitted from the archive. ``.gitattributes``
@@ -65,6 +65,7 @@ EXCLUDED_PREFIXES = (
     "docs/runbooks/ci-runner.md",  # the self-hosted runner runbook
     "tests/test_export_names.py",  # the exported-text tripwire
     "README.dev.md",  # the private documentation index
+    "docs/2-changelog",  # the engineering record, one file per release
 )
 
 
