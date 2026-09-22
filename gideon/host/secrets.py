@@ -9,7 +9,7 @@ import hashlib
 import re
 import secrets as token_secrets
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, Literal
@@ -22,12 +22,30 @@ RotationClass = Literal["rewrite", "remint", "role", "account", "seeded"]
 """How a secret's value is held beyond its file, if anywhere."""
 # A file rotation is safe only when the file alone holds the value; a second
 # home must be changed through that consumer's own route.
-SECRETS_DIR: Final = Path("/etc/gideon/secrets")
+SECRETS_DIR = Path("/etc/gideon/secrets")
 SERVICE_GROUP: Final = "gideon"
 SERVICE_GROUP_PROBLEM: Final = f"the {SERVICE_GROUP} service group is missing or invalid"
 _SERVICE_GROUP_FIX: Final = (
     "Run sudo python3 -m gideon host provision --only service-user, then retry."
 )
+
+
+def select_directory(path: Path) -> None:
+    """Point every reader and fix text at ``path`` for the rest of the process.
+
+    The one sanctioned way to move the module off ``/etc/gideon/secrets``:
+    ``tools.cistack`` and ``tools.turns --stack ci`` call it once per process
+    for the sibling's directory, and the contract harnesses for their stack's.
+    """
+
+    global SECRETS_DIR
+    SECRETS_DIR = path
+
+
+def current_directory() -> Path:
+    """Return the directory the readers currently use, for a tool's rows."""
+
+    return SECRETS_DIR
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,7 +210,7 @@ def read_secret(host: Host, name: str) -> SecretReadResult:
     if path.name != name or not name:
         return SecretReadResult(
             problem=f"Invalid secret file name: {name!r}.",
-            fix="Use a secret file name under /etc/gideon/secrets.",
+            fix=f"Use a secret file name under {SECRETS_DIR}.",
         )
     try:
         value = host.read_text(path).rstrip("\r\n")
@@ -297,8 +315,13 @@ def rotate_generated(host: Host, name: str) -> RotateResult:
     return RotateResult(written=written)
 
 
-def ensure_generated(host: Host) -> EnsureResult:
-    """Create absent password-kind registry entries with mode ``0440``."""
+def ensure_generated(host: Host, *, skip: Collection[str] = ()) -> EnsureResult:
+    """Create absent password-kind registry entries with mode ``0440``.
+
+    ``skip`` names entries a selected directory never holds — the
+    ``gideon-ci`` sibling mounts production's engine key and runs no Grafana
+    or SearXNG.
+    """
 
     if host.geteuid() != 0:
         return EnsureResult(
@@ -318,7 +341,7 @@ def ensure_generated(host: Host) -> EnsureResult:
     created: list[str] = []
     printed: dict[str, str] = {}
     for secret in SECRET_REGISTRY:
-        if secret.kind != "password":
+        if secret.kind != "password" or secret.name in skip:
             continue
         if host.exists(secret_path(secret.name)):
             continue
@@ -329,7 +352,7 @@ def ensure_generated(host: Host) -> EnsureResult:
                 tuple(created),
                 printed,
                 problem=f"Unable to create generated secret: {problem}",
-                fix="Correct ownership and mode for /etc/gideon/secrets, then retry.",
+                fix=f"Correct ownership and mode for {SECRETS_DIR}, then retry.",
             )
         created.append(secret.name)
         if secret.print_once:

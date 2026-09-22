@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from gideon.host import backupset
+from gideon.host.render.ci import CI_ROOT
 from gideon.host.sysio import Command, PathLike
 
 
@@ -173,6 +174,12 @@ class LayoutAndLabels(unittest.TestCase):
             [(root.snapshotted, root.restore_in_place) for root in roots],
             [(True, True), (True, False), (True, True), (True, True), (False, False)],
         )
+
+    def test_ci_root_is_outside_every_inventory_root(self) -> None:
+        ci_root = CI_ROOT
+        for root in backupset.inventory_roots("/work/GIDEON"):
+            self.assertFalse(ci_root == root.source or ci_root.startswith(f"{root.source}/"))
+            self.assertFalse(root.source == ci_root or root.source.startswith(f"{ci_root}/"))
 
     def test_labels_grammar_and_kind(self) -> None:
         local = datetime(2026, 9, 2, 7, 8, 9, tzinfo=ZoneInfo("America/Chicago"))

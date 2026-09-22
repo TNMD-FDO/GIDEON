@@ -4,10 +4,10 @@ Runs on the self-hosted runner after ``mirror-images`` (never on a hosted
 runner: it needs Docker and the release registry's mirrored digests) as
 ``python3 -m unittest tests/contract/owui_apply_manifest.py`` — the file has
 no ``test_`` prefix so the hosted pytest run never collects it.  It brings up
-a throwaway Compose project (Postgres + Open WebUI on loopback) in production
-order — Postgres, ``stores.converge``, then the frontend — adds a Function by
-hand, pushes the rendered example manifest with ``owui.bootstrap``, and
-proves the hand Function is gone, the rendered branch-gate Function, both model
+a throwaway Compose project (Postgres, Open WebUI, and a standard-library model
+stub on loopback) in production order — Postgres, ``stores.converge``, then the
+frontend — adds a Function by hand, pushes the rendered example manifest with
+``owui.bootstrap``, and proves the hand Function is gone, the rendered branch-gate Function, both model
 records with General's empty attachment list, groups, and keys match, and a
 further push changes nothing. The rendered Function is hand-edited, toggled,
 and removed through the frontend routes, General's attachment list is
@@ -42,6 +42,7 @@ sys.path.insert(0, str(ROOT))
 import gideon.host.secrets as secret_files
 from gideon.host import owui, stores
 from gideon.host.images import load_image_lock, parse_registry, reference
+from gideon.host.models import HardwareProfile, load_models_lock, select_profile
 from gideon.host.render.engine import ENGINE_SERVICE_NAME
 from gideon.host.render.owui import (
     ALLOWED_ENDPOINTS,
@@ -52,10 +53,13 @@ from gideon.host.render.owui import (
     GENERAL_PRESET_ID,
     SERVICE_GROUP,
 )
+from gideon.host.site import load_site
 from gideon.host.sysio import RealHost
 
 MANIFEST = ROOT / "tests/fixtures/render/example/open-webui/manifest.yaml"
 COMPOSE_TEMPLATE = ROOT / "tests/contract/compose.yaml"
+STUB_TEMPLATE = ROOT / "tests/contract/sentinel/stub.py"
+EXAMPLE_SITE = ROOT / "config/site.example.yaml"
 REGISTRY = os.environ.get("GIDEON_CONTRACT_REGISTRY", "127.0.0.1:5000")
 PORT = int(os.environ.get("GIDEON_CONTRACT_PORT", "18081"))
 BASE_URL = f"http://127.0.0.1:{PORT}"
@@ -68,6 +72,20 @@ HAND_ADDED_FUNCTION = {
     "content": "class Filter:\n    def __init__(self):\n        pass\n\n    def inlet(self, body, __user__=None):\n        return body\n",
     "meta": {"description": "contract probe"},
 }
+
+
+def stub_model_id() -> str:
+    """Return the selected profile's generator served name for the stub."""
+
+    site_result = load_site(EXAMPLE_SITE)
+    models_result = load_models_lock(ROOT / "models.lock")
+    assert site_result.config is not None and not site_result.errors
+    assert models_result.lock is not None and not models_result.errors
+    profile = select_profile(models_result.lock, site_result.config.hardware_profile)
+    assert isinstance(profile, HardwareProfile)
+    generator = profile.model("generator")
+    assert generator is not None
+    return generator.serve.served_name
 
 
 def image_references() -> dict[str, str]:
@@ -99,6 +117,7 @@ class ContractStack:
             path.write_text(value + "\n")
             path.chmod(0o440)
         shutil.copy(COMPOSE_TEMPLATE, self.directory / "compose.yaml")
+        shutil.copy2(STUB_TEMPLATE, self.directory / "stub.py")
         database_url = (
             f"postgresql://openwebui:{quote(self.passwords['postgres_openwebui_password'], safe='')}"
             "@postgres:5432/openwebui"
@@ -116,6 +135,8 @@ class ContractStack:
             f"CONTRACT_PORT={PORT}\n"
             f"ALLOWED_ENDPOINTS={','.join(ALLOWED_ENDPOINTS)}\n"
             f"DEFAULT_MODELS={GENERAL_PRESET_ID}\n"
+            "STUB_MODE=ok\n"
+            f"STUB_MODEL_ID={stub_model_id()}\n"
         )
 
     def compose(self, *args: str) -> subprocess.CompletedProcess[str]:
@@ -298,6 +319,29 @@ class ApplyManifestContract(unittest.TestCase):
             assert isinstance(chat, dict)
             self.assertFalse(chat["web_upload"])
 
+    def _assert_live_model_listing(self, client: owui.Client, *, arena: bool = False) -> None:
+        """Hold the chat-facing listing to the stub model and General."""
+
+        listing = client.request("GET", "/api/models")
+        self.assertEqual(listing.status, 200, listing.body)
+        self.assertIsInstance(listing.body, dict)
+        assert isinstance(listing.body, dict)
+        rows = listing.body["data"]
+        self.assertIsInstance(rows, list)
+        assert isinstance(rows, list)
+        ids = {
+            row["id"]
+            for row in rows
+            if isinstance(row, dict) and isinstance(row.get("id"), str)
+        }
+        expected = {stub_model_id(), GENERAL_PRESET_ID}
+        if arena:
+            self.assertEqual(len(rows), len(expected) + 1)
+            self.assertEqual(len(ids - expected), 1)
+        else:
+            self.assertEqual(ids, expected)
+            self.assertEqual(len(rows), len(expected))
+
     def _assert_manifest_function_state(self, admin: owui.Client) -> None:
         """Hold the Function listing, source row, and empty valves to the manifest."""
 
@@ -367,12 +411,9 @@ class ApplyManifestContract(unittest.TestCase):
 
         # The eval key reaches what it is for and nothing administrative.
         eval_client = client_factory(api_key=(self.stack.secrets / "gideon_eval_api_key").read_text().strip())
-        eval_models = eval_client.request("GET", "/api/models")
-        self.assertEqual(eval_models.status, 200, eval_models.body)
-        self.assertEqual(eval_models.body, {"data": []})
+        self._assert_live_model_listing(eval_client)
         self.assertIn(eval_client.request("GET", "/api/v1/users/all").status, (401, 403))
-        # The chat-facing list is intentionally empty without an engine, while
-        # the base listing remains admin-only (docs/research/owui-model-record.md §8.3).
+        # The base listing remains admin-only (docs/research/owui-model-record.md §8.3).
         self.assertIn(eval_client.request("GET", "/api/v1/models/base").status, (401, 403))
         # The admin key is bound to the allowlist too.
         self.assertEqual(admin.request("GET", "/api/v1/auths/").status, 403)
@@ -509,10 +550,7 @@ class ApplyManifestContract(unittest.TestCase):
         self.assertIsInstance(config.body["default_models"], str)
         self.assertEqual(config.body["default_models"], GENERAL_PRESET_ID)
 
-        models = admin.request("GET", "/api/models")
-        self.assertEqual(models.status, 200, models.body)
-        assert isinstance(models.body, dict)
-        self.assertEqual(models.body["data"], [])
+        self._assert_live_model_listing(admin)
 
         edited_models = admin.request(
             "POST",
@@ -540,16 +578,9 @@ class ApplyManifestContract(unittest.TestCase):
         assert isinstance(arena_config.body, dict)
         self.assertTrue(arena_config.body["ENABLE_EVALUATION_ARENA_MODELS"])
 
-        # The arena entry cannot show here even with the toggle on: the pinned
-        # list builder returns an empty list before it appends the arena when
-        # there are no base models (`utils/models.py:112-114`), and this stack
-        # has no engine.  The toggle's effect on the list is the box's proof
-        # (the admin's chat-facing list before and after apply); here the
-        # config read-back is what the restart reverts.
-        enabled_models = admin.request("GET", "/api/models")
-        self.assertEqual(enabled_models.status, 200, enabled_models.body)
-        assert isinstance(enabled_models.body, dict)
-        self.assertEqual(enabled_models.body["data"], [])
+        # The live listing now proves the arena entry appears beside the stub
+        # model and General; the config read-back is what the restart reverts.
+        self._assert_live_model_listing(admin, arena=True)
 
         restarted = self.stack.compose("restart", "open-webui")
         self.assertEqual(restarted.returncode, 0, restarted.stderr)
@@ -560,10 +591,7 @@ class ApplyManifestContract(unittest.TestCase):
         self.assertEqual(restored_config.status, 200, restored_config.body)
         assert isinstance(restored_config.body, dict)
         self.assertEqual(restored_config.body["default_models"], GENERAL_PRESET_ID)
-        restored_models = admin.request("GET", "/api/models")
-        self.assertEqual(restored_models.status, 200, restored_models.body)
-        assert isinstance(restored_models.body, dict)
-        self.assertEqual(restored_models.body["data"], [])
+        self._assert_live_model_listing(admin)
         restored_arena = admin.request("GET", "/api/v1/evaluations/config")
         self.assertEqual(restored_arena.status, 200, restored_arena.body)
         assert isinstance(restored_arena.body, dict)

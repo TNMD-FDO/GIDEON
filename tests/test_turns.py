@@ -23,8 +23,9 @@ import yaml  # type: ignore[import-untyped]
 from gideon import guardrail
 from gideon.api import stamp
 from gideon.evaluation.turns import cases, classify, run
-from gideon.host import models, owuiturn, site
+from gideon.host import models, owuiturn, secrets, site
 from gideon.host.owui import Client, OwuiError, Response
+from gideon.host.render.ci import CI_PORT, CI_ROOT, CI_SECRETS_DIR
 from gideon.host.render.owui import EVAL_IDENTITY, GENERAL_PRESET_ID
 from gideon.host.report import Problem
 from gideon.host.secrets import secret_path
@@ -725,6 +726,78 @@ class TurnHarness(TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.guardrail = guardrail
+
+    def test_ci_selects_sibling_secrets_before_read_and_uses_plain_http(self) -> None:
+        events: list[str] = []
+
+        class OrderedHost(FakeHost):
+            def read_text(self, path: object, *, encoding: str = "utf-8") -> str:
+                events.append("read")
+                return super().read_text(path, encoding=encoding)
+
+        original_directory = secrets.current_directory()
+        self.addCleanup(secrets.select_directory, original_directory)
+        host = OrderedHost()
+        host.files[str(Path(CI_SECRETS_DIR) / "gideon_eval_password")] = f"{PASSWORD}\n"
+        captured: dict[str, object] = {}
+        original_select = secrets.select_directory
+
+        def select(path: Path) -> None:
+            events.append("select")
+            original_select(path)
+
+        def fake_run(spec: run.RunSpec, **kwargs: object) -> int:
+            captured.update(kwargs)
+            captured["spec"] = spec
+            return 0
+
+        with (
+            patch.object(cli.secrets, "select_directory", side_effect=select),
+            patch.object(cli, "run", side_effect=fake_run),
+            TemporaryDirectory() as directory,
+        ):
+            cases_path = Path(directory) / "cases.yaml"
+            cases_path.write_text(
+                "cases:\n  - id: one\n    prompt: plain\n    expect: answered\n",
+                encoding="utf-8",
+            )
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                code = cli.main(
+                    [str(cases_path), "--stack", "ci"],
+                    host=cast(Host, host),
+                    checkout=ROOT,
+                    site_path=SITE_PATH,
+                    now=lambda: FIXED_NOW,
+                )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(events[0], "select")
+        self.assertIn(str(Path(CI_SECRETS_DIR) / "gideon_eval_password"), host.read_paths)
+        spec = cast(run.RunSpec, captured["spec"])
+        self.assertEqual(spec.stack, "ci")
+        self.assertEqual(captured["rendered_dir"], Path(CI_ROOT))
+        factory = cast(Callable[..., Client], captured["client_factory"])
+        client = factory()
+        self.assertEqual(client._scheme, "http")
+        self.assertEqual(client._host, "127.0.0.1")
+        self.assertEqual(client._port, CI_PORT)
+        self.assertIsNone(client._context)
+        self.assertIn("stack: ci; loaded", stdout.getvalue())
+
+    def test_ci_refuses_browser_and_unfiltered_before_signin(self) -> None:
+        for mode, flag in (("browser", "--browser"), ("unfiltered", "--unfiltered")):
+            with self.subTest(mode=mode):
+                output = StringIO()
+                with redirect_stdout(output):
+                    code = cli.main(
+                        ["missing.yaml", "--stack", "ci", flag, "--out", "/tmp/turns-out"],
+                        host=cast(Host, FakeHost()),
+                    )
+                self.assertEqual(code, 1)
+                text = output.getvalue()
+                self.assertIn("--stack production", text)
+                self.assertNotIn("signin:", text)
 
     def test_signin_body_turn_body_readback_and_replacement(self) -> None:
         frontend = Frontend(self.guardrail, {"replaced": "replaced"})

@@ -23,6 +23,7 @@ from gideon.evaluation.turns.run import (
 )
 from gideon.host import models, nogpu, owui, secrets, site, tls
 from gideon.host.render import command as render_command
+from gideon.host.render.ci import CI_BASE_URL, CI_ROOT, CI_SECRET_NAMES, CI_SECRETS_DIR
 from gideon.host.render.owui import (
     EVAL_PASSWORD_SECRET,
     GENERAL_PRESET_ID,
@@ -101,6 +102,8 @@ _RENDER_INPUTS_FIX: Final[str] = (
     "Correct the checkout's render inputs, then retry."
 )
 _BROWSER_ONLY_FIX: Final[str] = "Pass --browser with this flag, then retry."
+_CI_BROWSER_FIX: Final[str] = "Use --stack production with --browser, then retry."
+_CI_UNFILTERED_FIX: Final[str] = "Use --stack production without --unfiltered, then retry."
 _LAUNCH_FIX: Final[str] = (
     "Run .venv/bin/playwright install-deps chromium for the shared libraries and "
     f"check {chromium.BROWSERS_DIR}, then retry."
@@ -146,6 +149,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-instruction", action="store_true")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--stack", choices=("production", "ci"), default="production")
     return parser
 
 
@@ -241,6 +245,28 @@ def main(
     if refused_direct_flag is not None:
         print_stage(refused_direct_flag)
         return 1
+    if options.stack == "ci" and options.browser:
+        print_stage(
+            StageResult(
+                "preconditions",
+                False,
+                "--browser is not available with --stack ci",
+                _CI_BROWSER_FIX,
+            )
+        )
+        return 1
+    if options.stack == "ci" and options.unfiltered:
+        print_stage(
+            StageResult(
+                "preconditions",
+                False,
+                "--unfiltered is not available with --stack ci",
+                _CI_UNFILTERED_FIX,
+            )
+        )
+        return 1
+    if options.stack == "ci":
+        secrets.select_directory(Path(CI_SECRETS_DIR))
     io = host or RealHost()
     root = checkout or Path(__file__).resolve().parents[2]
     output = options.out.resolve() if options.out is not None else None
@@ -248,6 +274,7 @@ def main(
     # name and General's instruction instead of the frontend's preset and
     # need no eval password. Both modes now call a GIDEON service directly.
     direct_mode = options.service or options.unfiltered
+    rendered_dir = Path(CI_ROOT) if options.stack == "ci" else Path(_RENDERED_DIR)
     if options.unfiltered:
         refused_flag = _unfiltered_refusal(options, output)
         if refused_flag is not None:
@@ -321,7 +348,7 @@ def main(
             )
         )
         return 1
-    if direct_mode and not io.exists(Path(_RENDERED_DIR) / "compose.yaml"):
+    if direct_mode and not io.exists(rendered_dir / "compose.yaml"):
         print_stage(
             StageResult(
                 "preconditions",
@@ -380,6 +407,7 @@ def main(
             models_path=root / "models.lock",
             root=root,
             command="tools.turns",
+            secret_names=CI_SECRET_NAMES if options.stack == "ci" else None,
         )
         if loaded_render_inputs is None:
             print_stage(
@@ -563,11 +591,17 @@ def main(
     window_detail = judgement.description
     if options.force and office_hours:
         window_detail += "; window overridden by --force"
+    precondition_detail = (
+        f"stack: {options.stack}; "
+        if options.stack == "ci"
+        else ""
+    )
     print_stage(
         StageResult(
             "preconditions",
             True,
-            f"loaded {loaded_cases.origin}; {turns_detail}; "
+            precondition_detail
+            + f"loaded {loaded_cases.origin}; {turns_detail}; "
             + (f"{engine_call_detail}; " if shows_calls else "")
             + window_detail,
             "",
@@ -625,11 +659,18 @@ def main(
             print("mode: service")
         return 0
 
-    chosen_factory = client_factory or owui.ingress_client_factory(
-        loaded_site.config.hostname,
-        ca_path=tls.CA_PATH,
-        timeout=TURN_TIMEOUT_SECONDS,
-    )
+    if client_factory is not None:
+        chosen_factory = client_factory
+    elif options.stack == "ci":
+        chosen_factory = owui.loopback_client_factory(
+            CI_BASE_URL, timeout=TURN_TIMEOUT_SECONDS
+        )
+    else:
+        chosen_factory = owui.ingress_client_factory(
+            loaded_site.config.hostname,
+            ca_path=tls.CA_PATH,
+            timeout=TURN_TIMEOUT_SECONDS,
+        )
     browser_setup: BrowserSetup | None = None
     if options.browser:
         request_log = chromium.RequestLog(monotonic)
@@ -674,6 +715,7 @@ def main(
         case_ids=tuple(case.id for case in case_values) if options.case else (),
         service=options.service,
         instruction=not options.no_instruction,
+        stack=options.stack,
     )
     selected_now = now or _utc_now
 
@@ -697,6 +739,7 @@ def main(
         window=window_detail,
         browser_setup=browser_setup,
         hand_back=hand_back,
+        rendered_dir=rendered_dir,
     )
 
 

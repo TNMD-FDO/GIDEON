@@ -701,6 +701,23 @@ def _logs_fix(rendered_dir: PathLike) -> str:
     return stack.logs_fix(rendered_dir, "open-webui")
 
 
+def loopback_client_factory(
+    base_url: str,
+    *,
+    timeout: float = _DEFAULT_TIMEOUT,
+) -> Callable[..., Client]:
+    """A plain-HTTP factory for a frontend published on loopback, with no ingress.
+
+    The ``gideon-ci`` sibling's frontend has no Caddy and no certificate: its
+    tool and the turn harness under ``--stack ci`` reach it at *base_url*.
+    """
+
+    def factory(*, api_key: str | None = None, token: str | None = None) -> Client:
+        return Client(base_url, api_key=api_key, token=token, timeout=timeout)
+
+    return factory
+
+
 def ingress_client_factory(
     hostname: str,
     *,

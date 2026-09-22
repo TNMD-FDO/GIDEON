@@ -27,13 +27,14 @@ from gideon import guardrail
 from gideon.evaluation.turns import classify, door, doorclient, session
 from gideon.evaluation.turns import run as run_module
 from gideon.evaluation.turns.cases import Case
-from gideon.host import models, site
+from gideon.host import models, secrets, site
 from gideon.host.render.api import (
     API_SECRET_NAME,
     API_USER_EMAIL_HEADER,
     API_USER_NAME_HEADER,
     API_USER_ROLE_HEADER,
 )
+from gideon.host.render.ci import CI_ROOT, CI_SECRET_NAMES
 from gideon.host.render.owui import EVAL_IDENTITY
 from gideon.host.report import Problem
 from gideon.host.sysio import Command, PathLike
@@ -603,6 +604,43 @@ class ServiceDoor(unittest.TestCase):
         run_record = json.loads(host.files[str(output / "run.json")])
         self.assertTrue(run_record["arguments"]["service"])
         self.assertFalse(run_record["arguments"]["instruction"])
+
+    def test_ci_door_uses_ci_render_and_secret_contract(self) -> None:
+        original_directory = secrets.current_directory()
+        self.addCleanup(secrets.select_directory, original_directory)
+        record: dict[str, object]
+        with tempfile.TemporaryDirectory() as directory:
+            cases_path = Path(directory) / "cases.yaml"
+            _case_file(cases_path, [{"id": "one", "prompt": "plain", "expect": "answered"}])
+            host = FakeHost()
+            host.files[f"{CI_ROOT}/compose.yaml"] = "ci-rendered"
+            output = Path(directory) / "out"
+            loaded: dict[str, object] = {}
+
+            def load_inputs(*args: object, **kwargs: object) -> tuple[object, str, str, str]:
+                del args
+                loaded.update(kwargs)
+                return object(), "", "", ""
+
+            with (
+                patch.object(cli.render_command, "load_render_inputs", side_effect=load_inputs),
+                patch.object(cli, "general_texts", return_value=type("Texts", (), {"system_prompt": "instruction"})()),
+            ):
+                code, stdout, stderr = _run_service(
+                    host,
+                    cases_path,
+                    arguments=("--stack", "ci", "--service"),
+                    output=output,
+                )
+            record = cast(dict[str, object], json.loads(host.files[str(output / "run.json")]))
+
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(loaded["secret_names"], CI_SECRET_NAMES)
+        self.assertEqual(host.exec_argv[0][2], "--project-directory")
+        self.assertEqual(host.exec_argv[0][3], CI_ROOT)
+        self.assertIn("summary: ok — stack: ci;", stdout)
+        arguments = cast(dict[str, object], record["arguments"])
+        self.assertEqual(arguments["stack"], "ci")
 
     def test_exec_argv_contains_only_the_mounted_key_path_and_door_failure_is_a_row(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

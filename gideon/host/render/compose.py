@@ -46,6 +46,9 @@ from gideon.host.render.searxng import (
 )
 from gideon.host.render.yamlout import dump
 
+PROJECT_NAME: Final = "gideon"
+NETWORK_NAME: Final = "gideon"
+
 # The systemd collector's units: the registry and the runner exist on the
 # build box alone (slice-0 ticket 21), so every other host collects GIDEON's.
 BUILD_BOX_UNIT_PATTERN: Final = r"^(gideon-registry|actions\.runner\..+|gideon-.*)\.service$"
@@ -744,9 +747,9 @@ def _compose_document(inputs: RenderInputs) -> Mapping[str, object]:
         limited[name] = {**service, "mem_limit": memory_limit_bytes(inputs.profile, name)}
     services = limited
     return {
-        "name": "gideon",
+        "name": PROJECT_NAME,
         "services": services,
-        "networks": {"gideon": {}},
+        "networks": {NETWORK_NAME: {}},
         "volumes": {"caddy_data": {}, "caddy_config": {}},
         "secrets": secrets,
     }

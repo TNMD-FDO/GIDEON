@@ -15,10 +15,13 @@ from gideon.host.secrets import (
     SECRETS_DIR,
     SUPPLIED_NAMES,
     SUPPLIED_REGISTRY,
+    current_directory,
     ensure_generated,
     is_generated,
     read_secret,
     rotate_generated,
+    secret_path,
+    select_directory,
     write_secret,
 )
 from gideon.host.sysio import Command, PathLike
@@ -189,6 +192,25 @@ class Registry(unittest.TestCase):
 
 
 class Reader(unittest.TestCase):
+    def test_selected_directory_moves_readers_and_fix_text(self) -> None:
+        original = current_directory()
+        selected = Path("/tmp/fictitious-gideon-secrets")
+        try:
+            select_directory(selected)
+            self.assertEqual(current_directory(), selected)
+            self.assertEqual(secret_path("x"), selected / "x")
+            host = FakeHost({f"{selected}/x": "value\n"}, dirs={str(selected)})
+            result = read_secret(host, "x")
+            self.assertTrue(result.ok)
+            self.assertEqual(result.value, "value")
+
+            host.unwritable.add(f"{selected}/postgres_superuser_password")
+            refused = ensure_generated(host)
+            self.assertFalse(refused.ok)
+            self.assertIn(str(selected), refused.fix)
+        finally:
+            select_directory(original)
+
     def test_reads_and_strips_the_trailing_newline(self) -> None:
         host = FakeHost({f"{SECRETS_DIR}/x": "value\n"})
         result = read_secret(host, "x")
@@ -252,6 +274,16 @@ class Ensure(unittest.TestCase):
         self.assertEqual(result.printed["grafana_admin_password"] + "\n", host.files[f"{SECRETS_DIR}/grafana_admin_password"])
         for name in MINTED_KIND:
             self.assertNotIn(f"{SECRETS_DIR}/{name}", host.files)
+
+    def test_skipped_entries_are_never_created(self) -> None:
+        host = FakeHost()
+        skip = ("engine_api_key", "grafana_admin_password")
+        result = ensure_generated(host, skip=skip)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.created, tuple(name for name in PASSWORD_KIND if name not in skip))
+        for name in skip:
+            self.assertNotIn(f"{SECRETS_DIR}/{name}", host.files)
+        self.assertEqual(set(result.printed), {"gideon_admin_password"})
 
     def test_second_run_creates_nothing_and_prints_nothing(self) -> None:
         host = FakeHost()

@@ -355,17 +355,25 @@ def _generator_model(inputs: RenderInputs) -> ModelPin:
     return generator
 
 
-def owui_environment(inputs: RenderInputs, *, engine: bool = True) -> Mapping[str, str]:
+def owui_environment(
+    inputs: RenderInputs,
+    *,
+    engine: bool = True,
+    search: bool = True,
+    directory: bool = True,
+) -> Mapping[str, str]:
     """Return the non-secret Compose environment for Open WebUI.
 
     The service connection is rendered only on a GPU host and only when
     ``engine`` is true — the drill passes false because its project has no
-    service to reach.
+    service to reach. ``search`` and ``directory`` false render the search
+    switch and ``ENABLE_LDAP`` off with no search or LDAP keys whatever the
+    site says — the ``gideon-ci`` sibling, which has neither.
     """
 
     ldap = inputs.site.auth.ldap
     connected = engine and not inputs.no_gpu
-    searching = engine and search_enabled(inputs)
+    searching = engine and search and search_enabled(inputs)
     environment: dict[str, str] = {
         "WEBUI_NAME": "GIDEON",
         "WEBUI_URL": f"https://{inputs.site.hostname}",
@@ -527,25 +535,30 @@ def owui_environment(inputs: RenderInputs, *, engine: bool = True) -> Mapping[st
             "ENABLE_VERSION_UPDATE_CHECK": "false",
             "CONTENT_SECURITY_POLICY": CONTENT_SECURITY_POLICY,
             "TZ": inputs.site.office.timezone,
-            "ENABLE_LDAP": "true",
-            "LDAP_SERVER_LABEL": ldap.host,
-            "LDAP_SERVER_HOST": ldap.host,
-            "LDAP_SERVER_PORT": str(ldap.port),
-            "LDAP_USE_TLS": "true",
-            "LDAP_VALIDATE_CERT": "true",
-            "LDAP_CA_CERT_FILE": "/etc/gideon/ca.pem",
-            "LDAP_APP_DN": bind_identity(ldap.bind_user, ldap.host),
-            "LDAP_SEARCH_BASE": ldap.search_base,
-            "LDAP_SEARCH_FILTERS": f"(memberOf={filter_value(ldap.users_group_dn)})",
-            "LDAP_ATTRIBUTE_FOR_USERNAME": "sAMAccountName",
-            # ADR-0030: the frontend keys every human by this address, which is an
-            # identity and never a mailbox; every directory account has one.
-            "LDAP_ATTRIBUTE_FOR_MAIL": "userPrincipalName",
-            "ENABLE_LDAP_GROUP_MANAGEMENT": "true",
-            "ENABLE_LDAP_GROUP_CREATION": "false",
-            "LDAP_ATTRIBUTE_FOR_GROUPS": "memberOf",
+            "ENABLE_LDAP": "true" if directory else "false",
         }
     )
+    if directory:
+        environment.update(
+            {
+                "LDAP_SERVER_LABEL": ldap.host,
+                "LDAP_SERVER_HOST": ldap.host,
+                "LDAP_SERVER_PORT": str(ldap.port),
+                "LDAP_USE_TLS": "true",
+                "LDAP_VALIDATE_CERT": "true",
+                "LDAP_CA_CERT_FILE": "/etc/gideon/ca.pem",
+                "LDAP_APP_DN": bind_identity(ldap.bind_user, ldap.host),
+                "LDAP_SEARCH_BASE": ldap.search_base,
+                "LDAP_SEARCH_FILTERS": f"(memberOf={filter_value(ldap.users_group_dn)})",
+                "LDAP_ATTRIBUTE_FOR_USERNAME": "sAMAccountName",
+                # ADR-0030: the frontend keys every human by this address, which is an
+                # identity and never a mailbox; every directory account has one.
+                "LDAP_ATTRIBUTE_FOR_MAIL": "userPrincipalName",
+                "ENABLE_LDAP_GROUP_MANAGEMENT": "true",
+                "ENABLE_LDAP_GROUP_CREATION": "false",
+                "LDAP_ATTRIBUTE_FOR_GROUPS": "memberOf",
+            }
+        )
     environment.update(_permission_environment(permission_tree(inputs)))
     if inputs.site.egress_proxy:
         # The frontend's HTTP client reads the proxy variables unconditionally,
@@ -631,7 +644,9 @@ def general_preset_record(inputs: RenderInputs) -> Mapping[str, object]:
     }
 
 
-def owui_secret_names(inputs: RenderInputs) -> tuple[str, ...]:
+def owui_secret_names(
+    inputs: RenderInputs, *, directory: bool = True
+) -> tuple[str, ...]:
     """The secret names the frontend's env file reads on this host, in emit order.
 
     The one declaration the emitter and the consumer map share: the LDAP bind
@@ -640,7 +655,9 @@ def owui_secret_names(inputs: RenderInputs) -> tuple[str, ...]:
     inputs carry it.
     """
 
-    names = ["ldap_bind_password", "postgres_openwebui_password", "gideon_admin_password"]
+    names = ["postgres_openwebui_password", "gideon_admin_password"]
+    if directory:
+        names.insert(0, "ldap_bind_password")
     if not inputs.no_gpu:
         names.append(API_SECRET_NAME)
     # The proxy helper reads the credential only under a configured proxy, so a
@@ -650,7 +667,9 @@ def owui_secret_names(inputs: RenderInputs) -> tuple[str, ...]:
     return tuple(names)
 
 
-def owui_secret_environment(inputs: RenderInputs) -> Mapping[str, str]:
+def owui_secret_environment(
+    inputs: RenderInputs, *, directory: bool = True
+) -> Mapping[str, str]:
     """Return raw env-file values, including the service key for GPU hosts."""
 
     def required(name: str) -> str:
@@ -659,9 +678,8 @@ def owui_secret_environment(inputs: RenderInputs) -> Mapping[str, str]:
             raise ValueError(f"Render secret is missing: {name}.")
         return value
 
-    names = owui_secret_names(inputs)
+    names = owui_secret_names(inputs, directory=directory)
     values: dict[str, str] = {
-        "LDAP_APP_PASSWORD": required("ldap_bind_password"),
         "DATABASE_URL": (
             "postgresql://openwebui:"
             + quote(required("postgres_openwebui_password"), safe="")
@@ -669,10 +687,18 @@ def owui_secret_environment(inputs: RenderInputs) -> Mapping[str, str]:
         ),
         "WEBUI_ADMIN_PASSWORD": required("gideon_admin_password"),
     }
+    if directory:
+        values = {"LDAP_APP_PASSWORD": required("ldap_bind_password"), **values}
     if API_SECRET_NAME in names:
         values["OPENAI_API_KEYS"] = required(API_SECRET_NAME)
     values.update(proxy_environment_values(inputs))
     return values
+
+
+def owui_env_file_text(values: Mapping[str, str]) -> str:
+    """Render Open WebUI's secret environment mapping as raw lines."""
+
+    return "".join(f"{name}={value}\n" for name, value in values.items())
 
 
 class OwuiEnvArtifact(Artifact):
@@ -694,7 +720,7 @@ class OwuiEnvArtifact(Artifact):
         return owui_secret_names(inputs)
 
     def emit(self, inputs: RenderInputs) -> str:
-        return "".join(f"{name}={value}\n" for name, value in owui_secret_environment(inputs).items())
+        return owui_env_file_text(owui_secret_environment(inputs))
 
 
 def _manifest_permissions(inputs: RenderInputs, *, api_keys: bool = False) -> dict[str, dict[str, bool]]:

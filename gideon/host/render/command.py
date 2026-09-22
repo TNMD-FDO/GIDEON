@@ -5,7 +5,7 @@ import hashlib
 import os
 import stat
 import sys
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
@@ -539,7 +539,15 @@ def load_render_inputs(
     models_path: PathLike,
     root: Path,
     command: str,
+    secret_names: Sequence[str] | None = None,
 ) -> tuple[RenderInputs, str, str, str] | None:
+    """Load and validate every render input, or print the refusals and return None.
+
+    ``secret_names`` replaces the production artifacts' declared set with an
+    exact list, read from the selected secrets directory — the ``gideon-ci``
+    sibling's env file reads three names and no supplied secret.
+    """
+
     site_result = load_site(Path(site_path), host=io)
     lock_result = load_host_lock(lock_path, host=io)
     images_result = load_image_lock(images_path, host=io)
@@ -573,13 +581,16 @@ def load_render_inputs(
         print(_refusal(exc, _API_SOURCE_FIX, command), file=sys.stderr)
         return None
     secrets: dict[str, str] = {}
-    names = list(OWUI_SECRET_NAMES)
-    if site_search_enabled(site_result.config):
-        names.append(SEARXNG_SECRET_NAME)
-    if site_result.config.alerts.smtp.user:
-        names.append(_SMTP_PASSWORD_NAME)
-    if io.exists(secret_path(PROXY_AUTH_NAME)):
-        names.append(PROXY_AUTH_NAME)
+    if secret_names is not None:
+        names = list(secret_names)
+    else:
+        names = list(OWUI_SECRET_NAMES)
+        if site_search_enabled(site_result.config):
+            names.append(SEARXNG_SECRET_NAME)
+        if site_result.config.alerts.smtp.user:
+            names.append(_SMTP_PASSWORD_NAME)
+        if io.exists(secret_path(PROXY_AUTH_NAME)):
+            names.append(PROXY_AUTH_NAME)
     for name in names:
         if name == _SMTP_PASSWORD_NAME and not io.exists(secret_path(name)):
             print(

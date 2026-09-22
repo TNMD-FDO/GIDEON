@@ -14,6 +14,7 @@ Every run is a row in `audit_log` (`backup_run`, `backup_push`, `backup_drill`,
 | One backup set per run: `manifest.json`, `secrets.tar.age`, `files/<root>/` | `/data/backup-staging/sets/<label>/` | `backup run` — nightly at 01:00 office time by `gideon-backup.timer`, or by hand |
 | The off-box copy: dated hard-linked snapshots of the whole staging directory | `<backup.target.path>/<label>/` on the target | `backup push` — right after the nightly run in the same unit |
 | The drill's throwaway project (`gideon-drill`, loopback port 18090, no GPU, no Caddy) | `/data/drill/` | `backup drill` — on `backup.drill_interval`, a Saturday at 04:00 office time by `gideon-backup-drill.timer`, or by hand |
+| The standing developer sibling (`gideon-ci`, loopback port 18100, production's engine through its relay, no Caddy) — outside the backup set, rebuilt from scratch by `down --wipe` then `up` | `/data/ci/` | `sudo python3 -m tools.cistack up`, by a developer or the runner's jobs; stopped by `down` |
 
 A fifth line since `v0.0.22` (ticket 07): the **quarterly full off-box re-hash**,
 `backup push --verify-all`, by `gideon-backup-verify.timer` on the second
@@ -117,6 +118,10 @@ set finished by then; a naive time is office-local. Every point-in-time bound
 is a recorded archive boundary, never a clock: a time the sets cannot reach
 refuses and names the bound.
 
+While the `gideon-ci` sibling stands, run `sudo python3 -m tools.cistack down`
+first: its relay holds production's Compose network, which the restore's stop
+cannot remove while it is attached.
+
 What a restore does, in order: takes a `pre-restore-<ts>` set first (and pushes
 it for `--from target`), so a mistaken restore is itself recoverable within
 retention — but only when the whole stack is running; a partially running
@@ -193,5 +198,6 @@ it is refused with `--at` or `--from target`. After a rollback, Postgres runs
 on a new timeline, and an `--at` earlier than the rollback's boundary may name
 a point on the old one that pgBackRest's auto-selected backup cannot reach;
 prefer `--set` for anything a rollback took. It is also the by-hand rollback when `upgrade --rollback`
-finds no pre-upgrade set to work from. A labelled or pre-restore set never
+finds no pre-upgrade set to work from. As before a restore, `sudo python3 -m
+tools.cistack down` runs first while the `gideon-ci` sibling stands. A labelled or pre-restore set never
 expires the repository's retention on its own; only the nightly run does.

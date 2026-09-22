@@ -63,6 +63,7 @@ from gideon.host.render.owui import (
     general_texts,
     owui_environment,
     owui_secret_environment,
+    owui_secret_names,
     permission_tree,
     public_read_grant,
 )
@@ -292,6 +293,47 @@ class Environment(unittest.TestCase):
         self.assertEqual(env["ENABLE_LDAP_GROUP_CREATION"], "false")
         self.assertNotIn("LDAP_APP_PASSWORD", env)
 
+    def test_search_false_leaves_only_the_search_switch(self) -> None:
+        enabled = owui_environment(inputs())
+        disabled = owui_environment(inputs(), search=False)
+        self.assertEqual(disabled["ENABLE_WEB_SEARCH"], "false")
+        self.assertEqual(
+            set(enabled) - set(disabled),
+            {
+                "WEB_SEARCH_ENGINE",
+                "SEARXNG_QUERY_URL",
+                "WEB_SEARCH_RESULT_COUNT",
+                "WEB_LOADER_ENGINE",
+                "USER_AGENT",
+                "WEB_LOADER_TIMEOUT",
+                "BYPASS_WEB_SEARCH_WEB_LOADER",
+                "WEB_SEARCH_TRUST_ENV",
+                "ENABLE_WEB_LOADER_SSL_VERIFICATION",
+                "ENABLE_WEB_SEARCH_CONFIRMATION",
+                "WEB_SEARCH_CONFIRMATION_CONTENT",
+                "WEB_SEARCH_DOMAIN_FILTER_LIST",
+            },
+        )
+
+    def test_directory_false_disables_ldap_without_directory_settings(self) -> None:
+        enabled = owui_environment(inputs())
+        disabled = owui_environment(inputs(), directory=False)
+        self.assertEqual(disabled["ENABLE_LDAP"], "false")
+        self.assertFalse(
+            any(
+                name.startswith("LDAP_") or name.startswith("ENABLE_LDAP_")
+                for name in disabled
+            )
+        )
+        self.assertEqual(
+            set(enabled) - set(disabled),
+            {
+                name
+                for name in enabled
+                if name.startswith("LDAP_") or name.startswith("ENABLE_LDAP_")
+            },
+        )
+
     def test_a_dn_form_group_is_used_as_given(self) -> None:
         env = owui_environment(inputs(DN_GROUPS))
         self.assertEqual(env["LDAP_SEARCH_FILTERS"], "(memberOf=CN=GIDEON-Users,OU=Security Groups,DC=ad,DC=test)")
@@ -399,6 +441,11 @@ class SecretEnv(unittest.TestCase):
         self.assertEqual(values["DATABASE_URL"], "postgresql://openwebui:p%40ss%2Fword@postgres:5432/openwebui")
         self.assertEqual(values["OPENAI_API_KEYS"], SECRETS["gideon_api_key"])
         self.assertNotIn(SECRETS["engine_api_key"], values.values())
+
+    def test_directory_false_omits_the_bind_secret_and_name(self) -> None:
+        values = owui_secret_environment(inputs(), directory=False)
+        self.assertNotIn("LDAP_APP_PASSWORD", values)
+        self.assertNotIn("ldap_bind_password", owui_secret_names(inputs(), directory=False))
 
     def test_no_gpu_env_file_omits_the_connection_key(self) -> None:
         values = owui_secret_environment(inputs(no_gpu=True, secrets={

@@ -78,6 +78,7 @@ class RunSpec:
     case_ids: tuple[str, ...] = ()
     service: bool = False
     instruction: bool = True
+    stack: str = "production"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1786,6 +1787,7 @@ def _arguments(spec: RunSpec) -> dict[str, object]:
         "case_ids": list(spec.case_ids),
         "service": spec.service,
         "instruction": spec.instruction,
+        "stack": spec.stack,
     }
 
 
@@ -1938,6 +1940,8 @@ def _run_cases(
         offline_counts=reported_offline,
         replayed=not spec.service,
     )
+    if spec.stack != "production":
+        summary_detail = f"stack: {spec.stack}; {summary_detail}"
     summary_ok = (
         bookkeeping.offline_counts["error"] == 0
         if spec.unfiltered
