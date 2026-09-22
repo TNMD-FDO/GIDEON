@@ -121,6 +121,168 @@ The signing procedure — the sheet an attorney reads and the intake that append
 a line — is slice-2 ticket 24's sign-off kit. No sign-offs file is committed
 today, so every case here is unsigned.
 
+## The sign-off kit
+
+### The drafts file
+
+The slice 3 draft generator writes the drafts file. It is UTF-8 JSONL kept
+**outside the checkout**, one object per line, with these closed keys in this
+order:
+
+- `case_id` — a `research-qa` id that is a case of the loaded set, appearing
+  once per file.
+- `answer` — a non-empty drafted answer.
+- `must_cite` — a non-empty list whose item keys are `source_id` and `caption`,
+  in that order. Each source id is valid, appears only once, and each caption
+  is non-empty and one line.
+- `passage` — `source_id`, `sha256`, `start`, `end`, `caption`, and `text`, in
+  that order, with an optional `provenance` after them. The builder checks that
+  provenance is an object and never reads it into a packet.
+
+The passage source id must be among the `must_cite` source ids. Its coordinates
+follow the judgments coordinate rule, and `end - start` must equal the passage
+text's length in code points. The whole file is checked before the drafts stage
+refuses it; findings are located by line and, when valid, case id.
+
+A draft for a signed or superseded case is skipped and reported by id rather
+than refused. That is normal when a generator run predates an attorney's
+signing. A draft for an id the set does not hold is a finding. An unsigned case
+with no draft is reported by id and receives no packet. If there is no drafted
+unsigned case at all, the stage refuses with
+`drafts: refused — no drafted unsigned cases. Fix: Provide at least one draft
+for an unsigned case, then retry.`
+
+### The packet and the marks file
+
+The builder writes one self-contained page per attorney at
+`<out>/<role id>.html`, with `manifest.json` beside it. The attorney accepts
+each draft or corrects it in one sentence, then returns one marks file named
+`signoffs-<role id>.txt`. Its first line is exactly:
+
+    signoffs: <role id> <digest prefix> <ISO date>
+
+That is followed by one line per case, in display order:
+
+    <case id> accept
+    <case id> correct: <sentence>
+
+A correction sentence becomes `expected.answer`; the drafted authorities stand
+and their source ids remain in `expected.must_cite`. An attorney who disputes
+an authority cannot fix that dispute in one sentence: the case is a re-draft on
+the next drafts file and a new packet. The date is the attorney's own device
+date at the moment of saving. The kit itself reads no clock.
+
+### The manifest and the digest
+
+The manifest carries the draft answers and the authorities' captions because
+the intake must write the accepted answer and must open no packet. It carries
+neither the question nor the passage text. The packet digest binds everything
+the reader saw: the draft, question, authorities, passage, display order,
+roster position, and page format. A change to any of those makes an old marks
+file refuse rather than join the set. The intake recomputes every packet digest
+from the manifest and refuses a manifest whose stored digest does not
+recompute.
+
+### Building packets, for a CSA
+
+Build an invented packet set with, for example:
+
+    python3 -m tools.signoffs.packets /tmp/example-drafts.jsonl --out /tmp/example-packets --signer CHU-attorney-1 --signer TRAD-attorney-1
+
+The roster is sorted before the drafted unsigned cases are dealt. The cases are
+ordered by the SHA-256 of their ids and dealt round-robin, so the split is even
+to within one and does not depend on flag order. A draft names a case id the set
+already holds, `research-qa-001` among them; the passage source ids above are
+documentation values, not repository data.
+
+The pre-run refusals go to stderr, before any row, as
+`signoffs packets: <problem>. Fix: <fix>`:
+
+| Problem | Fix |
+|---|---|
+| `the drafts file is inside the checkout` | Move the drafts file outside the checkout and retry. |
+| `the output directory is inside the checkout` | Choose an output directory outside the checkout and retry. |
+| `the output path is not an empty directory` | Choose an empty output directory outside the checkout, then retry. |
+| `the output directory is not empty` | Choose an empty output directory outside the checkout, then retry. |
+| `the drafts file cannot be read` | Provide a readable UTF-8 drafts file outside the checkout, then retry. |
+| `the drafts file is not UTF-8` | Save the drafts file as UTF-8, then retry. |
+| `a signer role id is malformed` | Provide unique attorney role ids, then retry. |
+| `a signer role id is repeated` | Provide unique attorney role ids, then retry. |
+| `a signer role id is not an attorney role id` | Provide unique attorney role ids, then retry. |
+
+The stage refusals are rows on stdout, as `<stage>: refused — <problem>. Fix:
+<fix>`:
+
+| Row | Problem | Fix |
+|---|---|---|
+| `set` | `the evaluation set has findings`, the findings printed above it | Restore the evaluation set, then retry. |
+| `drafts` | `the drafts file has findings`, the findings printed above it | Correct the drafts JSONL file, then retry. |
+| `drafts` | `no drafted unsigned cases` | Provide at least one draft for an unsigned case, then retry. |
+| `assign` | `more signers than drafted unsigned cases (N signers, M cases)` | Use no more than M signers for M drafted unsigned cases, then retry. |
+
+### Taking sign-offs back, for a CSA
+
+For invented files, the intake command is:
+
+    python3 -m tools.signoffs.intake /tmp/example-manifest.json /tmp/example-marks-a.txt /tmp/example-marks-b.txt --dry-run
+
+The intake is all or nothing over the marks files in one run. It prints every
+unit row before deciding whether to write; if any file is refused, nothing is
+appended. `--dry-run` prints the same summary and writes nothing. A unit whose
+header never parses is labelled `input N`; once its header supplies a valid role
+id, its row is labelled `packet <role id>`.
+
+The manifest is read first, and its refusals go to stderr before any row, as
+`signoffs intake: <problem>. Fix: <fix>`:
+
+| Problem | Fix |
+|---|---|
+| `the manifest cannot be read` | Use a manifest written by signoffs packets, then retry. |
+| `the manifest is not a signoffs packets manifest` — which is also what a stored packet digest that does not recompute prints | Use a manifest written by signoffs packets, then retry. |
+
+The set is loaded next, printing its findings and then the row `set: refused —
+the evaluation set has findings. Fix: Restore the evaluation set, then retry.`
+
+Each marks file is then one unit, and a unit's row is either `packet <role id>:
+accepted N lines` or `packet <role id>: refused — <problem>. Fix: <fix>`. A unit
+that has several problems carries them all in that one row, joined with `; `, so
+every fault in a returned file is visible at once:
+
+| Problem | Fix |
+|---|---|
+| `the marks file cannot be read` | Provide a readable UTF-8 marks file, then retry. |
+| `the marks file is not UTF-8` | Provide a readable UTF-8 marks file, then retry. |
+| `the first line is not a signoffs header` | Provide a signoffs marks file with its header first, then retry. |
+| `the packet is not in the manifest` | Use a marks file from a packet in this manifest, then retry. |
+| `the packet digest prefix does not match the manifest` | Use the marks file from this packet build, then retry. |
+| `the header date is not an ISO date` | Use an ISO date in the marks header, then retry. |
+| `a mark line is malformed` | Use one line per case, either accept or correct: and one sentence, then retry. |
+| `case <case id> is not in this packet` | Use one line per case, either accept or correct: and one sentence, then retry. |
+| `case <case id> is marked twice` | Use one line per case, either accept or correct: and one sentence, then retry. |
+| `case <case id> correction is empty` | Use one line per case, either accept or correct: and one sentence, then retry. |
+| `case <case id> has no mark` | Use one line per case, either accept or correct: and one sentence, then retry. |
+
+Once every file has parsed, the relational pass reads the accepted units against
+the set:
+
+| Problem | Fix |
+|---|---|
+| `case <case id> is superseded since the build` | Build a packet for the current unsigned cases, then retry. |
+| `case <case id> is already signed` | Build a packet for the current unsigned cases, then retry. |
+| `case <case id> is marked in another marks file` | Build a packet for the current unsigned cases, then retry. |
+
+When every unit is accepted, the records are ordered by case id and appended
+atomically. The final three lines are the pin pair and the remaining count:
+
+    summary: N lines; appended
+    summary: sign-offs N lines sha256 <SHA-256>
+    summary: unsigned N
+
+With `--dry-run`, the first line instead says
+`summary: N lines; dry run, nothing was written`; the line count and SHA-256
+are still calculated from the bytes that would result. The line-count/SHA-256
+pair is the byte pin the first committed-file test will want.
+
 ## The unsigned rule
 
 A case whose shape takes a sign-off and that has no line in the sign-offs file

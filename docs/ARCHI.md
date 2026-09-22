@@ -76,7 +76,7 @@ GIDEON/
 ├── tools/                   # repository tooling, never the product (not in the release image); stdlib + gideon.host, gideon.guardrail, gideon.api.stamp only (archi/tools.md)
 │   ├── pinwatch/ · imagebuild/ · acceptance/ · turns/ · redact/ · courtmap/   # the pin watch (hosted CI); the build tool, the clean-VM harness, the turn harness's three drivers, the evidence redaction (the box); the court map generator (by hand)
 │   ├── ownership.py         # the sudo hand-back (--out and the bytecode caches) the two harnesses share
-│   └── gate.py · environment.py · cycles.py · tracker.py · judgments/ · variants/ · archi.py · exportboundary.py   # the gate, its environment-against-pins comparison, the cycles record, tracker board, the judgment and variant generators, the architecture check, the export list — the dev venv
+│   └── gate.py · environment.py · cycles.py · tracker.py · judgments/ · signoffs/ · variants/ · archi.py · exportboundary.py   # the gate, its pins comparison, the cycles record, the board, the judgment, sign-off, and variant kits, the architecture check, the export list — the dev venv
 ├── bin/                     # the lifecycle scripts — the cycle launcher, the guard's git as one plain command each, the public export; excluded from the export
 ├── preflight.sh / install.sh / upgrade.sh   # thin entrypoints over the CLI (§2.2)
 ├── config/                  # site.example.yaml (Appendix C, authoritative); site.schema.json (generated, drift-tested); egress.yaml (the §2.3 allowlist, by group)
@@ -202,7 +202,7 @@ How the skeleton becomes the product, per §22 (sequence normative, calendar not
 |---|---|---|---|
 | 0 Platform | `v0.1.0` | **Complete**, declared done on the tracker at `v0.1.33` — the leaves' inventories are the record; its open follow-ons are the board's | `host`, `render-apply`, `engine-frontend`, `backup-restore`, `stack`, `tools`, `tests` |
 | 1 General | `v0.2.0` | **Complete** at `v0.2.0`, the pre-launch release, with no user on the box until go-live (ADR-0044) — the leaves' slice-1 rows are the record; its open follow-ons are the board's | `host` (the profile and its memory table), `render-apply`, `engine-frontend`, `stack`, `tools`, `tests` |
-| 2 Eval harness | `v0.3.0` | **In progress** — the `extraction` slice frozen and measured, the judge grading on its own, and the harvest's questions committed as `research-qa` cases in the unsigned state, stdlib alone (ADR-0046); what remains: the turn harness and the suites [11]–[15], decision and nightly runs and their board [16]–[18], the sibling stack [19]–[20], the graders [21], the sign-off kit [24] | `eval`, `eval-slices` |
+| 2 Eval harness | `v0.3.0` | **In progress** — the `extraction` slice frozen and measured, the judge grading on its own, and the harvest's questions committed as `research-qa` cases in the unsigned state, stdlib alone (ADR-0046); what remains: the turn harness and the suites [11]–[15], decision and nightly runs and their board [16]–[18], the sibling stack [19]–[20], the graders [21] | `eval`, `eval-slices` |
 | 3 Corpus + tranche 1 | `v0.4.0` | corpus/index commands, parsers, chunker, the worker `caselaw` path | `corpus` |
 | 4 Research go-live | `v0.5.0` | the `/turn` service: plan → retrieve → gate → render (§§11–13) | `turn` |
 
