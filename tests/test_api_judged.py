@@ -15,7 +15,11 @@ from unittest.mock import patch
 import pytest
 import yaml  # type: ignore[import-untyped]
 
+# The citation seed's loader is the stamp module's test, which owns its shape.
+from test_api_stamp import cases as citation_seed_cases
+
 from gideon import guardrail
+from gideon.api import stamp
 from gideon.api.judged import (
     CHUNK_OBJECT,
     StreamMechanics,
@@ -318,6 +322,31 @@ class ApiJudged(unittest.TestCase):
                 sorted(str(case_id) for case_id in tripped),
             )
 
+    @pytest.mark.slow
+    def test_citation_seed_streams_stamp_shaped_answers_at_each_granularity(
+        self,
+    ) -> None:
+        for case in citation_seed_cases():
+            answer = case["answer"]
+            assert isinstance(answer, str)
+            shaped = case["kind"] == "shaped"
+            for granularity in (1, 7, 0):
+                with self.subTest(case=case["id"], granularity=granularity):
+                    state = state_for_prompt("Explain this visibly fictitious answer.")
+                    mechanics = StreamMechanics(state)
+                    released = ""
+                    for payload in seed_chunks("", answer, granularity):
+                        emitted, tripped = mechanics.process(payload)
+                        self.assertFalse(tripped)
+                        released += "".join(
+                            content_from_payload(item) for item in emitted
+                        )
+                    expected = answer + stamp.STAMP_TAIL if shaped else answer
+                    self.assertEqual(released, expected)
+                    self.assertEqual(
+                        released.count(stamp.CITATION_STAMP), 1 if shaped else 0
+                    )
+
     def test_request_state_uses_body_context_and_empty_stash_fallbacks(self) -> None:
         positive_path = next(path for path, _document in seed_documents())
         case = next(
@@ -528,6 +557,31 @@ class ApiJudged(unittest.TestCase):
                     self.assertFalse(contains_key(payload, key))
                     self.assertNotIn(private_text, json.dumps(payload))
 
+    def test_a_shape_in_the_reasoning_alone_is_never_stamped(self) -> None:
+        """Only ``content`` deltas enter the window, so reasoning is never scanned."""
+
+        thinking = "A withheld thought cites 2026 WL 123456."
+        answer = "A safe fixture answer with no citation shape."
+        self.assertIsNotNone(stamp.detect(thinking))
+        self.assertIsNone(stamp.detect(answer))
+
+        state = state_for_prompt("Explain this visibly fictitious rule.")
+        mechanics = StreamMechanics(state)
+        emitted: list[dict[str, object] | str] = []
+        for payload in (
+            chunk({"reasoning": thinking}),
+            chunk({"content": answer}),
+            chunk({}, finish_reason="stop"),
+            DONE_EVENT,
+        ):
+            payloads, tripped = mechanics.process(payload)
+            self.assertFalse(tripped)
+            emitted.extend(payloads)
+        self.assertEqual(
+            "".join(content_from_payload(item) for item in emitted), answer
+        )
+        self.assertNotIn(stamp.CITATION_STAMP, json.dumps(emitted))
+
     def test_clean_stream_preserves_envelopes_and_usage(self) -> None:
         answer = "This fixture describes a neutral record without a calculation. " * 18
         state = state_for_prompt("Explain the fictitious record.")
@@ -594,7 +648,7 @@ class ApiJudged(unittest.TestCase):
         self.assertNotIn(guardrail.REFUSAL_SEPARATOR, content_from_payload(emitted[0]))
 
     def test_finish_chunk_carries_the_settled_tail_in_its_delta(self) -> None:
-        answer = "A short fictitious explanation."
+        answer = "The invented reporter is 17 F.3d 204."
         state = state_for_prompt("Explain a fictitious rule.")
         mechanics = StreamMechanics(state)
         emitted, tripped = mechanics.process(chunk({"content": answer}))
@@ -603,7 +657,7 @@ class ApiJudged(unittest.TestCase):
         emitted, tripped = mechanics.process(chunk({}, finish_reason="stop"))
         self.assertFalse(tripped)
         self.assertEqual(len(emitted), 1)
-        self.assertEqual(content_from_payload(emitted[0]), answer)
+        self.assertEqual(content_from_payload(emitted[0]), answer + stamp.STAMP_TAIL)
         first_payload = emitted[0]
         self.assertIsInstance(first_payload, Mapping)
         assert isinstance(first_payload, Mapping)
@@ -611,6 +665,147 @@ class ApiJudged(unittest.TestCase):
         self.assertIsInstance(choices, list)
         assert isinstance(choices, list)
         self.assertEqual(choices[0]["finish_reason"], "stop")
+
+    def test_unfinished_shape_with_no_held_text_emits_its_own_label_chunk(self) -> None:
+        answer = "The invented reporter is 17 F.3d 204."
+        state = state_for_prompt("Explain a fictitious rule.")
+        mechanics = StreamMechanics(state)
+        mechanics.process(chunk({"content": ""}))
+        # The window always holds a lag behind real text, so a settled tail of
+        # nothing over a shaped answer is reachable only from a state whose
+        # text was already released whole: the branch is written to directly.
+        content = state["content"]
+        self.assertIsInstance(content, dict)
+        assert isinstance(content, dict)
+        content.update(
+            {
+                "text": answer,
+                "released": len(answer),
+                "decided": len(answer),
+                "constraints": [],
+            }
+        )
+        emitted, tripped = mechanics.process(DONE_EVENT)
+
+        self.assertFalse(tripped)
+        self.assertEqual(len(emitted), 2)
+        label_chunk = emitted[0]
+        self.assertIsInstance(label_chunk, Mapping)
+        assert isinstance(label_chunk, Mapping)
+        self.assertEqual(
+            {key: value for key, value in label_chunk.items() if key != "choices"},
+            BASE_ENVELOPE,
+        )
+        self.assertEqual(content_from_payload(label_chunk), stamp.STAMP_TAIL)
+        self.assertEqual(emitted[1], DONE_EVENT)
+
+    def test_unfinished_shape_is_stamped_once_before_every_following_end_payload(
+        self,
+    ) -> None:
+        answer = "The invented reporter is 17 F.3d 204."
+        error_payload: dict[str, object] = {
+            "error": {"message": "fixture upstream error"}
+        }
+        ends = (
+            ("end marker", "marker"),
+            ("clean body", "clean"),
+            ("transport failure", "transport"),
+            ("engine error", "error"),
+        )
+        for end_name, ending in ends:
+            with self.subTest(end=end_name):
+                _state, mechanics = self._held_stream(answer)
+                following: dict[str, object] | str | None
+                if ending == "marker":
+                    emitted, tripped = mechanics.process(DONE_EVENT)
+                    following = DONE_EVENT
+                elif ending in {"clean", "transport"}:
+                    emitted, tripped = mechanics.finish()
+                    following = None
+                else:
+                    emitted, tripped = mechanics.process(error_payload)
+                    following = error_payload
+                self.assertFalse(tripped)
+                self.assertEqual(
+                    content_from_payload(emitted[0]), answer + stamp.STAMP_TAIL
+                )
+                self.assertEqual(
+                    sum(
+                        content_from_payload(item).count(stamp.CITATION_STAMP)
+                        for item in emitted
+                    ),
+                    1,
+                )
+                if following is not None:
+                    self.assertEqual(emitted[1], following)
+
+    def test_finish_and_unfinished_ends_do_not_stamp_a_tripped_citation_shape(
+        self,
+    ) -> None:
+        answer = "The fictional statute is 18 U.S.C. § 3161(b). The deadline is June 5, 2027."
+        self.assertIsNotNone(stamp.detect(answer))
+
+        state = state_for_prompt("Explain a fictitious legal rule.")
+        emitted, tripped = StreamMechanics(state).process(
+            chunk({"content": answer}, finish_reason="stop")
+        )
+        self.assertTrue(tripped)
+        self.assertNotIn(stamp.CITATION_STAMP, json.dumps(emitted))
+        self.assertIn(
+            guardrail.DEADLINE_FAMILY.refusal,
+            content_from_payload(emitted[0]),
+        )
+
+        state, mechanics = self._held_stream(answer)
+        emitted, tripped = mechanics.finish()
+        self.assertTrue(tripped)
+        self.assertNotIn(stamp.CITATION_STAMP, json.dumps(emitted))
+        self.assertIn(
+            guardrail.DEADLINE_FAMILY.refusal,
+            content_from_payload(emitted[0]),
+        )
+
+    def test_tripped_stream_after_a_released_citation_prefix_has_no_label(self) -> None:
+        prefix = (
+            "neutral fixture context. " * 40
+            + "The fictional statute is 18 U.S.C. § 3161(b). "
+            + "more neutral fixture context. " * 20
+        )
+        state = state_for_prompt("Explain a fictitious legal rule.")
+        mechanics = StreamMechanics(state)
+        released, tripped = mechanics.process(chunk({"content": prefix}))
+        self.assertFalse(tripped)
+        self.assertIn(
+            "18 U.S.C. § 3161(b)",
+            "".join(content_from_payload(item) for item in released),
+        )
+        emitted, tripped = mechanics.process(
+            chunk({"content": "The deadline is June 5, 2027."}, finish_reason="stop")
+        )
+        self.assertTrue(tripped)
+        all_text = "".join(
+            content_from_payload(item) for item in released + emitted
+        )
+        self.assertIn("18 U.S.C. § 3161(b)", all_text)
+        self.assertNotIn(stamp.CITATION_STAMP, all_text)
+
+    def test_finish_with_usage_and_end_marker_does_not_add_a_second_label(self) -> None:
+        answer = "The invented reporter is 17 F.3d 204."
+        state = state_for_prompt("Explain a fictitious rule.")
+        mechanics = StreamMechanics(state)
+        emitted: list[dict[str, object] | str] = []
+        for payload in (
+            chunk({"content": answer}),
+            chunk({}, finish_reason="stop"),
+            usage_chunk(),
+            DONE_EVENT,
+        ):
+            payloads, tripped = mechanics.process(payload)
+            self.assertFalse(tripped)
+            emitted.extend(payloads)
+        text = "".join(content_from_payload(item) for item in emitted)
+        self.assertEqual(text, answer + stamp.STAMP_TAIL)
+        self.assertEqual(text.count(stamp.CITATION_STAMP), 1)
 
     def _held_stream(self, answer: str) -> tuple[guardrail.StreamState, StreamMechanics]:
         state = state_for_prompt("Explain a fictitious rule.")
@@ -811,6 +1006,30 @@ class ApiJudged(unittest.TestCase):
         self.assertEqual(parsed, expected)
         self.assertNotIn("logprobs", output.decode())
 
+    def test_whole_citation_seed_stamps_shaped_answers_and_leaves_free_ones(self) -> None:
+        for case in citation_seed_cases():
+            answer = case["answer"]
+            assert isinstance(answer, str)
+            shaped = case["kind"] == "shaped"
+            with self.subTest(case=case["id"]):
+                output, failure = judge_completion(
+                    completion_body(
+                        [
+                            {
+                                "index": 0,
+                                "message": {"role": "assistant", "content": answer},
+                                "finish_reason": "stop",
+                            }
+                        ]
+                    ),
+                    state_for_prompt("Explain this visibly fictitious answer."),
+                )
+                self.assertIsNone(failure)
+                assert output is not None
+                actual = json.loads(output)["choices"][0]["message"]["content"]
+                self.assertEqual(actual, answer + stamp.STAMP_TAIL if shaped else answer)
+                self.assertEqual(actual.count(stamp.CITATION_STAMP), 1 if shaped else 0)
+
     def test_whole_trip_replaces_content_and_preserves_finish_and_usage(self) -> None:
         body = completion_body(
             [
@@ -846,6 +1065,34 @@ class ApiJudged(unittest.TestCase):
         self.assertIsInstance(trip, dict)
         assert isinstance(trip, dict)
         self.assertEqual(trip["family"], guardrail.DEADLINE_FAMILY.name)
+
+    def test_whole_tripped_citation_shaped_choice_is_the_refusal_alone(self) -> None:
+        """A trip wins over the stamp: the refusal carries no label of its own."""
+
+        answer = "The deadline is June 5, 2027, under 18 U.S.C. § 3161(b)."
+        self.assertIsNotNone(stamp.detect(answer))
+        output, failure = judge_completion(
+            completion_body(
+                [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": answer},
+                        "finish_reason": "stop",
+                    }
+                ]
+            ),
+            state_for_prompt("Explain a fictitious legal rule."),
+        )
+
+        self.assertIsNone(failure)
+        self.assertIsNotNone(output)
+        assert output is not None
+        parsed = json.loads(output)
+        self.assertEqual(
+            parsed["choices"][0]["message"],
+            {"role": "assistant", "content": guardrail.DEADLINE_FAMILY.refusal},
+        )
+        self.assertNotIn(stamp.CITATION_STAMP, output.decode())
 
     def test_whole_reasoning_keys_are_stripped(self) -> None:
         for key in ("reasoning", "reasoning_content", "thinking"):
@@ -892,13 +1139,14 @@ class ApiJudged(unittest.TestCase):
         self.assertIsNone(state.get("trip"))
 
     def test_whole_choices_are_judged_independently(self) -> None:
+        shaped_answer = "The invented reporter is 17 F.3d 204."
         body = completion_body(
             [
                 {
                     "index": 0,
                     "message": {
                         "role": "assistant",
-                        "content": "A safe fictitious explanation.",
+                        "content": shaped_answer,
                     },
                     "finish_reason": "stop",
                 },
@@ -921,7 +1169,7 @@ class ApiJudged(unittest.TestCase):
         parsed = json.loads(output)
         self.assertEqual(
             parsed["choices"][0]["message"]["content"],
-            "A safe fictitious explanation.",
+            shaped_answer + stamp.STAMP_TAIL,
         )
         self.assertEqual(
             parsed["choices"][1]["message"]["content"],
@@ -984,7 +1232,66 @@ class ApiJudged(unittest.TestCase):
 
         self.assertIsNone(failure)
         self.assertIsNotNone(output)
+        assert output is not None
+        parsed = json.loads(output)
+        self.assertEqual(
+            parsed["choices"][0]["message"]["content"],
+            "A safe fictitious reply.",
+        )
         self.assertIsNone(state.get("branch"))
+
+    def test_whole_answer_already_ending_in_the_label_is_unchanged(self) -> None:
+        answer = "The invented reporter is 17 F.3d 204." + stamp.STAMP_TAIL
+        output, failure = judge_completion(
+            completion_body(
+                [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": answer},
+                    }
+                ]
+            ),
+            state_for_prompt("Explain a visibly fictitious citation."),
+        )
+
+        self.assertIsNone(failure)
+        self.assertIsNotNone(output)
+        assert output is not None
+        parsed = json.loads(output)
+        self.assertEqual(parsed["choices"][0]["message"]["content"], answer)
+        self.assertEqual(answer.count(stamp.CITATION_STAMP), 1)
+
+    def test_task_shaped_citation_title_is_stamped_after_its_json_object(self) -> None:
+        title = '{"title":"2026 WL 123456"}'
+        request_body = json.dumps(
+            {
+                "stream": False,
+                "messages": [{"role": "user", "content": "Generate a title."}],
+            }
+        ).encode()
+        state = stream_state_from_body(request_body, "user")
+        output, failure = judge_completion(
+            completion_body(
+                [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": title},
+                        "finish_reason": "stop",
+                    }
+                ]
+            ),
+            state,
+        )
+
+        self.assertIsNone(failure)
+        self.assertIsNotNone(output)
+        assert output is not None
+        parsed = json.loads(output)
+        stamped = parsed["choices"][0]["message"]["content"]
+        self.assertEqual(stamped, title + stamp.STAMP_TAIL)
+        first = stamped.index("{")
+        last = stamped.rindex("}") + 1
+        self.assertEqual(stamped[first:last], title)
 
 
 if __name__ == "__main__":

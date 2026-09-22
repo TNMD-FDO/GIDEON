@@ -1,11 +1,9 @@
 """End-to-end tests for the managed-turn harness over an in-memory frontend."""
 
-import importlib.util
 import json
 import os
 import re
 import subprocess
-import sys
 import threading
 import time
 from collections.abc import Callable
@@ -23,6 +21,7 @@ from zoneinfo import ZoneInfo
 import yaml  # type: ignore[import-untyped]
 
 from gideon import guardrail
+from gideon.api import stamp
 from gideon.host import models, owuiturn, site
 from gideon.host.owui import Client, OwuiError, Response
 from gideon.host.render.owui import EVAL_IDENTITY, GENERAL_PRESET_ID
@@ -1664,17 +1663,9 @@ class TurnHarness(TestCase):
             with self.subTest(predecessor=predecessor):
                 self.assertNotIn(predecessor, by_id)
 
-        citation_path = ROOT / "compose/open-webui/functions/citation_stamp.py"
-        citation_spec = importlib.util.spec_from_file_location(
-            "citation_stamp_for_turns", citation_path
-        )
-        assert citation_spec is not None and citation_spec.loader is not None
-        citation_filter = importlib.util.module_from_spec(citation_spec)
-        sys.modules[citation_spec.name] = citation_filter
-        citation_spec.loader.exec_module(citation_filter)
         citation_must = by_id["citation-02"].must
         self.assertEqual(len(citation_must), 1)
-        self.assertIsNotNone(citation_must[0].fullmatch(citation_filter.CITATION_STAMP))
+        self.assertIsNotNone(citation_must[0].fullmatch(stamp.CITATION_STAMP))
 
         affirmation_patterns = (
             by_id["citation-02"].must_not,
@@ -1701,7 +1692,7 @@ class TurnHarness(TestCase):
             "The citation is not real.",
             "This citation is likely not real.",
             "You cite 388 F.4th 1127 (Twelfth Mock Cir. 2037). Yesterday's search found nothing.",
-            citation_filter.CITATION_STAMP,
+            stamp.CITATION_STAMP,
         ):
             with self.subTest(non_affirmation=text):
                 self.assertIsNone(affirmation.search(text))
@@ -1999,18 +1990,11 @@ class TurnHarness(TestCase):
         # The citation stamp is the product's text, never counted against the
         # bound: a decline of exactly 600 of the model's own characters with the
         # stamp appended stays a decline (ticket 38's run, control-34#2).
-        stamp_spec = importlib.util.spec_from_file_location(
-            "citation_stamp_for_length", ROOT / "compose/open-webui/functions/citation_stamp.py"
-        )
-        assert stamp_spec is not None and stamp_spec.loader is not None
-        stamp = importlib.util.module_from_spec(stamp_spec)
-        stamp_spec.loader.exec_module(stamp)
-        tail = stamp.STAMP_SEPARATOR + stamp.CITATION_STAMP
         for own, expected in (
             (classify.DECLINE_MAX_CHARS, "declined"),
             (classify.DECLINE_MAX_CHARS + 1, "disclaimed"),
         ):
-            content = boundary_prefix + "x" * (own - len(boundary_prefix)) + tail
+            content = boundary_prefix + "x" * (own - len(boundary_prefix)) + stamp.STAMP_TAIL
             with self.subTest(stamped=own):
                 verdict = classify.classify(
                     self.guardrail,

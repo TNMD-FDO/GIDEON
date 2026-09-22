@@ -73,7 +73,7 @@ GIDEON/
 │   ├── fixtures/            # site/ (refusals); render/<example|second-office|no-gpu>/ (byte-stable renders); host/ (the recorded box, the runner's settings); pinwatch/ (the recorded hub and PyPI replies); courts/ (a fictitious CSV and hand table, malformed maps, lockfiles)
 │   ├── regenerate_render_fixtures.py   # rewrites fixtures/render deliberately (the drift test names it)
 │   └── contract/            # self-hosted-only modules, no test_ prefix, each with its throwaway stack's files beside it (archi/tests.md)
-├── tools/                   # repository tooling, never the product (not in the release image); stdlib + gideon.host and gideon.guardrail only (archi/tools.md)
+├── tools/                   # repository tooling, never the product (not in the release image); stdlib + gideon.host, gideon.guardrail, gideon.api.stamp only (archi/tools.md)
 │   ├── pinwatch/ · imagebuild/ · acceptance/ · turns/ · redact/ · courtmap/   # the pin watch (hosted CI); the build tool, the clean-VM harness, the turn harness's three drivers, the evidence redaction (the box); the court map generator (by hand)
 │   ├── ownership.py         # the sudo hand-back (--out and the bytecode caches) the two harnesses share
 │   └── gate.py · environment.py · cycles.py · tracker.py · judgments/ · variants/ · archi.py · exportboundary.py   # the gate, its environment-against-pins comparison, the cycles record, tracker board, the judgment and variant generators, the architecture check, the export list — the dev venv

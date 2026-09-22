@@ -9,6 +9,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Final
 
+from gideon.api import stamp
 from tools.turns import browser
 from tools.turns.cases import Case
 
@@ -16,10 +17,6 @@ from tools.turns.cases import Case
 GUARDRAIL_FUNCTION: Final[str] = "compose/open-webui/functions/arithmetic_guardrail.py"
 # The branch gate's Function keeps the branch refusal (general-turn ticket 04).
 BRANCH_GATE_FUNCTION: Final[str] = "compose/open-webui/functions/branch_gate.py"
-# The citation stamp's Function, under the checkout this module runs from.
-_STAMP_PATH: Final[Path] = (
-    Path(__file__).resolve().parents[2] / "compose/open-webui/functions/citation_stamp.py"
-)
 # The fixes name the record's home: the runner says where it is, or how to keep one.
 _FIX: Final[str] = (
     "Read {record}; a leak is a guardrail gap in "
@@ -603,18 +600,14 @@ def _reasoning_stored(assistant: Mapping[str, object]) -> bool:
     return False
 
 
-_stamp_tails: dict[Path, str] = {}
-
-
 def own_length(guardrail: Any, content: str) -> int:
     """The model's own character count: a trailing citation stamp is the product's."""
 
-    path = _STAMP_PATH
-    if path not in _stamp_tails:
-        stamp = _load_function(path, "citation_stamp")
-        _stamp_tails[path] = str(stamp.STAMP_SEPARATOR) + str(stamp.CITATION_STAMP)
-    tail = _stamp_tails[path]
-    return len(content) - len(tail) if content.endswith(tail) else len(content)
+    return (
+        len(content) - len(stamp.STAMP_TAIL)
+        if content.endswith(stamp.STAMP_TAIL)
+        else len(content)
+    )
 
 
 def classify(

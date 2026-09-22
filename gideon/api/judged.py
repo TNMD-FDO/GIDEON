@@ -7,6 +7,7 @@ from typing import Final
 
 from gideon import guardrail
 
+from . import stamp
 from .sse import DONE_EVENT
 
 # A downstream choice is rebuilt from these keys, never scrubbed of the ones it
@@ -78,7 +79,8 @@ def judge_completion(
     otherwise the failure's exception class, which the relay logs: the
     judgement itself never logs, since everything it holds is model text.  A
     valid body is compactly re-serialized even when no choice trips, so every
-    message passes through the same withholding boundary.
+    message passes through the same withholding boundary and an untripped text
+    receives the citation stamp's tail.
     """
 
     try:
@@ -114,6 +116,8 @@ def judge_completion(
                 if isinstance(result, guardrail.Trip):
                     _record_trip(state, result)
                     rebuilt_message["content"] = _refusal_for(result.family)
+                else:
+                    rebuilt_message["content"] = content + stamp.tail_for(content)
             # The choice is rebuilt here as it is on the stream: a `logprobs`
             # or a token id the engine adds beside the message cannot carry
             # text the window refused.
@@ -187,7 +191,12 @@ def _record_error_trip(state: guardrail.StreamState) -> None:
 
 
 class StreamMechanics:
-    """Judge and rebuild one streamed completion's parsed payloads."""
+    """Judge one stream and stamp its answer when the window's tail settles.
+
+    The citation label is decided only after the finished answer settles at a
+    finish chunk or an unfinished end.  A trip returns through the refusal
+    path before that decision and never reaches the stamp.
+    """
 
     def __init__(self, state: guardrail.StreamState) -> None:
         self.state = state
@@ -258,6 +267,8 @@ class StreamMechanics:
     def _process_chunk(
         self, event: Mapping[str, object]
     ) -> tuple[list[dict[str, object] | str], bool]:
+        """Process one chunk, stamping only an untripped finished answer."""
+
         choices = event.get("choices")
         if not isinstance(choices, list):
             raise TypeError("stream choices are not a list")
@@ -288,6 +299,7 @@ class StreamMechanics:
             raise TypeError("stream has ambiguous reasoning")
 
         self._last_envelope = envelope
+        was_finished = self.state.get("finished") is True
         checker = guardrail.StreamCheck(self.state, "content", judge=guardrail.judge_rendered)
         released = ""
         if "content" in texts:
@@ -303,6 +315,8 @@ class StreamMechanics:
         if self._tripped():
             self._ended = True
             return self._trip_payloads(envelope), True
+        if is_finished and not was_finished:
+            released += stamp.tail_for(self._finished_answer())
 
         output_delta: dict[str, object] = {
             key: delta[key] for key in RELAYED_DELTA_KEYS if key in delta
@@ -343,6 +357,8 @@ class StreamMechanics:
     def _settle_tail(
         self, envelope: Mapping[str, object] | None
     ) -> list[dict[str, object] | str]:
+        """Settle an unfinished answer, stamping only after its trip check passes."""
+
         if self.state.get("finished") is True:
             return []
         checker = guardrail.StreamCheck(self.state, "content", judge=guardrail.judge_rendered)
@@ -350,9 +366,19 @@ class StreamMechanics:
         self.state["finished"] = True
         if self._tripped():
             return self._trip_payloads(envelope)
+        tail += stamp.tail_for(self._finished_answer())
         if not tail:
             return []
         return [self._content_chunk(envelope, tail)]
+
+    def _finished_answer(self) -> str:
+        """Read the accumulated content text, or empty text for an unreadable state."""
+
+        content = self.state.get("content")
+        if not isinstance(content, dict):
+            return ""
+        text = content.get("text")
+        return text if isinstance(text, str) else ""
 
     @staticmethod
     def _envelope(event: Mapping[str, object]) -> dict[str, object]:

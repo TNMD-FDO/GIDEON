@@ -19,7 +19,7 @@ import httpx
 from starlette.types import Message, Scope
 
 from gideon import guardrail
-from gideon.api import judged
+from gideon.api import judged, stamp
 from gideon.api.app import create_app
 from gideon.api.relay import UPSTREAM_ERROR
 from gideon.api.settings import Settings
@@ -820,6 +820,31 @@ class ApiCompletions(unittest.TestCase):
         for secret in ("fixture prompt secret", "fixture header secret", API_KEY, ENGINE_KEY):
             self.assertNotIn(secret, captured.output[0])
 
+    def test_shaped_stream_keeps_chunk_count_and_stamps_its_last_text(self) -> None:
+        answer = (
+            "The invented reporter is 17 F.3d 204. " + "neutral fixture context. " * 40
+        )
+        chunks = (
+            _chunk_event({"role": "assistant"}),
+            _chunk_event({"content": answer}),
+            _chunk_event({}, finish_reason="stop"),
+            b"data: [DONE]\n\n",
+        )
+        start, bodies, stream = asyncio.run(
+            self.gated_stream("text/event-stream", chunks=chunks)
+        )
+
+        events = [_parse_event(self.message_body(message)) for message in bodies[:-1]]
+        self.assertEqual(start["status"], 200)
+        self.assertEqual(len(events), len(chunks))
+        text_events = [event for event in events if _event_content(event)]
+        self.assertTrue(text_events)
+        self.assertTrue(_event_content(text_events[-1]).endswith(stamp.STAMP_TAIL))
+        self.assertEqual(_event_content(text_events[-1]).count(stamp.CITATION_STAMP), 1)
+        self.assertEqual(events[-1], DONE_EVENT)
+        self.assertEqual(self.message_body(bodies[-1]), b"")
+        self.assertTrue(stream.closed)
+
     def test_stream_content_type_forms_are_preserved_without_a_length(self) -> None:
         for content_type in (
             "text/event-stream",
@@ -971,9 +996,9 @@ class ApiCompletions(unittest.TestCase):
         ):
             self.assertNotIn(secret, captured.output[0])
 
-    async def failed_stream(self) -> tuple[list[Message], GatedStream, httpx.HTTPError]:
+    async def failed_stream(self, chunks: tuple[bytes, ...] = _STREAM_EVENTS[:2]) -> tuple[list[Message], GatedStream, httpx.HTTPError]:
         failure = httpx.ReadError("fixture mid-stream failure")
-        stream = GatedStream(_STREAM_EVENTS[:2], failure)
+        stream = GatedStream(chunks, failure)
 
         def engine(request: httpx.Request) -> httpx.Response:
             return httpx.Response(
@@ -1038,6 +1063,85 @@ class ApiCompletions(unittest.TestCase):
             ENGINE_KEY,
         ):
             self.assertNotIn(secret, captured.output[0])
+
+    def test_mid_stream_failure_after_shaped_text_sends_label_before_error_events(
+        self,
+    ) -> None:
+        answer = (
+            "The invented reporter is 17 F.3d 204. " + "neutral fixture context. " * 40
+        )
+        chunks = (
+            _chunk_event({"role": "assistant"}),
+            _chunk_event({"content": answer}),
+        )
+        with self.assertLogs("gideon.api.relay", level="WARNING"):
+            messages, stream, _failure = asyncio.run(self.failed_stream(chunks))
+
+        released = _parse_event(self.message_body(messages[2]))
+        settled = _parse_event(self.message_body(messages[3]))
+        self.assertEqual(
+            _event_content(released) + _event_content(settled),
+            answer + stamp.STAMP_TAIL,
+        )
+        self.assertTrue(_event_content(settled).endswith(stamp.STAMP_TAIL))
+        self.assertEqual(self.message_body(messages[4]), b"\n\n")
+        self.assertEqual(_parse_event(self.message_body(messages[5])), UPSTREAM_ERROR)
+        self.assertEqual(_parse_event(self.message_body(messages[6])), DONE_EVENT)
+        self.assertEqual(self.message_body(messages[7]), b"")
+        self.assertTrue(stream.closed)
+
+    def test_engine_error_after_shaped_text_sends_label_before_the_error_event(
+        self,
+    ) -> None:
+        answer = (
+            "The invented reporter is 17 F.3d 204. " + "neutral fixture context. " * 40
+        )
+        error_event = b'data: {"error":{"message":"fixture engine error"}}\n\n'
+        stream = GatedStream(
+            (
+                _chunk_event({"role": "assistant"}),
+                _chunk_event({"content": answer}),
+                error_event,
+            )
+        )
+
+        def engine(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=stream,
+                request=request,
+            )
+
+        async def run() -> tuple[list[Message], GatedStream]:
+            app = create_app(self.settings(), transport=httpx.MockTransport(engine))
+            async with ASGISession(
+                app,
+                "POST",
+                "/v1/chat/completions",
+                b'{"stream":true,"prompt":"fixture prompt secret"}',
+                {"Authorization": f"Bearer {API_KEY}"},
+                "2.4",
+            ) as session:
+                messages = [await session.next_message()]
+                for index in range(len(stream.chunks)):
+                    stream.release(index)
+                while messages[-1].get("more_body", True):
+                    messages.append(await session.next_message())
+            return messages, stream
+
+        messages, stream = asyncio.run(run())
+        events = [
+            _parse_event(self.message_body(message)) for message in messages[1:-1]
+        ]
+        self.assertEqual(
+            _event_content(events[1]) + _event_content(events[2]),
+            answer + stamp.STAMP_TAIL,
+        )
+        self.assertTrue(_event_content(events[2]).endswith(stamp.STAMP_TAIL))
+        self.assertEqual(events[3], {"error": {"message": "fixture engine error"}})
+        self.assertEqual(self.message_body(messages[-1]), b"")
+        self.assertTrue(stream.closed)
 
     async def first_event_failure(self) -> tuple[list[Message], GatedStream]:
         stream = GatedStream((b"data: not-json\n\n",))
@@ -1169,6 +1273,86 @@ class ApiCompletions(unittest.TestCase):
         self.assertEqual(response.headers[b"content-type"], b"application/json")
         self.assertEqual(response.headers[b"content-length"], str(len(completion)).encode())
         self.assertTrue(stream.closed)
+
+    def test_whole_completion_stamps_shaped_and_preserves_free_bytes(self) -> None:
+        cases = (
+            ("shaped", "The invented reporter is 17 F.3d 204.", True),
+            ("free", "A visibly fictitious answer has no citation shape.", False),
+        )
+        request_body = json.dumps(
+            {
+                "stream": False,
+                "messages": [{"role": "user", "content": "fixture prompt"}],
+            },
+            separators=(",", ":"),
+        ).encode()
+        for name, answer, shaped in cases:
+            with self.subTest(case=name):
+                engine_body = whole_completion(
+                    [
+                        {
+                            "index": 0,
+                            "finish_reason": "stop",
+                            "message": {"role": "assistant", "content": answer},
+                        }
+                    ]
+                )
+
+                def engine(
+                    request: httpx.Request, response_body: bytes = engine_body
+                ) -> httpx.Response:
+                    return httpx.Response(
+                        200,
+                        headers={"content-type": "application/json"},
+                        content=response_body,
+                        request=request,
+                    )
+
+                response = self.request(
+                    httpx.MockTransport(engine),
+                    body=request_body,
+                    headers={"Authorization": f"Bearer {API_KEY}"},
+                )
+                self.assertEqual(response.status_code, 200)
+                parsed = json.loads(response.body)
+                actual = parsed["choices"][0]["message"]["content"]
+                expected = answer + stamp.STAMP_TAIL if shaped else answer
+                self.assertEqual(actual, expected)
+                if not shaped:
+                    self.assertEqual(response.body, engine_body)
+
+    def test_whole_stamp_does_not_put_answer_or_label_in_logs(self) -> None:
+        answer = "The invented reporter is 17 F.3d 204."
+        engine_body = whole_completion(
+            [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": answer},
+                    "finish_reason": "stop",
+                }
+            ]
+        )
+
+        def engine(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                content=engine_body,
+                request=request,
+            )
+
+        with capture_logs() as captured:
+            response = self.request(
+                httpx.MockTransport(engine),
+                body=b'{"stream":false,"messages":[{"role":"user","content":"fixture prompt"}]}',
+                headers={"Authorization": f"Bearer {API_KEY}"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        for record in captured.records:
+            rendered = logging.Formatter().format(record)
+            self.assertNotIn(answer, rendered)
+            self.assertNotIn(stamp.CITATION_STAMP, rendered)
 
     def test_completion_forwards_body_content_type_and_only_engine_identity(self) -> None:
         callers_body = b'{"messages":[{"content":"fixture prompt"}]}'

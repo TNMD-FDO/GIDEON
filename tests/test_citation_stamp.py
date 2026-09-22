@@ -1,4 +1,10 @@
-"""The citation stamp's contract: the Filter over its seed and the pinned payload shape."""
+"""The citation stamp Function's outlet hooks over the pinned payload shape.
+
+The seed, the detection, and the pattern bounds are the package module's
+(``tests/test_api_stamp.py``); what is left here is the Function's own
+payload plumbing, and every detection read below is the package's.
+Ticket 09's cutover deletes this module with the Function.
+"""
 
 import ast
 import copy
@@ -13,6 +19,7 @@ from unittest.mock import patch
 import yaml  # type: ignore[import-untyped]
 
 from gideon import guardrail
+from gideon.api import stamp
 
 ROOT = Path(__file__).resolve().parent.parent
 FILTER_PATH = ROOT / "compose/open-webui/functions/citation_stamp.py"
@@ -92,29 +99,6 @@ def message_item_text(message: dict[str, object]) -> str:
     return "".join(str(part["text"]) for part in parts)
 
 
-class Seed(unittest.TestCase):
-    def test_family_version_and_both_kinds(self) -> None:
-        loaded = document()
-        self.assertEqual(loaded["family"], "citation")
-        self.assertEqual(loaded["pattern_set_version"], 1)
-        kinds = {case["kind"] for case in cases()}
-        self.assertEqual(kinds, {"shaped", "free"})
-        shaped = [case for case in cases() if case["kind"] == "shaped"]
-        free = [case for case in cases() if case["kind"] == "free"]
-        self.assertEqual(len(shaped), len(free))
-        self.assertEqual(len({case["id"] for case in cases()}), len(cases()))
-        for case in shaped:
-            self.assertIn(case["pattern"], {pattern.pattern_id for pattern in FILTER.PATTERNS})
-        for case in free:
-            self.assertNotIn("pattern", case)
-
-    def test_every_family_has_two_shaped_cases(self) -> None:
-        shaped = [case for case in cases() if case["kind"] == "shaped"]
-        for pattern in FILTER.PATTERNS:
-            with self.subTest(family=pattern.pattern_id):
-                self.assertGreaterEqual(sum(case.get("pattern") == pattern.pattern_id for case in shaped), 2)
-
-
 class Outlet(unittest.TestCase):
     def test_shaped_cases_stamp_once_in_both_representations(self) -> None:
         for case in cases():
@@ -129,7 +113,7 @@ class Outlet(unittest.TestCase):
                 self.assertEqual(message["content"], answer + TAIL)
                 self.assertEqual(message_item_text(message), answer + TAIL)
                 self.assertEqual(str(message["content"]).count(FILTER.CITATION_STAMP), 1)
-                self.assertEqual(FILTER.detect(answer), case["pattern"])
+                self.assertEqual(stamp.detect(answer), case["pattern"])
 
     def test_free_cases_are_deep_equal(self) -> None:
         for case in cases():
@@ -141,7 +125,7 @@ class Outlet(unittest.TestCase):
                 returned = FILTER.Filter().outlet(payload)
                 self.assertIs(returned, payload)
                 self.assertEqual(payload, before)
-                self.assertIsNone(FILTER.detect(str(case["answer"])))
+                self.assertIsNone(stamp.detect(str(case["answer"])))
 
     def test_reasoning_items_are_not_scanned(self) -> None:
         payload = body("An ordinary fictional answer.", thinking="A hidden thought mentions 2026 WL 123456.")
@@ -235,63 +219,7 @@ class Outlet(unittest.TestCase):
         self.assertEqual(payload, before)
 
 
-class Detection(unittest.TestCase):
-    def test_shapes_the_families_cover(self) -> None:
-        for text, family in (
-            ("466 U.S. 668", FILTER.REPORTER_FAMILY_ID),
-            ("140 S.Ct. 1204", FILTER.REPORTER_FAMILY_ID),
-            ("--- F.4th ---", FILTER.REPORTER_FAMILY_ID),
-            ("91 Fed. Reg. 2048", FILTER.REPORTER_FAMILY_ID),
-            ("18 U.S.C. § 3553(a)", FILTER.CODE_FAMILY_ID),
-            ("U.S.S.G. §2D1.1(c)(5)", FILTER.CODE_FAMILY_ID),
-            ("18 U.S.C. 3553", FILTER.CODE_FAMILY_ID),
-            ("28 C.F.R. § 2.20", FILTER.CODE_FAMILY_ID),
-            ("Tenn. Code Ann. § 40-35-501", FILTER.CODE_FAMILY_ID),
-            ("§§ 3553-3554", FILTER.CODE_FAMILY_ID),
-            ("§ 2255", FILTER.CODE_FAMILY_ID),
-            ("Fed. R. Crim. P.", FILTER.RULE_FAMILY_ID),
-            ("Fed. R. Crim. P. 32.1(b)", FILTER.RULE_FAMILY_ID),
-            ("Fed. R. Evid. 404(b)", FILTER.RULE_FAMILY_ID),
-            ("2024 WL 1234567", FILTER.DATABASE_FAMILY_ID),
-            ("2024 U.S. App. LEXIS 9876", FILTER.DATABASE_FAMILY_ID),
-        ):
-            with self.subTest(text=text):
-                self.assertEqual(FILTER.detect(text), family)
-
-    def test_shapes_outside_the_families(self) -> None:
-        for text in (
-            "Strickland v. Washington",
-            "Section 3553(a) of Title 18",
-            "section 2255 motion",
-            "Rule 11",
-            "the 2024 report, page 12",
-            "9 a.m. to 3 p.m.",
-            "version 2.3.1",
-            "Form 1040, line 12",
-            "$3,553 over 30 days",
-            "United States v. Booker (2005)",
-        ):
-            with self.subTest(text=text):
-                self.assertIsNone(FILTER.detect(text))
-
-
-class BoundsAndHygiene(unittest.TestCase):
-    def test_patterns_are_bounded_and_match_within_ceiling(self) -> None:
-        adversarial = (
-            "x" * (FILTER.MAX_MATCH_CHARS * 2),
-            "999999 U.S. ____________",
-            "99999   U.S.C.A.   §§   999999A999.999999.999999.999999  (test)  (part)  (more)  (last)  (abcd)  (1234)",
-            "99999 Tenn. Code Ann. §§ 999999A999-999999-999999-999999 (aaaa)(bbbb)(cccc)(dddd)(eeee)(ffff)",
-            "Fed. R. Bankr. P. 999.99",
-            "9999 U.S. Dist. LEXIS 999999999999",
-        )
-        for pattern in FILTER.PATTERNS:
-            with self.subTest(family=pattern.pattern_id):
-                self.assertNotRegex(pattern.regex.pattern, r"(?:\*|\+|\{\d+,\})")
-                for text in adversarial:
-                    for match in pattern.regex.finditer(text):
-                        self.assertLessEqual(len(match.group(0)), FILTER.MAX_MATCH_CHARS)
-
+class Hygiene(unittest.TestCase):
     def test_hygiene_and_signature(self) -> None:
         source = FILTER_PATH.read_text()
         tree = ast.parse(source)
@@ -321,4 +249,4 @@ class BoundsAndHygiene(unittest.TestCase):
     def test_refusals_and_the_stamp_are_not_citations(self) -> None:
         for text in (guardrail.DEADLINE_REFUSAL, FUNCTION.SESSION_REFUSAL, FILTER.CITATION_STAMP):
             with self.subTest(text=text[:40]):
-                self.assertIsNone(FILTER.detect(text))
+                self.assertIsNone(stamp.detect(text))
