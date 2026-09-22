@@ -10,6 +10,7 @@ history at commit f06e83f. User-facing notes for every tag from `v0.2.0` live un
 `docs/release-notes/`, and `tests/test_release_records.py` holds this index
 complete, ordered, and dated from the release files.
 
+- [v0.2.32](docs/2-changelog/w4_v0.2.32.md) — 2026-09-22 — pin watch reads a dash-joined tag suffix (GT 13)
 - [v0.2.31](docs/2-changelog/w4_v0.2.31.md) — 2026-09-22 — release-git refuses a taken tag (workflow 56)
 - [v0.2.30](docs/2-changelog/w4_v0.2.30.md) — 2026-09-22 — the sign-off kit, packets and marks (slice-2 24)
 - [v0.2.29](docs/2-changelog/w4_v0.2.29.md) — 2026-09-22 — the cutover, the Filters retire (general-turn 09)

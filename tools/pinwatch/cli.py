@@ -13,6 +13,7 @@ from gideon.host.lock import render_errors as render_host_errors
 from gideon.host.sysio import Host, RealHost
 from tools.pinwatch import notes, skills
 from tools.pinwatch.fetch import Fetcher, FetchError, UrllibFetcher
+from tools.pinwatch.oci import UnreadableTagError
 from tools.pinwatch.patch import PatchError, apply_bump
 from tools.pinwatch.pins import Bump, ModelPin, Pin, SkillPin, pin_registry
 from tools.pinwatch.pr import (
@@ -53,10 +54,12 @@ def _print_pr_error(error: PrError) -> None:
 
 
 def _resolver_fix(pin: Pin, error: FetchError | ValueError) -> tuple[str, str]:
-    """The failed row's problem and fix: the URL to look at, or the lock to fix."""
+    """The failed row's problem and fix: the URL, rule, or lock to fix."""
 
     if isinstance(error, FetchError):
         return error.reason, f"Check {error.url}, then re-run the pin watch."
+    if isinstance(error, UnreadableTagError):
+        return error.problem, error.fix
     return str(error), f"Correct {pin.id} in {pin.lock}, then re-run the pin watch."
 
 

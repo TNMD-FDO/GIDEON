@@ -35,6 +35,7 @@ from tools.pinwatch import patch as patch_module
 from tools.pinwatch.cli import main as pinwatch_main
 from tools.pinwatch.fetch import FetchError, Response, UrllibFetcher
 from tools.pinwatch.oci import (
+    UnreadableTagError,
     created_time,
     image_created,
     leading_component_changed,
@@ -537,6 +538,28 @@ class OciContracts(unittest.TestCase):
         self.assertFalse(same_shape(current, "4.7.0-4.9.0"))
         self.assertFalse(same_shape(current, "4-7-0-4-9-0-distroless"))
 
+    def test_dash_joined_suffix_is_one_same_shape(self) -> None:
+        current = "9.8-slim-example"
+        shape = tag_shape(current)
+        self.assertIsNotNone(shape)
+        assert shape is not None
+        self.assertEqual(shape.components, (9, 8))
+        self.assertEqual(shape.suffix, "slim-example")
+        self.assertEqual(shape.separators, (".",))
+
+        candidates = (
+            "9.9-slim-example",
+            "9.9.1-slim-example",
+            "9.9-slim",
+            "9.9-slim-example-extra",
+            "9.9",
+            "9.9-rc1-slim-example",
+        )
+        self.assertEqual(newest_same_shape(candidates, current), "9.9-slim-example")
+        self.assertEqual(
+            newest_same_shape_candidates(candidates, current), ("9.9-slim-example",)
+        )
+
     def test_existing_pin_shapes_remain_regressions_and_unknown_tags_fail_closed(self) -> None:
         regressions = (
             ("2.11", ("2.12", "3.0"), "3.0"),
@@ -546,8 +569,16 @@ class OciContracts(unittest.TestCase):
         for current, tags, expected in regressions:
             with self.subTest(current=current):
                 self.assertEqual(newest_same_shape(tags, current), expected)
-        with self.assertRaises(ValueError):
+        with self.assertRaises(UnreadableTagError) as caught:
             newest_same_shape(("4.7.0-4.9.0-distroless",), "latest")
+        error = caught.exception
+        self.assertIsInstance(error, ValueError)
+        self.assertEqual(error.tag, "latest")
+        self.assertIn("tag_shape", error.fix)
+        self.assertIn("tools/pinwatch/oci.py", error.fix)
+        self.assertNotIn("images.lock", error.fix)
+        with self.assertRaises(UnreadableTagError):
+            newest_same_shape_candidates(("9.9-slim-example",), "latest")
 
     def test_bearer_challenge_is_anonymous_and_retried_once(self) -> None:
         tags_url = "https://registry-1.docker.io/v2/library/example/tags/list?n=1000"
@@ -3519,6 +3550,43 @@ class CliContracts(unittest.TestCase):
         )
         body = next(c[1] for c in host.calls if c[0][:3] == ("gh", "pr", "create"))
         self.assertIn("This is a proposal", body or "")
+
+    def test_unreadable_tag_row_names_the_tag_rule(self) -> None:
+        image_text = IMAGE_LOCK_TEXT.replace(
+            "docker.io/library/example:1.0",
+            "docker.io/library/example:latest-fictitious",
+        )
+        tags = "https://registry-1.docker.io/v2/library/example/tags/list?n=1000"
+        host = PinWatchHost(image_text=image_text)
+        result, stdout, stderr = _cli_output(
+            host,
+            DictFetcher({tags: response({"tags": ["latest-fictitious"]})}),
+            ["--only", "images.caddy"],
+        )
+        self.assertEqual(result, 1, stderr)
+        self.assertEqual(stdout.count("images.caddy: failed —"), 1)
+        self.assertIn("tag_shape", stdout)
+        self.assertIn("tools/pinwatch/oci.py", stdout)
+        self.assertNotIn("images.lock", stdout)
+
+    def test_unstable_pypi_version_keeps_the_lock_fix(self) -> None:
+        image_text = BUILT_TWO_KIND_IMAGE_LOCK_TEXT.replace(
+            "      PYPI_VERSION: 1.2.3\n",
+            "      PYPI_VERSION: 9000.0.0rc1\n",
+        )
+        pin_id = "images.postgres.build_args.PYPI_VERSION"
+        host = PinWatchHost(image_text=image_text)
+        result, stdout, stderr = _cli_output(
+            host,
+            DictFetcher({}),
+            ["--only", pin_id],
+        )
+        self.assertEqual(result, 1, stderr)
+        self.assertIn(
+            f"{pin_id}: failed — current PyPI version '9000.0.0rc1' is not stable. "
+            f"Fix: Correct {pin_id} in images.lock, then re-run the pin watch.",
+            stdout,
+        )
 
     def test_pypi_failure_is_a_row_and_the_run_continues(self) -> None:
         image_result = load_image_lock_text(BUILT_TWO_KIND_IMAGE_LOCK_TEXT)

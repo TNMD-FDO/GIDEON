@@ -34,6 +34,18 @@ class TagShape:
 
 
 @dataclass(frozen=True, slots=True)
+class UnreadableTagError(ValueError):
+    """A current tag has no shape; remain a ``ValueError`` for resolver callers."""
+
+    tag: str
+    problem: str
+    fix: str
+
+    def __post_init__(self) -> None:
+        ValueError.__init__(self, self.problem)
+
+
+@dataclass(frozen=True, slots=True)
 class BearerChallenge:
     """The anonymous token endpoint described by a registry challenge."""
 
@@ -43,7 +55,9 @@ class BearerChallenge:
 
 
 _TAG: Final = re.compile(
-    r"^(?P<prefix>v)?(?P<numeric>\d+(?:[.-]\d+)*)(?:-(?P<suffix>[A-Za-z][A-Za-z0-9]*))?$"
+    r"^(?P<prefix>v)?(?P<numeric>\d+(?:[.-]\d+)*)(?:-(?P<suffix>"
+    r"[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z][A-Za-z0-9]*)*"
+    r"))?$"
 )
 _DATED_COMMIT: Final = re.compile(
     r"^(?P<year>\d{4})\.(?P<month>\d{1,2})\.(?P<day>\d{1,2})-"
@@ -229,9 +243,12 @@ def resolve_digest(fetcher: Fetcher, reference: Reference, tag: str) -> str:
 def tag_shape(tag: str) -> TagShape | None:
     """Parse a release or SearXNG dated-commit tag; ``None`` otherwise.
 
-    Numeric groups may use dots or dashes, and a final word suffix is allowed.
-    The separators are retained because they are part of a pin's shape.  The
-    dated-commit grammar belongs to SearXNG's published tags
+    Numeric groups may use dots or dashes, and a final suffix may be one word
+    or several dash-joined words.  The suffix is retained as one string and
+    compared whole by ``same_shape``.  A word starts with a letter, so the
+    numeric group and suffix never compete.  The separators are retained
+    because they are part of a pin's shape.  The dated-commit grammar belongs
+    to SearXNG's published tags
     (docs/research/searxng-service-and-owui-search.md §1); its commit hash is
     not part of the shape.
     """
@@ -279,6 +296,15 @@ def same_shape(current_tag: str, candidate: str) -> bool:
     )
 
 
+def _unreadable_tag(current_tag: str) -> UnreadableTagError:
+    return UnreadableTagError(
+        current_tag,
+        f"current tag has no shape that tag_shape reads: {current_tag!r}",
+        "Teach tag_shape in tools/pinwatch/oci.py the tag's grammar, "
+        "then re-run the pin watch.",
+    )
+
+
 def newest_same_shape_candidates(
     tags: Iterable[str], current_tag: str
 ) -> tuple[str, ...]:
@@ -292,7 +318,7 @@ def newest_same_shape_candidates(
 
     current_shape = tag_shape(current_tag)
     if current_shape is None:
-        raise ValueError(f"current tag is not a numeric release tag: {current_tag!r}")
+        raise _unreadable_tag(current_tag)
     newer: list[tuple[str, TagShape]] = []
     for tag in tags:
         shape = tag_shape(tag)
@@ -316,7 +342,7 @@ def newest_same_shape(tags: Iterable[str], current_tag: str) -> str:
 
     current_shape = tag_shape(current_tag)
     if current_shape is None:
-        raise ValueError(f"current tag is not a numeric release tag: {current_tag!r}")
+        raise _unreadable_tag(current_tag)
     candidates = newest_same_shape_candidates(tags, current_tag)
     if not candidates:
         return current_tag
