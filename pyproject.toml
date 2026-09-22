@@ -42,11 +42,6 @@ select = ["E4", "E7", "E9", "F", "I", "UP", "B", "C4", "SIM", "RUF100", "BLE", "
 "tests/contract/*.py" = ["E402"]
 # On-box proof records, frozen as they ran.
 ".scratch/**/*.py" = ["E402", "B905"]
-# Applied on the box and embedded whole in the render fixtures, so its findings ride
-# a product cycle whose plan carries a Window, never a tooling commit (ticket 12).
-"compose/open-webui/functions/arithmetic_guardrail.py" = ["B905", "SIM105", "RUF100"]
-# The module is held statement-equal to the Function until ticket 09 removes the duplicate.
-"gideon/guardrail.py" = ["B905", "SIM105", "RUF100"]
 
 [tool.mypy]
 python_version = "3.12"

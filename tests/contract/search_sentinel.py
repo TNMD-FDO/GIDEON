@@ -73,6 +73,7 @@ CONTROL_LOG_LEVEL = "WARNING"
 FRONTEND_ENV_KEYS: tuple[str, ...] = (
     "ALLOWED_ENDPOINTS",
     "DEFAULT_MODELS",
+    "ENABLE_FORWARD_USER_INFO_HEADERS",
     "BYPASS_EMBEDDING_AND_RETRIEVAL",
     "GLOBAL_LOG_LEVEL",
     "AUDIT_LOG_LEVEL",
@@ -153,6 +154,7 @@ def render_inputs() -> RenderInputs:
             "postgres_openwebui_password": "p@ss/word",
             "gideon_admin_password": "admin-password",
             "engine_api_key": "engine-api-key",
+            "gideon_api_key": "gideon-api-key",
             "searxng_secret_key": "searxng-secret-key",
         },
         checkout="/opt/gideon",
@@ -442,7 +444,7 @@ class SearchSentinelContract(unittest.TestCase):
 
             # The stub and SearXNG start before the frontend: the frontend
             # discovers its base model from the stub's listing, and bootstrap's
-            # live-listing step then holds General to its attachment key over
+            # live-listing step then holds General to its attachment list over
             # a real base model (the plan's Overview).
             search = cls.stack.compose("up", "-d", "searxng", "stub")
             cls.stack.require_success(search, "docker compose up searxng stub")

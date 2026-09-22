@@ -15,6 +15,7 @@ FIXED_SECRETS = {
     "postgres_openwebui_password": "postgres-openwebui-password",
     "gideon_admin_password": "gideon-admin-password",
     "engine_api_key": "engine-api-key",
+    "gideon_api_key": "gideon-api-key",
     "searxng_secret_key": "searxng-secret-key",
 }
 FIXED_API_SOURCES_DIGEST = "sha256:" + "0" * 64

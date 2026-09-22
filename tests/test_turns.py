@@ -326,7 +326,6 @@ class Frontend:
             assistant: dict[str, object] = {
                 "id": assistant_id,
                 "content": self.guardrail.DEADLINE_REFUSAL,
-                "originalContent": "The filing deadline is March 2, 2027.",
                 "done": True,
                 "output": [{"type": "message", "content": []}],
             }
@@ -726,7 +725,7 @@ class TurnHarness(TestCase):
     def setUpClass(cls) -> None:
         cls.guardrail = guardrail
 
-    def test_signin_body_turn_body_readback_and_replaced_attribution(self) -> None:
+    def test_signin_body_turn_body_readback_and_replacement(self) -> None:
         frontend = Frontend(self.guardrail, {"replaced": "replaced"})
         prompt = "unique prompt never printed"
         answer = "The filing deadline is March 2, 2027."
@@ -736,8 +735,7 @@ class TurnHarness(TestCase):
         )
         self.assertEqual(code, 0)
         self.assertIn("signin: ok — signed in as gideon-eval", stdout)
-        self.assertIn("replaced (", stdout)
-        self.assertIn(" in answer); block absent; expect refused", stdout)
+        self.assertIn("replaced; block absent; expect refused", stdout)
         self.assertIn("cleanup: ok — 1 chats deleted", stdout)
         self.assertNotIn(prompt, stdout)
         self.assertNotIn(answer, stdout)
@@ -783,73 +781,59 @@ class TurnHarness(TestCase):
         self.assertEqual(delete_paths, ["/api/v1/chats/chat%2F1"])
         self.assertEqual(frontend.chats, {})
 
-    def test_replaced_from_the_outlet_says_so(self) -> None:
-        """A replacement whose stored answer is clean was tripped by the outlet's judgement."""
+    def test_refusal_shapes_are_replaced_or_leaks(self) -> None:
+        """A refusal stores the released prefix, which is judged before replacement."""
 
-        verdict = classify.classify(
-            self.guardrail,
-            {
-                "content": self.guardrail.DEADLINE_REFUSAL,
-                "originalContent": "Holland v. Florida recognised equitable tolling.",
-                "output": [{"type": "message", "content": []}],
-            },
-            {"role": "user", "content": "What did Holland hold?"},
+        refusal = self.guardrail.DEADLINE_REFUSAL
+        cases_to_judge = (
+            (refusal, "replaced", None),
+            ("Released prefix." + self.guardrail.REFUSAL_SEPARATOR + refusal, "replaced", None),
+            (
+                "The deadline is March 2, 2027." + self.guardrail.REFUSAL_SEPARATOR + refusal,
+                "leak",
+                self.guardrail.DATE_NEAR_DEADLINE.pattern_id,
+            ),
         )
-        self.assertEqual((verdict.kind, verdict.pattern_id, verdict.tripped_in), ("replaced", None, "outlet"))
-        self.assertEqual(verdict.length, len(self.guardrail.DEADLINE_REFUSAL))
-        judgement = classify.judge_case(cases.Case("c", "p", "recorded"), verdict, "", record="the record")
-        self.assertIn("replaced (by the outlet; the stored answer judges clean — read the trip row); block absent", judgement.detail)
-
-        stream_original = "safe prefix\n\n" + self.guardrail.DEADLINE_REFUSAL
-        verdict = classify.classify(
-            self.guardrail,
-            {
-                "content": self.guardrail.DEADLINE_REFUSAL,
-                "originalContent": stream_original,
-                "output": [],
-            },
-            {"role": "user", "content": "When is it due?"},
-        )
-        self.assertEqual((verdict.kind, verdict.pattern_id, verdict.tripped_in), ("replaced", None, "stream"))
-        self.assertEqual(verdict.length, len(self.guardrail.DEADLINE_REFUSAL))
-
-        judgement = classify.judge_case(cases.Case("c", "p", "recorded"), verdict, "", record="the record")
-        self.assertIn("replaced (in the stream); block absent", judgement.detail)
-
-        # A trip before any answer text was released: the stored content is the
-        # refusal itself and the frontend kept no originalContent.
-        verdict = classify.classify(
-            self.guardrail,
-            {"content": self.guardrail.DEADLINE_REFUSAL, "output": []},
-            {"role": "user", "content": "When is it due?"},
-        )
-        self.assertEqual((verdict.kind, verdict.pattern_id, verdict.tripped_in), ("replaced", None, "stream"))
-        self.assertEqual(verdict.length, len(self.guardrail.DEADLINE_REFUSAL))
-
-    def test_guidelines_refusal_has_stream_and_outlet_attribution(self) -> None:
-        """A stored Guidelines refusal is a replacement, attributed as the deadline refusal is."""
-
-        refusal = self.guardrail.GUIDELINES_REFUSAL
-        for original, expected in (
-            (None, "stream"),
-            ("A clean doctrinal answer.", "outlet"),
-            ("Released prefix. " + refusal, "stream"),
-        ):
-            with self.subTest(expected=expected):
-                assistant: dict[str, object] = {"content": refusal, "output": []}
-                if original is not None:
-                    assistant["originalContent"] = original
+        for content, expected, pattern in cases_to_judge:
+            with self.subTest(expected=expected, content=content[:20]):
                 verdict = classify.classify(
                     self.guardrail,
-                    assistant,
-                    {"role": "user", "content": "What is the guideline range?"},
+                    {"content": content, "output": []},
+                    {"role": "user", "content": "When is it due?"},
                 )
                 self.assertEqual(
-                    (verdict.kind, verdict.pattern_id, verdict.tripped_in),
-                    ("replaced", None, expected),
+                    (verdict.kind, verdict.pattern_id),
+                    (expected, pattern),
                 )
+                judgement = classify.judge_case(
+                    cases.Case("c", "p", "recorded"),
+                    verdict,
+                    content,
+                    record="the record",
+                )
+                self.assertNotIn("outlet", judgement.detail)
+                self.assertNotIn("stream", judgement.detail)
 
-    def test_stream_suffix_replacement_keeps_the_cancelled_message_shape(self) -> None:
+    def test_guidelines_refusal_is_the_same_replacement_shape(self) -> None:
+        refusal = self.guardrail.GUIDELINES_REFUSAL
+        for content in (refusal, "Released prefix." + self.guardrail.REFUSAL_SEPARATOR + refusal):
+            with self.subTest(content=content[:20]):
+                verdict = classify.classify(
+                    self.guardrail,
+                    {"content": content, "output": []},
+                    {"role": "user", "content": "What is the guideline range?"},
+                )
+                self.assertEqual((verdict.kind, verdict.pattern_id), ("replaced", None))
+                judgement = classify.judge_case(
+                    cases.Case("c", "p", "recorded"),
+                    verdict,
+                    content,
+                    record="the record",
+                )
+                self.assertNotIn("outlet", judgement.detail)
+                self.assertNotIn("stream", judgement.detail)
+
+    def test_stream_suffix_replacement_keeps_the_message_shape(self) -> None:
         prefix = "The governing doctrine explains the applicable rule."
         for refusal in self.guardrail.REFUSALS:
             with self.subTest(refusal=refusal):
@@ -878,8 +862,8 @@ class TurnHarness(TestCase):
                     {"role": "user", "content": "Explain the general doctrine."},
                 )
                 self.assertEqual(
-                    (verdict.kind, verdict.pattern_id, verdict.tripped_in),
-                    ("replaced", None, "stream"),
+                    (verdict.kind, verdict.pattern_id),
+                    ("replaced", None),
                 )
                 self.assertTrue(verdict.block_present)
                 self.assertFalse(verdict.reasoning_stored)
@@ -889,7 +873,7 @@ class TurnHarness(TestCase):
                     content,
                     record="the record",
                 )
-                self.assertIn("replaced (in the stream); block present", judgement.detail)
+                self.assertIn("replaced; block present", judgement.detail)
 
     def test_stream_suffix_prefix_computations_are_leaks_with_loaded_patterns(self) -> None:
         seed_paths = (

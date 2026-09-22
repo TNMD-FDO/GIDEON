@@ -289,7 +289,6 @@ services:
       - "/etc/gideon/ca.pem:/etc/gideon/ca.pem:ro"
     secrets:
       - "webui_secret_key"
-      - "postgres_gideon_audit_password"
     healthcheck:
       test:
         - "CMD-SHELL"

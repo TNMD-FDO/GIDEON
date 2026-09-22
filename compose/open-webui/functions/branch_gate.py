@@ -6,10 +6,10 @@ description: Refuses user requests that address a model row without a preset bra
 # The branch gate (ADR-0045 (d), docs/frontend-contract.md §2 row 8): an
 # inlet-only global Filter refusing a user-role request whose model entry is
 # not a preset, so the hidden base model answers no seat while admins and the
-# eval identity pass (slice-1 ticket 43, general-turn ticket 04).  It stays in
-# the frontend after the cutover because nothing else can tell the base from
-# General: a preset's turn reaches the connection under its base's id, and the
-# base row keeps its public-read grant.  It depends on the Filter inlet and the
+# eval identity pass (slice-1 ticket 43, general-turn ticket 04).  It is the
+# one GIDEON Function the cutover left in the frontend, because nothing else
+# can tell the base from General: a preset's turn reaches the connection under
+# its base's id, and the base row keeps its public-read grant.  It depends on the Filter inlet and the
 # model entry's info.base_model_id alone, reads no message, and keeps no state.
 # This file runs inside the frontend's container and is imported by path in
 # the unit tests, so it imports the standard library only, defines no Valves
@@ -19,11 +19,10 @@ description: Refuses user requests that address a model row without a preset bra
 # frontend's rewriter replaces over the whole file — the word "from" followed
 # by utils, apps, main, or config (docs/research/owui-filter-function.md
 # §4.2).  The inlet order: the pinned frontend sorts a request's Filters by
-# (priority, id), a Filter without Valves taking priority 0, so the arithmetic
-# guardrail's inlet (its session gate) runs before this one, and a raising
-# inlet ends the chain uncaught, so a request failing both gates reads the
-# session refusal and never reaches this gate (the note's §3.3 and §4.5).
-# From general-turn ticket 09 this is the only global inlet.
+# (priority, id), a Filter without Valves taking priority 0.  This is the only
+# global inlet, so no order question arises, and a raising inlet ends the chain
+# uncaught, so a refused request reads this gate's refusal and never reaches
+# the connection (the note's §3.3 and §4.5).
 from collections.abc import Mapping
 
 # The inlet's refusal for a user-role request that names no preset branch.

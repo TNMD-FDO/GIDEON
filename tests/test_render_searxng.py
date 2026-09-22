@@ -60,6 +60,7 @@ SECRETS = {
     "postgres_openwebui_password": "postgres-password",
     "gideon_admin_password": "admin-password",
     "engine_api_key": "engine-api-key",
+    "gideon_api_key": "gideon-api-key",
     SEARXNG_SECRET_NAME: "searxng-secret-key",
 }
 

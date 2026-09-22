@@ -33,7 +33,12 @@ from gideon.host.models import (
     select_profile,
 )
 from gideon.host.render import ARTIFACTS, RenderInputs, render_all
-from gideon.host.render.api import API_JOB_NAME, api_health_url
+from gideon.host.render.api import (
+    API_JOB_NAME,
+    API_SERVICE_NAME,
+    api_base_url,
+    api_health_url,
+)
 from gideon.host.render.caddy import CaddyfileArtifact
 from gideon.host.render.command import (
     AppliedManifest,
@@ -67,7 +72,6 @@ from gideon.host.render.engine import (
     ENGINE_PORT,
     ENGINE_SECRET_NAME,
     ENGINE_SERVICE_NAME,
-    engine_base_url,
     engine_metrics_target,
 )
 from gideon.host.render.facts import FactsError, HostFacts, gather_facts
@@ -192,6 +196,7 @@ def inputs(site_path: Path = EXAMPLE, **overrides: object) -> RenderInputs:
             "postgres_openwebui_password": "postgres-openwebui-password",
             "gideon_admin_password": "gideon-admin-password",
             "engine_api_key": "engine-api-key",
+            "gideon_api_key": "gideon-api-key",
             "searxng_secret_key": "searxng-secret-key",
             **(
                 {"proxy_auth": "proxy-user:p@$$-'\"#password"}
@@ -525,8 +530,8 @@ class Engine(unittest.TestCase):
         frontend_environment = frontend["environment"]
         self.assertEqual(frontend_environment["DEFAULT_MODELS"], manifest["models"][1]["id"])
         self.assertEqual(frontend_environment["TASK_MODEL_EXTERNAL"], ENGINE_SERVICE_NAME)
-        self.assertEqual(urlsplit(frontend_environment["OPENAI_API_BASE_URLS"]).hostname, ENGINE_SERVICE_NAME)
-        self.assertEqual(frontend_environment["OPENAI_API_BASE_URLS"], engine_base_url())
+        self.assertEqual(urlsplit(frontend_environment["OPENAI_API_BASE_URLS"]).hostname, API_SERVICE_NAME)
+        self.assertEqual(frontend_environment["OPENAI_API_BASE_URLS"], api_base_url())
 
     def test_wrapper_has_its_dollar_zero_element_so_arguments_start_at_the_repository(self) -> None:
         wrapper = engine_wrapper("/run/secrets/engine_api_key", "vllm serve")
@@ -1112,6 +1117,7 @@ def checkout_files() -> dict[str, str]:
         "/etc/gideon/secrets/postgres_openwebui_password": "postgres-openwebui-password",
         "/etc/gideon/secrets/gideon_admin_password": "gideon-admin-password",
         "/etc/gideon/secrets/engine_api_key": "engine-api-key",
+        "/etc/gideon/secrets/gideon_api_key": "gideon-api-key",
         "/etc/gideon/secrets/searxng_secret_key": "searxng-secret-key",
     }
 

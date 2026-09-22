@@ -7,12 +7,11 @@ no ``test_`` prefix so the hosted pytest run never collects it.  It brings up
 a throwaway Compose project (Postgres + Open WebUI on loopback) in production
 order — Postgres, ``stores.converge``, then the frontend — adds a Function by
 hand, pushes the rendered example manifest with ``owui.bootstrap``, and
-proves the hand Function is gone, the rendered Filter Functions (the
-arithmetic guardrail, branch gate, and citation stamp), both model records with
-General's attachment key, groups, and keys match, and a further push changes
-nothing. The rendered Functions are hand-edited, toggled, and removed through the
-frontend routes, General's attachment key is hand-dropped, and the next
-desired-state push restores all of it.
+proves the hand Function is gone, the rendered branch-gate Function, both model
+records with General's empty attachment list, groups, and keys match, and a
+further push changes nothing. The rendered Function is hand-edited, toggled,
+and removed through the frontend routes, General's attachment list is
+hand-added, and the next desired-state push restores all of it.
 
 It also proves the signed-in environment facts: the rendered ``default_models``
 value and the disabled evaluation arena are visible through session-only config
@@ -46,11 +45,8 @@ from gideon.host.images import load_image_lock, parse_registry, reference
 from gideon.host.render.engine import ENGINE_SERVICE_NAME
 from gideon.host.render.owui import (
     ALLOWED_ENDPOINTS,
-    ARITHMETIC_GUARDRAIL_ID,
     BASE_MODEL_CAPABILITIES,
-    BRANCH_GATE_ID,
     BREAK_GLASS,
-    CITATION_STAMP_ID,
     EVAL_IDENTITY,
     GENERAL_CAPABILITIES,
     GENERAL_PRESET_ID,
@@ -278,6 +274,9 @@ class ApplyManifestContract(unittest.TestCase):
                 if key not in {"description", "capabilities", "suggestion_prompts", "filterIds"}
             )
         )
+        # The rendered attachment list is empty since the cutover, and the push
+        # overwrites a live one with it — the key is kept so that it does.
+        self.assertEqual(rendered_meta["filterIds"], [])
         self.assertEqual(general_meta["filterIds"], rendered_meta["filterIds"])
         grants = general["access_grants"]
         assert isinstance(grants, list)
@@ -306,10 +305,6 @@ class ApplyManifestContract(unittest.TestCase):
         functions = document["functions"]
         assert isinstance(functions, list)
         expected_ids = [function["id"] for function in functions]
-        self.assertEqual(
-            expected_ids,
-            [ARITHMETIC_GUARDRAIL_ID, BRANCH_GATE_ID, CITATION_STAMP_ID],
-        )
 
         listing = admin.request("GET", "/api/v1/functions/")
         self.assertEqual(listing.status, 200, listing.body)
@@ -403,8 +398,8 @@ class ApplyManifestContract(unittest.TestCase):
         )
         self.assertEqual(edited.status, 200, edited.body)
         # The update route replaces the full preset row, including params,
-        # description, grants, and the attachment key; this hand edit drops
-        # `filterIds` deliberately (docs/research/owui-preset-system-prompt.md
+        # description, grants, and the attachment list; this hand edit adds a
+        # stray Function id (docs/research/owui-preset-system-prompt.md
         # §2.1–2.3, docs/research/owui-model-record.md §1.2, §6).
         edited_general = session.request(
             "POST",
@@ -419,6 +414,7 @@ class ApplyManifestContract(unittest.TestCase):
                     "suggestion_prompts": [
                         {"title": ["Fictitious", "hand-edit"], "content": "hand-edited"}
                     ],
+                    "filterIds": [HAND_ADDED_FUNCTION["id"]],
                 },
                 "params": {"system": "hand-edited"},
                 "access_grants": [],
@@ -442,66 +438,27 @@ class ApplyManifestContract(unittest.TestCase):
         document = self.manifest()
         functions = document["functions"]
         assert isinstance(functions, list)
-        functions_by_id = {function["id"]: function for function in functions}
-        function = functions_by_id[ARITHMETIC_GUARDRAIL_ID]
-        assert isinstance(function, dict)
-        function_edit = session.request(
-            "POST",
-            f"/api/v1/functions/id/{ARITHMETIC_GUARDRAIL_ID}/update",
-            {
-                **function,
-                "content": "class Filter:\n    pass\n",
-            },
-        )
-        self.assertEqual(function_edit.status, 200, function_edit.body)
-        toggled = session.request(
-            "POST", f"/api/v1/functions/id/{ARITHMETIC_GUARDRAIL_ID}/toggle"
-        )
-        self.assertEqual(toggled.status, 200, toggled.body)
-        globally_toggled = session.request(
-            "POST", f"/api/v1/functions/id/{ARITHMETIC_GUARDRAIL_ID}/toggle/global"
-        )
-        self.assertEqual(globally_toggled.status, 200, globally_toggled.body)
-
-        gate_function = functions_by_id[BRANCH_GATE_ID]
-        assert isinstance(gate_function, dict)
-        gate_edit = session.request(
-            "POST",
-            f"/api/v1/functions/id/{BRANCH_GATE_ID}/update",
-            {
-                **gate_function,
-                "content": "class Filter:\n    pass\n",
-            },
-        )
-        self.assertEqual(gate_edit.status, 200, gate_edit.body)
-        gate_toggled = session.request(
-            "POST", f"/api/v1/functions/id/{BRANCH_GATE_ID}/toggle"
-        )
-        self.assertEqual(gate_toggled.status, 200, gate_toggled.body)
-        gate_globally_toggled = session.request(
-            "POST", f"/api/v1/functions/id/{BRANCH_GATE_ID}/toggle/global"
-        )
-        self.assertEqual(gate_globally_toggled.status, 200, gate_globally_toggled.body)
-
-        stamp_function = functions_by_id[CITATION_STAMP_ID]
-        assert isinstance(stamp_function, dict)
-        stamp_edit = session.request(
-            "POST",
-            f"/api/v1/functions/id/{CITATION_STAMP_ID}/update",
-            {
-                **stamp_function,
-                "content": "class Filter:\n    pass\n",
-            },
-        )
-        self.assertEqual(stamp_edit.status, 200, stamp_edit.body)
-        stamp_toggled = session.request(
-            "POST", f"/api/v1/functions/id/{CITATION_STAMP_ID}/toggle"
-        )
-        self.assertEqual(stamp_toggled.status, 200, stamp_toggled.body)
-        stamp_globally_toggled = session.request(
-            "POST", f"/api/v1/functions/id/{CITATION_STAMP_ID}/toggle/global"
-        )
-        self.assertEqual(stamp_globally_toggled.status, 200, stamp_globally_toggled.body)
+        for function in functions:
+            assert isinstance(function, dict)
+            identifier = function["id"]
+            assert isinstance(identifier, str)
+            function_edit = session.request(
+                "POST",
+                f"/api/v1/functions/id/{identifier}/update",
+                {
+                    **function,
+                    "content": "class Filter:\n    pass\n",
+                },
+            )
+            self.assertEqual(function_edit.status, 200, function_edit.body)
+            toggled = session.request(
+                "POST", f"/api/v1/functions/id/{identifier}/toggle"
+            )
+            self.assertEqual(toggled.status, 200, toggled.body)
+            globally_toggled = session.request(
+                "POST", f"/api/v1/functions/id/{identifier}/toggle/global"
+            )
+            self.assertEqual(globally_toggled.status, 200, globally_toggled.body)
 
         stray = session.request(
             "POST",
@@ -525,18 +482,14 @@ class ApplyManifestContract(unittest.TestCase):
         self._assert_manifest_model_state(admin, users[BREAK_GLASS.email].id)
 
         # The pinned delete route answers the DELETE method alone (a POST is 405).
-        removed = session.request(
-            "DELETE", f"/api/v1/functions/id/{ARITHMETIC_GUARDRAIL_ID}/delete"
-        )
-        self.assertEqual(removed.status, 200, removed.body)
-        removed_gate = session.request(
-            "DELETE", f"/api/v1/functions/id/{BRANCH_GATE_ID}/delete"
-        )
-        self.assertEqual(removed_gate.status, 200, removed_gate.body)
-        removed_stamp = session.request(
-            "DELETE", f"/api/v1/functions/id/{CITATION_STAMP_ID}/delete"
-        )
-        self.assertEqual(removed_stamp.status, 200, removed_stamp.body)
+        for function in functions:
+            assert isinstance(function, dict)
+            identifier = function["id"]
+            assert isinstance(identifier, str)
+            removed = session.request(
+                "DELETE", f"/api/v1/functions/id/{identifier}/delete"
+            )
+            self.assertEqual(removed.status, 200, removed.body)
         third = owui.bootstrap(ContractHost(), client_factory, self.manifest(), rendered_dir=self.stack.directory)
         self.assertTrue(third.ok, third.problem)
         self.assertEqual(third.removed_functions, ())

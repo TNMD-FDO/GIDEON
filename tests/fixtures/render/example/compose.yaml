@@ -180,7 +180,8 @@ services:
       STORAGE_PROVIDER: "local"
       ENABLE_OLLAMA_API: "false"
       ENABLE_OPENAI_API: "true"
-      OPENAI_API_BASE_URLS: "http://gideon-generator:8000/v1"
+      OPENAI_API_BASE_URLS: "http://gideon-api:8000/v1"
+      ENABLE_FORWARD_USER_INFO_HEADERS: "true"
       TASK_MODEL_EXTERNAL: "gideon-generator"
       ENABLE_TITLE_GENERATION: "true"
       ENABLE_TAGS_GENERATION: "true"
@@ -298,7 +299,6 @@ services:
       - "/etc/gideon/ca.pem:/etc/gideon/ca.pem:ro"
     secrets:
       - "webui_secret_key"
-      - "postgres_gideon_audit_password"
     healthcheck:
       test:
         - "CMD-SHELL"

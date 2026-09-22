@@ -5,11 +5,6 @@ harness's classifier strips it from a measured length, and
 ``tests/test_api_stamp.py`` holds both.  It imports the standard library
 alone: the harness imports it on the box's system Python, where the service
 image's dependencies do not exist.
-
-The detection and the text are the citation stamp Function's
-(``compose/open-webui/functions/citation_stamp.py``), moved statement for
-statement; ``tests/test_api_stamp.py`` holds the two files equal until
-ticket 09's cutover deletes the Function.
 """
 
 # The citation stamp (spec §15, [06] item 16, ADR-0020): General's second

@@ -10,6 +10,7 @@ history at commit f06e83f. User-facing notes for every tag from `v0.2.0` live un
 `docs/release-notes/`, and `tests/test_release_records.py` holds this index
 complete, ordered, and dated from the release files.
 
+- [v0.2.29](docs/2-changelog/w4_v0.2.29.md) — 2026-09-22 — the cutover, the Filters retire (general-turn 09)
 - [v0.2.28](docs/2-changelog/w4_v0.2.28.md) — 2026-09-21 — the harvest's cases, unsigned (slice-2 10)
 - [v0.2.27](docs/2-changelog/w4_v0.2.27.md) — 2026-09-21 — the service stamps the citation (general-turn 08)
 - [v0.2.26](docs/2-changelog/w4_v0.2.26.md) — 2026-09-21 — the gate checks its tree's pins (workflow 54)

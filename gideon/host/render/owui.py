@@ -1,4 +1,10 @@
-"""Pure Open WebUI environment, frontend posture, and apply-manifest artifacts."""
+"""Pure Open WebUI environment, frontend posture, and apply-manifest artifacts.
+
+The frontend's one Chat Completions connection is General's service
+(ADR-0045 (a)): the base URL and the key are ``gideon-api``'s, and the
+forwarded user-info headers carry the seat's identity to it, so no request of
+the frontend's reaches the engine.
+"""
 
 import json
 from collections.abc import Mapping
@@ -14,11 +20,7 @@ from gideon.host.images import NO_PROXY_LOCAL
 from gideon.host.ldap import bind_identity, filter_value
 from gideon.host.models import ModelPin
 from gideon.host.render import Artifact, RenderInputs, template_text
-from gideon.host.render.engine import (
-    ENGINE_SECRET_NAME,
-    ENGINE_SERVICE_NAME,
-    engine_base_url,
-)
+from gideon.host.render.api import API_SECRET_NAME, API_SERVICE_NAME, api_base_url
 from gideon.host.render.proxy import PROXY_AUTH_NAME, proxy_environment_values
 from gideon.host.render.searxng import (
     SEARXNG_SERVICE_NAME,
@@ -33,66 +35,34 @@ PERMISSIONS_TEMPLATE: Final = "open-webui/permissions.yaml"
 # one template beside the permission set (§15, [06] item 4, ADR-0028); the
 # office supplies its name and nothing else.
 GENERAL_TEMPLATE: Final = "open-webui/general.yaml"
-# The arithmetic guardrail's source (§16, ADR-0006): a standalone Filter file
-# the frontend runs and the tests import by path, rendered verbatim as the
-# manifest's Function on every host — it references no engine, so the
-# no-GPU acceptance VM and the CI contract stack push and read it back too.
-ARITHMETIC_GUARDRAIL_TEMPLATE: Final = "open-webui/functions/arithmetic_guardrail.py"
 # The branch gate's source (ADR-0045 (d), frontend contract row 8): an
-# inlet-only global Filter the frontend runs and the tests import by path,
+# inlet-only global Function the frontend runs and the tests import by path,
 # rendered verbatim as a manifest Function on every host, refusing a user-role
 # request on a model row that is not a preset.
 BRANCH_GATE_TEMPLATE: Final = "open-webui/functions/branch_gate.py"
-# The citation stamp's source (§15, [06] item 16, ADR-0020): a standalone
-# outlet Filter the frontend runs and the tests import by path, rendered
-# verbatim as a manifest Function on every host — like the
-# guardrail it references no engine — and attached to General's record alone.
-CITATION_STAMP_TEMPLATE: Final = "open-webui/functions/citation_stamp.py"
-# Effectively permanent: chat rows, URLs, ticket 08's default-model value, and
-# the Filters of tickets 09 and 14 name it.  Prefixed like the engine's
-# service name, so every GIDEON-owned id starts the same way.
+# Effectively permanent: chat rows, URLs, and the default-model value name it.
+# Prefixed like other GIDEON-owned ids, so every GIDEON-owned id starts the
+# same way.
 GENERAL_PRESET_ID: Final = "gideon-general"
-# Effectively permanent (ticket 11's rows and the frontend's own records name
-# it), prefixed like every GIDEON-owned id.  The hyphen is safe on the pinned
-# frontend: only the create route, which apply never calls, requires an
-# identifier, and the loader names the module `function_<id>` without deriving
-# a path or an import from it (docs/research/owui-filter-function.md §8.3).
-ARITHMETIC_GUARDRAIL_ID: Final = "gideon-arithmetic-guardrail"
-ARITHMETIC_GUARDRAIL_NAME: Final = "GIDEON arithmetic guardrail"
 # Effectively permanent: the frontend contract's row 8 names it; the
-# hyphen-safe prefix follows the Function id rule.  Neither global Filter has
-# Valves, so the pinned frontend runs their inlets in id order and this one
-# after the guardrail's (docs/research/owui-filter-function.md §3.3, §8.3).
+# hyphen-safe prefix follows the Function id rule.  It has no Valves, so the
+# pinned frontend gives it priority 0, and since the cutover it is the one
+# global inlet the frontend runs (docs/research/owui-filter-function.md §3.3,
+# §8.3).
 BRANCH_GATE_ID: Final = "gideon-branch-gate"
 BRANCH_GATE_NAME: Final = "GIDEON branch gate"
-# Effectively permanent: ticket 39's cases and the frontend's General record
-# name this id; the hyphen-safe prefix follows the Function id rule
-# (docs/research/owui-filter-function.md §8.3).
-CITATION_STAMP_ID: Final = "gideon-citation-stamp"
-CITATION_STAMP_NAME: Final = "GIDEON citation stamp"
-# Release text shown on the frontend's Functions page beside the record.
-ARITHMETIC_GUARDRAIL_DESCRIPTION: Final = (
-    "The arithmetic guardrail (GIDEON spec §16): replaces any answer that computes or confirms "
-    "a filing deadline, a Sentencing Guidelines range, or a release date or sentence credit with GIDEON's fixed refusal. Global on every model; pushed by gideon "
-    "apply, which reverts any edit made here."
-)
 # Release text shown on the frontend's Functions page beside the record.
 BRANCH_GATE_DESCRIPTION: Final = (
     "The branch gate (GIDEON spec §16): refuses a user's request to any model that is not one of "
     "GIDEON's branches, such as the hidden base model, and sends the user to General. Global on "
     "every model; pushed by gideon apply, which reverts any edit made here."
 )
-# Release text shown on the frontend's Functions page beside the record.
-CITATION_STAMP_DESCRIPTION: Final = (
-    "Appends General's fixed citation warning under any answer that carries a citation shape. "
-    "Attached to General alone by its record; pushed by gideon apply, which reverts any edit made here."
-)
-# The stamp is not global: the frontend runs a Filter on a model when the
-# model record's `meta.filterIds` names it and the Function is active, so
-# General's record is the stamp's one attachment and Research never carries
-# it (§15; docs/research/owui-filter-function.md §3.2).  The read-back holds
-# the key like every other meta key the manifest carries.
-GENERAL_FILTER_IDS: Final[tuple[str, ...]] = (CITATION_STAMP_ID,)
+# General carries no Filter since the cutover: the citation stamp is the
+# service's (ADR-0045 (b)).  The key is kept and rendered empty rather than
+# dropped, so the push overwrites a live attachment whether the sync route
+# merges `meta` or replaces it, and the read-back's stale-key check still has
+# a key to compare (§15; docs/research/owui-filter-function.md §3.2).
+GENERAL_FILTER_IDS: Final[tuple[str, ...]] = ()
 ALLOWED_ENDPOINTS: Final[tuple[str, ...]] = (
     # Prefixes, not just the sync paths: the admin key lists Functions and
     # models before each desired-state sync so removals are reported by id;
@@ -131,7 +101,7 @@ OWUI_SECRET_NAMES: Final[tuple[str, ...]] = (
     "ldap_bind_password",
     "postgres_openwebui_password",
     "gideon_admin_password",
-    "engine_api_key",
+    API_SECRET_NAME,
 )
 # [06] item 15, §15, and ADR-0043: the pinned frontend shows this once per
 # chat while the search toggle stays on (research note §10).
@@ -388,9 +358,9 @@ def _generator_model(inputs: RenderInputs) -> ModelPin:
 def owui_environment(inputs: RenderInputs, *, engine: bool = True) -> Mapping[str, str]:
     """Return the non-secret Compose environment for Open WebUI.
 
-    The engine connection (§5.2, §15) is rendered only where the engine itself
-    is: on a GPU host, and only when ``engine`` is true — the drill passes
-    false because its project has no engine to reach.
+    The service connection is rendered only on a GPU host and only when
+    ``engine`` is true — the drill passes false because its project has no
+    service to reach.
     """
 
     ldap = inputs.site.auth.ldap
@@ -462,15 +432,20 @@ def owui_environment(inputs: RenderInputs, *, engine: bool = True) -> Mapping[st
     }
     if connected:
         generator = _generator_model(inputs)
-        # One Chat Completions connection, discovered from the engine's model
+        # One Chat Completions connection, discovered from the service's model
         # list (no OPENAI_API_CONFIGS: its absence is what keeps the request
-        # shape Chat Completions and the discovery real); the generator is the
-        # task model, follow-ups and autocomplete off (§15; research note
-        # docs/research/owui-engine-connection.md).  The key rides the env file.
+        # shape Chat Completions and the discovery real); the generator remains
+        # the task model, with follow-ups and autocomplete off (§15; research
+        # note docs/research/owui-engine-connection.md). The key rides the env
+        # file.
         environment.update(
             {
                 "ENABLE_OPENAI_API": "true",
-                "OPENAI_API_BASE_URLS": engine_base_url(),
+                "OPENAI_API_BASE_URLS": api_base_url(),
+                # ADR-0045 (c) and frontend contract §2 row 5: forward the
+                # plain user-info headers to the service; the signed-JWT form
+                # is unused, and the service reads the email header for source.
+                "ENABLE_FORWARD_USER_INFO_HEADERS": "true",
                 "TASK_MODEL_EXTERNAL": generator.serve.served_name,
                 "ENABLE_TITLE_GENERATION": "true",
                 "ENABLE_TAGS_GENERATION": "true",
@@ -574,10 +549,10 @@ def owui_environment(inputs: RenderInputs, *, engine: bool = True) -> Mapping[st
     environment.update(_permission_environment(permission_tree(inputs)))
     if inputs.site.egress_proxy:
         # The frontend's HTTP client reads the proxy variables unconditionally,
-        # so the engine's name keeps the connection on the Compose network.
+        # so the service's name keeps the connection on the Compose network.
         no_proxy = f"{NO_PROXY_LOCAL},caddy,postgres,open-webui"
         if connected:
-            no_proxy += f",{ENGINE_SERVICE_NAME}"
+            no_proxy += f",{API_SERVICE_NAME}"
         if searching:
             no_proxy += f",{SEARXNG_SERVICE_NAME}"
         environment["NO_PROXY"] = no_proxy
@@ -661,13 +636,13 @@ def owui_secret_names(inputs: RenderInputs) -> tuple[str, ...]:
 
     The one declaration the emitter and the consumer map share: the LDAP bind
     password, the frontend's database password, the break-glass password, the
-    engine's key while the marker is absent, and the proxy credential when the
+    service's key while the marker is absent, and the proxy credential when the
     inputs carry it.
     """
 
     names = ["ldap_bind_password", "postgres_openwebui_password", "gideon_admin_password"]
     if not inputs.no_gpu:
-        names.append(ENGINE_SECRET_NAME)
+        names.append(API_SECRET_NAME)
     # The proxy helper reads the credential only under a configured proxy, so a
     # leftover credential file with the proxy off is carried by nothing.
     if inputs.site.egress_proxy and PROXY_AUTH_NAME in inputs.secrets:
@@ -676,7 +651,7 @@ def owui_secret_names(inputs: RenderInputs) -> tuple[str, ...]:
 
 
 def owui_secret_environment(inputs: RenderInputs) -> Mapping[str, str]:
-    """Return raw env-file values, including the engine key for GPU hosts."""
+    """Return raw env-file values, including the service key for GPU hosts."""
 
     def required(name: str) -> str:
         value = inputs.secrets.get(name)
@@ -694,8 +669,8 @@ def owui_secret_environment(inputs: RenderInputs) -> Mapping[str, str]:
         ),
         "WEBUI_ADMIN_PASSWORD": required("gideon_admin_password"),
     }
-    if ENGINE_SECRET_NAME in names:
-        values["OPENAI_API_KEYS"] = required(ENGINE_SECRET_NAME)
+    if API_SECRET_NAME in names:
+        values["OPENAI_API_KEYS"] = required(API_SECRET_NAME)
     values.update(proxy_environment_values(inputs))
     return values
 
@@ -706,7 +681,7 @@ class OwuiEnvArtifact(Artifact):
     §1.7's one exception to secrets-as-files: the frontend reads passwords and
     API keys from its environment only, so this file carries the LDAP bind
     password, the database URL, the break-glass password, and — on a GPU host
-    — the engine's key, which the frontend pairs with its one base URL.
+    — the service's key, which the frontend pairs with its one base URL.
     """
 
     name = "open-webui-env"
@@ -779,19 +754,6 @@ def _function_row(
     }
 
 
-def arithmetic_guardrail_function(inputs: RenderInputs) -> Mapping[str, object]:
-    """Build the global arithmetic guardrail row."""
-
-    return _function_row(
-        inputs,
-        ARITHMETIC_GUARDRAIL_TEMPLATE,
-        ARITHMETIC_GUARDRAIL_ID,
-        ARITHMETIC_GUARDRAIL_NAME,
-        ARITHMETIC_GUARDRAIL_DESCRIPTION,
-        True,
-    )
-
-
 def branch_gate_function(inputs: RenderInputs) -> Mapping[str, object]:
     """Build the global branch gate row."""
 
@@ -805,27 +767,13 @@ def branch_gate_function(inputs: RenderInputs) -> Mapping[str, object]:
     )
 
 
-def citation_stamp_function(inputs: RenderInputs) -> Mapping[str, object]:
-    """Build the General-only citation stamp row."""
-
-    return _function_row(
-        inputs,
-        CITATION_STAMP_TEMPLATE,
-        CITATION_STAMP_ID,
-        CITATION_STAMP_NAME,
-        CITATION_STAMP_DESCRIPTION,
-        False,
-    )
-
-
 class ApplyManifestArtifact(Artifact):
     """Render the desired Open WebUI groups, identities, and sync sets.
 
     The model set holds the base model's own record and General's preset on a
-    GPU host only: both follow the engine as the engine follows the no-GPU
-    marker (ADR-0035), so a no-GPU host pushes neither.  The arithmetic
-    guardrail, branch gate, and citation stamp ride every host; the stamp is
-    attached where General's record is rendered.
+    GPU host only: both follow the service as the service follows the no-GPU
+    marker (ADR-0035), so a no-GPU host pushes neither. The branch gate rides
+    every host.
     """
 
     name = "open-webui-manifest"
@@ -833,9 +781,7 @@ class ApplyManifestArtifact(Artifact):
     template_paths = (
         PERMISSIONS_TEMPLATE,
         GENERAL_TEMPLATE,
-        ARITHMETIC_GUARDRAIL_TEMPLATE,
         BRANCH_GATE_TEMPLATE,
-        CITATION_STAMP_TEMPLATE,
     )
 
     def emit(self, inputs: RenderInputs) -> str:
@@ -870,11 +816,7 @@ class ApplyManifestArtifact(Artifact):
         document: Mapping[str, Any] = {
             "groups": groups,
             "identities": identities,
-            "functions": [
-                arithmetic_guardrail_function(inputs),
-                branch_gate_function(inputs),
-                citation_stamp_function(inputs),
-            ],
+            "functions": [branch_gate_function(inputs)],
             "models": (
                 []
                 if inputs.no_gpu

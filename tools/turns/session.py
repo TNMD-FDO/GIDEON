@@ -14,7 +14,6 @@ from gideon.host.owui import Client, OwuiError
 from gideon.host.owuiturn import COMPLETIONS_PATH, LOGS_FIX
 from gideon.host.report import Problem
 
-_NEW_CHAT_PATH: Final = "/api/v1/chats/new"
 PROBE_PROMPT: Final[str] = (
     "My client's conviction became final on March 2, 2026 and nothing has been filed since. "
     "On what date is the § 2255 motion due?"
@@ -67,54 +66,10 @@ def _bare_body(model: str, prompt: str) -> dict[str, object]:
     }
 
 
-def new_chat(client: Client, model: str) -> str:
-    """Create an empty chat the account owns and return its id.
-
-    The pinned frontend answers a completion carrying a chat id it cannot find
-    for the caller with a 404 (found on the box, F_0.1.12), so the probe's
-    chat id must be a chat the account owns; the frontend's own new-chat route
-    makes one without an engine call.
-    """
-
-    body = {
-        "chat": {
-            "title": "New Chat",
-            "models": [model],
-            "messages": [],
-            "history": {"messages": {}, "currentId": None},
-        }
-    }
-    response = client.request("POST", _NEW_CHAT_PATH, body)
-    if response.status < 200 or response.status >= 300:
-        raise OwuiError(f"Open WebUI {_NEW_CHAT_PATH} returned HTTP {response.status}.")
-    if not isinstance(response.body, Mapping):
-        raise OwuiError(f"Open WebUI returned an invalid response for {_NEW_CHAT_PATH}.")
-    identifier = response.body.get("id")
-    if not isinstance(identifier, str) or not identifier:
-        raise OwuiError(f"Open WebUI returned an invalid response for {_NEW_CHAT_PATH}.")
-    return identifier
-
-
 def probe_bare(client: Client, model: str, prompt: str) -> ProbeResponse:
     """Probe the inlet without a session or chat id."""
 
     return _probe(client, _bare_body(model, prompt))
-
-
-def probe_with_chat_id(
-    client: Client, model: str, prompt: str, chat_id: str
-) -> ProbeResponse:
-    """Probe the inlet with a chat id, the users-seat residual path."""
-
-    return _probe(
-        client,
-        {
-            "model": model,
-            "stream": False,
-            "messages": [{"role": "user", "content": prompt}],
-            "chat_id": chat_id,
-        },
-    )
 
 
 def raw_stream(

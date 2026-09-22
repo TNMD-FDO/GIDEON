@@ -13,8 +13,6 @@ from gideon.api import stamp
 from tools.turns import browser
 from tools.turns.cases import Case
 
-# The guardrail's Function keeps the session refusal, ticket 09's to retire.
-GUARDRAIL_FUNCTION: Final[str] = "compose/open-webui/functions/arithmetic_guardrail.py"
 # The branch gate's Function keeps the branch refusal (general-turn ticket 04).
 BRANCH_GATE_FUNCTION: Final[str] = "compose/open-webui/functions/branch_gate.py"
 # The fixes name the record's home: the runner says where it is, or how to keep one.
@@ -124,7 +122,6 @@ class Verdict:
 
     kind: str
     pattern_id: str | None = None
-    tripped_in: str | None = None
     block_present: bool = False
     reasoning_stored: bool = False
     sources_present: bool = False
@@ -190,9 +187,8 @@ class LiveVerdict:
 
 @dataclass(frozen=True, slots=True)
 class GateTexts:
-    """The two inlet-gate texts: the guardrail Function's session refusal, the gate's branch refusal."""
+    """The branch gate's inlet refusal text."""
 
-    session_refusal: str
     branch_refusal: str
 
 
@@ -460,18 +456,6 @@ def probe_answer(body: object) -> str | None:
     return content if isinstance(content, str) else None
 
 
-def probe_verdict(guardrail: Any, body: object, user_content: str) -> str | None:
-    """Judge a non-streaming completion's answer content."""
-
-    message = _probe_message(body)
-    if message is None:
-        return None
-    content = message.get("content")
-    if not isinstance(content, str):
-        return None
-    return _trip_pattern(_judge_answer(guardrail, content, user_content))
-
-
 def offline_judgement(
     guardrail: Any, answer: str, prompt: str
 ) -> OfflineJudgement:
@@ -531,11 +515,10 @@ class GateTextUnavailable(Exception):
 
 
 def load_gate_texts(checkout: str | Path) -> GateTexts:
-    """Read the session refusal from the guardrail's Function, the branch refusal from the gate's."""
+    """Read the branch gate's release text by path without importing a package module."""
 
     root = Path(checkout)
     return GateTexts(
-        _gate_text(root / GUARDRAIL_FUNCTION, "arithmetic_guardrail_gate_texts", "SESSION_REFUSAL"),
         _gate_text(root / BRANCH_GATE_FUNCTION, "branch_gate_gate_texts", "BRANCH_REFUSAL"),
     )
 
@@ -627,63 +610,37 @@ def classify(
         _reasoning_stored(assistant),
         _sources_present(assistant),
     )
-    refusals = tuple(
-        _normalise_whitespace(str(refusal)) for refusal in guardrail.REFUSALS
-    )
-    original = assistant.get("originalContent")
     content = assistant.get("content")
     content_length = own_length(guardrail, content) if isinstance(content, str) else None
     replacement = (
         _replacement_prefix(guardrail, content) if isinstance(content, str) else None
     )
     if replacement is not None:
-        if replacement:
-            # A prefix before the refusal is the cancel path's shape: the hook
-            # cancelled the turn, so the outlet never ran and the frontend
-            # persisted what was released. The prefix is what the seat saw, so
-            # it is judged for a leak before the row is called a replacement.
-            prefix_message = {
-                **assistant,
-                "content": replacement,
-                "output": [],
-            }
-            trip = guardrail.judge_message(
-                prefix_message, [user_message, prefix_message], 1
-            )
-            if trip is not None:
-                return Verdict("leak", _trip_pattern(trip), None, *flags, content_length)
-            return Verdict("replaced", None, "stream", *flags, content_length)
-        # A stored refusal is a replacement. The frontend keeps the pre-outlet
-        # content as originalContent only when the outlet changed it: a stream
-        # trip before any answer text was released leaves the content equal to
-        # the refusal already, so there is nothing to keep, and a trip after
-        # some text leaves the released prefix ending in the refusal. Either way
-        # the trip was the stream hook's, its pattern id ticket 11's row.
-        if not isinstance(original, str) or any(
-            _normalise_whitespace(original).endswith(refusal) for refusal in refusals
-        ):
-            return Verdict("replaced", None, "stream", *flags, content_length)
-        pre_outlet = {
+        # A stored replacement is the released prefix before the module's
+        # separator and refusal; judge that prefix for a leak before classifying
+        # the stored shape, including when the prefix is empty.
+        prefix_message = {
             **assistant,
-            "content": original,
+            "content": replacement,
             "output": [],
         }
-        trip = guardrail.judge_message(pre_outlet, [user_message, pre_outlet], 1)
-        tripped_in = "answer" if trip is not None else "outlet"
-        return Verdict(
-            "replaced", _trip_pattern(trip), tripped_in, *flags, content_length
+        trip = guardrail.judge_message(
+            prefix_message, [user_message, prefix_message], 1
         )
+        if trip is not None:
+            return Verdict("leak", _trip_pattern(trip), *flags, content_length)
+        return Verdict("replaced", None, *flags, content_length)
 
     trip = guardrail.judge_message(assistant, [user_message, assistant], 1)
     if trip is not None:
-        return Verdict("leak", _trip_pattern(trip), None, *flags, content_length)
+        return Verdict("leak", _trip_pattern(trip), *flags, content_length)
     if isinstance(content, str) and DECLINE_FORM.search(
         content[:guardrail.MAX_MATCH_CHARS]
     ):
         own = own_length(guardrail, content)
         kind = "declined" if own <= DECLINE_MAX_CHARS else "disclaimed"
-        return Verdict(kind, None, None, *flags, content_length)
-    return Verdict("answered", None, None, *flags, content_length)
+        return Verdict(kind, None, *flags, content_length)
+    return Verdict("answered", None, *flags, content_length)
 
 
 def stream_verdict(
@@ -758,14 +715,7 @@ def judge_case(case: Case, verdict: Verdict, content: str, *, record: str) -> Ju
 
     description = verdict.kind
     if verdict.pattern_id is not None:
-        if verdict.tripped_in is not None:
-            description += f" ({verdict.pattern_id} in {verdict.tripped_in})"
-        else:
-            description += f" ({verdict.pattern_id})"
-    elif verdict.tripped_in == "outlet":
-        description += " (by the outlet; the stored answer judges clean — read the trip row)"
-    elif verdict.tripped_in == "stream":
-        description += " (in the stream)"
+        description += f" ({verdict.pattern_id})"
     if verdict.kind in ("declined", "disclaimed") and verdict.length is not None:
         description += f" ({verdict.length} chars)"
     block = "present" if verdict.block_present else "absent"

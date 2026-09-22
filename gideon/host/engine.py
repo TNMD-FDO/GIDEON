@@ -890,15 +890,9 @@ def _frontend_outcome(
 
     refusals = tuple(_normalised(refusal) for refusal in guardrail.REFUSALS)
     if any(_normalised(content).endswith(refusal) for refusal in refusals):
-        # The frontend keeps the pre-outlet text as originalContent only when the
-        # outlet changed it; a stream trip leaves nothing to keep, or a released
-        # prefix ending in the refusal (the harness's rule in tools/turns/classify.py).
-        original = assistant.get("originalContent")
-        if not isinstance(original, str) or any(
-            _normalised(original).endswith(refusal) for refusal in refusals
-        ):
-            return "refused-stream", None
-        return "outlet-replaced", None
+        # The service stores one shape: the released prefix, the module's
+        # separator, then the refusal; there is no pre-outlet answer to read.
+        return "refused-stream", None
     return "answered", None
 
 
@@ -931,8 +925,6 @@ def _frontend_verdict(
             return True, f"no computation stored (the model's own answer), turn {elapsed_seconds:.1f} s"
         if outcome == "leak":
             return False, "a matched span was stored"
-        if outcome == "outlet-replaced":
-            return False, "the stream hook released a span the outlet replaced"
         if outcome == "computed":
             # A calendar date the prompt did not carry, in the answer alone, with no
             # deadline vocabulary near it: the family's detector needs that context by
@@ -951,8 +943,6 @@ def _frontend_verdict(
             return False, "the trip stimulus was not refused"
         if outcome == "leak":
             return False, "a matched span was stored"
-        if outcome == "outlet-replaced":
-            return False, "the stream hook released a span the outlet replaced"
     return False, "frontend outcome is unknown"
 
 

@@ -19,6 +19,7 @@ from gideon.host.models import (
     select_profile,
 )
 from gideon.host.render import ARTIFACTS, RenderInputs, render_all
+from gideon.host.render.api import API_SERVICE_NAME, api_base_url
 from gideon.host.render.compose import STORE_SERVICES, service_names
 from gideon.host.render.drill import (
     DRILL_PORT,
@@ -26,14 +27,10 @@ from gideon.host.render.drill import (
     DRILL_ROOT,
     drill_compose_document,
 )
-from gideon.host.render.engine import ENGINE_SERVICE_NAME, engine_base_url
+from gideon.host.render.engine import ENGINE_SERVICE_NAME
 from gideon.host.render.facts import HostFacts
 from gideon.host.render.owui import (
     ALLOWED_ENDPOINTS,
-    ARITHMETIC_GUARDRAIL_DESCRIPTION,
-    ARITHMETIC_GUARDRAIL_ID,
-    ARITHMETIC_GUARDRAIL_NAME,
-    ARITHMETIC_GUARDRAIL_TEMPLATE,
     AUDIT_EXCLUDED_PATHS,
     AUDIT_LOG_FILE,
     BASE_MODEL_CAPABILITIES,
@@ -43,13 +40,8 @@ from gideon.host.render.owui import (
     BRANCH_GATE_NAME,
     BRANCH_GATE_TEMPLATE,
     BREAK_GLASS,
-    CITATION_STAMP_DESCRIPTION,
-    CITATION_STAMP_ID,
-    CITATION_STAMP_NAME,
-    CITATION_STAMP_TEMPLATE,
     EVAL_IDENTITY,
     GENERAL_CAPABILITIES,
-    GENERAL_FILTER_IDS,
     GENERAL_FUNCTION_CALLING,
     GENERAL_PRESET_ID,
     MODEL_GRANT_CREATED_AT,
@@ -66,9 +58,7 @@ from gideon.host.render.owui import (
     WEB_SEARCH_RESULT_COUNT,
     ApplyManifestArtifact,
     OwuiEnvArtifact,
-    arithmetic_guardrail_function,
     branch_gate_function,
-    citation_stamp_function,
     general_preset_record,
     general_texts,
     owui_environment,
@@ -105,6 +95,7 @@ SECRETS = {
     "postgres_openwebui_password": "p@ss/word",
     "gideon_admin_password": "admin-password",
     "engine_api_key": "engine-api-key",
+    "gideon_api_key": "gideon-api-key",
     "searxng_secret_key": "searxng-secret-key",
 }
 
@@ -183,8 +174,11 @@ class Environment(unittest.TestCase):
         self.assertEqual(env["DEFAULT_MODELS"], GENERAL_PRESET_ID)
         self.assertEqual(env["ENABLE_EVALUATION_ARENA_MODELS"], "false")
         self.assertEqual(env["ENABLE_OPENAI_API"], "true")
-        self.assertEqual(env["OPENAI_API_BASE_URLS"], engine_base_url())
-        self.assertEqual(env["TASK_MODEL_EXTERNAL"], ENGINE_SERVICE_NAME)
+        self.assertEqual(env["OPENAI_API_BASE_URLS"], api_base_url())
+        self.assertEqual(env["ENABLE_FORWARD_USER_INFO_HEADERS"], "true")
+        generator = inputs().profile.model("generator")
+        assert generator is not None
+        self.assertEqual(env["TASK_MODEL_EXTERNAL"], generator.serve.served_name)
         self.assertEqual(
             {
                 name: env[name]
@@ -212,6 +206,7 @@ class Environment(unittest.TestCase):
             set(env) - set(owui_environment(inputs(), engine=False)),
             {
                 "OPENAI_API_BASE_URLS",
+                "ENABLE_FORWARD_USER_INFO_HEADERS",
                 "TASK_MODEL_EXTERNAL",
                 "ENABLE_TITLE_GENERATION",
                 "ENABLE_TAGS_GENERATION",
@@ -334,9 +329,11 @@ class Environment(unittest.TestCase):
         env = owui_environment(second)
         self.assertTrue(
             env["NO_PROXY"].endswith(
-                ",caddy,postgres,open-webui,gideon-generator"
+                ",caddy,postgres,open-webui,gideon-api"
             )
         )
+        self.assertIn(API_SERVICE_NAME, env["NO_PROXY"])
+        self.assertNotIn(ENGINE_SERVICE_NAME, env["NO_PROXY"])
         self.assertNotIn("HTTP_PROXY", env)
         self.assertNotIn("HTTPS_PROXY", env)
         searching_site = replace(
@@ -346,7 +343,7 @@ class Environment(unittest.TestCase):
         searching = owui_environment(replace(second, site=searching_site))
         self.assertTrue(
             searching["NO_PROXY"].endswith(
-                ",caddy,postgres,open-webui,gideon-generator,searxng"
+                ",caddy,postgres,open-webui,gideon-api,searxng"
             )
         )
 
@@ -359,6 +356,7 @@ class Environment(unittest.TestCase):
         self.assertEqual(no_gpu["WEB_LOADER_TIMEOUT"], str(WEB_LOADER_TIMEOUT_SECONDS))
         self.assertEqual(no_gpu["ENABLE_OPENAI_API"], "false")
         self.assertNotIn("OPENAI_API_BASE_URLS", no_gpu)
+        self.assertNotIn("ENABLE_FORWARD_USER_INFO_HEADERS", no_gpu)
         self.assertNotIn("TASK_MODEL_EXTERNAL", no_gpu)
         self.assertNotIn("DEFAULT_MODELS", no_gpu)
         self.assertNotIn("ENABLE_RETRIEVAL_QUERY_GENERATION", no_gpu)
@@ -366,6 +364,7 @@ class Environment(unittest.TestCase):
         self.assertNotIn("NO_PROXY", no_gpu)
         self.assertEqual(disconnected["ENABLE_OPENAI_API"], "false")
         self.assertNotIn("OPENAI_API_BASE_URLS", disconnected)
+        self.assertNotIn("ENABLE_FORWARD_USER_INFO_HEADERS", disconnected)
         self.assertNotIn("DEFAULT_MODELS", disconnected)
         self.assertEqual(disconnected["ENABLE_EVALUATION_ARENA_MODELS"], "false")
         self.assertEqual(disconnected["ENABLE_WEB_SEARCH"], "false")
@@ -398,13 +397,17 @@ class SecretEnv(unittest.TestCase):
         self.assertEqual(list(values), ["LDAP_APP_PASSWORD", "DATABASE_URL", "WEBUI_ADMIN_PASSWORD", "OPENAI_API_KEYS"])
         self.assertEqual(values["LDAP_APP_PASSWORD"], SECRETS["ldap_bind_password"])
         self.assertEqual(values["DATABASE_URL"], "postgresql://openwebui:p%40ss%2Fword@postgres:5432/openwebui")
-        self.assertEqual(values["OPENAI_API_KEYS"], SECRETS["engine_api_key"])
+        self.assertEqual(values["OPENAI_API_KEYS"], SECRETS["gideon_api_key"])
+        self.assertNotIn(SECRETS["engine_api_key"], values.values())
 
-    def test_no_gpu_env_file_omits_the_engine_key(self) -> None:
+    def test_no_gpu_env_file_omits_the_connection_key(self) -> None:
         values = owui_secret_environment(inputs(no_gpu=True, secrets={
-            name: value for name, value in SECRETS.items() if name != "engine_api_key"
+            name: value
+            for name, value in SECRETS.items()
+            if name not in {"engine_api_key", "gideon_api_key"}
         }))
         self.assertNotIn("OPENAI_API_KEYS", values)
+        self.assertNotIn(SECRETS["engine_api_key"], values.values())
 
     def test_proxy_credentials_ride_in_the_secret_env_only(self) -> None:
         values = owui_secret_environment(inputs(SECOND, secrets={**SECRETS, "proxy_auth": "user:p@ss"}))
@@ -429,7 +432,15 @@ class SecretEnv(unittest.TestCase):
         lines = artifact.emit(inputs()).splitlines()
         self.assertEqual(lines[0], f"LDAP_APP_PASSWORD={SECRETS['ldap_bind_password']}")
         self.assertTrue(all("=" in line and not line.startswith(" ") for line in lines))
-        self.assertEqual(tuple(name for name in OWUI_SECRET_NAMES), ("ldap_bind_password", "postgres_openwebui_password", "gideon_admin_password", "engine_api_key"))
+        self.assertEqual(
+            tuple(name for name in OWUI_SECRET_NAMES),
+            (
+                "ldap_bind_password",
+                "postgres_openwebui_password",
+                "gideon_admin_password",
+                "gideon_api_key",
+            ),
+        )
 
 
 class Manifest(unittest.TestCase):
@@ -458,32 +469,11 @@ class Manifest(unittest.TestCase):
         )
         self.assertEqual(
             document["functions"],
-            [
-                arithmetic_guardrail_function(inputs(SECOND)),
-                branch_gate_function(inputs(SECOND)),
-                citation_stamp_function(inputs(SECOND)),
-            ],
+            [branch_gate_function(inputs(SECOND))],
         )
         function = document["functions"][0]
         self.assertEqual(
             function,
-            {
-                "id": ARITHMETIC_GUARDRAIL_ID,
-                "user_id": SYNC_ROW_USER_ID,
-                "name": ARITHMETIC_GUARDRAIL_NAME,
-                "type": "filter",
-                "content": inputs(SECOND).templates[ARITHMETIC_GUARDRAIL_TEMPLATE],
-                "meta": {"description": ARITHMETIC_GUARDRAIL_DESCRIPTION},
-                "valves": {},
-                "is_active": True,
-                "is_global": True,
-                "updated_at": SYNC_ROW_UPDATED_AT,
-                "created_at": SYNC_ROW_CREATED_AT,
-            },
-        )
-        gate = document["functions"][1]
-        self.assertEqual(
-            gate,
             {
                 "id": BRANCH_GATE_ID,
                 "user_id": SYNC_ROW_USER_ID,
@@ -494,23 +484,6 @@ class Manifest(unittest.TestCase):
                 "valves": {},
                 "is_active": True,
                 "is_global": True,
-                "updated_at": SYNC_ROW_UPDATED_AT,
-                "created_at": SYNC_ROW_CREATED_AT,
-            },
-        )
-        stamp = document["functions"][2]
-        self.assertEqual(
-            stamp,
-            {
-                "id": CITATION_STAMP_ID,
-                "user_id": SYNC_ROW_USER_ID,
-                "name": CITATION_STAMP_NAME,
-                "type": "filter",
-                "content": inputs(SECOND).templates[CITATION_STAMP_TEMPLATE],
-                "meta": {"description": CITATION_STAMP_DESCRIPTION},
-                "valves": {},
-                "is_active": True,
-                "is_global": False,
                 "updated_at": SYNC_ROW_UPDATED_AT,
                 "created_at": SYNC_ROW_CREATED_AT,
             },
@@ -550,7 +523,7 @@ class Manifest(unittest.TestCase):
                 "description": general_texts(inputs(SECOND)).description,
                 "capabilities": dict(GENERAL_CAPABILITIES),
                 "suggestion_prompts": [],
-                "filterIds": list(GENERAL_FILTER_IDS),
+                "filterIds": [],
             },
         )
         self.assertNotIn("filterIds", model[0]["meta"])
@@ -595,8 +568,8 @@ class Manifest(unittest.TestCase):
     def test_general_records_differ_between_offices_only_by_the_office_name(self) -> None:
         first = yaml.safe_load(ApplyManifestArtifact().emit(inputs(EXAMPLE)))["models"][1]
         second = yaml.safe_load(ApplyManifestArtifact().emit(inputs(SECOND)))["models"][1]
-        self.assertEqual(first["meta"]["filterIds"], list(GENERAL_FILTER_IDS))
-        self.assertEqual(second["meta"]["filterIds"], list(GENERAL_FILTER_IDS))
+        self.assertEqual(first["meta"]["filterIds"], [])
+        self.assertEqual(second["meta"]["filterIds"], [])
         first_name = inputs(EXAMPLE).site.office.name
         second_name = inputs(SECOND).site.office.name
         self.assertNotEqual(first, second)
@@ -656,58 +629,38 @@ class Manifest(unittest.TestCase):
         self.assertEqual(document["models"], [])
         self.assertEqual(
             document["functions"],
-            [
-                arithmetic_guardrail_function(inputs(no_gpu=True)),
-                branch_gate_function(inputs(no_gpu=True)),
-                citation_stamp_function(inputs(no_gpu=True)),
-            ],
+            [branch_gate_function(inputs(no_gpu=True))],
         )
 
-    def test_filter_functions_are_held_for_all_fixture_sites(self) -> None:
+    def test_branch_gate_is_held_for_all_fixture_sites(self) -> None:
         for site_path, no_gpu in ((EXAMPLE, False), (SECOND, False), (EXAMPLE, True)):
             with self.subTest(site_path=site_path, no_gpu=no_gpu):
                 rendered_inputs = inputs(site_path, no_gpu=no_gpu)
                 document = yaml.safe_load(ApplyManifestArtifact().emit(rendered_inputs))
                 self.assertEqual(
                     document["functions"],
-                    [
-                        arithmetic_guardrail_function(rendered_inputs),
-                        branch_gate_function(rendered_inputs),
-                        citation_stamp_function(rendered_inputs),
-                    ],
+                    [branch_gate_function(rendered_inputs)],
                 )
 
-    def test_filter_functions_refuse_syntax_errors_with_template_and_line(self) -> None:
-        for template, builder in (
-            (ARITHMETIC_GUARDRAIL_TEMPLATE, arithmetic_guardrail_function),
-            (BRANCH_GATE_TEMPLATE, branch_gate_function),
-            (CITATION_STAMP_TEMPLATE, citation_stamp_function),
-        ):
-            with self.subTest(template=template):
-                rendered_inputs = inputs(
-                    templates={
-                        **inputs().templates,
-                        template: "class Filter(\n",
-                    }
-                )
-                with self.assertRaises(ValueError) as ctx:
-                    builder(rendered_inputs)
-                self.assertIn(template, str(ctx.exception))
-                self.assertIn("line 1", str(ctx.exception))
+    def test_branch_gate_refuses_syntax_errors_with_template_and_line(self) -> None:
+        rendered_inputs = inputs(
+            templates={
+                **inputs().templates,
+                BRANCH_GATE_TEMPLATE: "class Filter(\n",
+            }
+        )
+        with self.assertRaises(ValueError) as ctx:
+            branch_gate_function(rendered_inputs)
+        self.assertIn(BRANCH_GATE_TEMPLATE, str(ctx.exception))
+        self.assertIn("line 1", str(ctx.exception))
 
-    def test_filter_functions_refuse_a_missing_template(self) -> None:
-        for template, builder in (
-            (ARITHMETIC_GUARDRAIL_TEMPLATE, arithmetic_guardrail_function),
-            (BRANCH_GATE_TEMPLATE, branch_gate_function),
-            (CITATION_STAMP_TEMPLATE, citation_stamp_function),
-        ):
-            with self.subTest(template=template):
-                rendered_inputs = inputs(
-                    templates={name: value for name, value in inputs().templates.items() if name != template}
-                )
-                with self.assertRaises(ValueError) as ctx:
-                    builder(rendered_inputs)
-                self.assertIn(template, str(ctx.exception))
+    def test_branch_gate_refuses_a_missing_template(self) -> None:
+        rendered_inputs = inputs(
+            templates={name: value for name, value in inputs().templates.items() if name != BRANCH_GATE_TEMPLATE}
+        )
+        with self.assertRaises(ValueError) as ctx:
+            branch_gate_function(rendered_inputs)
+        self.assertIn(BRANCH_GATE_TEMPLATE, str(ctx.exception))
 
     def test_missing_generator_refuses_from_manifest(self) -> None:
         rendered_inputs = inputs()
@@ -872,7 +825,7 @@ class ComposeShape(unittest.TestCase):
         self.assertIn("/data/bulk/openwebui:/app/backend/data", frontend["volumes"])
         self.assertEqual(
             frontend["secrets"],
-            ["webui_secret_key", "postgres_gideon_audit_password"],
+            ["webui_secret_key"],
         )
         self.assertEqual(frontend["healthcheck"]["test"][0], "CMD-SHELL")
         self.assertNotIn("ports", frontend)

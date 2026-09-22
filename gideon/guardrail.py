@@ -9,16 +9,13 @@ a text, a rendered message, and a floor; the lag window's state and check over
 a stream (``StreamCheck``, text in and released text out); and the guardrail
 trip's content-free row with its silent writer (``record_trip``).
 
-``engine verify`` and the turn harness import it, General's service next. It
-imports the standard library only at module level: the writer's import of the
-Postgres driver sits inside ``write_trip_row``, which no host path calls.
-
-The guardrail Function (``compose/open-webui/functions/arithmetic_guardrail.py``)
-cannot import the package and keeps its own copy of these statements until
-ticket 09's cutover; ``tests/test_guardrail_equality.py`` holds the two
-statement-equal, so an edit here is carried there.
+General's service and ``engine verify`` call it, with the turn harness beside
+them (ADR-0045 (b)). It imports the standard library only at module level: the
+writer's import of the Postgres driver sits inside ``write_trip_row``, which no
+host path calls.
 """
 
+import contextlib
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -1999,7 +1996,11 @@ def _normalised_release_date(found: str) -> str:
 # its digits by this table (the units, the teens, then the tens), so the user's
 # "eight years" and the model's "8 years" share one key.
 NUMBER_WORD_VALUES = dict(
-    zip(NUMBER_WORDS, [*map(str, range(1, 21)), *map(str, range(30, 100, 10))])
+    zip(
+        NUMBER_WORDS,
+        [*map(str, range(1, 21)), *map(str, range(30, 100, 10))],
+        strict=True,
+    )
 )
 NUMBER_WORD_VALUES.update(
     {
@@ -2482,9 +2483,7 @@ def _new_text_state() -> dict[str, object]:
     }
 
 
-# The per-request state remains on the request metadata after a browser cancel:
-# the frontend's cancel path does not run the outlet, and the state dies with
-# that metadata when the request ends.
+# The per-request state remains on request metadata until the request ends.
 class StreamState(dict[str, object]):
     """The per-request stream state, kept on ``__metadata__`` under STREAM_STATE_KEY.
 
@@ -2493,8 +2492,8 @@ class StreamState(dict[str, object]):
     whole request with ``%s`` into a DEBUG log line, and no character of the
     stream or of the user's dates may reach a log (spec §19.4).  The content
     entry holds its accumulated string, released length, decided length, and
-    release constraints; the state also holds the placeholder flag, trip,
-    cancel-requested and finished flags, and inlet stash.
+    release constraints; the state also holds the placeholder and finished
+    flags, the trip, and the inlet stash.
     """
 
     def __init__(
@@ -2510,7 +2509,6 @@ class StreamState(dict[str, object]):
                 "content": _new_text_state(),
                 "placeholder_sent": False,
                 "trip": None,
-                "cancel_requested": False,
                 "finished": False,
                 "supplied": {
                     name: sorted(figures) for name, figures in supplied.items()
@@ -2533,7 +2531,6 @@ class StreamState(dict[str, object]):
         return (
             f"StreamState(content={content}, placeholder_sent={self.get('placeholder_sent')}, "
             f"tripped={self.get('trip') is not None}, "
-            f"cancel_requested={self.get('cancel_requested')}, "
             f"finished={self.get('finished')})"
         )
 
@@ -2547,7 +2544,6 @@ def _stream_state(value: object) -> dict[str, object] | None:
         "content",
         "placeholder_sent",
         "trip",
-        "cancel_requested",
         "finished",
         "supplied",
         "confirmation",
@@ -2574,14 +2570,14 @@ def _record_stream_trip(state: dict[str, object], trip: Trip) -> None:
     state["trip"] = {"family": trip.family, "pattern_id": trip.pattern_id}
     branch = state.get("branch")
     source = state.get("source")
-    try:
+    # Trip recording cannot affect the refusal; its writer stays silent on any
+    # failure so a logging problem never changes the judged response.
+    with contextlib.suppress(Exception):
         record_trip(
             trip,
             branch if isinstance(branch, str) else None,
             source if isinstance(source, str) else "user",
         )
-    except Exception:  # noqa: BLE001, S110 - trip recording cannot affect the refusal, and nothing is logged.
-        pass
     entry = _stream_entry(state, "content")
     entry["text"] = ""
     entry["constraints"] = []

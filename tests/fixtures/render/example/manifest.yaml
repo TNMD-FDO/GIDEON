@@ -11,7 +11,7 @@ inputs:
   build_box: true
 files:
   compose.yaml:
-    sha256: "95d5e770c93c6b9ba9e375d81f9aaee271cdfb99974d4f7a82b75bba20403a09"
+    sha256: "ebd916e614ce822e374945c314ac49efdb079f456418f42a5352eacd20d59943"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
@@ -85,12 +85,12 @@ files:
     owners:
       - "caddy"
   "open-webui/env":
-    sha256: "ff072a018f69185d01f4b3437bca6b9b19cd47680e88f1f34c681712029f86a7"
+    sha256: "96bc11c50cf219484d865c65bb8df0c66ffebbc9e3980a32e0deaa4586909775"
     mode: "0600"
     owners:
       - "open-webui"
   "open-webui/manifest.yaml":
-    sha256: "c9c9130a9cc79d2b9c8be73db4e741e42e01bb6e8f0221525f7766da565c47cb"
+    sha256: "19160be4e4f0fdf70895f2e5e3e9e33026bc233352f80205402b2ff2708c3323"
     mode: "0644"
     owners: []
   "searxng/settings.yml":
@@ -146,7 +146,7 @@ services:
   node-exporter: "372e640d7a5bc260c18cbd0a7cb48c5fd16fea5fc2f76ff1c0fa7b8eeb531134"
   grafana: "86e24511cbb77a0b1bec1a2a8f1355c9b7af147143937b88441071b959f3c7f3"
   postgres: "7039d090c0ae384766b132e1bbddf593645233c1df0d4d716963776e5f7902c1"
-  open-webui: "67f9820d3fc9126cbb4a0ce8563cc1bbde1001cc590d926d2bcfb2e681dfd32a"
+  open-webui: "ec582814e6e7a3e89956d9fb347be63bd195d0e28ed27fae283f379960157a75"
   gideon-generator: "4769d4dcc7e4e3de52094a84573d13c76bc57eaaafc7c39cbec954fe93b5efa9"
   gideon-api: "4a954aa3c0a983dca60da30d38f06bda508b3b7d16c854e78abc6328cda84c23"
   searxng: "790f3d23c5a48d8b2e3c02d12c6615884bb4073095bdf7faa51ccee49aa51c2c"

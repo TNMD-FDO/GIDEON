@@ -745,7 +745,6 @@ class EngineRotation(RealStack):
                 "record",
             ],
         )
-        self.assertIn("start: ok — recreated open-webui: changed rendered files", out)
         new_value = host.files[path].strip()
         self.assertNotEqual(new_value, old_value)
         self.assertEqual(host.write_modes[path], 0o440)
@@ -753,14 +752,10 @@ class EngineRotation(RealStack):
         calls = argv_calls(host)[baseline_calls:]
         self.assertEqual(calls.count(force_recreate(ENGINE_SERVICE_NAME)), 1)
         self.assertEqual(calls.count(force_recreate(API_SERVICE_NAME)), 1)
-        self.assertEqual(calls.count(force_recreate("open-webui")), 1)
+        self.assertEqual(calls.count(force_recreate("open-webui")), 0)
         self.assertLess(
             calls.index(force_recreate(ENGINE_SERVICE_NAME)),
             calls.index(force_recreate(API_SERVICE_NAME)),
-        )
-        self.assertLess(
-            calls.index(force_recreate(API_SERVICE_NAME)),
-            calls.index(force_recreate("open-webui")),
         )
         self.assertEqual(
             yaml.safe_load(host.files[f"{RENDERED}/applied.yaml"])["services"][ENGINE_SERVICE_NAME],
@@ -768,7 +763,71 @@ class EngineRotation(RealStack):
         )
         self.assertEqual(host.writes[-1], f"{RENDERED}/applied.yaml")
         written = host.writes[baseline_writes:]
-        allowed = {path, f"{RENDERED}/open-webui/env"}
+        allowed = {path}
+        for written_path in written:
+            if new_value in host.files[written_path]:
+                self.assertIn(written_path, allowed)
+        self.assertNotIn(f"{RENDERED}/open-webui/env", written)
+        for command, environment in host.calls[baseline_calls:]:
+            self.assertNotIn(new_value, command)
+            if environment is not None:
+                self.assertNotIn(new_value, environment.values())
+        for command, input_text in host.inputs[baseline_calls:]:
+            self.assertNotIn(new_value, command)
+            self.assertNotIn(new_value, input_text or "")
+        assert_no_secret_text(self, out + err, (new_value,))
+
+
+class ApiRotation(RealStack):
+    def test_gideon_api_key_rotates_mount_and_frontend_carrier_then_converges(self) -> None:
+        host = self.applied_host()
+        path = f"{SECRETS_DIR}/gideon_api_key"
+        env_path = f"{RENDERED}/open-webui/env"
+        old_value = host.files[path].strip()
+        baseline_calls = len(host.calls)
+        baseline_writes = len(host.writes)
+
+        code, out, err = run_rotate(host, "gideon_api_key")
+
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertEqual(
+            stages(out),
+            [
+                "preconditions",
+                "plan",
+                "rotate",
+                "recreate",
+                "secrets",
+                "render",
+                "registry",
+                "pull",
+                "models",
+                "recreate",
+                "stores",
+                "start",
+                "apply-manifest",
+                "verify",
+                "timers",
+                "record",
+            ],
+        )
+        self.assertIn("recreate: ok — recreated gideon-api: mount gideon_api_key", out)
+        self.assertIn("start: ok — recreated open-webui: changed rendered files", out)
+        new_value = host.files[path].strip()
+        self.assertNotEqual(new_value, old_value)
+        self.assertEqual(host.write_modes[path], 0o440)
+        self.assertIn((path, 0, 4242), host.chown_calls)
+        calls = argv_calls(host)[baseline_calls:]
+        self.assertEqual(calls.count(force_recreate(ENGINE_SERVICE_NAME)), 0)
+        self.assertEqual(calls.count(force_recreate(API_SERVICE_NAME)), 1)
+        self.assertEqual(calls.count(force_recreate("open-webui")), 1)
+        self.assertLess(
+            calls.index(force_recreate(API_SERVICE_NAME)),
+            calls.index(force_recreate("open-webui")),
+        )
+        self.assertIn(new_value, host.files[env_path])
+        written = host.writes[baseline_writes:]
+        allowed = {path, env_path}
         for written_path in written:
             if new_value in host.files[written_path]:
                 self.assertIn(written_path, allowed)
@@ -870,35 +929,66 @@ class PartialRotation(RealStack):
         assert_no_secret_text(self, out + err)
 
     def test_failed_mount_recreate_requires_apply_then_a_fresh_rotation(self) -> None:
+        # The connection key is the carried secret since the cutover: its value
+        # reaches the frontend's rendered env file, so a rotation that dies past
+        # the write leaves a pending change the next run is refused on.
+        host = self.applied_host()
+        api_recreate = force_recreate(API_SERVICE_NAME)
+        host.commands[api_recreate] = done(api_recreate, rc=1, stderr="service failed")
+        code, out, err = run_rotate(host, "gideon_api_key")
+        self.assertEqual(code, 1)
+        self.assertEqual(err, "")
+        self.assertIn("sudo docker compose", out)
+        self.assertIn(f"logs {API_SERVICE_NAME}", out)
+        self.assertIn("sudo python3 -m gideon apply", out)
+        self.assertIn("sudo python3 -m gideon secrets rotate gideon_api_key again", out)
+        first_value = host.files[f"{SECRETS_DIR}/gideon_api_key"]
+
+        host.calls.clear()
+        host.writes.clear()
+        code, out, err = run_rotate(host, "gideon_api_key")
+        self.assertEqual(code, 1)
+        self.assertEqual(err, "")
+        self.assertIn("preconditions: refuse", out)
+        self.assertIn("apply", out)
+        self.assertEqual(host.writes, [])
+        self.assertEqual(host.files[f"{SECRETS_DIR}/gideon_api_key"], first_value)
+
+        host.commands[api_recreate] = done(api_recreate)
+        code, out, err = run_apply_once(host)
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertIn("start: ok — recreated open-webui: changed rendered files", out)
+        code, out, err = run_rotate(host, "gideon_api_key")
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertIn("rotate: ok", out)
+        assert_no_secret_text(self, out + err)
+
+    def test_failed_engine_recreate_leaves_no_pending_change_so_a_rerun_proceeds(self) -> None:
+        # The engine key is carried by nothing since the cutover — its two homes
+        # are the engine's and the service's Compose mounts — so a rotation that
+        # dies past the write moves no rendered byte, the recreate judgment stays
+        # empty, and the recovery is the re-run itself rather than an apply.
         host = self.applied_host()
         engine_recreate = force_recreate(ENGINE_SERVICE_NAME)
         host.commands[engine_recreate] = done(engine_recreate, rc=1, stderr="engine failed")
         code, out, err = run_rotate(host, "engine_api_key")
         self.assertEqual(code, 1)
         self.assertEqual(err, "")
-        self.assertIn("sudo docker compose", out)
-        self.assertIn("logs gideon-generator", out)
-        self.assertIn("sudo python3 -m gideon apply", out)
+        self.assertIn(f"logs {ENGINE_SERVICE_NAME}", out)
         self.assertIn("sudo python3 -m gideon secrets rotate engine_api_key again", out)
         first_value = host.files[f"{SECRETS_DIR}/engine_api_key"]
 
-        host.calls.clear()
-        host.writes.clear()
-        code, out, err = run_rotate(host, "engine_api_key")
-        self.assertEqual(code, 1)
-        self.assertEqual(err, "")
-        self.assertIn("preconditions: refuse", out)
-        self.assertIn("apply", out)
-        self.assertEqual(host.writes, [])
-        self.assertEqual(host.files[f"{SECRETS_DIR}/engine_api_key"], first_value)
-
         host.commands[engine_recreate] = done(engine_recreate)
-        code, out, err = run_apply_once(host)
-        self.assertEqual((code, err), (0, ""), out)
-        self.assertIn("start: ok — recreated open-webui: changed rendered files", out)
+        baseline_calls = len(host.calls)
         code, out, err = run_rotate(host, "engine_api_key")
         self.assertEqual((code, err), (0, ""), out)
+        self.assertIn("preconditions: ok", out)
         self.assertIn("rotate: ok", out)
+        self.assertNotEqual(host.files[f"{SECRETS_DIR}/engine_api_key"], first_value)
+        calls = argv_calls(host)[baseline_calls:]
+        self.assertEqual(calls.count(force_recreate(ENGINE_SERVICE_NAME)), 1)
+        self.assertEqual(calls.count(force_recreate(API_SERVICE_NAME)), 1)
+        self.assertEqual(calls.count(force_recreate("open-webui")), 0)
         assert_no_secret_text(self, out + err)
 
 

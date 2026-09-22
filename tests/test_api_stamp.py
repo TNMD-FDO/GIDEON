@@ -1,4 +1,4 @@
-"""The service citation stamp's seed, detection, decision, and held copy (spec §15)."""
+"""The service citation stamp's seed, detection, and decision (spec §15)."""
 
 import ast
 import sys
@@ -9,46 +9,12 @@ from unittest.mock import patch
 
 import yaml  # type: ignore[import-untyped]
 
-# Ticket 03's kind of check is one rule with one home: the guardrail's module
-# owns the statement reader, and this one reads the same tree the same way.
-# Ticket 09 deletes both checks with the two Functions they hold.
-from test_guardrail_equality import bound_names, parse, statement_label, statements
-
 from gideon.api import stamp
 
 ROOT = Path(__file__).resolve().parent.parent
 STAMP_PATH = ROOT / "gideon/api/stamp.py"
-FUNCTION_PATH = ROOT / "compose/open-webui/functions/citation_stamp.py"
 SEED_PATH = ROOT / "eval/seed/general/citation-stamp.yaml"
 SITE_EXAMPLE = ROOT / "config/site.example.yaml"
-FUNCTION_NAME = "functions/citation_stamp.py"
-_CARRY = "carry the edit to both files until ticket 09"
-
-FUNCTION_ONLY = frozenset(
-    {
-        "Mapping",
-        "STAMP_MESSAGE_ID",
-        "answer_text",
-        "_last_message_item",
-        "_message_item",
-        "_append_output_text",
-        "append_stamp",
-        "_last_assistant",
-        "_stamp_anyway",
-        "Filter",
-    }
-)
-MODULE_ONLY = frozenset({"Final", "STAMP_TAIL", "tail_for"})
-
-# The render's template, the Function's hook tests, the service module's own
-# provenance, and this check.  The classifier and harness readers leave in the
-# next Phase 1 checkbox, so this is the end-state list for the whole ticket.
-HELD_FUNCTION_USERS = (
-    "gideon/api/stamp.py",
-    "gideon/host/render/owui.py",
-    "tests/test_api_stamp.py",
-    "tests/test_citation_stamp.py",
-)
 
 
 def document() -> dict[str, object]:
@@ -260,72 +226,3 @@ class StampDecision(unittest.TestCase):
 
     def test_stamp_tail_is_separator_plus_label(self) -> None:
         self.assertEqual(stamp.STAMP_TAIL, stamp.STAMP_SEPARATOR + stamp.CITATION_STAMP)
-
-
-class StampEquality(unittest.TestCase):
-    """Hold the service statements equal to the Function until ticket 09."""
-
-    def test_moved_statements_equal_without_function_or_module_only_statements(
-        self,
-    ) -> None:
-        function_statements = [
-            node
-            for node in statements(parse(FUNCTION_PATH))
-            if not bound_names(node) & FUNCTION_ONLY
-        ]
-        module_statements = [
-            node
-            for node in statements(parse(STAMP_PATH))
-            if not bound_names(node) & MODULE_ONLY
-        ]
-        for actual, wanted in zip(module_statements, function_statements, strict=False):
-            self.assertEqual(
-                ast.dump(actual, include_attributes=False),
-                ast.dump(wanted, include_attributes=False),
-                f"{statement_label(actual)} at line {actual.lineno} of the module differs "
-                f"from {statement_label(wanted)} at line {wanted.lineno} of the Function; "
-                f"{_CARRY}",
-            )
-        self.assertEqual(
-            len(module_statements),
-            len(function_statements),
-            f"the module has {len(module_statements)} moved top-level statements where the "
-            f"Function has {len(function_statements)} outside the Function-only set; {_CARRY}",
-        )
-
-    def test_function_and_module_only_names_are_exact(self) -> None:
-        function_names = frozenset(
-            name
-            for node in statements(parse(FUNCTION_PATH))
-            for name in bound_names(node)
-        )
-        module_names = frozenset(
-            name for node in statements(parse(STAMP_PATH)) for name in bound_names(node)
-        )
-        self.assertEqual(function_names - module_names, FUNCTION_ONLY)
-        self.assertEqual(module_names - function_names, MODULE_ONLY)
-
-    def test_no_top_level_name_is_bound_twice(self) -> None:
-        for label, path in (("Function", FUNCTION_PATH), ("module", STAMP_PATH)):
-            seen: set[str] = set()
-            duplicates: set[str] = set()
-            for node in statements(parse(path)):
-                names = bound_names(node)
-                duplicates.update(seen & names)
-                seen.update(names)
-            self.assertEqual(duplicates, set(), f"{label} binds names twice; {_CARRY}")
-
-    def test_function_path_users_are_held_for_the_end_state(self) -> None:
-        actual = tuple(
-            sorted(
-                path.relative_to(ROOT).as_posix()
-                for directory in (ROOT / "tools", ROOT / "tests", ROOT / "gideon")
-                for path in directory.rglob("*.py")
-                if FUNCTION_NAME in path.read_text(encoding="utf-8")
-            )
-        )
-        self.assertEqual(
-            actual,
-            HELD_FUNCTION_USERS,
-            f"a file naming {FUNCTION_NAME} is a by-path loader; add it here consciously",
-        )

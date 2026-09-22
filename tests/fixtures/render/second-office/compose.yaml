@@ -183,7 +183,8 @@ services:
       STORAGE_PROVIDER: "local"
       ENABLE_OLLAMA_API: "false"
       ENABLE_OPENAI_API: "true"
-      OPENAI_API_BASE_URLS: "http://gideon-generator:8000/v1"
+      OPENAI_API_BASE_URLS: "http://gideon-api:8000/v1"
+      ENABLE_FORWARD_USER_INFO_HEADERS: "true"
       TASK_MODEL_EXTERNAL: "gideon-generator"
       ENABLE_TITLE_GENERATION: "true"
       ENABLE_TAGS_GENERATION: "true"
@@ -276,7 +277,7 @@ services:
       USER_PERMISSIONS_FEATURES_AUTOMATIONS: "false"
       USER_PERMISSIONS_FEATURES_WEBHOOKS: "false"
       USER_PERMISSIONS_SETTINGS_INTERFACE: "true"
-      NO_PROXY: "127.0.0.1,localhost,::1,192.168.122.1,caddy,postgres,open-webui,gideon-generator"
+      NO_PROXY: "127.0.0.1,localhost,::1,192.168.122.1,caddy,postgres,open-webui,gideon-api"
     command:
       - "bash"
       - "start.sh"
@@ -290,7 +291,6 @@ services:
       - "/etc/gideon/ca.pem:/etc/gideon/ca.pem:ro"
     secrets:
       - "webui_secret_key"
-      - "postgres_gideon_audit_password"
     healthcheck:
       test:
         - "CMD-SHELL"

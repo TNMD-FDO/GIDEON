@@ -1,8 +1,8 @@
 """The arithmetic guardrail's judge, imported from ``gideon.guardrail``.
 
-The tests moved whole from ``test_arithmetic_guardrail.py`` (general-turn ticket
-03), which keeps the Function's hook tests; ``FILTER`` names the module so each
-moved test reads as it did there until ticket 09 deletes the Function.
+The tests moved whole from the former arithmetic guardrail module (general-turn
+ticket 03); ``FILTER`` names the service module so each moved test reads as it
+did there.
 """
 
 import contextlib

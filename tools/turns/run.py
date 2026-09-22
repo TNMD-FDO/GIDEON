@@ -30,9 +30,8 @@ TURN_TIMEOUT_SECONDS: Final[float] = 600.0
 SMOKE_TURNS: Final[int] = 8
 # A frontend page's turn sends the answer, then the page's title and tag tasks
 # (follow-ups are rendered off in render/owui.py); the API mode's managed turn
-# and the probe's chat-id completion send no background tasks and cost one. The
-# starting value comes from ticket 36's proof: 65 engine calls for 24
-# completions, or 62 over 21 browser turns after the three one-call probes.
+# sends no background tasks. The starting value comes from ticket 36's proof:
+# 65 engine calls for 24 completions, or 62 over 21 browser turns.
 # Correct it from the engine access log's POST /v1/chat/completions lines over a
 # run's span, divided by that run's browser turns.
 BROWSER_ENGINE_CALLS_PER_TURN: Final[int] = 3
@@ -638,7 +637,6 @@ def _verdict_data(verdict: classify.Verdict | None) -> dict[str, object] | None:
     return {
         "kind": verdict.kind,
         "pattern_id": verdict.pattern_id,
-        "tripped_in": verdict.tripped_in,
         "block_present": verdict.block_present,
         "reasoning_stored": verdict.reasoning_stored,
         "sources_present": verdict.sources_present,
@@ -982,12 +980,10 @@ def _browser_run_data(
 
 @dataclass(frozen=True, slots=True)
 class ProbeOutcome:
-    """What the inlet probe's three rows produced: their records and their accounting.
+    """What the inlet probe's one row produced: its record and accounting.
 
-    ``turns`` is the engine calls attempted — one when the chat-id completion
-    was posted, one more when the base-model completion answered (the gate
-    failed open and the request reached the engine), none when the probe
-    never got that far.
+    ``turns`` is the engine calls attempted: none when the gate refuses as it
+    should, one when it failed open and the request reached the engine.
     """
 
     records: dict[str, dict[str, object]]
@@ -1023,23 +1019,16 @@ def _probe_row(
 def _run_probe(
     client: Client,
     spec: RunSpec,
-    guardrail: Any,
     gate_texts: classify.GateTexts,
     host: Host,
     emit: Callable[[StageResult], None],
 ) -> ProbeOutcome:
-    """Ticket 34's inlet-gate probe from the users seat, three rows.
+    """Probe the users-seat branch gate through one bare base-model completion.
 
-    ``inlet-bare`` posts a completion carrying neither a session id nor a chat
-    id and expects the guardrail Function's session refusal on a 400 — refused
-    before the engine, a row and never a turn. ``inlet-chat-id`` adds the id of a chat
-    the account owns and expects the model's answer unreplaced: §16's recorded
-    residual, judged and reported, never failed on its content.
-    ``inlet-base-model`` reuses that owned chat with the base model and expects
-    the branch gate Function's refusal before the engine. Neither completion
-    should create a chat of its own; any that appears is deleted, and the owned
-    chat is deleted whatever happened. A request that fails is a failed row for whichever
-    probe had not been reported, never a traceback.
+    The request carries no session or chat id and must receive the gate's
+    refusal as HTTP 400 before the engine (ADR-0045 (d), frontend contract §2
+    row 8). A chat that appears is deleted and reported as a guard violation;
+    failures remain one named row and never become a traceback.
     """
 
     prompt = session.prompt_text("inlet-probe", spec.sentinel, session.PROBE_PROMPT)
@@ -1048,8 +1037,6 @@ def _run_probe(
     deleted = 0
     not_deleted: list[str] = []
     emitted: set[str] = set()
-    probe_chat: str | None = None
-    probe_chat_deleted = False
     turns = 0
 
     def report(result: StageResult) -> None:
@@ -1060,142 +1047,61 @@ def _run_probe(
 
     try:
         before = owuiturn.chat_ids(client)
-        bare = session.probe_bare(client, spec.model, prompt)
-        bare_ok = (
-            bare.problem is None
-            and bare.status == 400
-            and isinstance(bare.body, Mapping)
-            and bare.body.get("detail") == gate_texts.session_refusal
-        )
-        report(
-            _probe_row(
-                host,
-                spec,
-                _probe_result(
-                    "inlet-bare",
-                    bare,
-                    bare_ok,
-                    "refused with the session refusal (HTTP 400)"
-                    if bare_ok
-                    else f"HTTP {bare.status}, not the session refusal",
-                    "" if bare_ok else _turn_fix(spec),
-                ),
-                bare,
-                None,
-                records,
-                residual=None,
-            )
-        )
-
-        # The chat id must be a chat the account owns (the frontend answers
-        # 404 otherwise), so an empty one is made through the frontend's own
-        # route — no engine call — and kept until both completion probes finish.
-        probe_chat = session.new_chat(client, spec.model)
-        turns = 1
-        with_chat = session.probe_with_chat_id(client, spec.model, prompt, probe_chat)
-        answer = classify.probe_answer(with_chat.body)
-        pattern = classify.probe_verdict(guardrail, with_chat.body, prompt)
-        chat_ok = (
-            with_chat.problem is None
-            and with_chat.status == 200
-            and answer is not None
-            and bool(answer.strip())
-        )
-        residual: str | None = None
-        if chat_ok:
-            residual = (
-                f"unreplaced, computed@{pattern}" if pattern is not None else "unreplaced, clean"
-            )
-        chat_result = _probe_row(
-            host,
-            spec,
-            _probe_result(
-                "inlet-chat-id",
-                with_chat,
-                chat_ok,
-                f"residual: {residual}" if chat_ok else f"HTTP {with_chat.status}, no answer",
-                "" if chat_ok else _turn_fix(spec),
-            ),
-            with_chat,
-            pattern,
-            records,
-            residual=residual,
-        )
-        # The base-model completion is posted before the stray sweep, so a chat
-        # either completion might create is swept; its row follows the chat-id row.
         if spec.base_model is None:
             raise RuntimeError("the probe base model is unavailable")
-        base = session.probe_with_chat_id(client, spec.base_model, prompt, probe_chat)
+        base = session.probe_bare(client, spec.base_model, prompt)
         if base.problem is None and base.status == 200:
-            # The gate failed open: the completion reached the engine, so it counts.
-            turns += 1
+            # The gate failed open: the completion reached the engine, so the
+            # record counts the call the guard's estimate did not expect.
+            turns = 1
         strays = 0
-        for stray in sorted(owuiturn.chat_ids(client) - before - {probe_chat}):
+        for stray in sorted(owuiturn.chat_ids(client) - before):
             if owuiturn.delete_chat(client, stray) is None:
                 deleted += 1
                 strays += 1
             else:
                 not_deleted.append(stray)
-        if strays:
-            chat_result = StageResult(
-                chat_result.name,
-                chat_result.ok,
-                f"{chat_result.detail}; stray chat deleted",
-                chat_result.fix,
-            )
-        report(chat_result)
-
         base_ok = (
             base.problem is None
             and base.status == 400
             and isinstance(base.body, Mapping)
             and base.body.get("detail") == gate_texts.branch_refusal
         )
+        detail = (
+            "refused with the branch refusal (HTTP 400)"
+            if base_ok
+            else f"HTTP {base.status}, not the branch refusal"
+        )
+        if strays:
+            detail += "; stray chat deleted"
+        result = _probe_result(
+            "inlet-base-model",
+            base,
+            base_ok,
+            detail,
+            "" if base_ok else _turn_fix(spec),
+        )
         report(
             _probe_row(
                 host,
                 spec,
-                _probe_result(
-                    "inlet-base-model",
-                    base,
-                    base_ok,
-                    "refused with the branch refusal (HTTP 400)"
-                    if base_ok
-                    else f"HTTP {base.status}, not the branch refusal",
-                    "" if base_ok else _turn_fix(spec),
-                ),
+                result,
                 base,
                 None,
                 records,
                 residual=None,
             )
         )
-
-        if owuiturn.delete_chat(client, probe_chat) is None:
-            deleted += 1
-        else:
-            not_deleted.append(probe_chat)
-        probe_chat_deleted = True
     except owui.OwuiError as exc:
-        for name in ("inlet-bare", "inlet-chat-id", "inlet-base-model"):
-            if name not in emitted:
-                records[name] = {"ok": False, "status": 0, "body": None, "verdict": None, "residual": None, "problem": {"problem": exc.problem, "fix": exc.fix}}
-                report(StageResult(name, False, f"probe error: {exc.problem}", exc.fix))
+        name = "inlet-base-model"
+        if name not in emitted:
+            records[name] = {"ok": False, "status": 0, "body": None, "verdict": None, "residual": None, "problem": {"problem": exc.problem, "fix": exc.fix}}
+            report(StageResult(name, False, f"probe error: {exc.problem}", exc.fix))
     except Exception as exc:  # noqa: BLE001 - the probe boundary owns the traceback.
-        for name in ("inlet-bare", "inlet-chat-id", "inlet-base-model"):
-            if name not in emitted:
-                records[name] = {"ok": False, "status": 0, "body": None, "verdict": None, "residual": None, "problem": None}
-                report(_internal_error(name, exc, _turn_fix(spec)))
-    finally:
-        if probe_chat is not None and not probe_chat_deleted:
-            try:
-                deletion = owuiturn.delete_chat(client, probe_chat)
-            except Exception:  # noqa: BLE001 - cleanup must reach its row.
-                deletion = Problem("chat deletion raised an internal error", _turn_fix(spec))
-            if deletion is None:
-                deleted += 1
-            else:
-                not_deleted.append(probe_chat)
+        name = "inlet-base-model"
+        if name not in emitted:
+            records[name] = {"ok": False, "status": 0, "body": None, "verdict": None, "residual": None, "problem": None}
+            report(_internal_error(name, exc, _turn_fix(spec)))
     return ProbeOutcome(records, misses, deleted, tuple(not_deleted), turns)
 
 
@@ -1219,7 +1125,8 @@ def _summary_counts(
             "clean": offline_counts.get("clean", 0),
             "errors": offline_counts.get("error", 0),
         }
-    # A turn is a row: every case row, plus every replay and the probe's call;
+    # A turn is a row: every case row, plus every replay; the probe's refusal
+    # reaches no engine and is not a turn;
     # the guard's engine-call count lives in cli.py. A streamed door row is not
     # a replay — it is the case's one call — so ``replayed`` is false there.
     replays = (
@@ -2010,7 +1917,7 @@ def _run_cases(
     if spec.probe_inlet:
         assert gate_texts is not None
         assert client is not None
-        probe = _run_probe(client, spec, guardrail, gate_texts, host, emit)
+        probe = _run_probe(client, spec, gate_texts, host, emit)
         probe_turns = probe.turns
         probe_records = probe.records
         bookkeeping.misses += probe.misses
@@ -2155,8 +2062,8 @@ def run(
 
     The browser is closed and the output handed back whatever happened; a
     browser that does not close cleanly is a failed ``browser`` row and a
-    non-zero exit, never a traceback. ``gate_texts`` are the two inlet
-    gates' refusals the probe's rows compare; a probe spec without them is
+    non-zero exit, never a traceback. ``gate_texts`` is the branch gate's
+    refusal the probe row compares; a probe spec without it is
     the caller's error, refused before any sign-in.
     """
 

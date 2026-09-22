@@ -9,7 +9,9 @@
 # ticket 52's cases, and carries no sentinel word (the harness tags each
 # prompt).  No search case, so both modes load the file whole; the searched
 # row is the smoke set's `search-01`.  Never edited in place: a correction is a
-# new case with a new id naming the old with `supersedes:`.
+# new case with a new id naming the old with `supersedes:`.  Since the cutover
+# `--probe-inlet` is the branch gate's one row, `inlet-base-model`: a bare
+# completion on the base model from the users seat, refused before the engine.
 #
 #   sudo python3 -B -m tools.turns eval/seed/general/frontend-bump.yaml --out <dir>
 #   sudo python3 -B -m tools.turns eval/seed/general/smoke.yaml --out <dir>

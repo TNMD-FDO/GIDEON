@@ -8,11 +8,9 @@ smoke set is its third; the frontend-bump cases are its fourth.
 ## `citation-stamp.yaml`
 
 The committed seed for General's citation stamp (spec §15, slice-1 ticket 14),
-the answers three test modules run the stamp over: `tests/test_api_stamp.py`
-for the package's detection and the tail it owes, `tests/test_api_judged.py`
-for the service's whole and streamed paths, and
-`tests/test_citation_stamp.py` for the Function's outlet until ticket 09's
-cutover deletes it. Its
+the answers two test modules run the stamp over: `tests/test_api_stamp.py`
+for the package's detection and the tail it owes, and
+`tests/test_api_judged.py` for the service's whole and streamed paths. Its
 top-level shape is `family: citation`, `pattern_set_version`, and `cases`. Each
 case has an `id`, a `kind` (`shaped` or `free`), and an invented `answer`; a
 shaped case also has `pattern`, the family id the stamp's detector must report

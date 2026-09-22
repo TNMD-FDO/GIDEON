@@ -615,7 +615,7 @@ def _compose_document(inputs: RenderInputs) -> Mapping[str, object]:
                 "/data/bulk/openwebui:/app/backend/data",
                 "/etc/gideon/ca.pem:/etc/gideon/ca.pem:ro",
             ],
-            "secrets": ["webui_secret_key", "postgres_gideon_audit_password"],
+            "secrets": ["webui_secret_key"],
             "healthcheck": dict(OWUI_HEALTHCHECK),
             "networks": ["gideon"],
         },

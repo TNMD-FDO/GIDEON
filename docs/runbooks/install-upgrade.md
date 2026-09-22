@@ -101,13 +101,16 @@ same command is run again after the fix.
    (`v0.1.40`, spec §1.7). The command refuses first when `apply` has pending
    changes or has never verified (run `render --diff`, then `apply`), then
    prints what it will do — the engine recreated with a cold start, bounded by
-   apply's engine wait, and the frontend recreated by the recreate rule in
+   apply's engine wait, and `gideon-api`, its second mount, recreated in
    seconds — writes a new value to the same path as `root:gideon` 0440,
    force-recreates the engine once (a file secret is a bind mount and the new
    key reaches only a new container, the rule `tls reload` follows for Caddy),
-   and converges the rest as apply does: the frontend's env file re-rendered
-   and its owner recreated, verify, `applied.yaml` recorded, so `render --diff`
-   then reports nothing. Once General is live, a rotation that recreates the
+   and converges the rest as apply does: verify, `applied.yaml` recorded, so
+   `render --diff` then reports nothing. Since `v0.2.29` the frontend is not
+   among the consumers: the engine's key left its env file at the cutover.
+   The frontend's own connection key is `gideon_api_key`, and
+   `sudo python3 -m gideon secrets rotate gideon_api_key` recreates
+   `gideon-api` (its mount) and the frontend (its env file's owner). Once General is live, a rotation that recreates the
    engine is made in an announced maintenance window (§21; the command does
    not gate on the clock). The same command rotates `webui_secret_key` (the
    frontend recreated once; every signed-in session ends — §4.4's live-session

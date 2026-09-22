@@ -130,7 +130,7 @@ class Registry(unittest.TestCase):
         api = next(secret for secret in SECRET_REGISTRY if secret.name == "gideon_api_key")
         self.assertEqual(api.kind, "password")
         self.assertFalse(api.print_once)
-        self.assertEqual(api.consumer, "the gideon-api connection key (gideon-api)")
+        self.assertEqual(api.consumer, "the gideon-api connection key carried by Open WebUI")
         audit = next(
             secret
             for secret in SECRET_REGISTRY
@@ -138,7 +138,7 @@ class Registry(unittest.TestCase):
         )
         self.assertEqual(
             audit.consumer,
-            "audit writer database role, frontend guardrail trip writer, and gideon-api trip writer",
+            "audit writer database role and gideon-api trip writer",
         )
 
     def test_every_entry_has_the_release_rotation_class(self) -> None:

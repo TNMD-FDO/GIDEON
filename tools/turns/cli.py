@@ -532,26 +532,18 @@ def main(
     case_values = loaded_cases.cases
     selected_now = now or _utc_now
     stream_turns = 1 if options.service else (2 if options.stream else 1)
-    case_turns = len(case_values) * options.repeat * options.concurrent * stream_turns
-    turns = case_turns + (1 if options.probe_inlet else 0)
+    # The inlet probe is counted in neither total: the branch gate refuses it
+    # before the engine, and it is not one of the run's turns.
+    turns = len(case_values) * options.repeat * options.concurrent * stream_turns
     if options.browser:
-        engine_calls = case_turns * BROWSER_ENGINE_CALLS_PER_TURN + (
-            1 if options.probe_inlet else 0
-        )
+        engine_calls = turns * BROWSER_ENGINE_CALLS_PER_TURN
     elif options.service:
-        engine_calls = case_turns
+        engine_calls = turns
     else:
-        engine_calls = (
-            case_turns
-            + loaded_cases.searched * options.repeat * options.concurrent
-            + (1 if options.probe_inlet else 0)
-        )
+        engine_calls = turns + loaded_cases.searched * options.repeat * options.concurrent
     engine_call_fragment = ""
     if options.browser:
-        engine_call_fragment = f" ({BROWSER_ENGINE_CALLS_PER_TURN} per browser turn"
-        if options.probe_inlet:
-            engine_call_fragment += ", the probe 1"
-        engine_call_fragment += ")"
+        engine_call_fragment = f" ({BROWSER_ENGINE_CALLS_PER_TURN} per browser turn)"
     elif loaded_cases.searched:
         engine_call_fragment = " (2 per searched case)"
     engine_call_detail = f"{engine_calls} engine calls{engine_call_fragment}"

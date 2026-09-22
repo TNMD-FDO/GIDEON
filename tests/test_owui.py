@@ -25,10 +25,8 @@ from gideon.host.owui import (
     wait_ready,
 )
 from gideon.host.render.owui import (
-    ARITHMETIC_GUARDRAIL_ID,
     BRANCH_GATE_ID,
     BREAK_GLASS,
-    CITATION_STAMP_ID,
     EVAL_IDENTITY,
     GENERAL_PRESET_ID,
     SERVICE_GROUP,
@@ -108,7 +106,7 @@ class Frontend:
         self.calls: list[tuple[str, str]] = []
         self.next_id = 0
         self.swallow_sync = False
-        # The live listing built from a stale cache: every entry without its attachment key.
+        # The live listing built from a stale cache: General carries a stray attachment.
         self.stale_live_models = False
 
     def fresh_id(self, prefix: str) -> str:
@@ -201,8 +199,11 @@ class Frontend:
             entries: list[dict[str, Any]] = []
             for model in self.models:
                 info = {key: value for key, value in model.items() if key != "params"}
-                if self.stale_live_models and isinstance(info.get("meta"), dict):
-                    info["meta"] = {key: value for key, value in info["meta"].items() if key != "filterIds"}
+                if self.stale_live_models and model["id"] == GENERAL_PRESET_ID and isinstance(info.get("meta"), dict):
+                    info["meta"] = {
+                        **info["meta"],
+                        "filterIds": ["stale-filter"],
+                    }
                 entries.append(
                     {
                         "id": model["id"],
@@ -571,7 +572,7 @@ class Bootstrap(unittest.TestCase):
         self.assertEqual(report.removed_groups, ("stray",))
         self.assertEqual(
             [item["id"] for item in frontend.functions],
-            [ARITHMETIC_GUARDRAIL_ID, BRANCH_GATE_ID, CITATION_STAMP_ID],
+            [BRANCH_GATE_ID],
         )
         expected_models = manifest()["models"]
         assert isinstance(expected_models, list)
@@ -704,11 +705,11 @@ class Bootstrap(unittest.TestCase):
         self.assertNotIn(suggestion_text, problem)
         self.assertIn("logs open-webui", report.fix)
 
-    def test_swallowed_general_sync_with_removed_filter_ids_refuses(self) -> None:
+    def test_swallowed_general_sync_with_stray_filter_id_refuses(self) -> None:
         def mutate(model: dict[str, Any]) -> None:
             meta = model["meta"]
             assert isinstance(meta, dict)
-            del meta["filterIds"]
+            meta["filterIds"] = ["hand-added-filter"]
 
         self._assert_swallowed_general_correction_refuses(mutate, "meta.filterIds")
 
@@ -776,7 +777,7 @@ class Bootstrap(unittest.TestCase):
         self,
         mutate: Callable[[dict[str, Any]], None],
         field: str,
-        function_id: str = ARITHMETIC_GUARDRAIL_ID,
+        function_id: str = BRANCH_GATE_ID,
     ) -> None:
         frontend = Frontend()
         host = FakeHost(secrets())
@@ -810,13 +811,6 @@ class Bootstrap(unittest.TestCase):
         self._assert_swallowed_function_correction_refuses(
             lambda function: function.update(is_global=False),
             "is_global",
-        )
-
-    def test_swallowed_functions_sync_with_stamp_global_row_refuses(self) -> None:
-        self._assert_swallowed_function_correction_refuses(
-            lambda function: function.update(is_global=True),
-            "is_global",
-            CITATION_STAMP_ID,
         )
 
     def test_swallowed_functions_sync_with_changed_description_refuses(self) -> None:
@@ -904,7 +898,7 @@ class Manifest(unittest.TestCase):
         assert isinstance(functions, list)
         self.assertEqual(
             [function["id"] for function in functions],
-            [ARITHMETIC_GUARDRAIL_ID, BRANCH_GATE_ID, CITATION_STAMP_ID],
+            [BRANCH_GATE_ID],
         )
         groups = document["groups"]
         assert isinstance(groups, list)

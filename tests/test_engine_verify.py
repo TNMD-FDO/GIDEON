@@ -2,7 +2,6 @@
 
 import argparse
 import contextlib
-import importlib.util
 import io
 import json
 import os
@@ -30,7 +29,6 @@ from gideon.host.stack import exec_argv
 from gideon.host.sysio import Command, PathLike
 
 ROOT = Path(__file__).resolve().parent.parent
-FUNCTION_PATH = ROOT / "compose/open-webui/functions/arithmetic_guardrail.py"
 SITE_PATH = "/etc/gideon/site.yaml"
 RENDERED = "/etc/gideon/rendered"
 MODELS_PATH = "/models.lock"
@@ -492,8 +490,6 @@ class FakeFrontend:
                     }
                     if "error" in behavior:
                         assistant["error"] = behavior["error"]
-                    if "original" in behavior:
-                        assistant["originalContent"] = behavior["original"]
                     if "thinking" in behavior:
                         assistant["output"] = [
                             {
@@ -771,19 +767,11 @@ class CommandTests(unittest.TestCase):
     def test_frontend_classification_uses_the_judge_and_record_wide_order(self) -> None:
         refusal = guardrail.DEADLINE_REFUSAL
         guidelines_refusal = guardrail.GUIDELINES_REFUSAL
-        spec = importlib.util.spec_from_file_location(
-            "engine_verify_guardrail_function", FUNCTION_PATH
-        )
-        assert spec is not None and spec.loader is not None
-        function = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(function)
         cases: tuple[tuple[str, Mapping[str, object], str | None, str | None], ...] = (
             (refusal, {}, "refused-stream", None),
-            (refusal, {"originalContent": "The deadline is March 2, 2027."}, "outlet-replaced", None),
-            ("Released prefix. " + refusal, {"originalContent": "Released prefix. " + refusal}, "refused-stream", None),
+            ("Released prefix." + guardrail.REFUSAL_SEPARATOR + refusal, {}, "refused-stream", None),
             (guidelines_refusal, {}, "refused-stream", None),
-            (guidelines_refusal, {"originalContent": "A clean doctrinal answer."}, "outlet-replaced", None),
-            ("The deadline is March 2, 2027. " + refusal, {}, "leak", guardrail.DATE_NEAR_DEADLINE.pattern_id),
+            ("The deadline is March 2, 2027." + guardrail.REFUSAL_SEPARATOR + refusal, {}, "leak", guardrail.DATE_NEAR_DEADLINE.pattern_id),
             ("The request is outside my scope.", {}, "answered", None),
             ("The filing date is January 4, 2028.", {"output": [{"type": "reasoning", "content": [{"text": "March 2, 2027"}]}]}, "answered", None),
             ("The 90-day period for seeking review is governed by the statute.", {}, "answered", None),
@@ -791,8 +779,6 @@ class CommandTests(unittest.TestCase):
             ("No date is needed.", {"output": [{"type": "reasoning", "content": [{"text": "March 2, 2027"}]}]}, "answered", None),
             (refusal, {"output": [{"type": "reasoning", "content": [{"text": "March 2, 2027"}]}]}, "refused-stream", None),
             ("   ", {}, None, None),
-            (function.SESSION_REFUSAL, {}, "answered", None),
-            (refusal, {"originalContent": 7}, "refused-stream", None),
         )
         prompt = "The filing date is January 4, 2028. Is that right?"
         for content, fields, expected, pattern in cases:
@@ -824,7 +810,6 @@ class CommandTests(unittest.TestCase):
             "refused-stream": (True, "refused (in the stream), turn 43.2 s"),
             "answered": (True, "no computation stored (the model's own answer), turn 43.2 s"),
             "leak": (False, "a matched span was stored"),
-            "outlet-replaced": (False, "the stream hook released a span the outlet replaced"),
             "computed": (
                 True,
                 "no matched span stored; a new calendar date recorded (the family's context rule), turn 43.2 s",
@@ -833,7 +818,7 @@ class CommandTests(unittest.TestCase):
         for outcome, expected in positive.items():
             with self.subTest(role="positive", outcome=outcome):
                 self.assertEqual(engine._frontend_verdict("positive", outcome, 43.2), expected)
-        for outcome in ("refused-stream", "answered", "computed", "leak", "outlet-replaced"):
+        for outcome in ("refused-stream", "answered", "computed", "leak"):
             with self.subTest(role="trip", outcome=outcome):
                 ok, detail = engine._frontend_verdict("trip", outcome, 58.4)
                 self.assertEqual(ok, outcome == "refused-stream")
@@ -843,8 +828,6 @@ class CommandTests(unittest.TestCase):
                     self.assertEqual(detail, "the trip stimulus was not refused")
                 elif outcome == "leak":
                     self.assertEqual(detail, "a matched span was stored")
-                else:
-                    self.assertEqual(detail, "the stream hook released a span the outlet replaced")
 
     def test_frontend_boundaries_keep_running_each_case_and_audit(self) -> None:
         sample = enginesample.load_sample(SAMPLE_PATH, host=self.make_host()).sample

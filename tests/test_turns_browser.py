@@ -559,19 +559,12 @@ class FakeFrontend:
         self.chats: dict[str, dict[str, object]] = {}
         self.calls: list[tuple[str, str, object | None, str | None]] = []
         gate_texts = classify.load_gate_texts(ROOT)
-        self.session_refusal = gate_texts.session_refusal
         self.branch_refusal = gate_texts.branch_refusal
         self.base_model_id: str | None = None
         self.base_model_status = 400
         self.base_model_detail = self.branch_refusal
         self.base_model_content = "A clean base-model answer."
-        self.bare_status = 400
-        self.bare_detail = self.session_refusal
-        self.chat_probe_status = 200
-        self.chat_probe_content = "A clean residual answer."
-        self.chat_probe_reasoning = ""
-        self.chat_probe_stray = False
-        self.new_chat_status = 200
+        self.base_model_stray = False
         self.completions_transport_error = False
 
     def factory(self, *, token: str | None = None) -> Client:
@@ -610,21 +603,13 @@ class FakeFrontend:
         self.calls.append((method, path, body, token))
         if token != self.token:
             return Response(403, {"detail": "not owner"})
-        if method == "POST" and path == "/api/v1/chats/new":
-            if self.new_chat_status != 200:
-                return Response(self.new_chat_status, {"detail": "private creation detail"})
-            self.chats["probe-chat"] = {"id": "probe-chat", "chat": {"history": {"messages": {}}}}
-            return Response(200, {"id": "probe-chat"})
         if method == "POST" and path == "/api/chat/completions":
             if self.completions_transport_error:
                 raise OwuiError("connection refused by the ingress", "Check the ingress, then retry.")
             request = body if isinstance(body, Mapping) else {}
-            if "chat_id" not in request:
-                return Response(self.bare_status, {"detail": self.bare_detail})
-            if request["chat_id"] not in self.chats:
-                # The pinned frontend's answer for a chat the caller does not own.
-                return Response(404, {"detail": "Something went wrong :/"})
             if request.get("model") == self.base_model_id:
+                if self.base_model_stray:
+                    self.create_chat("probe", "probe-stray")
                 if self.base_model_status != 200:
                     return Response(self.base_model_status, {"detail": self.base_model_detail})
                 return Response(
@@ -635,21 +620,9 @@ class FakeFrontend:
                         ]
                     },
                 )
-            if self.chat_probe_stray:
-                self.create_chat("probe", "probe-stray")
-            return Response(
-                self.chat_probe_status,
-                {
-                    "choices": [
-                        {
-                            "message": {
-                                "content": self.chat_probe_content,
-                                "reasoning": self.chat_probe_reasoning,
-                            }
-                        }
-                    ]
-                },
-            )
+            # The probe's one completion is the bare base-model request; any
+            # other falls through to the handler's not-found answer rather than
+            # being given a plausible reply this fake does not model.
         if method == "GET" and path == "/api/v1/chats/list":
             return Response(200, [{"id": chat_id} for chat_id in self.chats])
         if method == "GET" and path.startswith("/api/v1/chats/"):
@@ -1021,38 +994,25 @@ class BrowserTurnIntegration(TestCase):
             self.assertIn("Drop --browser", output.getvalue())
             self.assertEqual(host.read_paths, [])
 
-    def test_inlet_probe_rows_are_clean_and_count_the_chat_id_call(self) -> None:
+    def test_inlet_probe_row_is_clean(self) -> None:
         frontend = FakeFrontend()
         page = FakePage(frontend, drains=self._drains())
         code, stdout, _stderr, frontend, host = self._run(
             page=page, args=["--probe-inlet"]
         )
         self.assertEqual(code, 0)
-        self.assertIn("inlet-bare: ok — refused with the session refusal (HTTP 400)", stdout)
-        self.assertIn("inlet-chat-id: ok — residual: unreplaced, clean\n", stdout)
         self.assertIn(
             "inlet-base-model: ok — refused with the branch refusal (HTTP 400)", stdout
         )
-        self.assertIn("summary: ok — 2 turns", stdout)
+        self.assertIn("summary: ok — 1 turns", stdout)
         probe_calls = [call for call in frontend.calls if call[1] == "/api/chat/completions"]
-        self.assertEqual(len(probe_calls), 3)
-        chat_body = probe_calls[1][2]
-        assert isinstance(chat_body, Mapping)
-        self.assertEqual(chat_body["chat_id"], "probe-chat")
-        base_body = probe_calls[2][2]
+        self.assertEqual(len(probe_calls), 1)
+        base_body = probe_calls[0][2]
         assert isinstance(base_body, Mapping)
-        self.assertEqual(base_body["chat_id"], "probe-chat")
         self.assertEqual(base_body["model"], frontend.base_model_id)
+        self.assertNotIn("chat_id", base_body)
         self.assertIsNotNone(frontend.base_model_id)
-        self.assertEqual(
-            [call for call in frontend.calls if call[1] == "/api/v1/chats/probe-chat"],
-            [("DELETE", "/api/v1/chats/probe-chat", None, frontend.token)],
-        )
         self.assertEqual(frontend.chats, {})
-        self.assertEqual(
-            json.loads(next(value for key, value in host.files.items() if key.endswith("inlet-chat-id.json")))["status"],
-            200,
-        )
         base_record = json.loads(
             next(value for key, value in host.files.items() if key.endswith("inlet-base-model.json"))
         )
@@ -1070,7 +1030,7 @@ class BrowserTurnIntegration(TestCase):
             code, stdout, _stderr, _frontend, _host = self._run(
                 page=page, args=["--probe-inlet"]
             )
-        function_path = ROOT / classify.GUARDRAIL_FUNCTION
+        function_path = ROOT / classify.BRANCH_GATE_FUNCTION
         self.assertEqual(code, 1)
         self.assertIn(
             f"preconditions: refuse — inlet gate text could not be loaded from {function_path}",
@@ -1079,43 +1039,7 @@ class BrowserTurnIntegration(TestCase):
         self.assertIn(f"Correct {function_path}, then retry.", stdout)
         self.assertNotIn("private gate text", stdout)
 
-    def test_inlet_probe_reports_a_computed_residual_without_failing(self) -> None:
-        frontend = FakeFrontend()
-        frontend.chat_probe_content = "the deadline is June 5, 2027"
-        page = FakePage(frontend, drains=self._drains())
-        code, stdout, _stderr, _frontend, _host = self._run(
-            page=page, args=["--probe-inlet"]
-        )
-        self.assertEqual(code, 0)
-        self.assertIn(
-            "inlet-chat-id: ok — residual: unreplaced, computed@deadline/date-near-deadline-word@1",
-            stdout,
-        )
-
     def test_inlet_probe_failures_never_print_response_text(self) -> None:
-        cases = (
-            ("bare detail", 400, 200),
-            ("bare status", 200, 200),
-            ("chat status", 400, 400),
-        )
-        for label, bare_status, chat_status in cases:
-            with self.subTest(label=label):
-                frontend = FakeFrontend()
-                frontend.bare_status = bare_status
-                frontend.bare_detail = "private body detail"
-                frontend.chat_probe_status = chat_status
-                page = FakePage(frontend, drains=self._drains())
-                code, stdout, _stderr, _frontend, _host = self._run(
-                    page=page, args=["--probe-inlet"]
-                )
-                self.assertEqual(code, 1)
-                self.assertNotIn("private body detail", stdout)
-                if chat_status != 200:
-                    self.assertIn("inlet-chat-id: refuse — HTTP 400, no answer", stdout)
-                else:
-                    self.assertIn("inlet-bare: refuse", stdout)
-
-    def test_base_model_probe_failure_prints_status_without_response_detail(self) -> None:
         for status, detail in ((200, "private base answer"), (400, "private branch detail")):
             with self.subTest(status=status):
                 frontend = FakeFrontend()
@@ -1131,33 +1055,21 @@ class BrowserTurnIntegration(TestCase):
                     stdout,
                 )
                 self.assertNotIn(detail, stdout)
-                # An answer means the completion reached the engine: a turn the
-                # summary counts; a refusal with another detail reached none.
-                self.assertIn("3 turns" if status == 200 else "2 turns", stdout)
+                self.assertIn("2 turns" if status == 200 else "1 turns", stdout)
 
     def test_inlet_probe_deletes_and_reports_a_stray_chat(self) -> None:
         frontend = FakeFrontend()
-        frontend.chat_probe_stray = True
+        frontend.base_model_stray = True
         page = FakePage(frontend, drains=self._drains())
         code, stdout, _stderr, frontend, _host = self._run(
             page=page, args=["--probe-inlet"]
         )
         self.assertEqual(code, 0)
-        self.assertIn("inlet-chat-id: ok — residual: unreplaced, clean; stray chat deleted", stdout)
+        self.assertIn(
+            "inlet-base-model: ok — refused with the branch refusal (HTTP 400); stray chat deleted",
+            stdout,
+        )
         self.assertIn(("DELETE", "/api/v1/chats/probe-stray", None, frontend.token), frontend.calls)
-
-    def test_probe_chat_creation_failure_is_a_row_and_the_run_still_closes(self) -> None:
-        frontend = FakeFrontend()
-        frontend.new_chat_status = 500
-        page = FakePage(frontend, drains=self._drains())
-        code, stdout, _stderr, frontend, _host = self._run(page=page, args=["--probe-inlet"])
-        self.assertEqual(code, 1)
-        self.assertIn("inlet-bare: ok", stdout)
-        self.assertIn("inlet-chat-id: refuse — probe error:", stdout)
-        self.assertNotIn("private creation detail", stdout)
-        for row in ("summary: refuse — 1 turns", "cleanup: ok", "requests: ok", "record: ok"):
-            self.assertIn(row, stdout)
-        self.assertEqual([call for call in frontend.calls if call[1] == "/api/chat/completions"][1:], [])
 
     def test_probe_transport_failure_keeps_its_problem_and_fix(self) -> None:
         frontend = FakeFrontend()
@@ -1167,14 +1079,12 @@ class BrowserTurnIntegration(TestCase):
         self.assertEqual(code, 1)
         # A request that fails carries its problem and the frontend's logs fix,
         # owuiturn.py's rule for every call it makes — never an HTTP 0.
-        self.assertIn("inlet-bare: refuse — probe error: connection refused by the ingress Fix: docker compose", stdout)
-        self.assertIn("inlet-chat-id: refuse — probe error: connection refused by the ingress", stdout)
-        self.assertIn("inlet-base-model: refuse — probe error: connection refused by the ingress", stdout)
+        self.assertIn("inlet-base-model: refuse — probe error: connection refused by the ingress Fix: docker compose", stdout)
         self.assertNotIn("HTTP 0", stdout)
-        record = json.loads(next(value for key, value in host.files.items() if key.endswith("inlet-bare.json")))
+        record = json.loads(next(value for key, value in host.files.items() if key.endswith("inlet-base-model.json")))
         self.assertIn("logs open-webui", record["problem"]["fix"])
 
-    def test_probe_internal_error_names_all_three_rows(self) -> None:
+    def test_probe_internal_error_names_the_one_row(self) -> None:
         frontend = FakeFrontend()
         page = FakePage(frontend, drains=self._drains())
         with patch(
@@ -1185,8 +1095,7 @@ class BrowserTurnIntegration(TestCase):
                 page=page, args=["--probe-inlet"]
             )
         self.assertEqual(code, 1)
-        for name in ("inlet-bare", "inlet-chat-id", "inlet-base-model"):
-            self.assertIn(f"{name}: refuse — internal error: RuntimeError: probe broke", stdout)
+        self.assertIn("inlet-base-model: refuse — internal error: RuntimeError: probe broke", stdout)
 
     def test_no_painted_frame_fails_even_with_a_clean_end_state(self) -> None:
         page = FakePage(
@@ -1432,7 +1341,7 @@ class BrowserTurnIntegration(TestCase):
             self.assertEqual(code, 0)
             self.assertIn("probe: inlet gate", output.getvalue())
             self.assertIn(
-                "engine calls: 7 (3 per browser turn, the probe 1)",
+                "engine calls: 6 (3 per browser turn)",
                 output.getvalue(),
             )
             self.assertIn(f"probe: inlet gate ({expected_base_model})", output.getvalue())
@@ -1535,10 +1444,10 @@ class BrowserTurnIntegration(TestCase):
             )
             self.assertEqual(code, 0)
             self.assertIn(
-                "3 turns; 7 engine calls (3 per browser turn, the probe 1)",
+                "2 turns; 6 engine calls (3 per browser turn)",
                 probed_output,
             )
-            self.assertIn("summary: ok — 3 turns", probed_output)
+            self.assertIn("summary: ok — 2 turns", probed_output)
 
             code, forced_output, _frontend, _factory_calls = run_browser_cases(
                 3, "forced", ("--force",)

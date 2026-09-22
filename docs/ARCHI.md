@@ -17,7 +17,7 @@ GIDEON is a fully local legal AI system for federal defender offices: corpus-gro
 | [`archi/host.md`](archi/host.md) | the host platform: the site model and schema, provision and its steps, the image store's home, preflight and its checks, the three locks and the profile's memory table, host state, the no-GPU and build-box modes, the office clock, the CI runner step |
 | [`archi/render-apply.md`](archi/render-apply.md) | render and apply: the rendered tree, secrets and their rotation, the release constants, the search rig's rendered files, the memory limits, the weights tree |
 | [`archi/api.md`](archi/api.md) | the mounted `gideon-api` service: its routes, image, source digest, import boundary, and tests |
-| [`archi/engine-frontend.md`](archi/engine-frontend.md) | the engine and the frontend's runtime: the engine service and the frontend's connection, the two model records, the frontend client and the managed turn, the two Filters and the branch gate, the guardrail's judge (`gideon/guardrail.py`), and the trip's row, `engine verify` and its sample |
+| [`archi/engine-frontend.md`](archi/engine-frontend.md) | the engine and the frontend's runtime: the engine service and the frontend's connection, the two model records, the frontend client and the managed turn, the branch gate, the guardrail's judge (`gideon/guardrail.py`) and the trip's row, `engine verify` and its sample |
 | [`archi/backup-restore.md`](archi/backup-restore.md) | the backup set and its commands, restore, install, upgrade and rollback |
 | [`archi/stack.md`](archi/stack.md) | ingress and TLS, the registry mirror, observability and alerting, reconcile and the audit writer |
 | [`archi/tools.md`](archi/tools.md) | the pin watch and the research notes' pin bindings, the build tool, the acceptance harness and its full-restore form, the turn harness, its browser mode and service door, the evidence redaction, the gate, and the export boundary list; their interpreters and footprints |
@@ -55,7 +55,7 @@ GIDEON/
 │   ├── extraction/          # the exact-object contract, the extraction grammar, its measure — stdlib only (archi/eval-slices.md)
 │   ├── api/                 # the mounted gideon-api service package (§17.1; archi/api.md)
 │   ├── evaluation/          # the eval-set loader, the slice registry and its runners, the judge, the quiet window, the recorder, the reference format, the two `eval` commands (archi/eval.md; the runners and the judge archi/eval-slices.md)
-│   ├── guardrail.py         # the arithmetic guardrail's judge (§9's third set); the Function's copy held equal until general-turn ticket 09
+│   ├── guardrail.py         # the arithmetic guardrail's judge (§9's third set); the judge's one home since general-turn ticket 09
 │   └── host/                # bare-host subtree: stdlib + yaml ONLY (§9)
 │       ├── cli.py · sysio.py · report.py · stages.py   # the handlers, the injectable Host seam, the refusal and row shapes, run_stage (§8, §10, §14)
 │       ├── lock.py · images.py · models.py · egress.py · courts.py · site.py · site_schema.py · nogpu.py   # the committed-artifact loaders, the schema emitter, the no-GPU marker
@@ -67,7 +67,7 @@ GIDEON/
 │       └── stack.py · pgbackrest.py · sshtarget.py   # argv builders and probes
 ├── images/postgres/Dockerfile   # the built Postgres image (base + pgBackrest; no pin in the file)
 ├── images/gideon/Dockerfile     # the built API image (base + Python dependencies; no pin in the file)
-├── compose/                 # templates by service: caddy/, open-webui/ (permissions.yaml, general.yaml, functions/ — the two Filters and the branch gate, release content
+├── compose/                 # templates by service: caddy/, open-webui/ (permissions.yaml, general.yaml, functions/ — the branch gate alone since general-turn ticket 09, release content
 │                            #   never imported as a gideon module), postgres/, systemd/, prometheus/, blackbox/, grafana/
 ├── tests/                   # unittest-style classes run by pytest (§15); one test_<area>.py per module or command, plus:
 │   ├── fixtures/            # site/ (refusals); render/<example|second-office|no-gpu>/ (byte-stable renders); host/ (the recorded box, the runner's settings); pinwatch/ (the recorded hub and PyPI replies); courts/ (a fictitious CSV and hand table, malformed maps, lockfiles)
@@ -85,7 +85,7 @@ GIDEON/
 ├── requirements-dev.txt     # the dev and CI toolchain's pins — never the product's (§3)
 ├── migrations/              # forward-only SQL (ADR-0005), NNNN_<name>.sql in order; the runner owns schema_migrations
 ├── eval/                    # reference/<slice>/<list>.json (the gate's committed comparand, §18.5); seed/prototype-qa/ (frozen harvest tooling, ruff-excluded, do not modify); sets/eval-v1/ (the set's cases by suite — judgments/, build-gates/, judge/, research-qa/ — and its frozen slices, slices/<name>/<file>.ids; archi/eval.md);
-│                            #   seed/guardrails/ and seed/general/ (the two Filters' seeds, General's load and smoke sets — superseded, never edited); engine-verify/ (the §6.7 sample, release content)
+│                            #   seed/guardrails/ and seed/general/ (the judge's and the stamp's seeds, General's load and smoke sets — superseded, never edited); engine-verify/ (the §6.7 sample, release content)
 ├── .claude/ · skills-lock.json   # the shared agent tooling (docs/agents/tooling.md); the Matt Pocock skills' lock
 ├── .github/                 # workflows/ (ci.yml, pin-watch.yml, acceptance.yml — §6); the contributor's issue and pull-request templates; dependabot.yml (§6)
 ├── docs/                    # ARCHI.md (the map), archi/ (the leaves), box-ledger.md (the shared box), adr/, agents/, runbooks/ (the operator runbooks), handoffs/, research/, teach/,
@@ -157,7 +157,7 @@ One row per leaf, each command with its module:
 |---|---|
 | `host provision` (`host/provision.py`) · `preflight` (`host/preflight.py`) | [`archi/host.md`](archi/host.md) |
 | `render [--diff]` (`host/render/`) · `apply` (`host/apply.py`) · `secrets rotate <name>` (`host/rotate.py`) · `models pull` (`host/weights.py`) | [`archi/render-apply.md`](archi/render-apply.md) |
-| `engine verify` (`host/engine.py`) · the frontend client (`host/owui.py`, `host/owuiturn.py`) · the two Filters and the branch gate (`compose/open-webui/functions/`) and the guardrail's judge (`gideon/guardrail.py`) | [`archi/engine-frontend.md`](archi/engine-frontend.md) |
+| `engine verify` (`host/engine.py`) · the frontend client (`host/owui.py`, `host/owuiturn.py`) · the branch gate (`compose/open-webui/functions/`) and the guardrail's judge (`gideon/guardrail.py`) | [`archi/engine-frontend.md`](archi/engine-frontend.md) |
 | `backup run` and `backup push` (`host/backup.py`) · `backup drill` (`host/drill.py`) · `restore` (`host/restore.py`) · `install` (`host/install.py`) · `upgrade <tag>` and `upgrade --rollback` (`host/upgrade.py`) | [`archi/backup-restore.md`](archi/backup-restore.md) |
 | `alerts test` (`host/alerts.py`) · `users reconcile [--now]` (`host/users.py`) · `tls reload` (`host/tls.py`) · `registry mirror [--to]` (`host/registry.py`) | [`archi/stack.md`](archi/stack.md) |
 | `eval run --slice <name> [--set <dir>] [--ranked <file>]` (`evaluation/command.py`) · `eval reference --run <id>` (`evaluation/reference_command.py`) | [`archi/eval.md`](archi/eval.md) |
@@ -287,7 +287,7 @@ Argparse handles usage errors; stubs refuse to stderr and exit non-zero. A real 
 | render's pure emitters | `render/*` | may raise (`ValueError` for a missing template or an unusable registry key); the command boundary turns it into one refusal line |
 | `_guarded` | the ordered commands' handlers in `host/cli.py` | any unexpected exception becomes one `internal error` refusal line |
 
-**Fail-safe guards** — where a wrong action is worse than a refusal: disk identity/blankness, sshd/ufw lockout, keypair regeneration (provision); a foreign file under `rendered/` refuses rather than being deleted; TLS material is validated before Caddy is touched; `applied.yaml` is written only after verify, so a failed apply retries with the same recreate set; a set is `.partial` until its manifest exists; the verify-before-act rules of [`archi/backup-restore.md`](archi/backup-restore.md); the engine's entrypoint, which refuses to serve without its key file; and the two Filters, which answer their own exception with the refusal or the stamp because the pinned frontend's Filter chain fails open — a false stamp harmless, a missed one the failure — a trip's record never awaited and silent on failure (ADR-0027, ADR-0039); the inlet gates, the Filters' hooks, and the stream trip's cancel are [`archi/engine-frontend.md`](archi/engine-frontend.md)'s.
+**Fail-safe guards** — where a wrong action is worse than a refusal: disk identity/blankness, sshd/ufw lockout, keypair regeneration (provision); a foreign file under `rendered/` refuses rather than being deleted; TLS material is validated before Caddy is touched; `applied.yaml` is written only after verify, so a failed apply retries with the same recreate set; a set is `.partial` until its manifest exists; the verify-before-act rules of [`archi/backup-restore.md`](archi/backup-restore.md); the engine's entrypoint, which refuses to serve without its key file; the branch gate, which raises its refusal before anything is called and whose own exception the pinned frontend's fail-open Filter chain would swallow, so it guards a client-side hiding and nothing more; and General's service, which answers a body its judge cannot read with a content-free `completion_unjudged` error rather than relaying it, stamps on its own internal error because a false stamp is harmless and a missed one the failure, and never awaits the trip's record, silent on its failure (ADR-0027, ADR-0039 superseded by ADR-0045); the gate's inlet is [`archi/engine-frontend.md`](archi/engine-frontend.md)'s, the judge's window, the trip, and the unjudged path [`archi/api.md`](archi/api.md)'s.
 
 **Two disciplines**: a *sensitive* psql statement (one carrying a password) reports only its exit status, because psql diagnostics quote the failing line; audit writes follow an intent/applied protocol — the writer is probed before any mutation, a snapshot batch is one transaction, an interrupted run leaves a visible intent row rather than a lost one.
 

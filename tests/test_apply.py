@@ -33,9 +33,7 @@ from gideon.host.render.compose import ENGINE_READY_SECONDS
 from gideon.host.render.engine import ENGINE_SERVICE_NAME
 from gideon.host.render.grafana import GRAFANA_ADMIN_USER
 from gideon.host.render.owui import (
-    ARITHMETIC_GUARDRAIL_ID,
     BRANCH_GATE_ID,
-    CITATION_STAMP_ID,
 )
 from gideon.host.site import SiteConfig, load_site
 from gideon.host.stack import compose_argv, exec_argv
@@ -1237,7 +1235,7 @@ class NewStages(unittest.TestCase):
         self.assertEqual(host.write_modes["/etc/gideon/secrets/gideon_admin_api_key"], 0o440)
         self.assertEqual(
             [item["id"] for item in host.frontend.functions],
-            [ARITHMETIC_GUARDRAIL_ID, BRANCH_GATE_ID, CITATION_STAMP_ID],
+            [BRANCH_GATE_ID],
         )
         code, out, _ = apply(host)
         self.assertIn("apply-manifest: ok — frontend state matches the manifest", out)

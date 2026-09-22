@@ -8,17 +8,13 @@ import sys
 import unittest
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
 
 from gideon.host.render.owui import (
-    ARITHMETIC_GUARDRAIL_ID,
-    BRANCH_GATE_ID,
     EVAL_IDENTITY,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
 GATE_PATH = ROOT / "compose/open-webui/functions/branch_gate.py"
-GUARDRAIL_PATH = ROOT / "compose/open-webui/functions/arithmetic_guardrail.py"
 
 # These entry shapes mirror the preset/base record merge in
 # docs/research/owui-model-record.md §4.1; all ids are visibly fictitious.
@@ -46,31 +42,6 @@ def load_filter(path: Path, module_name: str) -> Any:
 
 
 GATE: Any = load_filter(GATE_PATH, "branch_gate")
-GUARDRAIL: Any = load_filter(GUARDRAIL_PATH, "arithmetic_guardrail")
-
-
-def frontend_priority(module: Any) -> int:
-    """The pinned frontend's priority: a Filter without Valves takes 0 (the note's §3.3)."""
-
-    assert not hasattr(module, "Valves") and not hasattr(module.Filter, "Valves")
-    return 0
-
-
-def run_global_inlets(
-    body: object,
-    user: object,
-    metadata: dict[str, object],
-    model_entry: object,
-) -> object:
-    """Run both global inlets as the pinned frontend does: sorted, by name, uncaught."""
-
-    extras = {"__user__": user, "__metadata__": metadata, "__model__": model_entry}
-    modules = ((ARITHMETIC_GUARDRAIL_ID, GUARDRAIL), (BRANCH_GATE_ID, GATE))
-    for _, module in sorted(modules, key=lambda item: (frontend_priority(item[1]), item[0])):
-        inlet = module.Filter().inlet
-        parameters = inspect.signature(inlet).parameters
-        body = inlet(body, **{name: value for name, value in extras.items() if name in parameters})
-    return body
 
 
 class BranchGate(unittest.TestCase):
@@ -144,60 +115,6 @@ class BranchGate(unittest.TestCase):
             GATE.BRANCH_REFUSAL,
             "GIDEON answers only through one of its branches. Start a new chat and ask General.",
         )
-
-
-class InletOrder(unittest.TestCase):
-    """The pinned frontend's id order keeps the session gate first."""
-
-    def setUp(self) -> None:
-        self.body = {"messages": [{"role": "user", "content": object()}]}
-
-    def test_frontend_key_puts_guardrail_before_branch_gate(self) -> None:
-        keys = [(frontend_priority(GUARDRAIL), ARITHMETIC_GUARDRAIL_ID), (frontend_priority(GATE), BRANCH_GATE_ID)]
-        self.assertEqual(sorted(keys), keys)
-
-    def test_session_refusal_stops_the_chain_before_the_branch_gate(self) -> None:
-        with (
-            patch.object(GATE.Filter, "inlet", side_effect=AssertionError("gate reached")),
-            self.assertRaisesRegex(GUARDRAIL.SessionRefusal, re.escape(GUARDRAIL.SESSION_REFUSAL)),
-        ):
-            run_global_inlets(
-                self.body,
-                {"role": "user", "email": "person@example.invalid"},
-                {},
-                BASE_ENTRY,
-            )
-
-    def test_branch_refusal_runs_after_session_gate_on_the_base_row(self) -> None:
-        with self.assertRaisesRegex(GATE.BranchRefusal, re.escape(GATE.BRANCH_REFUSAL)):
-            run_global_inlets(
-                self.body,
-                {"role": "user", "email": "person@example.invalid"},
-                {"chat_id": "chat"},
-                BASE_ENTRY,
-            )
-
-    def test_general_passes_both_global_inlets(self) -> None:
-        self.assertIs(
-            run_global_inlets(
-                self.body,
-                {"role": "user", "email": "person@example.invalid"},
-                {"chat_id": "chat"},
-                PRESET_ENTRY,
-            ),
-            self.body,
-        )
-
-    def test_machine_paths_pass_both_global_inlets_on_the_base_row(self) -> None:
-        for user in (
-            {"role": "admin", "email": "admin@example.invalid"},
-            {"role": "user", "email": EVAL_IDENTITY.email},
-        ):
-            with self.subTest(user=user):
-                self.assertIs(
-                    run_global_inlets(self.body, user, {}, BASE_ENTRY),
-                    self.body,
-                )
 
 
 class FileRules(unittest.TestCase):

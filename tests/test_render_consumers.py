@@ -27,6 +27,7 @@ SECRETS = {
     "postgres_openwebui_password": "postgres-password",
     "gideon_admin_password": "admin-password",
     "engine_api_key": "engine-api-key",
+    "gideon_api_key": "gideon-api-key",
     "searxng_secret_key": "searxng-secret-key",
 }
 
@@ -84,14 +85,14 @@ class ConsumerMap(unittest.TestCase):
         second = secret_consumers(inputs(SECOND))
         no_gpu = secret_consumers(inputs(no_gpu=True))
 
-        self.assertEqual(gpu["engine_api_key"], SecretConsumers(("gideon-generator", "gideon-api"), ("open-webui",)))
-        self.assertEqual(gpu["gideon_api_key"], SecretConsumers(("gideon-api",), ()))
+        self.assertEqual(gpu["engine_api_key"], SecretConsumers(("gideon-generator", "gideon-api"), ()))
+        self.assertEqual(gpu["gideon_api_key"], SecretConsumers(("gideon-api",), ("open-webui",)))
         self.assertEqual(no_gpu.get("engine_api_key"), None)
         self.assertEqual(no_gpu.get("gideon_api_key"), None)
         self.assertEqual(gpu["webui_secret_key"], SecretConsumers(("open-webui",), ()))
         self.assertEqual(
             gpu["postgres_gideon_audit_password"],
-            SecretConsumers(("open-webui", "gideon-api"), ()),
+            SecretConsumers(("gideon-api",), ()),
         )
         self.assertEqual(gpu["postgres_gideon_ro_metrics_password"], SecretConsumers(("grafana", "postgres-exporter"), ()))
         self.assertEqual(consumers_of(inputs(), "postgres_gideon_eval_password"), SecretConsumers((), ()))
