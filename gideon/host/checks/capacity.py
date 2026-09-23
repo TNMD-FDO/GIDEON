@@ -4,6 +4,8 @@ The data-volume floor is the profile's size minimum (ADR-0017). Free bytes
 are reported, not judged, until §7.6's reserve rule lands with its consumer.
 """
 
+from typing import Final
+
 from gideon.host.checks import (
     CheckReport,
     PreflightCheck,
@@ -19,6 +21,25 @@ _DATA_FIX = (
     "hardware_profile in /etc/gideon/site.yaml to a profile this host satisfies, "
     "then re-run preflight."
 )
+DATA_DF_ARGV: Final[tuple[str, ...]] = ("df", "-B1", "--output=size,avail", "/data")
+
+
+def parse_size_and_available(output: str) -> tuple[int, int] | None:
+    """Parse the size and available byte counts from ``df`` output."""
+
+    lines = [line for line in output.splitlines() if line.strip()]
+    if not lines:
+        return None
+    fields = lines[-1].split()
+    if len(fields) != 2:
+        return None
+    try:
+        size, available = (int(field) for field in fields)
+    except ValueError:
+        return None
+    if size < 0 or available < 0:
+        return None
+    return size, available
 
 
 class DataVolumeCheck(PreflightCheck):
@@ -36,8 +57,8 @@ class DataVolumeCheck(PreflightCheck):
         if isinstance(profile, Problem):
             return CheckReport(Severity.REFUSE, profile.problem, profile.fix)
 
-        result = context.host.run(["df", "-B1", "--output=size,avail", "/data"])
-        measurements = self._size_and_available(result.stdout) if result.returncode == 0 else None
+        result = context.host.run(DATA_DF_ARGV)
+        measurements = parse_size_and_available(result.stdout) if result.returncode == 0 else None
         if measurements is None:
             return CheckReport(
                 Severity.REFUSE,
@@ -67,19 +88,3 @@ class DataVolumeCheck(PreflightCheck):
             Severity.PASS,
             f"/data size {size_detail}, {free_detail} free; profile requires a {floor} GB data volume",
         )
-
-    @staticmethod
-    def _size_and_available(output: str) -> tuple[int, int] | None:
-        lines = [line for line in output.splitlines() if line.strip()]
-        if not lines:
-            return None
-        fields = lines[-1].split()
-        if len(fields) != 2:
-            return None
-        try:
-            size, available = (int(field) for field in fields)
-        except ValueError:
-            return None
-        if size < 0 or available < 0:
-            return None
-        return size, available

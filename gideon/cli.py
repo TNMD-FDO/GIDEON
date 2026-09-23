@@ -42,6 +42,12 @@ def _run_proposals(args: argparse.Namespace) -> int:
     return host_cli._guarded("proposals", proposals.run_proposals, args)
 
 
+def _run_status(args: argparse.Namespace) -> int:
+    from gideon.status import command
+
+    return host_cli._guarded("status", command.run_status, args)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="gideon",
@@ -236,6 +242,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="read the improvement proposals (§20.2, ADR-0049); read-only report",
     )
     proposals.set_defaults(handler=_run_proposals, command_path="proposals")
+
+    status_help = (
+        "the box status: needs attention, waiting on you, at a glance "
+        "(§20.2, the front-door brief); needs root; writes nothing"
+    )
+    status = commands.add_parser("status", help=status_help, description=status_help)
+    status.set_defaults(handler=_run_status, command_path="status")
 
     backup = commands.add_parser("backup", help="backup set, off-box push, drill (§19)")
     backup_sub = backup.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)

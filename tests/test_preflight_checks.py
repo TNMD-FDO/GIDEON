@@ -17,7 +17,11 @@ from gideon.host.checks.artifacts import (
     JurisdictionCheck,
     OsKernelCheck,
 )
-from gideon.host.checks.capacity import DataVolumeCheck
+from gideon.host.checks.capacity import (
+    DATA_DF_ARGV,
+    DataVolumeCheck,
+    parse_size_and_available,
+)
 from gideon.host.checks.network import (
     PROBE_TIMEOUT_SECONDS,
     EgressCheck,
@@ -565,7 +569,7 @@ class Ntp(unittest.TestCase):
 
 
 class DataVolume(unittest.TestCase):
-    DF = ("df", "-B1", "--output=size,avail", "/data")
+    DF = DATA_DF_ARGV
 
     def host(self, size: int | None, available: int = 10_000) -> FakeHost:
         if size is None:
@@ -616,6 +620,14 @@ class DataVolume(unittest.TestCase):
         self.assertIn("skipped: no-GPU host", report.detail)
         self.assertIn(format_gb(size), report.detail)
         self.assertEqual(report.fix, "")
+
+    def test_lifted_df_parser_reads_the_last_measurement_row(self) -> None:
+        self.assertEqual(parse_size_and_available(" Size Avail\n123 45\n"), (123, 45))
+
+    def test_lifted_df_parser_refuses_malformed_or_negative_values(self) -> None:
+        for output in ("", "Size Avail\n", "Size Avail\n1 two\n", "Size Avail\n-1 2\n"):
+            with self.subTest(output=output):
+                self.assertIsNone(parse_size_and_available(output))
 
 
 class FormatGb(unittest.TestCase):

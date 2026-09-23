@@ -10,6 +10,7 @@ from typing import Any, ClassVar
 from unittest.mock import patch
 
 from gideon.host.grafana import (
+    Alert,
     Client,
     GrafanaError,
     Receiver,
@@ -20,6 +21,10 @@ from gideon.host.grafana import (
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):
+    alert_status: ClassVar[int] = 200
+    alert_body: ClassVar[object] = []
+    alert_headers: ClassVar[dict[str, str]] = {}
+    alert_path: ClassVar[str] = ""
     post_body: ClassVar[dict[str, Any] | None] = None
     post_headers: ClassVar[dict[str, str]] = {}
     post_path: ClassVar[str] = ""
@@ -33,7 +38,11 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def do_GET(self) -> None:
-        if self.path == "/grafana/api/health":
+        if self.path == "/grafana/api/alertmanager/grafana/api/v2/alerts":
+            self.__class__.alert_headers = dict(self.headers.items())
+            self.__class__.alert_path = self.path
+            self._reply(self.alert_status, json.dumps(self.alert_body).encode())
+        elif self.path == "/grafana/api/health":
             self._reply(200, b'{"database": "ok"}')
         elif self.path == "/grafana/apis/notifications.alerting.grafana.app/v1beta1/namespaces/default/receivers":
             self._reply(
@@ -170,6 +179,63 @@ class ClientOverLoopback(unittest.TestCase):
             _Handler.post_path,
             "/grafana/apis/notifications.alerting.grafana.app/v1beta1/namespaces/default/receivers/page-email/test",
         )
+
+    def test_get_alerts_path_credentials_and_alert_fields(self) -> None:
+        _Handler.alert_body = [
+            {
+                "labels": {"alertname": "One", "class": "page"},
+                "annotations": {"summary": "First", "runbook": "#one"},
+                "startsAt": "2099-01-02T03:04:05Z",
+                "status": {"state": "active", "silencedBy": []},
+            },
+            {
+                "labels": {"alertname": "Two"},
+                "annotations": {},
+                "startsAt": "2099-01-02T03:04:06Z",
+                "status": {"state": "suppressed", "silencedBy": ["silence-id"]},
+            },
+        ]
+        _Handler.alert_status = 200
+        password = "alert-password"
+        alerts = self.client(credential=("grafana-admin", password)).get_alerts()
+        self.assertEqual(_Handler.alert_path, "/grafana/api/alertmanager/grafana/api/v2/alerts")
+        self.assertEqual(
+            _Handler.alert_headers["Authorization"],
+            "Basic " + base64.b64encode(f"grafana-admin:{password}".encode()).decode(),
+        )
+        self.assertEqual(len(alerts), 2)
+        self.assertIsInstance(alerts[0], Alert)
+        self.assertEqual(alerts[0].labels["alertname"], "One")
+        self.assertEqual(alerts[0].annotations["summary"], "First")
+        self.assertEqual(alerts[0].starts_at, "2099-01-02T03:04:05Z")
+        self.assertEqual(alerts[0].state, "active")
+        self.assertFalse(alerts[0].silenced)
+        self.assertTrue(alerts[1].silenced)
+
+    def test_get_alerts_refuses_non_list_body_without_body_text(self) -> None:
+        _Handler.alert_body = {"private": "response detail"}
+        _Handler.alert_status = 200
+        try:
+            with self.assertRaises(GrafanaError) as ctx:
+                self.client().get_alerts()
+            self.assertIn("alert list", ctx.exception.problem)
+            self.assertIn("apply", ctx.exception.fix)
+            self.assertNotIn("response detail", str(ctx.exception))
+        finally:
+            _Handler.alert_body = []
+
+    def test_get_alerts_refuses_non_success_status_without_body_text(self) -> None:
+        _Handler.alert_body = {"private": "response detail"}
+        _Handler.alert_status = 503
+        try:
+            with self.assertRaises(GrafanaError) as ctx:
+                self.client().get_alerts()
+            self.assertIn("503", ctx.exception.problem)
+            self.assertIn("apply", ctx.exception.fix)
+            self.assertNotIn("response detail", str(ctx.exception))
+        finally:
+            _Handler.alert_body = []
+            _Handler.alert_status = 200
 
     def test_failed_receiver_status_redacts_addresses_and_extracts_smtp_code(self) -> None:
         _Handler.post_response = {

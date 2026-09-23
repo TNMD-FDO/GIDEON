@@ -67,6 +67,7 @@ disk, memory, load, filesystems, and systemd units are the host's.
 Every page-class email names the rule and the fix; the rule set is a release
 file (`compose/grafana/provisioning/alerting/rules.yaml.tmpl`). An unresolved
 condition is re-sent daily; acknowledgement is business-hours (§19.5).
+`sudo python3 -m gideon status` lists the pages firing now with each rule's runbook section.
 
 | Rule | Fires when | Do |
 |---|---|---|

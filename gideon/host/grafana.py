@@ -17,12 +17,14 @@ from gideon.host.sysio import PathLike
 _DEFAULT_TIMEOUT: Final[float] = 15.0
 _READY_SLEEP_SECONDS: Final[float] = 5.0
 _RETRY_FIX: Final[str] = "Check Grafana availability, then retry."
+_APPLY_FIX: Final[str] = "Run sudo python3 -m gideon apply, then retry."
 _HEALTH_PATH: Final[str] = "/api/health"
 _RECEIVERS_NAMESPACE: Final[str] = "default"
 _RECEIVERS_PATH: Final[str] = (
     "/apis/notifications.alerting.grafana.app/v1beta1/"
     f"namespaces/{_RECEIVERS_NAMESPACE}/receivers"
 )
+_ALERTS_PATH: Final[str] = "/api/alertmanager/grafana/api/v2/alerts"
 _CONTACT_TEST_FIX: Final[str] = (
     "Run sudo python3 -m gideon preflight, then correct "
     "/etc/gideon/secrets/smtp_password."
@@ -54,6 +56,21 @@ class Receiver:
     uid: str
     title: str
     integrations: tuple[Mapping[str, object], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class Alert:
+    """One alert instance reported by Grafana's Alertmanager API."""
+
+    labels: Mapping[str, str]
+    annotations: Mapping[str, str]
+    starts_at: str
+    state: str
+    silenced: bool
+
+
+def _string_pairs(mapping: Mapping[object, object]) -> dict[str, str]:
+    return {key: value for key, value in mapping.items() if isinstance(key, str) and isinstance(value, str)}
 
 
 class Client:
@@ -204,7 +221,7 @@ class Client:
         if not 200 <= response.status < 300:
             raise GrafanaError(
                 f"Grafana receiver lookup returned HTTP {response.status}.",
-                "Run sudo python3 -m gideon apply, then retry.",
+                _APPLY_FIX,
             )
         if not isinstance(response.body, Mapping):
             return None
@@ -232,6 +249,48 @@ class Client:
             )
             return Receiver(uid, receiver_title, stored)
         return None
+
+    def get_alerts(self) -> tuple[Alert, ...]:
+        """Read the alert instances currently held by Grafana's Alertmanager."""
+
+        response = self.request("GET", _ALERTS_PATH)
+        if not 200 <= response.status < 300:
+            raise GrafanaError(
+                f"Grafana alert lookup returned HTTP {response.status}.",
+                _APPLY_FIX,
+            )
+        if not isinstance(response.body, list):
+            raise GrafanaError(
+                "Grafana returned an invalid alert list.",
+                _APPLY_FIX,
+            )
+
+        alerts: list[Alert] = []
+        for item in response.body:
+            if not isinstance(item, Mapping):
+                continue
+            labels = item.get("labels")
+            annotations = item.get("annotations")
+            starts_at = item.get("startsAt")
+            status = item.get("status")
+            if (
+                not isinstance(labels, Mapping)
+                or not isinstance(annotations, Mapping)
+                or not isinstance(status, Mapping)
+            ):
+                continue
+            state = status.get("state")
+            silenced_by = status.get("silencedBy")
+            alerts.append(
+                Alert(
+                    _string_pairs(labels),
+                    _string_pairs(annotations),
+                    starts_at if isinstance(starts_at, str) else "",
+                    state if isinstance(state, str) else "",
+                    isinstance(silenced_by, list) and bool(silenced_by),
+                )
+            )
+        return tuple(alerts)
 
     @staticmethod
     def _redact_recipients(text: str, recipients: Sequence[str]) -> str:

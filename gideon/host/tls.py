@@ -6,6 +6,7 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
@@ -200,19 +201,14 @@ def _probe_failure(detail: str, fix: str = _CADDY_FIX) -> ProbeResult:
     return ProbeResult(False, detail, fix)
 
 
-def served_fingerprint(
+def _served_certificate(
     host: Host,
     *,
     connect: str,
     hostname: str,
     cafile: PathLike,
 ) -> str | Problem:
-    """Return the SHA-256 fingerprint of the certificate served at *connect*.
-
-    The TLS handshake and the certificate fingerprint are separate bounded
-    commands through the Host seam.  A handshake failure is deliberately
-    worded so ``probe_ingress`` can retain its slow-start retry boundary.
-    """
+    """Return the PEM certificate served at *connect* through the bounded handshake."""
 
     handshake_argv = [
         "openssl",
@@ -245,10 +241,27 @@ def served_fingerprint(
     match = _CERTIFICATE_BLOCK.search(handshake.stdout)
     if match is None:
         return Problem("HTTPS ingress probe returned no certificate", _CADDY_FIX)
+    return match.group(0)
+
+
+def served_fingerprint(
+    host: Host,
+    *,
+    connect: str,
+    hostname: str,
+    cafile: PathLike,
+) -> str | Problem:
+    """Return the SHA-256 fingerprint of the certificate served at *connect*."""
+
+    certificate = _served_certificate(
+        host, connect=connect, hostname=hostname, cafile=cafile
+    )
+    if isinstance(certificate, Problem):
+        return certificate
     try:
         served = host.run(
             ["openssl", "x509", "-noout", "-fingerprint", "-sha256"],
-            input=match.group(0),
+            input=certificate,
             timeout=_OPENSSL_TIMEOUT,
         )
     except (OSError, subprocess.SubprocessError) as exc:
@@ -264,6 +277,53 @@ def served_fingerprint(
     if fingerprint is None:
         return Problem("served certificate returned no SHA-256 fingerprint", _CADDY_FIX)
     return fingerprint
+
+
+def served_expiry(
+    host: Host,
+    *,
+    connect: str,
+    hostname: str,
+    cafile: PathLike,
+) -> datetime | Problem:
+    """Return the UTC expiry of the leaf certificate served at *connect*."""
+
+    certificate = _served_certificate(
+        host, connect=connect, hostname=hostname, cafile=cafile
+    )
+    if isinstance(certificate, Problem):
+        return certificate
+    try:
+        served = host.run(
+            ["openssl", "x509", "-noout", "-enddate"],
+            input=certificate,
+            timeout=_OPENSSL_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return Problem(f"could not run openssl x509: {exc}", _OPENSSL_FIX)
+    if served.returncode == 127:
+        return Problem("openssl is not available", _OPENSSL_FIX)
+    if served.returncode != 0:
+        return Problem(
+            f"served certificate expiry failed: {command_detail(served)}",
+            _CADDY_FIX,
+        )
+    line = next(
+        (line.strip() for line in served.stdout.splitlines() if line.startswith("notAfter=")),
+        None,
+    )
+    if line is None:
+        return Problem("served certificate returned no expiry date", _CADDY_FIX)
+    date_text = line.removeprefix("notAfter=")
+    if not date_text.endswith(" GMT"):
+        return Problem("served certificate returned an invalid expiry date", _CADDY_FIX)
+    try:
+        expiry = datetime.strptime(
+            date_text.removesuffix(" GMT") + " +0000", "%b %d %H:%M:%S %Y %z"
+        )
+    except ValueError:
+        return Problem("served certificate returned an invalid expiry date", _CADDY_FIX)
+    return expiry.astimezone(UTC)
 
 
 def file_fingerprint(host: Host, path: PathLike) -> str | Problem:

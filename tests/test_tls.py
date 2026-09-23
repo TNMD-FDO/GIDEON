@@ -7,6 +7,7 @@ import os
 import subprocess
 import unittest
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 
 from gideon.host import tls
@@ -39,6 +40,7 @@ CHECKEND = ("openssl", "x509", "-in", CERT, "-noout", "-checkend", "0")
 HANDSHAKE = ("openssl", "s_client", "-connect", "127.0.0.1:443", "-servername", HOSTNAME, "-verify_hostname", HOSTNAME, "-CAfile", CA, "-verify_return_error")
 SERVED_FP = ("openssl", "x509", "-noout", "-fingerprint", "-sha256")
 PLACED_FP = ("openssl", "x509", "-in", CERT, "-noout", "-fingerprint", "-sha256")
+SERVED_ENDDATE = ("openssl", "x509", "-noout", "-enddate")
 RECREATE = tuple(compose_argv(RENDERED, "up", "-d", "--no-deps", "--force-recreate", "caddy"))
 
 
@@ -273,6 +275,66 @@ class Probe(unittest.TestCase):
         commands[HANDSHAKE] = done(HANDSHAKE, 0, stdout="CONNECTED\n")
         result = tls.probe_ingress(FakeHost(commands), HOSTNAME, sleep=lambda _: None)
         self.assertFalse(result.ok)
+
+
+class ServedExpiry(unittest.TestCase):
+    def test_handshake_and_x509_stdin_return_aware_utc_expiry(self) -> None:
+        handshake = (
+            "openssl", "s_client", "-connect", "192.0.2.12:443", "-servername",
+            HOSTNAME, "-verify_hostname", HOSTNAME, "-CAfile", "/tmp/fake-ca.pem",
+            "-verify_return_error",
+        )
+        host = FakeHost(
+            {
+                handshake: done(handshake, stdout=f"CONNECTED\n{LEAF}---\n"),
+                SERVED_ENDDATE: done(SERVED_ENDDATE, stdout="notAfter=Jan  2 03:04:05 2099 GMT\n"),
+            }
+        )
+        result = tls.served_expiry(
+            host,
+            connect="192.0.2.12:443",
+            hostname=HOSTNAME,
+            cafile="/tmp/fake-ca.pem",
+        )
+        self.assertEqual(result, datetime(2099, 1, 2, 3, 4, 5, tzinfo=UTC))
+        self.assertEqual(host.calls[0][0], handshake)
+        self.assertEqual(host.calls[1], (SERVED_ENDDATE, LEAF.rstrip("\n")))
+
+    def test_handshake_missing_certificate_and_bad_expiry_return_problems(self) -> None:
+        handshake = HANDSHAKE
+        for stdout, enddate, expected in (
+            ("CONNECTED\n", None, "no certificate"),
+            (f"CONNECTED\n{LEAF}---\n", "notAfter=unparseable\n", "invalid expiry"),
+            (f"CONNECTED\n{LEAF}---\n", "", "no expiry date"),
+        ):
+            with self.subTest(expected=expected):
+                commands: dict[tuple[str, ...], Outcome] = {
+                    handshake: done(handshake, stdout=stdout),
+                }
+                if enddate is not None:
+                    commands[SERVED_ENDDATE] = done(SERVED_ENDDATE, stdout=enddate)
+                result = tls.served_expiry(
+                    FakeHost(commands),
+                    connect="127.0.0.1:443",
+                    hostname=HOSTNAME,
+                    cafile=CA,
+                )
+                self.assertIsInstance(result, tls.Problem)
+                assert isinstance(result, tls.Problem)
+                self.assertIn(expected, result.problem)
+                self.assertTrue(result.fix)
+
+    def test_handshake_failure_preserves_caddy_fix(self) -> None:
+        result = tls.served_expiry(
+            FakeHost({HANDSHAKE: done(HANDSHAKE, rc=1, stderr="connection refused")}),
+            connect="127.0.0.1:443",
+            hostname=HOSTNAME,
+            cafile=CA,
+        )
+        self.assertIsInstance(result, tls.Problem)
+        assert isinstance(result, tls.Problem)
+        self.assertIn("handshake failed", result.problem)
+        self.assertIn("logs caddy", result.fix)
 
 
 def reload(host: FakeHost) -> tuple[int, str, str]:

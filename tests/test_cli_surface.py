@@ -13,7 +13,7 @@ from gideon.host.steps import STEPS
 
 TOP_LEVEL = [
     "host", "render", "apply", "preflight", "install", "upgrade", "tls",
-    "users", "secrets", "engine", "models", "corpus", "index", "registry", "eval", "proposals",
+    "users", "secrets", "engine", "models", "corpus", "index", "registry", "eval", "proposals", "status",
     "backup", "restore", "audit", "retention", "alerts",
 ]
 
@@ -64,6 +64,22 @@ class Help(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 0)
         self.assertIn("--run ID", reference.getvalue())
         self.assertIn("§18.6", reference.getvalue())
+
+    def test_status_help_names_its_blocks_and_front_door_contract(self) -> None:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as ctx:
+            main(["status", "--help"])
+        self.assertEqual(ctx.exception.code, 0)
+        for phrase in (
+            "needs attention",
+            "waiting on you",
+            "at a glance",
+            "front-door brief",
+            "§20.2",
+            "root",
+            "writes nothing",
+        ):
+            self.assertIn(phrase, out.getvalue())
 
 
 class Stubs(unittest.TestCase):

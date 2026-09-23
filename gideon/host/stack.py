@@ -5,8 +5,14 @@ import os
 import subprocess
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Final
 
+import yaml  # type: ignore[import-untyped]
+
+from gideon.host.report import Problem
 from gideon.host.sysio import Host, PathLike
+
+_APPLY_FIX: Final[str] = "Run sudo python3 -m gideon apply, then retry."
 
 
 def compose_argv(rendered_dir: PathLike, *args: str) -> list[str]:
@@ -102,3 +108,21 @@ def running_services(host: Host, rendered_dir: PathLike) -> tuple[str, ...] | No
         for row in rows
         if isinstance(row.get("Service"), str) and row.get("State") == "running"
     )
+
+
+def declared_services(host: Host, rendered_dir: PathLike) -> tuple[str, ...] | Problem:
+    """Read service names in order from the rendered Compose file."""
+
+    compose_path = Path(rendered_dir) / "compose.yaml"
+    try:
+        document = yaml.safe_load(host.read_text(compose_path))
+    except (OSError, UnicodeDecodeError) as exc:
+        return Problem(f"rendered Compose file is unavailable: {exc}.", _APPLY_FIX)
+    except yaml.YAMLError:
+        return Problem("rendered Compose file is invalid.", _APPLY_FIX)
+    if not isinstance(document, Mapping) or not isinstance(document.get("services"), Mapping):
+        return Problem("rendered Compose file has no services map.", _APPLY_FIX)
+    services = document["services"]
+    if not all(isinstance(name, str) for name in services):
+        return Problem("rendered Compose file has an invalid services map.", _APPLY_FIX)
+    return tuple(services)
