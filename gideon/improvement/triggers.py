@@ -130,7 +130,7 @@ TriggerLoader.add_constructor(
 )
 
 
-_FIX: Final = "Edit config/triggers.yaml; consult docs/archi/improvement.md."
+_FIX: Final = "Edit config/triggers.yaml; consult docs/runbooks/release-files.md §7."
 _ROOT_KEYS: Final = ("version", "triggers")
 _ENTRY_KEYS: Final = (
     "id",

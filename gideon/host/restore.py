@@ -1,8 +1,7 @@
 """Verified staging and off-box restore orchestration (§19.2).
 
 Each entry holds the backup lock (``backuplock.py``) for its whole run, so a
-backup, a push, and a restore never overlap; ``docs/archi/backup-restore.md``
-names its rules.
+backup, a push, and a restore never overlap; ``backuplock.py`` owns the rules.
 """
 
 import argparse

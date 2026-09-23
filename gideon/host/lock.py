@@ -133,7 +133,7 @@ LockLoader.add_constructor(
 )
 
 
-_FIX: Final = "Edit host.lock; consult docs/archi/host.md."
+_FIX: Final = "Edit host.lock; consult docs/runbooks/release-files.md §2."
 _ROOT_KEYS: Final = (
     "os_lts",
     "kernel_tested",

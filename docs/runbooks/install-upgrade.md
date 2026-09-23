@@ -416,3 +416,155 @@ pre-v0.1.1` rather than `--rollback` (which would find nothing to do). The
 candidate tree); apply recreated the services whose files changed; verify at
 0.1.1 by `--version`, the applied record, and every service healthy. The box
 runs `v0.1.1`; the checkout is back on `main`, whose product code equals the tag.
+
+## 7. Moving a populated image store
+
+When `host provision` reports `docker-engine: unfixable`, or `apply` refuses while naming a populated package-default containerd root beside an empty root on the Docker volume, move the store by hand in an announced maintenance window. Starting the daemon on that empty root would make its existing images and container snapshots disappear. Every Compose project using the Docker daemon is down during the copy, including any other project sharing it. Tell users before starting.
+
+### Survey
+
+Keep the GIDEON and any other Compose projects running for the survey. Check free space on the root filesystem and the Docker volume, measure the current store, and record the image and container lists for comparison after the move. The move record directory is root-owned and is kept until acceptance:
+
+```sh
+sudo install -d -m 0700 /var/lib/gideon-store-move
+sudo df -h / /var/lib/docker
+sudo du -sb /var/lib/containerd
+sudo bash -o pipefail -c 'docker image ls --digests --format "{{.Repository}}\t{{.Tag}}\t{{.Digest}}\t{{.ID}}" | sort > /var/lib/gideon-store-move/images.before'
+sudo bash -o pipefail -c 'docker ps -a --format "{{.Names}}\t{{.Image}}\t{{.State}}\t{{.Label \"com.docker.compose.project\"}}" | sort > /var/lib/gideon-store-move/containers.before'
+sudo docker system df
+sudo cp -p /etc/containerd/config.toml /var/lib/gideon-store-move/config.toml.shipped
+```
+
+Check for pending package actions affecting Docker or containerd with `sudo apt-get update -q` and `sudo apt-get -s install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin`. If the simulation lists an action, apply it while all projects remain up with `sudo apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin`, then repeat the survey and replace the saved lists and configuration. Do not stop the daemons until the simulation reports no pending action.
+
+### Stop
+
+Stop the release registry, Docker's socket and service, then containerd. `gideon-registry.service` is provisioned on the build box alone: on any other box, leave out every command below that names it, here and in the stages after.
+
+```sh
+sudo systemctl stop gideon-registry.service
+sudo systemctl stop docker.socket docker.service
+sudo systemctl stop containerd.service
+sudo systemctl is-active gideon-registry.service
+sudo systemctl is-active docker.socket
+sudo systemctl is-active docker.service
+sudo systemctl is-active containerd.service
+pgrep -a containerd-shim
+sudo findmnt -R /var/lib/containerd
+sudo ls -A /var/lib/containerd/tmpmounts
+```
+
+Each `systemctl is-active` command should print `inactive`; its non-zero status is expected for an inactive unit. `pgrep` should print no processes and return status 1; any other failure means its result is unknown. `findmnt` should show no mounts under the old root, and `ls` should print nothing for the empty `tmpmounts` directory. If a process, mount, or temporary entry remains, leave the store in place and resolve it before continuing.
+
+### Copy
+
+Copy the old root to the Docker volume. The command preserves hard links, ACLs, extended attributes, sparse files, and numeric owners. If interrupted, run the same command again to resume the copy:
+
+```sh
+sudo mkdir -p /var/lib/docker/containerd
+sudo rsync -aHAXxS --numeric-ids /var/lib/containerd/ /var/lib/docker/containerd/
+```
+
+### Verify
+
+With all daemons still stopped, run a second dry pass. It must exit successfully and print no itemized differences:
+
+```sh
+sudo rsync -aHAXxS --numeric-ids -n -i /var/lib/containerd/ /var/lib/docker/containerd/
+```
+
+Compare the roots' inode counts and apparent byte counts. Also compare the counts of character-device whiteouts under `io.containerd.snapshotter.v1.overlayfs/snapshots` and directories carrying the `trusted.overlay.opaque` extended attribute:
+
+```sh
+sudo bash -o pipefail -c 'find /var/lib/containerd | wc -l'
+sudo bash -o pipefail -c 'find /var/lib/docker/containerd | wc -l'
+sudo du -sb /var/lib/containerd /var/lib/docker/containerd
+sudo bash -o pipefail -c 'find /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots -type c | wc -l'
+sudo bash -o pipefail -c 'find /var/lib/docker/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots -type c | wc -l'
+sudo python3 -c '
+import os, sys
+for root in sys.argv[1:]:
+    count = 0
+    for base, dirs, _ in os.walk(root):
+        for name in dirs:
+            try:
+                os.getxattr(os.path.join(base, name), "trusted.overlay.opaque")
+                count += 1
+            except OSError:
+                pass
+    print(root, count)
+' /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots /var/lib/docker/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots
+```
+
+All four counts must match. Whiteouts are device nodes and opaque markers are extended attributes; a plain file copy would lose overlay state. Do not provision if the dry pass reports a difference or any count differs.
+
+### Provision
+
+A package action during provision must not start a daemon on the old root, so hold every package maintainer script back with a temporary `policy-rc.d` for the one step. If `/usr/sbin/policy-rc.d` already exists, it is the host's own policy: stop and resolve it rather than overwrite it. From `/opt/gideon`, write the new containerd root and restart the managed daemons:
+
+```sh
+cd /opt/gideon
+printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d >/dev/null
+sudo chmod 755 /usr/sbin/policy-rc.d
+sudo python3 -m gideon host provision --only docker-engine
+sudo rm /usr/sbin/policy-rc.d
+sudo systemctl start gideon-registry.service
+sudo containerd config dump
+```
+
+Remove `/usr/sbin/policy-rc.d` whether or not provision succeeds.
+
+Confirm Docker's socket and service, containerd, and on the build box the registry are active. Confirm `containerd config dump` reports `/var/lib/docker/containerd` as the root. If provision or that check fails, keep both roots and use the rollback below.
+
+### Check and accept
+
+Wait for the containers that were running in the survey to return and for their health checks to pass. Save fresh lists and compare them with the survey; both diffs must exit zero:
+
+```sh
+sudo bash -o pipefail -c 'docker image ls --digests --format "{{.Repository}}\t{{.Tag}}\t{{.Digest}}\t{{.ID}}" | sort > /var/lib/gideon-store-move/images.after'
+sudo bash -o pipefail -c 'docker ps -a --format "{{.Names}}\t{{.Image}}\t{{.State}}\t{{.Label \"com.docker.compose.project\"}}" | sort > /var/lib/gideon-store-move/containers.after'
+sudo diff -u /var/lib/gideon-store-move/images.before /var/lib/gideon-store-move/images.after
+sudo diff -u /var/lib/gideon-store-move/containers.before /var/lib/gideon-store-move/containers.after
+sudo docker ps --filter health=unhealthy
+sudo du -sb /var/lib/docker/containerd
+sudo df -h / /var/lib/docker
+```
+
+Do not accept the move until both list comparisons are identical, no unhealthy container is reported, the engine is healthy, and every surveyed project has returned to its surveyed state. Record the responsible operator's confirmation with the move record:
+
+```sh
+printf '%s\n' '<operator confirmation>' | sudo tee /var/lib/gideon-store-move/accept.txt >/dev/null
+```
+
+### Remove
+
+Only after acceptance, confirm once more that `containerd config dump` names `/var/lib/docker/containerd` and that the surveyed projects are healthy. Then remove the old root and the temporary move record:
+
+```sh
+sudo rm -rf /var/lib/containerd /var/lib/gideon-store-move
+sudo python3 -m gideon host provision
+```
+
+The closing provision, from `/opt/gideon`, should report every step converged.
+
+### Roll back before acceptance
+
+Rollback is available after the stop and before acceptance. Stop the registry, Docker socket and service, and containerd, then restore the saved configuration and start the old root:
+
+```sh
+sudo systemctl stop gideon-registry.service
+sudo systemctl stop docker.socket docker.service
+sudo systemctl stop containerd.service
+sudo cp -p /var/lib/gideon-store-move/config.toml.shipped /etc/containerd/config.toml
+sudo systemctl start containerd.service
+sudo containerd config dump
+```
+
+Continue only when `containerd config dump` reports `/var/lib/containerd` as the root; otherwise stop and remove nothing. Then start the rest:
+
+```sh
+sudo systemctl start docker.socket docker.service
+sudo systemctl start gideon-registry.service
+```
+
+Wait for the surveyed projects to return. Save fresh image and container lists, compare them with the saved lists in `/var/lib/gideon-store-move`, and confirm the old root is active before removing the copied `/var/lib/docker/containerd` root. Keep both roots until those checks pass.

@@ -1,8 +1,7 @@
 """The local backup-run command and its ordered host-side stages (§19.1).
 
 Each entry holds the backup lock (``backuplock.py``) for its whole run, so a
-backup, a push, and a restore never overlap; ``docs/archi/backup-restore.md``
-names its rules.
+backup, a push, and a restore never overlap; ``backuplock.py`` owns the rules.
 """
 
 import hashlib

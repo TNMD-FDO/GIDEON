@@ -100,7 +100,7 @@ EgressLoader.add_constructor(
 
 
 _FIX: Final = (
-    "Edit config/egress.yaml; consult docs/archi/host.md."
+    "Edit config/egress.yaml; consult docs/runbooks/release-files.md §5."
 )
 _ROOT_KEYS: Final = ("version", "groups")
 _GROUP_NAMES: Final = ("host-provisioning", "install-upgrade", "corpus", "image-build")

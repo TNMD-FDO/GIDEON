@@ -52,9 +52,15 @@ eval/reference/extraction/harvest.json export-ignore
 .github/workflows/pin-watch.yml export-ignore
 .github/dependabot.yml export-ignore
 bin/ export-ignore
-docs/archi/workflow-tools.md export-ignore
 docs/runbooks/pin-watch-app-setup.md export-ignore
 docs/runbooks/ci-runner.md export-ignore
 tests/test_export_names.py export-ignore
 README.dev.md export-ignore
 docs/2-changelog/ export-ignore
+docs/ARCHI.md export-ignore
+docs/ARCHI-rules.md export-ignore
+docs/archi/ export-ignore
+docs/adr/ export-ignore
+docs/research/ export-ignore
+tests/test_archi_budget.py export-ignore
+tests/test_research_notes.py export-ignore

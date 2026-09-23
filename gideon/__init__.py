@@ -1,7 +1,7 @@
 """GIDEON — a fully local legal AI system for federal defender offices.
 
 Skeleton package: structure and CLI stubs only; behaviour arrives slice by
-slice under TRIP plans. docs/ARCHI.md is the map.
+slice under TRIP plans.
 """
 
-__version__ = "0.2.41"
+__version__ = "0.2.42"

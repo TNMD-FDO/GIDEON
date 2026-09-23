@@ -1,4 +1,8 @@
-"""Contract checks for the filtered export boundary and its text exemptions."""
+"""Contract checks for the filtered export boundary and its text exemptions.
+
+The research-note citation allowlist exempts only named source files, and each
+file leaves it when its comments no longer cite excluded research notes.
+"""
 
 from __future__ import annotations
 
@@ -26,6 +30,18 @@ ATTRIBUTES_PATH = Path(".gitattributes")
 TEXT_RULE_EXEMPT = (
     "tools/exportboundary.py",
     "tools/pinwatch",
+)
+# These files' comments cite research notes and leave this tuple when reworded.
+RESEARCH_NOTE_TEXT_EXEMPT = (
+    "compose/open-webui/functions/branch_gate.py",
+    "compose/open-webui/general.yaml",
+    "gideon/api/judged.py",
+    "gideon/host/owui.py",
+    "gideon/host/owuiturn.py",
+    "gideon/host/render/compose.py",
+    "gideon/host/render/owui.py",
+    "gideon/host/render/searxng.py",
+    "gideon/host/site.py",
 )
 _TEXT_ROOTS = (Path("gideon"), Path("compose"), Path("config"), Path("tools"))
 _TEXT_FILES = (Path(".github/workflows/ci.yml"), Path("README.md"))
@@ -207,14 +223,15 @@ def rule_text(root: Path) -> list[Finding]:
     """Find excluded paths named by text in the scoped kept source files.
 
     The scope is the source roots plus the two single files ci.yml and README.md,
-    which holds the README to naming no path the export omits.
+    which holds the README to naming no path the export omits. The named research-
+    note citation allowlist is the rule's only other tolerance.
     """
 
     findings: list[Finding] = []
     patterns = {prefix: _text_pattern(root, prefix) for prefix in EXCLUDED_PREFIXES}
     for path in _text_files(root):
         relative = path.relative_to(root).as_posix()
-        if any(
+        if relative in RESEARCH_NOTE_TEXT_EXEMPT or any(
             relative == prefix or relative.startswith(prefix + "/")
             for prefix in TEXT_RULE_EXEMPT
         ):
@@ -443,6 +460,17 @@ class SeededTrees(unittest.TestCase):
         self.assertIn("Remove or retarget", items[0].fix)
         self.assertEqual(items[1].path, Path("tools/sibling.py"))
         self.assertEqual(items[1].line, 1)
+
+    def test_research_note_allowlist_exempts_only_the_named_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            listed = root / RESEARCH_NOTE_TEXT_EXEMPT[2]
+            listed.parent.mkdir(parents=True)
+            listed.write_text("docs/research/example.md\n", encoding="utf-8")
+            sibling = listed.with_name("sibling.py")
+            sibling.write_text("docs/research/example.md\n", encoding="utf-8")
+            items = rule_text(root)
+        self.assertEqual([item.path for item in items], [Path("gideon/api/sibling.py")])
 
     def test_text_reports_excluded_prefix_in_readme(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

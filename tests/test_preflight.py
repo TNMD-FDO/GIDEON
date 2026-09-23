@@ -234,7 +234,7 @@ class Refusals(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(out, "")
         self.assertIn("models lock is missing", error)
-        self.assertTrue(error.rstrip().endswith("docs/archi/host.md."))
+        self.assertTrue(error.rstrip().endswith("docs/runbooks/release-files.md §4."))
 
     def test_malformed_models_lock_refuses_before_check_rows(self) -> None:
         path = "/tmp/gideon-test-models.lock"
@@ -245,7 +245,7 @@ class Refusals(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(out, "")
         self.assertIn("Unknown key 'unknown'", error)
-        self.assertTrue(error.rstrip().endswith("docs/archi/host.md."))
+        self.assertTrue(error.rstrip().endswith("docs/runbooks/release-files.md §4."))
 
     def test_missing_court_map_refuses_before_check_rows(self) -> None:
         path = "/nonexistent-gideon-test/courts.yaml"
@@ -253,7 +253,7 @@ class Refusals(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(out, "")
         self.assertIn("court map is missing", error)
-        self.assertTrue(error.rstrip().endswith("docs/archi/host.md."))
+        self.assertTrue(error.rstrip().endswith("docs/runbooks/release-files.md §6."))
 
     def test_unreadable_court_map_refuses_before_check_rows(self) -> None:
         path = os.fspath(COURTS_PATH)
@@ -263,7 +263,7 @@ class Refusals(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(out, "")
         self.assertIn("court map is unreadable due to permissions", error)
-        self.assertTrue(error.rstrip().endswith("docs/archi/host.md."))
+        self.assertTrue(error.rstrip().endswith("docs/runbooks/release-files.md §6."))
 
     def test_malformed_court_map_refuses_before_check_rows(self) -> None:
         path = "/tmp/gideon-test-courts.yaml"
@@ -274,7 +274,7 @@ class Refusals(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(out, "")
         self.assertIn("Unknown key 'unknown'", error)
-        self.assertTrue(error.rstrip().endswith("docs/archi/host.md."))
+        self.assertTrue(error.rstrip().endswith("docs/runbooks/release-files.md §6."))
 
     def test_good_court_map_reaches_a_check(self) -> None:
         class ContextCheck(PreflightCheck):

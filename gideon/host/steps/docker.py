@@ -33,7 +33,7 @@ _CONTAINERD_STORE_PATHS = (
     Path("io.containerd.snapshotter.v1.overlayfs/snapshots"),
     Path("io.containerd.content.v1.content/blobs/sha256"),
 )
-_CONTAINERD_STORE_FIX = "Follow the containerd store move procedure in docs/archi/host.md, then re-run provision."
+_CONTAINERD_STORE_FIX = "Follow the containerd store move procedure in docs/runbooks/install-upgrade.md §7, then re-run provision."
 _CONTAINERD_LIST_FIX = "Repair the containerd store directory named above, then re-run provision."
 _VERSION = re.compile(r"(?:^|\s)v?(\d+)(?:\.(\d+))?")
 

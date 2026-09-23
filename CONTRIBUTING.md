@@ -3,8 +3,7 @@
 ## The dedication
 
 GIDEON is a public-domain work: a United States government work under
-17 U.S.C. § 105, dedicated worldwide under CC0 1.0 Universal (see `LICENSE`,
-[ADR-0004](docs/adr/0004-cc0-public-domain-dedication.md)).
+17 U.S.C. § 105, dedicated worldwide under CC0 1.0 Universal; see `LICENSE`.
 
 **By submitting a contribution to this repository you dedicate that
 contribution to the public domain under the CC0 1.0 Universal dedication,

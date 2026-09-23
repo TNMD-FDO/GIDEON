@@ -328,9 +328,9 @@ class Refusals(unittest.TestCase):
         self.assert_refused(VALID.replace("        gb: 1\n", "        gb: 0\n", 1), "positive integer", key_path="profiles.2x96v-256d.memory.caddy.gb")
         self.assert_refused(VALID.replace("      caddy:\n        gb: 1", "      caddy:\n        gb: 1\n        future: true"), "Unknown key", key_path="profiles.2x96v-256d.memory.caddy.future")
         self.assert_refused(VALID.replace("        gb: 32\n        role: generator", "        gb: 32\n        role: alternate"), "not pinned", key_path="profiles.2x96v-256d.memory.gideon-generator.role")
-        # The table's errors name the architecture leaf that owns the lock.
+        # The table's errors name the runbook section for this lock.
         result = load_text(without_memory)
-        self.assertTrue(all("docs/archi/host.md" in error.fix for error in result.errors if error.key_path == "profiles.2x96v-256d.memory"))
+        self.assertTrue(all("docs/runbooks/release-files.md §4" in error.fix for error in result.errors if error.key_path == "profiles.2x96v-256d.memory"))
 
     def test_profile_role_and_flag_names_follow_grammars(self) -> None:
         self.assert_refused(VALID.replace("  2x96v-256d:\n", "  bad.name:\n").replace("reference: 2x96v-256d", "reference: bad.name"), "hardware profile name")

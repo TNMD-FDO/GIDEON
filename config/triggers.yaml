@@ -1,8 +1,9 @@
 # GIDEON's committed trigger registry. A state moves only by pull request
 # (ADR-0049): entries are watching, acted, or retired. Conditions use above,
 # at-least, or below, and `runs` counts releases the clause must hold in a row.
-# Thresholds are starting values; the format and its measures live in
-# docs/archi/improvement.md.
+# Thresholds are starting values; the format is the loader's,
+# gideon/improvement/triggers.py, and a refusal names
+# docs/runbooks/release-files.md §7.
 version: 1
 
 triggers:

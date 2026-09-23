@@ -171,10 +171,10 @@ ModelsLockLoader.add_constructor(
 
 
 _FIX: Final = (
-    "Edit models.lock; consult docs/archi/host.md."
+    "Edit models.lock; consult docs/runbooks/release-files.md §4."
 )
 _MEMORY_FIX: Final = (
-    "Edit models.lock; consult docs/archi/host.md."
+    "Edit models.lock; consult docs/runbooks/release-files.md §4."
 )
 _ROOT_KEYS: Final = ("version", "reference", "profiles")
 _PROFILE_KEYS: Final = ("requires", "memory", "models")

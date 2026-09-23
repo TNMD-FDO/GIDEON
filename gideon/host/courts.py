@@ -226,7 +226,7 @@ CourtMapLoader.add_constructor(
 
 
 _FIX: Final = (
-    "Restore courts.yaml from the release checkout; consult docs/archi/host.md."
+    "Restore courts.yaml from the release checkout; consult docs/runbooks/release-files.md §6."
 )
 _ROOT_KEYS: Final = ("source", "courts")
 _SOURCE_KEYS: Final = ("file", "date", "sha256", "rows", "levels")

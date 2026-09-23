@@ -148,7 +148,7 @@ class CourtMapContract(unittest.TestCase):
                 self.assertFalse(result.ok)
                 self.assertTrue(result.errors)
                 self.assertTrue(all("Restore courts.yaml from the release checkout" in error.fix for error in result.errors))
-                self.assertTrue(all("docs/archi/host.md" in error.fix for error in result.errors))
+                self.assertTrue(all("docs/runbooks/release-files.md §6" in error.fix for error in result.errors))
         collected = load_court_map(COURT_FIXTURES / "maps" / "collect-all.yaml")
         paths = {error.key_path for error in collected.errors}
         self.assertIn("unexpected", paths)

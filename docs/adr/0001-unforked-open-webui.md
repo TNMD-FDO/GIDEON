@@ -1,3 +1,0 @@
-# Unforked Open WebUI as the frontend
-
-GIDEON's frontend is stock Open WebUI, tracking upstream, never forked. All customization happens through its supported extension surface (Workspace Models, Pipes/Filters/Functions, OpenAPI tool servers, configurable extraction endpoint, admin settings); anything the extension surface cannot express is built as an external service, not a code change. Chosen because a two-CSA office cannot carry a fork's rebase burden, and because receiving offices must be able to take upstream security updates without us in the loop. This is the only technology decision confirmed at charting time (greenfield-spec map, Aug 2026); every other stack choice is an open ticket.

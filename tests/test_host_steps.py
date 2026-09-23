@@ -1050,7 +1050,7 @@ class DockerStepTests(unittest.TestCase):
         self.assertEqual(result.disposition, Disposition.UNFIXABLE)
         self.assertIn(os.fspath(_CONTAINERD_DEFAULT_ROOT), result.detail)
         self.assertIn(os.fspath(_CONTAINERD_ROOT), result.detail)
-        self.assertIn("docs/archi/host.md", result.fix)
+        self.assertIn("docs/runbooks/install-upgrade.md §7", result.fix)
 
     def test_store_is_converged_when_both_roots_are_populated(self) -> None:
         daemon = {

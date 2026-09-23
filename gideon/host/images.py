@@ -129,7 +129,7 @@ _PROXY_CREDENTIALS_FIX: Final = (
     "then retry."
 )
 _FIX: Final = (
-    "Edit images.lock; consult docs/archi/host.md."
+    "Edit images.lock; consult docs/runbooks/release-files.md §3."
 )
 _ROOT_KEYS: Final = ("version", "images")
 _MIRRORED_KEYS: Final = ("source", "digest")

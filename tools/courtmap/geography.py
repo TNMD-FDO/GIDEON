@@ -114,7 +114,7 @@ GeographyLoader.add_constructor(
 )
 
 
-_FIX: Final = "Edit tools/courtmap/geography.yaml; consult docs/archi/tools.md."
+_FIX: Final = "Edit tools/courtmap/geography.yaml; consult docs/runbooks/release-files.md §6."
 _ROOT_KEYS: Final = ("states", "federal", "state_courts", "unplaced", "corrections")
 _STATE_KEYS: Final = ("name", "circuit")
 _CORRECTION_KEYS: Final = ("code", "reason")
