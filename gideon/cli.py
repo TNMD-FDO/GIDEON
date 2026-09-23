@@ -1,8 +1,10 @@
 """The one product CLI (spec §20.2): ``python3 -m gideon <command>``.
 
-A command is a stub until a TRIP plan lands its behaviour: it prints
-"not implemented" and exits non-zero. ``preflight.sh``, ``install.sh``, and
-``upgrade.sh`` at the repo root are thin entrypoints over this CLI (§2.2).
+A bare invocation prints the start screen and exits 0. A command is a stub
+until a TRIP plan lands its behaviour: its help names where it lands, and it
+prints "not implemented" with the same text and exits non-zero.
+``preflight.sh``, ``install.sh``, and ``upgrade.sh`` at the repo root are thin
+entrypoints over this CLI (§2.2).
 
 This module is on the bare-host path (§1.9 step 3 runs ``python3 -m gideon
 host provision`` on a fresh Ubuntu Server install), so at module level it may
@@ -14,14 +16,90 @@ heavier dependencies inside their handlers, never at module level.
 import argparse
 import sys
 from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import Final
 
 import gideon
 from gideon.host import cli as host_cli
 
+_EVERYTHING_ELSE: Final = "Everything else\n  gideon --help, and the runbooks under docs/runbooks/"
+_ROOT_LINE: Final = (
+    "Every command runs as root: sudo asks for the password at most once a sitting,\n"
+    "how often being the office's policy."
+)
+
+
+@dataclass(frozen=True, slots=True)
+class Situation:
+    """A start-screen heading and the ``(command path, argument hint)`` pairs under it."""
+
+    heading: str
+    entries: tuple[tuple[str, str], ...]
+
+
+SITUATIONS: Final = (
+    Situation("An alert email arrived, or something looks wrong", (("status", ""),)),
+    Situation("A decision is waiting on a person", (("proposals", ""),)),
+    Situation(
+        "The site file, a certificate, or the mail relay changed",
+        (("apply", ""), ("tls reload", ""), ("alerts test", "")),
+    ),
+    Situation(
+        "Backups, and going back in time",
+        (("backup run", ""), ("backup push", ""), ("backup drill", ""), ("restore", "--from staging|target")),
+    ),
+    Situation("Upgrade day", (("upgrade", "<tag>"), ("upgrade", "--rollback"))),
+    Situation("After an engine or driver change", (("engine verify", ""),)),
+    Situation("Someone joined or left", (("users reconcile", "--now"),)),
+)
+
+
+def start_screen() -> str:
+    """What a bare ``gideon`` prints: the situations, the everything-else line, the root line."""
+    blocks = [
+        "\n".join([situation.heading, *(f"  gideon {path} {hint}".rstrip() for path, hint in situation.entries)])
+        for situation in SITUATIONS
+    ]
+    return "\n\n".join(["Where to start:", "\n".join([*blocks, _EVERYTHING_ELSE]), _ROOT_LINE])
+
+
+_LANDING: Final = {
+    "host gpu": "the escape hatch, pulled only on eval evidence of reranker latency during bulk embedding (§1.5)",
+    "corpus cut": "lands in slice 3 (v0.4.0)",
+    "corpus install": "lands in slice 3 (v0.4.0)",
+    "index build": "lands in slice 3 (v0.4.0)",
+    "index promote": "lands in slice 3 (v0.4.0)",
+    "index gc": "lands in slice 3 (v0.4.0)",
+    "index report": "lands in slice 3 (v0.4.0)",
+    "registry gc": "in the §20.2 surface, no slice scheduled",
+    "audit query": "in the §20.2 surface, no slice scheduled",
+    "retention sweep": "lands in slice 6 (v0.7.0)",
+}
+
+
+def _start(_args: argparse.Namespace) -> int:
+    print(start_screen())
+    return 0
+
 
 def _stub(args: argparse.Namespace) -> int:
-    print(f"gideon {args.command_path}: not implemented", file=sys.stderr)
+    landing = getattr(args, "landing", "")
+    print(f"gideon {args.command_path}: not implemented{f'; {landing}' if landing else ''}", file=sys.stderr)
     return 1
+
+
+def _stub_parser(
+    parent: argparse._SubParsersAction[argparse.ArgumentParser],
+    name: str,
+    command_path: str,
+    summary: str,
+) -> argparse.ArgumentParser:
+    """Add a stub parser whose help, description, and refusal share its landing text."""
+    landing = _LANDING[command_path]
+    labeled = f"{summary} ({landing})"
+    parser = parent.add_parser(name, help=labeled, description=labeled)
+    parser.set_defaults(handler=_stub, command_path=command_path, landing=landing)
+    return parser
 
 
 def _run_eval(args: argparse.Namespace) -> int:
@@ -51,15 +129,13 @@ def _run_status(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="gideon",
-        description=(
-            "GIDEON product CLI. All commands are stubs until their slice "
-            "lands; the surface is spec §20.2."
-        ),
+        description="GIDEON product CLI. Run gideon alone to see where to start.",
     )
+    parser.set_defaults(handler=_start, command_path="")
     parser.add_argument(
         "--version", action="version", version=f"gideon {gideon.__version__}"
     )
-    commands = parser.add_subparsers(dest="command", metavar="<command>", required=True)
+    commands = parser.add_subparsers(dest="command", metavar="<command>", required=False)
 
     host = commands.add_parser("host", help="host provisioning and GPU layout (§1.5)")
     host_sub = host.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)
@@ -85,9 +161,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="declare this host the build box: the KVM, registry, and runner steps converge here and on no other host (§1.5, §1.8; slice-0 ticket 21)",
     )
     provision.set_defaults(handler=host_cli.run_provision, command_path="host provision")
-    gpu = host_sub.add_parser("gpu", help="GPU layout escape hatch (MIG)")
+    gpu = _stub_parser(host_sub, "gpu", "host gpu", "GPU layout escape hatch (MIG)")
     gpu.add_argument("--mig", metavar="<layout>", help="MIG layout for GPU 1, e.g. 2x48")
-    gpu.set_defaults(handler=host_cli.run_gpu, command_path="host gpu")
 
     render = commands.add_parser(
         "render", help="site file + release + profile + host facts → /etc/gideon/rendered (§3.5)"
@@ -172,26 +247,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     corpus = commands.add_parser("corpus", help="corpus lockfile cuts and installs (§8)")
     corpus_sub = corpus.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)
-    cut = corpus_sub.add_parser("cut", help="cut a corpus lockfile")
+    cut = _stub_parser(corpus_sub, "cut", "corpus cut", "cut a corpus lockfile")
     cut.add_argument("--base", metavar="<lockfile>", help="lockfile to derive from")
     cut.add_argument("--add-courts", metavar="<ids>", help="court ids to add to the base")
-    cut.set_defaults(handler=_stub, command_path="corpus cut")
-    corpus_install = corpus_sub.add_parser("install", help="install a corpus lockfile")
+    corpus_install = _stub_parser(
+        corpus_sub, "install", "corpus install", "install a corpus lockfile"
+    )
     corpus_install.add_argument("label", help="lockfile label, e.g. corpus-2026-08-31")
-    corpus_install.set_defaults(handler=_stub, command_path="corpus install")
 
     index = commands.add_parser("index", help="index generations (§9, §7.5)")
     index_sub = index.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)
-    build = index_sub.add_parser("build", help="build a new index generation")
+    build = _stub_parser(index_sub, "build", "index build", "build a new index generation")
     build.add_argument("--sample", action="store_true", help="build the eval sample")
-    build.set_defaults(handler=_stub, command_path="index build")
-    promote = index_sub.add_parser("promote", help="switch serving to a generation")
+    promote = _stub_parser(
+        index_sub, "promote", "index promote", "switch serving to a generation"
+    )
     promote.add_argument("gen", help="generation to promote")
-    promote.set_defaults(handler=_stub, command_path="index promote")
-    index_gc = index_sub.add_parser("gc", help="drop retired generations past their hold")
-    index_gc.set_defaults(handler=_stub, command_path="index gc")
-    report = index_sub.add_parser("report", help="report generations and build state")
-    report.set_defaults(handler=_stub, command_path="index report")
+    _stub_parser(index_sub, "gc", "index gc", "drop retired generations past their hold")
+    _stub_parser(index_sub, "report", "index report", "report generations and build state")
 
     registry = commands.add_parser("registry", help="local release registry (§1.8)")
     registry_sub = registry.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)
@@ -202,8 +275,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--to", metavar="<registry>", help="destination registry (default: the site file's registry key)"
     )
     mirror.set_defaults(handler=host_cli.run_registry_mirror, command_path="registry mirror")
-    registry_gc = registry_sub.add_parser("gc", help="garbage-collect unreferenced blobs")
-    registry_gc.set_defaults(handler=_stub, command_path="registry gc")
+    _stub_parser(registry_sub, "gc", "registry gc", "garbage-collect unreferenced blobs")
 
     eval_ = commands.add_parser("eval", help="evaluation suites (§18)")
     eval_sub = eval_.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)
@@ -295,19 +367,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     audit = commands.add_parser("audit", help="the append-only audit log (§19)")
     audit_sub = audit.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)
-    query = audit_sub.add_parser("query", help="query audit rows by kb, user, or chat")
+    query = _stub_parser(
+        audit_sub, "query", "audit query", "query audit rows by kb, user, or chat"
+    )
     query.add_argument("--kb", metavar="<id>", help="knowledge-base id")
     query.add_argument("--user", metavar="<id>", help="OWUI user id")
     query.add_argument("--chat", metavar="<id>", help="chat id")
     query.add_argument("--since", metavar="<ts>", help="start of the window")
     query.add_argument("--until", metavar="<ts>", help="end of the window")
     query.add_argument("--json", action="store_true", help="machine-readable output")
-    query.set_defaults(handler=_stub, command_path="audit query")
 
     retention = commands.add_parser("retention", help="retention sweeps (§19)")
     retention_sub = retention.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)
-    sweep = retention_sub.add_parser("sweep", help="expire chats, uploads, partitions")
-    sweep.set_defaults(handler=_stub, command_path="retention sweep")
+    _stub_parser(
+        retention_sub, "sweep", "retention sweep", "expire chats, uploads, partitions"
+    )
 
     alerts = commands.add_parser("alerts", help="alerting (§19)")
     alerts_sub = alerts.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)

@@ -8,7 +8,7 @@ assistant, on one box the office controls. Built by TNMD-FDO (the Office of
 the Federal Public Defender, Middle District of Tennessee) and designed from
 day one for distribution: clone a tag, edit `site.yaml`, run one script.
 
-**Status:** 0.x — slice 0 (platform) complete at `v0.1.0`, the clean-VM acceptance at minor tags its standing proof; slice 1 (General) complete at `v0.2.0`, with no user on the box until go-live (ADR-0044); slice 2 (eval harness) under way toward `v0.3.0`; this tree is `v0.2.47`.
+**Status:** 0.x — slice 0 (platform) complete at `v0.1.0`, the clean-VM acceptance at minor tags its standing proof; slice 1 (General) complete at `v0.2.0`, with no user on the box until go-live (ADR-0044); slice 2 (eval harness) under way toward `v0.3.0`; this tree is `v0.2.48`.
 What each release changed is in [`CHANGELOG.md`](CHANGELOG.md), one line per release; from `v0.2.0` each line links its release note. Later-slice commands still print "not implemented".
 
 ## Install
@@ -65,7 +65,7 @@ The receiving-office sequence (spec §1.9), run from the checkout:
    sudo python3 -m gideon alerts test
    ```
 
-From provision on, every command is re-runnable: a refusal prints its fix, and the same command is run again after it. `gideon corpus install` and `index promote` arrive with slice 3. `preflight.sh`, `install.sh`, and `upgrade.sh` are thin entrypoints over the same CLI: `sudo ./upgrade.sh <tag>` upgrades from the clean checkout (git runs as the checkout's owner, the new tree's commands as children, a mandatory pre-upgrade set taken first), and `sudo ./upgrade.sh --rollback` restores that set and re-applies the previous release. The runbook for this sequence, upgrades, rollbacks, and every refusal's fix is [`docs/runbooks/install-upgrade.md`](docs/runbooks/install-upgrade.md); what the office's services must provide is [`docs/runbooks/office-services-setup.md`](docs/runbooks/office-services-setup.md).
+From provision on, every command is re-runnable: a refusal prints its fix, and the same command is run again after it. `gideon corpus install` and `index promote` arrive with slice 3. Provision installs the `gideon` command: from then on, `gideon <command>` from any directory runs `sudo python3 -m gideon <command>` from `/opt/gideon`, and bare `gideon` prints where to start. `preflight.sh`, `install.sh`, and `upgrade.sh` are thin entrypoints over the same CLI: `sudo ./upgrade.sh <tag>` upgrades from the clean checkout (git runs as the checkout's owner, the new tree's commands as children, a mandatory pre-upgrade set taken first), and `sudo ./upgrade.sh --rollback` restores that set and re-applies the previous release. The runbook for this sequence, upgrades, rollbacks, and every refusal's fix is [`docs/runbooks/install-upgrade.md`](docs/runbooks/install-upgrade.md); what the office's services must provide is [`docs/runbooks/office-services-setup.md`](docs/runbooks/office-services-setup.md).
 
 ## Quickstart
 
@@ -75,7 +75,7 @@ From a checkout, no install step:
 python3 -m gideon --help
 ```
 
-`gideon host …`, `preflight`, `render`, `apply`, `secrets rotate`, `tls reload`, `registry mirror`, and `users reconcile` run from the checkout on a bare Ubuntu Server install using only the standard library and `python3-yaml` (spec §1.5, §3.6 — render runs before any image is pulled) — a boundary CI enforces. `render`, `apply`, `secrets rotate`, `tls reload`, `users reconcile`, and `status` need root; `registry mirror` needs Docker access; `alerts test` needs root and a converged `apply`. `status` reads firing pages, office proposals, and host facts without writing. A host without a GPU is provisioned once with `sudo python3 -m gideon host provision --no-gpu`; every later command reads that declaration. TNMD's box is declared once with `sudo python3 -m gideon host provision --build-box`. `users reconcile` reports until given `--now`, and a rendered systemd timer runs it nightly.
+`gideon host …`, `preflight`, `render`, `apply`, `secrets rotate`, `tls reload`, `registry mirror`, and `users reconcile` run from the checkout on a bare Ubuntu Server install using only the standard library and `python3-yaml` (spec §1.5, §3.6 — render runs before any image is pulled) — a boundary CI enforces. `render`, `apply`, `secrets rotate`, `tls reload`, `users reconcile`, and `status` need root; `registry mirror` needs Docker access; `alerts test` needs root and a converged `apply`. `status` reads firing pages, office proposals, and host facts without writing. The installed `gideon` command runs every command as root. A host without a GPU is provisioned once with `sudo python3 -m gideon host provision --no-gpu`; every later command reads that declaration. TNMD's box is declared once with `sudo python3 -m gideon host provision --build-box`. `users reconcile` reports until given `--now`, and a rendered systemd timer runs it nightly.
 
 The development toolchain is `requirements-dev.txt` — the five toolchain pins and, beside them, a copy of the `gideon` image's dependency set so mypy and the unit suite see the service's imports; never the product's path, which installs nothing from PyPI — in an untracked project venv:
 

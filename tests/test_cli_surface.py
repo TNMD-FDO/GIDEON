@@ -1,14 +1,15 @@
 """The recorded CLI surface (spec §20.2 + `backup drill` from the [22] Answer).
 
 Phase B contract (bootstrap brief): ``--help`` lists every command group, and
-every stub prints "not implemented" and exits non-zero.
+every stub prints "not implemented" and exits non-zero. Front-door ticket 01:
+a bare invocation prints the start screen, and every stub names where it lands.
 """
 
 import contextlib
 import io
 import unittest
 
-from gideon.cli import main
+from gideon.cli import SITUATIONS, main
 from gideon.host.steps import STEPS
 
 TOP_LEVEL = [
@@ -17,18 +18,51 @@ TOP_LEVEL = [
     "backup", "restore", "audit", "retention", "alerts",
 ]
 
+# Each stub with the phrase its help and refusal must carry (§22.1's slice, or the spec's own words).
 STUBS = [
-    ["host", "gpu"],
-    ["corpus", "cut"],
-    ["corpus", "install", "corpus-2026-08-31"],
-    ["index", "build"],
-    ["index", "promote", "1"],
-    ["index", "gc"],
-    ["index", "report"],
-    ["registry", "gc"],
-    ["audit", "query"],
-    ["retention", "sweep"],
+    (["host", "gpu"], "escape hatch"),
+    (["corpus", "cut"], "slice 3"),
+    (["corpus", "install", "corpus-2026-08-31"], "slice 3"),
+    (["index", "build"], "slice 3"),
+    (["index", "promote", "1"], "slice 3"),
+    (["index", "gc"], "slice 3"),
+    (["index", "report"], "slice 3"),
+    (["registry", "gc"], "no slice scheduled"),
+    (["audit", "query"], "no slice scheduled"),
+    (["retention", "sweep"], "slice 6"),
 ]
+
+
+def collapsed(text: str) -> str:
+    """Argparse wraps help lines, so a phrase is searched with whitespace collapsed."""
+    return " ".join(text.split())
+
+
+class Start(unittest.TestCase):
+    def test_bare_invocation_prints_start_screen(self) -> None:
+        out = io.StringIO()
+        err = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = main([])
+        screen = out.getvalue()
+        self.assertEqual(code, 0)
+        self.assertEqual(err.getvalue(), "")
+        commands = [line.strip() for line in screen.splitlines() if line.startswith("  gideon ")]
+        self.assertEqual(commands[0], "gideon status")
+        self.assertTrue(commands[-1].startswith("gideon --help"))
+        self.assertIn("runs as root", screen)
+        self.assertIn("at most once a sitting", collapsed(screen))
+
+    def test_situation_commands_parse_and_are_not_stubs(self) -> None:
+        stub_paths = {" ".join(argv[:2]) for argv, _ in STUBS}
+        for situation in SITUATIONS:
+            for path, _hint in situation.entries:
+                with self.subTest(path=path):
+                    self.assertNotIn(path, stub_paths)
+                    out = io.StringIO()
+                    with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as ctx:
+                        main([*path.split(), "--help"])
+                    self.assertEqual(ctx.exception.code, 0)
 
 
 class Help(unittest.TestCase):
@@ -83,14 +117,32 @@ class Help(unittest.TestCase):
 
 
 class Stubs(unittest.TestCase):
-    def test_every_stub_refuses_as_not_implemented(self) -> None:
-        for argv in STUBS:
-            with self.subTest(command=" ".join(argv)):
+    def test_every_stub_names_its_landing_in_help_and_refusal(self) -> None:
+        for argv, landing in STUBS:
+            path = " ".join(argv[:2])
+            with self.subTest(command=path):
+                command_help = io.StringIO()
+                with contextlib.redirect_stdout(command_help), self.assertRaises(SystemExit) as ctx:
+                    main([*argv[:2], "--help"])
+                self.assertEqual(ctx.exception.code, 0)
+                normalized_command_help = collapsed(command_help.getvalue())
+                self.assertIn(path, normalized_command_help)
+                self.assertIn(landing, normalized_command_help)
+
+                group_help = io.StringIO()
+                with contextlib.redirect_stdout(group_help), self.assertRaises(SystemExit) as ctx:
+                    main([argv[0], "--help"])
+                self.assertEqual(ctx.exception.code, 0)
+                normalized_group_help = collapsed(group_help.getvalue())
+                self.assertIn(argv[1], normalized_group_help)
+                self.assertIn(landing, normalized_group_help)
+
                 err = io.StringIO()
                 with contextlib.redirect_stderr(err):
                     code = main(argv)
                 self.assertNotEqual(code, 0)
                 self.assertIn("not implemented", err.getvalue())
+                self.assertIn(landing, err.getvalue())
 
 
 class RestoreSelection(unittest.TestCase):

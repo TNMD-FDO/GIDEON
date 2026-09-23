@@ -33,11 +33,6 @@ def run_preflight(args: argparse.Namespace) -> int:
     return preflight.run_preflight(args)
 
 
-def run_gpu(args: argparse.Namespace) -> int:
-    print(f"gideon {args.command_path}: not implemented", file=sys.stderr)
-    return 1
-
-
 def run_render(args: argparse.Namespace) -> int:
     return render_command.run_render(args)
 

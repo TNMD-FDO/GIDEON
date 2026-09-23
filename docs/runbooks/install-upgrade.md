@@ -32,7 +32,10 @@ same command is run again after the fix.
    driver, a kernel) means: reboot, then run provision again until every step
    reads `ok`. The `wait-online` step (new in `v0.0.25`) makes the boot-time
    network wait accept any one link online, so a box with an unplugged second
-   port no longer boots with a failed unit.
+   port no longer boots with a failed unit. Once provision has run,
+   `gideon <command>` from any directory runs
+   `sudo python3 -m gideon <command>` from `/opt/gideon`; this runbook keeps
+   the long form because it is the only form available before this step.
 3. **Write the site file** at `/etc/gideon/site.yaml` from
    `config/site.example.yaml`, and place the supplied secrets
    (`office-services-setup.md`). On the build box, `python3 -m gideon registry

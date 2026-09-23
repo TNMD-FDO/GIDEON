@@ -25,6 +25,15 @@ from gideon.host.steps import (
     package_version,
 )
 from gideon.host.steps.accounts import CsaAccountsStep, ServiceUserStep
+from gideon.host.steps.command import (
+    COMMAND_ANNOUNCEMENT,
+    COMMAND_FIX,
+    COMMAND_MODE,
+    COMMAND_PATH,
+    INSTALL_HOME,
+    GideonCommandStep,
+    command_text,
+)
 from gideon.host.steps.disk import DiskLayoutStep
 from gideon.host.steps.docker import (
     _CONTAINERD_CONFIG,
@@ -263,9 +272,9 @@ class RegistryContract(unittest.TestCase):
             names.add(step.name)
         self.assertEqual(
             [step.name for step in STEPS[:5]],
-            ["platform", "wait-online", "egress-proxy", "host-tools", "service-user"],
+            ["platform", "wait-online", "egress-proxy", "host-tools", "gideon-command"],
         )
-        self.assertEqual(len(STEPS), 21)
+        self.assertEqual(len(STEPS), 22)
         self.assertEqual(
             {step.name for step in STEPS if step.gpu_host_only},
             {"nvidia-driver", "nvidia-toolkit"},
@@ -1437,6 +1446,72 @@ class WaitOnlineStepTests(unittest.TestCase):
         self.assertEqual(WaitOnlineStep().check(context(host)).disposition, Disposition.CONVERGED)
 
 
+class GideonCommandStepTests(unittest.TestCase):
+    def test_command_file_truth_table(self) -> None:
+        cases: tuple[
+            tuple[
+                str,
+                dict[str, str],
+                dict[str, os.stat_result],
+                Disposition,
+                str,
+            ],
+            ...,
+        ] = (
+            ("missing", {}, {}, Disposition.DRIFT, "missing"),
+            (
+                "different",
+                {os.fspath(COMMAND_PATH): "#!/bin/sh\n"},
+                {os.fspath(COMMAND_PATH): file_stat(COMMAND_MODE)},
+                Disposition.DRIFT,
+                "differs",
+            ),
+            (
+                "wrong mode",
+                {os.fspath(COMMAND_PATH): command_text(INSTALL_HOME)},
+                {os.fspath(COMMAND_PATH): file_stat(0o644)},
+                Disposition.DRIFT,
+                "0644",
+            ),
+            (
+                "converged",
+                {os.fspath(COMMAND_PATH): command_text(INSTALL_HOME)},
+                {os.fspath(COMMAND_PATH): file_stat(COMMAND_MODE)},
+                Disposition.CONVERGED,
+                "the release's command",
+            ),
+        )
+        for name, files, stats, disposition, detail in cases:
+            with self.subTest(name=name):
+                result = GideonCommandStep().check(context(FakeHost(files=files, stats=stats)))
+                self.assertEqual(result.disposition, disposition)
+                self.assertIn(detail, result.detail)
+                self.assertEqual(result.fix, "" if disposition is Disposition.CONVERGED else COMMAND_FIX)
+
+    def test_unreadable_command_is_unfixable(self) -> None:
+        class UnreadableHost(FakeHost):
+            def read_text(self, path: PathLike, *, encoding: str = "utf-8") -> str:
+                raise OSError(os.fspath(path))
+
+        result = GideonCommandStep().check(context(UnreadableHost()))
+        self.assertEqual(result.disposition, Disposition.UNFIXABLE)
+        self.assertIn("cannot read", result.detail)
+        self.assertIn("Repair access", result.fix)
+
+    def test_apply_creates_command_directory_then_writes_executable(self) -> None:
+        host = FakeHost()
+        announcement = GideonCommandStep().apply(context(host))
+        self.assertEqual(announcement, COMMAND_ANNOUNCEMENT)
+        self.assertEqual(
+            host.calls,
+            [
+                ("mkdir", ("/usr/local/bin", 0o755, True, True)),
+                ("write_text", (os.fspath(COMMAND_PATH), command_text(INSTALL_HOME))),
+            ],
+        )
+        self.assertEqual(host.write_modes, [(os.fspath(COMMAND_PATH), COMMAND_MODE)])
+
+
 class TimezoneStepTests(unittest.TestCase):
     SHOW = ("timedatectl", "show", "-p", "Timezone", "--value")
 
@@ -2355,6 +2430,7 @@ class BaselineCheckPass(unittest.TestCase):
             "platform": Disposition.CONVERGED,
             "wait-online": Disposition.DRIFT,
             "host-tools": Disposition.DRIFT,
+            "gideon-command": Disposition.DRIFT,
             "service-user": Disposition.DRIFT,
             "csa-accounts": Disposition.UNFIXABLE,
             "disk-layout": Disposition.DRIFT,

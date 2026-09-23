@@ -282,6 +282,7 @@ STEPS: list[Step] = []
 
 def _registered_steps() -> tuple[Step, ...]:
     from gideon.host.steps.accounts import CsaAccountsStep, ServiceUserStep
+    from gideon.host.steps.command import GideonCommandStep
     from gideon.host.steps.disk import DiskLayoutStep
     from gideon.host.steps.docker import DockerEngineStep
     from gideon.host.steps.maintenance import UnattendedUpgradesStep
@@ -304,6 +305,7 @@ def _registered_steps() -> tuple[Step, ...]:
         WaitOnlineStep(),
         EgressProxyStep(),
         HostToolsStep(),
+        GideonCommandStep(),
         ServiceUserStep(),
         CsaAccountsStep(),
         DiskLayoutStep(),
