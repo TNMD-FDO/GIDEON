@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 from gideon import guardrail
 from gideon.evaluation import window
-from gideon.evaluation.turns import browser, cases, chromium, classify
+from gideon.evaluation.turns import access, browser, cases, chromium, classify
 from gideon.evaluation.turns.run import (
     BROWSER_ENGINE_CALLS_PER_TURN,
     SMOKE_TURNS,
@@ -21,14 +21,9 @@ from gideon.evaluation.turns.run import (
     new_sentinel,
     run,
 )
-from gideon.host import models, nogpu, owui, secrets, site, tls
-from gideon.host.render import command as render_command
-from gideon.host.render.ci import CI_BASE_URL, CI_ROOT, CI_SECRET_NAMES, CI_SECRETS_DIR
-from gideon.host.render.owui import (
-    EVAL_PASSWORD_SECRET,
-    GENERAL_PRESET_ID,
-    general_texts,
-)
+from gideon.host import models, nogpu, owui, secrets, site
+from gideon.host.render.ci import CI_ROOT, CI_SECRETS_DIR
+from gideon.host.render.owui import GENERAL_PRESET_ID
 from gideon.host.report import Problem, StageResult, print_stage
 from gideon.host.sysio import Host, PathLike, RealHost
 from tools.ownership import restore_ownership, sudo_ids
@@ -40,7 +35,6 @@ _ROOT_FIX: Final[str] = "Run sudo python3 -m tools.turns <cases>, then retry."
 _BROWSER_ROOT_FIX: Final[str] = (
     "Run sudo .venv/bin/python -m tools.turns --browser <cases>, then retry."
 )
-_PASSWORD_FIX: Final[str] = "Run sudo python3 -m gideon apply, then retry."
 _MODELS_FIX: Final[str] = (
     "Correct models.lock so the site's hardware_profile names a profile with a generator pin, then retry."
 )
@@ -97,9 +91,6 @@ _GPU_MODE_FIX: Final[str] = (
 )
 _RENDERED_FIX: Final[str] = (
     "Run sudo python3 -m gideon render, then retry."
-)
-_RENDER_INPUTS_FIX: Final[str] = (
-    "Correct the checkout's render inputs, then retry."
 )
 _BROWSER_ONLY_FIX: Final[str] = "Pass --browser with this flag, then retry."
 _CI_BROWSER_FIX: Final[str] = "Use --stack production with --browser, then retry."
@@ -399,38 +390,24 @@ def main(
 
     instruction: str | None = None
     if direct_mode and not options.no_instruction:
-        loaded_render_inputs = render_command.load_render_inputs(
+        resolved_instruction = access.load_general_instruction(
             io,
             site_path=site_path,
-            lock_path=root / "host.lock",
-            images_path=root / "images.lock",
-            models_path=root / "models.lock",
             root=root,
+            stack=options.stack,
             command="tools.turns",
-            secret_names=CI_SECRET_NAMES if options.stack == "ci" else None,
         )
-        if loaded_render_inputs is None:
+        if isinstance(resolved_instruction, Problem):
             print_stage(
                 StageResult(
                     "preconditions",
                     False,
-                    "render inputs are unavailable",
-                    _RENDER_INPUTS_FIX,
+                    resolved_instruction.problem,
+                    resolved_instruction.fix,
                 )
             )
             return 1
-        try:
-            instruction = general_texts(loaded_render_inputs[0]).system_prompt
-        except (TypeError, ValueError) as exc:
-            print_stage(
-                StageResult(
-                    "preconditions",
-                    False,
-                    f"General instruction is unavailable: {exc}",
-                    _RENDER_INPUTS_FIX,
-                )
-            )
-            return 1
+        instruction = resolved_instruction
 
     if options.browser:
         password_problem = chromium.password_file_problem(io)
@@ -456,19 +433,18 @@ def main(
     elif direct_mode:
         password_value = ""
     else:
-        password = secrets.read_secret(io, EVAL_PASSWORD_SECRET)
-        if not password.ok or password.value is None:
-            fix = _PASSWORD_FIX if password.missing else password.fix or _PASSWORD_FIX
+        resolved_password = access.read_eval_password(io)
+        if isinstance(resolved_password, Problem):
             print_stage(
                 StageResult(
                     "preconditions",
                     False,
-                    password.problem or "the evaluation password is unavailable",
-                    fix,
+                    resolved_password.problem,
+                    resolved_password.fix,
                 )
             )
             return 1
-        password_value = password.value
+        password_value = resolved_password
 
     gate_texts: classify.GateTexts | None = None
     if options.probe_inlet:
@@ -661,14 +637,10 @@ def main(
 
     if client_factory is not None:
         chosen_factory = client_factory
-    elif options.stack == "ci":
-        chosen_factory = owui.loopback_client_factory(
-            CI_BASE_URL, timeout=TURN_TIMEOUT_SECONDS
-        )
     else:
-        chosen_factory = owui.ingress_client_factory(
+        chosen_factory = access.make_client_factory(
             loaded_site.config.hostname,
-            ca_path=tls.CA_PATH,
+            stack=options.stack,
             timeout=TURN_TIMEOUT_SECONDS,
         )
     browser_setup: BrowserSetup | None = None

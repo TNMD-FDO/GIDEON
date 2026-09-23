@@ -22,7 +22,7 @@ import yaml  # type: ignore[import-untyped]
 
 from gideon import guardrail
 from gideon.api import stamp
-from gideon.evaluation.turns import cases, classify, run
+from gideon.evaluation.turns import access, cases, classify, run, session
 from gideon.host import models, owuiturn, secrets, site
 from gideon.host.owui import Client, OwuiError, Response
 from gideon.host.render.ci import CI_PORT, CI_ROOT, CI_SECRETS_DIR
@@ -43,14 +43,14 @@ PASSWORD = "test-evaluation-password"
 TOKEN = "test-session-token"
 FIXED_NOW = datetime(2026, 9, 5, 12, 0, tzinfo=UTC)
 # The fix a row carries when the finder identified no chat of this turn's own.
-SENTINEL_FIX = run._unverified_fix(EVAL_IDENTITY.username)
+SENTINEL_FIX = run.unverified_fix(EVAL_IDENTITY.username)
 _USE_FAKE_FACTORY = object()
 
 
 def _tagged_case_id(prompt: str) -> str:
     """The case id from the prompt's trailing tag, the way a journal grep would find it."""
 
-    match = re.search(r"\[turn harness [0-9a-f]{8} ([A-Za-z0-9_.-]+)\]$", prompt)
+    match = re.search(r"\[turn harness [0-9a-f]{8} ([A-Za-z0-9_./-]+)\]$", prompt)
     assert match is not None, prompt
     return match.group(1)
 
@@ -726,6 +726,193 @@ class TurnHarness(TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.guardrail = guardrail
+
+    def test_entry_help_text_is_byte_stable(self) -> None:
+        stdout = StringIO()
+        # argparse wraps to the terminal's width, so the pin fixes it.
+        with (
+            patch.dict(os.environ, {"COLUMNS": "80"}),
+            redirect_stdout(stdout),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            cli.main(["--help"])
+        self.assertEqual(raised.exception.code, 0)
+        self.assertEqual(
+            stdout.getvalue(),
+            "usage: python3 -m tools.turns [-h] [--repeat N] [--concurrent N] [--stream]\n"
+            "                              [--browser] [--probe-inlet] [--trust-ca]\n"
+            "                              [--out DIR] [--case ID] [--unfiltered]\n"
+            "                              [--service] [--no-instruction] [--force]\n"
+            "                              [--dry-run] [--stack {production,ci}]\n"
+            "                              cases\n\n"
+            "positional arguments:\n"
+            "  cases\n\n"
+            "options:\n"
+            "  -h, --help            show this help message and exit\n"
+            "  --repeat N\n"
+            "  --concurrent N\n"
+            "  --stream\n"
+            "  --browser\n"
+            "  --probe-inlet\n"
+            "  --trust-ca\n"
+            "  --out DIR\n"
+            "  --case ID\n"
+            "  --unfiltered\n"
+            "  --service\n"
+            "  --no-instruction\n"
+            "  --force\n"
+            "  --dry-run\n"
+            "  --stack {production,ci}\n",
+        )
+
+    def test_turn_access_helpers_return_their_refusal_rows(self) -> None:
+        with patch.object(
+            access.render_command, "load_render_inputs", return_value=None
+        ):
+            instruction = access.load_general_instruction(
+                cast(Host, FakeHost()),
+                site_path=SITE_PATH,
+                root=ROOT,
+                stack="production",
+                command="tools.turns",
+            )
+        self.assertEqual(
+            instruction,
+            Problem(
+                "render inputs are unavailable",
+                "Correct the checkout's render inputs, then retry.",
+            ),
+        )
+
+        with (
+            patch.object(
+                access.render_command,
+                "load_render_inputs",
+                return_value=(object(), "", "", ""),
+            ),
+            patch.object(access, "general_texts", side_effect=ValueError("bad instruction")),
+        ):
+            malformed = access.load_general_instruction(
+                cast(Host, FakeHost()),
+                site_path=SITE_PATH,
+                root=ROOT,
+                stack="production",
+                command="tools.turns",
+            )
+        self.assertEqual(
+            malformed,
+            Problem(
+                "General instruction is unavailable: bad instruction",
+                "Correct the checkout's render inputs, then retry.",
+            ),
+        )
+
+        password = access.read_eval_password(cast(Host, FakeHost(password=None)))
+        self.assertIsInstance(password, Problem)
+        assert isinstance(password, Problem)
+        self.assertTrue(password.problem)
+        self.assertEqual(password.fix, "Run sudo python3 -m gideon apply, then retry.")
+
+    def test_turn_access_helpers_resolve_instruction_password_and_client_factory(self) -> None:
+        instruction_inputs = (object(), "", "", "")
+        with (
+            patch.object(
+                access.render_command,
+                "load_render_inputs",
+                return_value=instruction_inputs,
+            ) as load_inputs,
+            patch.object(
+                access,
+                "general_texts",
+                return_value=type("Texts", (), {"system_prompt": "rendered instruction"})(),
+            ),
+        ):
+            instruction = access.load_general_instruction(
+                cast(Host, FakeHost()),
+                site_path=SITE_PATH,
+                root=ROOT,
+                stack="ci",
+                command="tools.turns",
+            )
+        self.assertEqual(instruction, "rendered instruction")
+        self.assertEqual(load_inputs.call_args.kwargs["secret_names"], cli.access.CI_SECRET_NAMES)
+        self.assertEqual(load_inputs.call_args.kwargs["command"], "tools.turns")
+
+        self.assertEqual(
+            access.read_eval_password(cast(Host, FakeHost())),
+            PASSWORD,
+        )
+
+        with patch.object(
+            access.owui,
+            "loopback_client_factory",
+            return_value=lambda **_kwargs: cast(Client, object()),
+        ) as loopback_factory:
+            factory = access.make_client_factory(
+                "gideon.example.invalid", stack="ci", timeout=23.0
+            )
+        self.assertTrue(callable(factory))
+        loopback_factory.assert_called_once_with(cli.access.CI_BASE_URL, timeout=23.0)
+
+    def test_turn_access_withholds_password_from_repr(self) -> None:
+        record = access.TurnAccess(
+            "rendered instruction",
+            PASSWORD,
+            lambda **_kwargs: cast(Client, object()),
+            "run-sentinel",
+        )
+        self.assertNotIn(PASSWORD, repr(record))
+        self.assertIn("rendered instruction", repr(record))
+
+    def test_frontend_turn_structured_facts_exist_with_and_without_output(self) -> None:
+        source = seed_case("direct-01")
+        prompt = cast(str, source["prompt"])
+        case = cases.Case("direct-01", prompt, "refused", kind="positive")
+        answer = self.guardrail.DEADLINE_REFUSAL
+        for output_enabled in (False, True):
+            with self.subTest(output=output_enabled), TemporaryDirectory() as directory:
+                frontend = Frontend(self.guardrail, {case.id: "replaced"})
+                driver = run.ApiTurnDriver(frontend.factory, PASSWORD)
+                driver.signin()
+                output = Path(directory) / "out" if output_enabled else None
+                spec = run.RunSpec(
+                    cases=Path(directory) / "cases.yaml",
+                    repeat=1,
+                    stream=False,
+                    out=output,
+                    force=False,
+                    dry_run=False,
+                    sentinel="1234abcd",
+                )
+                row = run.frontend_turn(
+                    spec,
+                    client=driver.client,
+                    driver=driver,
+                    guardrail=self.guardrail,
+                    case=case,
+                    session_number=1,
+                    row_name=case.id,
+                    now=lambda: FIXED_NOW,
+                    monotonic=time.monotonic,
+                )
+
+            self.assertIsNotNone(row.elapsed, row.result.detail)
+            self.assertIsInstance(row.checks, dict)
+            self.assertTrue(row.checks)
+            self.assertTrue(all(isinstance(value, bool) for value in row.checks.values()))
+            self.assertIsNotNone(row.verdict_kind)
+            expected = classify.classify(
+                self.guardrail,
+                {"content": answer, "output": []},
+                {"role": "user", "content": session.prompt_text(case.id, spec.sentinel, prompt)},
+            )
+            self.assertEqual(row.pattern_id, expected.pattern_id)
+            self.assertIsNone(row.stream_pattern_id)
+            self.assertIsNone(row.stream_offset)
+            self.assertEqual(row.record is not None, output_enabled)
+            facts = (row.elapsed, row.checks, row.pattern_id, row.stream_pattern_id, row.stream_offset)
+            self.assertNotIn(prompt, repr(facts))
+            self.assertNotIn(answer, repr(facts))
 
     def test_ci_selects_sibling_secrets_before_read_and_uses_plain_http(self) -> None:
         events: list[str] = []
@@ -1597,7 +1784,7 @@ class TurnHarness(TestCase):
     def test_production_factory_receives_turn_timeout(self) -> None:
         frontend = Frontend(self.guardrail, {"factory": "answered"})
         with patch(
-            "tools.turns.cli.owui.ingress_client_factory",
+            "tools.turns.cli.access.owui.ingress_client_factory",
             return_value=frontend.factory,
         ) as factory:
             code, stdout, _ = _run_file(
@@ -1609,7 +1796,7 @@ class TurnHarness(TestCase):
         self.assertIn("factory: ok", stdout)
         factory.assert_called_once_with(
             yaml.safe_load(SITE_TEXT)["hostname"],
-            ca_path=cli.tls.CA_PATH,
+            ca_path=cli.access.tls.CA_PATH,
             timeout=run.TURN_TIMEOUT_SECONDS,
         )
 
@@ -2445,6 +2632,18 @@ class TurnHarness(TestCase):
         self.assertIn("model: gideon-general", stdout)
         self.assertIn("output directory: none", stdout)
         self.assertEqual(frontend.calls, [])
+        dynamic_path = stdout.split("loaded cases file ", 1)[1].split(":", 1)[0]
+        office_window = f"office hours (14:00 {timezone_name}, Tuesday)"
+        self.assertEqual(
+            stdout.replace(dynamic_path, "<fixture-cases>"),
+            f"preconditions: ok — loaded cases file <fixture-cases>: 1 cases; 1 turns; {office_window}\n"
+            "Turn harness dry run:\n"
+            "cases: cases file <fixture-cases>: 1 cases\n"
+            "turns: 1 (1 × 1)\n"
+            f"window: {office_window}\n"
+            "model: gideon-general\n"
+            "output directory: none\n",
+        )
 
     def test_api_mode_does_not_read_models_lock_or_run_inlet_probe(self) -> None:
         frontend = Frontend(self.guardrail, {"api": "answered"})

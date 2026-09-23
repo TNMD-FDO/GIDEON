@@ -48,7 +48,7 @@ def _cleanup_fix(account: str) -> str:
     return f"Delete the listed chats as {account} through the frontend, then retry."
 
 
-def _unverified_fix(account: str) -> str:
+def unverified_fix(account: str) -> str:
     return f"List {account}'s chats and delete any carrying this run's sentinel, then retry."
 
 
@@ -122,6 +122,11 @@ class TurnRow:
     session: int
     started: float | None
     offline_kind: str | None = None
+    elapsed: float | None = None
+    checks: Mapping[str, bool] = field(default_factory=dict)
+    pattern_id: str | None = None
+    stream_pattern_id: str | None = None
+    stream_offset: int | None = None
 
 
 class TurnDriver(Protocol):
@@ -1334,7 +1339,7 @@ class _Bookkeeping:
             emit(finalized.result)
 
 
-def _run_service_turn(
+def service_turn(
     spec: RunSpec,
     *,
     driver: TurnDriver,
@@ -1479,10 +1484,23 @@ def _run_service_turn(
         stream_kind=stream_kind,
         session=session_number,
         started=started,
+        elapsed=elapsed,
+        checks=checks,
+        pattern_id=verdict.pattern_id if verdict is not None else None,
+        stream_pattern_id=(
+            stream_verdict.pattern_id
+            if stream_verdict is not None and not stream_verdict.clean
+            else None
+        ),
+        stream_offset=(
+            stream_verdict.offset
+            if stream_verdict is not None and not stream_verdict.clean
+            else None
+        ),
     )
 
 
-def _run_turn(
+def frontend_turn(
     spec: RunSpec,
     *,
     client: Client,
@@ -1565,7 +1583,7 @@ def _run_turn(
                 row_name,
                 False,
                 f"{unidentified.problem}{live_detail}",
-                _unverified_fix(driver.account),
+                unverified_fix(driver.account),
             )
         elif assistant is None:
             problem = Problem("assistant message is missing", _turn_fix(spec))
@@ -1670,6 +1688,19 @@ def _run_turn(
         stream_kind=stream_kind,
         session=session_number,
         started=started,
+        elapsed=elapsed,
+        checks=checks,
+        pattern_id=verdict.pattern_id if verdict is not None else None,
+        stream_pattern_id=(
+            stream_verdict.pattern_id
+            if stream_verdict is not None and not stream_verdict.clean
+            else None
+        ),
+        stream_offset=(
+            stream_verdict.offset
+            if stream_verdict is not None and not stream_verdict.clean
+            else None
+        ),
     )
 
 
@@ -1862,7 +1893,7 @@ def _run_cases(
         driver = drivers[session_number - 1]
         for case, repetition in _session_units(units, session_number):
             if spec.service:
-                row = _run_service_turn(
+                row = service_turn(
                     spec,
                     driver=driver,
                     guardrail=guardrail,
@@ -1885,7 +1916,7 @@ def _run_cases(
                 )
             else:
                 assert client is not None
-                row = _run_turn(
+                row = frontend_turn(
                     spec,
                     client=client,
                     driver=driver,
@@ -1979,7 +2010,7 @@ def _run_cases(
                     "; ".join(details),
                     _cleanup_fix(first_driver.account)
                     if bookkeeping.not_deleted
-                    else _unverified_fix(first_driver.account),
+                    else unverified_fix(first_driver.account),
                 )
             )
     requests_ok = True

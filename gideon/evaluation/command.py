@@ -24,6 +24,7 @@ from gideon.evaluation.evalset import (
 )
 from gideon.evaluation.results import RunContext, SliceResult
 from gideon.evaluation.slices import SLICE_RUNNERS, SliceSpec
+from gideon.evaluation.turns import access, door, run
 from gideon.host import courts, engine, nogpu, site, stack
 from gideon.host.report import Problem, StageResult, print_stage, refusal
 from gideon.host.sysio import Host, PathLike, RealHost
@@ -44,6 +45,7 @@ class _EnginePreconditions:
     served_model_name: str
     provenance: tuple[str | None, bool | None]
     site_config: site.SiteConfig
+    turns: access.TurnAccess | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -357,6 +359,46 @@ def _engine_preconditions(
         print_stage(StageResult("preconditions", False, target.problem, target.fix))
         return None
 
+    turns: access.TurnAccess | None = None
+    if slice_spec.drives_turns:
+        instruction = access.load_general_instruction(
+            io,
+            site_path=site_path,
+            root=checkout,
+            stack="production",
+            command="gideon eval run",
+        )
+        if isinstance(instruction, Problem):
+            print_stage(
+                StageResult("preconditions", False, instruction.problem, instruction.fix)
+            )
+            return None
+        password = access.read_eval_password(io)
+        if isinstance(password, Problem):
+            print_stage(StageResult("preconditions", False, password.problem, password.fix))
+            return None
+        probe = door.probe(
+            io,
+            rendered_dir,
+            served_name=target.served_model_name,
+            max_time=run.TURN_TIMEOUT_SECONDS,
+        )
+        if probe.problem is not None:
+            print_stage(
+                StageResult("preconditions", False, probe.problem.problem, probe.problem.fix)
+            )
+            return None
+        turns = access.TurnAccess(
+            instruction=instruction,
+            password=password,
+            client_factory=access.make_client_factory(
+                config.hostname,
+                stack="production",
+                timeout=run.TURN_TIMEOUT_SECONDS,
+            ),
+            sentinel=run.new_sentinel(),
+        )
+
     provenance: tuple[str | None, bool | None] = (None, None)
     if not supplied_set:
         resolved_provenance, provenance_fix = _provenance(io, checkout)
@@ -397,7 +439,12 @@ def _engine_preconditions(
             True,
             f"root, no-GPU marker absent, site, {judgement.description}, "
             f"profile {target.profile_name}, served model {target.served_model_name}, "
-            f"prompt {prompt_id}, {writer}",
+            f"prompt {prompt_id}, {writer}"
+            + (
+                ", instruction rendered, eval password read, door probed"
+                if slice_spec.drives_turns
+                else ""
+            ),
             "",
         )
     )
@@ -406,6 +453,7 @@ def _engine_preconditions(
         target.served_model_name,
         provenance,
         config,
+        turns,
     )
 
 
@@ -690,6 +738,7 @@ def _run_body(
         repeats=slice_spec.repeats,
         progress=print,
         ranked=ranked_lists,
+        turns=None if engine_preconditions is None else engine_preconditions.turns,
     )
     slice_result = _run_slice(slice_spec, loaded, slice_name, context)
     selection = select_cases(loaded, slice_name)

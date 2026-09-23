@@ -6,6 +6,7 @@ triple is an invented reference-and-candidate grading case. A research-qa case
 is one reviewed research question carrying no expected answer: its signed
 answer lives in the sign-offs file, and a case with no line there is unsigned —
 it loads, and a selection keeps it out of what a gate counts.
+Guardrails cases carry an expected turn class and, for positives, a pattern id.
 """
 
 import hashlib
@@ -51,6 +52,24 @@ _HARVEST_ID: Final[re.Pattern[str]] = re.compile(r"HARV-[0-9]{3}")
 _HARVEST_CLUSTER: Final[re.Pattern[str]] = re.compile(r"harvest-chat-[0-9a-f]+")
 _JUDGMENT_CLUSTER: Final[re.Pattern[str]] = re.compile(r"harvest-chat-[A-Za-z0-9_-]+")
 RESEARCH_QA_ID_PATTERN: Final[re.Pattern[str]] = re.compile(r"research-qa-[0-9]{3,}")
+GUARDRAIL_ID_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"[a-z]+(?:-[a-z]+)*/[a-z]+(?:-[a-z]+)*(?:-[0-9]+)?-[0-9]{2,}"
+)
+_GUARDRAIL_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"[a-z]+(?:-[a-z]+)*/[a-z]+(?:-[a-z]+)*@[1-9][0-9]*"
+)
+_GUARDRAIL_TURNS: Final[frozenset[str]] = frozenset({"blocked", "clean"})
+_GUARDRAIL_BASE_KEYS: Final[tuple[str, ...]] = (
+    "id",
+    "suite",
+    "category",
+    "branch",
+    "question",
+    "expected",
+    "labels",
+    "cluster_id",
+    "review",
+)
 _QUESTION_BASE_KEYS: Final[tuple[str, ...]] = (
     "id",
     "suite",
@@ -115,7 +134,7 @@ class ShapeSpec:
             if "supersedes" in record:
                 keys.append("supersedes")
             keys.append("notes")
-        elif self.category == "triples":
+        elif self.category == "triples" or self.suite == "guardrails":
             if "supersedes" in record:
                 keys.append("supersedes")
             keys.append("notes")
@@ -214,6 +233,33 @@ SHAPE_REGISTRY: Final[Mapping[tuple[str, str], ShapeSpec]] = {
         {"suite": "judge", "category": "triples", "branch": "legal"},
         _TRIPLE_ID,
         _TRIPLE_ID,
+        ("by", "on"),
+    ),
+    ("guardrails", "deadline-trap"): ShapeSpec(
+        "guardrails",
+        "deadline-trap",
+        _GUARDRAIL_BASE_KEYS,
+        {"suite": "guardrails", "category": "deadline-trap", "branch": "general"},
+        GUARDRAIL_ID_PATTERN,
+        GUARDRAIL_ID_PATTERN,
+        ("by", "on"),
+    ),
+    ("guardrails", "guidelines-range"): ShapeSpec(
+        "guardrails",
+        "guidelines-range",
+        _GUARDRAIL_BASE_KEYS,
+        {"suite": "guardrails", "category": "guidelines-range", "branch": "general"},
+        GUARDRAIL_ID_PATTERN,
+        GUARDRAIL_ID_PATTERN,
+        ("by", "on"),
+    ),
+    ("guardrails", "sentence-credit"): ShapeSpec(
+        "guardrails",
+        "sentence-credit",
+        _GUARDRAIL_BASE_KEYS,
+        {"suite": "guardrails", "category": "sentence-credit", "branch": "general"},
+        GUARDRAIL_ID_PATTERN,
+        GUARDRAIL_ID_PATTERN,
         ("by", "on"),
     ),
 }
@@ -587,6 +633,8 @@ def _validate_shape(
         or labels[1] not in {"faithful", "wrong", "partial", "unsourced-length"}
     ):
         findings.append(Finding(relative, case_id, line, "labels", _CASE_FIX))
+    elif spec.suite == "guardrails":
+        _validate_guardrail_fields(record, relative, case_id, line, findings)
 
     seed = record.get("seed")
     if origin == "harvest":
@@ -647,6 +695,49 @@ def _validate_shape(
             )
     elif spec.category == "triples":
         _validate_triple_fields(record, relative, case_id, line, findings)
+
+
+def _validate_guardrail_fields(
+    record: Case,
+    file: str,
+    case_id: str | None,
+    line: int,
+    findings: list[Finding],
+) -> None:
+    """Validate the guardrail role, expected turn, pattern, and qualified id."""
+
+    category = record.get("category")
+    if not isinstance(case_id, str) or not isinstance(category, str) or not case_id.startswith(f"{category}/"):
+        findings.append(Finding(file, case_id, line, "id category prefix", _CASE_FIX))
+
+    labels = record.get("labels")
+    expected = record.get("expected")
+    if (
+        not isinstance(labels, list)
+        or len(labels) != 2
+        or labels[0] != "invented"
+        or not isinstance(labels[1], str)
+        or labels[1] not in {"positive", "control"}
+    ):
+        findings.append(Finding(file, case_id, line, "labels", _CASE_FIX))
+        return
+    if not isinstance(expected, dict):
+        findings.append(Finding(file, case_id, line, "expected mapping", _CASE_FIX))
+        return
+
+    role = labels[1]
+    expected_keys = ("turn", "pattern") if role == "positive" else ("turn",)
+    if tuple(expected) != expected_keys:
+        findings.append(Finding(file, case_id, line, "expected keys or order", _CASE_FIX))
+        return
+    expected_turn = "blocked" if role == "positive" else "clean"
+    turn = expected.get("turn")
+    if not isinstance(turn, str) or turn not in _GUARDRAIL_TURNS or turn != expected_turn:
+        findings.append(Finding(file, case_id, line, "expected.turn role", _CASE_FIX))
+    if role == "positive":
+        pattern = expected.get("pattern")
+        if not isinstance(pattern, str) or _GUARDRAIL_PATTERN.fullmatch(pattern) is None:
+            findings.append(Finding(file, case_id, line, "expected.pattern", _CASE_FIX))
 
 
 def _read_cases(
@@ -775,6 +866,13 @@ def _supersedes_findings(
     """Refuse a bad ``supersedes``; of two naming one target, the lower id keeps it."""
 
     superseded: set[str] = set()
+    occurrences = tuple(occurrences)
+    locations = {
+        case_id: (relative, line)
+        for relative, line, case in occurrences
+        for case_id in (_case_id(case),)
+        if case_id is not None
+    }
     claims = (
         (relative, line, case_id, target)
         for relative, line, case in occurrences
@@ -784,10 +882,20 @@ def _supersedes_findings(
     for relative, line, case_id, target in sorted(claims, key=lambda claim: (_series(claim[2]) or ("", 0), claim[2])):
         case_series = _series(case_id)
         target_series = _series(target)
+        # A guardrails seed retires a case under another stem (`control-30`
+        # supersedes `thinking-01`), so there "earlier" is an earlier line of
+        # the same file rather than a lower number of the same series.
+        target_location = locations.get(target)
+        earlier_guardrail_line = (
+            cases_by_id.get(case_id, {}).get("suite") == "guardrails"
+            and target_location is not None
+            and target_location[0] == relative
+            and target_location[1] < line
+        )
         rule = None
         if target not in cases_by_id:
             rule = "supersedes names no case"
-        elif (
+        elif not earlier_guardrail_line and (
             case_series is None
             or target_series is None
             or target_series[0] != case_series[0]

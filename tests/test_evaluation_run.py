@@ -882,6 +882,12 @@ class SliceRegistry(unittest.TestCase):
             )
         )
 
+    def test_drives_turns_is_true_only_for_guardrails(self) -> None:
+        for slice_name, spec in SLICE_RUNNERS.items():
+            with self.subTest(slice_name=slice_name):
+                self.assertIs(type(spec.drives_turns), bool)
+                self.assertEqual(spec.drives_turns, slice_name == "guardrails")
+
 
 class Imports(unittest.TestCase):
     """The evaluation package stays within the standard-library import boundary."""

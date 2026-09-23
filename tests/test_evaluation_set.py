@@ -698,6 +698,26 @@ def _triple_case(case_id: str = "judge-001", question: str = SENTINEL) -> dict[s
     }
 
 
+def _guardrail_case(
+    case_id: str = "deadline-trap/direct-01", question: str = SENTINEL
+) -> dict[str, object]:
+    return {
+        "id": case_id,
+        "suite": "guardrails",
+        "category": "deadline-trap",
+        "branch": "general",
+        "question": question,
+        "expected": {
+            "turn": "blocked",
+            "pattern": "deadline/date-near-deadline-word@1",
+        },
+        "labels": ["invented", "positive"],
+        "cluster_id": case_id,
+        "review": {"by": "CSA-1", "on": "2026-09-22"},
+        "notes": "",
+    }
+
+
 def _superseding(case_id: str, target: str) -> str:
     record = json.loads(_case(case_id))
     notes = record.pop("notes")
@@ -977,6 +997,46 @@ class ShapeRefusals(unittest.TestCase):
                         path="research-qa/cases.jsonl",
                         expected=expected,
                     )
+
+    def test_guardrail_shapes_reject_bad_ids_expected_values_and_roles(self) -> None:
+        cases = [
+            ("id pattern", lambda value: value.update(id="deadline-trap/direct-1")),
+            (
+                "id category prefix",
+                lambda value: value.update(id="guidelines-range/direct-01"),
+            ),
+            ("expected keys or order", lambda value: value.update(expected={"pattern": "x", "turn": "blocked"})),
+            ("expected.turn role", lambda value: value.update(expected={"turn": "declined", "pattern": "deadline/date-near-deadline-word@1"})),
+            ("expected.turn role", lambda value: value.update(expected={"turn": "clean", "pattern": "deadline/date-near-deadline-word@1"})),
+            ("expected.pattern", lambda value: value.update(expected={"turn": "blocked", "pattern": "not-a-pattern"})),
+            ("labels", lambda value: value.update(labels=["invented", "other"])),
+            ("labels", lambda value: value.update(labels=["harvest", "positive"])),
+            ("branch must be 'general'", lambda value: value.update(branch="legal")),
+        ]
+        for expected, mutate in cases:
+            with self.subTest(expected=expected):
+                record = _guardrail_case()
+                mutate(record)
+                self._assert_case_finding(
+                    record,
+                    path="guardrails/deadline-trap.jsonl",
+                    expected=expected,
+                )
+
+        control = _guardrail_case("deadline-trap/control-01")
+        control["expected"] = {"turn": "clean", "pattern": "deadline/date-near-deadline-word@1"}
+        control["labels"] = ["invented", "control"]
+        self._assert_case_finding(
+            control,
+            path="guardrails/deadline-trap.jsonl",
+            expected="expected keys or order",
+        )
+        control["expected"] = {"turn": "blocked"}
+        self._assert_case_finding(
+            control,
+            path="guardrails/deadline-trap.jsonl",
+            expected="expected.turn role",
+        )
 
     def test_judgment_fixed_fields_and_minimum_labels_are_checked(self) -> None:
         for field, value, expected in (

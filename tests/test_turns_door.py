@@ -14,7 +14,7 @@ import tempfile
 import threading
 import time
 import unittest
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -37,7 +37,7 @@ from gideon.host.render.api import (
 from gideon.host.render.ci import CI_ROOT, CI_SECRET_NAMES
 from gideon.host.render.owui import EVAL_IDENTITY
 from gideon.host.report import Problem
-from gideon.host.sysio import Command, PathLike
+from gideon.host.sysio import Command, Host, PathLike
 from tools.turns import cli
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -605,6 +605,103 @@ class ServiceDoor(unittest.TestCase):
         self.assertTrue(run_record["arguments"]["service"])
         self.assertFalse(run_record["arguments"]["instruction"])
 
+    def test_service_turn_structured_facts_exist_with_and_without_output(self) -> None:
+        prompt, answer = _seed_case("direct-01")
+        case = Case("direct-01", prompt, "refused", kind="positive")
+
+        class FixedDoorDriver(run_module.ServiceTurnDriver):
+            def __init__(self, reply: door.DoorReply) -> None:
+                super().__init__(
+                    cast(Host, FakeHost()),
+                    RENDERED_COMPOSE.parent,
+                    model="served",
+                    instruction=None,
+                    stream=True,
+                )
+                self.reply = reply
+
+            def turn(
+                self,
+                case: Case,
+                prompt: str,
+                *,
+                now: Callable[[], datetime],
+                monotonic: Callable[[], float],
+                ids_before: frozenset[str],
+                row_name: str,
+            ) -> run_module.TurnOutcome:
+                del case, prompt, now, monotonic, ids_before, row_name
+                return run_module.TurnOutcome(
+                    chat_id=None,
+                    assistant=None,
+                    user=None,
+                    elapsed=0.25,
+                    problem=None,
+                    extras=self.reply,
+                    started=10.0,
+                )
+
+        for output_enabled in (False, True):
+            with self.subTest(output=output_enabled), tempfile.TemporaryDirectory() as directory:
+                reply = door.DoorReply(
+                    status=200,
+                    media_type=door.EVENT_STREAM_MEDIA_TYPE,
+                    body_text="",
+                    events=(door.DoorEvent(0.01, (("content", answer),)),),
+                    done=True,
+                    elapsed=0.25,
+                    problem=None,
+                )
+                spec = run_module.RunSpec(
+                    cases=Path(directory) / "cases.yaml",
+                    repeat=1,
+                    stream=True,
+                    out=Path(directory) / "out" if output_enabled else None,
+                    force=False,
+                    dry_run=False,
+                    sentinel="turn-access-test",
+                    service=True,
+                )
+                row = run_module.service_turn(
+                    spec,
+                    driver=FixedDoorDriver(reply),
+                    guardrail=guardrail,
+                    case=case,
+                    session_number=1,
+                    row_name=case.id,
+                    now=lambda: FIXED_NOW,
+                    monotonic=lambda: 10.0,
+                )
+                tagged_prompt = session.prompt_text(case.id, spec.sentinel, prompt)
+                expected_class = classify.classify(
+                    guardrail,
+                    {"content": answer, "output": []},
+                    {"role": "user", "content": tagged_prompt},
+                )
+                expected_stream = classify.stream_verdict(
+                    guardrail,
+                    (("content", answer),),
+                    tagged_prompt,
+                )
+
+                self.assertEqual(row.elapsed, 0.25)
+                self.assertTrue(row.checks)
+                self.assertTrue(all(isinstance(value, bool) for value in row.checks.values()))
+                self.assertEqual(row.pattern_id, expected_class.pattern_id)
+                self.assertFalse(expected_stream.clean)
+                self.assertEqual(row.stream_pattern_id, expected_stream.pattern_id)
+                self.assertEqual(row.stream_offset, expected_stream.offset)
+                self.assertEqual(row.record is not None, output_enabled)
+                facts = (
+                    row.elapsed,
+                    row.checks,
+                    row.pattern_id,
+                    row.stream_pattern_id,
+                    row.stream_offset,
+                )
+                self.assertNotIn(prompt, repr(facts))
+                self.assertNotIn(answer, repr(facts))
+
     def test_ci_door_uses_ci_render_and_secret_contract(self) -> None:
         original_directory = secrets.current_directory()
         self.addCleanup(secrets.select_directory, original_directory)
@@ -623,8 +720,8 @@ class ServiceDoor(unittest.TestCase):
                 return object(), "", "", ""
 
             with (
-                patch.object(cli.render_command, "load_render_inputs", side_effect=load_inputs),
-                patch.object(cli, "general_texts", return_value=type("Texts", (), {"system_prompt": "instruction"})()),
+                patch.object(cli.access.render_command, "load_render_inputs", side_effect=load_inputs),
+                patch.object(cli.access, "general_texts", return_value=type("Texts", (), {"system_prompt": "instruction"})()),
             ):
                 code, stdout, stderr = _run_service(
                     host,

@@ -1,10 +1,16 @@
 """Shared result types for evaluation runners."""
 
+from __future__ import annotations
+
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from gideon.evaluation.rankmetrics import Coordinates
 from gideon.host.sysio import Host, PathLike
+
+if TYPE_CHECKING:
+    from gideon.evaluation.turns.access import TurnAccess
 
 type JSONValue = None | bool | int | float | str | list[JSONValue] | Mapping[str, JSONValue]
 
@@ -52,7 +58,11 @@ class SliceResult:
 
 @dataclass(frozen=True, slots=True)
 class RunContext:
-    """The host seams and runner settings for one evaluation slice."""
+    """The host seams and runner settings for one evaluation slice.
+
+    ``turns`` is present for a slice that drives turns through the harness's
+    service or managed frontend drivers.
+    """
 
     host: Host
     rendered_dir: PathLike
@@ -61,3 +71,4 @@ class RunContext:
     repeats: int
     progress: Callable[[str], None]
     ranked: Mapping[str, tuple[Coordinates, ...]] | None = None
+    turns: TurnAccess | None = None

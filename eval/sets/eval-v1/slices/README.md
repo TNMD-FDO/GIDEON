@@ -17,6 +17,11 @@ The `judge-triples` slice selects the invented judge triples in
 count. The slice stays on the kept side of the export boundary, as its cases are
 invented.
 
+The `guardrails` slice has one id list for each of its three category files in
+`../guardrails/`. Each list includes every source id, including superseded
+cases, and changes only by append. The suite is invented and stays on the kept
+side of the export boundary.
+
 The `judgments` slice selects the judgment set's queries in
 `../judgments/queries.jsonl`, one result per active query, scored against the
 judgments file by the `judgments@1` definition that `../judgments/README.md`
