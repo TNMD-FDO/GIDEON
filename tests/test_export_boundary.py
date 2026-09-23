@@ -21,6 +21,8 @@ from tools.exportboundary import (
     absent_from_export,
     in_export_tree,
     is_excluded,
+    is_file_prefix,
+    text_pattern,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -79,12 +81,6 @@ def _attribute_entries(text: str) -> tuple[tuple[int, str, bool], ...]:
     return tuple(entries)
 
 
-def _is_file_prefix(root: Path, prefix: str) -> bool:
-    """Return whether an existing prefix is a file; absent prefixes are directories."""
-
-    return (root / prefix).is_file()
-
-
 def rule_attributes(root: Path) -> list[Finding]:
     """Find differences between the boundary list and its attributes mirror."""
 
@@ -109,7 +105,7 @@ def rule_attributes(root: Path) -> list[Finding]:
         if prefix in mirrored:
             continue
         line = len(text.splitlines()) + 1
-        rendered = prefix if _is_file_prefix(root, prefix) else prefix + "/"
+        rendered = prefix if is_file_prefix(root, prefix) else prefix + "/"
         findings.append(
             _finding(
                 root,
@@ -122,7 +118,7 @@ def rule_attributes(root: Path) -> list[Finding]:
     for line, prefix, has_trailing_slash in entries:
         if prefix not in allowed or not (root / prefix).exists():
             continue
-        expected_trailing_slash = not _is_file_prefix(root, prefix)
+        expected_trailing_slash = not is_file_prefix(root, prefix)
         if has_trailing_slash == expected_trailing_slash:
             continue
         rendered = prefix + ("/" if expected_trailing_slash else "")
@@ -205,20 +201,6 @@ def _text_files(root: Path) -> tuple[Path, ...]:
     return tuple(sorted(paths))
 
 
-def _text_pattern(root: Path, prefix: str) -> re.Pattern[str]:
-    if "/" not in prefix and not prefix.startswith("."):
-        # A bare top-level name (`bin`, `CLAUDE.md`) is a path only at a path's
-        # start: not after a path character, so `/usr/bin` and `.venv/bin` are not it.
-        return re.compile(
-            r"(?<![A-Za-z0-9_.\\/'\"-])"
-            + re.escape(prefix)
-            + r"(?:/|(?![A-Za-z0-9_.-]))"
-        )
-    if _is_file_prefix(root, prefix):
-        return re.compile(re.escape(prefix) + r"(?![A-Za-z0-9_./-])")
-    return re.compile(re.escape(prefix) + r"(?:/|(?![A-Za-z0-9_.-]))")
-
-
 def rule_text(root: Path) -> list[Finding]:
     """Find excluded paths named by text in the scoped kept source files.
 
@@ -228,7 +210,7 @@ def rule_text(root: Path) -> list[Finding]:
     """
 
     findings: list[Finding] = []
-    patterns = {prefix: _text_pattern(root, prefix) for prefix in EXCLUDED_PREFIXES}
+    patterns = {prefix: text_pattern(root, prefix) for prefix in EXCLUDED_PREFIXES}
     for path in _text_files(root):
         relative = path.relative_to(root).as_posix()
         if relative in RESEARCH_NOTE_TEXT_EXEMPT or any(
@@ -508,9 +490,9 @@ class HelperContracts(unittest.TestCase):
             root = Path(directory)
             (root / "CLAUDE.md").write_text("development\n", encoding="utf-8")
             (root / "docs" / "agents").mkdir(parents=True)
-            self.assertTrue(_is_file_prefix(root, "CLAUDE.md"))
-            self.assertFalse(_is_file_prefix(root, "docs/agents"))
-            self.assertFalse(_is_file_prefix(root, "missing"))
+            self.assertTrue(is_file_prefix(root, "CLAUDE.md"))
+            self.assertFalse(is_file_prefix(root, "docs/agents"))
+            self.assertFalse(is_file_prefix(root, "missing"))
 
     def test_absent_from_export_contract(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

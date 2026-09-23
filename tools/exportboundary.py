@@ -1,13 +1,15 @@
-"""The public repository's export boundary (slice-1 tickets 56, 79, 87, and 88).
+"""The public repository's export boundary (slice-1 tickets 56, 79, 87–89).
 
 The public repository receives a ``git archive`` of each release tag; the
 paths listed here are omitted from the archive. ``.gitattributes``
 mirrors the list as ``export-ignore`` lines and ``tests/test_export_boundary.py``
-holds the two equal. A whole test that reads an excluded path skips in an
+holds the two equal; the tests also import ``is_file_prefix`` and
+``text_pattern``. A whole test that reads an excluded path skips in an
 exported tree by ``in_export_tree``; a single read uses ``absent_from_export``.
 A kept path's absence is never tolerated.
 """
 
+import re
 from pathlib import Path
 
 EXCLUDED_PREFIXES = (
@@ -83,6 +85,28 @@ def is_excluded(relative_posix_path: str) -> bool:
         or relative_posix_path.startswith(prefix + "/")
         for prefix in EXCLUDED_PREFIXES
     )
+
+
+def is_file_prefix(root: Path, prefix: str) -> bool:
+    """Return whether an existing prefix is a file; absent prefixes are directories."""
+
+    return (root / prefix).is_file()
+
+
+def text_pattern(root: Path, prefix: str) -> re.Pattern[str]:
+    """Build a text matcher for a path prefix using its shape under ``root``."""
+
+    if "/" not in prefix and not prefix.startswith("."):
+        # A bare top-level name (`bin`, `CLAUDE.md`) is a path only at a path's
+        # start: not after a path character, so `/usr/bin` and `.venv/bin` are not it.
+        return re.compile(
+            r"(?<![A-Za-z0-9_.\\/'\"-])"
+            + re.escape(prefix)
+            + r"(?:/|(?![A-Za-z0-9_.-]))"
+        )
+    if is_file_prefix(root, prefix):
+        return re.compile(re.escape(prefix) + r"(?![A-Za-z0-9_./-])")
+    return re.compile(re.escape(prefix) + r"(?:/|(?![A-Za-z0-9_.-]))")
 
 
 def absent_from_export(path: str | Path, root: Path) -> bool:
