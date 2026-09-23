@@ -36,6 +36,12 @@ def _run_reference(args: argparse.Namespace) -> int:
     return host_cli._guarded("eval reference", reference_command.run_reference, args)
 
 
+def _run_proposals(args: argparse.Namespace) -> int:
+    from gideon.improvement import proposals
+
+    return host_cli._guarded("proposals", proposals.run_proposals, args)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="gideon",
@@ -224,6 +230,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="recorded evaluation run id (§18.6)",
     )
     eval_reference.set_defaults(handler=_run_reference, command_path="eval reference")
+
+    proposals = commands.add_parser(
+        "proposals",
+        help="read the improvement proposals (§20.2, ADR-0049); read-only report",
+    )
+    proposals.set_defaults(handler=_run_proposals, command_path="proposals")
 
     backup = commands.add_parser("backup", help="backup set, off-box push, drill (§19)")
     backup_sub = backup.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)

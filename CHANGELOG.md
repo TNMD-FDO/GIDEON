@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.2.41](docs/release-notes/v0.2.41.md) — 2026-09-22 — the gideon proposals report (improvement 02)
 - [v0.2.40](docs/release-notes/v0.2.40.md) — 2026-09-22 — release-git passes the cycle's own tag (workflow 59)
 - [v0.2.39](docs/release-notes/v0.2.39.md) — 2026-09-22 — a rate-rejected count holds its release (general-turn 12)
 - [v0.2.38](docs/release-notes/v0.2.38.md) — 2026-09-22 — gideon-ci, one sibling stack (slice-2 19)

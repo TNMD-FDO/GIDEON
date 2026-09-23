@@ -56,7 +56,7 @@ GIDEON/
 │   ├── extraction/          # the exact-object contract, the extraction grammar, its measure — stdlib only (archi/eval-slices.md)
 │   ├── api/                 # the mounted gideon-api service package (§17.1; archi/api.md)
 │   ├── evaluation/          # the eval-set loader, the slice registry and its runners, the judge, the quiet window, the recorder, the reference format, the two `eval` commands, and `turns/` — the turn harness's drivers, classifier, cases reader, browser seam and launcher, and door (archi/eval.md; the runners and the judge archi/eval-slices.md)
-│   ├── improvement/         # the ADR-0049 improvement loops: trigger registry and later readers (archi/improvement.md)
+│   ├── improvement/         # the ADR-0049 improvement loops: the trigger registry, the `proposals` report, its section interface and read seam, the measure readers, and the trigger watch (archi/improvement.md)
 │   ├── guardrail/           # the arithmetic guardrail's judge, five modules (§9's third set; the judge's one home since general-turn ticket 09)
 │   │   └── grammar.py · families.py · judge.py · writer.py · window.py
 │   └── host/                # bare-host subtree: stdlib + yaml ONLY (§9)
@@ -165,6 +165,7 @@ One row per leaf, each command with its module:
 | `backup run` and `backup push` (`host/backup.py`) · `backup drill` (`host/drill.py`) · `restore` (`host/restore.py`) · `install` (`host/install.py`) · `upgrade <tag>` and `upgrade --rollback` (`host/upgrade.py`) | [`archi/backup-restore.md`](archi/backup-restore.md) |
 | `alerts test` (`host/alerts.py`) · `users reconcile [--now]` (`host/users.py`) · `tls reload` (`host/tls.py`) · `registry mirror [--to]` (`host/registry.py`) | [`archi/stack.md`](archi/stack.md) |
 | `eval run --slice <name> [--set <dir>] [--ranked <file>]` (`evaluation/command.py`) · `eval reference --run <id>` (`evaluation/reference_command.py`) | [`archi/eval.md`](archi/eval.md) |
+| `proposals` (`improvement/proposals.py`) | [`archi/improvement.md`](archi/improvement.md) |
 | `python3 -m tools.variants` (`tools/variants/`) | [`archi/eval-slices.md`](archi/eval-slices.md) |
 | `python -m gideon.api` (`gideon/api/`) | [`archi/api.md`](archi/api.md) |
 | `python3 -m tools.gate [--all] [--masked] [TEST_PATH ...]` · `python3 -m tools.imagebuild` · `sudo python3 -m tools.acceptance` · `sudo python3 -m tools.turns [--browser]` · `python3 -m tools.pinwatch` and its `.notes`, `.hub`, and `.bumped` · `python3 -m tools.redact --site <file>` · `python3 -m tools.courtmap --csv <file>` · `sudo python3 -m tools.cistack {up,down,status}`, each the module under `tools/` it names | [`archi/tools.md`](archi/tools.md) |
@@ -210,7 +211,7 @@ How the skeleton becomes the product, per §22 (sequence normative, calendar not
 | 3 Corpus + tranche 1 | `v0.4.0` | corpus/index commands, parsers, chunker, the worker `caselaw` path | `corpus` |
 | 4 Research go-live | `v0.5.0` | the `/turn` service: plan → retrieve → gate → render (§§11–13) | `turn` |
 
-Later slices (§22.1) bring authorities parsing, ingestion GA, and the 1.0 distribution flip. **The first service role has landed**: `gideon-api` (HTTP) shares the Python package while its interpreter and dependencies live in `images/gideon/`; the later `gideon-worker` (Procrastinate jobs) will join it under §17.1, with the host subtree untouched. The improvement loops (ADR-0049) have begun with the committed trigger registry, their leaf [`archi/improvement.md`](archi/improvement.md). The handoff note's build-time verification items are slice-time reading work, resolved via `/research` when their slice arrives.
+Later slices (§22.1) bring authorities parsing, ingestion GA, and the 1.0 distribution flip. **The first service role has landed**: `gideon-api` (HTTP) shares the Python package while its interpreter and dependencies live in `images/gideon/`; the later `gideon-worker` (Procrastinate jobs) will join it under §17.1, with the host subtree untouched. The improvement loops (ADR-0049) have begun with the committed trigger registry and the `gideon proposals` report that reads it, their leaf [`archi/improvement.md`](archi/improvement.md). The handoff note's build-time verification items are slice-time reading work, resolved via `/research` when their slice arrives.
 
 ## 13. Data Flow Diagrams
 
@@ -248,6 +249,7 @@ flowchart LR
     E -->|"eval run --slice <name>"| ER["evaluation/command.py: the gated, recorded run<br/>(archi/eval.md)"]
     E -->|"eval reference --run <id>"| EF["evaluation/reference_command.py: the reference<br/>(archi/eval.md)"]
     ER --> ST
+    E -->|"proposals"| PR["improvement/proposals.py: the read-only report<br/>(archi/improvement.md)"]
     E -->|"users reconcile [--now]"| U["users.py: ldapsearch membership → frontend roles<br/>→ audit.py rows"]
     E -->|"backup run"| BR["backup.py: the set under /data/backup-staging/sets/<br/>(archi/backup-restore.md)"]
     E -->|"backup push"| BP["backup.py: push.json, one rsync over SSH,<br/>the off-box check"]
@@ -269,7 +271,7 @@ flowchart LR
     UP --> BR
     UP --> EV
     E -->|"host gpu, corpus, …"| G["_stub → 'not implemented', exit 1"]
-    I & L & ST & OW & U & M & BP & AL & W & EV & ER & IN & UP & G --> H["exit code"]
+    I & L & ST & OW & U & M & BP & AL & W & EV & ER & PR & IN & UP & G --> H["exit code"]
 ```
 
 Absent from this chain by design, each through the same `sysio.Host` seam: the pin watch runs on a hosted runner and touches nothing on the box; the build tool runs only on the box, never from the product CLI or CI, which only *checks* its result; the acceptance harness runs only on the build box and touches nothing of the office's stack; the turn harness runs only on the box as the eval identity, against the office's own frontend, whose every chat it deletes, or against General's service directly. The deployed-product topology is §20.1's table — not redrawn here until the code implements it.
