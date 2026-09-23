@@ -986,6 +986,39 @@ class TurnHarness(TestCase):
                 self.assertIn("--stack production", text)
                 self.assertNotIn("signin:", text)
 
+    def test_missing_rendered_tree_fix_names_stack_writer(self) -> None:
+        for stack, fix in (
+            ("production", "Run sudo python3 -m gideon render, then retry."),
+            ("ci", "Run sudo python3 -m tools.cistack up, then retry."),
+        ):
+            with self.subTest(stack=stack):
+                original_directory = secrets.current_directory()
+                self.addCleanup(secrets.select_directory, original_directory)
+                host = FakeHost()
+                output = StringIO()
+                with redirect_stdout(output):
+                    code = cli.main(
+                        ["missing.yaml", "--stack", stack, "--service"],
+                        host=cast(Host, host),
+                        checkout=ROOT,
+                        site_path=SITE_PATH,
+                        now=lambda: FIXED_NOW,
+                    )
+
+                text = output.getvalue()
+                self.assertEqual(code, 1)
+                self.assertIn(
+                    f"preconditions: refuse — the rendered tree is unavailable Fix: {fix}",
+                    text,
+                )
+                self.assertEqual(host.commands, [])
+                self.assertNotIn("door:", text)
+                if stack == "ci":
+                    self.assertNotIn(
+                        "Run sudo python3 -m gideon render, then retry.",
+                        text,
+                    )
+
     def test_signin_body_turn_body_readback_and_replacement(self) -> None:
         frontend = Frontend(self.guardrail, {"replaced": "replaced"})
         prompt = "unique prompt never printed"

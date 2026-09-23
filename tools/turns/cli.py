@@ -92,6 +92,9 @@ _GPU_MODE_FIX: Final[str] = (
 _RENDERED_FIX: Final[str] = (
     "Run sudo python3 -m gideon render, then retry."
 )
+_CI_RENDERED_FIX: Final[str] = (
+    "Run sudo python3 -m tools.cistack up, then retry."
+)
 _BROWSER_ONLY_FIX: Final[str] = "Pass --browser with this flag, then retry."
 _CI_BROWSER_FIX: Final[str] = "Use --stack production with --browser, then retry."
 _CI_UNFILTERED_FIX: Final[str] = "Use --stack production without --unfiltered, then retry."
@@ -266,6 +269,7 @@ def main(
     # need no eval password. Both modes now call a GIDEON service directly.
     direct_mode = options.service or options.unfiltered
     rendered_dir = Path(CI_ROOT) if options.stack == "ci" else Path(_RENDERED_DIR)
+    rendered_fix = _CI_RENDERED_FIX if options.stack == "ci" else _RENDERED_FIX
     if options.unfiltered:
         refused_flag = _unfiltered_refusal(options, output)
         if refused_flag is not None:
@@ -345,7 +349,7 @@ def main(
                 "preconditions",
                 False,
                 "the rendered tree is unavailable",
-                _RENDERED_FIX,
+                rendered_fix,
             )
         )
         return 1
