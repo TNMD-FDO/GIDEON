@@ -15,12 +15,13 @@ from pathlib import Path
 from typing import Any, NoReturn, cast
 
 import gideon
-from gideon.host import backupset, grafana, secrets, stack
+from gideon.host import backupset, grafana, owui, secrets, stack
 from gideon.host.checks.capacity import DATA_DF_ARGV
 from gideon.host.render.grafana import GRAFANA_ADMIN_USER
 from gideon.host.report import Problem
 from gideon.host.sysio import Command, PathLike
-from gideon.improvement.sections import Context, Row, Section, SectionReport
+from gideon.improvement import feedback
+from gideon.improvement.sections import Context, Row, Scope, Section, SectionReport
 from gideon.status import command, glance
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -301,11 +302,11 @@ class FakeSection:
     def __init__(
         self,
         name: str,
-        scope: str,
+        scope: Scope,
         result: SectionReport | Problem,
     ) -> None:
         self.name = name
-        self.scope = scope
+        self.scope: Scope = scope
         self.result = result
         self.calls = 0
 
@@ -315,6 +316,22 @@ class FakeSection:
         if self.scope == "product":
             raise AssertionError("status rendered a product section")
         return self.result
+
+
+class FeedbackContextSection:
+    name: str = "feedback-context"
+    scope: Scope = "office"
+
+    def __init__(self) -> None:
+        self.reading: feedback.FeedbackReading | Problem | None = None
+        self.clock: float | None = None
+
+    def render(self, context: Context) -> SectionReport | Problem:
+        self.reading = context.feedback()
+        self.clock = context.now()
+        if isinstance(self.reading, Problem):
+            return self.reading
+        return SectionReport("read complete", ())
 
 
 class Status(unittest.TestCase):
@@ -336,7 +353,8 @@ class Status(unittest.TestCase):
         fake: FakeGrafana | None = None,
         *,
         factory_error: Exception | None = None,
-        sections: Sequence[FakeSection] | None = None,
+        sections: Sequence[Section] | None = None,
+        owui_factory: Any = None,
         site_path: PathLike = SITE_PATH,
         triggers_path: PathLike = TRIGGERS_PATH,
     ) -> tuple[int, str, str, list[object]]:
@@ -359,7 +377,8 @@ class Status(unittest.TestCase):
                 checkout_root=CHECKOUT,
                 triggers_path=triggers_path,
                 client_factory=client_factory,
-                sections=cast(Sequence[Section] | None, sections),
+                owui_client_factory=owui_factory,
+                sections=cast(Sequence[Section] | None, sections or ()),
                 now=NOW,
             )
         return code, out.getvalue(), err.getvalue(), factory_calls
@@ -506,7 +525,11 @@ class Status(unittest.TestCase):
         fired = FakeSection(
             "office-fired",
             "office",
-            SectionReport("section detail", (Row("owed-action", "fired", "one action"), Row("quiet", "not fired", "none"))),
+            SectionReport("section detail", (
+                Row("owed-action", "fired", "one action"),
+                Row("rated-item", "rated", "feedback count"),
+                Row("quiet", "not fired", "none"),
+            )),
         )
         none = FakeSection(
             "office-none",
@@ -528,9 +551,63 @@ class Status(unittest.TestCase):
         self.assertIn("owed-action: one action", waiting)
         self.assertIn("office-problem: fictional read failed Fix: Run the fictional reader.", waiting)
         self.assertNotIn("quiet", waiting)
+        self.assertNotIn("rated-item", waiting)
         self.assertNotIn("not-owed", waiting)
         self.assertNotIn("product-section", waiting)
         self.assertEqual(product.calls, 0)
+
+    def test_feedback_context_fields_and_owui_factory_reach_read(self) -> None:
+        host = self.make_host()
+        host.files[os.fspath(secrets.secret_path("gideon_admin_api_key"))] = "fictional-admin-key"
+        section = FeedbackContextSection()
+        calls: list[tuple[str, str]] = []
+
+        class Client:
+            def request(self, method: str, path: str, **kwargs: object) -> owui.Response:
+                del kwargs
+                calls.append((method, path))
+                return owui.Response(200, {"items": [], "total": 0})
+
+        def factory(**kwargs: object) -> owui.Client:
+            self.assertEqual(kwargs.get("api_key"), "fictional-admin-key")
+            return cast(owui.Client, Client())
+
+        code, _stdout, stderr, _ = self.run_status(
+            host, FakeGrafana(), sections=(section,), owui_factory=factory
+        )
+        self.assertEqual((code, stderr), (0, ""))
+        self.assertEqual(section.reading, feedback.FeedbackReading((), 0))
+        self.assertEqual(section.clock, NOW.timestamp())
+        self.assertEqual(calls, [("GET", "/api/v1/evaluations/feedbacks/list?page=1")])
+
+    def test_frontend_down_is_one_waiting_line_under_the_registered_sections(self) -> None:
+        host = self.make_host()
+        host.files[os.fspath(secrets.secret_path("gideon_admin_api_key"))] = "fictional-admin-key"
+
+        def factory(**kwargs: object) -> owui.Client:
+            del kwargs
+            raise owui.OwuiError("Open WebUI request failed.", "Check Open WebUI availability, then retry.")
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            code = command.run_status(
+                argparse.Namespace(),
+                host=host,
+                site_path=SITE_PATH,
+                rendered_dir=RENDERED,
+                staging=STAGING,
+                checkout_root=CHECKOUT,
+                triggers_path=TRIGGERS_PATH,
+                client_factory=lambda **kwargs: cast(grafana.Client, FakeGrafana()),
+                owui_client_factory=factory,
+                now=NOW,
+            )
+        waiting = out.getvalue().split("waiting on you\n", 1)[1].split("at a glance\n", 1)[0]
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            waiting,
+            "feedback: Open WebUI request failed. Fix: Check Open WebUI availability, then retry.\n",
+        )
 
     def test_waiting_block_reports_none_and_unloadable_registry(self) -> None:
         host = self.make_host()

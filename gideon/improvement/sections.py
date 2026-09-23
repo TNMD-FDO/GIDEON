@@ -20,11 +20,12 @@ from gideon.evaluation.record import (
 from gideon.host import stack
 from gideon.host.report import Problem
 from gideon.host.sysio import Host, PathLike
+from gideon.improvement.feedback import FeedbackReading
 from gideon.improvement.triggers import TriggerRegistry
 
 type Scope = Literal["product", "office"]
 type RowState = Literal[
-    "fired", "not fired", "not yet measurable", "skipped", "refuse"
+    "fired", "not fired", "not yet measurable", "skipped", "refuse", "rated"
 ]
 
 
@@ -47,7 +48,11 @@ class SectionReport:
 
 @dataclass(frozen=True, slots=True)
 class Context:
-    """Read-only inputs shared with every improvement section."""
+    """Read-only inputs shared with every improvement section.
+
+    ``feedback`` reads the content-free frontend seam, and ``now`` supplies
+    the seconds clock used by time-windowed sections.
+    """
 
     host: Host
     checkout_root: Path
@@ -55,6 +60,8 @@ class Context:
     registry: TriggerRegistry
     build_box: bool
     query: Callable[[str], tuple[str, ...] | Problem]
+    feedback: Callable[[], FeedbackReading | Problem]
+    now: Callable[[], float]
 
 
 class Section(Protocol):

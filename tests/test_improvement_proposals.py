@@ -10,13 +10,14 @@ import sys
 import unittest
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import NoReturn
+from typing import NoReturn, cast
 from unittest.mock import patch
 
 from gideon import cli
 from gideon.evaluation import evalset, judgments, record
-from gideon.host import report, stack
+from gideon.host import owui, report, secrets, stack
 from gideon.host.nogpu import BUILD_BOX_PATH, NO_GPU_PATH
+from gideon.host.render.owui import FEEDBACK_LIST_ROUTE
 from gideon.host.report import Problem
 from gideon.host.sysio import Command, PathLike
 from gideon.improvement import proposals, triggers, watch
@@ -29,6 +30,8 @@ from gideon.improvement.sections import (
 
 ROOT = Path(__file__).resolve().parent.parent
 IMPROVEMENT = ROOT / "gideon" / "improvement"
+# The CLI cases hold the triggers section alone; the feedback cases below bring its read.
+TRIGGERS_ONLY = (watch.TRIGGERS_SECTION,)
 REGISTRY_PATH = ROOT / "config" / "triggers.yaml"
 RENDERED = Path("/etc/gideon/rendered")
 DIAGNOSTIC = "FICTIONAL_DATABASE_DIAGNOSTIC"
@@ -252,6 +255,7 @@ class ReportCase(unittest.TestCase):
         stderr = io.StringIO()
         with (
             patch.object(proposals, "RealHost", return_value=host),
+            patch.object(proposals, "SECTIONS", TRIGGERS_ONLY),
             contextlib.redirect_stdout(stdout),
             contextlib.redirect_stderr(stderr),
         ):
@@ -302,7 +306,7 @@ class ReportCase(unittest.TestCase):
         )
         self.assertTrue(
             stdout.rstrip().endswith(
-                f"proposals: {fired} fired, {len(proposals.SECTIONS)} sections, 0 skipped"
+                f"proposals: {fired} fired, {len(TRIGGERS_ONLY)} sections, 0 skipped"
             )
         )
 
@@ -326,7 +330,7 @@ class ReportCase(unittest.TestCase):
                     self.assertNotIn(f"  {trigger.id}:", stdout)
                 self.assertTrue(
                     stdout.rstrip().endswith(
-                        f"proposals: 0 fired, {len(proposals.SECTIONS)} sections, 1 skipped"
+                        f"proposals: 0 fired, {len(TRIGGERS_ONLY)} sections, 1 skipped"
                     )
                 )
 
@@ -509,7 +513,8 @@ triggers:
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):
             code = proposals.run_proposals(
-                argparse.Namespace(), host=host, checkout_root=ROOT
+                argparse.Namespace(), host=host, checkout_root=ROOT,
+                sections=TRIGGERS_ONLY,
             )
         rendered = stdout.getvalue()
         self.assertEqual(code, 0)
@@ -521,6 +526,12 @@ triggers:
 
     def test_improvement_package_imports_only_allowed_top_level_modules(self) -> None:
         allowed = set(sys.stdlib_module_names) | {"yaml", "gideon"}
+        new_modules = {
+            IMPROVEMENT / "feedback.py",
+            IMPROVEMENT / "owuifeedback.py",
+            IMPROVEMENT / "ratings.py",
+        }
+        self.assertTrue(new_modules.issubset(set(IMPROVEMENT.rglob("*.py"))))
         for path in sorted(IMPROVEMENT.rglob("*.py")):
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             for node in ast.walk(tree):
@@ -532,6 +543,79 @@ triggers:
                     continue
                 for name in names:
                     self.assertIn(name.split(".", 1)[0], allowed, path)
+
+    def test_feedback_section_follows_triggers_and_rated_is_not_fired(self) -> None:
+        self.assertEqual(
+            tuple(section.name for section in proposals.SECTIONS),
+            ("triggers", "feedback"),
+        )
+        self.assertIn("rated", proposals.ROW_STATES)
+        host = self._host(build_box=True)
+        host.files[str(ROOT / "config/site.example.yaml")] = (ROOT / "config/site.example.yaml").read_text()
+        host.files[str(secrets.secret_path("gideon_admin_api_key"))] = "fictional-admin-key"
+        page = {"items": [{
+            "id": "fictional-rating-id", "type": "rating",
+            "data": {"rating": 1, "model_id": "fictional-rated-model"},
+            "meta": {"chat_id": "fictional-chat", "message_id": "fictional-message"},
+            "created_at": 2_000_000_000,
+        }], "total": 1}
+
+        class Client:
+            def request(self, method: str, path: str, **kwargs: object) -> owui.Response:
+                del kwargs
+                calls.append((method, path))
+                return owui.Response(200, page)
+
+        calls: list[tuple[str, str]] = []
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = proposals.run_proposals(
+                argparse.Namespace(), host=host, checkout_root=ROOT,
+                site_path=ROOT / "config/site.example.yaml",
+                client_factory=lambda **kwargs: cast(owui.Client, Client()),
+            )
+        rendered = output.getvalue()
+        self.assertEqual(code, 0)
+        self.assertLess(rendered.index("section triggers"), rendered.index("section feedback"))
+        self.assertIn("fictional-rated-model: rated", rendered)
+        trigger_lines = rendered.split("section feedback", 1)[0].splitlines()
+        fired = sum(": fired —" in line for line in trigger_lines)
+        self.assertTrue(rendered.rstrip().endswith(
+            f"proposals: {fired} fired, {len(proposals.SECTIONS)} sections, 0 skipped"
+        ))
+        self.assertEqual(calls, [("GET", f"{FEEDBACK_LIST_ROUTE}?page=1")])
+        self.assertFalse(host.write_attempted)
+
+    def test_refused_feedback_read_is_one_refuse_and_exits_one_without_writes(self) -> None:
+        host = self._host(build_box=True)
+        host.files[str(ROOT / "config/site.example.yaml")] = (ROOT / "config/site.example.yaml").read_text()
+        host.files[str(secrets.secret_path("gideon_admin_api_key"))] = "fictional-admin-key"
+
+        class Client:
+            def request(self, method: str, path: str, **kwargs: object) -> owui.Response:
+                del method, path, kwargs
+                return owui.Response(503, "FICTIONAL_BODY_SENTINEL")
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = proposals.run_proposals(
+                argparse.Namespace(), host=host, checkout_root=ROOT,
+                site_path=ROOT / "config/site.example.yaml",
+                client_factory=lambda **kwargs: cast(owui.Client, Client()),
+            )
+        rendered = output.getvalue()
+        self.assertEqual(code, 1)
+        self.assertIn("section feedback (office): refused", rendered)
+        self.assertIn("feedback: refuse — Open WebUI answered", rendered)
+        self.assertEqual(rendered.count("feedback: refuse —"), 1)
+        self.assertIn("Fix: Check Open WebUI availability", rendered)
+        self.assertNotIn("FICTIONAL_BODY_SENTINEL", rendered)
+        trigger_lines = rendered.split("section feedback", 1)[0].splitlines()
+        fired = sum(": fired —" in line for line in trigger_lines)
+        self.assertTrue(rendered.rstrip().endswith(
+            f"proposals: {fired} fired, {len(proposals.SECTIONS)} sections, 0 skipped"
+        ))
+        self.assertFalse(host.write_attempted)
 
     def test_proposals_help_names_the_surface_section(self) -> None:
         output = io.StringIO()

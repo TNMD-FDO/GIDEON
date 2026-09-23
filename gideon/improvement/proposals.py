@@ -2,14 +2,15 @@
 
 import argparse
 import sys
-from collections.abc import Sequence
+import time
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final
 
-from gideon.host import nogpu
+from gideon.host import nogpu, owui
 from gideon.host.report import Problem, one_line, refusal
 from gideon.host.sysio import Host, PathLike, RealHost
-from gideon.improvement import triggers
+from gideon.improvement import owuifeedback, ratings, triggers
 from gideon.improvement.sections import (
     Context,
     Row,
@@ -19,13 +20,17 @@ from gideon.improvement.sections import (
 )
 from gideon.improvement.watch import TRIGGERS_SECTION
 
-SECTIONS: Final[tuple[Section, ...]] = (TRIGGERS_SECTION,)
+SECTIONS: Final[tuple[Section, ...]] = (
+    TRIGGERS_SECTION,
+    ratings.FEEDBACK_SECTION,
+)
 ROW_STATES: Final[tuple[RowState, ...]] = (
     "fired",
     "not fired",
     "not yet measurable",
     "skipped",
     "refuse",
+    "rated",
 )
 SECTION_HEADER: Final[str] = "section {name} ({scope}): {detail}"
 CLOSING_LINE: Final[str] = "proposals: {fired} fired, {sections} sections, {skipped} skipped"
@@ -62,6 +67,8 @@ def run_proposals(
     rendered_dir: PathLike = "/etc/gideon/rendered",
     triggers_path: PathLike | None = None,
     sections: Sequence[Section] | None = None,
+    site_path: PathLike = "/etc/gideon/site.yaml",
+    client_factory: Callable[..., owui.Client] | None = None,
 ) -> int:
     """Load the registry, walk sections, and return the report exit code."""
 
@@ -82,6 +89,8 @@ def run_proposals(
         registry=loaded.registry,
         build_box=build_box,
         query=lambda sql: read_rows(io, rendered, sql),
+        feedback=owuifeedback.source(io, site_path, client_factory).read,
+        now=time.time,
     )
     registered = SECTIONS if sections is None else tuple(sections)
     refused = False

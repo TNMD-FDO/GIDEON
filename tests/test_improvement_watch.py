@@ -10,6 +10,7 @@ from gideon.evaluation import evalset, judgments
 from gideon.host.report import Problem
 from gideon.host.sysio import Command, PathLike
 from gideon.improvement import triggers
+from gideon.improvement.feedback import FeedbackReading
 from gideon.improvement.measures import READERS
 from gideon.improvement.sections import Context
 from gideon.improvement.watch import (
@@ -191,6 +192,8 @@ def _context(host: MeasureHost) -> Context:
         registry=registry,
         build_box=False,
         query=lambda _sql: (),
+        feedback=lambda: FeedbackReading((), 0),
+        now=lambda: 0.0,
     )
 
 

@@ -41,6 +41,7 @@ from gideon.host.render.owui import (
     BRANCH_GATE_TEMPLATE,
     BREAK_GLASS,
     EVAL_IDENTITY,
+    FEEDBACK_LIST_ROUTE,
     GENERAL_CAPABILITIES,
     GENERAL_FUNCTION_CALLING,
     GENERAL_PRESET_ID,
@@ -125,6 +126,14 @@ def inputs(site_path: Path = EXAMPLE, **overrides: object) -> RenderInputs:
 
 
 class Environment(unittest.TestCase):
+    def test_rating_switch_is_on_for_every_rendered_host_kind(self) -> None:
+        for site_path, no_gpu in ((EXAMPLE, False), (SECOND, False), (EXAMPLE, True)):
+            with self.subTest(site_path=site_path, no_gpu=no_gpu):
+                env = owui_environment(inputs(site_path, no_gpu=no_gpu))
+                self.assertEqual(env["ENABLE_MESSAGE_RATING"], "true")
+        self.assertEqual(len(ALLOWED_ENDPOINTS), 9)
+        self.assertEqual(ALLOWED_ENDPOINTS[8], FEEDBACK_LIST_ROUTE)
+
     def test_the_identity_and_policy_env_is_the_spec_verbatim(self) -> None:
         env = owui_environment(inputs())
         self.assertEqual(env["WEBUI_NAME"], "GIDEON")

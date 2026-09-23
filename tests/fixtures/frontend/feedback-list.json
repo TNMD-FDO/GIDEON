@@ -1,0 +1,75 @@
+{
+  "items": [
+    {
+      "id": "fictional-saved-rating",
+      "user_id": "fictional-rater-id",
+      "version": 0,
+      "type": "rating",
+      "data": {
+        "rating": -1,
+        "model_id": "fictional-model-z",
+        "sibling_model_ids": [
+          "fictional-sibling-model"
+        ],
+        "reason": "FICTIONAL_FEEDBACK_SENTINEL_7Q",
+        "comment": "FICTIONAL_FEEDBACK_SENTINEL_7Q",
+        "tags": [
+          "FICTIONAL_FEEDBACK_SENTINEL_7Q"
+        ],
+        "details": {
+          "rating": 7
+        }
+      },
+      "meta": {
+        "arena": false,
+        "chat_id": "fictional-chat-id",
+        "message_id": "fictional-message-id",
+        "message_index": 2,
+        "model_id": "fictional-model-z",
+        "base_models": {
+          "fictional-model-z": "fictional-base-model"
+        }
+      },
+      "created_at": 1700000000,
+      "updated_at": 1700000001,
+      "user": {
+        "id": "fictional-rater-id",
+        "name": "FICTIONAL_FEEDBACK_SENTINEL_7Q",
+        "email": "feedback-sentinel@example.com",
+        "role": "user",
+        "last_active_at": 1700000001,
+        "updated_at": 1700000001,
+        "created_at": 1600000000
+      }
+    },
+    {
+      "id": "fictional-bare-thumb",
+      "user_id": "fictional-rater-id",
+      "version": 0,
+      "type": "rating",
+      "data": {
+        "rating": 1,
+        "model_id": "fictional-model-a"
+      },
+      "meta": {
+        "arena": false,
+        "chat_id": "fictional-bare-chat",
+        "message_id": "fictional-bare-message",
+        "message_index": 1,
+        "model_id": "fictional-model-a"
+      },
+      "created_at": 1700000002,
+      "updated_at": 1700000002,
+      "user": {
+        "id": "fictional-rater-id",
+        "name": "FICTIONAL_FEEDBACK_SENTINEL_7Q",
+        "email": "feedback-sentinel@example.com",
+        "role": "user",
+        "last_active_at": 1700000002,
+        "updated_at": 1700000002,
+        "created_at": 1600000000
+      }
+    }
+  ],
+  "total": 2
+}

@@ -63,10 +63,18 @@ BRANCH_GATE_DESCRIPTION: Final = (
 # merges `meta` or replaces it, and the read-back's stale-key check still has
 # a key to compare (§15; docs/research/owui-filter-function.md §3.2).
 GENERAL_FILTER_IDS: Final[tuple[str, ...]] = ()
+# The feedback adapter's one read (improvement ticket 05): the admin list
+# route, which answers each rating without its chat snapshot.  The pinned
+# frontend admits a key's request when the path equals an entry or begins with
+# it and a slash, the admin role getting no bypass, so this exact entry admits
+# the one GET and leaves the export twin, the deletes, and the arena config
+# under the evaluations router out (docs/research/owui-feedback-record.md §3).
+FEEDBACK_LIST_ROUTE: Final[str] = "/api/v1/evaluations/feedbacks/list"
 ALLOWED_ENDPOINTS: Final[tuple[str, ...]] = (
     # Prefixes, not just the sync paths: the admin key lists Functions and
     # models before each desired-state sync so removals are reported by id;
     # role gating still refuses the eval identity every admin-only listing.
+    # The feedback list route alone is an exact path, not a prefix.
     "/api/v1/functions",
     "/api/v1/models",
     "/api/v1/groups",
@@ -75,6 +83,7 @@ ALLOWED_ENDPOINTS: Final[tuple[str, ...]] = (
     "/api/v1/auths/add",
     "/api/chat/completions",
     "/api/models",
+    FEEDBACK_LIST_ROUTE,
 )
 SERVICE_GROUP: Final = "gideon-service"
 
@@ -520,6 +529,13 @@ def owui_environment(
         environment["ENABLE_WEB_SEARCH"] = "false"
     environment.update(
         {
+            # Thumbs on for every chat the frontend shows (improvement ticket
+            # 05's ruling, superseding §18.6's "in Research"): the pinned
+            # frontend shows them when this switch and the chat.rate_response
+            # permission both hold and reads no model record for either, so
+            # there is no per-model gate (docs/research/owui-feedback-record.md
+            # §4).  Upstream default true; exempt: policy toggle.
+            "ENABLE_MESSAGE_RATING": "true",
             # The pinned frontend's evaluation arena (anonymous chatbots,
             # votes, a leaderboard) is on by default and offered to admins
             # alone; an arena turn draws a model at random from the

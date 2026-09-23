@@ -7,11 +7,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
-from gideon.host import backupset, grafana, nogpu, secrets, site, tls
+from gideon.host import backupset, grafana, nogpu, owui, secrets, site, tls
 from gideon.host.render.grafana import GRAFANA_ADMIN_USER
 from gideon.host.report import Problem, one_line, refusal
 from gideon.host.sysio import Host, PathLike, RealHost
-from gideon.improvement import proposals, triggers
+from gideon.improvement import owuifeedback, proposals, triggers
 from gideon.improvement import sections as improvement_sections
 from gideon.status import attention, glance
 
@@ -46,6 +46,9 @@ def _waiting_lines(
     rendered_dir: Path,
     triggers_path: PathLike | None,
     registered: Sequence[improvement_sections.Section] | None,
+    site_path: PathLike,
+    owui_client_factory: Callable[..., owui.Client] | None,
+    now: Callable[[], float],
 ) -> tuple[str, ...]:
     registry_path = (
         checkout_root / "config/triggers.yaml"
@@ -64,6 +67,12 @@ def _waiting_lines(
         registry=loaded.registry,
         build_box=nogpu.is_build_box(host),
         query=lambda sql: improvement_sections.read_rows(host, rendered_dir, sql),
+        feedback=owuifeedback.source(
+            host,
+            site_path,
+            owui_client_factory,
+        ).read,
+        now=now,
     )
     selected = proposals.SECTIONS if registered is None else tuple(registered)
     lines: list[str] = []
@@ -110,6 +119,7 @@ def run_status(
     checkout_root: PathLike | None = None,
     triggers_path: PathLike | None = None,
     client_factory: Callable[..., grafana.Client] | None = None,
+    owui_client_factory: Callable[..., owui.Client] | None = None,
     sections: Sequence[improvement_sections.Section] | None = None,
     now: datetime | None = None,
 ) -> int:
@@ -156,6 +166,9 @@ def run_status(
         rendered_dir=rendered,
         triggers_path=triggers_path,
         registered=sections,
+        site_path=site_path,
+        owui_client_factory=owui_client_factory,
+        now=lambda: current.timestamp(),
     ):
         _print_line(line)
 

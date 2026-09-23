@@ -58,7 +58,7 @@ chat:
   delete_message: true # upstream default
   continue_response: true # upstream default
   regenerate_response: true # upstream default
-  rate_response: true # upstream default
+  rate_response: true # improvement ticket 05's ruling; upstream default: true
   edit: true # upstream default
   share: false # plan rule: no chat share links
   export: true # §4.2 value

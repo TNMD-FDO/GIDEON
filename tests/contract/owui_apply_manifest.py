@@ -53,8 +53,11 @@ from gideon.host.render.owui import (
     GENERAL_PRESET_ID,
     SERVICE_GROUP,
 )
+from gideon.host.report import Problem
 from gideon.host.site import load_site
 from gideon.host.sysio import RealHost
+from gideon.improvement import owuifeedback
+from gideon.improvement.feedback import FeedbackReading
 
 MANIFEST = ROOT / "tests/fixtures/render/example/open-webui/manifest.yaml"
 COMPOSE_TEMPLATE = ROOT / "tests/contract/compose.yaml"
@@ -102,6 +105,8 @@ class ContractStack:
         self.directory = Path(tempfile.mkdtemp(prefix="gideon-ci-contract-"))
         self.secrets = self.directory / "secrets"
         self.secrets.mkdir(mode=0o700)
+        self.site_path = self.directory / "site.yaml"
+        shutil.copy(EXAMPLE_SITE, self.site_path)
         # Every role the stores stage converges needs its password file, so the
         # set is derived from the release's role table — a new role (v0.0.22's
         # metrics reader) must never leave this harness behind.
@@ -318,6 +323,7 @@ class ApplyManifestContract(unittest.TestCase):
             self.assertIsInstance(chat, dict)
             assert isinstance(chat, dict)
             self.assertFalse(chat["web_upload"])
+            self.assertTrue(chat["rate_response"])
 
     def _assert_live_model_listing(self, client: owui.Client, *, arena: bool = False) -> None:
         """Hold the chat-facing listing to the stub model and General."""
@@ -549,6 +555,10 @@ class ApplyManifestContract(unittest.TestCase):
         assert isinstance(config.body, dict)
         self.assertIsInstance(config.body["default_models"], str)
         self.assertEqual(config.body["default_models"], GENERAL_PRESET_ID)
+        features = config.body["features"]
+        self.assertIsInstance(features, dict)
+        assert isinstance(features, dict)
+        self.assertIs(features["enable_message_rating"], True)
 
         self._assert_live_model_listing(admin)
 
@@ -562,6 +572,25 @@ class ApplyManifestContract(unittest.TestCase):
             },
         )
         self.assertEqual(edited_models.status, 200, edited_models.body)
+
+        admin_form = admin.request("GET", "/api/v1/auths/admin/config")
+        self.assertEqual(admin_form.status, 200, admin_form.body)
+        self.assertIsInstance(admin_form.body, dict)
+        assert isinstance(admin_form.body, dict)
+        edited_form = dict(admin_form.body)
+        edited_form["ENABLE_MESSAGE_RATING"] = False
+        rating_edit = admin.request(
+            "POST", "/api/v1/auths/admin/config", edited_form
+        )
+        self.assertEqual(rating_edit.status, 200, rating_edit.body)
+        edited_rating_config = admin.request("GET", "/api/config")
+        self.assertEqual(edited_rating_config.status, 200, edited_rating_config.body)
+        assert isinstance(edited_rating_config.body, dict)
+        edited_features = edited_rating_config.body["features"]
+        self.assertIsInstance(edited_features, dict)
+        assert isinstance(edited_features, dict)
+        self.assertIs(edited_features["enable_message_rating"], False)
+
         edited_config = admin.request("GET", "/api/config")
         self.assertEqual(edited_config.status, 200, edited_config.body)
         assert isinstance(edited_config.body, dict)
@@ -591,11 +620,86 @@ class ApplyManifestContract(unittest.TestCase):
         self.assertEqual(restored_config.status, 200, restored_config.body)
         assert isinstance(restored_config.body, dict)
         self.assertEqual(restored_config.body["default_models"], GENERAL_PRESET_ID)
+        restored_features = restored_config.body["features"]
+        self.assertIsInstance(restored_features, dict)
+        assert isinstance(restored_features, dict)
+        self.assertIs(restored_features["enable_message_rating"], True)
         self._assert_live_model_listing(admin)
         restored_arena = admin.request("GET", "/api/v1/evaluations/config")
         self.assertEqual(restored_arena.status, 200, restored_arena.body)
         assert isinstance(restored_arena.body, dict)
         self.assertFalse(restored_arena.body["ENABLE_EVALUATION_ARENA_MODELS"])
+
+    def test_rating_round_trip_reads_ids_alone_and_the_export_is_refused(self) -> None:
+        """The adapter reads a user's rating as five fields; the key reaches no export."""
+
+        # Sorted after the hand-added case, whose first bootstrap asserts the
+        # mint; converged again here so the case also runs alone.
+        converged = owui.bootstrap(ContractHost(), client_factory, self.manifest(), rendered_dir=self.stack.directory)
+        self.assertTrue(converged.ok, converged)
+        sentinel = "FICTIONAL_FEEDBACK_BODY_SENTINEL_8K"
+        token = client_factory().signin(
+            EVAL_IDENTITY.email,
+            self.stack.passwords["gideon_eval_password"],
+        )
+        user = client_factory(token=token)
+        chat_id = "fictional-feedback-chat"
+        message_id = "fictional-feedback-message"
+        posted = user.request(
+            "POST",
+            "/api/v1/evaluations/feedback",
+            {
+                "type": "rating",
+                "data": {
+                    "rating": -1,
+                    "model_id": GENERAL_PRESET_ID,
+                    "comment": sentinel,
+                    "tags": [sentinel],
+                },
+                "meta": {
+                    "arena": False,
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "message_index": 0,
+                    "model_id": GENERAL_PRESET_ID,
+                },
+                "snapshot": {
+                    "chat": {"messages": [{"role": "user", "content": sentinel}]}
+                },
+            },
+        )
+        self.assertEqual(posted.status, 200, posted.body)
+        self.assertIsInstance(posted.body, dict)
+        assert isinstance(posted.body, dict)
+        created_at = posted.body["created_at"]
+        self.assertIs(type(created_at), int)
+
+        reading = owuifeedback.read(
+            ContractHost(), self.stack.site_path, client_factory
+        )
+        self.assertNotIsInstance(reading, Problem)
+        self.assertIsInstance(reading, FeedbackReading)
+        assert isinstance(reading, FeedbackReading)
+        self.assertEqual(len(reading.records), 1)
+        record = reading.records[0]
+        self.assertEqual(
+            (
+                record.rating,
+                record.chat_id,
+                record.message_id,
+                record.model_id,
+                record.created_at,
+            ),
+            ("down", chat_id, message_id, GENERAL_PRESET_ID, created_at),
+        )
+        self.assertNotIn(sentinel, repr(reading))
+
+        admin_key = (self.stack.secrets / "gideon_admin_api_key").read_text().strip()
+        admin_api = client_factory(api_key=admin_key)
+        exported = admin_api.request(
+            "GET", "/api/v1/evaluations/feedbacks/all/export"
+        )
+        self.assertEqual(exported.status, 403)
 
     def test_store_convergence_is_idempotent_and_the_audit_role_is_insert_only(self) -> None:
         again = stores.converge(ContractHost(), self.stack.directory, root=ROOT)
