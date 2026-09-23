@@ -4,4 +4,4 @@ Skeleton package: structure and CLI stubs only; behaviour arrives slice by
 slice under TRIP plans.
 """
 
-__version__ = "0.2.48"
+__version__ = "0.2.49"
