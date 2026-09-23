@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.2.47](docs/release-notes/v0.2.47.md) — 2026-09-23 — the amend takes the message file (workflow 61)
 - [v0.2.46](docs/release-notes/v0.2.46.md) — 2026-09-23 — kept tree cites nothing the export omits (slice-1 89)
 - [v0.2.45](docs/release-notes/v0.2.45.md) — 2026-09-23 — a bare number at a full stop blocks (workflow 58)
 - [v0.2.44](docs/release-notes/v0.2.44.md) — 2026-09-23 — the guardrails suite under gideon eval (slice-2 12)
