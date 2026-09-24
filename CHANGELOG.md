@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.2.67](docs/release-notes/v0.2.67.md) — 2026-09-24 — Transcribe's Vision hours in the ledger
 - [v0.2.66](docs/release-notes/v0.2.66.md) — 2026-09-24 — the names rule's spec-issue kind
 - [v0.2.65](docs/release-notes/v0.2.65.md) — 2026-09-24 — the note names a rebuilt image
 - [v0.2.64](docs/release-notes/v0.2.64.md) — 2026-09-24 — the version reserved for its branch
