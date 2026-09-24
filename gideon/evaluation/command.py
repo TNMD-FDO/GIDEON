@@ -768,7 +768,7 @@ def _run_body(
     else:
         cases = len({result.case_id for result in slice_result.results})
         run_detail = (
-            f"{len(slice_result.results)} gradings over {cases} active cases "
+            f"{len(slice_result.results)} results over {cases} active cases "
             f"at {slice_spec.repeats} repeats"
         )
     if selection.takes_signoff:

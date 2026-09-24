@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
 from gideon.evaluation import judgments, signoffs
@@ -726,6 +727,28 @@ def _superseding(case_id: str, target: str) -> str:
     return json.dumps(record, separators=(",", ":"))
 
 
+def _general_smoke_case() -> dict[str, object]:
+    return {
+        "id": "smoke-01",
+        "suite": "general",
+        "category": "smoke",
+        "branch": "general",
+        "question": SENTINEL,
+        "expected": {
+            "expect": "answered",
+            "block": "any",
+            "sources": "any",
+            "search": False,
+            "must": [r"fictional-expected-regex"],
+            "must_not": [],
+        },
+        "labels": ["invented"],
+        "cluster_id": "smoke-01",
+        "review": {"by": "CSA-1", "on": "2026-09-23"},
+        "notes": "",
+    }
+
+
 class ShapeRefusals(unittest.TestCase):
     """The loader reports each shape and relationship rule without question text."""
 
@@ -1216,6 +1239,71 @@ class ShapeRefusals(unittest.TestCase):
                 record = json.loads(_case("extraction-001"))
                 record.update(update)
                 self._assert_case_finding(record, expected=expected)
+
+    def test_general_smoke_rejects_id_labels_and_expected_key_order(self) -> None:
+        cases = [
+            ("id pattern", lambda record: record.update(id="Smoke-1")),
+            ("labels", lambda record: record.update(labels=["invented", "control"])),
+            (
+                "expected keys or order",
+                lambda record: cast(dict[str, object], record["expected"]).update(
+                    extra="fictional"
+                ),
+            ),
+            (
+                "expected keys or order",
+                lambda record: record.update(
+                    expected=dict(
+                        reversed(tuple(cast(dict[str, object], record["expected"]).items()))
+                    )
+                ),
+            ),
+        ]
+        for rule, change in cases:
+            with self.subTest(rule=rule):
+                record = _general_smoke_case()
+                change(record)
+                self._assert_case_finding(
+                    record, path="general/smoke.jsonl", expected=rule
+                )
+
+    def test_general_smoke_rejects_values_outside_harness_vocabularies(self) -> None:
+        cases = (
+            ("expected.expect", "expect", "fictional-expectation"),
+            ("expected.block", "block", "fictional-presence"),
+            ("expected.sources", "sources", "fictional-presence"),
+        )
+        for rule, field, value in cases:
+            with self.subTest(field=field):
+                record = _general_smoke_case()
+                cast(dict[str, object], record["expected"])[field] = value
+                self._assert_case_finding(
+                    record, path="general/smoke.jsonl", expected=rule
+                )
+
+    def test_general_smoke_requires_boolean_search_and_compiling_regex_lists(self) -> None:
+        cases = (
+            ("expected.search", "search", "false"),
+            ("expected.must regex", "must", ["("]),
+            ("expected.must_not regex", "must_not", ["("]),
+            ("expected.must", "must", "not-a-list"),
+        )
+        for rule, field, value in cases:
+            with self.subTest(field=field, rule=rule):
+                record = _general_smoke_case()
+                cast(dict[str, object], record["expected"])[field] = value
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory) / "eval-v9"
+                    path = "general/smoke.jsonl"
+                    _write(root, path, json.dumps(record, separators=(",", ":")))
+                    result = load_set(root)
+                    self.assertIsNone(result.loaded)
+                    rendered = "\n".join(finding.text() for finding in result.findings)
+                    self.assertIn("smoke.jsonl:id smoke-01", rendered)
+                    self.assertIn(rule, rendered)
+                    self.assertNotIn(SENTINEL, rendered)
+                    self.assertNotIn("fictional-expected-regex", rendered)
+                    self.assertNotIn('"("', rendered)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.2.53](docs/release-notes/v0.2.53.md) — 2026-09-23 — the general-smoke suite under eval run (slice-2 13)
 - [v0.2.52](docs/release-notes/v0.2.52.md) — 2026-09-23 — a retype's note copies are the script's (workflow 60)
 - [v0.2.51](docs/release-notes/v0.2.51.md) — 2026-09-23 — the CI missing-tree fix names cistack up (slice-2 27)
 - [v0.2.50](docs/release-notes/v0.2.50.md) — 2026-09-23 — thumbs on and the feedback adapter (improvement 05)

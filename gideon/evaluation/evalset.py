@@ -7,6 +7,7 @@ is one reviewed research question carrying no expected answer: its signed
 answer lives in the sign-offs file, and a case with no line there is unsigned —
 it loads, and a selection keeps it out of what a gate counts.
 Guardrails cases carry an expected turn class and, for positives, a pattern id.
+General smoke cases carry the turn harness's expected class and checks.
 """
 
 import hashlib
@@ -19,6 +20,7 @@ from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 
+from gideon.evaluation.turns.cases import EXPECTATIONS, PRESENCE_VALUES
 from gideon.extraction import (
     KEYED_TYPES,
     OBJECT_TYPES,
@@ -55,11 +57,22 @@ RESEARCH_QA_ID_PATTERN: Final[re.Pattern[str]] = re.compile(r"research-qa-[0-9]{
 GUARDRAIL_ID_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"[a-z]+(?:-[a-z]+)*/[a-z]+(?:-[a-z]+)*(?:-[0-9]+)?-[0-9]{2,}"
 )
+GENERAL_SMOKE_ID_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"[a-z]+(?:-[a-z]+)*-[0-9]{2,}"
+)
 _GUARDRAIL_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"[a-z]+(?:-[a-z]+)*/[a-z]+(?:-[a-z]+)*@[1-9][0-9]*"
 )
 _GUARDRAIL_TURNS: Final[frozenset[str]] = frozenset({"blocked", "clean"})
-_GUARDRAIL_BASE_KEYS: Final[tuple[str, ...]] = (
+_SMOKE_EXPECTED_KEYS: Final[tuple[str, ...]] = (
+    "expect",
+    "block",
+    "sources",
+    "search",
+    "must",
+    "must_not",
+)
+_EXPECTED_BASE_KEYS: Final[tuple[str, ...]] = (
     "id",
     "suite",
     "category",
@@ -134,7 +147,7 @@ class ShapeSpec:
             if "supersedes" in record:
                 keys.append("supersedes")
             keys.append("notes")
-        elif self.category == "triples" or self.suite == "guardrails":
+        elif self.category == "triples" or self.suite in {"guardrails", "general"}:
             if "supersedes" in record:
                 keys.append("supersedes")
             keys.append("notes")
@@ -238,7 +251,7 @@ SHAPE_REGISTRY: Final[Mapping[tuple[str, str], ShapeSpec]] = {
     ("guardrails", "deadline-trap"): ShapeSpec(
         "guardrails",
         "deadline-trap",
-        _GUARDRAIL_BASE_KEYS,
+        _EXPECTED_BASE_KEYS,
         {"suite": "guardrails", "category": "deadline-trap", "branch": "general"},
         GUARDRAIL_ID_PATTERN,
         GUARDRAIL_ID_PATTERN,
@@ -247,7 +260,7 @@ SHAPE_REGISTRY: Final[Mapping[tuple[str, str], ShapeSpec]] = {
     ("guardrails", "guidelines-range"): ShapeSpec(
         "guardrails",
         "guidelines-range",
-        _GUARDRAIL_BASE_KEYS,
+        _EXPECTED_BASE_KEYS,
         {"suite": "guardrails", "category": "guidelines-range", "branch": "general"},
         GUARDRAIL_ID_PATTERN,
         GUARDRAIL_ID_PATTERN,
@@ -256,10 +269,19 @@ SHAPE_REGISTRY: Final[Mapping[tuple[str, str], ShapeSpec]] = {
     ("guardrails", "sentence-credit"): ShapeSpec(
         "guardrails",
         "sentence-credit",
-        _GUARDRAIL_BASE_KEYS,
+        _EXPECTED_BASE_KEYS,
         {"suite": "guardrails", "category": "sentence-credit", "branch": "general"},
         GUARDRAIL_ID_PATTERN,
         GUARDRAIL_ID_PATTERN,
+        ("by", "on"),
+    ),
+    ("general", "smoke"): ShapeSpec(
+        "general",
+        "smoke",
+        _EXPECTED_BASE_KEYS,
+        {"suite": "general", "category": "smoke", "branch": "general"},
+        GENERAL_SMOKE_ID_PATTERN,
+        GENERAL_SMOKE_ID_PATTERN,
         ("by", "on"),
     ),
 }
@@ -635,6 +657,8 @@ def _validate_shape(
         findings.append(Finding(relative, case_id, line, "labels", _CASE_FIX))
     elif spec.suite == "guardrails":
         _validate_guardrail_fields(record, relative, case_id, line, findings)
+    elif spec.suite == "general":
+        _validate_smoke_fields(record, relative, case_id, line, findings)
 
     seed = record.get("seed")
     if origin == "harvest":
@@ -738,6 +762,44 @@ def _validate_guardrail_fields(
         pattern = expected.get("pattern")
         if not isinstance(pattern, str) or _GUARDRAIL_PATTERN.fullmatch(pattern) is None:
             findings.append(Finding(file, case_id, line, "expected.pattern", _CASE_FIX))
+
+
+def _validate_smoke_fields(
+    record: Case,
+    file: str,
+    case_id: str | None,
+    line: int,
+    findings: list[Finding],
+) -> None:
+    """Validate General smoke labels and its turn-harness checks."""
+
+    if record.get("labels") != ["invented"]:
+        findings.append(Finding(file, case_id, line, "labels", _CASE_FIX))
+    expected = record.get("expected")
+    if not isinstance(expected, dict):
+        findings.append(Finding(file, case_id, line, "expected mapping", _CASE_FIX))
+        return
+    if tuple(expected) != _SMOKE_EXPECTED_KEYS:
+        findings.append(Finding(file, case_id, line, "expected keys or order", _CASE_FIX))
+    value = expected.get("expect")
+    if not isinstance(value, str) or value not in EXPECTATIONS:
+        findings.append(Finding(file, case_id, line, "expected.expect", _CASE_FIX))
+    for field in ("block", "sources"):
+        value = expected.get(field)
+        if not isinstance(value, str) or value not in PRESENCE_VALUES:
+            findings.append(Finding(file, case_id, line, f"expected.{field}", _CASE_FIX))
+    if not isinstance(expected.get("search"), bool):
+        findings.append(Finding(file, case_id, line, "expected.search", _CASE_FIX))
+    for field in ("must", "must_not"):
+        patterns = expected.get(field)
+        if not isinstance(patterns, list) or any(not isinstance(item, str) for item in patterns):
+            findings.append(Finding(file, case_id, line, f"expected.{field}", _CASE_FIX))
+            continue
+        try:
+            for pattern in patterns:
+                re.compile(pattern)
+        except re.error:
+            findings.append(Finding(file, case_id, line, f"expected.{field} regex", _CASE_FIX))
 
 
 def _read_cases(

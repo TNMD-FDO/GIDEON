@@ -84,8 +84,13 @@ cases whose point is what the answer says carry it in `must`, `must_not`, and
 
 A case is never edited. A correction is a new case with a new id naming the
 old with `supersedes:`; the old stays in this file byte for byte, and the loader
-retires it (in a cases file since slice-1 ticket 39). The nightly schedule is
-slice 2's `gideon eval` (§18.5), not this file's.
+retires it (in a cases file since slice-1 ticket 39).
+
+The set lives as `eval-v1`'s `general` suite — `eval/sets/eval-v1/general/smoke.jsonl`,
+run as `gideon eval run --slice general-smoke` — and this file is its seed and
+still the turn harness's cases file, the two held equal by
+`tests/test_general_smoke_set.py`, so a correction is appended to both. The
+nightly schedule is slice-2 ticket 17's.
 
 ## `frontend-bump.yaml`
 

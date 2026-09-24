@@ -6,6 +6,7 @@ from typing import Final
 
 from gideon.evaluation import (
     extraction_slice,
+    general_smoke_slice,
     guardrails_slice,
     judge_slice,
     judgments_slice,
@@ -28,6 +29,14 @@ class SliceSpec:
     regression by ADR-0023's rule. ``drives_turns`` marks a slice whose runner
     drives turns through the harness's drivers, so ``eval run``'s
     ``preconditions`` resolves the turns' access and probes the door for it.
+    ``general-smoke`` runs two repeats, so every run is the repeat that shows
+    determinism rather than asserting it, and slice-2 ticket 17's nightly runs
+    the registry's count until that ticket rules otherwise. It drives no door
+    turn, yet ``drives_turns`` is its flag: the reads it triggers are the
+    password and client factory the runner needs, and the door probe proves
+    General's service — which every frontend turn passes through — answers
+    before the turns are spent; a second flag for one suite would be an axis
+    with no second reader.
     """
 
     runner: Callable[[LoadedSet, str, RunContext], SliceResult]
@@ -90,5 +99,17 @@ SLICE_RUNNERS: Final[Mapping[str, SliceSpec]] = {
         gate_pass="every positive blocked, over-trips within the ceiling, no leak, the frontend sample agreeing (§18.3)",
         gate_fail="a family's gate failed (§18.3)",
         gate_fix="Review the per-family report lines and the ids they list, then retry.",
+    ),
+    "general-smoke": SliceSpec(
+        runner=general_smoke_slice.run_general_smoke,
+        reaches_engine=True,
+        takes_ranked=False,
+        repeats=2,
+        judge_prompt=None,
+        compares_reference=True,
+        drives_turns=True,
+        gate_pass="every case met its expectation and checks on every repeat, the stream was clean, every chat was deleted (§18.2)",
+        gate_fail="a case failed its expectation, a check, its stream, or its cleanup (§18.2)",
+        gate_fix="Review the per-case report lines and the checks they name, then retry.",
     ),
 }

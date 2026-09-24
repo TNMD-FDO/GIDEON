@@ -22,6 +22,11 @@ The `guardrails` slice has one id list for each of its three category files in
 cases, and changes only by append. The suite is invented and stays on the kept
 side of the export boundary.
 
+The `general-smoke` slice has one list, `general-smoke/smoke.ids`, for the
+`general` suite's `smoke` category. It includes every source id, including
+superseded cases, and runs each active case twice; both repeats must pass. The
+invented suite stays on the kept side of the export boundary.
+
 The `judgments` slice selects the judgment set's queries in
 `../judgments/queries.jsonl`, one result per active query, scored against the
 judgments file by the `judgments@1` definition that `../judgments/README.md`

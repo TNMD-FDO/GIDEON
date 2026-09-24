@@ -11,10 +11,10 @@ import yaml  # type: ignore[import-untyped]
 from gideon.host.report import Problem
 
 _ID: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9_.-]+")
-_EXPECTATIONS: Final[frozenset[str]] = frozenset(
+EXPECTATIONS: Final[frozenset[str]] = frozenset(
     {"refused", "answered", "not-confirmed", "recorded"}
 )
-_PRESENCE_VALUES: Final[frozenset[str]] = frozenset({"present", "absent", "any"})
+PRESENCE_VALUES: Final[frozenset[str]] = frozenset({"present", "absent", "any"})
 # A case's kind: the seed's two, and the cases file's one; the summary counts by it.
 CASE_KINDS: Final[tuple[str, ...]] = ("positive", "control", "case")
 _SEED_KINDS: Final[frozenset[str]] = frozenset(CASE_KINDS) - {"case"}
@@ -116,13 +116,13 @@ def _case_entry(
         return Case(identifier, prompt, expect, kind=kind)
 
     expected_value = value.get("expect")
-    if not isinstance(expected_value, str) or expected_value not in _EXPECTATIONS:
+    if not isinstance(expected_value, str) or expected_value not in EXPECTATIONS:
         return _problem(case_path, f"case {identifier!r} has an invalid expectation.")
     block = value.get("block", "any")
-    if not isinstance(block, str) or block not in _PRESENCE_VALUES:
+    if not isinstance(block, str) or block not in PRESENCE_VALUES:
         return _problem(case_path, f"case {identifier!r} has an invalid block.")
     sources = value.get("sources", "any")
-    if not isinstance(sources, str) or sources not in _PRESENCE_VALUES:
+    if not isinstance(sources, str) or sources not in PRESENCE_VALUES:
         return _problem(case_path, f"case {identifier!r} has an invalid sources.")
     must: tuple[re.Pattern[str], ...] = ()
     must_not: tuple[re.Pattern[str], ...] = ()
