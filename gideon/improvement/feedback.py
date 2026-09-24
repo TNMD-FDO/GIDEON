@@ -1,7 +1,7 @@
 """The content-free feedback seam: a user's rating of one answer, by id.
 
-A record carries five fields and never text (ADR-0049, §19.4): no comment, no
-tag, no message, no chat.  This module names no frontend, route, or key; a
+A record carries five fields and never text: no comment, no tag, no message,
+no chat.  This module names no frontend, route, or key; a
 frontend swap keeps it and the section and replaces only the adapter.
 """
 

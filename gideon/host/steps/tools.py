@@ -9,9 +9,9 @@ from gideon.host.steps import (
     package_installed,
 )
 
-# ldap-utils: preflight's LDAP bind (ticket 03); skopeo: `gideon registry mirror`
-# copies images.lock into the release registry by digest (§2.4); age and rsync:
-# the backup and restore surfaces (§19.1–19.2).
+# ldap-utils supports preflight's LDAP bind; skopeo lets
+# `gideon registry mirror` copy images.lock into the release registry by
+# digest; age and rsync support the backup and restore commands.
 _PACKAGES = ("ldap-utils", "skopeo", "age", "rsync")
 
 

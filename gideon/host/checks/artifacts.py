@@ -57,10 +57,10 @@ def _judge_leaf(court_map: CourtMap, leaf: str, identifier: str, level: str) -> 
 class JurisdictionCheck(PreflightCheck):
     """Validate each site jurisdiction leaf against the committed court map.
 
-    Every id must sit in courts.yaml at its leaf's level (§3.4). The corpus
-    lockfile's ``courts[]`` rules ([35] item 6) judge ``lockfile_courts``, the
-    one seam, which the registry leaves ``None`` until slice 3 installs a
-    lockfile; the pass row then says those rules were not judged.
+    Every id must sit in courts.yaml at its leaf's level. The corpus lockfile's
+    ``courts[]`` rules judge ``lockfile_courts``, the one seam, which the
+    registry leaves ``None`` until slice 3 installs a lockfile; the pass row
+    then says those rules were not judged.
     """
 
     name = "jurisdiction"
@@ -119,7 +119,7 @@ class JurisdictionCheck(PreflightCheck):
                 "no court of state " + ", ".join(map(repr, pending))
                 + " is in the corpus lockfile's courts[]; the state tier is inert "
                 "until a derived cut adds them",
-                "Follow the derived-cut runbook section (§8.7) when state courts are wanted.",
+                "Add the state's courts with a derived corpus cut when they are wanted.",
             )
         return CheckReport(
             Severity.PASS,

@@ -42,8 +42,8 @@ _RUNNER_SUDOERS_CANDIDATE = Path("/etc/sudoers.d/gideon-acceptance.candidate")
 # looks the remainder up verbatim as the argument name; the lower-case suffix
 # is therefore the exact form.
 _RUNNER_TOKEN_VARIABLE = "ACTIONS_RUNNER_INPUT_token"
-_RUNNER_URL = "https://github.com/TNMD-FDO"  # §2.6 product fact.
-_RUNNER_LABELS = "self-hosted,linux,x64,gpu,dl385-gen11"  # §1.8 product fact.
+_RUNNER_URL = "https://github.com/TNMD-FDO"  # The product's GitHub organization.
+_RUNNER_LABELS = "self-hosted,linux,x64,gpu,dl385-gen11"  # The build box's runner labels.
 _KVM_FIX = "Install and repair the libvirt KVM prerequisites, then re-run provision."
 _IMAGE_FIX = "Download the lock-pinned acceptance VM image, then re-run provision."
 _REGISTRY_FIX = "Repair the provision-owned registry service, then re-run provision."
@@ -498,10 +498,9 @@ def _register(context: ProvisionContext, token: str) -> None:
 class GhRunnerStep(Step):
     """Install and optionally register the organization GitHub runner.
 
-    The runner is already root-equivalent through the docker group (bootstrap
-    ticket 01), never runs pull-request code, and the sudoers line names one
-    module of the checkout it runs from. Hardening waits for the public flip
-    (ADR-0031).
+    The runner is already root-equivalent through the docker group and never
+    runs pull-request code. Its sudoers line names one module of the checkout
+    it runs from; hardening waits for the public repository flip.
     """
 
     name = "gh-runner"

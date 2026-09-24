@@ -3,7 +3,7 @@
 ``host provision --no-gpu`` and ``host provision --build-box`` each record one
 exclusive mode as a marker file under ``/etc/gideon``; provision, preflight,
 render, apply, restore, and the backup set all read them through this module,
-and no other command takes a flag (ADR-0028: host state, never a site key).
+and no other command takes a flag: host state, never a site key.
 """
 
 from pathlib import Path

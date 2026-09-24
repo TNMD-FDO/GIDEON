@@ -169,7 +169,7 @@ def package_version(context: "ProvisionContext", package: str) -> str | None:
     dpkg's Status is "<selection> <flag> <state>"; a held package reports
     "hold ok installed", so only the state word decides installed-ness —
     demanding the install selection would blind the probe to every held
-    package, including the driver §1.2 requires held.
+    package, including the driver package provision intentionally holds.
     """
 
     result = context.host.run(

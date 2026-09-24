@@ -581,7 +581,7 @@ def validate(instance: object, schema: Mapping[str, object]) -> tuple[str, ...]:
                     visit(value[name], child, _pointer(path, name))
             if node.get("additionalProperties") is False:
                 # An unknown key is text the model chose: the path names its
-                # presence, never the key itself (§19.4).
+                # presence, never the key itself.
                 for name in value:
                     if name not in properties:
                         violations.append(_pointer(path, ADDITIONAL_PROPERTY))

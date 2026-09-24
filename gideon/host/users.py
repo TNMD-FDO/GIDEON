@@ -1,4 +1,4 @@
-"""LDAP-backed Open WebUI role reconciliation (§4.1).
+"""LDAP-backed Open WebUI role reconciliation.
 
 The directory is the source of membership, while Open WebUI remains the
 source of user and knowledge-base identifiers.  Host commands and audit SQL
@@ -24,8 +24,8 @@ _RENDERED_DIR: Final[str] = "/etc/gideon/rendered"
 _ROOT_FIX: Final[str] = "Run gideon users reconcile as root, for example with sudo."
 _ADMIN_KEY_FIX: Final[str] = "Run sudo python3 -m gideon apply, then retry"
 _LDAP_FIX: Final[str] = (
-    "Fix the LDAP bind account and group distinguished names in the §3.6 "
-    "step 0 checklist, then retry."
+    "Fix the LDAP bind account and group distinguished names per "
+    "docs/runbooks/office-services-setup.md §1, then retry."
 )
 _AUDIT_FIX: Final[str] = stack.logs_fix(_RENDERED_DIR, "postgres")
 _FRONTEND_FIX: Final[str] = stack.logs_fix(_RENDERED_DIR, "open-webui")

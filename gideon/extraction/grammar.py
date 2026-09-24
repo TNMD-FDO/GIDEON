@@ -1,4 +1,4 @@
-"""The GIDEON regex grammar: the exact-object families of spec §11.2.
+"""The GIDEON regex grammar: the exact-object families.
 
 Every pattern is a bounded regular expression with a versioned id in the
 ``family/pattern@N`` convention and declares the one type it emits; the

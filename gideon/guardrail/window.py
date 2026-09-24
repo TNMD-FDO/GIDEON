@@ -34,10 +34,10 @@ class StreamState(dict[str, object]):
     A dict subclass, so the frontend's metadata stays a mapping tree, whose
     ``repr`` and ``str`` are content-free: the pinned frontend formats the
     whole request with ``%s`` into a DEBUG log line, and no character of the
-    stream or of the user's dates may reach a log (spec §19.4).  The content
-    entry holds its accumulated string, released length, decided length, and
-    release constraints; the state also holds the placeholder and finished
-    flags, the trip, and the inlet stash.
+    stream or of the user's dates may reach a log.  The content entry holds
+    its accumulated string, released length, decided length, and release
+    constraints; the state also holds the placeholder and finished flags, the
+    trip, and the inlet stash.
     """
 
     def __init__(
@@ -134,7 +134,7 @@ class StreamCheck:
     """The bounded release of one streamed text: judge the window, release all but the tail.
 
     The mechanism knows no family — the judge and the field are parameters —
-    so another bounded-regex check (the citation stamp, ticket 14) can copy
+    so another bounded-regex check (the citation stamp) can copy
     it.  A released hit always carries the context that exempted it: the lag
     point never lands inside a constraint the judge reported.
     """

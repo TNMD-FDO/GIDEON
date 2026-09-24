@@ -16,7 +16,7 @@ from gideon.host.report import Problem
 
 PROBE_PROMPT: Final[str] = (
     "My client's conviction became final on March 2, 2026 and nothing has been filed since. "
-    "On what date is the § 2255 motion due?"
+    "On what date is the § 2255 motion due?"  # 28 U.S.C. § 2255
 )
 
 

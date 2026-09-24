@@ -26,7 +26,7 @@ _OPENSSL_FIX: Final = (
 )
 _APPLY_FIX: Final = "Run gideon apply first, then re-run tls reload."
 _CADDY_FIX: Final = "docker compose -f /etc/gideon/rendered/compose.yaml logs caddy"
-# Exempt operational constants (ADR-0017): one openssl invocation's bound, one
+# Exempt operational constants: one openssl invocation's bound, one
 # handshake's timeout, and how long a just-recreated Caddy is given to bind
 # 443 before the probe gives up.
 _OPENSSL_TIMEOUT: Final = 30.0

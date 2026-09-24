@@ -1,17 +1,16 @@
 """Shared managed turns for the pinned Open WebUI frontend.
 
-The recipe relies on the pinned routes' facts that the managed completion
-returns ``null`` and persists the turn (§1.5), the chat list is the way to
-learn the created chat id (§2), the stored history contains the outlet's
-edits (§3), deletion reports a boolean (§4), omitting the background-task
-key avoids follow-up work (§5.1), and the session token is not endpoint-
-allowlisted (§7.2) in ``docs/research/owui-chat-routes-machine-caller.md``.
+The recipe relies on the pinned routes' behaviour: the managed completion
+returns ``null`` and persists the turn, the chat list is the way to learn the
+created chat id, the stored history contains the outlet's edits, deletion
+reports a boolean, omitting the background-task key avoids follow-up work, and
+the session token is not limited to an allowlist of endpoints.
 Its three callers are ``gideon.evaluation.turns.run.ApiTurnDriver``, ``engine verify``'s
 frontend case, and ``tests/contract/search_sentinel.py``. Each identifies its
 own turn's chat through ``find_turn_chat`` — the one chat, among those new
 since the turn, whose stored ``history.messages`` holds both minted ids — and
 deletes that chat alone, so two sessions signed in as the one eval identity at
-once neither read nor delete each other's records (slice-1 ticket 68).
+once neither read nor delete each other's records.
 """
 
 from collections.abc import Callable, Mapping
@@ -24,23 +23,23 @@ from gideon.host.owui import Client, OwuiError, Response
 from gideon.host.report import Problem
 
 _RENDERED_DIR: Final = "/etc/gideon/rendered"
-# Omitting ``page`` leaves the pinned frontend's chat list unpaged (the route
-# note's §2.2), so the listing difference is the whole candidate set.
+# Omitting ``page`` leaves the frontend's chat list unpaged, so the listing
+# difference is the whole candidate set.
 _CHAT_LIST_PATH: Final = "/api/v1/chats/list"
 _CHAT_PATH: Final = "/api/v1/chats/"
 COMPLETIONS_PATH: Final = "/api/chat/completions"
 # A chat the caller cannot read answers 401 with the not-found detail, the one
-# status the pinned route gives whether the chat never existed or belongs to
-# another account (the note's §3.1); 404 is admitted as the status that detail
-# names elsewhere. The body's wording is the frontend's own and is not read.
+# status the route gives whether the chat never existed or belongs to another
+# account; 404 is also admitted as a not-found response. The body's wording is
+# the frontend's own and is not read.
 _NOT_FOUND_STATUSES: Final = (401, 404)
 _DELETE_FIX: Final = "Delete the chat through the frontend, then retry."
 _FIND_FIX: Final = (
     "List the account's chats through the frontend and delete the turn's chat "
     "by its prompt tag, then retry."
 )
-# The frontend's own logs are the next step when a turn or a record is not
-# what the pinned routes promise (docs/research/owui-chat-routes-machine-caller.md).
+# The frontend's own logs are the next step when a turn or a record differs
+# from what the frontend routes promise.
 LOGS_FIX: Final = stack.logs_fix(_RENDERED_DIR, "open-webui")
 
 
@@ -134,14 +133,14 @@ def managed_turn(
 ) -> Problem | None:
     """Submit one managed turn: the frontend creates the chat and answers ``null``.
 
-    The body is the browser's new-chat form (ticket 05's recipe): ``parent_id``
-    null, the ``user_message`` with the two ids the caller mints, no
+    The body is the browser's new-chat form: ``parent_id`` null, the
+    ``user_message`` with the two ids the caller mints, no
     ``session_id`` (that selects the background fan-out branch) and no
     ``background_tasks`` (absent, no title or tag task runs — one engine call).
     ``features`` is the machine-caller mapping read by the completions route;
-    when supplied it is carried under the top-level ``features`` key
-    (the note's §5.3).  When absent, the body retains the existing shape used
-    by the API driver and ``engine verify``'s frontend case.
+    when supplied it is carried under the top-level ``features`` key.  When
+    absent, the body retains the existing shape used by the API driver and
+    ``engine verify``'s frontend case.
     """
 
     body = {
@@ -280,8 +279,8 @@ def find_turn_chat(
     """Identify a turn's own chat among those new since it, by its minted ids.
 
     The listing difference is the candidate filter — the pinned frontend
-    answers no route for the chat holding a message id (the note's §2) — and
-    the read by id is the proof. Every candidate is read, so a second match is
+    has no route to find the chat holding a message id — and the read by id is
+    the proof. Every candidate is read, so a second match is
     a refusal rather than an arbitrary first one, and a candidate another
     session has deleted since the listing is skipped, not raised.
     """

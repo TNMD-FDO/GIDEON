@@ -326,14 +326,13 @@ class StreamMechanics:
         if released:
             output_delta["content"] = released
         # The turn's first reasoning delta leaves as one fixed space, every
-        # later one empty (slice-1 ticket 37): the pinned frontend's streaming
-        # accumulator opens its "Thinking…" block from a `reasoning`,
-        # `reasoning_content`, or `thinking` delta (docs/research/
-        # owui-engine-connection.md §4), so without this it never opens one and
-        # a seat watches a silent wait while the model reasons.  The placeholder
-        # is a release constant and carries no model text (§19.4); it is
-        # relayed under the engine's own key, so a pin bump that renames the
-        # field carries the placeholder with it.
+        # later one empty: the pinned frontend's streaming accumulator opens
+        # its "Thinking…" block from a `reasoning`, `reasoning_content`, or
+        # `thinking` delta, so without this it never opens one and a seat
+        # watches a silent wait while the model reasons. The placeholder is a
+        # release constant and carries no model text; it is relayed under the
+        # engine's own key, so a pin bump that renames the field carries the
+        # placeholder with it.
         if reasoning_keys and not self.state.get("placeholder_sent"):
             output_delta[reasoning_keys[0]] = guardrail.REASONING_PLACEHOLDER
             self.state["placeholder_sent"] = True

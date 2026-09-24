@@ -1,9 +1,9 @@
 """The ``judgments@1`` metric definition over ranked gold-evidence coordinates.
 
-This docstring is the definition's one home (§18.2, [21] item 13). A rule or
-threshold that changes takes the next ``@N`` rather than an edit here, as a
-grammar pattern and a judge prompt do, so ticket 16's pairing can refuse to
-pair two definitions.
+This docstring is the definition's one home. A rule or threshold that changes
+takes the next ``@N`` rather than an edit here, as a grammar pattern and a
+judge prompt do, so a decision run's pairing can refuse to pair two
+definitions.
 
 **Meets.** A ranked chunk meets a judged passage iff both carry the same
 source id and the same canonical-text SHA-256, and their half-open code-point
@@ -11,7 +11,7 @@ ranges overlap by at least ``OVERLAP_THRESHOLD`` of the *shorter* of the two
 ranges. A chunk inside a judged passage and a judged passage inside a larger
 chunk therefore both meet at 1.0, so a re-chunked index is measurable against
 grades given under another chunking; equal offsets in another source never
-meet. The threshold is a starting value (ADR-0017).
+meet. The threshold is a starting value, corrected by measurement.
 
 **Crediting.** The list is walked from rank 1 and a judged passage is credited
 at most once. A chunk's gain is the highest grade among the not-yet-credited
@@ -28,9 +28,8 @@ figure the grading cannot support:
 
 - ``ndcg_at_10`` — gain is the credited grade itself, the discount is
   ``log2(rank + 1)``, and the ideal ranking is the query's primary grades in
-  descending order, first ten (trec_eval's and BEIR's definition, the one [21]
-  item 13 cites: an unjudged passage holds its rank and gains 0). Undefined
-  when the ideal is 0.
+  descending order, first ten (trec_eval's and BEIR's definition: an unjudged
+  passage holds its rank and gains 0). Undefined when the ideal is 0.
 - ``recall_at_50`` — the relevant passages (grade at or above
   ``RELEVANT_GRADE``) met by at least one chunk among ranks 1 to
   ``RECALL_DEPTH``, over the query's relevant passages; meeting alone counts
@@ -47,7 +46,7 @@ nothing, which the run's summary says when it applies.
 passages earns the higher grade alone, so a large-chunk arm cannot reach 1.0 on
 such a query. And a judged passage whose canonical text the index under test
 does not hold reads as not retrieved, since a ranked list states nothing about
-what that index holds; the drop rule of §18.6 arrives with the input that can
+what that index holds; the drop rule arrives with the input that can
 prove absence, as this definition's next ``@N``.
 
 The module is pure over integers, strings, and grades: no file, no clock, no

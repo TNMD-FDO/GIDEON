@@ -1,9 +1,9 @@
 """Image-lock loading and registry reference helpers for host operations.
 
-``images.lock`` has two timeless pin kinds under spec sections §2.2 and §2.4:
-mirrored pins track an upstream ``source`` and digest, while built pins track a
-relative build directory, a mirrored base, build inputs, and the digest of the
-image produced from those inputs.
+``images.lock`` has two timeless pin kinds: mirrored pins track an upstream
+``source`` and digest, while built pins track a relative build directory, a
+mirrored base, build inputs, and the digest of the image produced from those
+inputs.
 """
 
 import difflib
@@ -24,7 +24,7 @@ from gideon.host.sysio import Host, PathLike, RealHost
 
 @dataclass(frozen=True, slots=True)
 class ImagePin:
-    """The common name and produced-image digest for one lock pin (§2.2)."""
+    """The common name and produced-image digest for one lock pin."""
 
     name: str
     digest: str
@@ -32,14 +32,14 @@ class ImagePin:
 
 @dataclass(frozen=True, slots=True)
 class MirroredImagePin(ImagePin):
-    """An upstream image copied into the release registry (§2.2/§2.4)."""
+    """An upstream image copied into the release registry."""
 
     source: str
 
 
 @dataclass(frozen=True, slots=True)
 class AptWatch:
-    """An apt index and package watched for a built image input (§2.2)."""
+    """An apt index and package watched for a built image input."""
 
     apt_index: str
     package: str
@@ -47,7 +47,7 @@ class AptWatch:
 
 @dataclass(frozen=True, slots=True)
 class PypiWatch:
-    """A normalized PyPI project watched for a built image input (§2.2)."""
+    """A normalized PyPI project watched for a built image input."""
 
     project: str
 
@@ -57,7 +57,7 @@ type WatchEntry = AptWatch | PypiWatch
 
 @dataclass(frozen=True, slots=True)
 class BuiltImagePin(ImagePin):
-    """A locally built image whose base and inputs are recorded (§2.2/§2.4)."""
+    """A locally built image whose base and inputs are recorded."""
 
     build: str
     base: str
@@ -619,7 +619,7 @@ def inputs_digest_text(
     build_args: Mapping[str, str],
     dockerfile_bytes: bytes,
 ) -> str:
-    """Return canonical built-image inputs text for §2.2/§2.4 verification."""
+    """Return canonical text for the inputs of a built image."""
 
     lines = [f"base_digest={base_digest}"]
     lines.extend(f"arg {name}={build_args[name]}" for name in sorted(build_args))
@@ -632,7 +632,7 @@ def compute_inputs_digest(
     build_args: Mapping[str, str],
     dockerfile_bytes: bytes,
 ) -> str:
-    """Compute the digest recorded for a built image's inputs (§2.2/§2.4)."""
+    """Compute the digest recorded for a built image's inputs."""
 
     return "sha256:" + hashlib.sha256(
         inputs_digest_text(base_digest, build_args, dockerfile_bytes).encode("utf-8")

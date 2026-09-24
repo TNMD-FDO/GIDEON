@@ -1,12 +1,12 @@
-"""The one product CLI (spec §20.2): ``python3 -m gideon <command>``.
+"""The one product CLI: ``python3 -m gideon <command>``.
 
 A bare invocation prints the start screen and exits 0. A command is a stub
-until a TRIP plan lands its behaviour: its help names where it lands, and it
-prints "not implemented" with the same text and exits non-zero.
+until its behaviour lands: its help names where it lands, and it prints
+"not implemented" with the same text and exits non-zero.
 ``preflight.sh``, ``install.sh``, and ``upgrade.sh`` at the repo root are thin
-entrypoints over this CLI (§2.2).
+entrypoints over this CLI.
 
-This module is on the bare-host path (§1.9 step 3 runs ``python3 -m gideon
+This module is on the bare-host path (the install runs ``python3 -m gideon
 host provision`` on a fresh Ubuntu Server install), so at module level it may
 import only the standard library, ``yaml``, and ``gideon.host`` — enforced by
 tests/test_host_import_boundary.py. Commands outside the host subtree grow
@@ -64,15 +64,15 @@ def start_screen() -> str:
 
 
 _LANDING: Final = {
-    "host gpu": "the escape hatch, pulled only on eval evidence of reranker latency during bulk embedding (§1.5)",
+    "host gpu": "the escape hatch, pulled only on eval evidence of reranker latency during bulk embedding",
     "corpus cut": "lands in slice 3 (v0.4.0)",
     "corpus install": "lands in slice 3 (v0.4.0)",
     "index build": "lands in slice 3 (v0.4.0)",
     "index promote": "lands in slice 3 (v0.4.0)",
     "index gc": "lands in slice 3 (v0.4.0)",
     "index report": "lands in slice 3 (v0.4.0)",
-    "registry gc": "in the §20.2 surface, no slice scheduled",
-    "audit query": "in the §20.2 surface, no slice scheduled",
+    "registry gc": "in the recorded command surface, no slice scheduled",
+    "audit query": "in the recorded command surface, no slice scheduled",
     "retention sweep": "lands in slice 6 (v0.7.0)",
 }
 
@@ -137,7 +137,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(dest="command", metavar="<command>", required=False)
 
-    host = commands.add_parser("host", help="host provisioning and GPU layout (§1.5)")
+    host = commands.add_parser("host", help="host provisioning and GPU layout")
     host_sub = host.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)
     provision = host_sub.add_parser(
         "provision", help="bring the host to the target state (check/apply)"
@@ -153,40 +153,40 @@ def build_parser() -> argparse.ArgumentParser:
     provision_mode.add_argument(
         "--no-gpu",
         action="store_true",
-        help="declare a host without a GPU: the engine is pinned out (§2.5, [29] item 12)",
+        help="declare a host without a GPU: the engine is pinned out",
     )
     provision_mode.add_argument(
         "--build-box",
         action="store_true",
-        help="declare this host the build box: the KVM, registry, and runner steps converge here and on no other host (§1.5, §1.8; slice-0 ticket 21)",
+        help="declare this host the build box: the KVM, registry, and runner steps converge here and on no other host",
     )
     provision.set_defaults(handler=host_cli.run_provision, command_path="host provision")
     gpu = _stub_parser(host_sub, "gpu", "host gpu", "GPU layout escape hatch (MIG)")
     gpu.add_argument("--mig", metavar="<layout>", help="MIG layout for GPU 1, e.g. 2x48")
 
     render = commands.add_parser(
-        "render", help="site file + release + profile + host facts → /etc/gideon/rendered (§3.5)"
+        "render", help="site file + release + profile + host facts → /etc/gideon/rendered"
     )
     render.add_argument("--diff", action="store_true", help="show what would change")
     render.set_defaults(handler=host_cli.run_render, command_path="render")
 
     apply_ = commands.add_parser(
-        "apply", help="render → diff → recreate changed services → verify (§3.5)"
+        "apply", help="render → diff → recreate changed services → verify"
     )
     apply_.set_defaults(handler=host_cli.run_apply, command_path="apply")
 
     preflight = commands.add_parser(
-        "preflight", help="provisioning checks + install-time checks (§1.5)"
+        "preflight", help="provisioning checks + install-time checks"
     )
     preflight.set_defaults(handler=host_cli.run_preflight, command_path="preflight")
 
     install = commands.add_parser(
-        "install", help="install sequence: preflight → apply → backup → drill (§3.6)"
+        "install", help="install sequence: preflight → apply → backup → drill"
     )
     install.set_defaults(handler=host_cli.run_install, command_path="install")
 
     upgrade = commands.add_parser(
-        "upgrade", help="upgrade to a tag or rollback with --rollback (§2.1, §3.6)"
+        "upgrade", help="upgrade to a tag or rollback with --rollback"
     )
     upgrade.add_argument("tag", nargs="?", help="release tag to upgrade to")
     upgrade.add_argument(
@@ -199,18 +199,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     upgrade.set_defaults(handler=host_cli.run_upgrade, command_path="upgrade")
 
-    tls = commands.add_parser("tls", help="TLS certificate operations (§1.6)")
+    tls = commands.add_parser("tls", help="TLS certificate operations")
     tls_sub = tls.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)
     tls_reload = tls_sub.add_parser("reload", help="pick up replaced certificate files")
     tls_reload.set_defaults(handler=host_cli.run_tls_reload, command_path="tls reload")
 
-    secrets = commands.add_parser("secrets", help="secret files: rotation (§1.7)")
+    secrets = commands.add_parser("secrets", help="secret files: rotation")
     secrets_sub = secrets.add_subparsers(
         dest="subcommand", metavar="<subcommand>", required=True
     )
     rotate = secrets_sub.add_parser(
         "rotate",
-        help="regenerate one rotatable secret and recreate exactly its consumers (§1.7)",
+        help="regenerate one rotatable secret and recreate exactly its consumers",
     )
     rotate.add_argument(
         "name",
@@ -224,28 +224,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     rotate.set_defaults(handler=host_cli.run_secrets_rotate, command_path="secrets rotate")
 
-    users = commands.add_parser("users", help="user and group reconciliation (§4)")
+    users = commands.add_parser("users", help="user and group reconciliation")
     users_sub = users.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)
     reconcile = users_sub.add_parser(
-        "reconcile", help="reconcile Open WebUI users against LDAP (§4.1)"
+        "reconcile", help="reconcile Open WebUI users against LDAP"
     )
     reconcile.add_argument("--now", action="store_true", help="run once, immediately")
     reconcile.set_defaults(handler=host_cli.run_users_reconcile, command_path="users reconcile")
 
-    engine = commands.add_parser("engine", help="serving-engine operations (§5)")
+    engine = commands.add_parser("engine", help="serving-engine operations")
     engine_sub = engine.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)
-    verify = engine_sub.add_parser("verify", help="engine verification gate (§6.7)")
+    verify = engine_sub.add_parser("verify", help="engine verification gate")
     verify.set_defaults(handler=host_cli.run_engine_verify, command_path="engine verify")
 
-    models = commands.add_parser("models", help="model artifacts (§2.4)")
+    models = commands.add_parser("models", help="model artifacts")
     models_sub = models.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)
     pull = models_sub.add_parser(
         "pull",
-        help="fetch and verify the profile's models into /data/models (§5.4, §2.4)",
+        help="fetch and verify the profile's models into /data/models",
     )
     pull.set_defaults(handler=host_cli.run_models_pull, command_path="models pull")
 
-    corpus = commands.add_parser("corpus", help="corpus lockfile cuts and installs (§8)")
+    corpus = commands.add_parser("corpus", help="corpus lockfile cuts and installs")
     corpus_sub = corpus.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)
     cut = _stub_parser(corpus_sub, "cut", "corpus cut", "cut a corpus lockfile")
     cut.add_argument("--base", metavar="<lockfile>", help="lockfile to derive from")
@@ -255,7 +255,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     corpus_install.add_argument("label", help="lockfile label, e.g. corpus-2026-08-31")
 
-    index = commands.add_parser("index", help="index generations (§9, §7.5)")
+    index = commands.add_parser("index", help="index generations")
     index_sub = index.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)
     build = _stub_parser(index_sub, "build", "index build", "build a new index generation")
     build.add_argument("--sample", action="store_true", help="build the eval sample")
@@ -266,10 +266,10 @@ def build_parser() -> argparse.ArgumentParser:
     _stub_parser(index_sub, "gc", "index gc", "drop retired generations past their hold")
     _stub_parser(index_sub, "report", "index report", "report generations and build state")
 
-    registry = commands.add_parser("registry", help="local release registry (§1.8)")
+    registry = commands.add_parser("registry", help="local release registry")
     registry_sub = registry.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)
     mirror = registry_sub.add_parser(
-        "mirror", help="copy images.lock into the release registry by digest (§2.4)"
+        "mirror", help="copy images.lock into the release registry by digest"
     )
     mirror.add_argument(
         "--to", metavar="<registry>", help="destination registry (default: the site file's registry key)"
@@ -277,55 +277,55 @@ def build_parser() -> argparse.ArgumentParser:
     mirror.set_defaults(handler=host_cli.run_registry_mirror, command_path="registry mirror")
     _stub_parser(registry_sub, "gc", "registry gc", "garbage-collect unreferenced blobs")
 
-    eval_ = commands.add_parser("eval", help="evaluation suites (§18)")
+    eval_ = commands.add_parser("eval", help="evaluation suites")
     eval_sub = eval_.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)
-    eval_run = eval_sub.add_parser("run", help="run the eval suites (§18)")
+    eval_run = eval_sub.add_parser("run", help="run the eval suites")
     eval_run.add_argument("--decision", action="store_true", help="a decision run")
     eval_run.add_argument("--force", action="store_true", help="run despite a dirty state")
     eval_run.add_argument(
         "--slice",
         metavar="NAME",
-        help="frozen slice to run (§18.6)",
+        help="frozen slice to run",
     )
     eval_run.add_argument(
         "--set",
         metavar="DIR",
-        help="eval set version directory (§18.6)",
+        help="eval set version directory",
     )
     eval_run.add_argument(
         "--ranked",
         metavar="FILE",
-        help="ranked-list JSONL file for the judgments metrics (§18.2)",
+        help="ranked-list JSONL file for the judgments metrics",
     )
     eval_run.set_defaults(handler=_run_eval, command_path="eval run")
     eval_reference = eval_sub.add_parser(
-        "reference", help="write a reference from a recorded run (§18.6)"
+        "reference", help="write a reference from a recorded run"
     )
     eval_reference.add_argument(
         "--run",
         required=True,
         metavar="ID",
-        help="recorded evaluation run id (§18.6)",
+        help="recorded evaluation run id",
     )
     eval_reference.set_defaults(handler=_run_reference, command_path="eval reference")
 
     proposals = commands.add_parser(
         "proposals",
-        help="read the improvement proposals (§20.2, ADR-0049); read-only report",
+        help="read the improvement proposals; read-only report",
     )
     proposals.set_defaults(handler=_run_proposals, command_path="proposals")
 
     status_help = (
         "the box status: needs attention, waiting on you, at a glance "
-        "(§20.2, the front-door brief); needs root; writes nothing"
+        "(the front-door brief); needs root; writes nothing"
     )
     status = commands.add_parser("status", help=status_help, description=status_help)
     status.set_defaults(handler=_run_status, command_path="status")
 
-    backup = commands.add_parser("backup", help="backup set, off-box push, drill (§19)")
+    backup = commands.add_parser("backup", help="backup set, off-box push, drill")
     backup_sub = backup.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)
     backup_run = backup_sub.add_parser(
-        "run", help="snapshot + pgBackRest + manifest (§19.1, ADR-0005)"
+        "run", help="snapshot + pgBackRest + manifest"
     )
     backup_run.add_argument(
         "--full", action="store_true", help="force a full pgBackRest backup"
@@ -335,19 +335,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     backup_run.set_defaults(handler=host_cli.run_backup_run, command_path="backup run")
     push = backup_sub.add_parser(
-        "push", help="one rsync-over-SSH to backup.target (§19.1, ADR-0026)"
+        "push", help="one rsync-over-SSH to backup.target"
     )
     push.add_argument(
         "--verify-all", action="store_true", help="verify every inventoried file"
     )
     push.set_defaults(handler=host_cli.run_backup_push, command_path="backup push")
     drill = backup_sub.add_parser(
-        "drill", help="restore drill into the gideon-drill project (§19.2, [22])"
+        "drill", help="restore drill into the gideon-drill project"
     )
     drill.set_defaults(handler=host_cli.run_backup_drill, command_path="backup drill")
 
     restore = commands.add_parser(
-        "restore", help="restore from a backup set (§19.2, ADR-0005)"
+        "restore", help="restore from a backup set"
     )
     restore.add_argument(
         "--from",
@@ -361,11 +361,11 @@ def build_parser() -> argparse.ArgumentParser:
     restore_target.add_argument(
         "--set",
         metavar="<label>",
-        help="restore the named staging set to its archive boundary (ADR-0005 rollback)",
+        help="restore the named staging set to its archive boundary; rollback is a restore",
     )
     restore.set_defaults(handler=host_cli.run_restore, command_path="restore")
 
-    audit = commands.add_parser("audit", help="the append-only audit log (§19)")
+    audit = commands.add_parser("audit", help="the append-only audit log")
     audit_sub = audit.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)
     query = _stub_parser(
         audit_sub, "query", "audit query", "query audit rows by kb, user, or chat"
@@ -377,16 +377,16 @@ def build_parser() -> argparse.ArgumentParser:
     query.add_argument("--until", metavar="<ts>", help="end of the window")
     query.add_argument("--json", action="store_true", help="machine-readable output")
 
-    retention = commands.add_parser("retention", help="retention sweeps (§19)")
+    retention = commands.add_parser("retention", help="retention sweeps")
     retention_sub = retention.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)
     _stub_parser(
         retention_sub, "sweep", "retention sweep", "expire chats, uploads, partitions"
     )
 
-    alerts = commands.add_parser("alerts", help="alerting (§19)")
+    alerts = commands.add_parser("alerts", help="alerting")
     alerts_sub = alerts.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)
     test = alerts_sub.add_parser(
-        "test", help="send one test message through the relay (§19.5)"
+        "test", help="send one test message through the relay"
     )
     test.set_defaults(handler=host_cli.run_alerts_test, command_path="alerts test")
 

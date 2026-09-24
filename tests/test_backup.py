@@ -778,6 +778,10 @@ class BackupRun(unittest.TestCase):
             )
         self.assertEqual(code, 1)
         self.assertIn("no hard links to the previous set", err.getvalue())
+        self.assertIn(
+            "Fix: Confirm /data/backup-staging is one filesystem, then re-run backup run",
+            err.getvalue(),
+        )
         self.assertFalse(any(call[0][:2] == ("bash", "-c") for call in host.calls))
 
     def test_prune_removes_candidates_and_refuses_unsafe_paths(self) -> None:

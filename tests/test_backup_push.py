@@ -278,7 +278,7 @@ class Preconditions(unittest.TestCase):
             ("rsync", host(), "host provision --only host-tools"),
             ("local", host(), "backup run"),
             ("audit", host(fail_audit=True), "logs postgres"),
-            ("target", host(fail_target=True), "office-services runbook §3"),
+            ("target", host(fail_target=True), "docs/runbooks/office-services-setup.md §3"),
         )
         cases[1][1].files.pop(SITE_PATH)
         cases[2][1].files.pop("/usr/bin/rsync")
@@ -452,6 +452,11 @@ class PushContracts(unittest.TestCase):
         self.assertIn("901", push_row)
         self.assertIn("1000", push_row)
         self.assertIn("one filesystem", push_row)
+        self.assertIn(
+            "Fix: Keep every snapshot under one path on one filesystem on the target "
+            "(docs/runbooks/office-services-setup.md §3), then re-run backup push.",
+            push_row,
+        )
         rsync = next(call[0] for call in failed.calls if call[0][0] == "rsync")
         self.assertIn("--link-dest=../20260901T120000Z", rsync)
         self.assertFalse(any(call[0][0] == "ssh" and "mv --" in call[0][-1] for call in failed.calls))
@@ -519,6 +524,12 @@ class PushContracts(unittest.TestCase):
         check_row = next(line for line in out.getvalue().splitlines() if line.startswith("check:"))
         self.assertIn("1 path(s)", check_row)
         self.assertNotIn("pgbackrest/file", check_row)
+        self.assertIn(
+            "Fix: Re-run sudo python3 -m gideon backup push --verify-all; if it fails "
+            "again, the target's copy is corrupt — check the target's disk per "
+            "docs/runbooks/office-services-setup.md §3.",
+            check_row,
+        )
 
     def test_verify_all_sends_every_inventory_file(self) -> None:
         value = manifest(file_count=500)

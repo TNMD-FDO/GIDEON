@@ -2,8 +2,8 @@
 
 It reads the admin list route with the break-glass key, page by page, and
 copies five values from each rating — nothing of a comment, a tag, a rater,
-or a chat.  The route, its row, and its paging are the Open WebUI
-feedback-record research note's §§1.2 and 2.
+or a chat. The admin ``/feedbacks/list`` route returns 30 rows per page and
+includes the rater's name and email; this reader copies only five values.
 """
 
 from collections.abc import Callable, Mapping, Sequence
@@ -27,7 +27,7 @@ ADMIN_KEY_SECRET: Final[str] = "gideon_admin_api_key"
 RATING_TYPE: Final[str] = "rating"
 # The frontend's integers; a boolean is an int to Python and is refused.
 RATING_VALUES: Final[Mapping[int, Rating]] = {1: "up", -1: "down"}
-# The route answers 30 items a page; 100 pages is a starting bound (ADR-0017).
+# The route answers 30 items a page; 100 pages is a starting bound.
 FEEDBACK_PAGE_LIMIT: Final[int] = 100
 _SITE_FIX: Final[str] = "Correct the site file, then retry."
 _KEY_FIX: Final[str] = "Run sudo python3 -m gideon apply, which mints the key, then retry."

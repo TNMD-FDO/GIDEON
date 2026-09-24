@@ -1,4 +1,4 @@
-"""Verified staging and off-box restore orchestration (§19.2).
+"""Verified staging and off-box restore orchestration.
 
 Each entry holds the backup lock (``backuplock.py``) for its whole run, so a
 backup, a push, and a restore never overlap; ``backuplock.py`` owns the rules.
@@ -54,8 +54,8 @@ REOWN_NO_RECORD_DETAIL: Final = "no gideon ids recorded"
 _ROOT_FIX: Final = "Run sudo python3 -m gideon restore --from <staging|target>, then retry."
 _APPLY_FIX: Final = "Run sudo python3 -m gideon apply, then retry."
 _TARGET_FIX: Final = (
-    "Authorize the backup key and check the target per the office-services "
-    "runbook §3, then re-run restore."
+    "Authorize the backup key and check the target per "
+    "docs/runbooks/office-services-setup.md §3, then re-run restore."
 )
 _SET_FIX: Final = "Run sudo python3 -m gideon backup run, then retry."
 _ACCOUNT_FIX: Final = "Run sudo python3 -m gideon host provision, then retry."

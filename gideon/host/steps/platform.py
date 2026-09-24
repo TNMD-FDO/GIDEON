@@ -5,7 +5,7 @@ import yaml  # type: ignore[import-untyped]
 from gideon.host.steps import CheckResult, Disposition, ProvisionContext, Step
 
 _OS_RELEASE = "/etc/os-release"
-_REINSTALL_FIX = "Reinstall Ubuntu 26.04 per the §1.9 runbook, then re-run provision."
+_REINSTALL_FIX = "Reinstall Ubuntu 26.04 Server on this host, then re-run provision."
 
 
 def _release_values(text: str) -> dict[str, str]:

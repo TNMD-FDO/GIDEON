@@ -312,7 +312,10 @@ class PlatformStepTests(unittest.TestCase):
         result = PlatformStep().check(context(host))
         self.assertEqual(result.disposition, Disposition.UNFIXABLE)
         self.assertTrue(result.halts_run)
-        self.assertIn("§1.9", result.fix)
+        self.assertEqual(
+            result.fix,
+            "Reinstall Ubuntu 26.04 Server on this host, then re-run provision.",
+        )
 
 
 class ProxyStepTests(unittest.TestCase):
@@ -594,6 +597,13 @@ class DiskLayoutStepTests(unittest.TestCase):
         self.assertIn("sdb", multiple_result.detail)
         self.assertIn("sdc", multiple_result.detail)
         self.assertIn("other-wwn", multiple_result.detail)
+
+        devices = disk_devices()
+        devices[1]["size"] = devices[0]["size"]
+        small = disk_host(devices)
+        small_result = DiskLayoutStep().check(context(small))
+        self.assertEqual(small_result.disposition, Disposition.UNFIXABLE)
+        self.assertIn("wrong size class for the data-disk layout", small_result.detail)
 
     def test_wipefs_signature_and_missing_wwn_refuse_mutation(self) -> None:
         signed = disk_host(
@@ -924,7 +934,7 @@ class NvidiaStepTests(unittest.TestCase):
     def test_toolkit_is_blocked_until_driver_is_loaded(self) -> None:
         result = NvidiaToolkitStep().check(context(FakeHost()))
         self.assertEqual(result.disposition, Disposition.PENDING_INPUT)
-        self.assertIn("Reboot", result.fix)
+        self.assertIn("docs/runbooks/install-upgrade.md §1", result.fix)
 
 
 def docker_commands(

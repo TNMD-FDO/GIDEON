@@ -94,7 +94,7 @@ STATES: Final = (
 """The fifty states and the District of Columbia; each has a court of last resort."""
 
 TERRITORIES: Final = ("AS", "GU", "MP", "PR", "VI")
-"""The five territories, placed like states (§8.6); not every one holds a district."""
+"""The five territories are placed like states; not all have a district."""
 
 STATE_CODES: Final = (*STATES, *TERRITORIES)
 """Every USPS code a court's ``state`` may carry."""

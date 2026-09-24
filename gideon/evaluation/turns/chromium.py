@@ -27,8 +27,7 @@ HARNESS_HOME: Final[Path] = Path("/root/.config/gideon-turns")
 PASSWORD_FILE: Final[Path] = HARNESS_HOME / "gideon-test-user.password"
 BROWSERS_DIR: Final[Path] = HARNESS_HOME / "browsers"
 BROWSER_HOME: Final[Path] = HARNESS_HOME / "home"
-# Chromium's Linux NSS database default has been this path since M146; see
-# the research note's Part B §3.4.
+# Chromium's Linux NSS database default has been this path since M146.
 TRUST_STORE_PATH: Final[Path] = BROWSER_HOME / ".local/share/pki/nssdb"
 TRUST_NICKNAME: Final[str] = "gideon-office-ca"
 PAGE_TIMEOUT_SECONDS: Final[float] = 30.0
@@ -144,8 +143,7 @@ def disposition(url: str, hostname: str) -> Disposition:
 
 
 # The only JavaScript run by the harness. It observes mutations but records
-# only what a painted animation frame showed; see the plan's Implementation
-# Details §1 and the research note's Part A §4.
+# only what a painted animation frame showed.
 OBSERVER_SCRIPT: Final[str] = r"""
 (() => {
   const key = "__gideon_turn_observer__";
@@ -197,7 +195,7 @@ OBSERVER_SCRIPT: Final[str] = r"""
     // is the button's sibling, and a live element's innerText leaves out the
     // summary's spinner stylesheet, which a detached clone's innerText carried
     // ahead of "Thinking..." and so hid the button from a text match while
-    // the reasoning was in progress (slice-1 ticket 37's proof).
+    // the reasoning was in progress.
     let block = "";
     if (expanded && root) {
       block = Array.from(root.children)

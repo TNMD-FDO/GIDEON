@@ -147,10 +147,13 @@ _PRINTED_LOGINS: Final[Mapping[str, str]] = {
     "gideon_admin_password": BREAK_GLASS.username,
     "grafana_admin_password": GRAFANA_ADMIN_USER,
 }
-PRINT_ONCE_SUFFIX: Final = " — into the office password manager now (§1.7)."
+PRINT_ONCE_SUFFIX: Final = " — into the office password manager now."
+# An earlier tag's suffix carried a parenthesised trailer before its period;
+# the line still matches it, so a transcript from that tag is redacted too.
 PRINT_ONCE_LINE: Final = re.compile(
     r"^[^()\n]+ \([^)]*\): (?P<value>.+?)"
-    + re.escape(PRINT_ONCE_SUFFIX)
+    + re.escape(PRINT_ONCE_SUFFIX[:-1])
+    + r"(?:\s+\([^()\n]*\))?\."
     + r"$"
 )
 
@@ -352,7 +355,7 @@ def _models_stage(
     egress_path: PathLike,
     pull_models: PullModels,
 ) -> StageResult:
-    """Converge the weights tree to the profile before any service restarts (§5.4, §3.6)."""
+    """Converge the weights tree to the profile before any service restarts."""
 
     allowlist_result = egress.load_egress_allowlist(egress_path, host=io)
     if not allowlist_result.ok or allowlist_result.allowlist is None:

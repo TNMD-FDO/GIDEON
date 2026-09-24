@@ -26,7 +26,7 @@ _KEY_URL = "https://download.docker.com/linux/ubuntu/gpg"
 _REPO = "deb [arch=amd64 signed-by=/etc/apt/keyrings/gideon-docker.asc] https://download.docker.com/linux/ubuntu resolute stable\n"
 _JOURNALD_TEXT = "[Journal]\nStorage=persistent\nSystemMaxUse=50G\nMaxRetentionSec=90day\n"
 # Read from the installed containerd's `containerd config default` and `config
-# dump` on 2026-09-10 (ADR-0040).  The metadata database is created on every
+# dump` on 2026-09-10. The metadata database is created on every
 # start, so store presence is judged by snapshot and content entries instead.
 _CONTAINERD_TEXT = "version = 4\nroot = '/var/lib/docker/containerd'\ndisabled_plugins = ['io.containerd.grpc.v1.cri']\n"
 _CONTAINERD_STORE_PATHS = (

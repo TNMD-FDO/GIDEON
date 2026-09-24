@@ -624,9 +624,8 @@ triggers:
         self.assertEqual(ctx.exception.code, 0)
         help_text = output.getvalue()
         self.assertIn("proposals", help_text)
-        self.assertIn("§20.2", help_text)
-        self.assertIn("ADR-0049", help_text)
-        self.assertIn("read-only", help_text)
+        self.assertIn("read the improvement proposals", help_text)
+        self.assertIn("read-only report", help_text)
 
 
 class FakeSection:

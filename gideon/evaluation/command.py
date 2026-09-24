@@ -30,7 +30,7 @@ from gideon.host.report import Problem, StageResult, print_stage, refusal
 from gideon.host.sysio import Host, PathLike, RealHost
 
 _COMMAND: Final[str] = "eval run"
-_FLAG_FIX: Final[str] = "Run gideon eval run --slice extraction; decision runs land in slice-2 ticket 16."
+_FLAG_FIX: Final[str] = "Run gideon eval run --slice extraction; decision runs land in a later release."
 _SLICE_FIX: Final[str] = "Run gideon eval run --slice extraction."
 _LOAD_FIX: Final[str] = "Correct every listed eval-set finding, then retry."
 _NO_GPU_FIX: Final[str] = "Run the evaluation on a GPU host, then retry."
@@ -336,7 +336,7 @@ def _engine_preconditions(
     if not judgement.inside:
         fix = (
             f"Next opening is {judgement.next_opening.isoformat()}; "
-            "--force lands with slice-2 ticket 16."
+            "--force lands in a later release."
         )
         print_stage(
             StageResult(

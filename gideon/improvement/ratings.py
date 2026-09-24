@@ -1,8 +1,8 @@
 """The office ``feedback`` section: the window's ratings counted by model.
 
 A ``rated`` row is never ``fired``: a thumbs-down becomes a person's step only
-through the monthly packet (improvement ticket 06), so the report's fired count
-and ``status``'s waiting block pass these rows by.
+through the monthly packet, so the report's fired count and ``status``'s
+waiting block pass these rows by.
 """
 
 from dataclasses import dataclass

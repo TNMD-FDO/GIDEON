@@ -1,4 +1,4 @@
-"""Append-only audit transport for §19.4.
+"""Append-only audit transport.
 
 Audit rows contain ids and identifiers only, never document or query text.
 The writer therefore sends its SQL through the Postgres container's stdin
@@ -23,7 +23,7 @@ _PSQL_FLAGS: Final[tuple[str, ...]] = ("-v", "ON_ERROR_STOP=1", "--single-transa
 
 @dataclass(frozen=True, slots=True)
 class AuditRow:
-    """One §19.4 row whose fields are identifiers rather than content."""
+    """One audit row whose fields are identifiers rather than content."""
 
     run_id: str
     kind: str

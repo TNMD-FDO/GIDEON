@@ -907,7 +907,7 @@ class CommandTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertEqual([row.name for row in observed], ["engine"])
-        self.assertEqual(output, "engine: ok — skipped — no-GPU host (§2.5)\n")
+        self.assertEqual(output, "engine: ok — skipped — no-GPU host\n")
 
         host = self.make_host()
         code, output, _ = self.run_command(host)
@@ -1150,7 +1150,7 @@ class CommandTests(unittest.TestCase):
         code, output, backend = self.run_command(host, audit_backend)
 
         self.assertEqual(code, 0)
-        self.assertEqual(output, "engine: ok — skipped — no-GPU host (§2.5)\n")
+        self.assertEqual(output, "engine: ok — skipped — no-GPU host\n")
         self.assertEqual(host.runs, [])
         self.assertEqual(backend.rows, [])
 

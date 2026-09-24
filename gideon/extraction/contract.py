@@ -2,13 +2,13 @@
 
 An :class:`ExactObject` is an object present verbatim in the user's message:
 its ``text`` is exactly the source's ``[start:end]`` slice, the offsets
-half-open code points of the string; nothing is respelled or normalized away
-(ADR-0019).  The objects of one extraction never overlap and are ordered by
-``start``.  The type vocabulary is closed and written once, for both
-extractors and both halves of the grammar, so a label never renames.
+half-open code points of the string; nothing is respelled or normalized away.
+The objects of one extraction never overlap and are ordered by ``start``.
+The type vocabulary is closed and written once, for both extractors and both
+halves of the grammar, so a label never renames.
 
-A keyed type always carries its authority's permanent key, at section level
-(ADR-0024), and every other type never does:
+A keyed type always carries its authority's permanent key, at section level,
+and every other type never does:
 
 - ``statute`` — ``/us/usc/t<title>/s<section>``, ``/us/usc/t18/s3663A``;
 - ``guideline`` — ``ussg/<id>``, the id upper-cased as every Manual prints it;
@@ -34,7 +34,7 @@ from the text (``3663A`` against ``78j``), so the key carries it as typed.
 A ``bare_section`` (a section with no title) and a ``bare_rule`` (a rule
 number with no rule set, including the unnamed habeas form ``Habeas Rule 6``)
 never carry a key: the text does not state the authority, and deterministic
-code never guesses one (ADR-0006) — ``Habeas Rule 6``, beside ``Rule 41``,
+code never guesses one — ``Habeas Rule 6``, beside ``Rule 41``,
 names no set.
 """
 

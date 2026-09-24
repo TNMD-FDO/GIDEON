@@ -1,4 +1,4 @@
-"""The weights tree: the hub-cache layout under /data/models and the pull record (§5.4, §2.4).
+"""The weights tree: the hub-cache layout under /data/models and the pull record.
 
 The layout helpers are pure; the pull record is the ``rollback.json``-shaped
 journal (claim, current, previous, retiring) whose transitions every run of
@@ -562,8 +562,7 @@ _FOREIGN_FIX: Final = (
 )
 _REPUBLISH_FIX: Final = (
     "The pinned upstream is gone or changed; report it to TNMD; the source "
-    "archive is republished and models.lock repinned in the next patch release "
-    "(§2.4)."
+    "archive is republished and models.lock repinned in the next patch release."
 )
 _WGET_FIX: Final = "Install wget with sudo apt-get install wget, then re-run gideon models pull."
 _FREE_SPACE_FIX: Final = "Free space on /data, then re-run gideon models pull."

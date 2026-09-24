@@ -1,4 +1,4 @@
-"""The isolated backup restore drill (§19.2 and the [22] ruling)."""
+"""The isolated backup restore drill."""
 
 import base64
 import binascii

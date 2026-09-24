@@ -79,7 +79,7 @@ class Help(unittest.TestCase):
         with contextlib.redirect_stdout(group), self.assertRaises(SystemExit) as ctx:
             main(["eval", "--help"])
         self.assertEqual(ctx.exception.code, 0)
-        self.assertIn("§18", group.getvalue())
+        self.assertIn("run the eval suites", group.getvalue())
 
         command = io.StringIO()
         with contextlib.redirect_stdout(command), self.assertRaises(SystemExit) as ctx:
@@ -88,32 +88,32 @@ class Help(unittest.TestCase):
         self.assertIn("--slice NAME", command.getvalue())
         self.assertIn("--set DIR", command.getvalue())
         self.assertIn("--ranked FILE", command.getvalue())
-        self.assertIn("§18", command.getvalue())
-        self.assertIn("§18.6", command.getvalue())
-        self.assertIn("§18.2", command.getvalue())
+        self.assertIn("frozen slice to run", command.getvalue())
+        self.assertIn("eval set version directory", command.getvalue())
+        self.assertIn("ranked-list JSONL file", command.getvalue())
 
         reference = io.StringIO()
         with contextlib.redirect_stdout(reference), self.assertRaises(SystemExit) as ctx:
             main(["eval", "reference", "--help"])
         self.assertEqual(ctx.exception.code, 0)
         self.assertIn("--run ID", reference.getvalue())
-        self.assertIn("§18.6", reference.getvalue())
+        self.assertIn("recorded evaluation run id", reference.getvalue())
 
     def test_status_help_names_its_blocks_and_front_door_contract(self) -> None:
         out = io.StringIO()
         with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as ctx:
             main(["status", "--help"])
         self.assertEqual(ctx.exception.code, 0)
+        help_text = collapsed(out.getvalue())
         for phrase in (
             "needs attention",
             "waiting on you",
             "at a glance",
             "front-door brief",
-            "§20.2",
             "root",
             "writes nothing",
         ):
-            self.assertIn(phrase, out.getvalue())
+            self.assertIn(phrase, help_text)
 
 
 class Stubs(unittest.TestCase):

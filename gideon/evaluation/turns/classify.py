@@ -13,7 +13,7 @@ from gideon.api import stamp
 from gideon.evaluation.turns import browser
 from gideon.evaluation.turns.cases import Case
 
-# The branch gate's Function keeps the branch refusal (general-turn ticket 04).
+# The branch gate's Function keeps the branch refusal.
 BRANCH_GATE_FUNCTION: Final[str] = "compose/open-webui/functions/branch_gate.py"
 # The fixes name the record's home: the runner says where it is, or how to keep one.
 _FIX: Final[str] = (
@@ -23,8 +23,8 @@ _FIX: Final[str] = (
     "expecting answered that reads declined is the model's own refusal of the "
     "question, a false refusal to record on the ticket."
 )
-# The generator writes its declines with a typographic apostrophe ("I can’t",
-# every decline in ticket 09's transcript), so each contraction admits both.
+# The generator writes its declines with a typographic apostrophe ("I can’t"),
+# so each contraction admits both.
 _APOSTROPHE: Final[str] = "[’']"
 _DECLINE_NEGATIONS: Final[tuple[str, ...]] = (
     rf"I can{_APOSTROPHE}t",
@@ -65,18 +65,17 @@ DECLINE_FORM: Final[re.Pattern[str]] = re.compile(
 # A decline is the refusal and at most an offer: a form match within this bound
 # is ``declined`` and a longer stored answer is ``disclaimed``. The starting
 # value sits above the committed declines, 71–388 characters (the seed's own
-# written declines, ticket 37's four restating controls at 174–217, the
-# v0.1.10 proof's stored decline at 372 and replaced original at 378), and below
-# the committed disclaimed answers (the v0.1.10 proof's 3,159 and 5,693); a
+# written declines, four restating controls at 174–217, the v0.1.10 proof's
+# stored decline at 372 and replaced original at 378), and below the
+# committed disclaimed answers (the v0.1.10 proof's 3,159 and 5,693); a
 # doctrine paragraph after a 150–350-character disclaimer does not fit under
 # it. The measured length is the model's own: a trailing citation stamp, the
-# product's text, is not counted. Ticket 38's seed run (2026-09-16, 126 control
+# product's text, is not counted. The seed run (2026-09-16, 126 control
 # turns) confirmed the value: declined controls 110–580 and disclaimed 612 up,
 # both counted without the stamp; read by hand, 5 of 65 form-matched controls
-# sit on the wrong side between 430 and 620 — the bound's known error,
-# recorded on the ticket. exempt: tooling (ADR-0017), no site key
-# (ADR-0028): corrected by seed runs' lengths, never by argument, a move editing
-# this value and this comment together. A decline past the form's window, a
+# sit on the wrong side between 430 and 620 — the bound's known error.
+# exempt: tooling, no site key: corrected by seed runs' lengths, never by
+# argument, a move editing this value and this comment together. A decline past the form's window, a
 # negation without a refusal verb, a calendar-date reply, and an answer that
 # complies without the figure remain ``answered`` because the form does not
 # read them.

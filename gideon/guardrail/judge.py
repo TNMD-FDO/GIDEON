@@ -171,11 +171,10 @@ def judge_text(
                     # makes the match another family's (or nobody's): no
                     # trip.  When the hit reaches past the match, prefix mode
                     # holds the match to the hit's end, so no release boundary
-                    # falls inside the context that rejected it (general-turn
-                    # ticket 12).  A hit deeper inside the
-                    # match (a second clause the deadline's greedy gap
-                    # swallowed) rejects nothing, so the earlier family keeps
-                    # its trip.
+                    # falls inside the context that rejected it.  A hit deeper
+                    # inside the match (a second clause the deadline's greedy
+                    # gap swallowed) rejects nothing, so the earlier family
+                    # keeps its trip.
                     exclusion_start = max(0, match.start() - EXCLUSION_REACH_CHARS)
                     exclusion_end = min(len(text), match.end() + EXCLUSION_REACH_CHARS)
                     exclusion_hit = next(

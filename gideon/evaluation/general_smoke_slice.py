@@ -1,13 +1,13 @@
 """Run General's smoke set as managed turns through the frontend.
 
-§18.2's ``general-smoke`` suite: every active case is one managed turn as the
+The ``general-smoke`` suite: every active case is one managed turn as the
 eval identity through Open WebUI's chat path, the frontend's adapter the thing
-under test (ADR-0045), replayed on the raw streaming route and judged by the
-turn harness's own checks over the stored record. A turn passes iff the
-harness's row holds — its expectation, ``must``, ``must_not``, ``block``,
-``sources``, ``withheld``, and a clean stream — and its chat was identified and
-deleted; nothing is graded (ADR-0006, ADR-0023). Rows carry ids, classes,
-check names, and fixed codes, never text.
+under test, replayed on the raw streaming route and judged by the turn
+harness's own checks over the stored record. A turn passes iff the harness's
+row holds — its expectation, ``must``, ``must_not``, ``block``, ``sources``,
+``withheld``, and a clean stream — and its chat was identified and deleted;
+nothing is graded, and no judge gates. Rows carry ids, classes, check names,
+and fixed codes, never text.
 """
 
 import re

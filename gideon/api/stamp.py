@@ -1,4 +1,4 @@
-"""General's citation detection and its fixed warning label (spec §15).
+"""General's citation detection and its fixed warning label.
 
 The service's judged paths append the label this module decides on, the turn
 harness's classifier strips it from a measured length, and
@@ -7,17 +7,16 @@ alone: the harness imports it on the box's system Python, where the service
 image's dependencies do not exist.
 """
 
-# The citation stamp (spec §15, [06] item 16, ADR-0020): General's second
-# mechanical guardrail.  It reads the finished answer — the answer text alone,
-# never the reasoning — for anything citation-shaped and appends one fixed
-# sentence after it: a warning label, never a verdict, so over-triggering is
-# harmless and a miss is the failure (ADR-0043), and the stamp's own internal
-# error fails toward the label.
+# The citation stamp: General's second mechanical guardrail.  It reads the
+# finished answer — the answer text alone, never the reasoning — for anything
+# citation-shaped and appends one fixed sentence after it: a warning label,
+# never a verdict, so over-triggering is harmless and a miss is the failure,
+# and the stamp's own internal error fails toward the label.
 import re
 from dataclasses import dataclass
 from typing import Final
 
-# ADR-0043 and §15: fixed product text, no site value (ADR-0028).
+# Fixed product text, no site value.
 CITATION_STAMP = "General does not verify citations."
 STAMP_SEPARATOR = "\n\n"
 # The longest text one pattern may match; a test holds every pattern to it.
@@ -140,8 +139,8 @@ REPORTER_PATTERN = _compiled(
 CODE_PATTERN = _compiled(
     CODE_FAMILY_ID,
     # A code with an optional title before it and an optional section symbol
-    # after it (18 U.S.C. § 3553(a), U.S.S.G. §2D1.1, 18 U.S.C. 3553), or the
-    # bare section symbol with a number (§ 2255, §§ 3553-3554).
+    # after it (18 U.S.C. § 3553(a), U.S.S.G. § 2D1.1, 18 U.S.C. 3553), or a
+    # bare section symbol followed by a number.
     _BOUNDARY_START
     + r"(?:\d{1,5}"
     + _SPACE
@@ -200,8 +199,8 @@ def is_stamped(text: str) -> bool:
     return " ".join(text.split()).endswith(" ".join(CITATION_STAMP.split()))
 
 
-# exempt: fixed product text (ADR-0043), never a tuned figure: the one string
-# every reader of General's answer appends or strips.
+# exempt: fixed product text, never a tuned figure: the one string every
+# reader of General's answer appends or strips.
 STAMP_TAIL: Final[str] = STAMP_SEPARATOR + CITATION_STAMP
 
 
@@ -213,7 +212,7 @@ def tail_for(text: str) -> str:
     owed nothing.  The stamp's own failure fails toward the label, as the
     Function's fallback does — an already-stamped answer is still owed nothing
     when that second read succeeds — so this never raises and its callers need
-    no guard of their own.  It logs nothing: it holds model text (spec §19.4).
+    no guard of their own. It logs nothing: it holds model text.
     """
 
     try:

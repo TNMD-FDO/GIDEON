@@ -19,10 +19,10 @@ _READER_FIX: Final[str] = "Use a recorded run from the release's eval set, then 
 _CLEAN_FIX: Final[str] = "Run the evaluation from a clean checkout at the release tag, then retry."
 _OVERRIDES_FIX: Final[str] = "Run the evaluation without overrides, then retry."
 # A suite-wide run names no slice, so it has no key under eval/reference/;
-# slice-2 tickets 12 and 13 choose one when their suites land.
+# a slice defines the reference when its suite lands.
 _SUITE_WIDE_FIX: Final[str] = (
     "Use a run of one slice; a suite-wide run has no reference key until "
-    "slice-2 tickets 12 and 13 choose one."
+    "a later release chooses one."
 )
 _WRITE_FIX: Final[str] = "Restore the release checkout's reference directory ownership, then retry."
 _UNSIGNED_FIX: Final[str] = (

@@ -13,8 +13,8 @@ from gideon.host.sysio import PathLike
 
 LDAP_PASSWORD: Final = Path("/etc/gideon/secrets/ldap_bind_password")
 LDAP_CA: Final = Path("/etc/gideon/ca.pem")
-# ldapsearch exits with the LDAP result code; noSuchObject (RFC 4511 §4.1.9)
-# is what a base-scope search at an absent DN returns.
+# ldapsearch exits with the LDAP result code; noSuchObject (RFC 4511, section
+# 4.1.9) is what a base-scope search at an absent DN returns.
 NO_SUCH_OBJECT: Final = 32
 # Exempt operational constant: one directory query's bound, so a hung
 # controller cannot stall preflight or the nightly reconcile.

@@ -26,7 +26,7 @@ _DOCKER_BLOCK = re.compile(
 # bridge is docker0 and every user-defined network is a br-<id> bridge.
 _DOCKER_BRIDGES = ("docker0", "br-+")
 # Docker-published ports and who may reach them: Caddy's 443 from the office
-# LANs (§1.5), the registry's 5000 from the acceptance VM's bridge only (§1.8).
+# LANs, and the registry's 5000 from the acceptance VM's bridge only.
 _PUBLISHED_PORTS = (443, 5000)
 _DOCKER_FIX = (
     "Rewrite the DOCKER-USER block in /etc/ufw/after.rules from site.lan_cidrs "

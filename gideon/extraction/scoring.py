@@ -26,10 +26,10 @@ from gideon.extraction.contract import OBJECT_TYPES, ExactObject, ObjectType, ke
 type Case = Mapping[str, Any]
 
 MIN_PRECISION: Final[float] = 0.95
-"""Spec §11.2: each landed type's precision over the extraction set."""
+"""Each landed type's precision over the extraction set."""
 
 MIN_RECALL: Final[float] = 0.90
-"""Spec §11.2: each landed type's recall over the extraction set."""
+"""Each landed type's recall over the extraction set."""
 
 
 @dataclass(frozen=True, slots=True)

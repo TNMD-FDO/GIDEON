@@ -1,4 +1,4 @@
-"""The local backup-set layout and its pure data model (spec §19.1)."""
+"""The local backup-set layout and its pure data model."""
 
 import json
 import math

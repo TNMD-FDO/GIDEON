@@ -184,6 +184,13 @@ class Registry(unittest.TestCase):
             SUPPLIED_NAMES,
             {Path(KEY_PATH).name, _SMTP_PASSWORD_NAME, PROXY_AUTH_NAME, "ldap_bind_password"},
         )
+        tls_replacement = next(
+            secret.replaced_by
+            for secret in SUPPLIED_REGISTRY
+            if secret.name == "tls_key"
+        )
+        self.assertIn("docs/runbooks/office-services-setup.md §4", tls_replacement)
+        self.assertTrue(tls_replacement.endswith("sudo python3 -m gideon tls reload."))
 
     def test_supplied_secrets_are_not_generated(self) -> None:
         self.assertTrue(is_generated("gideon_admin_password"))

@@ -37,13 +37,9 @@ TEXT_RULE_EXEMPT = (
 RESEARCH_NOTE_TEXT_EXEMPT = (
     "compose/open-webui/functions/branch_gate.py",
     "compose/open-webui/general.yaml",
-    "gideon/api/judged.py",
-    "gideon/host/owui.py",
-    "gideon/host/owuiturn.py",
     "gideon/host/render/compose.py",
     "gideon/host/render/owui.py",
     "gideon/host/render/searxng.py",
-    "gideon/host/site.py",
 )
 _TEXT_ROOTS = (Path("gideon"), Path("compose"), Path("config"), Path("tools"))
 _TEXT_FILES = (Path(".github/workflows/ci.yml"), Path("README.md"))
@@ -201,7 +197,9 @@ def _text_files(root: Path) -> tuple[Path, ...]:
     return tuple(sorted(paths))
 
 
-def rule_text(root: Path) -> list[Finding]:
+def rule_text(
+    root: Path, *, exempt: tuple[str, ...] = RESEARCH_NOTE_TEXT_EXEMPT
+) -> list[Finding]:
     """Find excluded paths named by text in the scoped kept source files.
 
     The scope is the source roots plus the two single files ci.yml and README.md,
@@ -213,7 +211,7 @@ def rule_text(root: Path) -> list[Finding]:
     patterns = {prefix: text_pattern(root, prefix) for prefix in EXCLUDED_PREFIXES}
     for path in _text_files(root):
         relative = path.relative_to(root).as_posix()
-        if relative in RESEARCH_NOTE_TEXT_EXEMPT or any(
+        if relative in exempt or any(
             relative == prefix or relative.startswith(prefix + "/")
             for prefix in TEXT_RULE_EXEMPT
         ):
@@ -446,13 +444,17 @@ class SeededTrees(unittest.TestCase):
     def test_research_note_allowlist_exempts_only_the_named_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            listed = root / RESEARCH_NOTE_TEXT_EXEMPT[2]
+            listed_name = "gideon/api/listed-research-note.py"
+            listed = root / listed_name
             listed.parent.mkdir(parents=True)
             listed.write_text("docs/research/example.md\n", encoding="utf-8")
-            sibling = listed.with_name("sibling.py")
+            sibling = listed.with_name("sibling-research-note.py")
             sibling.write_text("docs/research/example.md\n", encoding="utf-8")
-            items = rule_text(root)
-        self.assertEqual([item.path for item in items], [Path("gideon/api/sibling.py")])
+            items = rule_text(root, exempt=(listed_name,))
+        self.assertEqual(
+            [item.path for item in items],
+            [Path("gideon/api/sibling-research-note.py")],
+        )
 
     def test_text_reports_excluded_prefix_in_readme(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

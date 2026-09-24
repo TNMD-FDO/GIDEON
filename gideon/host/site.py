@@ -1,8 +1,8 @@
-"""The site-file model: registry, bare-host YAML loader, typed config (§3.3–3.4).
+"""The site-file model: registry, bare-host YAML loader, typed config.
 
 Every leaf of ``/etc/gideon/site.yaml`` is declared once in ``FIELD_REGISTRY``;
 the validator, the dataclasses, and the schema emitter all read that one table
-so allowed values are written exactly once (ticket [23] item 8).
+so allowed values are written exactly once.
 """
 
 import difflib
@@ -82,13 +82,12 @@ _RETENTION_VALUES: Final = ("1d", "7d", "30d", "60d", "90d", "180d", "1y")
 _DRILL_INTERVAL_VALUES: Final = ("1w", "2w", "1m", "3m", "6m", "1y")
 _PROMPT_LOGGING_VALUES: Final = ("metadata_only", "full")
 _WEB_SEARCH_VALUES: Final = ("on", "off")
-# The engines an office may name (§3.3's defaults: brave, bing, startpage, and
+# The engines an office may name (the defaults: brave, bing, startpage, and
 # wikipedia; DuckDuckGo and Google are allowed but off by default because
 # DuckDuckGo's bot detection answers a SearXNG instance's request shape with a
-# CAPTCHA at every search; ticket 71): each is the ``name:`` of a default
-# engine in the pinned SearXNG image (docs/research/searxng-service-and-owui-search.md
-# §5a); ``brave`` is the keyless engine, never ``braveapi``.  A release extends
-# the list.
+# CAPTCHA at every search): each is the ``name:`` of a default engine in the
+# pinned SearXNG image; ``brave`` is the keyless engine, never ``braveapi``.
+# A release extends the list.
 WEB_ENGINE_VALUES: Final[tuple[str, ...]] = (
     "duckduckgo",
     "brave",
@@ -99,9 +98,8 @@ WEB_ENGINE_VALUES: Final[tuple[str, ...]] = (
 )
 # Bare lowercase domain names only: the frontend reads a leading ``!`` as a
 # block rule and an address as a network, while this key is an allow-list; a
-# bare name matches itself and its subdomains on label boundaries
-# (docs/research/searxng-service-and-owui-search.md §7).  The last label
-# carries a letter, so a dotted address never passes as a name.
+# bare name matches itself and its subdomains on label boundaries.  The last
+# label carries a letter, so a dotted address never passes as a name.
 DOMAIN_NAME: Final[re.Pattern[str]] = re.compile(
     r"^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+"
     r"(?=[a-z0-9-]*[a-z])[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$"

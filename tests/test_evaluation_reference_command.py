@@ -226,7 +226,7 @@ class CheckRefusals(unittest.TestCase):
             ({"git_sha": None}, "clean checkout"),
             ({"overrides": {"fictitious": "override"}}, "without overrides"),
             ({"slice": "missing-slice"}, "loaded eval set"),
-            ({"slice": None}, "tickets 12 and 13"),
+            ({"slice": None}, "chooses one"),
             ({"slice": "judge-triples"}, "compares against a reference"),
             ({"eval_set_version": "eval-v-fictitious-other"}, "release's eval set"),
             ({"set_digest": "e" * 64}, "release's eval set"),

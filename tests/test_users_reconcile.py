@@ -282,7 +282,7 @@ class Refusals(unittest.TestCase):
         code, _, err = reconcile(host, front, now=True)
         self.assertEqual(code, 1)
         self.assertIn("auth.ldap.admins_group", err)
-        self.assertIn("§3.6", err)
+        self.assertIn("docs/runbooks/office-services-setup.md §1", err)
         self.assertEqual(front.role_updates, [])
 
     def test_frontend_not_ready_refuses_with_logs(self) -> None:

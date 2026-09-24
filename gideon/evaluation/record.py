@@ -73,7 +73,7 @@ class ResultRow:
         """Keep the judge's reason out of diagnostic representations.
 
         Every other column is content-free; ``judge`` carries the one
-        model-written text a result row holds (ADR-0048).
+        model-written text a result row holds.
         """
 
         judge = None if self.judge is None else "<redacted>"

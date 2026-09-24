@@ -1,4 +1,4 @@
-"""The arithmetic guardrail's judge (spec §16, ADR-0006, ADR-0045 (b)).
+"""The arithmetic guardrail's judge.
 
 The code enforcement of the no-model-arithmetic rule, as five modules each
 importing only from those before it: ``grammar`` (the bounds, the
@@ -13,8 +13,8 @@ a stream, ``StreamCheck``, text in and released text out). This module binds
 every public name of the five, so callers read one surface.
 
 General's service and ``engine verify`` call it, with the turn harness beside
-them (ADR-0045 (b)). Every module imports the standard library only at module
-level: the writer's import of the Postgres driver sits inside
+them.  Every module imports the standard library only at module level: the
+writer's import of the Postgres driver sits inside
 ``write_trip_row``, which no host path calls.
 """
 

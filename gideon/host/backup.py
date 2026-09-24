@@ -1,4 +1,4 @@
-"""The local backup-run command and its ordered host-side stages (§19.1).
+"""The local backup-run command and its ordered host-side stages.
 
 Each entry holds the backup lock (``backuplock.py``) for its whole run, so a
 backup, a push, and a restore never overlap; ``backuplock.py`` owns the rules.
@@ -63,7 +63,7 @@ _IDENTITY_FIX: Final = (
 _ACCOUNT_FIX: Final = "Run sudo python3 -m gideon host provision, then retry."
 _STAGE_FIX: Final = "Run sudo python3 -m gideon apply, then retry."
 _LINK_FIX: Final = (
-    "Confirm /data/backup-staging is one filesystem (§3.7), then re-run backup run"
+    "Confirm /data/backup-staging is one filesystem, then re-run backup run"
 )
 _PRUNE_FIX: Final = "Repair the staging directory, then re-run backup run."
 _SECRET_STAGE_FIX: Final = (
@@ -79,17 +79,18 @@ _PUSH_TOOLS_FIX: Final = (
     "Run sudo python3 -m gideon host provision --only host-tools, then retry."
 )
 _PUSH_TARGET_FIX: Final = (
-    "Authorize the backup key and check the target per the office-services "
-    "runbook §3, then re-run backup push."
+    "Authorize the backup key and check the target per "
+    "docs/runbooks/office-services-setup.md §3, then re-run backup push."
 )
 _PUSH_STAGE_FIX: Final = "Run sudo python3 -m gideon backup push, then retry."
 _PUSH_FULL_COPY_FIX: Final = (
-    "Keep every snapshot under one path on one filesystem on the target (§3.7), "
-    "then re-run backup push."
+    "Keep every snapshot under one path on one filesystem on the target "
+    "(docs/runbooks/office-services-setup.md §3), then re-run backup push."
 )
 _PUSH_CHECK_FIX: Final = (
     "Re-run sudo python3 -m gideon backup push --verify-all; if it fails again, "
-    "the target's copy is corrupt — check the target's disk per §3.7."
+    "the target's copy is corrupt — check the target's disk per "
+    "docs/runbooks/office-services-setup.md §3."
 )
 _RSYNC_STAT_PATTERN = re.compile(
     r"^\s*Total (file size|transferred file size):\s*([0-9][0-9,]*) bytes\s*$"

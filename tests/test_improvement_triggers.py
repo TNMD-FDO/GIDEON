@@ -327,8 +327,9 @@ class Validation(unittest.TestCase):
                 _entry(id="duplicate-trigger"),
             ],
         }
-        self.assert_document_errors(
-            document,
+        errors = validate_trigger_registry(document)
+        self.assert_errors(
+            errors,
             "future",
             "triggers[0].future_entry",
             "triggers[0].condition.future_clause",
@@ -341,6 +342,14 @@ class Validation(unittest.TestCase):
             "triggers[0].condition.value",
             "triggers[0].condition.runs",
             "triggers[2].id",
+        )
+        self.assertIn(
+            "expected a section reference: the section sign, then a number such as 18.4",
+            next(
+                error.problem
+                for error in errors
+                if error.key_path == "triggers[0].reopens"
+            ),
         )
 
     def test_missing_required_key_is_reported(self) -> None:

@@ -1,4 +1,4 @@
-"""The Grafana-managed alerting channel test (§19.5)."""
+"""The Grafana-managed alerting channel test."""
 
 import argparse
 import time

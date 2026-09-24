@@ -73,7 +73,7 @@ def _owner_ids(uid: int, gid: int) -> Mapping[str, tuple[int, int]]:
 _BEGIN = "# GIDEON BEGIN provision:disk-layout"
 _END = "# GIDEON END provision:disk-layout"
 _RESERVE_BYTES = 2**40
-_REINSTALL_FIX = "Reinstall the host per the §1.9 runbook, then re-run provision."
+_REINSTALL_FIX = "Reinstall the host's operating system, then re-run provision."
 _DISK_FIX = (
     "Resolve the data disk manually without wiping foreign data, then re-run provision."
 )
@@ -438,7 +438,7 @@ def _inspect(context: ProvisionContext) -> _Inspection:
             error=(
                 f"data disk {data_disk.name} ({data_disk.size} B) is not larger "
                 f"than the OS disk ({os_disk.size} B); wrong size class for the "
-                "§1.4 layout"
+                "data-disk layout"
             ),
             error_fix=_DISK_FIX,
         )

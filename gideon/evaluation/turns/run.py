@@ -23,20 +23,20 @@ from gideon.host.sysio import Host, PathLike, RealHost
 # A managed turn waits for the frontend to finish the engine, outlet, and
 # persistence; the starting bound covers the observed longest turn.
 TURN_TIMEOUT_SECONDS: Final[float] = 600.0
-# §18.5: a handful of engine calls may run at any hour, a longer run only in the
+# A handful of engine calls may run at any hour, a longer run only in the
 # quiet window or on a weekend; this is the handful — a starting value. A
 # browser turn counts BROWSER_ENGINE_CALLS_PER_TURN engine calls.
 SMOKE_TURNS: Final[int] = 8
 # A frontend page's turn sends the answer, then the page's title and tag tasks
 # (follow-ups are rendered off in render/owui.py); the API mode's managed turn
-# sends no background tasks. The starting value comes from ticket 36's proof:
-# 65 engine calls for 24 completions, or 62 over 21 browser turns.
+# sends no background tasks. The starting value reflects 65 engine calls for
+# 24 completions, or 62 over 21 browser turns.
 # Correct it from the engine access log's POST /v1/chat/completions lines over a
 # run's span, divided by that run's browser turns.
 BROWSER_ENGINE_CALLS_PER_TURN: Final[int] = 3
 # A released-prefix leak on the raw route and a flash from a seat are failures;
 # this is the one policy both fields share, enforced by the Filter stream hook
-# (ticket 10, v0.1.18).
+# (v0.1.18).
 STREAM_LEAK_FAILS: Final[bool] = True
 # The browser mode drains its frame observer this often; the observer captures
 # every painted frame regardless, so this is the drain interval, not the
@@ -242,7 +242,7 @@ class ApiTurnDriver:
         user_id = str(uuid.uuid4())
         assistant_id = str(uuid.uuid4())
         started = monotonic()
-        # An unsearched case's body carries no features key (ticket 16).
+        # An unsearched case's body carries no features key.
         managed_problem = owuiturn.managed_turn(
             self.client,
             model=self._model,
@@ -1031,9 +1031,9 @@ def _run_probe(
     """Probe the users-seat branch gate through one bare base-model completion.
 
     The request carries no session or chat id and must receive the gate's
-    refusal as HTTP 400 before the engine (ADR-0045 (d), frontend contract §2
-    row 8). A chat that appears is deleted and reported as a guard violation;
-    failures remain one named row and never become a traceback.
+    refusal as HTTP 400 before the engine. A chat that appears is deleted and
+    reported as a guard violation; failures remain one named row and never
+    become a traceback.
     """
 
     prompt = session.prompt_text("inlet-probe", spec.sentinel, session.PROBE_PROMPT)

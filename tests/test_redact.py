@@ -161,6 +161,7 @@ class RedactContracts(unittest.TestCase):
             f"recipient {site.alerts.recipients[1]}\n"
             "gideon_admin_password (break-glass administrator): secret"
             f"{PRINT_ONCE_SUFFIX}\n"
+            "older_password (break-glass administrator): older-secret — into the office password manager now (§1.7).\n"
             "age identity (store it in the office password manager now): "
             "AGE-SECRET-KEY-1abc\n"
             "short age key: AGE-SECRET-KEY-1abc\n"
@@ -168,6 +169,11 @@ class RedactContracts(unittest.TestCase):
         redacted = redact(text, site)
         self.assertIn("recipient <alerts.recipients[1]>", redacted)
         self.assertIn(f"<redacted>{PRINT_ONCE_SUFFIX}", redacted)
+        self.assertIn(
+            "older_password (break-glass administrator): <redacted> — into the office "
+            "password manager now (§1.7).",
+            redacted,
+        )
         self.assertIn(
             "age identity (store it in the office password manager now): <redacted>",
             redacted,

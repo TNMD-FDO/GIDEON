@@ -1,4 +1,4 @@
-"""The ordered host command for rotating one generated secret (§1.7, slice-1 ticket 24).
+"""The ordered host command for rotating one generated secret.
 
 ``secrets rotate <name>`` regenerates one rotatable secret and recreates exactly
 the services that loaded the old value, then converges the rest of the stack

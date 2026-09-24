@@ -1,4 +1,4 @@
-"""Postgres roles, databases, and forward-only migration convergence (spec §7.2, ADR-0005).
+"""Postgres roles, databases, and forward-only migration convergence.
 
 Every statement reaches the server through ``docker compose exec`` over the
 container's unix socket, which the official image trusts for every role, so no
@@ -231,8 +231,8 @@ def _run_migrations(io: Host, rendered_dir: PathLike, root: Path, report: Conver
 def converge(io: Host, rendered_dir: PathLike, root: PathLike | None = None) -> ConvergeReport:
     """Create absent roles and databases, then apply pending migrations in order.
 
-    Existing roles are never altered (a password rotation is a documented CSA
-    action, §0.2); ``CREATE DATABASE`` cannot share a transaction, so every
+    Existing roles are never altered (a password rotation is an explicit CSA
+    action); ``CREATE DATABASE`` cannot share a transaction, so every
     creation is its own autocommit statement.
     """
 

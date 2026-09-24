@@ -148,7 +148,7 @@ def run_judgments(eval_set: LoadedSet, slice_name: str, context: RunContext) -> 
 
     results = tuple(case_results)
     # The verdict is coverage and never a metric: a row fails exactly when a
-    # judged query had no ranked list, so the slice verdict is its rows' (§18.3).
+    # judged query had no ranked list, so the verdict is based on its rows.
     return SliceResult(
         all(result.verdict == "pass" for result in results),
         _report(case_ids, results, graded, ranked_lists),

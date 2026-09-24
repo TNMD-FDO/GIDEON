@@ -713,8 +713,25 @@ class Command(unittest.TestCase):
             with self.subTest(argv=argv):
                 code, stdout, stderr = _invoke(argv, **_run_kwargs(EvalHost()))
                 self.assertEqual(code, 1)
-                self.assertIn("Fix:", stderr if stderr else stdout)
+                refusal_text = stderr if stderr else stdout
+                self.assertIn("Fix:", refusal_text)
+                if argv[-1] == "--decision":
+                    self.assertIn(
+                        "Run gideon eval run --slice extraction; decision runs "
+                        "land in a later release.",
+                        refusal_text,
+                    )
                 self.assertNotIn("reference:", stdout)
+
+        next_opening = datetime(2026, 9, 21, 19, 0, tzinfo=UTC)
+        outside = command.window.WindowJudgement(False, "office hours", next_opening)
+        with patch.object(command.window, "window_judgement", return_value=outside):
+            code, stdout, stderr = _invoke(
+                ["eval", "run", "--slice", "judge-triples"],
+                **_run_kwargs(EvalHost()),
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("--force lands in a later release.", stderr or stdout)
 
     def test_refused_load_prints_no_reference_line(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

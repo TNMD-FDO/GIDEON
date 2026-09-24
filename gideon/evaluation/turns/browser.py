@@ -129,21 +129,21 @@ class Page(Protocol):
     def drain(self) -> PageDrain: ...
 
 
-# Research note §A1: the LDAP form and its alternate-form toggle.
+# Selectors for the LDAP form and its alternate-form toggle.
 USERNAME_SELECTOR = "#username"
 PASSWORD_SELECTOR = "#password"
 AUTHENTICATE_SELECTOR = 'role=button[name="Authenticate"]'
 LDAP_TOGGLE_SELECTOR = 'text="Continue with LDAP"'
 
-# Research note §A2: the composer, its send and stop buttons, the selector, the two menus.
+# Selectors for the composer, its send and stop buttons, the model selector,
+# and the two menus.
 CHAT_INPUT_SELECTOR = "#chat-input"
 SEND_BUTTON_SELECTOR = "#send-message-button"
 STOP_BUTTON_SELECTOR = '[aria-label="Stop"]'
 MODEL_SELECTOR = "#model-selector-model-button"
 INPUT_MENU_SELECTOR = "#input-menu-button"
 INTEGRATION_MENU_SELECTOR = "#integration-menu-button"
-# The menus' markup, read on the box (the note's §A2 names the buttons, not the
-# items): the model list's rows are options; the "+" menu's items are plain
+# The model list's rows are options; the "+" menu's items are plain
 # buttons inside its role=menu container; an integrations toggle is a pressed
 # button in the same kind of container.
 MODEL_OPTION_SELECTOR = "role=option"
@@ -153,7 +153,7 @@ INTEGRATION_TOGGLE_SELECTOR = '[role="menu"] button[aria-pressed]'
 # page's own, so the render is serviced — a starting value.
 MENU_SETTLE_SECONDS = 0.5
 
-# Research note §A3 and the box: a message container's id is message-<uuid>;
+# A message container's id is message-<uuid>;
 # the user's own carries the user-message class and the composer's id starts
 # with message- too, so the turn's assistant message is the last container
 # with neither. Its reasoning collapsible is the aria-expanded button under

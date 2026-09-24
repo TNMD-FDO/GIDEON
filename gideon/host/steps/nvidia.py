@@ -26,7 +26,8 @@ _DEB_TMP = Path("/var/tmp/gideon-cuda-keyring.deb")
 _LEGACY_KEYRING = Path("/etc/apt/keyrings/gideon-nvidia.asc")
 _LEGACY_SOURCE = Path("/etc/apt/sources.list.d/gideon-nvidia.list")
 _DRIVER_REBOOT_FIX = (
-    "Reboot the host per the §1.9 runbook, then re-run provision."
+    "Reboot the host, then re-run provision "
+    "(docs/runbooks/install-upgrade.md §1)."
 )
 _DRIVER_REPO_FIX = "Configure the pinned NVIDIA CUDA APT repository, then re-run provision."
 _DRIVER_PACKAGE_FIX = "Install the pinned NVIDIA driver package, then re-run provision."

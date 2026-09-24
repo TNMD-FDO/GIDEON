@@ -1,4 +1,4 @@
-"""The ordered receiving-office install command (§3.6 step 5).
+"""The ordered receiving-office install command.
 
 Install is composition: every phase is an existing command run in-process,
 each printing its own rows, followed by one phase row here.  The engine verify
@@ -28,7 +28,7 @@ _RENDERED_DIR: Final = "/etc/gideon/rendered"
 _ROOT_FIX: Final = "Run sudo python3 -m gideon install, then retry."
 _SITE_FIX: Final = "Correct /etc/gideon/site.yaml, then retry install."
 _AUDIT_FIX: Final = "Run sudo python3 -m gideon apply, then retry install."
-ENGINE_VERIFY_SKIPPED_DETAIL: Final = "engine verify skipped — no-GPU host (§2.5)"
+ENGINE_VERIFY_SKIPPED_DETAIL: Final = "engine verify skipped — no-GPU host"
 
 Runner = Callable[[argparse.Namespace], int]
 

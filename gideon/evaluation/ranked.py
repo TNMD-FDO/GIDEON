@@ -22,7 +22,7 @@ The ranked file may live anywhere readable and is never committed, so its
 directory can name a client or a matter; the path is used for the read alone
 and never reaches a stream or a row. What locates a finding is the line, the
 query id, and the entry ordinal, and what identifies the file on the record is
-its SHA-256 (Data Discipline, §19.4).
+its SHA-256.
 """
 
 

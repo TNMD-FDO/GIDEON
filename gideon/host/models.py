@@ -194,7 +194,7 @@ _MEMORY_ROW_KEYS: Final = ("gb", "role")
 PROFILE_NAME: Final = re.compile(
     r"^(?:[1-9][0-9]*x[1-9][0-9]*v-[1-9][0-9]*d|[1-9][0-9]*u)$"
 )
-"""The hardware-profile name grammar from §1.1."""
+"""The hardware-profile name grammar."""
 
 PLATFORM: Final = re.compile(r"^[a-z0-9_]+$")
 """A machine name as ``uname -m`` prints it (``x86_64``, ``aarch64``)."""

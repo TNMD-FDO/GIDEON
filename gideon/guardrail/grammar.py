@@ -24,12 +24,12 @@ REASONING_PLACEHOLDER = " "
 # The in-stream refusal follows any answer text already released.
 REFUSAL_SEPARATOR = "\n\n"
 
-# The deadline family's vocabulary — starting values from greenfield ticket 07
-# item 8, tuned on eval/seed/guardrails/deadline-trap.yaml and judged by the
-# deadline-trap gate (spec §18.3).  A "lead" precedes a date in a computed
-# answer ("the deadline is June 5, 2027"); "within" and "after" are absent on
-# purpose, because they carry the doctrinal restatement of a period ("must be
-# filed within 14 days after entry of judgment"), which is answered freely.
+# The deadline family's vocabulary — starting values, tuned on
+# eval/seed/guardrails/deadline-trap.yaml and judged by the deadline-trap gate.
+# A "lead" precedes a date in a computed answer ("the deadline is June 5,
+# 2027"); "within" and "after" are absent on purpose, because they carry the
+# doctrinal restatement of a period ("must be filed within 14 days after entry
+# of judgment"), which is answered freely.
 DEADLINE_LEADS = (
     "deadline",
     "due date",
@@ -226,7 +226,7 @@ CREDIT_NOUNS = (
     "presentence credit",
     "pretrial credit",
     "credit for time served",
-    "§ 3585(b) credit",
+    "§ 3585(b) credit",  # 18 U.S.C. § 3585(b)
     "sentence credit",
     "credit",
 )
@@ -965,7 +965,7 @@ GUIDELINES_POINT_COUNT_SOURCE = (
     rf"{SP}points?{MARK}(?![\w/])"
 )
 # A gap inside one sentence: a period ends the sentence only before
-# whitespace or the text's end, so "§ 2K2.1" stays inside it.
+# whitespace or the text's end, so "U.S.S.G. § 2K2.1" stays inside it.
 GUIDELINES_SENTENCE_BREAK = r"(?:[.!?](?:\s|$)|\n)"
 # The reach from a chain's level figure to its "for a total of", and from a
 # point count to its link or a category to its lead.

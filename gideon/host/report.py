@@ -11,7 +11,7 @@ def one_line(value: object) -> str:
 
 
 def refusal(command: str, problem: object, fix: str) -> str:
-    """The one refusal shape: the command, what is wrong, and the fix last (§1.5)."""
+    """The one refusal shape: the command, what is wrong, and the fix last."""
 
     return f"gideon {command}: {one_line(problem)} Fix: {fix}"
 

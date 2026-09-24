@@ -1,7 +1,7 @@
 """Capacity checks for the host preflight.
 
-The data-volume floor is the profile's size minimum (ADR-0017). Free bytes
-are reported, not judged, until §7.6's reserve rule lands with its consumer.
+The data-volume floor comes from the profile's size minimum. Free bytes are
+reported, not judged, until the reserve rule lands with its consumer.
 """
 
 from typing import Final
@@ -17,7 +17,7 @@ from gideon.host.models import GIGABYTE, select_profile
 from gideon.host.report import Problem
 
 _DATA_FIX = (
-    "Provide a data volume of at least {floor} GB at /data (§1.4), or set "
+    "Provide a data volume of at least {floor} GB at /data, or set "
     "hardware_profile in /etc/gideon/site.yaml to a profile this host satisfies, "
     "then re-run preflight."
 )

@@ -105,7 +105,7 @@ class RealHost:
             sys.stdout.flush()
             sys.stderr.flush()
         try:
-            # No host command is interactive (§1.9, §3.6), so a child never gets
+            # No host command is interactive, so a child never gets
             # the terminal as stdin: with no tty on any descriptor a nested sudo
             # allocates no pty, and a docker compose exec reads nothing — the two
             # that, together, stopped an upgrade's readiness probe with SIGTTIN.

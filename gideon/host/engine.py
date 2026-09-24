@@ -1,4 +1,4 @@
-"""The direct serving-engine verification command (§6.7)."""
+"""The direct serving-engine verification command."""
 
 import argparse
 import json
@@ -59,34 +59,34 @@ _FILLER_FIX: Final[str] = (
 # curl's own diagnostic is safe to show (never a response body); one line, bounded.
 _STDERR_LIMIT: Final[int] = 200
 
-# exempt: acceptance bounds (ADR-0017).  The smoke is a bounded operator check;
-# the timing is a starting value, not a pass threshold.
+# exempt: acceptance bounds, starting values corrected by measurement.  The
+# smoke is a bounded operator check; the timing is not a pass threshold.
 SMOKE_TIMEOUT_SECONDS: Final[int] = 120
-# exempt: acceptance bounds (ADR-0017).  Host.run must outlive curl's bound.
+# exempt: acceptance bounds.  Host.run must outlive curl's bound.
 RUN_TIMEOUT_MARGIN_SECONDS: Final[int] = 15
-# §6.7's nominal needle lengths (32k, 128k, 256k): a spec decision, not a starting value.
+# The nominal needle lengths (32k, 128k, 256k): a product decision, not a starting value.
 NEEDLE_LENGTHS: Final[tuple[int, ...]] = (32_768, 131_072, 262_144)
-# exempt: acceptance bounds (ADR-0017).  The bounded recall answer reserve.
+# exempt: acceptance bounds.  The bounded recall answer reserve.
 NEEDLE_MAX_TOKENS: Final[int] = 64
-# exempt: acceptance bounds (ADR-0017).  A deterministic needle request seed.
+# exempt: acceptance bounds.  A deterministic needle request seed.
 NEEDLE_SEED: Final[int] = 1
-# exempt: acceptance bounds (ADR-0017).  Reserve beyond the answer bound.
+# exempt: acceptance bounds.  Reserve beyond the answer bound.
 NEEDLE_SIZING_MARGIN_TOKENS: Final[int] = 256
-# exempt: acceptance bounds (ADR-0017).  Minimum exact-fill fraction.
+# exempt: acceptance bounds.  Minimum exact-fill fraction.
 NEEDLE_MIN_FILL: Final[float] = 0.97
-# exempt: acceptance bounds (ADR-0017).  Maximum correction rounds.
+# exempt: acceptance bounds.  Maximum correction rounds.
 NEEDLE_SIZING_ROUNDS: Final[int] = 6
-# exempt: acceptance bounds (ADR-0017).  Tokenization request bound.
+# exempt: acceptance bounds.  Tokenization request bound.
 TOKENIZE_TIMEOUT_SECONDS: Final[int] = 60
-# exempt: acceptance bounds (ADR-0017).  Per-needle request bound.
+# exempt: acceptance bounds.  Per-needle request bound.
 NEEDLE_TIMEOUT_SECONDS: Final[int] = 600
-# exempt: acceptance bounds (ADR-0017).  The structured-output request bound.
+# exempt: acceptance bounds.  The structured-output request bound.
 STRUCTURED_TIMEOUT_SECONDS: Final[int] = 180
-# exempt: acceptance bounds (ADR-0017).  The reasoning and JSON answer reserve.
+# exempt: acceptance bounds.  The reasoning and JSON answer reserve.
 STRUCTURED_MAX_TOKENS: Final[int] = 2048
-# exempt: acceptance bounds (ADR-0017). The starting value is
-# gideon.evaluation.turns.run's TURN_TIMEOUT_SECONDS; ticket 52 measured 245 s of
-# thinking on one positive.
+# exempt: acceptance bounds. The starting value is
+# gideon.evaluation.turns.run's TURN_TIMEOUT_SECONDS; a measured positive took
+# 245 s of thinking.
 FRONTEND_TURN_TIMEOUT_SECONDS: Final[int] = 600
 FRONTEND_ROW_PREFIX: Final[str] = "frontend-"
 
@@ -928,10 +928,10 @@ def _frontend_verdict(
         if outcome == "computed":
             # A calendar date the prompt did not carry, in the answer alone, with no
             # deadline vocabulary near it: the family's detector needs that context by
-            # design (§16), so this is the model's behaviour under General's instructed
+            # design, so this is the model's behaviour under General's instructed
             # refusal, recorded for the eval and the family tickets, never a fault an
             # install or upgrade could correct. The reasoning is withheld and never
-            # stored since slice-1 ticket 37.
+            # stored.
             return True, (
                 "no matched span stored; a new calendar date recorded "
                 f"(the family's context rule), turn {elapsed_seconds:.1f} s"
@@ -1176,7 +1176,7 @@ def run_engine_verify(
         show(_failed("preconditions", "root privileges are required.", _ROOT_FIX))
         return 1
     if nogpu.is_no_gpu_host(io):
-        show(StageResult("engine", True, "skipped — no-GPU host (§2.5)", ""))
+        show(StageResult("engine", True, "skipped — no-GPU host", ""))
         return 0
 
     site_result = site.load_site(Path(site_path), host=io)

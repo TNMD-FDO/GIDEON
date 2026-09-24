@@ -380,6 +380,7 @@ class Egress(unittest.TestCase):
         self.assertIn("a.example", report.detail)
         self.assertIn("b.example", report.detail)
         self.assertIn("egress_proxy", report.fix)
+        self.assertIn("docs/runbooks/release-files.md §5", report.fix)
 
     def test_corpus_group_is_not_probed_pre_install(self) -> None:
         host = FakeHost(commands=self.outcomes())
@@ -549,7 +550,7 @@ class Hostname(unittest.TestCase):
         report = HostnameCheck().run(context(host))
         self.assertEqual(report.severity, Severity.REFUSE)
         self.assertIn("gideon.test", report.detail)
-        self.assertIn("§3.6", report.fix)
+        self.assertIn("docs/runbooks/office-services-setup.md §2", report.fix)
 
 
 class Ntp(unittest.TestCase):
@@ -585,6 +586,7 @@ class DataVolume(unittest.TestCase):
         self.assertIn(format_gb(size), report.detail)
         self.assertIn(f"{MODELS.profiles[0].requires.data_volume_gb} GB", report.detail)
         self.assertIn(f"{MODELS.profiles[0].requires.data_volume_gb} GB", report.fix)
+        self.assertIn(" GB at /data, or set", report.fix)
         self.assertIn("hardware_profile", report.fix)
 
     def test_at_floor_passes_with_size_free_bytes_and_floor(self) -> None:
@@ -833,7 +835,7 @@ class Ldap(unittest.TestCase):
         host = FakeHost(files=dict(self.PASSWORD))
         report = LdapCheck().run(context(host))
         self.assertEqual(report.severity, Severity.REFUSE)
-        self.assertIn("§3.6", report.fix)
+        self.assertIn("docs/runbooks/office-services-setup.md §1", report.fix)
 
 
 SSH_BASE = (
@@ -872,7 +874,7 @@ class BackupSsh(unittest.TestCase):
         host = FakeHost(commands={SSH_CONNECT: completed(SSH_CONNECT, "", 255)})
         report = BackupSshCheck().run(context(host))
         self.assertEqual(report.severity, Severity.REFUSE)
-        self.assertIn("§1.9", report.fix)
+        self.assertIn("docs/runbooks/office-services-setup.md §3", report.fix)
 
     def test_unwritable_path_refuses_with_path_fix(self) -> None:
         host = FakeHost(
@@ -884,7 +886,7 @@ class BackupSsh(unittest.TestCase):
         report = BackupSshCheck().run(context(host))
         self.assertEqual(report.severity, Severity.REFUSE)
         self.assertIn("/volume1/backup", report.detail)
-        self.assertIn("§3.7", report.fix)
+        self.assertIn("docs/runbooks/office-services-setup.md §3", report.fix)
 
     def test_writable_path_passes(self) -> None:
         host = FakeHost(
@@ -924,7 +926,8 @@ class BackupSsh(unittest.TestCase):
         )
         self.assertEqual(
             report.fix,
-            "Install rsync and coreutils sha256sum on the backup target per the office-services runbook (§3.7), then re-run preflight.",
+            "Install rsync and coreutils sha256sum on the backup target per "
+            "docs/runbooks/office-services-setup.md §3, then re-run preflight.",
         )
 
 
@@ -1083,7 +1086,7 @@ class Jurisdiction(unittest.TestCase):
         )
         self.assertEqual(report.severity, Severity.WARN)
         self.assertIn("fx-state", report.detail)
-        self.assertIn("§8.7", report.fix)
+        self.assertIn("derived corpus cut", report.fix)
 
     def test_state_with_installed_courts_passes(self) -> None:
         site = make_jurisdiction_site(states="fx-state")

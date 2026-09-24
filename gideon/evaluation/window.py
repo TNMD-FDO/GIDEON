@@ -6,13 +6,13 @@ from typing import Final
 from zoneinfo import ZoneInfo
 
 QUIET_WINDOW_START_HOUR: Final[int] = 19
-"""The quiet window opens at 19:00 office time (§18.5)."""
+"""The quiet window opens at 19:00 office time."""
 
 QUIET_WINDOW_END_HOUR: Final[int] = 6
-"""The quiet window ends at 06:00 office time (§18.5)."""
+"""The quiet window ends at 06:00 office time."""
 
 WEEKEND_DAYS: Final[frozenset[int]] = frozenset({5, 6})
-"""Saturday and Sunday are quiet-window days (§18.5)."""
+"""Saturday and Sunday are quiet-window days."""
 
 
 @dataclass(frozen=True, slots=True)

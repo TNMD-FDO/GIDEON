@@ -380,7 +380,10 @@ def validate_trigger_registry(document: Mapping[str, object]) -> list[TriggerErr
         reopens = _required_string(item, "reopens", f"{entry_path}.reopens", errors)
         if reopens is not None and SECTION_PATTERN.fullmatch(reopens) is None:
             errors.append(
-                _error(f"{entry_path}.reopens", "expected a spec section such as §18.4")
+                _error(
+                    f"{entry_path}.reopens",
+                    "expected a section reference: the section sign, then a number such as 18.4",
+                )
             )
 
         if "register" in item:

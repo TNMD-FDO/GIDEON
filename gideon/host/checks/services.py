@@ -27,9 +27,18 @@ from gideon.host.sshtarget import BACKUP_PROBE_SHA256, remote_script, ssh_argv
 SMTP_PASSWORD = Path("/etc/gideon/secrets/smtp_password")
 SERVICE_TIMEOUT_SECONDS = 10
 
-_LDAP_BIND_FIX = "Fix the LDAP bind account in the §3.6 step 0 checklist, then re-run preflight."
-_BACKUP_AUTH_FIX = "Authorize the printed public key on the backup target per §1.9 step 3, then re-run preflight."
-_BACKUP_PATH_FIX = "Correct the backup target path and its permissions as recorded in §3.7, then re-run preflight."
+_LDAP_BIND_FIX = (
+    "Fix the LDAP bind account per docs/runbooks/office-services-setup.md §1, "
+    "then re-run preflight."
+)
+_BACKUP_AUTH_FIX = (
+    "Authorize the printed public key on the backup target per "
+    "docs/runbooks/office-services-setup.md §3, then re-run preflight."
+)
+_BACKUP_PATH_FIX = (
+    "Correct the backup target path and its permissions per "
+    "docs/runbooks/office-services-setup.md §3, then re-run preflight."
+)
 _SMTP_FIX = "Permit this host and sender through the office SMTP relay, then re-run preflight."
 
 
@@ -255,7 +264,8 @@ class BackupSshCheck(PreflightCheck):
             return CheckReport(
                 Severity.REFUSE,
                 "backup target lacks rsync or a working sha256sum -c",
-                "Install rsync and coreutils sha256sum on the backup target per the office-services runbook (§3.7), then re-run preflight.",
+                "Install rsync and coreutils sha256sum on the backup target per "
+                "docs/runbooks/office-services-setup.md §3, then re-run preflight.",
             )
         return CheckReport(Severity.PASS, f"backup target path is writable: {target.path}")
 

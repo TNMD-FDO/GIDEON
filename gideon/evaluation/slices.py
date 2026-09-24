@@ -23,16 +23,15 @@ class SliceSpec:
     committed reference and ``eval reference`` writes one. ``judge-triples``
     keeps none: a triple passes when its grading came back on-schema, which the
     slice's own gate already refuses on, so a regression list would say it twice.
-    ``guardrails`` compares because slice-2 tickets 16 and 17 pair and gate
-    against its reference; a control's per-case verdict is "not replaced, no
-    leak", so a control newly replaced since the reference is a per-case
-    regression by ADR-0023's rule. ``drives_turns`` marks a slice whose runner
-    drives turns through the harness's drivers, so ``eval run``'s
-    ``preconditions`` resolves the turns' access and probes the door for it.
-    ``general-smoke`` runs two repeats, so every run is the repeat that shows
-    determinism rather than asserting it, and slice-2 ticket 17's nightly runs
-    the registry's count until that ticket rules otherwise. It drives no door
-    turn, yet ``drives_turns`` is its flag: the reads it triggers are the
+    ``guardrails`` compares because the decision runs and the nightly run pair
+    and gate against its reference; a control's per-case verdict is "not
+    replaced, no leak", so a control newly replaced since the reference is a
+    per-case regression, whatever the judge said. ``drives_turns`` marks a
+    slice whose runner drives turns through the harness's drivers, so ``eval
+    run``'s ``preconditions`` resolves the turns' access and probes the door
+    for it. ``general-smoke`` runs two repeats, so every run is the repeat that
+    shows determinism rather than asserting it, and the nightly run takes the
+    registry's count until it is ruled otherwise. It drives no door turn, yet ``drives_turns`` is its flag: the reads it triggers are the
     password and client factory the runner needs, and the door probe proves
     General's service — which every frontend turn passes through — answers
     before the turns are spent; a second flag for one suite would be an axis
@@ -84,7 +83,7 @@ SLICE_RUNNERS: Final[Mapping[str, SliceSpec]] = {
         judge_prompt=None,
         compares_reference=False,
         drives_turns=False,
-        gate_pass="every judged query was scored, the metrics reported and never gated (§18.3)",
+        gate_pass="every judged query was scored, the metrics reported and never gated",
         gate_fail="one or more judged queries have no ranked list",
         gate_fix="add a ranked list for each query id the report names, then retry.",
     ),
@@ -96,8 +95,8 @@ SLICE_RUNNERS: Final[Mapping[str, SliceSpec]] = {
         judge_prompt=None,
         compares_reference=True,
         drives_turns=True,
-        gate_pass="every positive blocked, over-trips within the ceiling, no leak, the frontend sample agreeing (§18.3)",
-        gate_fail="a family's gate failed (§18.3)",
+        gate_pass="every positive blocked, over-trips within the ceiling, no leak, the frontend sample agreeing",
+        gate_fail="a family's gate failed",
         gate_fix="Review the per-family report lines and the ids they list, then retry.",
     ),
     "general-smoke": SliceSpec(
@@ -108,8 +107,8 @@ SLICE_RUNNERS: Final[Mapping[str, SliceSpec]] = {
         judge_prompt=None,
         compares_reference=True,
         drives_turns=True,
-        gate_pass="every case met its expectation and checks on every repeat, the stream was clean, every chat was deleted (§18.2)",
-        gate_fail="a case failed its expectation, a check, its stream, or its cleanup (§18.2)",
+        gate_pass="every case met its expectation and checks on every repeat, the stream was clean, every chat was deleted",
+        gate_fail="a case failed its expectation, a check, its stream, or its cleanup",
         gate_fix="Review the per-case report lines and the checks they name, then retry.",
     ),
 }

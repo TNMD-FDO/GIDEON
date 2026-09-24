@@ -5,7 +5,7 @@ count, and Guidelines normalisers, and ``FAMILIES`` with the refusal lookups.
 In prefix mode a hit the judge did not trip on is never split from the context
 that follows and decided it: a pattern rejecting on following context owes
 ``judge_text`` that context's span as a release constraint, as the rate form
-and an exclusion hit reaching past its match do (general-turn ticket 12).
+and an exclusion hit reaching past its match do.
 
 Built over ``grammar``; ``judge``, ``writer``, and ``window`` import from it.
 """

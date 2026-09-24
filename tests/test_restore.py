@@ -1350,7 +1350,7 @@ class RestoreContracts(unittest.TestCase):
     def test_refusals_and_secret_kept_line(self) -> None:
         for fake, expected in (
             (make_host(), "--from staging"),
-            (make_host(target=False, source="target"), "office-services runbook"),
+            (make_host(target=False, source="target"), "docs/runbooks/office-services-setup.md §3"),
             (make_host(secrets_present=True), "secrets on disk are the set's"),
         ):
             if expected == "--from staging":
@@ -1360,7 +1360,7 @@ class RestoreContracts(unittest.TestCase):
                     code = restore.run_restore(args, host=fake, now=NOW)
                 self.assertEqual(code, 1)
                 self.assertIn(expected, err.getvalue())
-            elif expected == "office-services runbook":
+            elif expected == "docs/runbooks/office-services-setup.md §3":
                 err = io.StringIO()
                 with contextlib.redirect_stderr(err):
                     code = restore.run_restore(

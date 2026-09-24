@@ -35,16 +35,15 @@ _VALID_ROLES: Final[frozenset[str]] = frozenset({"admin", "user", "pending"})
 _FUNCTIONS_PATH: Final[str] = "/api/v1/functions/"
 # The bare /api/v1/models/ path is served by the single-page app; the JSON
 # listing is /list, paginated like knowledge — and it holds preset rows only.
-# A base model's own row is listed by /base, unpaged and admin-only; the
-# removal report and the read-back need both (docs/research/owui-model-record.md §1.3).
+# A base model's row is listed by /base, unpaged and admin-only; the removal
+# report and read-back therefore need both endpoints.
 _MODELS_PATH: Final[str] = "/api/v1/models/list"
 _BASE_MODELS_PATH: Final[str] = "/api/v1/models/base"
 # The live listing every signed-in caller sees.  The frontend's chat route reads
 # a per-worker model cache that only this listing refreshes — a browser hits it
 # on every page load, an API-path caller never — so a record the sync pushed is
-# live for every path only after one read of it (docs/research/
-# owui-model-record.md §8.1; slice-1 ticket 14's proof, where the stamp's
-# attachment stayed stale for the harness's managed turn until a page loaded).
+# live for every path only after one read of it; before that read, an API-path
+# managed turn still sees the stale record.
 _LIVE_MODELS_PATH: Final[str] = "/api/models"
 _KNOWLEDGE_PATH: Final[str] = "/api/v1/knowledge/"
 _MANIFEST_FIX: Final[str] = "Correct /etc/gideon/rendered/open-webui/manifest.yaml, then retry."
@@ -863,9 +862,9 @@ def _live_attachment_difference(
 ) -> str | None:
     """The live listing's entry disagreeing with the manifest's attachment key, or None.
 
-    The listing carries the record under ``info`` with its ``meta``; the
-    per-model Filter attachment is the one key a turn's path reads from it
-    (docs/research/owui-filter-function.md §3.2).  Names the field, never a value.
+    The listing carries the record under ``info`` with its ``meta``; turns
+    read the per-model Filter attachment from ``info.meta.filterIds``. Names
+    the field, never a value.
     """
 
     identifier = desired.get("id")
@@ -905,9 +904,9 @@ def _refresh_live_models(client: Client, desired_by_id: Mapping[str, Mapping[str
 def _read_back(kind: str, listed: Sequence[str], desired: frozenset[str]) -> None:
     """Refuse unless a sync's read-back holds exactly the manifest's ids.
 
-    The pinned sync routes answer a swallowed persistence failure with HTTP
-    200 and an empty list (docs/research/owui-model-record.md §1.2), so the
-    listing after the push, never the status, is the proof.
+    The sync route can swallow a persistence failure and still answer HTTP 200
+    with an empty list. The listing after the push, never the status, is the
+    proof.
     """
 
     differing = sorted(desired.symmetric_difference(listed))

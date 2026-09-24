@@ -115,9 +115,8 @@ ROTATABLE_NAMES: Final[frozenset[str]] = frozenset(
 )
 
 _APPLY_COMMAND: Final = "sudo python3 -m gideon apply"
-# Grafana mounts the two below as Compose file secrets, and apply's recreate
-# rule judges rendered files only, so its recreate after a replacement is by
-# hand (the gap slice-1 ticket 24's triage recorded).
+# Grafana mounts these Compose file secrets, and apply's recreate rule judges
+# rendered files only. The replacement therefore needs a manual recreate.
 _GRAFANA_RECREATE: Final = (
     "sudo docker compose -f /etc/gideon/rendered/compose.yaml "
     "up -d --no-deps --force-recreate grafana"
@@ -132,12 +131,13 @@ def _grafana_mounted_replacement(name: str) -> str:
     )
 
 
-# The office's replacement path per supplied secret (§1.7's four), the fix the
-# rotation command prints for each; every path is a command sequence (§1.5).
+# Each office-supplied secret has a replacement path; the rotation command
+# prints it as a command sequence.
 SUPPLIED_REGISTRY: Final[tuple[SuppliedSecret, ...]] = (
     SuppliedSecret(
         "tls_key",
-        "Replace the certificate and key at their fixed homes (§1.6), then run "
+        "Replace the certificate and key at their fixed homes per "
+        "docs/runbooks/office-services-setup.md §4, then run "
         "sudo python3 -m gideon tls reload.",
     ),
     SuppliedSecret("ldap_bind_password", _grafana_mounted_replacement("ldap_bind_password")),

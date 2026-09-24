@@ -1,4 +1,4 @@
-"""The forward release upgrade command (§2.1 and §3.6 step 7).
+"""The forward release upgrade command.
 
 Forward upgrades and rollbacks run the engine verify child after structural
 verify and before their applied audit row; a failure records the failed phase.
@@ -52,7 +52,7 @@ _HEADING_RE: Final = re.compile(r"^#{1,6}\s+", re.MULTILINE)
 _NO_BREAKING: Final = "Breaking: the release notes name none."
 _PRE_RELEASE_SET_SUFFIX: Final = re.compile(r"-\d{8}T\d{6}Z$")
 
-# The standing next step by where the run failed (plan §3): before the checkout
+# The next step depends on where the run failed: before the checkout
 # nothing has moved; at the new tree's provision or preflight the product is still
 # the previous release; at or after its apply only a rollback goes back.
 _BEFORE_NEW_TREE_FIX: Final = (
@@ -1252,7 +1252,7 @@ def _run_rollback(
     now: datetime | None,
     audit_api: Any,
 ) -> int:
-    """Restore the pre-upgrade set and re-apply the release it describes (ADR-0005)."""
+    """Restore the pre-upgrade set and re-apply the release it describes."""
 
     tag = getattr(args, "tag", None)
     if tag is not None and (not isinstance(tag, str) or _release_tag(tag) is None):

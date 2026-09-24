@@ -17,12 +17,12 @@ PROBE_TIMEOUT_SECONDS = 10
 
 _EGRESS_FIX = (
     "Allow the listed hosts through the firewall or configure egress_proxy "
-    "as described in §2.3, then re-run preflight."
+    "per docs/runbooks/release-files.md §5, then re-run preflight."
 )
 _PORT_FIX = "Stop or move the squatting process, then re-run preflight."
 _HOSTNAME_FIX = (
-    "Create the site hostname's DNS record as described in §3.6 step 0, "
-    "then re-run preflight."
+    "Create the site hostname's DNS record per "
+    "docs/runbooks/office-services-setup.md §2, then re-run preflight."
 )
 _NTP_FIX = (
     "Configure chrony against the office domain controllers, then re-run "
@@ -178,7 +178,7 @@ def _docker_owner(context: PreflightContext, port: int) -> str | None:
 
 def _expected_container(port: int, owner: str | None) -> bool:
     # 5000 belongs to provision's registry container by exact name; 443's
-    # Caddy container name is ticket 04's to pin, so match on the service.
+    # Caddy container name is not pinned yet, so match on the service.
     if owner is None:
         return False
     if port == 5000:

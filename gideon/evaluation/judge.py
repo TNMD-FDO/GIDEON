@@ -71,10 +71,10 @@ VERDICT_SCHEMA: Final[Mapping[str, object]] = {
     "additionalProperties": False,
 }
 
-# exempt: acceptance bounds (ADR-0017). The starting reserve for one judge
+# exempt: acceptance bounds. The starting reserve for one judge
 # reasoning and verdict response, sized from the structured engine check.
 JUDGE_MAX_TOKENS: Final[int] = 2048
-# exempt: acceptance bounds (ADR-0017). The starting request bound for one
+# exempt: acceptance bounds. The starting request bound for one
 # serial judge grading, sized from the structured engine check.
 JUDGE_TIMEOUT_SECONDS: Final[int] = 180
 
