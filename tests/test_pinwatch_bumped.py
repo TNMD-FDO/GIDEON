@@ -90,7 +90,14 @@ def _models_lock(*, revision: str = MODEL_REVISION, second: bool = False) -> str
     )
 
 
-def _images_lock(*, moved: bool = True, new_digest: bool = False, new: bool = False) -> str:
+def _images_lock(
+    *,
+    moved: bool = True,
+    new_digest: bool = False,
+    new: bool = False,
+    moved_built_digest: bool = False,
+    moved_inputs_digest: bool = False,
+) -> str:
     source = (
         "docker.io/library/example:1000.0.1"
         if moved
@@ -104,6 +111,8 @@ def _images_lock(*, moved: bool = True, new_digest: bool = False, new: bool = Fa
         if new
         else ""
     )
+    built_digest = "6" if moved_built_digest else "5"
+    inputs_digest = "7" if moved_inputs_digest else "4"
     return (
         "version: 1\n"
         "images:\n"
@@ -113,6 +122,18 @@ def _images_lock(*, moved: bool = True, new_digest: bool = False, new: bool = Fa
         "  digest:\n"
         "    source: docker.io/library/example/digest:1000.0.0\n"
         f"    digest: {digest}\n"
+        "  rebuilt:\n"
+        "    build: images/fictitious\n"
+        "    base: docker.io/library/example:1000.0.0\n"
+        "    base_digest: sha256:" + "3" * 64 + "\n"
+        "    build_args:\n"
+        "      BUILD_VERSION: 1000.0.0-1.example\n"
+        "    watch:\n"
+        "      BUILD_VERSION:\n"
+        "        apt_index: https://apt.example/dists/fictitious/Packages\n"
+        "        package: fictitious-build-package\n"
+        "    inputs_digest: sha256:" + inputs_digest * 64 + "\n"
+        "    digest: sha256:" + built_digest * 64 + "\n"
         + extra
     )
 
@@ -244,6 +265,44 @@ class SinceSelection(unittest.TestCase):
 
 
 class BumpedRendering(unittest.TestCase):
+    def test_built_image_digest_move_renders_rebuild_line(self) -> None:
+        host = _host(
+            current_images=_images_lock(moved=False, moved_built_digest=True),
+            current_models=_models_lock(),
+            old_images=_images_lock(moved=False),
+        )
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(
+                bumped.main(
+                    ["--since", "v0.1.0", "--root", str(FAKE_ROOT)],
+                    host=cast(Host, host),
+                ),
+                0,
+            )
+        self.assertEqual(
+            output.getvalue(),
+            "Since v0.1.0:\n"
+            "- images.rebuilt: rebuilt at the same version (the digest moved)\n",
+        )
+
+    def test_built_image_inputs_digest_move_alone_renders_no_pin(self) -> None:
+        host = _host(
+            current_images=_images_lock(moved=False, moved_inputs_digest=True),
+            current_models=_models_lock(),
+            old_images=_images_lock(moved=False),
+        )
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(
+                bumped.main(
+                    ["--since", "v0.1.0", "--root", str(FAKE_ROOT)],
+                    host=cast(Host, host),
+                ),
+                0,
+            )
+        self.assertEqual(output.getvalue(), "No pin moved since v0.1.0.\n")
+
     def test_moved_digest_only_new_and_model_revision_lines_are_rendered(self) -> None:
         current_images = _images_lock(moved=True, new_digest=True, new=True)
         host = _host(

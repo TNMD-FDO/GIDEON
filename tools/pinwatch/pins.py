@@ -96,6 +96,15 @@ class Pin:
 
         raise NotImplementedError
 
+    @property
+    def note_paths(self) -> tuple[str, ...]:
+        """Return the lock paths the release note compares.
+
+        These are the owned paths unless a pin records a value the watch never writes.
+        """
+
+        return self.key_paths
+
     def resolve(self, fetcher: Fetcher) -> Bump | None:
         """Resolve this pin and return a bump when upstream has moved."""
 
@@ -227,6 +236,15 @@ class BuiltImagePin(Pin):
     def key_paths(self) -> tuple[str, ...]:
         prefix = f"images.{self.image.name}"
         return (f"{prefix}.base", f"{prefix}.base_digest")
+
+    @property
+    def note_paths(self) -> tuple[str, ...]:
+        """Add the pushed digest after the base, so a moved base tag is named first.
+
+        `inputs_digest` stays out: a rebuild that pushed the same digest pulls nothing.
+        """
+
+        return (*self.key_paths, f"images.{self.image.name}.digest")
 
     def current(self) -> str:
         return f"{self.image.base}@{self.image.base_digest}"

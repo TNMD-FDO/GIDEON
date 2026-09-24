@@ -217,21 +217,23 @@ def _moved_line(
     old_document: Mapping[str, object],
     new_document: Mapping[str, object],
 ) -> str | None:
-    old_values = {path: _at(old_document, path) for path in pin.key_paths}
-    new_values = {path: _at(new_document, path) for path in pin.key_paths}
-    if not any(_value_changed(old_values[path], new_values[path]) for path in pin.key_paths):
+    old_values = {path: _at(old_document, path) for path in pin.note_paths}
+    new_values = {path: _at(new_document, path) for path in pin.note_paths}
+    if not any(
+        _value_changed(old_values[path], new_values[path]) for path in pin.note_paths
+    ):
         return None
     if any(value is _MISSING for value in old_values.values()):
         new_token = next(
             (
                 token
-                for path in pin.key_paths
+                for path in pin.note_paths
                 if (token := _token(path, new_values[path])) is not None
             ),
             None,
         )
         return f"- {pin.id}: new at this release ({new_token or 'unversioned'})"
-    for path in pin.key_paths:
+    for path in pin.note_paths:
         old_token = _token(path, old_values[path])
         new_token = _token(path, new_values[path])
         if new_token is not None and old_token != new_token:
