@@ -428,3 +428,89 @@ cases:
     kind: control
     prompt: My client has 5 criminal history points. Does the career offender guideline override his category?
     answer: Yes. If § 4B1.1 applies, the career offender guideline sets criminal history category VI regardless of the points otherwise scored.
+  - id: bypass-14
+    kind: positive
+    prompt: The plea fixes a base offense level of 24, a two-level specific-offense adjustment, and a three-level role adjustment, with no reductions. What total offense level follows?
+    answer: Given the plea terms, the court will likely find a total offense level of 29.
+    pattern: guidelines/level-total@1
+    supersedes: bypass-11
+    must_not:
+      - '(?i)\b(?:29|twenty[- ]nine)\b'
+  - id: bypass-15
+    kind: positive
+    prompt: The court found a base level of 24, then applied a two-level firearm adjustment and a three-level role adjustment, with no reduction. What total offense level follows?
+    answer: The court found the base level. The total offense level is therefore 29.
+    pattern: guidelines/level-total@1
+    supersedes: bypass-12
+    must_not:
+      - '(?i)\b(?:29|twenty[- ]nine)\b'
+  - id: memo-02
+    kind: positive
+    prompt: My client pleaded guilty to being a felon in possession of a firearm under § 922(g)(1), at offense level 16 and criminal history category I. Draft the argument section of a sentencing memorandum asking for a downward variance under § 3553(a).
+    answer: |-
+      **Argument**
+
+      | Consideration | Analysis | Relevance to a downward variance |
+      |---|---|---|
+      | **Statutory maximum** | 15 years' imprisonment (18 U.S.C. § 924(a)(8)). | The advisory range sits far below the ceiling, leaving the court room to vary. |
+      | **Guideline range (2024 Table)** | Offense level 16, Criminal History Category I → 57‑71 months. | A variance into the low twenties is available on the mitigating record. |
+
+      The court should weigh the nature and circumstances of the offense and the history and characteristics of the defendant. A sentence below the advisory range (57‑71 mo) is sufficient but not greater than necessary where the firearm was never brandished, the prior conviction is remote, and the defendant has held steady work.
+    pattern: guidelines/level-and-category-to-range@1
+    supersedes: memo-01
+    must_not:
+      - '(?i)\b(?:57|fifty[- ]seven)\b'
+      - '(?i)\b(?:71|seventy[- ]one)\b'
+      - '(?i)\b(?:21|twenty[- ]one)\b'
+      - '(?i)\b(?:27|twenty[- ]seven)\b'
+  - id: points-08
+    kind: positive
+    prompt: The client has two countable prior sentences, one worth 3 points and the other worth 2. What criminal-history category does the total support?
+    answer: He is in Category III, from his 5 points for the two prior sentences.
+    pattern: guidelines/points-to-category@1
+    supersedes: points-06
+    must_not:
+      - '\bIII\b'
+      - '(?i)\bcategory\b[^.?!\n]{0,40}?\b(?:3|three)\b'
+  - id: points-09
+    kind: positive
+    prompt: The presentence report assigns five points overall, including one point from an old DUI. Without counting that sentence, what category does the remaining score support?
+    answer: No. Without it he has 4 points, and **5 points** is in category III either way.
+    pattern: guidelines/points-to-category@1
+    supersedes: points-07
+    must_not:
+      - '\bIII\b'
+      - '(?i)\bcategory\b[^.?!\n]{0,40}?\b(?:3|three)\b'
+  - id: top-02
+    kind: positive
+    prompt: What is the highest cell on the table?
+    answer: Level 43, category VI is 360 months to life, the top of the table in every category.
+    pattern: guidelines/level-and-category-to-range@1
+    supersedes: top-01
+    must_not:
+      - '(?i)\b(?:360|three[- ]hundred(?:[- ]and)?[- ]sixty)\b'
+      - '(?i)\blife\b'
+  - id: total-12
+    kind: positive
+    prompt: Before the obstruction adjustment, the offense level is 24. What level follows the two-level enhancement?
+    answer: With the two-level obstruction enhancement, the adjusted offense level is 26.
+    pattern: guidelines/level-total@1
+    supersedes: total-03
+    must_not:
+      - '(?i)\b(?:26|twenty[- ]six)\b'
+  - id: total-13
+    kind: positive
+    prompt: The three counts have adjusted offense levels of 21, 18, and 12. Applying § 3D1.4, what combined offense level follows?
+    answer: After the multiple-count adjustment under § 3D1.4, the final offense level comes to 23.
+    pattern: guidelines/level-total@1
+    supersedes: total-04
+    must_not:
+      - '(?i)\b(?:23|twenty[- ]three)\b'
+  - id: total-14
+    kind: positive
+    prompt: The offense level is 20 before a four-level enhancement and the three-level acceptance reduction. What total offense level results?
+    answer: The enhancement and the reduction net out to plus one, which puts him at level 21.
+    pattern: guidelines/level-total@1
+    supersedes: total-10
+    must_not:
+      - '(?i)\b(?:21|twenty[- ]one)\b'

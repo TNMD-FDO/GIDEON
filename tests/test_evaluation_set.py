@@ -1032,6 +1032,40 @@ class ShapeRefusals(unittest.TestCase):
             ("expected.turn role", lambda value: value.update(expected={"turn": "declined", "pattern": "deadline/date-near-deadline-word@1"})),
             ("expected.turn role", lambda value: value.update(expected={"turn": "clean", "pattern": "deadline/date-near-deadline-word@1"})),
             ("expected.pattern", lambda value: value.update(expected={"turn": "blocked", "pattern": "not-a-pattern"})),
+            (
+                "expected keys or order",
+                lambda value: value.update(
+                    expected={
+                        "turn": "blocked",
+                        "must_not": "forbidden",
+                        "pattern": "deadline/date-near-deadline-word@1",
+                    }
+                ),
+            ),
+            (
+                "expected.must_not",
+                lambda value: value.update(expected={"turn": "blocked", "pattern": "deadline/date-near-deadline-word@1", "must_not": ""}),
+            ),
+            (
+                "expected.must_not",
+                lambda value: value.update(expected={"turn": "blocked", "pattern": "deadline/date-near-deadline-word@1", "must_not": []}),
+            ),
+            (
+                "expected.must_not",
+                lambda value: value.update(expected={"turn": "blocked", "pattern": "deadline/date-near-deadline-word@1", "must_not": 7}),
+            ),
+            (
+                "expected.must_not",
+                lambda value: value.update(expected={"turn": "blocked", "pattern": "deadline/date-near-deadline-word@1", "must_not": ["forbidden", 7]}),
+            ),
+            (
+                "expected.must_not",
+                lambda value: value.update(expected={"turn": "blocked", "pattern": "deadline/date-near-deadline-word@1", "must_not": [""]}),
+            ),
+            (
+                "expected.must_not",
+                lambda value: value.update(expected={"turn": "blocked", "pattern": "deadline/date-near-deadline-word@1", "must_not": "["}),
+            ),
             ("labels", lambda value: value.update(labels=["invented", "other"])),
             ("labels", lambda value: value.update(labels=["harvest", "positive"])),
             ("branch must be 'general'", lambda value: value.update(branch="legal")),
@@ -1060,6 +1094,52 @@ class ShapeRefusals(unittest.TestCase):
             path="guardrails/deadline-trap.jsonl",
             expected="expected.turn role",
         )
+        control["expected"] = {"turn": "clean", "must_not": "forbidden"}
+        self._assert_case_finding(
+            control,
+            path="guardrails/deadline-trap.jsonl",
+            expected="expected keys or order",
+        )
+
+    def test_guardrail_positive_must_not_string_and_list_load_clean(self) -> None:
+        for index, must_not in enumerate(("forbidden", ["forbidden", r"secret\s+figure"]), start=1):
+            with self.subTest(form=type(must_not).__name__), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory) / "eval-v9"
+                record = _guardrail_case(f"deadline-trap/direct-{index:02d}")
+                record["expected"] = {
+                    "turn": "blocked",
+                    "pattern": "deadline/date-near-deadline-word@1",
+                    "must_not": must_not,
+                }
+                _write(
+                    root,
+                    "guardrails/deadline-trap.jsonl",
+                    json.dumps(record, separators=(",", ":")),
+                )
+                result = load_set(root)
+            self.assertTrue(result.ok, result.findings)
+
+    def test_guardrail_must_not_findings_do_not_quote_patterns(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "eval-v9"
+            record = _guardrail_case()
+            record["expected"] = {
+                "turn": "blocked",
+                "pattern": "deadline/date-near-deadline-word@1",
+                "must_not": "fictional-sensitive-pattern[",
+            }
+            _write(
+                root,
+                "guardrails/deadline-trap.jsonl",
+                json.dumps(record, separators=(",", ":")),
+            )
+            result = load_set(root)
+        self.assertIsNone(result.loaded)
+        rendered = "\n".join(finding.text() for finding in result.findings)
+        self.assertIn("expected.must_not", rendered)
+        self.assertIn("deadline-trap/direct-01", rendered)
+        self.assertNotIn("fictional-sensitive-pattern", rendered)
+        self.assertNotIn(SENTINEL, rendered)
 
     def test_judgment_fixed_fields_and_minimum_labels_are_checked(self) -> None:
         for field, value, expected in (

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import tempfile
 import unittest
@@ -21,16 +22,71 @@ GUARDRAILS_PATH: Final[Path] = SET_ROOT / "guardrails"
 SEED_PATH: Final[Path] = Path("eval/seed/guardrails")
 PINNED_PREFIXES: Final[tuple[tuple[str, int, str], ...]] = (
     ("deadline-trap", 105, "d38ceb4e875111cf7503b8c2e378204e38168996e36f36e8a6859ff3d5828f76"),
-    ("guidelines-range", 87, "5532625b6e3e8cbc023d3dce7fa67da2df040a512885d719f0be503e58f801a2"),
-    ("sentence-credit", 86, "72460af111a63e7bbb36c24e2dee71ecd8a9b2913ef8c2a08aececc41238a30f"),
+    ("guidelines-range", 96, "c25da2f636b208315f61935299d2fa3cea4e5a04084fb239912f232ae3502e0b"),
+    ("sentence-credit", 89, "d7efe667a7b88e9811452162ed1ebda5c4937bf68bee4e45454ffe4c77a2c03f"),
 )
 # The counts at the conversion (the plan's §1): lines, active, active
 # positives, active controls, superseded. An append moves them with the pins.
 COUNTS: Final[dict[str, tuple[int, int, int, int, int]]] = {
     "deadline-trap": (105, 102, 39, 63, 3),
-    "guidelines-range": (87, 87, 45, 42, 0),
-    "sentence-credit": (86, 86, 39, 47, 0),
+    "guidelines-range": (96, 87, 45, 42, 9),
+    "sentence-credit": (89, 86, 39, 47, 3),
 }
+
+_UNDER_TWENTY: Final[tuple[str, ...]] = (
+    "zero",
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "ten",
+    "eleven",
+    "twelve",
+    "thirteen",
+    "fourteen",
+    "fifteen",
+    "sixteen",
+    "seventeen",
+    "eighteen",
+    "nineteen",
+)
+_TENS: Final[tuple[str, ...]] = (
+    "",
+    "",
+    "twenty",
+    "thirty",
+    "forty",
+    "fifty",
+    "sixty",
+    "seventy",
+    "eighty",
+    "ninety",
+)
+_SMALL_NUMBER: Final[re.Pattern[str]] = re.compile(r"(?<![A-Za-z0-9])([0-9]{1,3})(?![A-Za-z0-9])")
+
+
+def _number_words(value: int) -> str:
+    """Spell one non-negative integer below one thousand with hyphens."""
+
+    if value < 20:
+        return _UNDER_TWENTY[value]
+    if value < 100:
+        tens, ones = divmod(value, 10)
+        return _TENS[tens] if ones == 0 else f"{_TENS[tens]}-{_UNDER_TWENTY[ones]}"
+    hundreds, remainder = divmod(value, 100)
+    prefix = f"{_UNDER_TWENTY[hundreds]} hundred"
+    return prefix if remainder == 0 else f"{prefix} {_number_words(remainder)}"
+
+
+def _spell_small_numbers(text: str) -> str:
+    """Spell prose numerals below one thousand while preserving four-digit years."""
+
+    return _SMALL_NUMBER.sub(lambda match: _number_words(int(match.group(1))), text)
 
 
 def _records(path: Path) -> tuple[dict[str, object], ...]:
@@ -43,7 +99,7 @@ def _records(path: Path) -> tuple[dict[str, object], ...]:
 
 
 class GuardrailsSetContract(unittest.TestCase):
-    """The committed suite stays bound to its untouched seed files."""
+    """The committed suite stays bound to its guardrail seed files."""
 
     def test_files_are_pinned_by_append_only_prefixes(self) -> None:
         for category, count, digest in PINNED_PREFIXES:
@@ -91,6 +147,26 @@ class GuardrailsSetContract(unittest.TestCase):
                     )
                     if source["kind"] == "positive":
                         self.assertEqual(expected["pattern"], source["pattern"])
+                    if source["kind"] == "control":
+                        self.assertNotIn("must_not", source)
+                    if "must_not" not in source:
+                        self.assertNotIn("must_not", expected)
+                    else:
+                        # The named figure is in the canned answer, digits and
+                        # spelled alike, and never in the prompt's inputs.
+                        self.assertEqual(expected["must_not"], source["must_not"])
+                        values = source["must_not"]
+                        patterns = [values] if isinstance(values, str) else cast(list[str], values)
+                        compiled = [re.compile(pattern) for pattern in patterns]
+                        answer = cast(str, source["answer"])
+                        for text in (answer, _spell_small_numbers(answer)):
+                            self.assertTrue(
+                                any(pattern.search(text) for pattern in compiled), source["id"]
+                            )
+                        self.assertFalse(
+                            any(pattern.search(cast(str, source["prompt"])) for pattern in compiled),
+                            source["id"],
+                        )
                     if "supersedes" in source:
                         target = f"{category}/{source['supersedes']}"
                         self.assertEqual(converted["supersedes"], target)

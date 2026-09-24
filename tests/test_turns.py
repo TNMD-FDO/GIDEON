@@ -2141,6 +2141,57 @@ class TurnHarness(TestCase):
         self.assertEqual([pattern.pattern for pattern in loaded.cases[0].must_not], ["forbidden"])
         self.assertEqual(loaded.cases[0].block, "present")
 
+    def test_seed_positive_must_not_compiles_and_unrepresentable_checks_refuse(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "cases.yaml"
+            path.write_text(
+                "family: test\n"
+                "pattern_set_version: 1\n"
+                "cases:\n"
+                "  - id: string-check\n"
+                "    kind: positive\n"
+                "    prompt: short prompt\n"
+                "    must_not: forbidden\\s+figure\n"
+                "  - id: list-check\n"
+                "    kind: positive\n"
+                "    prompt: another prompt\n"
+                "    must_not: [forbidden, 'figure']\n",
+                encoding="utf-8",
+            )
+            loaded = cases.load_cases(path)
+        self.assertIsInstance(loaded, cases.CaseSet)
+        assert isinstance(loaded, cases.CaseSet)
+        self.assertEqual(
+            [[pattern.pattern for pattern in case.must_not] for case in loaded.cases],
+            [[r"forbidden\s+figure"], ["forbidden", "figure"]],
+        )
+
+        refusals = (
+            ("bad-regex", "    must_not: '['\n", ("bad-regex", "must_not")),
+            (
+                "control-check",
+                "    must_not: forbidden\n",
+                ("control-check", "cannot carry must_not"),
+            ),
+            ("must-check", "    must: required\n", ("must-check", "cannot carry must")),
+        )
+        for identifier, extra, fragments in refusals:
+            with self.subTest(identifier=identifier), TemporaryDirectory() as directory:
+                kind = "control" if identifier == "control-check" else "positive"
+                path = Path(directory) / "cases.yaml"
+                path.write_text(
+                    "family: test\npattern_set_version: 1\ncases:\n"
+                    f"  - id: {identifier}\n    kind: {kind}\n"
+                    "    prompt: short prompt\n"
+                    f"{extra}",
+                    encoding="utf-8",
+                )
+                loaded = cases.load_cases(path)
+            self.assertIsInstance(loaded, Problem)
+            assert isinstance(loaded, Problem)
+            for fragment in fragments:
+                self.assertIn(fragment, loaded.problem)
+
     def test_decline_form_and_plain_doctrinal_answer(self) -> None:
         # The first two are the generator's own words from ticket 09's transcript,
         # typographic apostrophe included; the fourth is a disclaimer opening

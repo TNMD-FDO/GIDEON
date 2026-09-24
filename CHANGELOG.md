@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.2.58](docs/release-notes/v0.2.58.md) — 2026-09-24 — the gate reads a positive's named figure (slice-2 28)
 - [v0.2.57](docs/release-notes/v0.2.57.md) — 2026-09-23 — false refusal read by the judge (slice-2 15)
 - [v0.2.56](docs/release-notes/v0.2.56.md) — 2026-09-23 — the monthly feedback packet (improvement 06)
 - [v0.2.55](docs/release-notes/v0.2.55.md) — 2026-09-23 — the package cites no omitted file (slice-1 91)

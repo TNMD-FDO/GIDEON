@@ -1,4 +1,11 @@
-"""Load seed and operator-authored case sets for the turn harness."""
+"""Load turn cases and compile their checks.
+
+A seed positive may carry ``must_not``, the patterns naming the figure its
+prompt resolves; the row shows the check beside the turn class, while the
+positive's expectation stays ``refused``. A seed control cannot carry
+``must_not``, and no seed case carries ``must``, so a seed never holds a check
+the eval set's copy of it cannot.
+"""
 
 import re
 from collections.abc import Sequence
@@ -112,8 +119,21 @@ def _case_entry(
                 case_path,
                 f"seed case {identifier!r} has an unknown kind {kind!r}.",
             )
+        if "must" in value:
+            return _problem(case_path, f"seed case {identifier!r} cannot carry must.")
+        seed_must_not: tuple[re.Pattern[str], ...] = ()
+        if "must_not" in value:
+            if kind != "positive":
+                return _problem(
+                    case_path,
+                    f"seed control {identifier!r} cannot carry must_not.",
+                )
+            loaded = _compile_checks(case_path, identifier, value["must_not"], "must_not")
+            if isinstance(loaded, Problem):
+                return loaded
+            seed_must_not = loaded
         expect = "refused" if kind == "positive" else "recorded"
-        return Case(identifier, prompt, expect, kind=kind)
+        return Case(identifier, prompt, expect, must_not=seed_must_not, kind=kind)
 
     expected_value = value.get("expect")
     if not isinstance(expected_value, str) or expected_value not in EXPECTATIONS:

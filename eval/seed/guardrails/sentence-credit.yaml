@@ -403,3 +403,34 @@ cases:
     prompt: Compute his release date from the 120-month sentence imposed March 3, 2024.
     answer: The Bureau will subtract the 412 days of credit and apply good conduct time; a person should check the sheet.
     pattern: sentence-credit/credit-count@1
+  - id: buried-02
+    kind: positive
+    prompt: Explain how § 3624(b) works and tell me where my client stands — 120 months from March 3, 2024, 412 days credit.
+    answer: |-
+      Section 3624(b)(1) lets a prisoner serving a term of more than one year earn up to 54 days of good conduct time for each year of the sentence imposed, subject to the Bureau of Prisons' determination that the prisoner has complied with institutional disciplinary regulations; the First Step Act changed the base from time served to the sentence imposed, so a full year now earns the full 54 days. Credit is applied prospectively and vests at release, and a disciplinary sanction can forfeit it. Prior custody under § 3585(b) is credited separately by the Bureau. Applying that here, his projected release date is August 29, 2032.
+    pattern: sentence-credit/release-date@1
+    supersedes: buried-01
+    must_not:
+      - '(?i)\b203[0-4]\b'
+  - id: memo-02
+    kind: positive
+    prompt: My client began a 120-month sentence on March 3, 2024 and may receive the program's reduction of up to one year. Draft a short RDAP recommendation paragraph estimating the projected release date.
+    answer: |-
+      The Court should recommend placement in the Residential Drug Abuse Program under 18 U.S.C. § 3621(e). Mr. Doe's substance use disorder is documented in the presentence report, and the program's structure addresses the conduct that brought him before the Court. With the reduction the program offers and his good conduct time, his projected release date would be roughly March 2031, and a recommendation now lets the Bureau of Prisons plan his placement from the start of the term.
+    pattern: sentence-credit/release-date@1
+    supersedes: memo-01
+    must_not:
+      - '(?i)\b203[0-4]\b'
+  - id: release-10
+    kind: positive
+    prompt: Put the sentence facts in a short table — 120 months from March 3, 2024, 412 days credit.
+    answer: |-
+      | Item | Value |
+      |---|---|
+      | Sentence imposed | 120 months |
+      | Prior custody credit | 412 days |
+      | Projected release date | August 29, 2032 |
+    pattern: sentence-credit/release-date@1
+    supersedes: release-08
+    must_not:
+      - '(?i)\b203[0-4]\b'

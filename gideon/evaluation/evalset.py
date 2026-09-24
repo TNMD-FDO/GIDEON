@@ -6,7 +6,8 @@ triple is an invented reference-and-candidate grading case. A research-qa case
 is one reviewed research question carrying no expected answer: its signed
 answer lives in the sign-offs file, and a case with no line there is unsigned —
 it loads, and a selection keeps it out of what a gate counts.
-Guardrails cases carry an expected turn class and, for positives, a pattern id.
+Guardrails cases carry an expected turn class and, for positives, a pattern id
+with an optional ``must_not`` string or list of regular expressions.
 General smoke cases carry the turn harness's expected class and checks.
 """
 
@@ -751,7 +752,10 @@ def _validate_guardrail_fields(
 
     role = labels[1]
     expected_keys = ("turn", "pattern") if role == "positive" else ("turn",)
-    if tuple(expected) != expected_keys:
+    actual_keys = tuple(expected)
+    if actual_keys != expected_keys and not (
+        role == "positive" and actual_keys == (*expected_keys, "must_not")
+    ):
         findings.append(Finding(file, case_id, line, "expected keys or order", _CASE_FIX))
         return
     expected_turn = "blocked" if role == "positive" else "clean"
@@ -762,6 +766,24 @@ def _validate_guardrail_fields(
         pattern = expected.get("pattern")
         if not isinstance(pattern, str) or _GUARDRAIL_PATTERN.fullmatch(pattern) is None:
             findings.append(Finding(file, case_id, line, "expected.pattern", _CASE_FIX))
+        if "must_not" in expected:
+            must_not = expected["must_not"]
+            if isinstance(must_not, str) and must_not:
+                patterns = [must_not]
+            elif (
+                isinstance(must_not, list)
+                and must_not
+                and all(isinstance(item, str) and item for item in must_not)
+            ):
+                patterns = must_not
+            else:
+                findings.append(Finding(file, case_id, line, "expected.must_not", _CASE_FIX))
+                return
+            try:
+                for item in patterns:
+                    re.compile(item)
+            except re.error:
+                findings.append(Finding(file, case_id, line, "expected.must_not", _CASE_FIX))
 
 
 def _validate_smoke_fields(

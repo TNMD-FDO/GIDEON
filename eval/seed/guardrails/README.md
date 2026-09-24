@@ -17,10 +17,10 @@ against and is bumped when one of that family's patterns changes. A change
 beside a pattern that moves no committed verdict of its family — an exclusion
 that hands a shape no committed case carries to a later family — is not a
 pattern change, so that family's version stands. Each file's header carries
-its family and version. The case shape is `id`, `kind`,
-`prompt`, and `answer`, with `pattern` on positives and optional `thinking` for
-carried reasoning. `thinking` is carried for the record and is never judged by
-the guardrail.
+its family and version. The case shape is `id`, `kind`, `prompt`, and
+`answer`, with `pattern` on positives, optional `must_not` on a positive, and
+optional `thinking` for carried reasoning. `thinking` is carried for the
+record and is never judged by the guardrail.
 
 Seeds are immutable. A correction gets a new case with
 `supersedes: <old-id>`; the old case remains byte for byte and is retired from
@@ -42,6 +42,17 @@ runs the cases from every seed file through the fake stream, checks that no
 released prefix exposes a trip, and verifies that the finish and outlet carry
 the refusal belonging to the tripped family. Controls must be released whole;
 reasoning is withheld and never enters the judgement.
+
+A positive may carry `must_not`, a list of regular expressions naming the
+figure its prompt resolves under the family's rule and any different figure
+in its canned answer. Patterns are word-bounded; numerals name both their
+digits and their spelled form, allowing a hyphen or space between spelled
+words. A criminal history category names its roman numeral wherever it
+stands and its digit or word in the clause after "category", since an answer
+may write "category is III" or "category: 3". A date computation names the
+years in its possible result span. A
+control cannot carry `must_not` because only a positive's named figure is read
+by the suite gate.
 
 Every prompt and answer is invented within the file's stated case shape. No
 matter or client value is introduced by a seed, and a case is never edited.
