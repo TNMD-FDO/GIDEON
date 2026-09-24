@@ -2,8 +2,9 @@
 
 `bin/release-git` derives both from `gideon.__version__` and the release files
 (slice-1 tickets 60 and 61, workflow tickets 38 and 42); this module holds the
-committed tree to them, with each linked line targeting its release note, and
-fires each index rule on a seeded tree.
+committed tree to them, with each linked line targeting its release note,
+rejects ticket citations at the end of an index phrase, and fires each index
+rule on a seeded tree.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ _INDEX_LINE = re.compile(
     r" — (?P<date>\d{4}-\d{2}-\d{2}) — "
     r"(?P<phrase>\S(?:.*\S)?)$"
 )
+_TICKET_PHRASE = re.compile(r"(?:^|\s+)\((?:(?:[a-z][a-z0-9-]*|[A-Z]+)\s+)?\d+\)$")
 _TITLE = re.compile(
     r"^# Changelog - Week [^,]+, (?P<date>\d{2}-\d{2}-\d{4}), V\. "
     r"(?P<version>\d+\.\d+\.\d+)$"
@@ -120,6 +122,15 @@ def index_findings(root: Path) -> list[Finding]:
             found.append(Finding(index, number, "index line does not match the fixed shape", "Write a dash, the tag linked to its release note from v0.2.0 or as text below it, an ISO date, and a non-empty phrase"))
             continue
         target = match.group("target")
+        if _TICKET_PHRASE.search(match.group("phrase")) is not None:
+            found.append(
+                Finding(
+                    index,
+                    number,
+                    "index phrase ends in a ticket citation",
+                    "Drop the parenthetical; the release commit's subject keeps the ticket",
+                )
+            )
         linked_version = match.group("file_version")
         text_version = match.group("text_version")
         version = linked_version or text_version
@@ -211,6 +222,9 @@ class ReleaseRecords(unittest.TestCase):
             ("missing line", [], "has no index line"),
             ("duplicate line", ["same", "same"], "has a duplicate index line"),
             ("malformed line", ["- docs/2-changelog/nothing.md"], "does not match the fixed shape"),
+            ("worded ticket phrase", [_line(newest, "newest", today).replace("synthetic release", "fictitious update (example 23)")], "index phrase ends in a ticket citation"),
+            ("abbreviated ticket phrase", [_line(newest, "newest", today).replace("synthetic release", "fictitious update (GT 23)")], "index phrase ends in a ticket citation"),
+            ("bare ticket phrase", [_line(newest, "newest", today).replace("synthetic release", "fictitious update (23)")], "index phrase ends in a ticket citation"),
             ("missing target", [_line(older, f"docs/release-notes/v{older}.md", today)], "does not exist"),
             ("link version", [_line(older, "newest", today)], "differs from its target filename"),
             ("order", ["older-line", "same"], "not newest first"),

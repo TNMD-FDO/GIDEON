@@ -1,6 +1,6 @@
 # Building a GIDEON image (CSA runbook material)
 
-Ticket 16. GIDEON's own images — `postgres`, Postgres 18 plus pgBackRest, and
+GIDEON's own images — `postgres`, Postgres 18 plus pgBackRest, and
 `gideon`, the Python service image —
 are built **on the box, never by CI**: a build is not byte-reproducible, so
 `images.lock` records the digest that was actually pushed, and the hosted checks
@@ -48,7 +48,8 @@ pull request: `git fetch origin && git checkout pin-watch/<pin id>`):
    at merge time).
 5. Merge when green. The push-only chain runs `mirror-images` (with the
    built-image contract) then `frontend-contract`; a human tags the release
-   (§2.1). The running stack moves at the next `sudo python3 -m gideon apply`:
+   after the merge and green checks. The running stack moves at the next
+   `sudo python3 -m gideon apply`:
    the store tier is recreated onto the new image, so Postgres restarts for
    about a minute — choose the moment.
 
@@ -88,8 +89,9 @@ once, one pull request each. Complete them with one build:
 - `postgres: failed — … Fix: Build and push it with …` — build per §2, or,
   after a `/data/registry` loss, restore the registry from the backup set
   (`sudo python3 -m gideon restore --from staging`, or `--from target`;
-  `/data/registry` is one of the set's file roots — ticket 06's runbook,
-  `backup-restore.md`); until then `apply` refuses at its registry
+  `/data/registry` is one of the set's file roots, so restoring the set brings
+  the registry back too; see `docs/runbooks/backup-restore.md`. Until then
+  `apply` refuses at its registry
   stage.
 - Two builds from the same inputs produce two digests. The lock records the
   one pushed last; earlier ones stay in the registry until `registry gc`

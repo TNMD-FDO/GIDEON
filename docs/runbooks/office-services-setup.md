@@ -1,14 +1,14 @@
 # Office-services setup for GIDEON (CSA runbook material)
 
-What a CSA sets up **outside the box** before `./preflight.sh` can pass — the
-§3.6 step 0 "before-you-begin checklist", made explicit. Written from TNMD's
-first live setup (2026-09-01, ticket 03); promote into the formal install
-runbook when that document lands. TNMD example values throughout — a receiving
-office substitutes its own and records them in `/etc/gideon/site.yaml`.
+What a CSA sets up **outside the box** before `./preflight.sh` can pass: the
+before-you-begin checklist made explicit. Written from TNMD's first live setup
+(2026-09-01); promote into the formal install runbook when that document lands.
+TNMD example values throughout — a receiving office substitutes its own and
+records them in `/etc/gideon/site.yaml`.
 
 The `~/gideon-onbox-wizard.sh` pattern (an interactive script that walks these
-steps and places the results) is worth regenerating per office; this document
-is the source of truth the wizard automates.
+steps and places the results) is worth regenerating per office; this checklist
+makes the before-you-begin work explicit for the person preparing a box.
 
 ## 1. Active Directory (ADUC)
 
@@ -26,7 +26,7 @@ Users container is fine):
 **Groups** — two Global Security groups, names exactly matching the site
 file's `auth.ldap` keys (defaults shown):
 
-| Group | Meaning (§4.1) |
+| Group | Meaning |
 |---|---|
 | `GIDEON-Users` | membership = may log in to GIDEON |
 | `GIDEON-Admins` | membership = GIDEON admin (`gideon users reconcile` enforces); since `v0.0.22` also the only directory group that may open Grafana at `/grafana/` (§7) |
@@ -38,8 +38,9 @@ an admin who can't log in.
 **Every account that will sign in needs a `userPrincipalName`** — ADUC's *User
 logon name* on the Account tab (`user@<ad-domain>`), which every account
 created through ADUC already has; only script-created accounts may lack one,
-and preflight's LDAP check refuses naming any users-group member without it
-(ADR-0030). Users sign in with their `sAMAccountName`; the frontend keys the
+and preflight's LDAP check refuses a users-group member without one. This is
+required because the frontend and reconcile need a stable directory identity.
+Users sign in with their `sAMAccountName`; the frontend keys the
 account by its UPN and shows it as the account's address, and
 `gideon users reconcile` joins directory accounts to frontend users by the same
 attribute. The E-mail (`mail`) attribute is not read by GIDEON.
@@ -48,8 +49,8 @@ attribute. The E-mail (`mail`) attribute is not read by GIDEON.
 
 Two A records in the AD forward zone (DNS Manager on a DC):
 
-- `gideon` → the box's LAN IP (this is the certificate subject and Caddy's
-  hostname — §1.6).
+- `gideon` → the box's LAN IP, which is the certificate subject and Caddy's
+  hostname.
 - `nas` → the backup target's LAN IP.
 
 Per record: "create associated PTR" if a reverse zone exists (harmless
@@ -76,8 +77,7 @@ caching layer in front of AD DNS:**
 ## 3. Backup target (Synology DSM 7 — TNMD: DS2422)
 
 **Which unit/volume**: any single volume works — a DSM volume is one
-filesystem, satisfying §3.7's "all snapshots under one path on one
-filesystem" (the `--link-dest` hard-link requirement). Choose by headroom,
+filesystem, so `--link-dest` can hard-link snapshots under one path. Choose by headroom,
 and prefer a volume that isolates backup growth from other duties the unit
 carries (TNMD's Synologys also run office DNS). If the units replicate
 primary→backup, target the **primary** — GIDEON's snapshots then gain a
@@ -89,7 +89,7 @@ second copy for free. **Whatever you choose, `backup.target.path` in
 
 - Name `gideon-backup` (it becomes the path's last segment); location = the
   chosen volume.
-- **Recycle Bin: OFF** — pruning uses `rsync --delete`; a recycle bin would
+- **Recycle Bin: OFF** — pruning uses `rsync --delete`; the Synology Recycle Bin would
   invisibly hoard every pruned snapshot.
 - Encryption: off unless policy demands (an unmounted encrypted share after a
   NAS reboot silently fails the nightly push).
@@ -102,7 +102,7 @@ second copy for free. **Whatever you choose, `backup.target.path` in
 password (used exactly once, for key placement).
 
 - **Member of `administrators` — required**: Synology's sshd only allows SSH
-  for administrators (§3.7 vendor design). Compensate by stripping everything
+  for administrators. Compensate by stripping everything
   else: No access to all other shares, **Deny all** on the Applications tab.
   (If a later `backup push` hits a permission wall, the "rsync" application
   privilege is the first knob — do not pre-grant.)
@@ -116,7 +116,8 @@ assumed by preflight and `backup push`), Advanced Settings left at default.
 File Services → rsync → ☑ **Enable rsync service** — DSM's `rsync` binary is a
 wrapper that answers `Permission denied, please try again.` to `rsync
 --server` (the push, over SSH) while the service is off, even though SSH key
-authentication succeeded (ticket 06's first push hit exactly this); the rsync
+authentication succeeded; the first push showed that enabling SSH alone does
+not enable this separate rsync service. The rsync
 port 873 itself is not used and may stay firewalled. Then grant the account the
 **rsync application privilege** (User & Group → `gideon-backup` → Applications).
 
@@ -168,8 +169,8 @@ Verify on the box before installing: subject/SAN, chain
 (`openssl verify -CAfile /etc/gideon/ca.pem`), and key match (pubkey sha256 of
 cert vs key). Homes: cert → `/etc/gideon/tls/cert.pem` (0644), key →
 `/etc/gideon/secrets/tls_key` (0400) — then `shred -u` the loose key copy.
-Web Server template default validity is 2 years; the product alerts at <14
-days (§1.6); renewal = same CSR flow + `gideon tls reload`.
+Web Server template default validity is 2 years; the product alerts when
+fewer than 14 days remain, and renewal is the same CSR flow and `gideon tls reload`.
 
 ## 5. Hard-won practicalities
 
@@ -188,7 +189,7 @@ days (§1.6); renewal = same CSR flow + `gideon tls reload`.
   (`ldapsearch -y` reads the file verbatim) — relevant to anyone placing it
   by hand instead of via the wizard.
 
-## 1a. Active Directory — two facts the first live pass added (ticket 05)
+## 1a. Active Directory — two facts the first live pass added
 
 - **Group location**: if `GIDEON-Users` / `GIDEON-Admins` (or a mirrored group)
   live anywhere but the default `Users` container, set the site keys to the
@@ -233,7 +234,7 @@ Deleting the row (Admin panel → Users → delete) is the fallback only for an
 account with nothing worth keeping. A receiving office never needs this
 section: its accounts are UPN-keyed from the first sign-in.
 
-## 7. The SMTP relay, Grafana's door, and one more egress host (ticket 07, `v0.0.22`)
+## 7. The SMTP relay, Grafana's door, and one more egress host (`v0.0.22`)
 
 - **The relay's STARTTLS and certificate.** Preflight's SMTP check already sends
   one message; from `v0.0.22` Grafana sends every page-class alert through the
@@ -253,4 +254,4 @@ section: its accounts are UPN-keyed from the first sign-in.
   office firewall must allow it (HTTPS) for `registry mirror` and the CI
   runner, beside the hosts already in `config/egress.yaml`. cAdvisor comes from
   GHCR, already allowed.
-- **Search egress** (`v0.1.25`, spec §15). With `web.search` on, the box reaches the internet's search engines and fetches result pages, directly or through `egress_proxy`, from the `searxng` container and the frontend's page loader — the one runtime path user-authored text leaves the box, and only after a user has turned search on in General and confirmed the reminder. The destinations are whatever the engines return, so no allowlist names them; `web.search: off` removes the feature and the service.
+- **Search egress** (`v0.1.25`). With `web.search` on, the box reaches the internet's search engines and fetches result pages, directly or through `egress_proxy`, from the `searxng` container and the frontend's page loader — the one runtime path user-authored text leaves the box, and only after a user has turned search on in General and confirmed the reminder. The destinations are whatever the engines return, so no allowlist names them; `web.search: off` removes the feature and the service.

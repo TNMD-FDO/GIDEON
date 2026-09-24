@@ -1,9 +1,9 @@
 # Backup, restore, and the drill (CSA runbook material)
 
-Ticket 06 (`v0.0.18`). The product produces its own backup set and the off-box
-copy is one push (ADR-0026); rollback of an upgrade is a restore (ADR-0005).
-Every run is a row in `audit_log` (`backup_run`, `backup_push`, `backup_drill`,
-`restore`), never a log line (ADR-0027). The Synology side is §3 of
+`v0.0.18`. The product produces its own backup set, and one push copies it
+off-box. An upgrade rollback restores the pre-upgrade set. Each run is kept as
+an `audit_log` row (`backup_run`, `backup_push`, `backup_drill`, `restore`),
+which an operator can query, never as a log line. The Synology side is §3 of
 [`office-services-setup.md`](office-services-setup.md).
 
 ## 1. What runs, and where it lives
@@ -16,7 +16,7 @@ Every run is a row in `audit_log` (`backup_run`, `backup_push`, `backup_drill`,
 | The drill's throwaway project (`gideon-drill`, loopback port 18090, no GPU, no Caddy) | `/data/drill/` | `backup drill` — on `backup.drill_interval`, a Saturday at 04:00 office time by `gideon-backup-drill.timer`, or by hand |
 | The standing developer sibling (`gideon-ci`, loopback port 18100, production's engine through its relay, no Caddy) — outside the backup set, rebuilt from scratch by `down --wipe` then `up` | `/data/ci/` | `sudo python3 -m tools.cistack up`, by a developer or the runner's jobs; stopped by `down` |
 
-A fifth line since `v0.0.22` (ticket 07): the **quarterly full off-box re-hash**,
+A fifth line since `v0.0.22`: the **quarterly full off-box re-hash**,
 `backup push --verify-all`, by `gideon-backup-verify.timer` on the second
 Saturday of January, April, July, and October at 04:00 office time, ordered
 after the backup unit like the drill. And since the same release the box speaks
@@ -25,7 +25,7 @@ a drill overdue by three days past its interval, or any of the four units in
 systemd's `failed` state is a page-class email to `alerts.recipients[]`
 (`observability.md` §4); the Backup board shows the recorded runs.
 
-Times are office time, on two carriers (`v0.0.19`, ticket 17): the `timezone`
+Times are office time, on two carriers (`v0.0.19`): the `timezone`
 provision step sets the host clock to `office.timezone`, and every rendered
 timer's `OnCalendar` carries that zone as a suffix, so the units fire at the
 office hour whatever the host clock says and `systemctl list-timers 'gideon-*'`
@@ -42,17 +42,18 @@ once whenever the box has drilled before, and waits for a running backup
 says afterwards which ran.
 
 `backup run`, `backup push`, and `restore` share one lock
-(`/run/gideon/backup.lock`, slice-0 ticket 26): a second started while one runs
+(`/run/gideon/backup.lock`): a second started while one runs
 refuses before any stage, naming the running command, when it started, and its
 pid, and a refused nightly fails its unit like any other failure.
 
 The four file roots in a set are `/etc/gideon` (minus `secrets/` and the
 frontend's rendered env file — both carry secrets), the checkout the command ran
 from, `/data/registry`, and `/data/bulk/openwebui`. The secrets ride only as
-`secrets.tar.age`, sealed to two age recipients (ADR-0042), both named in the
-set's `manifest.json`: the office's (`/etc/gideon/backup_age_recipient`), whose
-identity exists in one place — the office password manager — and opens a set
-anywhere; and the box's own, whose identity is readable only by root at
+`secrets.tar.age`, sealed to two age recipients named in the set's
+`manifest.json`, so the office can open a set anywhere and the box can open its
+own sets. The office recipient (`/etc/gideon/backup_age_recipient`) has an
+identity kept in one place — the office password manager. The box's recipient
+uses an identity readable only by root at
 `/etc/gideon/backup_age_identity`, is never in a set, and opens the box's own
 sets on the box. Retention is `backup.local_days`
 (default 7) on the box and `backup.remote_days` (default 30) on the target;
@@ -94,8 +95,8 @@ nothing older is recoverable, and there is no monthly tier.
   a `.partial` directory that the next run prunes after a day.
 - **`backup push`** — `record` (`push.json`, the snapshot's coverage record),
   `list`, `push` (`transferred x of y bytes`: with a previous snapshot, a
-  transfer above 90 % of the total fails the push — the target is not keeping
-  every snapshot under one path on one filesystem, §3.7), `finalize`, `prune`,
+  transfer above 90 % of the total fails the push — snapshots must share one
+  path on one filesystem so they can use hard links), `finalize`, `prune`,
   `check` (the newest set's manifest, `push.json`, the tarball, pgBackRest's
   info files and the set's backup manifest, plus 1 % of every root, re-hashed
   on the target; `--verify-all` re-hashes every file), `audit`.
@@ -152,7 +153,8 @@ rotated since the set was made (the install runbook's rotation step, `v0.1.40`).
 
 ## 5. Total-loss recovery (a rebuilt box)
 
-1. OS per §1.9, then `sudo python3 -m gideon host provision` — a **new** backup
+1. Install the supported Ubuntu Server release, then
+   `sudo python3 -m gideon host provision` — a **new** backup
    keypair and a **new** age identity are printed; authorize the printed public
    key on the target. Do not replace the password manager's identity with the
    new one: step 4 brings the set's `backup_age_recipient` back, so every later
@@ -186,8 +188,9 @@ This is a check a person makes, not a gate any command enforces.
 
 ## 6. The pre-upgrade backup
 
-`sudo ./upgrade.sh <tag>` takes the full, labelled set ADR-0005 requires before
-an upgrade — `pre-<tag>`, or `pre-<tag>-<timestamp>` when an earlier attempt
+`sudo ./upgrade.sh <tag>` takes a full, labelled set before an upgrade so
+rollback has the checkout and data from before the change — `pre-<tag>`, or
+`pre-<tag>-<timestamp>` when an earlier attempt
 that never crossed the checkout left the plain label behind — and `sudo
 ./upgrade.sh --rollback [<tag>]` is the rollback: it restores that set with
 `restore --from staging --set <label>` and re-applies the previous release

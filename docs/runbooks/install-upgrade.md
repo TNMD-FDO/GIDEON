@@ -1,24 +1,22 @@
 # Install, upgrade, and rollback (CSA runbook material)
 
-Ticket 08 (`v0.0.25`). The two shell entrypoints a receiving office runs,
+`v0.0.25`. The two shell entrypoints a receiving office runs,
 `./install.sh` and `./upgrade.sh`, are three-line wrappers over `python3 -m
-gideon install` and `python3 -m gideon upgrade` (spec §2.2). Install is the
-§3.6 step 5 sequence as one ordered command over commands that already exist;
-upgrade is §3.6 step 7 with the mandatory pre-upgrade set (ADR-0005) and a
-rollback that restores it. Every run is a row in `audit_log` (`install`,
-`upgrade`, `rollback`), never a log line (ADR-0027). The acceptance section
-(the clean-VM harness, the two-CSA exercise) is §6 below and arrives with
-`v0.1.0`.
+gideon install` and `python3 -m gideon upgrade`. Install runs the existing
+commands in order; upgrade takes a full set before changing the checkout so
+rollback can restore the prior state. Each install, upgrade, and rollback is
+an `audit_log` row an operator can query, never a log line. The
+acceptance section below records the clean-VM exercise by two CSAs; it arrived
+with `v0.1.0`.
 
-## 1. The receiving-office sequence (§1.9 steps 3–7)
+## 1. The receiving-office sequence, steps 3–7
 
 Every step is re-runnable; a refusal prints its fix and exits non-zero, and the
 same command is run again after the fix.
 
 1. **Clone the release** to `/opt/gideon` as the account that will own the
    checkout (a CSA account with GitHub credentials, never root). Because
-   `/opt` is root-owned, create and assign the directory first — the acceptance
-   harness's shape in `tools/acceptance/vm.py`:
+   `/opt` is root-owned, create and assign the directory first:
    `sudo install -d -o <account> -g <account> /opt/gideon`
    Then clone the release:
    `git clone --branch <tag> <repository> /opt/gideon`. The owner matters
@@ -37,15 +35,16 @@ same command is run again after the fix.
    `sudo python3 -m gideon <command>` from `/opt/gideon`; this runbook keeps
    the long form because it is the only form available before this step.
 3. **Write the site file** at `/etc/gideon/site.yaml` from
-   `config/site.example.yaml`, and place the supplied secrets
-   (`office-services-setup.md`). On the build box, `python3 -m gideon registry
-   mirror` (Docker access) pulls the release's images into the loopback registry;
-   an office's image source is standing ticket 24's.
+   `config/site.example.yaml`, and place the supplied secrets as described in
+   `office-services-setup.md`. On the build box, `python3 -m gideon registry
+   mirror` (Docker access) pulls the release's images into the loopback
+   registry; where a receiving office pulls its images from is settled with
+   the release registry at `v1.0.0`.
 4. **Provision again**: `sudo python3 -m gideon host provision`. The
    site-dependent steps — `egress-proxy`, `firewall`, `time-sync`, and
    `timezone` — are blocked until the site file exists, and preflight refuses
-   on any unconverged step. The specification's §1.9 step 3 and §3.6 step 2
-   omit this second run; it is required by the actual dependency order.
+   on any unconverged step. This second run is required because those
+   site-dependent steps cannot converge until the site file exists.
 5. **Preflight**: `sudo ./preflight.sh`. Every provisioning step re-checked,
    then the install-time checks (the directory, the relay, the backup target,
    TLS material, ports, disk). Exit 0 iff nothing refuses. Install opens with
@@ -72,18 +71,19 @@ same command is run again after the fix.
    once apply has converged the stores; a failure in preflight or apply leaves
    no row, because the writer does not exist yet and their own rows are the
    record.
-   **The weights tree** (`v0.1.5`, spec §5.4): apply's `models` stage, between
+   **The weights tree** (`v0.1.5`): apply's `models` stage, between
    `pull` and `recreate`, makes `/data/models` hold the profile's models in the
    Hugging Face hub-cache layout, every file verified against `models.lock`;
    `sudo python3 -m gideon models pull` runs the same converge by hand, and a
    re-run verifies and fetches nothing. The tree is derived state outside the
-   backup set (§19.1) — after a rebuild, apply fetches it again — and the pull
+   backup set because it is derived from the model lock; after a rebuild,
+   apply fetches it again. The pull
    keeps the pinned set and the newest previous complete set, so
    `upgrade --rollback` re-applies the previous release without a download;
    older sets are removed and each removal printed. `/data/models/gideon/pulls.yaml`
    is the pull's record; a pull that stops mid-file resumes on the next run,
    and a second pull started while one runs refuses naming it.
-   **The engine** (`v0.1.6`, spec §5.2–5.3): on a GPU host apply renders
+   **The engine** (`v0.1.6`): on a GPU host apply renders
    `gideon-generator` from the profile's `serve` block — the vLLM image at its
    `images.lock` digest, GPU 0 reserved by UUID through CDI, `/data/models`
    mounted read-only, no published port — and starts it in the `start`
@@ -101,7 +101,7 @@ same command is run again after the fix.
    an orphan and leaves the key file. On a no-GPU host none of this is
    rendered.
    To rotate the key: `sudo python3 -m gideon secrets rotate engine_api_key`
-   (`v0.1.40`, spec §1.7). The command refuses first when `apply` has pending
+   (`v0.1.40`). The command refuses first when `apply` has pending
    changes or has never verified (run `render --diff`, then `apply`), then
    prints what it will do — the engine recreated with a cold start, bounded by
    apply's engine wait, and `gideon-api`, its second mount, recreated in
@@ -114,10 +114,10 @@ same command is run again after the fix.
    The frontend's own connection key is `gideon_api_key`, and
    `sudo python3 -m gideon secrets rotate gideon_api_key` recreates
    `gideon-api` (its mount) and the frontend (its env file's owner). Once General is live, a rotation that recreates the
-   engine is made in an announced maintenance window (§21; the command does
-   not gate on the clock). The same command rotates `webui_secret_key` (the
-   frontend recreated once; every signed-in session ends — §4.4's live-session
-   revocation), `searxng_secret_key` (SearXNG recreated through the recreate
+   engine is made in an announced maintenance window because the cold start
+   makes General unavailable; the command does not gate on the clock. The same
+   command rotates `webui_secret_key` (the frontend is recreated once and every
+   signed-in session ends), `searxng_secret_key` (SearXNG recreated through the recreate
    rule; with search off nothing consumes it and the command says so and
    writes nothing), and the two minted keys `gideon_admin_api_key` and
    `gideon_eval_api_key` (the file removed and re-minted by the apply-manifest
@@ -128,13 +128,13 @@ same command is run again after the fix.
    -f /etc/gideon/rendered/compose.yaml up -d --no-deps --force-recreate
    grafana`), which mounts them and which the recreate rule does not see;
    `proxy_auth`: replace the file and run `apply` — a Postgres role password
-   (the role holds the value; a ticket of its own), `gideon_admin_password`
+   (the role itself holds the value), `gideon_admin_password`
    and `gideon_eval_password` (the frontend's account holds it),
    `grafana_admin_password` (Grafana's admin user is seeded from the file at
    first start only: change it through Grafana's password endpoint as the
    administrator with the old and new value in the request body carried on
-   stdin, then rewrite the file in place — `.scratch/slice-1/assets/15-on-box.txt`
-   §18 is the record). A restore of a set made before a rotation brings the
+   stdin, then rewrite the file in place; the rotation transcript is the
+   record. A restore of a set made before a rotation brings the
    older value back: after that restore's `apply`, run `secrets rotate <name>`
    for every secret rotated since the set was made.
 7. **Corpus** (`gideon corpus install`, `index promote`) arrives with slice 3.
@@ -161,9 +161,8 @@ renders the host-unit rule and the runner's unit pattern away), then
 `sudo python3 -m gideon host provision --build-box` (the three `ok`), then
 `sudo python3 -m gideon apply`, which renders the rule and the pattern back; the
 transcript is kept as §2 says. TNMD's box was declared on 2026-09-16, at
-`v0.1.71`'s release, before any upgrade; the transcripts of its crossing — the
-marker removed to leave the mode, then the three commands — are kept at
-`.scratch/slice-0/assets/21-on-box.txt`. To leave
+`v0.1.71`'s release, before any upgrade, and its crossing — the marker
+removed to leave the mode, then the three commands — was recorded that way. To leave
 the mode, remove the marker, run provision again, then apply; the three units
 stay until removed by hand, and until they are, `restore` refuses on a host
 whose registry is still active.
@@ -171,11 +170,11 @@ whose registry is still active.
 ## 6. The acceptance run
 
 The acceptance harness builds a throwaway VM from the pinned image, converts it
-to the §1.4 LVM layout, and proves the receiving-office sequence in a clean
+to the LVM layout used on the box, and proves the receiving-office sequence in a clean
 environment. The VM has its own office services: the real directory is reached
 over NAT, the harness runs a STARTTLS + AUTH SMTP sink on the libvirt bridge,
 the VM is its own backup target, and a throwaway CA is bundled with the office
-root. The sequence is exactly §1 above. Every product command runs as
+root. The sequence is exactly the one in §1 above. Every product command runs as
 `sudo … 2>&1 | tee`, with its transcript retained under `--out`.
 
 The harness prints one row per stage on its own stdout — that output, under
@@ -209,28 +208,24 @@ by the one sudoers line the `gh-runner` provision step converges; it is already
 root-equivalent through the docker group, never runs pull-request code, and the
 line names one checkout module.
 
-Acceptance runs happen at minor tags only: the TRIP-3 `acceptance-run` block
-runs against the local tag before the push, then `.github/workflows/acceptance.yml`
-runs the pushed tag and stores the transcripts as an artifact. Patch tags never
-run the harness. A tag can name any commit its pusher can reach, so the
-workflow's trust is the two CSAs who may create a `v*` tag where it runs, not
-anything in the tag's tree: a `v*` ruleset guards the tags an office clones
-(tickets 22 and 57). This cadence is the CSA ruling superseding §2.5's every-tag
-wording; the harness pass is also the ruling's proof for §22.1, superseding its
-two-CSA by-hand exercise. The corresponding spec-gap comments are recorded on
-ticket 08.
+Acceptance runs happen at minor tags only: run against the local tag before
+the push, then run again on the pushed tag and keep its transcripts as an
+artifact. Patch tags never run the harness. A tag can name any commit its
+pusher can reach, so the trust is the two CSAs authorized to create a `v*` tag,
+not anything in the tag's tree; a `v*` ruleset restricts who can create tags an
+office clones. The release's two-CSA run proves the install sequence in a clean
+VM and replaces the earlier by-hand exercise.
 
 Transcripts redact print-once values and age identities before they reach the
-host. `tests/test_evidence_hygiene.py` scans `.scratch/` as a tripwire, so the
-evidence cannot accidentally carry a complete age secret or an unredacted
+host; an evidence check scans them for a complete age secret or an unredacted
 print-once line. On TNMD's box a complete run — image conversion, boot, two
 provisions, preflight, install with the drill, `alerts test`, the four
 rehearsal legs, the push and target restore, verify — takes under six minutes
 (the plan estimated 45); the converted image boots in about nine seconds. The
 candidate tree's passing run is `08-acceptance-run-2026-09-03/`.
 
-**What the runs of this release found** (each fixed in the same release,
-recorded on ticket 08): the firewall step's `DOCKER-USER` drops judged every
+**What the runs of this release found.** Each issue was fixed in the same
+release. The firewall step's `DOCKER-USER` drops judged every
 forwarded packet to ports 443 and 5000, the VM's NAT egress included, so no
 HTTPS download from the VM could succeed — the drops now name the Docker bridge
 they forward into; a fresh cloud image ships empty apt lists, so the first
@@ -251,22 +246,22 @@ that backup's timeline, and its target, the third timeline lesson after
 provision row also carries the failed command's own text now, which is what
 made the second of these visible.
 
-**The `v0.1.0` run.** `sudo python3 -m tools.acceptance v0.1.0` against the local tag on TNMD's box, 2026-09-03T21:28:56-05:00 to 2026-09-03T21:34:41-05:00, before the push: every stage ok, exit 0 — the VM installed to its URL, `alerts test` delivered through the sink, the four rehearsal legs on `v0.1.1-rc.1`, the push and the target restore, verify at release 0.1.0 by the applied record and the checkout's `--version`, sixteen authenticated TLS messages, thirteen transcripts, the VM torn down. The record is `08-acceptance-v0.1.0/`; the pushed tag's own run in `acceptance.yml` is the standing one.
+**The `v0.1.0` run.** The local-tag acceptance run on TNMD's box, 2026-09-03T21:28:56-05:00 to 2026-09-03T21:34:41-05:00, before the push: every stage ok, exit 0 — the VM installed to its URL, `alerts test` delivered through the sink, the four rehearsal legs on `v0.1.1-rc.1`, the push and the target restore, verify at release 0.1.0 by the applied record and the checkout's `--version`, sixteen authenticated TLS messages, thirteen transcripts, the VM torn down. The pushed tag's own run is the standing record.
 
-**The CI record.** The pushed tag's own run (33830159940) refused at `boot`: the workflow named `--out acceptance-out` relative to the runner's workspace, and libvirt opens the console log by path from its own working directory — every local run had used an absolute `--out`. The same root run left root-owned `__pycache__` directories under the workspace's `tools/`, and the next `ci` run's `mirror-images` job failed at its checkout on them (`git clean` cannot unlink them as the runner's account). Hotfix `v0.1.1`: an absolute `--out` whatever is typed, no bytecode written after the harness's entry point, the checkout's caches handed back with the transcripts, and a `workflow_dispatch` on `acceptance.yml` with a full-history checkout; the three directories were removed from the workspace by hand once. The standing record is the dispatched run against `v0.1.0` from the fixed `main`, 33831089332, 2026-09-04T02:51:53Z to 2026-09-04T02:57:48Z, every stage ok, the transcripts its `acceptance-v0.1.0` artifact, and the workspace held nothing root-owned after it. A red tag run whose cause is the harness or the workflow, not the tag's tree, is re-made this way: `gh workflow run acceptance.yml -f ref=v<x.y.0>`.
+**The CI record.** The pushed tag's run refused at `boot`: its output directory was relative to the runner's workspace, while libvirt opened the console log from its own working directory; local runs had used an absolute output path. The root run also left root-owned bytecode caches in the workspace, which made the next checkout fail because the runner could not remove them. Hotfix `v0.1.1` uses an absolute output path, avoids writing bytecode after the harness starts, returns the checkout's caches with the transcripts, and lets an operator dispatch the acceptance workflow again for a selected tag. The standing rerun against `v0.1.0` passed every stage from 2026-09-04T02:51:53Z to 2026-09-04T02:57:48Z; its transcripts were preserved as an artifact, and the workspace held nothing root-owned afterward. A red tag run whose cause is the harness or the workflow, not the tag's tree, is re-made the same way, by dispatching the acceptance workflow at that tag.
 
-**The `v0.2.0` run.** Both forms against the local tag on TNMD's box, from the release's worktree, before the push: `sudo python3 -m tools.acceptance v0.2.0`, 2026-09-18T09:15:55-05:00 to 09:36:47, 1252 s, every stage ok, exit 0 — the no-GPU install, `alerts test` through the sink, the four rehearsal legs on `v0.2.1-rc.1`, the push and the target restore, verify at release 0.2.0, sixteen authenticated TLS messages and thirteen transcripts; then `--full-restore` of the box's newest set (release 0.1.81), to 09:56:57, 1196 s, every stage ok, exit 0, the run directory 155 GB at its peak. The box itself then upgraded 0.1.82 → 0.2.0 by `upgrade`, from the checkout still on `main` at 0.1.82, 09:57:36 to 10:03:26, with `engine-verify` ok in the sequence. The records are `.scratch/slice-1/assets/18-acceptance-v0.2.0/`, `18-acceptance-restore-v0.2.0/`, and `18-on-box.txt`; the pushed tag's own two-step run in `acceptance.yml` is the standing one.
+**The `v0.2.0` run.** Both acceptance forms ran against the local tag on TNMD's box from the release worktree before the push: the no-GPU install passed every stage in 1252 seconds, with `alerts test`, four rehearsal legs on `v0.2.1-rc.1`, the push and target restore, sixteen authenticated TLS messages, and thirteen transcripts. The full-restore form then restored the box's newest set from release 0.1.81; it passed every stage in 1196 seconds and the run directory peaked at 155 GB. The box itself then upgraded 0.1.82 to 0.2.0 from the checkout on `main`; `engine-verify` passed. The run transcripts are kept with the release records, and the pushed tag's own two-step run is the standing record.
 
 ## 2. Upgrading: `sudo ./upgrade.sh <tag>`
 
 Run from the checkout, as root, with a clean work tree: no change to a tracked
 file. An untracked file is no obstacle, so `sudo ./upgrade.sh <tag> 2>&1 | tee
-.scratch/slice-0/assets/<transcript>.txt` is the way to keep the record. The
+<transcript file>` keeps the command output with the office's records. The
 command runs from the *current* release's tree and hands over to the new tree's
 own CLI after the checkout; nothing of the new release is loaded into the
 running process.
 
-**From go-live** (ADR-0044). A tag is user-facing from the office's first
+**From go-live.** A tag is user-facing from the office's first
 users; before them the rules below do not bind. The **quiet window** is
 weeknights 19:00–06:00 and Friday 19:00 to Monday 06:00 in the site's timezone
 (TNMD: America/Chicago). Work is window-bound when it sends requests to the
@@ -311,8 +306,9 @@ pre-upgrade set is not pushed; the nightly unit pushes.
 ## 3. Rolling back: `sudo ./upgrade.sh --rollback [<tag>]`
 
 The pre-upgrade set *is* the record of what to restore: its manifest carries
-the checkout's commit, the release, and the archive boundary. Rollback is a
-restore of that set plus the previous release's apply (ADR-0005). How far a
+the checkout's commit, the release, and the archive boundary. Rollback restores
+that set and applies the previous release, returning both data and product
+state to the saved point. How far a
 rollback got is a second, small record, `/data/backup-staging/rollback.json`,
 which exists only while one is in progress (the `plan` row below).
 
@@ -323,7 +319,7 @@ which exists only while one is in progress (the `plan` row below).
 | `safety` | when a restore is needed and the whole stack is running, a full `pre-rollback-<timestamp>` set taken by the *current* tree, so its files, checkout copy, and database describe the release that is running. A partial or stopped stack gets none, and the row says that anything written since the upgrade began is not preserved |
 | `audit-intent` | a `rollback` row when Postgres answers; when it does not (the reason for many rollbacks) the row is deferred and the applied row later says `intent_recorded: false` — never a silent skip |
 | `stop` | when a restore is needed, `compose down` whatever is running, so the previous tree's restore finds a stopped stack and takes no pre-restore set of its own |
-| `identity` | reads the selected set's manifest: a set sealed to one recipient was made by a tree that knows no box identity, whose nightly would snapshot it, so `/etc/gideon/backup_age_identity` is removed and the row says so; a set sealed to two keeps it (ADR-0042). The next `upgrade` mints a fresh one in its provision phase |
+| `identity` | reads the selected set's manifest: a set sealed to one recipient was made by a tree that knows no box identity, whose nightly would snapshot it, so `/etc/gideon/backup_age_identity` is removed and the row says so; a set sealed to two keeps it so this box can open its own sets. The next `upgrade` mints a fresh one in its provision phase |
 | `checkout` | the tag pointing at the manifest's commit when one does, else the commit; as the owner |
 | `restore` | when needed, the previous tree's `restore --from staging --set <label>`: verified whole before anything is replaced, Postgres back to the set's archive boundary |
 | `apply` | the previous tree's `apply` — restore leaves the frontend and ingress down and names apply as the next command; here the command runs it |
@@ -335,9 +331,10 @@ which exists only while one is in progress (the `plan` row below).
 registry, and the frontend's bulk data return to the pre-upgrade set's state:
 anything written after the set was taken (a user's chat during a failed
 upgrade) lives only in the `pre-rollback-*` safety set, when one could be
-taken. **Host state converged for the newer release stays converged**: ADR-0005's
-scope is the product, and a driver or package rollback is a `host provision`
-decision a person takes, never something rollback does.
+taken. **Host state converged for the newer release stays converged** because
+rollback restores the product from its set, not the host's drivers or packages.
+A driver or package rollback is a `host provision` decision a person takes,
+never something rollback does.
 
 ## 4. Re-runs and refusals
 
@@ -387,7 +384,7 @@ ran: a no-op apply, an incremental set, a passing drill, the URL
 (`08-install-rerun.txt`, `08-wait-online.txt`).
 
 The rehearsal ran on throwaway tags, never pushed, and found two defects, each
-fixed by a hotfix the same afternoon and each recorded on ticket 08:
+fixed by a hotfix the same afternoon:
 
 | Leg | Command | What it proved |
 |---|---|---|

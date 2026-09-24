@@ -26,16 +26,15 @@ public issue or pull request.
 
 ## How the work is organized
 
-- Decisions are recorded in `docs/adr/`.
 - Contribution is by invitation through the [access-request
   issue form](https://github.com/TNMD-FDO/GIDEON/issues/new?template=access-request.yml);
   a CSA decides each request under this document's dedication. This repository
   receives one commit per release, so a pull request here is not merged.
 - Trunk-based development: `main` is always deployable, feature branches are
-  short-lived, every slice ends in a tagged release (spec §2.1, §22). Bump
-  pull requests come from the pin watch (`pin-watch/*` branches, ADR-0031)
-  and are merged by a human, never auto-merged — a merge is a release
-  decision.
+  short-lived, and every slice ends in a tagged release. Bump pull requests
+  come from the pin watch on `pin-watch/*` branches, since a pin moves only
+  through a pull request, and a human merges each one, never automatically: a
+  merge is a release decision.
 - GIDEON's own images (`postgres` and `gideon`; `images/<name>/Dockerfile`, the built pins in
   `images.lock`) are built on the box, never by CI. A change under `images/`
   or to a built pin's inputs needs the rebuild in

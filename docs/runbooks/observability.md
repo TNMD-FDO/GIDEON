@@ -1,13 +1,14 @@
 # Observability and alerting (CSA runbook material)
 
-Ticket 07 (`v0.0.22`). The box watches itself with Prometheus, Grafana, and
-exporters, rendered and applied like every other service (spec §19.5,
-ADR-0027). **Grafana is the one alert engine** (ADR-0034): the page-class rules,
-the email contact point, and the notification policy are release files, and
-Grafana sends the email itself through the office relay named in `alerts.smtp`
-to `alerts.recipients[]`. There is no Alertmanager. Kept facts are rows in
-`audit_log`; container logs are in journald (90 days, 50 GB); metrics are
-Prometheus series (one year); none of the three is the other.
+`v0.0.22`. Prometheus, Grafana, and exporters watch the box. Their configuration
+is rendered and applied with the services, so a release can restore the whole
+monitoring setup. **Grafana is the one alert engine**: its release files define
+the page-class rules, email contact point, and notification policy, and Grafana
+sends alerts through the office relay in `alerts.smtp` to
+`alerts.recipients[]`. Keeping one alert engine gives operators one place to
+follow a page. There is no Alertmanager. Kept facts are `audit_log` rows so
+operators can query them; container logs are in journald (90 days, 50 GB), and
+metrics are Prometheus series (one year). Each serves a different purpose.
 
 ## 1. What runs, and where it lives
 
@@ -55,8 +56,8 @@ and stays Normal, inert until the directory is recreated.
   over the rows, and the last ten runs as a table — the timers' recorded runs.
 - **GPU** — per-GPU utilisation, memory, temperature, power from DCGM; and,
   from the engine's own `/metrics`, its KV-cache usage and its queue depth
-  (requests waiting and running) — the two series [22] item 16 names for
-  watching the engine's share of a card, since DCGM sees only per-GPU totals.
+  (requests waiting and running), which show the engine's share of a card while
+  DCGM reports only per-GPU totals.
 
 The node exporter runs on the private network with the host's root mounted, so
 its network-device series describe the container's interfaces, not the host's;
@@ -66,7 +67,7 @@ disk, memory, load, filesystems, and systemd units are the host's.
 
 Every page-class email names the rule and the fix; the rule set is a release
 file (`compose/grafana/provisioning/alerting/rules.yaml.tmpl`). An unresolved
-condition is re-sent daily; acknowledgement is business-hours (§19.5).
+condition is re-sent daily; acknowledgement follows business hours.
 `sudo python3 -m gideon status` lists the pages firing now with each rule's runbook section.
 
 | Rule | Fires when | Do |
@@ -113,7 +114,7 @@ recreate stay under the rule's period and need none.
   `journalctl CONTAINER_NAME=gideon-grafana-1` reads one service across
   recreations.
 - Rows live a year in `audit_log`'s monthly partitions.
-- No search-query text reaches a log (slice-1 ticket 16, `v0.1.35`): SearXNG's
+- No search-query text reaches a log (`v0.1.35`): SearXNG's
   journal carries no request line and, from that tag, no `HTTP Request failed`
   warning naming an engine's URL — the rendered `searxng/logging.json` holds its
   network logger at ERROR, and the engines' `ErrorContext` lines still name each
@@ -123,8 +124,7 @@ recreate stay under the rule's period and need none.
   line a query can reach; the frontend's page loader prints a fetched page's address
   (a retry warning, a blocked-URL warning, a content-loading traceback) when a fetch
   fails — a third party's URL, never the query, the second recorded residual
-  (slice-1 ticket 65, `v0.1.38`). `.scratch/slice-1/assets/16-enumerate-logs.sh`
-  counts every source by hand.
+  (`v0.1.38`). Every log source was enumerated by hand for that release.
 
 ## 7. Inducing each page (the acceptance pass, and after a relay change)
 
@@ -137,11 +137,11 @@ notice.
 3. **backup set / push overdue**: cannot be induced without waiting; instead confirm the rule's SQL by hand as `gideon_ro_metrics` (`SELECT max(at) FROM audit_log WHERE kind='backup_run' AND detail->>'phase'='applied'`) and read the rule's state in Grafana (Alerting → Alert rules) — it evaluates every minute.
 4. **drill overdue / failed**: same as 3, against `backup_drill` rows.
 5. **data volume low**: a sparse file cannot move `df`; `fallocate -l <size> /data/work/fill` to cross the line, then remove it.
-6. **host filesystem low**: a directory made under `/var/tmp` (on the root filesystem; `/tmp` is a tmpfs on the box), one `fallocate` there sized as the filesystem's free bytes less 14 % of its size, both read from the node exporter's two series or `df -B1 /`; the rule fires at its next evaluation (no pending period) and the email follows the group wait; removing the directory resolves it; never on `/var/lib/docker` while a build or a pull runs. (Verified 2026-09-15: filled 20:57:17 to 14.00 % free, the rule Alerting at 20:58:20 and the notifier handed the alert at 20:58:24 — 67 s from the fill, no pending period; the `/var/lib/docker` instance stayed Normal throughout; the directory removed 20:59:38, the rule Normal at 21:00:20 and the alert gone at 21:00:38; both emails confirmed at the page receiver, the resolved one at 21:04 on the policy's 5 m group tick — `.scratch/slice-1/assets/74-on-box.txt` §4 and §5.)
+6. **host filesystem low**: a directory made under `/var/tmp` (on the root filesystem; `/tmp` is a tmpfs on the box), one `fallocate` there sized as the filesystem's free bytes less 14 % of its size, both read from the node exporter's two series or `df -B1 /`; the rule fires at its next evaluation (no pending period) and the email follows the group wait; removing the directory resolves it; never on `/var/lib/docker` while a build or a pull runs. (Verified 2026-09-15: filled 20:57:17 to 14.00 % free, the rule Alerting at 20:58:20 and the notifier handed the alert at 20:58:24 — 67 s from the fill, no pending period; the `/var/lib/docker` instance stayed Normal throughout; the directory removed 20:59:38, the rule Normal at 21:00:20 and the alert gone at 21:00:38; both emails confirmed at the page receiver, the resolved one at 21:04 on the policy's 5 m group tick.)
 7. **TLS expiring**: not induced on the live box; the probe's `probe_ssl_earliest_cert_expiry` value is read in Prometheus and the rule's expression checked against it.
 8. **driver drift**: not induced; the rule's rendered version string is compared with `host.lock`'s `driver.tested` and DCGM's `DCGM_FI_DRIVER_VERSION` label in Prometheus (`curl -s 'http://127.0.0.1:9090/api/v1/query?query=DCGM_FI_DEV_GPU_UTIL'`).
 9. **heartbeat**: the first Saturday after `apply`; before that, `alerts test`.
-10. **engine down**: `docker compose -f /etc/gideon/rendered/compose.yaml stop gideon-generator`; wait a little over five minutes; `start` it. Exactly one page arrives (Engine down); Target down stays Normal, since its expression excludes the engine job. Do it in the quiet window — General is unavailable meanwhile. (Verified 2026-09-06: stopped 20:39:05, `up` 0 within a scrape, the rule Pending from 20:39:22 and Alerting at 20:44:20, the notifier handed the alert at 20:44:22; started 20:45:28, the container healthy at 20:46:29, `up` 1 at 20:46:49, the rule Normal at 20:47:22 and the resolved notice sent — `.scratch/slice-1/assets/06-on-box.txt` §5.)
+10. **engine down**: `docker compose -f /etc/gideon/rendered/compose.yaml stop gideon-generator`; wait a little over five minutes; `start` it. Exactly one page arrives (Engine down); Target down stays Normal, since its expression excludes the engine job. Do it in the quiet window — General is unavailable meanwhile. (Verified 2026-09-06: stopped 20:39:05, `up` 0 within a scrape, the rule Pending from 20:39:22 and Alerting at 20:44:20, the notifier handed the alert at 20:44:22; started 20:45:28, the container healthy at 20:46:29, `up` 1 at 20:46:49, the rule Normal at 20:47:22 and the resolved notice sent.)
 11. **API probe failing**: on a GPU host, `docker compose -f /etc/gideon/rendered/compose.yaml stop gideon-api`; watch `probe_success{job="api"}` until the rule is pending, then `start` the container again inside the ten-minute pending period. Confirm the probe clears and no page is sent; use `logs gideon-api` and `sudo python3 -m gideon apply` for a real failure.
 
 ## 8. Secrets and the service group

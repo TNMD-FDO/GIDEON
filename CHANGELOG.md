@@ -9,96 +9,97 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
-- [v0.2.60](docs/release-notes/v0.2.60.md) — 2026-09-24 — the rendered surface's citations (slice-1 90)
-- [v0.2.59](docs/release-notes/v0.2.59.md) — 2026-09-24 — the guardrail review (improvement 07)
-- [v0.2.58](docs/release-notes/v0.2.58.md) — 2026-09-24 — the gate reads a positive's named figure (slice-2 28)
-- [v0.2.57](docs/release-notes/v0.2.57.md) — 2026-09-23 — false refusal read by the judge (slice-2 15)
-- [v0.2.56](docs/release-notes/v0.2.56.md) — 2026-09-23 — the monthly feedback packet (improvement 06)
-- [v0.2.55](docs/release-notes/v0.2.55.md) — 2026-09-23 — the package cites no omitted file (slice-1 91)
-- [v0.2.54](docs/release-notes/v0.2.54.md) — 2026-09-23 — the sibling in the ledger's RAM line (slice-2 26)
-- [v0.2.53](docs/release-notes/v0.2.53.md) — 2026-09-23 — the general-smoke suite under eval run (slice-2 13)
-- [v0.2.52](docs/release-notes/v0.2.52.md) — 2026-09-23 — a retype's note copies are the script's (workflow 60)
-- [v0.2.51](docs/release-notes/v0.2.51.md) — 2026-09-23 — the CI missing-tree fix names cistack up (slice-2 27)
-- [v0.2.50](docs/release-notes/v0.2.50.md) — 2026-09-23 — thumbs on and the feedback adapter (improvement 05)
-- [v0.2.49](docs/release-notes/v0.2.49.md) — 2026-09-23 — the cycles record reads both stores (workflow 63)
-- [v0.2.48](docs/release-notes/v0.2.48.md) — 2026-09-23 — the gideon command and its start screen (front-door 01)
-- [v0.2.47](docs/release-notes/v0.2.47.md) — 2026-09-23 — the amend takes the message file (workflow 61)
-- [v0.2.46](docs/release-notes/v0.2.46.md) — 2026-09-23 — kept tree cites nothing the export omits (slice-1 89)
-- [v0.2.45](docs/release-notes/v0.2.45.md) — 2026-09-23 — a bare number at a full stop blocks (workflow 58)
-- [v0.2.44](docs/release-notes/v0.2.44.md) — 2026-09-23 — the guardrails suite under gideon eval (slice-2 12)
-- [v0.2.43](docs/release-notes/v0.2.43.md) — 2026-09-23 — the gideon status box report (front-door 02)
-- [v0.2.42](docs/release-notes/v0.2.42.md) — 2026-09-22 — the design record leaves the export (slice-1 88)
-- [v0.2.41](docs/release-notes/v0.2.41.md) — 2026-09-22 — the gideon proposals report (improvement 02)
-- [v0.2.40](docs/release-notes/v0.2.40.md) — 2026-09-22 — release-git passes the cycle's own tag (workflow 59)
-- [v0.2.39](docs/release-notes/v0.2.39.md) — 2026-09-22 — a rate-rejected count holds its release (general-turn 12)
-- [v0.2.38](docs/release-notes/v0.2.38.md) — 2026-09-22 — gideon-ci, one sibling stack (slice-2 19)
-- [v0.2.37](docs/release-notes/v0.2.37.md) — 2026-09-22 — the turn harness moves under eval (slice-2 11)
-- [v0.2.36](docs/release-notes/v0.2.36.md) — 2026-09-22 — the guardrail package split (general-turn 11)
-- [v0.2.35](docs/release-notes/v0.2.35.md) — 2026-09-22 — the trigger registry (improvement 01)
-- [v0.2.34](docs/release-notes/v0.2.34.md) — 2026-09-22 — the changelog leaves the export (slice-1 87)
-- [v0.2.33](docs/release-notes/v0.2.33.md) — 2026-09-22 — no trip writer outlives its fixture (general-turn 14)
-- [v0.2.32](docs/release-notes/v0.2.32.md) — 2026-09-22 — pin watch reads a dash-joined tag suffix (GT 13)
-- [v0.2.31](docs/release-notes/v0.2.31.md) — 2026-09-22 — release-git refuses a taken tag (workflow 56)
-- [v0.2.30](docs/release-notes/v0.2.30.md) — 2026-09-22 — the sign-off kit, packets and marks (slice-2 24)
-- [v0.2.29](docs/release-notes/v0.2.29.md) — 2026-09-22 — the cutover, the Filters retire (general-turn 09)
-- [v0.2.28](docs/release-notes/v0.2.28.md) — 2026-09-21 — the harvest's cases, unsigned (slice-2 10)
-- [v0.2.27](docs/release-notes/v0.2.27.md) — 2026-09-21 — the service stamps the citation (general-turn 08)
-- [v0.2.26](docs/release-notes/v0.2.26.md) — 2026-09-21 — the gate checks its tree's pins (workflow 54)
-- [v0.2.25](docs/release-notes/v0.2.25.md) — 2026-09-20 — the service writes the trip row (general-turn 07)
-- [v0.2.24](docs/release-notes/v0.2.24.md) — 2026-09-20 — the judgments suite's three numbers (slice-2 09)
+- [v0.2.61](docs/release-notes/v0.2.61.md) — 2026-09-24 — the public documents' citations
+- [v0.2.60](docs/release-notes/v0.2.60.md) — 2026-09-24 — the rendered surface's citations
+- [v0.2.59](docs/release-notes/v0.2.59.md) — 2026-09-24 — the guardrail review
+- [v0.2.58](docs/release-notes/v0.2.58.md) — 2026-09-24 — the gate reads a positive's named figure
+- [v0.2.57](docs/release-notes/v0.2.57.md) — 2026-09-23 — false refusal read by the judge
+- [v0.2.56](docs/release-notes/v0.2.56.md) — 2026-09-23 — the monthly feedback packet
+- [v0.2.55](docs/release-notes/v0.2.55.md) — 2026-09-23 — the package cites no omitted file
+- [v0.2.54](docs/release-notes/v0.2.54.md) — 2026-09-23 — the sibling in the ledger's RAM line
+- [v0.2.53](docs/release-notes/v0.2.53.md) — 2026-09-23 — the general-smoke suite under eval run
+- [v0.2.52](docs/release-notes/v0.2.52.md) — 2026-09-23 — a retype's note copies are the script's
+- [v0.2.51](docs/release-notes/v0.2.51.md) — 2026-09-23 — the CI missing-tree fix names cistack up
+- [v0.2.50](docs/release-notes/v0.2.50.md) — 2026-09-23 — thumbs on and the feedback adapter
+- [v0.2.49](docs/release-notes/v0.2.49.md) — 2026-09-23 — the cycles record reads both stores
+- [v0.2.48](docs/release-notes/v0.2.48.md) — 2026-09-23 — the gideon command and its start screen
+- [v0.2.47](docs/release-notes/v0.2.47.md) — 2026-09-23 — the amend takes the message file
+- [v0.2.46](docs/release-notes/v0.2.46.md) — 2026-09-23 — kept tree cites nothing the export omits
+- [v0.2.45](docs/release-notes/v0.2.45.md) — 2026-09-23 — a bare number at a full stop blocks
+- [v0.2.44](docs/release-notes/v0.2.44.md) — 2026-09-23 — the guardrails suite under gideon eval
+- [v0.2.43](docs/release-notes/v0.2.43.md) — 2026-09-23 — the gideon status box report
+- [v0.2.42](docs/release-notes/v0.2.42.md) — 2026-09-22 — the design record leaves the export
+- [v0.2.41](docs/release-notes/v0.2.41.md) — 2026-09-22 — the gideon proposals report
+- [v0.2.40](docs/release-notes/v0.2.40.md) — 2026-09-22 — release-git passes the cycle's own tag
+- [v0.2.39](docs/release-notes/v0.2.39.md) — 2026-09-22 — a rate-rejected count holds its release
+- [v0.2.38](docs/release-notes/v0.2.38.md) — 2026-09-22 — gideon-ci, one sibling stack
+- [v0.2.37](docs/release-notes/v0.2.37.md) — 2026-09-22 — the turn harness moves under eval
+- [v0.2.36](docs/release-notes/v0.2.36.md) — 2026-09-22 — the guardrail package split
+- [v0.2.35](docs/release-notes/v0.2.35.md) — 2026-09-22 — the trigger registry
+- [v0.2.34](docs/release-notes/v0.2.34.md) — 2026-09-22 — the changelog leaves the export
+- [v0.2.33](docs/release-notes/v0.2.33.md) — 2026-09-22 — no trip writer outlives its fixture
+- [v0.2.32](docs/release-notes/v0.2.32.md) — 2026-09-22 — pin watch reads a dash-joined tag suffix
+- [v0.2.31](docs/release-notes/v0.2.31.md) — 2026-09-22 — release-git refuses a taken tag
+- [v0.2.30](docs/release-notes/v0.2.30.md) — 2026-09-22 — the sign-off kit, packets and marks
+- [v0.2.29](docs/release-notes/v0.2.29.md) — 2026-09-22 — the cutover, the Filters retire
+- [v0.2.28](docs/release-notes/v0.2.28.md) — 2026-09-21 — the harvest's cases, unsigned
+- [v0.2.27](docs/release-notes/v0.2.27.md) — 2026-09-21 — the service stamps the citation
+- [v0.2.26](docs/release-notes/v0.2.26.md) — 2026-09-21 — the gate checks its tree's pins
+- [v0.2.25](docs/release-notes/v0.2.25.md) — 2026-09-20 — the service writes the trip row
+- [v0.2.24](docs/release-notes/v0.2.24.md) — 2026-09-20 — the judgments suite's three numbers
 - [v0.2.23](docs/release-notes/v0.2.23.md) — 2026-09-20 — the pin watch completes a shallow checkout
-- [v0.2.22](docs/release-notes/v0.2.22.md) — 2026-09-20 — the service judges every answer (general-turn 06)
+- [v0.2.22](docs/release-notes/v0.2.22.md) — 2026-09-20 — the service judges every answer
 - [v0.2.21](docs/release-notes/v0.2.21.md) — 2026-09-20 — the partial-reference test portable to the export
 - [v0.2.20](docs/release-notes/v0.2.20.md) — 2026-09-20 — the served name off the box's site file
-- [v0.2.19](docs/release-notes/v0.2.19.md) — 2026-09-20 — the turn harness's service door (general-turn 05)
-- [v0.2.18](docs/release-notes/v0.2.18.md) — 2026-09-20 — the judge grades and never gates (slice-2 06)
-- [v0.2.17](docs/release-notes/v0.2.17.md) — 2026-09-19 — the reference run and regression list (slice-2 05)
-- [v0.2.16](docs/release-notes/v0.2.16.md) — 2026-09-19 — a pool in, packets out, grades in (slice-2 08)
-- [v0.2.15](docs/release-notes/v0.2.15.md) — 2026-09-19 — a completion streamed and whole (general-turn 02)
-- [v0.2.14](docs/release-notes/v0.2.14.md) — 2026-09-19 — slice-2 02 — the grammar's remaining families and the variants
-- [v0.2.13](docs/release-notes/v0.2.13.md) — 2026-09-19 — the public tree points only at itself (slice-1 86)
-- [v0.2.12](docs/release-notes/v0.2.12.md) — 2026-09-19 — gideon-api in the stack (general-turn 01)
-- [v0.2.11](docs/release-notes/v0.2.11.md) — 2026-09-19 — eval run records a run (slice-2 04)
-- [v0.2.10](docs/release-notes/v0.2.10.md) — 2026-09-19 — a PyPI watch kind for built pins (general-turn 10)
-- [v0.2.9](docs/release-notes/v0.2.9.md) — 2026-09-19 — the branch gate, its own Function (general-turn 04)
-- [v0.2.8](docs/release-notes/v0.2.8.md) — 2026-09-19 — gideon.guardrail, the shared judge (general-turn 03)
-- [v0.2.7](docs/release-notes/v0.2.7.md) — 2026-09-19 — the extraction grammar's first families (slice-2 01)
-- [v0.2.6](docs/release-notes/v0.2.6.md) — 2026-09-19 — the judgment set's queries file (slice-2 07)
-- [v0.2.5](docs/release-notes/v0.2.5.md) — 2026-09-19 — courts.yaml and the jurisdiction check (slice-2 03)
-- [v0.2.4](docs/release-notes/v0.2.4.md) — 2026-09-18 — the overlap test's fake holds its read (slice-1 85)
-- [v0.2.3](docs/release-notes/v0.2.3.md) — 2026-09-18 — a frontend bump re-proves both modes (slice-1 41)
-- [v0.2.2](docs/release-notes/v0.2.2.md) — 2026-09-18 — the turn harness's unfiltered turn (slice-1 76)
-- [v0.2.1](docs/release-notes/v0.2.1.md) — 2026-09-18 — the box's install home is /opt/gideon (slice-1 84)
-- [v0.2.0](docs/release-notes/v0.2.0.md) — 2026-09-18 — the pre-launch release; slice 1 closes (slice-1 18)
-- v0.1.82 — 2026-09-18 — General's texts refer a user nowhere (slice-1 83)
-- v0.1.81 — 2026-09-17 — backup, push, and restore share one lock (slice-0 26)
-- v0.1.80 — 2026-09-17 — a stream trip cancels its turn (slice-1 52)
-- v0.1.79 — 2026-09-17 — restore re-owns the old gideon by name (slice-0 25)
-- v0.1.78 — 2026-09-17 — a fresh stack skips its pre-restore set (slice-0 24)
-- v0.1.77 — 2026-09-17 — clean-VM full restore form (slice-0 20)
-- v0.1.76 — 2026-09-17 — the turn harness's decline form (38)
-- v0.1.75 — 2026-09-17 — Guidelines level and point totals (45)
-- v0.1.74 — 2026-09-16 — the public repository is the application alone (79)
-- v0.1.73 — 2026-09-16 — the build box's crossing, procedure and proof (21)
+- [v0.2.19](docs/release-notes/v0.2.19.md) — 2026-09-20 — the turn harness's service door
+- [v0.2.18](docs/release-notes/v0.2.18.md) — 2026-09-20 — the judge grades and never gates
+- [v0.2.17](docs/release-notes/v0.2.17.md) — 2026-09-19 — the reference run and regression list
+- [v0.2.16](docs/release-notes/v0.2.16.md) — 2026-09-19 — a pool in, packets out, grades in
+- [v0.2.15](docs/release-notes/v0.2.15.md) — 2026-09-19 — a completion streamed and whole
+- [v0.2.14](docs/release-notes/v0.2.14.md) — 2026-09-19 — the grammar's remaining families and the variants
+- [v0.2.13](docs/release-notes/v0.2.13.md) — 2026-09-19 — the public tree points only at itself
+- [v0.2.12](docs/release-notes/v0.2.12.md) — 2026-09-19 — gideon-api in the stack
+- [v0.2.11](docs/release-notes/v0.2.11.md) — 2026-09-19 — eval run records a run
+- [v0.2.10](docs/release-notes/v0.2.10.md) — 2026-09-19 — a PyPI watch kind for built pins
+- [v0.2.9](docs/release-notes/v0.2.9.md) — 2026-09-19 — the branch gate, its own Function
+- [v0.2.8](docs/release-notes/v0.2.8.md) — 2026-09-19 — gideon.guardrail, the shared judge
+- [v0.2.7](docs/release-notes/v0.2.7.md) — 2026-09-19 — the extraction grammar's first families
+- [v0.2.6](docs/release-notes/v0.2.6.md) — 2026-09-19 — the judgment set's queries file
+- [v0.2.5](docs/release-notes/v0.2.5.md) — 2026-09-19 — courts.yaml and the jurisdiction check
+- [v0.2.4](docs/release-notes/v0.2.4.md) — 2026-09-18 — the overlap test's fake holds its read
+- [v0.2.3](docs/release-notes/v0.2.3.md) — 2026-09-18 — a frontend bump re-proves both modes
+- [v0.2.2](docs/release-notes/v0.2.2.md) — 2026-09-18 — the turn harness's unfiltered turn
+- [v0.2.1](docs/release-notes/v0.2.1.md) — 2026-09-18 — the box's install home is /opt/gideon
+- [v0.2.0](docs/release-notes/v0.2.0.md) — 2026-09-18 — the pre-launch release; slice 1 closes
+- v0.1.82 — 2026-09-18 — General's texts refer a user nowhere
+- v0.1.81 — 2026-09-17 — backup, push, and restore share one lock
+- v0.1.80 — 2026-09-17 — a stream trip cancels its turn
+- v0.1.79 — 2026-09-17 — restore re-owns the old gideon by name
+- v0.1.78 — 2026-09-17 — a fresh stack skips its pre-restore set
+- v0.1.77 — 2026-09-17 — clean-VM full restore form
+- v0.1.76 — 2026-09-17 — the turn harness's decline form
+- v0.1.75 — 2026-09-17 — Guidelines level and point totals
+- v0.1.74 — 2026-09-16 — the public repository is the application alone
+- v0.1.73 — 2026-09-16 — the build box's crossing, procedure and proof
 - v0.1.72 — 2026-09-16 — the host-mode fakes answer exists from their dict alone
-- v0.1.71 — 2026-09-16 — the deadline family's elapsed forms (ticket 44)
-- v0.1.70 — 2026-09-16 — the public repository and its export (ticket 57)
-- v0.1.69 — 2026-09-16 — General's smoke set (ticket 39)
-- v0.1.68 — 2026-09-16 — three roles on the declared build box (ticket 21)
+- v0.1.71 — 2026-09-16 — the deadline family's elapsed forms
+- v0.1.70 — 2026-09-16 — the public repository and its export
+- v0.1.69 — 2026-09-16 — General's smoke set
+- v0.1.68 — 2026-09-16 — three roles on the declared build box
 - v0.1.67 — 2026-09-16 — the turn tests' fake mints fresh chat ids under N
-- v0.1.66 — 2026-09-16 — General measured under concurrent load (ticket 62)
-- v0.1.65 — 2026-09-16 — sets are sealed to the box's own key too (ticket 23)
-- v0.1.64 — 2026-09-16 — a turn finds its chat by the ids it mints (ticket 68)
-- v0.1.63 — 2026-09-16 — the sentinel stub logs before it answers (ticket 77)
-- v0.1.62 — 2026-09-15 — the host filesystems page when low (ticket 74)
+- v0.1.66 — 2026-09-16 — General measured under concurrent load
+- v0.1.65 — 2026-09-16 — sets are sealed to the box's own key too
+- v0.1.64 — 2026-09-16 — a turn finds its chat by the ids it mints
+- v0.1.63 — 2026-09-16 — the sentinel stub logs before it answers
+- v0.1.62 — 2026-09-15 — the host filesystems page when low
 - v0.1.61 — 2026-09-12 — the image store on the Docker volume: containerd's root a `docker-engine` setting, the box's store moved in its window
-- v0.1.60 — 2026-09-11 — the guard's git as one command: `bin/release-git` and `bin/worktree-claim` under the guard, the tracker's `--check`, the Frontier trimmed
+- v0.1.60 — 2026-09-11 — the release git tail and the claimed worktree under the guard, the tracker check, the Frontier trimmed
 - v0.1.59 — 2026-09-11 — one home per workflow fact: the block table, the tools leaf, the two pages, and the Step 7 block point at each fact's home
 - v0.1.58 — 2026-09-11 — the brief is the ticket's one contract: a triage writes each fact once, the body as opened, the brief's one criteria list
 - v0.1.57 — 2026-09-11 — the rung and account switch: two optional words before the phase select the account and the pairing row for every phase of a cycle
-- v0.1.56 — 2026-09-11 — a model and an effort per phase: `bin/trip` runs each phase in its own session, the pairing held once, the cycles record split per phase
+- v0.1.56 — 2026-09-11 — a model and an effort per phase: the cycle launcher runs each phase in its own session, the pairing held once, the cycles record split per phase
 - v0.1.55 — 2026-09-10 — the arithmetic guardrail's sentence-credit family: a release date, a credit count, or a time to serve the model computed is refused
-- v0.1.54 — 2026-09-10 — the second CSA learns the method: `docs/agents/onboarding.md`, proven by two fresh sessions; the selection rule's one home
+- v0.1.54 — 2026-09-10 — the second CSA learns the method's reading path, proven by two fresh sessions; the selection rule's one home
 - v0.1.53 — 2026-09-10 — the export boundary: one list mirrored in `.gitattributes`, held by a tripwire; the runbooks under `docs/runbooks/`; the box jobs fenced
 - v0.1.52 — 2026-09-10 — office values redacted at capture: a registry marker, one function, the harness and an on-box command
 - v0.1.51 — 2026-09-10 — the README as the export's first page: a badge, a two-line status, install and quickstart, a tripwire holding its shape
@@ -106,7 +107,7 @@ are in the repository's history at commit f06e83f.
 - v0.1.49 — 2026-09-10 — turns beside the peak in the cycles record and the sizing rule; a session past 150 turns ends at its next seam
 - v0.1.48 — 2026-09-10 — the render-apply leaf split by what grew into the host tree and the engine and the frontend's runtime, both halves under the warning
 - v0.1.47 — 2026-09-10 — the release renumbers by one command when `main` took its number; the cycles record reads the version a release took
-- v0.1.46 — 2026-09-10 — a budget for CLAUDE.md and the agent documents, the four classes' figures on one line the budget test reads
+- v0.1.46 — 2026-09-10 — a budget for the agents' documents, the four classes' figures on one line the budget test reads
 - v0.1.45 — 2026-09-10 — the arithmetic guardrail's Guidelines family: a resolved Sentencing Guidelines range refused, the Filter's plumbing per family
 - v0.1.44 — 2026-09-10 — the default engine list without DuckDuckGo; the page loader's rendered agent and its 30 s bound
 - v0.1.43 — 2026-09-09 — the reasoning withheld from the screen and the guardrail's judgement; the restatement rule's answer-side forms over a canonical date
@@ -133,10 +134,10 @@ are in the repository's history at commit f06e83f.
 - v0.1.22 — 2026-09-07 — engine verify through the frontend, and the install and upgrade gate
 - v0.1.21 — 2026-09-07 — the window guard counts a browser turn as three engine calls
 - v0.1.20 — 2026-09-07 — engine verify
-- v0.1.19 — 2026-09-07 — TRIP-2 proves staged work on the acceptance VM
+- v0.1.19 — 2026-09-07 — the implement phase proves staged work on the acceptance VM
 - v0.1.18 — 2026-09-07 — the arithmetic guardrail's lag window
 - v0.1.17 — 2026-09-06 — the engine observed
-- v0.1.16 — 2026-09-06 — ARCHI-rules.md's Step 7 checklist names the landed-mechanism case
+- v0.1.16 — 2026-09-06 — the map's rules: the Step 7 checklist names the landed-mechanism case
 - v0.1.15 — 2026-09-06 — glossary entries name their leaf
 - v0.1.14 — 2026-09-06 — ARCHI as a map with leaves
 - v0.1.13 — 2026-09-06 — General the default model for every user, the arena model off, the web-upload leaf off, no suggestion cards

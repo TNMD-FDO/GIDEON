@@ -8,12 +8,12 @@ assistant, on one box the office controls. Built by TNMD-FDO (the Office of
 the Federal Public Defender, Middle District of Tennessee) and designed from
 day one for distribution: clone a tag, edit `site.yaml`, run one script.
 
-**Status:** 0.x — slice 0 (platform) complete at `v0.1.0`, the clean-VM acceptance at minor tags its standing proof; slice 1 (General) complete at `v0.2.0`, with no user on the box until go-live (ADR-0044); slice 2 (eval harness) under way toward `v0.3.0`; this tree is `v0.2.60`.
+**Status:** 0.x — slice 0 (platform) complete at `v0.1.0`, the clean-VM acceptance at minor tags its standing proof; slice 1 (General) complete at `v0.2.0`, with no user on the box until go-live; slice 2 (eval harness) under way toward `v0.3.0`; this tree is `v0.2.61`.
 What each release changed is in [`CHANGELOG.md`](CHANGELOG.md), one line per release; from `v0.2.0` each line links its release note. Later-slice commands still print "not implemented".
 
 ## Install
 
-The receiving-office sequence (spec §1.9), run from the checkout:
+The receiving-office sequence, run from the checkout:
 
 1. Create the install home owned by the account that will own the checkout, never root, clone the tag into it as that account, and enter it:
 
@@ -75,7 +75,7 @@ From a checkout, no install step:
 python3 -m gideon --help
 ```
 
-`gideon host …`, `preflight`, `render`, `apply`, `secrets rotate`, `tls reload`, `registry mirror`, and `users reconcile` run from the checkout on a bare Ubuntu Server install using only the standard library and `python3-yaml` (spec §1.5, §3.6 — render runs before any image is pulled) — a boundary CI enforces. `render`, `apply`, `secrets rotate`, `tls reload`, `users reconcile`, and `status` need root; `registry mirror` needs Docker access; `alerts test` needs root and a converged `apply`. `status` reads firing pages, office proposals, and host facts without writing. The installed `gideon` command runs every command as root. A host without a GPU is provisioned once with `sudo python3 -m gideon host provision --no-gpu`; every later command reads that declaration. TNMD's box is declared once with `sudo python3 -m gideon host provision --build-box`. `users reconcile` reports until given `--now`, and a rendered systemd timer runs it nightly.
+`gideon host …`, `preflight`, `render`, `apply`, `secrets rotate`, `tls reload`, `registry mirror`, and `users reconcile` run from the checkout on a bare Ubuntu Server install using only the standard library and `python3-yaml`, because render runs before any image is pulled — a boundary CI enforces. `render`, `apply`, `secrets rotate`, `tls reload`, `users reconcile`, and `status` need root; `registry mirror` needs Docker access; `alerts test` needs root and a converged `apply`. `status` reads firing pages, office proposals, and host facts without writing. The installed `gideon` command runs every command as root. A host without a GPU is provisioned once with `sudo python3 -m gideon host provision --no-gpu`; every later command reads that declaration. TNMD's box is declared once with `sudo python3 -m gideon host provision --build-box`. `users reconcile` reports until given `--now`, and a rendered systemd timer runs it nightly.
 
 The development toolchain is `requirements-dev.txt` — the five toolchain pins and, beside them, a copy of the `gideon` image's dependency set so mypy and the unit suite see the service's imports; never the product's path, which installs nothing from PyPI — in an untracked project venv:
 
@@ -122,7 +122,7 @@ python3 -m tools.gate
 | The proposals report (`sudo python3 -m gideon proposals` on the box, root for the feedback read, from the release checkout: every proposal waiting on a person, read-only — each `watching` trigger in `config/triggers.yaml` fired, not fired, or not yet measurable with the figures that decided it; `feedback` shows 30-day rating counts by model; `guardrail` joins the window's user trips to down ratings by chat id, ids and figures only; office rows are never fired; it writes nothing, and exits 1 only when a section could not be read) | [`gideon/improvement/`](gideon/improvement/) · [`config/triggers.yaml`](config/triggers.yaml) |
 | The candidate packet (`sudo python3 -m gideon eval candidates --out <dir>` on the box, root, once a month: the month's thumbs-down turns, question and answer beside their ids and bucket, written as one root-only plain-text page and a text-free manifest into an empty directory outside every backup set and checkout, read by a person with `less`, who writes candidate questions in their own words; the command's rows carry counts, ids, and the page's digest alone) | [`gideon/improvement/`](gideon/improvement/) · [`docs/runbooks/feedback-packet.md`](docs/runbooks/feedback-packet.md) |
 | The box status (`sudo python3 -m gideon status`: firing pages, office proposals, and a glance at services, backups, TLS, and `/data`; reads only) | [`gideon/status/`](gideon/status/) · [`docs/runbooks/observability.md`](docs/runbooks/observability.md) |
-| The reference run (`sudo python3 -m gideon eval reference --run <id>` from the development checkout: one recorded run taken as a tagged release's reference, written as one content-free file per id list, so a case that passed there and fails now blocks by id and a mean never gates) | [`eval/reference/`](eval/reference/) · [`gideon/evaluation/reference.py`](gideon/evaluation/reference.py) |
+| The reference run (`sudo python3 -m gideon eval reference --run <id>` from a clean checkout at the release's tag: one recorded run taken as a tagged release's reference, written as one content-free file per id list, so a case that passed there and fails now blocks by id and a mean never gates) | [`eval/reference/`](eval/reference/) · [`gideon/evaluation/reference.py`](gideon/evaluation/reference.py) |
 | Forward-only migrations (the `gideon` database) | [`migrations/`](migrations/) |
 | The live frontend, built-image, and search-sentinel contracts (self-hosted CI only) | [`tests/contract/`](tests/contract/) |
 
