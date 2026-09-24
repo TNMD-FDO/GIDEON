@@ -117,8 +117,8 @@ LIBVIRT_BRIDGE_CIDR: Final = "192.168.122.0/24"
 _LIBVIRT_BRIDGE_NETWORK = ipaddress.ip_network(LIBVIRT_BRIDGE_CIDR)
 
 _PROXY_AUTH_PATH: Final = Path("/etc/gideon/secrets/proxy_auth")
-# Loopback (the pre-1.0 release registry) and libvirt's bridge address
-# ([29] item 13, the acceptance VM's path) are never proxied.
+# Loopback (the pre-1.0 release registry) and libvirt's bridge address,
+# the acceptance VM's path to that registry, are never proxied.
 NO_PROXY_LOCAL: Final = "127.0.0.1,localhost,::1,192.168.122.1"
 _PROXY_AUTH_FIX: Final = (
     "Run with sudo so the process can read /etc/gideon/secrets/proxy_auth, "
