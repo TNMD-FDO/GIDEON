@@ -1446,7 +1446,7 @@ class TripWriter(unittest.TestCase):
     @staticmethod
     def _row() -> Any:
         family = FILTER.FAMILIES[0]
-        return FILTER.TripRow("branch", family.name, family.patterns[0].pattern_id, "user")
+        return FILTER.TripRow("branch", family.name, family.patterns[0].pattern_id, "user", None)
 
     def test_package_public_names_are_the_module_union(self) -> None:
         modules = tuple(
@@ -1529,7 +1529,7 @@ class TripWriter(unittest.TestCase):
         self.assertIn(f"INSERT INTO {FILTER.GUARDRAIL_TRIPS_TABLE}", connection.calls[1][0])
         self.assertEqual(
             connection.calls[1][1],
-            (row.branch, row.family, row.pattern_id, row.source),
+            (row.branch, row.family, row.pattern_id, row.source, row.chat_id),
         )
         self.assertNotIn(password, "\n".join(call[0] for call in connection.calls))
         self.assertEqual(connection.entries, 1)
@@ -1574,7 +1574,7 @@ class TripWriter(unittest.TestCase):
         normalized_rows: list[Any] = []
         with patch.object(FILTER.writer, "dispatch_trip_row", side_effect=normalized_rows.append):
             FILTER.record_trip(trip, None, "not-a-source")
-        self.assertEqual(normalized_rows, [FILTER.TripRow(FILTER.UNKNOWN_BRANCH, trip.family, trip.pattern_id, "user")])
+        self.assertEqual(normalized_rows, [FILTER.TripRow(FILTER.UNKNOWN_BRANCH, trip.family, trip.pattern_id, "user", None)])
         with patch.object(FILTER.writer, "dispatch_trip_row", side_effect=RuntimeError("dispatch failed")):
             self.assertIsNone(FILTER.record_trip(trip, None, "not-a-source"))
 
@@ -1587,7 +1587,7 @@ class TripWriter(unittest.TestCase):
             received.append(row)
             completed.set()
 
-        row = FILTER.TripRow("branch", "deadline", "pattern", "user")
+        row = FILTER.TripRow("branch", "deadline", "pattern", "user", None)
         _DISPATCH_PATCH.stop()
         try:
             with patch.object(FILTER.writer, "write_trip_row", side_effect=write):
@@ -1600,6 +1600,30 @@ class TripWriter(unittest.TestCase):
         self.assertTrue(workers[0].daemon)
         workers[0].join(1)
         self.assertFalse(workers[0].is_alive())
+
+    def test_record_trip_keeps_only_a_bounded_id_shaped_chat_id(self) -> None:
+        family = FILTER.FAMILIES[0]
+        trip = FILTER.Trip(family.name, family.patterns[0].pattern_id)
+        maximum = int(FILTER.TRIP_CHAT_ID_PATTERN.pattern.split(",")[-1].rstrip("}"))
+        accepted = "fictional-chat_42"
+        rejected = (
+            "",
+            "c" * (maximum + 1),
+            "fictional|chat",
+            "fictional chat",
+            "fictional\nchat",
+        )
+        rows: list[FILTER.TripRow] = []
+        with patch.object(FILTER.writer, "dispatch_trip_row", side_effect=rows.append):
+            FILTER.record_trip(trip, None, FILTER.SOURCE_VOCABULARY[0], accepted)
+            for value in rejected:
+                FILTER.record_trip(trip, None, FILTER.SOURCE_VOCABULARY[0], value)
+            FILTER.record_trip(trip, None, FILTER.SOURCE_VOCABULARY[0])
+
+        self.assertEqual(
+            [row.chat_id for row in rows],
+            [accepted, None, None, None, None, None, None],
+        )
 
     def test_filter_constants_follow_host_database_and_secret_registry(self) -> None:
         audit_secret = next(

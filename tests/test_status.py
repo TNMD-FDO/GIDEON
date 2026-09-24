@@ -13,6 +13,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, NoReturn, cast
+from unittest.mock import patch
 
 import gideon
 from gideon.host import backupset, grafana, owui, secrets, stack
@@ -20,7 +21,7 @@ from gideon.host.checks.capacity import DATA_DF_ARGV
 from gideon.host.render.grafana import GRAFANA_ADMIN_USER
 from gideon.host.report import Problem
 from gideon.host.sysio import Command, PathLike
-from gideon.improvement import feedback
+from gideon.improvement import feedback, ratings, trips
 from gideon.improvement.sections import Context, Row, Scope, Section, SectionReport
 from gideon.status import command, glance
 
@@ -99,6 +100,8 @@ class ReadOnlyHost:
         compose_stdout: str | None = None,
         psql_rc: int = 0,
         psql_stdout: str = "",
+        guardrail_rc: int = 0,
+        guardrail_stdout: str = "",
         df_rc: int = 0,
         df_stdout: str = "Size Avail\n2000000000 500000000\n",
         handshake_rc: int = 0,
@@ -120,6 +123,8 @@ class ReadOnlyHost:
         )
         self.psql_rc = psql_rc
         self.psql_stdout = psql_stdout
+        self.guardrail_rc = guardrail_rc
+        self.guardrail_stdout = guardrail_stdout
         self.df_rc = df_rc
         self.df_stdout = df_stdout
         self.handshake_rc = handshake_rc
@@ -151,6 +156,10 @@ class ReadOnlyHost:
         self.calls.append((command_argv, input))
         if command_argv[:2] == ("docker", "compose"):
             if "psql" in command_argv:
+                if input is not None and "FROM guardrail_trips" in input:
+                    return self._completed(
+                        command_argv, self.guardrail_rc, self.guardrail_stdout
+                    )
                 return self._completed(command_argv, self.psql_rc, self.psql_stdout)
             if "ps" in command_argv:
                 return self._completed(command_argv, self.compose_rc, self.compose_stdout)
@@ -556,6 +565,60 @@ class Status(unittest.TestCase):
         self.assertNotIn("product-section", waiting)
         self.assertEqual(product.calls, 0)
 
+    def test_office_sections_share_feedback_and_guardrail_rows_do_not_wait(self) -> None:
+        host = self.make_host(
+            guardrail_stdout="fictional-family|fictional-pattern|fictional-chat|1\n"
+        )
+        reading = feedback.FeedbackReading(
+            (
+                feedback.FeedbackRecord(
+                    "down",
+                    "fictional-chat",
+                    "fictional-message",
+                    "fictional-model",
+                    int(NOW.timestamp()) - 10,
+                ),
+            ),
+            0,
+        )
+
+        class Source:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def read(self) -> feedback.FeedbackReading:
+                self.calls += 1
+                return reading
+
+        source = Source()
+        with patch.object(command.owuifeedback, "source", return_value=source):
+            code, stdout, stderr, _ = self.run_status(
+                host,
+                FakeGrafana(),
+                sections=(ratings.FEEDBACK_SECTION, trips.TRIPS_SECTION),
+            )
+
+        waiting = stdout.split("waiting on you\n", 1)[1].split("\nat a glance", 1)[0]
+        self.assertEqual((code, stderr), (0, ""))
+        self.assertEqual(waiting, "none")
+        self.assertEqual(source.calls, 1)
+        self.assertEqual(
+            sum("FROM guardrail_trips" in (input_text or "") for _argv, input_text in host.calls),
+            1,
+        )
+
+    def test_refused_guardrail_read_is_one_waiting_line_with_its_fix(self) -> None:
+        host = self.make_host(guardrail_rc=1)
+        code, stdout, stderr, _ = self.run_status(
+            host, FakeGrafana(), sections=(trips.TRIPS_SECTION,)
+        )
+
+        waiting = stdout.split("waiting on you\n", 1)[1].split("\nat a glance", 1)[0]
+        self.assertEqual((code, stderr), (0, ""))
+        self.assertEqual(waiting.count("guardrail:"), 1)
+        self.assertIn("guardrail: metrics reader failed with exit code 1 Fix:", waiting)
+        self.assertTrue(waiting.endswith("then retry."))
+
     def test_feedback_context_fields_and_owui_factory_reach_read(self) -> None:
         host = self.make_host()
         host.files[os.fspath(secrets.secret_path("gideon_admin_api_key"))] = "fictional-admin-key"
@@ -580,11 +643,14 @@ class Status(unittest.TestCase):
         self.assertEqual(section.clock, NOW.timestamp())
         self.assertEqual(calls, [("GET", "/api/v1/evaluations/feedbacks/list?page=1")])
 
-    def test_frontend_down_is_one_waiting_line_under_the_registered_sections(self) -> None:
+    def test_frontend_down_refuses_each_office_section_from_one_shared_read(self) -> None:
         host = self.make_host()
         host.files[os.fspath(secrets.secret_path("gideon_admin_api_key"))] = "fictional-admin-key"
+        factory_calls = 0
 
         def factory(**kwargs: object) -> owui.Client:
+            nonlocal factory_calls
+            factory_calls += 1
             del kwargs
             raise owui.OwuiError("Open WebUI request failed.", "Check Open WebUI availability, then retry.")
 
@@ -606,8 +672,10 @@ class Status(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(
             waiting,
-            "feedback: Open WebUI request failed. Fix: Check Open WebUI availability, then retry.\n",
+            "feedback: Open WebUI request failed. Fix: Check Open WebUI availability, then retry.\n"
+            "guardrail: Open WebUI request failed. Fix: Check Open WebUI availability, then retry.\n",
         )
+        self.assertEqual(factory_calls, 1)
 
     def test_waiting_block_reports_none_and_unloadable_registry(self) -> None:
         host = self.make_host()

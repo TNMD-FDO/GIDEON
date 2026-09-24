@@ -12,6 +12,7 @@ from test_render import DirHost, checkout_files, inputs
 from gideon.host.images import parse_registry
 from gideon.host.render import RenderInputs, render_all
 from gideon.host.render.api import (
+    API_CHAT_HEADER,
     API_HEALTH_PATH,
     API_JOB_NAME,
     API_MOUNT_TARGET,
@@ -62,6 +63,7 @@ class ApiRender(unittest.TestCase):
             [ENGINE_SECRET_NAME, API_SECRET_NAME, "postgres_gideon_audit_password"],
         )
         self.assertEqual(api["environment"]["GIDEON_SOURCE_HEADER"], API_SOURCE_HEADER)
+        self.assertEqual(api["environment"]["GIDEON_CHAT_HEADER"], API_CHAT_HEADER)
         self.assertEqual(api["environment"]["GIDEON_EVAL_IDENTITY"], EVAL_IDENTITY.email)
         self.assertEqual(API_SOURCE_HEADER, API_USER_EMAIL_HEADER)
         self.assertNotIn("ports", api)
@@ -148,6 +150,7 @@ class ApiRender(unittest.TestCase):
         moved_identity = replace(EVAL_IDENTITY, email="moved@gideon.invalid")
         with (
             patch("gideon.host.render.compose.API_SOURCE_HEADER", "X-Moved-Source"),
+            patch("gideon.host.render.compose.API_CHAT_HEADER", "X-Moved-Chat"),
             patch("gideon.host.render.compose.EVAL_IDENTITY", moved_identity),
         ):
             moved = render_all(original)

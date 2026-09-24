@@ -19,6 +19,7 @@ from gideon.api.settings import Settings
 API_KEY = "fixture-api-key"
 ENGINE_KEY = "fixture-engine-key"
 SOURCE_HEADER = "X-Fixture-Source"
+CHAT_HEADER = "X-Fixture-Chat"
 EVAL_IDENTITY = "eval@example.invalid"
 _WAIT_SECONDS = 3.0
 _POLL_SECONDS = 0.05
@@ -304,6 +305,7 @@ class ApiRelaySockets(unittest.TestCase):
             API_KEY,
             0,
             SOURCE_HEADER,
+            CHAT_HEADER,
             EVAL_IDENTITY,
         )
         self.service_server = StartedServer(

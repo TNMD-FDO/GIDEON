@@ -10,12 +10,13 @@ from typing import Final
 from gideon.host import nogpu, owui
 from gideon.host.report import Problem, one_line, refusal
 from gideon.host.sysio import Host, PathLike, RealHost
-from gideon.improvement import owuifeedback, ratings, triggers
+from gideon.improvement import owuifeedback, ratings, triggers, trips
 from gideon.improvement.sections import (
     Context,
     Row,
     RowState,
     Section,
+    once,
     read_rows,
 )
 from gideon.improvement.watch import TRIGGERS_SECTION
@@ -23,6 +24,7 @@ from gideon.improvement.watch import TRIGGERS_SECTION
 SECTIONS: Final[tuple[Section, ...]] = (
     TRIGGERS_SECTION,
     ratings.FEEDBACK_SECTION,
+    trips.TRIPS_SECTION,
 )
 ROW_STATES: Final[tuple[RowState, ...]] = (
     "fired",
@@ -89,7 +91,7 @@ def run_proposals(
         registry=loaded.registry,
         build_box=build_box,
         query=lambda sql: read_rows(io, rendered, sql),
-        feedback=owuifeedback.source(io, site_path, client_factory).read,
+        feedback=once(owuifeedback.source(io, site_path, client_factory).read),
         now=time.time,
     )
     registered = SECTIONS if sections is None else tuple(sections)

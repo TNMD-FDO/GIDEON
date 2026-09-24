@@ -67,11 +67,13 @@ def _waiting_lines(
         registry=loaded.registry,
         build_box=nogpu.is_build_box(host),
         query=lambda sql: improvement_sections.read_rows(host, rendered_dir, sql),
-        feedback=owuifeedback.source(
-            host,
-            site_path,
-            owui_client_factory,
-        ).read,
+        feedback=improvement_sections.once(
+            owuifeedback.source(
+                host,
+                site_path,
+                owui_client_factory,
+            ).read
+        ),
         now=now,
     )
     selected = proposals.SECTIONS if registered is None else tuple(registered)

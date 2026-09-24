@@ -23,6 +23,7 @@ from gideon.api import stamp
 from gideon.api.judged import (
     CHUNK_OBJECT,
     StreamMechanics,
+    chat_id_for_header,
     judge_completion,
     source_for_header,
     stream_state_from_body,
@@ -414,6 +415,30 @@ class ApiJudged(unittest.TestCase):
             with self.subTest(body=body):
                 self.assertEqual(stream_state_from_body(body, "eval")["source"], "eval")
 
+    def test_chat_id_header_and_request_state_paths(self) -> None:
+        cases = (
+            (("fictional-chat-id-42",), "fictional-chat-id-42"),
+            ((), None),
+            (("",), None),
+            (("  fictional-chat-id-42  ",), "fictional-chat-id-42"),
+            (("fictional-chat-id-42", "fictional-chat-id-42"), None),
+        )
+        for values, expected in cases:
+            with self.subTest(values=values):
+                self.assertEqual(chat_id_for_header(values), expected)
+
+        chat_id = "fictional-chat-id-42"
+        bodies = (
+            b"not-json",
+            b"[]",
+            b'{"model":"fixture-model","messages":{}}',
+            body_for_prompt("Explain a visibly fictitious rule."),
+        )
+        for body in bodies:
+            with self.subTest(body=body):
+                state = stream_state_from_body(body, "user", chat_id)
+                self.assertEqual(state.get("chat_id"), chat_id)
+
     def test_whole_trips_record_once_and_clear_after_unjudgeable_choice(self) -> None:
         rows: list[object] = []
         row_written = threading.Event()
@@ -479,6 +504,7 @@ class ApiJudged(unittest.TestCase):
                             first_trip["family"],
                             first_trip["pattern_id"],
                             "eval",
+                            None,
                         ),
                     )
 

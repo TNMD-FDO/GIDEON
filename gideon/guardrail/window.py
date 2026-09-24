@@ -47,6 +47,7 @@ class StreamState(dict[str, object]):
         *,
         branch: str | None = None,
         source: str = "user",
+        chat_id: str | None = None,
     ) -> None:
         super().__init__(
             {
@@ -60,6 +61,7 @@ class StreamState(dict[str, object]):
                 "confirmation": sorted(confirmation),
                 "branch": branch,
                 "source": source,
+                "chat_id": chat_id,
             }
         )
 
@@ -93,6 +95,7 @@ def _stream_state(value: object) -> dict[str, object] | None:
         "confirmation",
         "branch",
         "source",
+        "chat_id",
     )
     if isinstance(value, dict) and all(key in value for key in keys):
         return value
@@ -114,6 +117,7 @@ def _record_stream_trip(state: dict[str, object], trip: Trip) -> None:
     state["trip"] = {"family": trip.family, "pattern_id": trip.pattern_id}
     branch = state.get("branch")
     source = state.get("source")
+    chat_id = state.get("chat_id")
     # Trip recording cannot affect the refusal; its writer stays silent on any
     # failure so a logging problem never changes the judged response.
     with contextlib.suppress(Exception):
@@ -121,6 +125,7 @@ def _record_stream_trip(state: dict[str, object], trip: Trip) -> None:
             trip,
             branch if isinstance(branch, str) else None,
             source if isinstance(source, str) else "user",
+            chat_id if isinstance(chat_id, str) else None,
         )
     entry = _stream_entry(state, "content")
     entry["text"] = ""

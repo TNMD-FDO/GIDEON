@@ -30,6 +30,7 @@ from gideon.api.upstream import (
     UPSTREAM_READ_TIMEOUT_SECONDS,
 )
 from gideon.host.render.api import (
+    API_CHAT_HEADER,
     API_USER_EMAIL_HEADER,
     API_USER_NAME_HEADER,
     API_USER_ROLE_HEADER,
@@ -135,7 +136,7 @@ _SENTINEL_HEADERS = {
     API_USER_EMAIL_HEADER: "sentinel-email-7f3c@example.invalid",
     API_USER_ROLE_HEADER: "sentinel-role-7f3c",
     "X-OpenWebUI-User-Id": "sentinel-user-id-7f3c",
-    "X-OpenWebUI-Chat-Id": "sentinel-chat-id-7f3c",
+    API_CHAT_HEADER: "sentinel-chat-id-7f3c",
 }
 
 
@@ -250,7 +251,7 @@ class TripConnection:
 
     def __init__(
         self,
-        rows: list[tuple[str, str, str, str]],
+        rows: list[tuple[str, str, str, str, str | None]],
         row_written: threading.Event,
     ) -> None:
         self.rows = rows
@@ -268,11 +269,14 @@ class TripConnection:
             return
         if (
             not isinstance(parameters, tuple)
-            or len(parameters) != 4
-            or not all(isinstance(value, str) for value in parameters)
+            or len(parameters) != 5
+            or not all(
+                isinstance(value, str) or (index == 4 and value is None)
+                for index, value in enumerate(parameters)
+            )
         ):
             raise AssertionError("writer parameters are not one content-free row")
-        self.rows.append(cast(tuple[str, str, str, str], parameters))
+        self.rows.append(cast(tuple[str, str, str, str, str | None], parameters))
         self.row_written.set()
 
 
@@ -505,10 +509,17 @@ class ApiCompletions(unittest.TestCase):
     # reads the configured name; the sentinel case sets it to the email header
     # the render configures in production, where a value is actually read.
     source_header: str = SOURCE_HEADER
+    chat_header: str = API_CHAT_HEADER
 
     def settings(self) -> Settings:
         return Settings(
-            ENGINE_URL, ENGINE_KEY, API_KEY, 8000, self.source_header, EVAL_IDENTITY
+            ENGINE_URL,
+            ENGINE_KEY,
+            API_KEY,
+            8000,
+            self.source_header,
+            self.chat_header,
+            EVAL_IDENTITY,
         )
 
     def request(
@@ -587,7 +598,9 @@ class ApiCompletions(unittest.TestCase):
         return cast(bytes, message["body"])
 
     @staticmethod
-    def expected_row(source: str) -> tuple[str, str, str, str]:
+    def expected_row(
+        source: str, chat_id: str | None = None
+    ) -> tuple[str, str, str, str, str | None]:
         supplied, confirmation = guardrail.message_context(
             [{"role": "user", "content": _TRIP_PROMPT}], 1
         )
@@ -599,7 +612,7 @@ class ApiCompletions(unittest.TestCase):
         )
         if not isinstance(expected, guardrail.Trip):
             raise AssertionError("fixture answer stopped tripping")
-        return ("fixture-model", expected.family, expected.pattern_id, source)
+        return ("fixture-model", expected.family, expected.pattern_id, source, chat_id)
 
     @staticmethod
     def response_body(messages: Sequence[Message]) -> bytes:
@@ -643,7 +656,7 @@ class ApiCompletions(unittest.TestCase):
 
     @staticmethod
     def recording_connect(
-        rows: list[tuple[str, str, str, str]], row_written: threading.Event
+        rows: list[tuple[str, str, str, str, str | None]], row_written: threading.Event
     ) -> Callable[..., object]:
         def connect(**kwargs: object) -> TripConnection:
             del kwargs
@@ -658,7 +671,7 @@ class ApiCompletions(unittest.TestCase):
         }
         for streamed in (True, False):
             with self.subTest(path="stream" if streamed else "whole"):
-                rows: list[tuple[str, str, str, str]] = []
+                rows: list[tuple[str, str, str, str, str | None]] = []
                 row_written = threading.Event()
                 with trip_driver(self.recording_connect(rows, row_written)):
                     if streamed:
@@ -688,7 +701,7 @@ class ApiCompletions(unittest.TestCase):
         )
         for name, choices, status, unjudged in cases:
             with self.subTest(case=name):
-                rows: list[tuple[str, str, str, str]] = []
+                rows: list[tuple[str, str, str, str, str | None]] = []
                 row_written = threading.Event()
                 with trip_driver(self.recording_connect(rows, row_written)):
                     response = self.whole_trip_response(
@@ -722,7 +735,7 @@ class ApiCompletions(unittest.TestCase):
                 ]
                 if header_name is not None:
                     request_headers.extend((header_name, value) for value in values)
-                rows: list[tuple[str, str, str, str]] = []
+                rows: list[tuple[str, str, str, str, str | None]] = []
                 row_written = threading.Event()
                 with trip_driver(self.recording_connect(rows, row_written)):
                     response = self.whole_trip_response(headers=request_headers)
@@ -730,10 +743,36 @@ class ApiCompletions(unittest.TestCase):
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(rows, [self.expected_row(source)])
 
+    def test_absent_and_repeated_chat_headers_write_no_chat_id(self) -> None:
+        cases = (
+            ("absent", ()),
+            (
+                "repeated",
+                (
+                    (API_CHAT_HEADER, "fictional-chat-id-7f3c"),
+                    (API_CHAT_HEADER, "fictional-chat-id-7f3c"),
+                ),
+            ),
+        )
+        for name, chat_headers in cases:
+            with self.subTest(case=name):
+                headers = [
+                    ("Authorization", f"Bearer {API_KEY}"),
+                    (SOURCE_HEADER, EVAL_IDENTITY),
+                    *chat_headers,
+                ]
+                rows: list[tuple[str, str, str, str, str | None]] = []
+                row_written = threading.Event()
+                with trip_driver(self.recording_connect(rows, row_written)):
+                    response = self.whole_trip_response(headers=headers)
+                    self.assertTrue(row_written.wait(_ASGI_WAIT_SECONDS))
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(rows, [self.expected_row("eval")])
+
     def test_writer_failure_or_waiting_connect_never_changes_the_answer(self) -> None:
         for streamed in (True, False):
             with self.subTest(path="stream" if streamed else "whole"):
-                rows: list[tuple[str, str, str, str]] = []
+                rows: list[tuple[str, str, str, str, str | None]] = []
                 row_written = threading.Event()
                 with trip_driver(self.recording_connect(rows, row_written)):
                     expected_status, expected_body = self.trip_response_bytes(streamed)
@@ -780,6 +819,7 @@ class ApiCompletions(unittest.TestCase):
             "fixture-family",
             "fixture-pattern",
             "user",
+            None,
         )
         try:
             with self.assertRaisesRegex(
@@ -794,7 +834,7 @@ class ApiCompletions(unittest.TestCase):
 
     def test_forwarded_header_sentinels_stay_out_of_logs_rows_responses_and_engine(self) -> None:
         calls: list[httpx.Request] = []
-        rows: list[tuple[str, str, str, str]] = []
+        rows: list[tuple[str, str, str, str, str | None]] = []
         row_written = threading.Event()
 
         def engine(request: httpx.Request) -> httpx.Response:
@@ -844,7 +884,11 @@ class ApiCompletions(unittest.TestCase):
 
         self.assertEqual([response.status_code for response in responses], [200, 200, 502, 502])
         self.assertEqual(len(rows), 2)
-        for sentinel in _SENTINEL_HEADERS.values():
+        chat_sentinel = _SENTINEL_HEADERS[API_CHAT_HEADER]
+        self.assertEqual([row[4] for row in rows], [chat_sentinel, chat_sentinel])
+        for header, sentinel in _SENTINEL_HEADERS.items():
+            if header == API_CHAT_HEADER:
+                continue
             for row in rows:
                 self.assertNotIn(sentinel, repr(row))
             for response in responses:
@@ -858,6 +902,14 @@ class ApiCompletions(unittest.TestCase):
                 # a header value would surface.
                 self.assertNotIn(sentinel, record.getMessage())
                 self.assertNotIn(sentinel, logging.Formatter().format(record))
+        for response in responses:
+            self.assertNotIn(chat_sentinel.encode(), response.body)
+        for request in calls:
+            self.assertNotIn(chat_sentinel.encode(), request.content)
+            self.assertNotIn(chat_sentinel, "\n".join(request.headers.values()))
+        for record in captured.records:
+            self.assertNotIn(chat_sentinel, record.getMessage())
+            self.assertNotIn(chat_sentinel, logging.Formatter().format(record))
 
     def test_stream_is_relayed_in_order_before_next_upstream_chunk(self) -> None:
         with self.assertLogs("gideon.api.request", level="INFO") as captured:

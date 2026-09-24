@@ -12,7 +12,7 @@ from gideon.host.report import Problem
 from gideon.host.sysio import Host, PathLike
 from gideon.improvement import owuifeedback, ratings
 from gideon.improvement.feedback import FeedbackReading, FeedbackRecord
-from gideon.improvement.sections import Context
+from gideon.improvement.sections import Context, once
 from gideon.improvement.triggers import TriggerRegistry
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -324,6 +324,27 @@ def _context(reading: FeedbackReading | Problem, now: float) -> Context:
         feedback=lambda: reading,
         now=lambda: now,
     )
+
+
+class SharedRead(unittest.TestCase):
+    def test_first_result_and_problem_are_cached_for_later_calls(self) -> None:
+        results: tuple[FeedbackReading | Problem, ...] = (
+            FeedbackReading((), 0),
+            Problem("fictional read refusal", "Fix the fictional source."),
+        )
+        for result in results:
+            with self.subTest(problem=isinstance(result, Problem)):
+                calls = 0
+
+                def read(captured: FeedbackReading | Problem = result) -> FeedbackReading | Problem:
+                    nonlocal calls
+                    calls += 1
+                    return captured
+
+                shared = once(read)
+                self.assertIs(shared(), result)
+                self.assertIs(shared(), result)
+                self.assertEqual(calls, 1)
 
 
 if __name__ == "__main__":

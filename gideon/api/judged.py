@@ -48,26 +48,41 @@ def source_for_header(values: Sequence[str], eval_identity: str) -> str:
     return "eval" if value.casefold() == identity.casefold() else "user"
 
 
-def stream_state_from_body(body: bytes, source: str) -> guardrail.StreamState:
+def chat_id_for_header(values: Sequence[str]) -> str | None:
+    """Return the one non-empty forwarded chat id, or ``None``."""
+
+    if len(values) != 1:
+        return None
+    value = values[0].strip()
+    return value or None
+
+
+def stream_state_from_body(
+    body: bytes, source: str, chat_id: str | None = None
+) -> guardrail.StreamState:
     """Build the stream's request context from the caller's JSON body."""
 
     try:
         parsed = json.loads(body)
     except Exception:  # noqa: BLE001 - unreadable request bodies use the strict empty stash.
-        return guardrail.StreamState({}, frozenset(), source=source)
+        return guardrail.StreamState({}, frozenset(), source=source, chat_id=chat_id)
     if not isinstance(parsed, dict):
-        return guardrail.StreamState({}, frozenset(), source=source)
+        return guardrail.StreamState({}, frozenset(), source=source, chat_id=chat_id)
 
     model = parsed.get("model")
     branch = model if isinstance(model, str) else None
     messages = parsed.get("messages")
     if not isinstance(messages, list):
-        return guardrail.StreamState({}, frozenset(), branch=branch, source=source)
+        return guardrail.StreamState(
+            {}, frozenset(), branch=branch, source=source, chat_id=chat_id
+        )
     try:
         supplied, contexts = guardrail.message_context(messages, len(messages))
     except Exception:  # noqa: BLE001 - malformed context uses the strict empty stash.
         supplied, contexts = {}, frozenset()
-    return guardrail.StreamState(supplied, contexts, branch=branch, source=source)
+    return guardrail.StreamState(
+        supplied, contexts, branch=branch, source=source, chat_id=chat_id
+    )
 
 
 def judge_completion(
@@ -171,11 +186,13 @@ def _record_trip(state: guardrail.StreamState, trip: guardrail.Trip) -> None:
     state["trip"] = {"family": trip.family, "pattern_id": trip.pattern_id}
     branch = state.get("branch")
     source = state.get("source")
+    chat_id = state.get("chat_id")
     with suppress(Exception):
         guardrail.record_trip(
             trip,
             branch if isinstance(branch, str) else None,
             source if isinstance(source, str) else "user",
+            chat_id if isinstance(chat_id, str) else None,
         )
 
 

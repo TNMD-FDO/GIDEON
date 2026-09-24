@@ -15,6 +15,7 @@ class Settings:
     api_key: str
     port: int
     source_header: str  # the forwarded header the trip's source is decided on
+    chat_header: str  # the forwarded header holding the trip's chat id
     eval_identity: str  # the value under that header that reads as the eval identity
 
 
@@ -54,5 +55,6 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         api_key=_read_secret(values, "GIDEON_API_KEY_FILE"),
         port=port,
         source_header=_required_environment(values, "GIDEON_SOURCE_HEADER"),
+        chat_header=_required_environment(values, "GIDEON_CHAT_HEADER"),
         eval_identity=_required_environment(values, "GIDEON_EVAL_IDENTITY"),
     )

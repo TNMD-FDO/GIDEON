@@ -382,6 +382,7 @@ services:
       GIDEON_API_PORT: "8000"
       GIDEON_SOURCE_HEADER: "X-OpenWebUI-User-Email"
       GIDEON_EVAL_IDENTITY: "gideon-eval@gideon.invalid"
+      GIDEON_CHAT_HEADER: "X-OpenWebUI-Chat-Id"
       TZ: "America/Chicago"
     command:
       - "python"

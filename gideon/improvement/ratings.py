@@ -18,7 +18,7 @@ RATED_STATE: Final[RowState] = "rated"
 HEADER_DETAIL: Final[str] = "{ratings} ratings in the last {days} days, {listed} listed"
 ROW_DETAIL: Final[str] = "up {up}, down {down}, newest {newest}"
 _SECONDS_PER_DAY: Final[int] = 24 * 60 * 60
-_TIME_FORMAT: Final[str] = "%Y-%m-%dT%H:%M:%SZ"
+TIME_FORMAT: Final[str] = "%Y-%m-%dT%H:%M:%SZ"
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,7 +79,7 @@ class RatingsSection:
                 ROW_DETAIL.format(
                     up=summary.up,
                     down=summary.down,
-                    newest=datetime.fromtimestamp(summary.newest, UTC).strftime(_TIME_FORMAT),
+                    newest=datetime.fromtimestamp(summary.newest, UTC).strftime(TIME_FORMAT),
                 ),
             )
             for model_id, summary in summaries.items()

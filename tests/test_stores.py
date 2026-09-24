@@ -24,7 +24,8 @@ MIGRATIONS = {
     f"{ROOT}/migrations/0002_metrics_reader.sql": (ROOT / "migrations/0002_metrics_reader.sql").read_text(),
     f"{ROOT}/migrations/0003_guardrail_trips.sql": (ROOT / "migrations/0003_guardrail_trips.sql").read_text(),
     f"{ROOT}/migrations/0004_eval_runs.sql": (ROOT / "migrations/0004_eval_runs.sql").read_text(),
-    f"{ROOT}/migrations/0005_second.sql": "CREATE TABLE second (id int);\n",
+    f"{ROOT}/migrations/0006_guardrail_trips_chat_id.sql": (ROOT / "migrations/0006_guardrail_trips_chat_id.sql").read_text(),
+    f"{ROOT}/migrations/0007_second.sql": "CREATE TABLE second (id int);\n",
     f"{ROOT}/migrations/README.md": "not a migration",
 }
 
@@ -136,7 +137,14 @@ class Converge(unittest.TestCase):
         self.assertEqual(report.created_databases, ("openwebui", "gideon"))
         self.assertEqual(
             report.applied_migrations,
-            ("0001_audit_log", "0002_metrics_reader", "0003_guardrail_trips", "0004_eval_runs", "0005_second"),
+            (
+                "0001_audit_log",
+                "0002_metrics_reader",
+                "0003_guardrail_trips",
+                "0004_eval_runs",
+                "0006_guardrail_trips_chat_id",
+                "0007_second",
+            ),
         )
 
         argvs = [call[0] for call in host.calls]
@@ -159,7 +167,7 @@ class Converge(unittest.TestCase):
         self.assertIn(psql("gideon", "gideon", *STATEMENT), argvs)
         self.assertIn(psql("gideon", "gideon", *QUERY), argvs)
         migration_runs = [call for call in host.calls if call[0] == psql("gideon", "gideon", *MIGRATION)]
-        self.assertEqual(len(migration_runs), 5)
+        self.assertEqual(len(migration_runs), 6)
         self.assertTrue((migration_runs[0][1] or "").startswith("-- §19.4"))
         self.assertTrue((migration_runs[0][1] or "").endswith("INSERT INTO schema_migrations (version) VALUES ('0001_audit_log');\n"))
         metrics_migration = next(call[1] or "" for call in migration_runs if "0002_metrics_reader" in (call[1] or ""))
@@ -246,17 +254,44 @@ class Converge(unittest.TestCase):
 
         report = converge(FakeHost(respond, {**SECRETS, **MIGRATIONS}), RENDERED, root=ROOT)
         self.assertFalse(report.ok)
-        self.assertIn("0005_second.sql", report.problem or "")
-        self.assertIn("0005_second.sql", report.fix)
-        self.assertEqual(report.applied_migrations, ("0001_audit_log", "0002_metrics_reader", "0003_guardrail_trips", "0004_eval_runs"))
-        self.assertEqual(server.versions, ["0001_audit_log", "0002_metrics_reader", "0003_guardrail_trips", "0004_eval_runs"])
+        self.assertIn("0007_second.sql", report.problem or "")
+        self.assertIn("0007_second.sql", report.fix)
+        self.assertEqual(
+            report.applied_migrations,
+            (
+                "0001_audit_log",
+                "0002_metrics_reader",
+                "0003_guardrail_trips",
+                "0004_eval_runs",
+                "0006_guardrail_trips_chat_id",
+            ),
+        )
+        self.assertEqual(
+            server.versions,
+            [
+                "0001_audit_log",
+                "0002_metrics_reader",
+                "0003_guardrail_trips",
+                "0004_eval_runs",
+                "0006_guardrail_trips_chat_id",
+            ],
+        )
 
     def test_applied_versions_are_skipped_and_names_are_lexical(self) -> None:
         server = FreshServer()
         server.versions.append("0001_audit_log")
         host = FakeHost(server, {**SECRETS, **MIGRATIONS})
         report = converge(host, RENDERED, root=ROOT)
-        self.assertEqual(report.applied_migrations, ("0002_metrics_reader", "0003_guardrail_trips", "0004_eval_runs", "0005_second"))
+        self.assertEqual(
+            report.applied_migrations,
+            (
+                "0002_metrics_reader",
+                "0003_guardrail_trips",
+                "0004_eval_runs",
+                "0006_guardrail_trips_chat_id",
+                "0007_second",
+            ),
+        )
 
     def test_missing_migrations_directory_refuses(self) -> None:
         report = converge(FakeHost(FreshServer(), SECRETS), RENDERED, root=ROOT)

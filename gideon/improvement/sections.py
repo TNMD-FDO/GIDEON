@@ -3,7 +3,8 @@
 Sections have ``product`` scope, printed only on a build box, or ``office``
 scope, printed everywhere. Rows contain only ids, section numbers, register
 tags, figure names, and numbers. Sections never read the build-box marker, and
-this module's query seam is the report's only path to Postgres.
+this module's query seam is the report's only path to Postgres. A runner wraps
+an input two sections read, the frontend's ratings, in ``once``.
 """
 
 import subprocess
@@ -79,6 +80,20 @@ class Section(Protocol):
 READ_FIX: Final[str] = (
     "Run sudo python3 -m gideon proposals as root with the stack up, then retry."
 )
+
+
+def once[T](read: Callable[[], T]) -> Callable[[], T]:
+    """Call ``read`` on the first call and hand its result, a problem included,
+    to every later one, so two sections over one input read it once per run."""
+
+    results: list[T] = []
+
+    def read_once() -> T:
+        if not results:
+            results.append(read())
+        return results[0]
+
+    return read_once
 
 
 def read_rows(

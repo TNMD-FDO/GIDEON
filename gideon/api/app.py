@@ -125,7 +125,9 @@ def create_app(
         # as an ASGI application, which is the relay's shape.
         Route(
             _COMPLETIONS_PATH,
-            CompletionRelay(settings.source_header, settings.eval_identity),
+            CompletionRelay(
+                settings.source_header, settings.chat_header, settings.eval_identity
+            ),
             methods=["POST"],
         ),
     ]

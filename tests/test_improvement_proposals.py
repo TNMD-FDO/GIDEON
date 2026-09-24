@@ -21,6 +21,7 @@ from gideon.host.render.owui import FEEDBACK_LIST_ROUTE
 from gideon.host.report import Problem
 from gideon.host.sysio import Command, PathLike
 from gideon.improvement import proposals, triggers, watch
+from gideon.improvement.feedback import FeedbackReading, FeedbackRecord
 from gideon.improvement.sections import (
     Context,
     Row,
@@ -533,6 +534,7 @@ triggers:
             IMPROVEMENT / "owuisnapshot.py",
             IMPROVEMENT / "packet.py",
             IMPROVEMENT / "ratings.py",
+            IMPROVEMENT / "trips.py",
         }
         self.assertTrue(new_modules.issubset(set(IMPROVEMENT.rglob("*.py"))))
         for path in sorted(IMPROVEMENT.rglob("*.py")):
@@ -550,7 +552,7 @@ triggers:
     def test_feedback_section_follows_triggers_and_rated_is_not_fired(self) -> None:
         self.assertEqual(
             tuple(section.name for section in proposals.SECTIONS),
-            ("triggers", "feedback"),
+            ("triggers", "feedback", "guardrail"),
         )
         self.assertIn("rated", proposals.ROW_STATES)
         host = self._host(build_box=True)
@@ -587,6 +589,57 @@ triggers:
             f"proposals: {fired} fired, {len(proposals.SECTIONS)} sections, 0 skipped"
         ))
         self.assertEqual(calls, [("GET", f"{FEEDBACK_LIST_ROUTE}?page=1")])
+        self.assertFalse(host.write_attempted)
+
+    def test_guardrail_section_follows_feedback_and_reuses_its_read(self) -> None:
+        fixed_now = 4_000_000_000.0
+        reading = FeedbackReading(
+            (
+                FeedbackRecord(
+                    "down",
+                    "fictional-chat-a",
+                    "fictional-message-a",
+                    "fictional-model-a",
+                    int(fixed_now - 10),
+                ),
+            ),
+            0,
+        )
+        trip_lines = "fictional-family|fictional-pattern-a|fictional-chat-a|2\n"
+        host = self._host(run_stdout=trip_lines)
+
+        class CountingFeedback:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def read(self) -> FeedbackReading:
+                self.calls += 1
+                return reading
+
+        class Source:
+            def __init__(self, reader: CountingFeedback) -> None:
+                self.read = reader.read
+
+        fake = CountingFeedback()
+        output = io.StringIO()
+        with (
+            patch.object(proposals, "RealHost", return_value=host),
+            patch.object(proposals.owuifeedback, "source", return_value=Source(fake)),
+            patch("gideon.improvement.proposals.time.time", return_value=fixed_now),
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            code = cli.main(["proposals"])
+
+        rendered = output.getvalue()
+        self.assertEqual(code, 0)
+        self.assertLess(rendered.index("section feedback"), rendered.index("section guardrail"))
+        self.assertIn("fictional-pattern-a: rated — 2 trips, 1 rated down", rendered)
+        self.assertIn("fictional-chat-a: rated — message fictional-message-a", rendered)
+        self.assertTrue(rendered.rstrip().endswith("proposals: 0 fired, 3 sections, 1 skipped"))
+        self.assertEqual(fake.calls, 1)
+        self.assertEqual(len(host.calls), 1)
+        self.assertIn("FROM guardrail_trips", host.calls[0][1] or "")
         self.assertFalse(host.write_attempted)
 
     def test_refused_feedback_read_is_one_refuse_and_exits_one_without_writes(self) -> None:

@@ -9,6 +9,7 @@ from gideon.host.images import ImagePin, RegistryTarget, parse_registry, referen
 from gideon.host.models import GIGABYTE, HardwareProfile, ModelPin
 from gideon.host.render import Artifact, RenderInputs
 from gideon.host.render.api import (
+    API_CHAT_HEADER,
     API_HEALTH_PATH,
     API_IMAGE_NAME,
     API_MOUNT_TARGET,
@@ -333,6 +334,7 @@ def api_service(inputs: RenderInputs, target: RegistryTarget) -> Mapping[str, ob
             "GIDEON_API_PORT": str(ENGINE_PORT),
             "GIDEON_SOURCE_HEADER": API_SOURCE_HEADER,
             "GIDEON_EVAL_IDENTITY": EVAL_IDENTITY.email,
+            "GIDEON_CHAT_HEADER": API_CHAT_HEADER,
             "TZ": inputs.site.office.timezone,
         },
         "command": ["python", "-m", "gideon.api"],

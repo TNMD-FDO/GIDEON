@@ -15,6 +15,7 @@ API_KEY = "fixture-api-key"
 ENGINE_KEY = "fixture-engine-key"
 ENGINE_URL = "http://fixture-engine/v1"
 SOURCE_HEADER = "X-Fixture-Source"
+CHAT_HEADER = "X-Fixture-Chat"
 EVAL_IDENTITY = "eval@example.invalid"
 
 
@@ -32,6 +33,7 @@ class ApiService(unittest.TestCase):
             API_KEY,
             8000,
             SOURCE_HEADER,
+            CHAT_HEADER,
             EVAL_IDENTITY,
         )
 
@@ -191,6 +193,7 @@ class ApiService(unittest.TestCase):
                 "GIDEON_ENGINE_API_KEY_FILE": str(root / "engine-key"),
                 "GIDEON_API_PORT": "8000",
                 "GIDEON_SOURCE_HEADER": SOURCE_HEADER,
+                "GIDEON_CHAT_HEADER": CHAT_HEADER,
                 "GIDEON_EVAL_IDENTITY": EVAL_IDENTITY,
             }
             (root / "engine-key").write_text(ENGINE_KEY, encoding="utf-8")
@@ -213,11 +216,13 @@ class ApiService(unittest.TestCase):
                     "GIDEON_API_KEY_FILE": str(root / "api-key"),
                     "GIDEON_API_PORT": "8000",
                     "GIDEON_SOURCE_HEADER": SOURCE_HEADER,
+                    "GIDEON_CHAT_HEADER": CHAT_HEADER,
                     "GIDEON_EVAL_IDENTITY": EVAL_IDENTITY,
                 }
             )
 
         self.assertEqual(settings.source_header, SOURCE_HEADER)
+        self.assertEqual(settings.chat_header, CHAT_HEADER)
         self.assertEqual(settings.eval_identity, EVAL_IDENTITY)
 
     def test_missing_or_empty_source_settings_refuse(self) -> None:
@@ -231,9 +236,14 @@ class ApiService(unittest.TestCase):
                 "GIDEON_API_KEY_FILE": str(root / "api-key"),
                 "GIDEON_API_PORT": "8000",
                 "GIDEON_SOURCE_HEADER": SOURCE_HEADER,
+                "GIDEON_CHAT_HEADER": CHAT_HEADER,
                 "GIDEON_EVAL_IDENTITY": EVAL_IDENTITY,
             }
-            for variable in ("GIDEON_SOURCE_HEADER", "GIDEON_EVAL_IDENTITY"):
+            for variable in (
+                "GIDEON_SOURCE_HEADER",
+                "GIDEON_CHAT_HEADER",
+                "GIDEON_EVAL_IDENTITY",
+            ):
                 for value in (None, " \t"):
                     with self.subTest(variable=variable, value=value):
                         environment = dict(common)

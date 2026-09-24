@@ -72,8 +72,11 @@ async def _run_with_disconnect(work: Callable[[], Awaitable[None]], receive: Rec
 class CompletionRelay:
     """Relay one judged completion response as a stream or after reading it in full."""
 
-    def __init__(self, source_header: str, eval_identity: str) -> None:
+    def __init__(
+        self, source_header: str, chat_header: str, eval_identity: str
+    ) -> None:
         self._source_header = source_header
+        self._chat_header = chat_header
         self._eval_identity = eval_identity
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -89,7 +92,8 @@ class CompletionRelay:
             source = judged.source_for_header(
                 request.headers.getlist(self._source_header), self._eval_identity
             )
-            state = judged.stream_state_from_body(body, source)
+            chat_id = judged.chat_id_for_header(request.headers.getlist(self._chat_header))
+            state = judged.stream_state_from_body(body, source, chat_id)
             upstream = await request.app.state.engine.completion(body, content_type)
             if upstream is None:
                 await JSONResponse(UPSTREAM_ERROR, status_code=502)(scope, receive, send)

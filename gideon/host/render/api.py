@@ -6,8 +6,8 @@ these names, as ``render/engine.py`` holds the engine's, so neither observer
 imports the document builder. The service listens on the engine's port number
 and the frontend's connection names the service by hostname alone (ticket 09).
 The API Compose block reads the email header name through ``API_SOURCE_HEADER``
-when it renders the service's source setting; it is the one rendered artifact
-that reads a forwarded header name.
+for the source word and the chat id through ``API_CHAT_HEADER`` for the trip row;
+it is the one rendered artifact that reads forwarded header names.
 ``API_SOURCES`` is the code the container imports from the mounted checkout,
 including the shared guardrail judge: its digest is the block's label, so a
 change there recreates the service and nothing else.
@@ -26,6 +26,7 @@ API_USER_NAME_HEADER: Final[str] = "X-OpenWebUI-User-Name"
 API_USER_EMAIL_HEADER: Final[str] = "X-OpenWebUI-User-Email"
 API_USER_ROLE_HEADER: Final[str] = "X-OpenWebUI-User-Role"
 API_SOURCE_HEADER: Final[str] = API_USER_EMAIL_HEADER
+API_CHAT_HEADER: Final[str] = "X-OpenWebUI-Chat-Id"
 API_MOUNT_TARGET: Final[str] = "/opt/gideon-src/gideon"
 API_WORKING_DIRECTORY: Final[str] = "/opt/gideon-src"
 API_SOURCES: Final[tuple[str, ...]] = ("gideon/api", "gideon/guardrail")
