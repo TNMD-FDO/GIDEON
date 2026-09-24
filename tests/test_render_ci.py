@@ -9,16 +9,23 @@ import yaml  # type: ignore[import-untyped]
 
 from gideon.host.images import load_image_lock, parse_registry, reference
 from gideon.host.lock import load_host_lock
-from gideon.host.models import HardwareProfile, load_models_lock, select_profile
+from gideon.host.models import (
+    GIGABYTE,
+    HardwareProfile,
+    load_models_lock,
+    select_profile,
+)
 from gideon.host.render import ARTIFACTS, RenderInputs
 from gideon.host.render.api import API_SERVICE_NAME
 from gideon.host.render.ci import (
     CI_PORT,
+    CI_POSTGRES_MEMORY_GB,
     CI_PROJECT,
     CI_ROOT,
     CI_SECRET_NAMES,
     CI_SECRETS_DIR,
     CI_WIPE_PATHS,
+    RELAY_MEMORY_LIMIT,
     RELAY_SERVICE_NAME,
     RELAY_SOURCE,
     ci_compose_document,
@@ -30,6 +37,7 @@ from gideon.host.render.compose import (
     NETWORK_NAME,
     PROJECT_NAME,
     image_pin,
+    memory_limit_bytes,
     service_names,
 )
 from gideon.host.render.engine import (
@@ -83,6 +91,51 @@ def mapping(value: object) -> Mapping[str, object]:
 
 
 class Compose(unittest.TestCase):
+    def test_each_service_memory_limit_uses_its_release_value(self) -> None:
+        render_inputs = inputs()
+        services = mapping(ci_compose_document(render_inputs)["services"])
+        expected = {
+            "postgres": CI_POSTGRES_MEMORY_GB * GIGABYTE,
+            "open-webui": memory_limit_bytes(render_inputs.profile, "open-webui"),
+            API_SERVICE_NAME: memory_limit_bytes(render_inputs.profile, API_SERVICE_NAME),
+            RELAY_SERVICE_NAME: RELAY_MEMORY_LIMIT,
+        }
+        for name, limit in expected.items():
+            with self.subTest(service=name):
+                service = mapping(services[name])
+                self.assertIsInstance(service["mem_limit"], int)
+                self.assertEqual(service["mem_limit"], limit)
+                self.assertEqual(tuple(service)[-1], "mem_limit")
+
+    def test_postgres_limit_is_own_and_frontend_tracks_its_profile_row(self) -> None:
+        render_inputs = inputs()
+        changed_rows = tuple(
+            replace(row, gb=row.gb + 1)
+            if row.service in {"postgres", "open-webui"}
+            else row
+            for row in render_inputs.profile.memory
+        )
+        changed_profile = replace(render_inputs.profile, memory=changed_rows)
+        changed_inputs = replace(render_inputs, profile=changed_profile)
+        baseline = mapping(ci_compose_document(render_inputs)["services"])
+        changed = mapping(ci_compose_document(changed_inputs)["services"])
+        baseline_postgres = mapping(baseline["postgres"])
+        changed_postgres = mapping(changed["postgres"])
+        self.assertEqual(
+            baseline_postgres["mem_limit"], CI_POSTGRES_MEMORY_GB * GIGABYTE
+        )
+        self.assertEqual(changed_postgres["mem_limit"], baseline_postgres["mem_limit"])
+        self.assertGreaterEqual(CI_POSTGRES_MEMORY_GB, 1)
+        self.assertIsInstance(CI_POSTGRES_MEMORY_GB, int)
+
+        frontend = mapping(changed["open-webui"])
+        self.assertEqual(
+            frontend["mem_limit"], memory_limit_bytes(changed_profile, "open-webui")
+        )
+        self.assertNotEqual(
+            frontend["mem_limit"], mapping(baseline["open-webui"])["mem_limit"]
+        )
+
     def test_has_the_four_isolated_services_and_expected_networks(self) -> None:
         render_inputs = inputs()
         document = ci_compose_document(render_inputs)

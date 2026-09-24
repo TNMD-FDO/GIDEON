@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from typing import Final
 
 from gideon.host.images import parse_registry, reference
+from gideon.host.models import GIGABYTE
 from gideon.host.render import RenderInputs
 from gideon.host.render.api import API_SECRET_NAME, API_SERVICE_NAME
 from gideon.host.render.compose import (
@@ -40,6 +41,16 @@ RELAY_SERVICE_NAME: Final[str] = "engine-relay"
 RELAY_SOURCE: Final[str] = "tools/cistack/relay.py"
 RELAY_CONTAINER_PATH: Final[str] = "/relay/relay.py"
 RELAY_MEMORY_LIMIT: Final[int] = 128 * 1024 * 1024
+# The sibling's Postgres ceiling in the memory table's unit, decimal gigabytes,
+# sized as the table's rows are: the smallest whole gigabyte at least four times
+# the service's working-set peak, floor 1. The peak is the maximum by Compose
+# project and service of container_memory_working_set_bytes over fourteen days,
+# read from the box's cAdvisor series through Prometheus on loopback port 9090:
+# 67 MiB on 2026-09-23, so 1. Re-take it the same way; a rise past the box
+# ledger's GIDEON line is a ledger change first. A constant, not a table row,
+# because the table is held to production's services in both directions and
+# the sibling runs on the build box alone.
+CI_POSTGRES_MEMORY_GB: Final[int] = 1
 # The sibling env file's reads on a GPU host with the directory off: what
 # ``tools.cistack`` loads from the sibling's secrets directory, no supplied one.
 CI_SECRET_NAMES: Final[tuple[str, ...]] = (
@@ -122,7 +133,7 @@ def ci_compose_document(inputs: RenderInputs) -> Mapping[str, object]:
             "secrets": ["postgres_superuser_password"],
             "healthcheck": dict(POSTGRES_HEALTHCHECK),
             "networks": [NETWORK_NAME],
-            "mem_limit": memory_limit_bytes(inputs.profile, "postgres"),
+            "mem_limit": CI_POSTGRES_MEMORY_GB * GIGABYTE,
         },
         "open-webui": {
             "image": reference(target, open_webui_pin),
