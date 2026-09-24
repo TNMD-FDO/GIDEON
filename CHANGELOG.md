@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.2.56](docs/release-notes/v0.2.56.md) — 2026-09-23 — the monthly feedback packet (improvement 06)
 - [v0.2.55](docs/release-notes/v0.2.55.md) — 2026-09-23 — the package cites no omitted file (slice-1 91)
 - [v0.2.54](docs/release-notes/v0.2.54.md) — 2026-09-23 — the sibling in the ledger's RAM line (slice-2 26)
 - [v0.2.53](docs/release-notes/v0.2.53.md) — 2026-09-23 — the general-smoke suite under eval run (slice-2 13)

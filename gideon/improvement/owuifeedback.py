@@ -48,6 +48,14 @@ def _text(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def decode_rating(value: object) -> Rating | None:
+    """Return the known direction for an integer rating, excluding booleans."""
+
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return RATING_VALUES.get(value)
+
+
 def _record(item: object) -> FeedbackRecord | None:
     if not isinstance(item, Mapping) or item.get("type") != RATING_TYPE:
         return None
@@ -57,7 +65,8 @@ def _record(item: object) -> FeedbackRecord | None:
         return None
     value = data.get("rating")
     created_at = item.get("created_at")
-    if isinstance(value, bool) or not isinstance(value, int) or value not in RATING_VALUES:
+    rating = decode_rating(value)
+    if rating is None:
         return None
     if isinstance(created_at, bool) or not isinstance(created_at, int):
         return None
@@ -66,7 +75,7 @@ def _record(item: object) -> FeedbackRecord | None:
     model_id = _text(data.get("model_id"))
     if chat_id is None or message_id is None or model_id is None:
         return None
-    return FeedbackRecord(RATING_VALUES[value], chat_id, message_id, model_id, created_at)
+    return FeedbackRecord(rating, chat_id, message_id, model_id, created_at)
 
 
 def decode_items(items: Sequence[object]) -> FeedbackReading:

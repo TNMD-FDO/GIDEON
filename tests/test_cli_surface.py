@@ -115,6 +115,14 @@ class Help(unittest.TestCase):
         ):
             self.assertIn(phrase, help_text)
 
+    def test_eval_candidates_help_names_root_and_default_month(self) -> None:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as ctx:
+            main(["eval", "candidates", "--help"])
+        self.assertEqual(ctx.exception.code, 0)
+        self.assertIn("root", out.getvalue())
+        self.assertIn("default: last month", collapsed(out.getvalue()))
+
 
 class Stubs(unittest.TestCase):
     def test_every_stub_names_its_landing_in_help_and_refusal(self) -> None:

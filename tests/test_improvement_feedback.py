@@ -159,6 +159,11 @@ class FeedbackBoundary(unittest.TestCase):
 
     def test_rating_mapping_and_page_shape(self) -> None:
         self.assertEqual(owuifeedback.RATING_VALUES, {1: "up", -1: "down"})
+        self.assertEqual(owuifeedback.decode_rating(1), "up")
+        self.assertEqual(owuifeedback.decode_rating(-1), "down")
+        for invalid in (True, False, 0, 2, "1", None):
+            with self.subTest(rating=invalid):
+                self.assertIsNone(owuifeedback.decode_rating(invalid))
         page = _page()
         reading = owuifeedback.decode_page(page)
         self.assertIsInstance(reading, FeedbackReading)

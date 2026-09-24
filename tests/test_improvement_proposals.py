@@ -529,6 +529,9 @@ triggers:
         new_modules = {
             IMPROVEMENT / "feedback.py",
             IMPROVEMENT / "owuifeedback.py",
+            IMPROVEMENT / "snapshot.py",
+            IMPROVEMENT / "owuisnapshot.py",
+            IMPROVEMENT / "packet.py",
             IMPROVEMENT / "ratings.py",
         }
         self.assertTrue(new_modules.issubset(set(IMPROVEMENT.rglob("*.py"))))

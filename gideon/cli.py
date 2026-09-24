@@ -39,7 +39,10 @@ class Situation:
 
 SITUATIONS: Final = (
     Situation("An alert email arrived, or something looks wrong", (("status", ""),)),
-    Situation("A decision is waiting on a person", (("proposals", ""),)),
+    Situation(
+        "A decision is waiting on a person",
+        (("proposals", ""), ("eval candidates", "--out <dir>")),
+    ),
     Situation(
         "The site file, a certificate, or the mail relay changed",
         (("apply", ""), ("tls reload", ""), ("alerts test", "")),
@@ -112,6 +115,12 @@ def _run_reference(args: argparse.Namespace) -> int:
     from gideon.evaluation import reference_command
 
     return host_cli._guarded("eval reference", reference_command.run_reference, args)
+
+
+def _run_candidates(args: argparse.Namespace) -> int:
+    from gideon.improvement import packet
+
+    return host_cli._guarded("eval candidates", packet.run_candidates, args)
 
 
 def _run_proposals(args: argparse.Namespace) -> int:
@@ -308,6 +317,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="recorded evaluation run id",
     )
     eval_reference.set_defaults(handler=_run_reference, command_path="eval reference")
+    eval_candidates = eval_sub.add_parser(
+        "candidates",
+        help="write the month's rated-down turns as a candidate packet for a person; root-only",
+        description="Write the candidate packet as root.",
+    )
+    eval_candidates.add_argument(
+        "--out",
+        required=True,
+        metavar="DIR",
+        help="an empty directory outside every backup-set root and checkout",
+    )
+    eval_candidates.add_argument(
+        "--month",
+        metavar="YYYY-MM",
+        help="the calendar month in office time (default: last month)",
+    )
+    eval_candidates.set_defaults(
+        handler=_run_candidates,
+        command_path="eval candidates",
+    )
 
     proposals = commands.add_parser(
         "proposals",
