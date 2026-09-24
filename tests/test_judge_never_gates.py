@@ -1,21 +1,24 @@
 """Independent invariants that keep judge scores out of the evaluation gate."""
 
 import ast
-import subprocess
 import unittest
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
 from typing import cast
 
-from test_judge import engine_output, valid_content
+from test_guardrails_slice import _DECLINE, SAMPLE_IDS, JudgingDoorHost, _fixture_turns
+from test_judge import false_refusal_content, valid_content
 
-from gideon.evaluation import command
+from gideon import guardrail
+from gideon.evaluation import command, judge
 from gideon.evaluation.evalset import SET_ROOT, LoadedSet, load_set
 from gideon.evaluation.results import RunContext, SliceResult
 from gideon.evaluation.slices import SLICE_RUNNERS
+from gideon.evaluation.turns import classify
 from gideon.host import courts
-from gideon.host.sysio import Command, Host, PathLike
+from gideon.host.sysio import Host, PathLike
 from tools.exportboundary import absent_from_export
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -50,25 +53,50 @@ FORBIDDEN_METRIC_NAMES: frozenset[str] = frozenset(
 
 
 
-class StubHost:
-    """Host seam returning one valid, canned judge reply."""
-
-    def __init__(self, output: str) -> None:
-        self.output = output
-
-    def run(
-        self,
-        argv: Command,
-        *,
-        check: bool = False,
-        input: str | None = None,
-        cwd: PathLike | None = None,
-        env: Mapping[str, str] | None = None,
-        timeout: float | None = None,
-        passthrough: bool = False,
-    ) -> subprocess.CompletedProcess[str]:
-        del check, input, cwd, env, timeout, passthrough
-        return subprocess.CompletedProcess(list(argv), 0, self.output, "")
+VERDICT_PAIRS: Mapping[str, tuple[tuple[str, int, int, float], tuple[str, int, int, float]]] = {
+    "synthesis_verdict": (
+        (
+            valid_content(
+                score=3,
+                reason="A visibly fictitious complete ruling.",
+                modes=(),
+            ),
+            17,
+            9,
+            2.5,
+        ),
+        (
+            valid_content(
+                score=0,
+                reason="A visibly fictitious contradictory ruling.",
+                modes=("contradicts-reference",),
+            ),
+            17,
+            9,
+            2.5,
+        ),
+    ),
+    "false_refusal_verdict": (
+        (
+            false_refusal_content(
+                withheld=True,
+                reason="A visibly fictitious withheld reading.",
+            ),
+            19,
+            11,
+            3.5,
+        ),
+        (
+            false_refusal_content(
+                withheld=False,
+                reason="A visibly fictitious answered reading.",
+            ),
+            37,
+            29,
+            6.5,
+        ),
+    ),
+}
 
 
 def _loaded() -> LoadedSet:
@@ -80,10 +108,9 @@ def _loaded() -> LoadedSet:
 
 
 def _run_registered(
-    *, score: int, reason: str, failure_modes: tuple[str, ...]
+    *, variation: int
 ) -> tuple[LoadedSet, Mapping[str, SliceResult]]:
     loaded = _loaded()
-    output = engine_output(valid_content(score=score, reason=reason, modes=failure_modes))
     results: dict[str, SliceResult] = {}
     for slice_name, spec in SLICE_RUNNERS.items():
         if slice_name not in loaded.slices:
@@ -95,14 +122,50 @@ def _run_registered(
                 "for it, and the export boundary does not omit its directory"
             )
             continue
+        prompt = (
+            None
+            if spec.judge_prompt is None
+            else judge.PROMPT_REGISTRY[spec.judge_prompt]
+        )
+        schema_name = "synthesis_verdict" if prompt is None else prompt.schema_name
+        pair = VERDICT_PAIRS[schema_name]
+        default_reading = pair[variation]
+        host = JudgingDoorHost(default=default_reading)
+        turns = None
+        rendered_dir: PathLike = "/rendered"
+        served_model = "fixture-model" if spec.reaches_engine else None
+        if spec.drives_turns and spec.judge_prompt is not None:
+            assert classify.DECLINE_FORM.match(_DECLINE)
+            assert len(_DECLINE) <= classify.DECLINE_MAX_CHARS
+            active = set(loaded.active_ids)
+            selected_ids = tuple(
+                case_id
+                for case_id in loaded.slices[slice_name]
+                if case_id in active
+            )
+            _host, _frontend, turn_context = _fixture_turns(
+                replace(loaded, active_ids=selected_ids), host=host
+            )
+            rendered_dir = turn_context.rendered_dir
+            served_model = turn_context.served_model_name
+            for case_id in loaded.slices[slice_name]:
+                if case_id not in active:
+                    continue
+                case = loaded.cases_by_id[case_id]
+                role = cast(list[str], case["labels"])[1]
+                host.answers[case_id] = (
+                    guardrail.DEADLINE_REFUSAL if role == "positive" else _DECLINE
+                )
+            turns = turn_context.turns
         progress: list[str] = []
         context = RunContext(
-            cast(Host, StubHost(output)),
-            "/rendered",
-            "fixture-model" if spec.reaches_engine else None,
+            cast(Host, host),
+            rendered_dir,
+            served_model,
             spec.judge_prompt,
             spec.repeats,
             progress.append,
+            turns=turns,
         )
         results[slice_name] = spec.runner(loaded, slice_name, context)
     return loaded, results
@@ -128,15 +191,15 @@ class Invariance(unittest.TestCase):
 
     def test_every_registered_slice_is_driven_and_never_gates_on_verdict_fields(self) -> None:
         first_loaded, first = _run_registered(
-            score=3,
-            reason="The first canned ruling is complete.",
-            failure_modes=(),
+            variation=0,
         )
         second_loaded, second = _run_registered(
-            score=0,
-            reason="The second canned ruling contradicts the reference.",
-            failure_modes=("contradicts-reference",),
+            variation=1,
         )
+        # A prompt registered later must bring its canned pair, or the
+        # invariance would be proven over no judge fields of its schema.
+        registered_schemas = {prompt.schema_name for prompt in judge.PROMPT_REGISTRY.values()}
+        self.assertEqual(registered_schemas, set(VERDICT_PAIRS))
         self.assertEqual(first_loaded.slices, second_loaded.slices)
         self.assertEqual(set(first), set(second))
         for slice_name in first:
@@ -162,6 +225,43 @@ class Invariance(unittest.TestCase):
                 self.assertEqual(
                     len(first_result.results), len(expected_ids) * spec.repeats
                 )
+                if spec.drives_turns and spec.judge_prompt is not None:
+                    controls = tuple(
+                        result
+                        for result in first_result.results
+                        if result.metrics["role"] == "control"
+                    )
+                    self.assertTrue(controls)
+                    self.assertTrue(
+                        all(
+                            result.metrics["class"] == "declined"
+                            and result.judge is not None
+                            for result in controls
+                        )
+                    )
+                    self.assertTrue(
+                        all(
+                            result.judge is None
+                            for result in first_result.results
+                            if result.metrics["role"] == "positive"
+                        )
+                    )
+                    self.assertTrue(
+                        all(
+                            result.metrics["class"] == "replaced"
+                            for result in first_result.results
+                            if result.metrics["role"] == "positive"
+                        )
+                    )
+                    frontend_rows = tuple(
+                        result
+                        for result in first_result.results
+                        if result.case_id in SAMPLE_IDS
+                    )
+                    self.assertEqual(len(frontend_rows), len(SAMPLE_IDS))
+                    self.assertTrue(
+                        all("frontend" in result.metrics for result in frontend_rows)
+                    )
 
         # The invariance above is only meaningful if the two runs really did
         # differ, so every judging slice in the registry — not one named here —
@@ -173,22 +273,17 @@ class Invariance(unittest.TestCase):
         self.assertTrue(judging, "no judging slice is registered")
         for slice_name in judging:
             with self.subTest(slice_name=slice_name):
-                first_judge = first[slice_name].results[0].judge
-                second_judge = second[slice_name].results[0].judge
+                first_judge = next(
+                    (result.judge for result in first[slice_name].results if result.judge is not None),
+                    None,
+                )
+                second_judge = next(
+                    (result.judge for result in second[slice_name].results if result.judge is not None),
+                    None,
+                )
                 assert first_judge is not None
                 assert second_judge is not None
-                self.assertNotEqual(
-                    (
-                        first_judge["score"],
-                        first_judge["reason"],
-                        first_judge["failure_modes"],
-                    ),
-                    (
-                        second_judge["score"],
-                        second_judge["reason"],
-                        second_judge["failure_modes"],
-                    ),
-                )
+                self.assertNotEqual(first_judge, second_judge)
 
 
 class MetricNames(unittest.TestCase):
@@ -196,9 +291,7 @@ class MetricNames(unittest.TestCase):
 
     def test_every_nested_metric_mapping_and_list_is_content_free(self) -> None:
         _loaded_set, results = _run_registered(
-            score=3,
-            reason="The canned ruling is complete.",
-            failure_modes=(),
+            variation=0,
         )
         for slice_name, slice_result in results.items():
             for result in slice_result.results:

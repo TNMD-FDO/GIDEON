@@ -108,7 +108,11 @@ class TurnOutcome:
 
 @dataclass(frozen=True, slots=True)
 class TurnRow:
-    """One completed case turn and the bookkeeping facts it contributes."""
+    """One turn's bookkeeping, with optional stored text for in-memory callers.
+
+    ``answer`` holds the service's stored assistant text only when the turn was
+    classified, and is omitted from this row's representation.
+    """
 
     result: StageResult
     record: dict[str, object] | None
@@ -127,6 +131,7 @@ class TurnRow:
     pattern_id: str | None = None
     stream_pattern_id: str | None = None
     stream_offset: int | None = None
+    answer: str | None = field(default=None, repr=False)
 
 
 class TurnDriver(Protocol):
@@ -1497,6 +1502,7 @@ def service_turn(
             if stream_verdict is not None and not stream_verdict.clean
             else None
         ),
+        answer=answer if verdict is not None else None,
     )
 
 

@@ -636,7 +636,7 @@ class ServiceDoor(unittest.TestCase):
                     assistant=None,
                     user=None,
                     elapsed=0.25,
-                    problem=None,
+                    problem=self.reply.problem,
                     extras=self.reply,
                     started=10.0,
                 )
@@ -691,7 +691,10 @@ class ServiceDoor(unittest.TestCase):
                 self.assertFalse(expected_stream.clean)
                 self.assertEqual(row.stream_pattern_id, expected_stream.pattern_id)
                 self.assertEqual(row.stream_offset, expected_stream.offset)
+                self.assertEqual(row.answer, answer)
                 self.assertEqual(row.record is not None, output_enabled)
+                if not output_enabled:
+                    self.assertNotIn(answer, repr(row))
                 facts = (
                     row.elapsed,
                     row.checks,
@@ -701,6 +704,38 @@ class ServiceDoor(unittest.TestCase):
                 )
                 self.assertNotIn(prompt, repr(facts))
                 self.assertNotIn(answer, repr(facts))
+
+        failed_reply = door.DoorReply(
+            status=None,
+            media_type="application/json",
+            body_text="",
+            events=(),
+            done=False,
+            elapsed=None,
+            problem=Problem("fixture turn failed", "Repair the fixture, then retry."),
+        )
+        failed_spec = run_module.RunSpec(
+            cases=Path("/fixture/cases.yaml"),
+            repeat=1,
+            stream=True,
+            out=None,
+            force=False,
+            dry_run=False,
+            sentinel="turn-access-test",
+            service=True,
+        )
+        failed_row = run_module.service_turn(
+            failed_spec,
+            driver=FixedDoorDriver(failed_reply),
+            guardrail=guardrail,
+            case=case,
+            session_number=1,
+            row_name=case.id,
+            now=lambda: FIXED_NOW,
+            monotonic=lambda: 10.0,
+        )
+        self.assertIsNone(failed_row.verdict_kind)
+        self.assertIsNone(failed_row.answer)
 
     def test_ci_door_uses_ci_render_and_secret_contract(self) -> None:
         original_directory = secrets.current_directory()

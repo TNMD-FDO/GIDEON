@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
+import subprocess
 import tempfile
 import unittest
 from collections.abc import Callable, Mapping
@@ -13,6 +15,7 @@ from typing import Any, cast
 from unittest.mock import patch
 
 from test_evaluation_run import NOW, ROOT, EvalHost, _invoke, _run_kwargs
+from test_judge import engine_output, false_refusal_content
 from test_turns import PASSWORD, Frontend
 from test_turns_door import RENDERED_COMPOSE, _served_name
 from test_turns_door import FakeHost as DoorHost
@@ -21,13 +24,128 @@ from gideon import guardrail
 from gideon.evaluation import command, guardrails_slice
 from gideon.evaluation.evalset import SET_ROOT, LoadedSet, load_set
 from gideon.evaluation.results import CaseResult, JSONValue, RunContext, SliceResult
-from gideon.evaluation.turns import run
+from gideon.evaluation.turns import classify, run
 from gideon.evaluation.turns.access import TurnAccess
 from gideon.host.report import Problem
-from gideon.host.sysio import Host
+from gideon.host.sysio import Command, Host, PathLike
 
 SAMPLE_IDS = guardrails_slice.FRONTEND_SAMPLE
 SENTINEL = "1234abcd"
+_DECLINE = "I can't compute that for you."
+
+
+class JudgingDoorHost(DoorHost):
+    """Serve direct judge requests and delegate all door requests to its fake."""
+
+    def __init__(
+        self,
+        readings: Mapping[str, tuple[str, int, int, float]] | None = None,
+        *,
+        default: tuple[str, int, int, float] | None = None,
+    ) -> None:
+        super().__init__()
+        self.readings = dict(readings or {})
+        self.default = default or (
+            false_refusal_content(withheld=False, reason="A visibly fictitious reading."),
+            17,
+            9,
+            2.5,
+        )
+        self.judge_requests: list[tuple[str, dict[str, object]]] = []
+        self.request_order: list[str] = []
+
+    def run(
+        self,
+        argv: Command,
+        *,
+        check: bool = False,
+        input: str | None = None,
+        cwd: PathLike | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        passthrough: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
+        if input is not None:
+            request = json.loads(input)
+            if isinstance(request, dict) and "response_format" in request and "body" not in request:
+                messages = request.get("messages")
+                assert isinstance(messages, list) and messages
+                content = messages[-1]["content"]
+                assert isinstance(content, str)
+                candidate = content.split("<candidate-answer>\n", 1)[1].split(
+                    "\n</candidate-answer>", 1
+                )[0]
+                self.judge_requests.append((candidate, request))
+                self.request_order.append("judge")
+                reply, prompt_tokens, completion_tokens, elapsed = self.readings.get(
+                    candidate, self.default
+                )
+                command = tuple(str(value) for value in argv)
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    engine_output(
+                        reply,
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        elapsed=elapsed,
+                    ),
+                    "",
+                )
+            self.request_order.append("door")
+        return super().run(
+            argv,
+            check=check,
+            input=input,
+            cwd=cwd,
+            env=env,
+            timeout=timeout,
+            passthrough=passthrough,
+        )
+
+
+def _decline_answers(loaded: LoadedSet) -> tuple[dict[str, str], str, str, str]:
+    controls = [
+        case_id
+        for case_id in loaded.active_ids
+        if case_id not in SAMPLE_IDS
+        and cast(list[str], loaded.cases_by_id[case_id]["labels"])[1] == "control"
+    ]
+    positives = [
+        case_id
+        for case_id in loaded.active_ids
+        if cast(list[str], loaded.cases_by_id[case_id]["labels"])[1] == "positive"
+    ]
+    assert len(controls) >= 2 and positives
+    assert classify.DECLINE_FORM.match(_DECLINE)
+    declined = _DECLINE + "x" * (classify.DECLINE_MAX_CHARS - len(_DECLINE))
+    disclaimed = _DECLINE + "x" * (classify.DECLINE_MAX_CHARS + 1 - len(_DECLINE))
+    positive_decline = _DECLINE
+    assert len(declined) == classify.DECLINE_MAX_CHARS
+    assert len(disclaimed) == classify.DECLINE_MAX_CHARS + 1
+    return (
+        {controls[0]: declined, controls[1]: disclaimed, positives[0]: positive_decline},
+        controls[0],
+        controls[1],
+        positives[0],
+    )
+
+
+def _run_with_readings(
+    loaded: LoadedSet,
+    answers: Mapping[str, str],
+    readings: Mapping[str, tuple[str, int, int, float]] | None = None,
+    *,
+    default: tuple[str, int, int, float] | None = None,
+) -> tuple[SliceResult, list[str], JudgingDoorHost]:
+    host = JudgingDoorHost(readings, default=default)
+    _host, _frontend, context = _fixture_turns(loaded, host=host)
+    host.answers.update(answers)
+    progress: list[str] = []
+    result = guardrails_slice.run_guardrails(
+        loaded, "guardrails", replace(context, progress=progress.append)
+    )
+    return result, progress, host
 
 
 def _small_set(root: Path) -> LoadedSet:
@@ -94,7 +212,7 @@ def _fixture_turns(
         cast(Host, selected_host),
         RENDERED_COMPOSE.parent,
         _served_name(),
-        None,
+        "false-refusal@1",
         1,
         lambda _line: None,
         turns=access,
@@ -169,6 +287,148 @@ class FamilyGate(unittest.TestCase):
 
 class GuardrailsRunner(unittest.TestCase):
     """The service and frontend turns expose only classified, content-free rows."""
+
+    def test_reads_only_control_declines_after_all_turns_and_reports_both_figures(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            loaded = _small_set(Path(directory) / "eval-v1")
+            answers, declined_id, disclaimed_id, positive_id = _decline_answers(loaded)
+            declined_answer = answers[declined_id]
+            disclaimed_answer = answers[disclaimed_id]
+            readings = {
+                declined_answer: (
+                    false_refusal_content(withheld=True, reason="A fictitious refusal."),
+                    21,
+                    11,
+                    3.25,
+                ),
+                disclaimed_answer: (
+                    false_refusal_content(withheld=True, reason="A fictitious mismatch."),
+                    22,
+                    12,
+                    4.25,
+                ),
+            }
+            result, progress, host = _run_with_readings(loaded, answers, readings)
+
+        self.assertTrue(result.verdict, result.report)
+        self.assertEqual([candidate for candidate, _request in host.judge_requests], [declined_answer, disclaimed_answer])
+        self.assertTrue(all("response_format" in request and "body" not in request for _, request in host.judge_requests))
+        for candidate, request in host.judge_requests:
+            case_id = next(case_id for case_id, answer in answers.items() if answer == candidate)
+            messages = cast(list[dict[str, object]], request["messages"])
+            user_content = cast(str, messages[-1]["content"])
+            question = user_content.split("<question>\n", 1)[1].split("\n</question>", 1)[0]
+            self.assertEqual(question, loaded.cases_by_id[case_id]["question"])
+        self.assertEqual(host.request_order[-2:], ["judge", "judge"])
+        self.assertEqual(host.request_order[:-2], ["door"] * (len(host.request_order) - 2))
+        rows = {row.case_id: row for row in result.results}
+        for case_id, expected_agrees in ((declined_id, True), (disclaimed_id, False)):
+            with self.subTest(case_id=case_id):
+                row = rows[case_id]
+                assert row.judge is not None
+                self.assertEqual(
+                    set(row.judge),
+                    {"prompt", "withheld", "reason", "agrees", "prompt_tokens", "completion_tokens", "seconds"},
+                )
+                self.assertIs(row.judge["agrees"], expected_agrees)
+        self.assertEqual(rows[positive_id].metrics["class"], "declined")
+        self.assertIsNone(rows[positive_id].judge)
+        for row in result.results:
+            if row.case_id not in {declined_id, disclaimed_id}:
+                self.assertIsNone(row.judge)
+        reading_lines = progress[-2:]
+        self.assertEqual(len(reading_lines), 2)
+        self.assertIn(f"guardrails judge {declined_id}: withheld; class declined; agrees true", reading_lines[0])
+        self.assertIn(f"guardrails judge {disclaimed_id}: withheld; class disclaimed; agrees false", reading_lines[1])
+        for line, reason, prompt_tokens, completion_tokens, seconds in (
+            (reading_lines[0], "A fictitious refusal.", 21, 11, "3.25"),
+            (reading_lines[1], "A fictitious mismatch.", 22, 12, "4.25"),
+        ):
+            self.assertIn(f"reason_length {len(reason)}", line)
+            self.assertIn(
+                f"reason_sha256 {hashlib.sha256(reason.encode('utf-8')).hexdigest()[:12]}",
+                line,
+            )
+            self.assertIn(f"prompt_tokens {prompt_tokens}", line)
+            self.assertIn(f"completion_tokens {completion_tokens}", line)
+            self.assertIn(f"seconds {seconds}", line)
+        self.assertIn(
+            "judge withheld 1 of 1 controls read; declined 1, disclaimed 0; "
+            "differing: none; unread: none",
+            result.report,
+        )
+        self.assertIn(
+            f"judge withheld 1 of 1 controls read; declined 0, disclaimed 1; "
+            f"differing: {disclaimed_id}; unread: none",
+            result.report,
+        )
+        self.assertTrue(result.report.rstrip().endswith("false refusal 1, judge withheld 2, differing 1"))
+
+        observed = repr(result.results) + "\n" + "\n".join(progress) + "\n" + result.report
+        for _case_id, case in loaded.cases_by_id.items():
+            self.assertNotIn(cast(str, case["question"]), observed)
+        for answer in host.answers.values():
+            self.assertNotIn(answer, observed)
+        self.assertNotIn(SENTINEL, observed)
+
+    def test_failed_read_is_unread_and_does_not_change_family_verdict(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            loaded = _small_set(Path(directory) / "eval-v1")
+            answers, declined_id, _disclaimed_id, _positive_id = _decline_answers(loaded)
+            good, _good_progress, _good_host = _run_with_readings(loaded, answers)
+            declined_answer = answers[declined_id]
+            invalid = json.dumps(
+                {"withheld": True, "reason": "A fictitious reading.", "score": 3}
+            )
+            failed, _failed_progress, _failed_host = _run_with_readings(
+                loaded,
+                answers,
+                {declined_answer: (invalid, 20, 10, 3.0)},
+            )
+
+        self.assertEqual(failed.verdict, good.verdict)
+        self.assertEqual(failed.verdict, True)
+        row = next(row for row in failed.results if row.case_id == declined_id)
+        assert row.judge is not None
+        self.assertEqual(row.judge["failed"], "schema-violation")
+        self.assertNotIn("withheld", row.judge)
+        self.assertIn(f"unread: {declined_id} schema-violation", failed.report)
+        family = declined_id.split("/", 1)[0]
+        self.assertIn(f"{family}: pass", good.report)
+        self.assertIn(f"{family}: pass", failed.report)
+
+    def test_reading_changes_do_not_change_slice_verdict_case_verdicts_or_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            loaded = _small_set(Path(directory) / "eval-v1")
+            answers, declined_id, disclaimed_id, _positive_id = _decline_answers(loaded)
+            candidates = (answers[declined_id], answers[disclaimed_id])
+            first_readings = {
+                candidate: (
+                    false_refusal_content(withheld=True, reason="A fictitious first reason."),
+                    31,
+                    13,
+                    5.0,
+                )
+                for candidate in candidates
+            }
+            second_readings = {
+                candidate: (
+                    false_refusal_content(withheld=False, reason="A different fictitious reason."),
+                    47,
+                    29,
+                    8.5,
+                )
+                for candidate in candidates
+            }
+            first, _first_progress, _first_host = _run_with_readings(loaded, answers, first_readings)
+            second, _second_progress, _second_host = _run_with_readings(loaded, answers, second_readings)
+
+        self.assertNotEqual(first_readings, second_readings)
+        self.assertEqual(first.verdict, second.verdict)
+        self.assertEqual(
+            [(row.case_id, row.verdict, row.metrics) for row in first.results],
+            [(row.case_id, row.verdict, row.metrics) for row in second.results],
+        )
 
     def test_fake_host_runner_records_classes_progress_and_no_sentinel_stream(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -337,7 +597,7 @@ class GuardrailsRunner(unittest.TestCase):
     def test_turns_unavailable_is_deterministic_and_makes_no_host_call(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             loaded = _small_set(Path(directory) / "eval-v1")
-            host = DoorHost()
+            host = JudgingDoorHost()
             context = RunContext(
                 cast(Host, host),
                 RENDERED_COMPOSE.parent,
@@ -352,6 +612,8 @@ class GuardrailsRunner(unittest.TestCase):
         self.assertEqual(len(first.results), 9)
         self.assertTrue(all(row.metrics["problem"] == "turns-unavailable" for row in first.results))
         self.assertEqual(host.requests, [])
+        self.assertEqual(host.judge_requests, [])
+        self.assertTrue(all(row.judge is None for row in first.results))
 
     def test_missing_turn_elapsed_keeps_latency_none(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -482,6 +744,10 @@ class GuardrailsCommand(unittest.TestCase):
         self.assertEqual(contexts[0].turns.password, "fixture password")
         self.assertEqual(contexts[0].turns.sentinel, SENTINEL)
         self.assertIn("instruction rendered, eval password read, door probed", stdout)
+        preconditions = next(
+            line for line in stdout.splitlines() if line.startswith("preconditions:")
+        )
+        self.assertIn("prompt false-refusal@1", preconditions)
         self.assertIn("record: ok — skipped", stdout)
         self.assertTrue(any(line.startswith("reference: ") for line in stdout.splitlines()))
         self.assertFalse(any(argv[0] == "docker" for argv, _input in host.calls))

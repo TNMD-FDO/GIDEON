@@ -2,9 +2,11 @@
 
 import ast
 import json
+import string
 import subprocess
 import unittest
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -20,6 +22,16 @@ from gideon.host.sysio import Command, PathLike
 
 RENDERED = "/rendered"
 PROMPT = judge.PROMPT_REGISTRY["synthesis@1"]
+FALSE_REFUSAL_PROMPT = judge.PROMPT_REGISTRY["false-refusal@1"]
+SLOTS = {
+    "question": "What is the answer?",
+    "reference": "The reference answer.",
+    "candidate": "The candidate answer.",
+}
+FALSE_REFUSAL_SLOTS = {
+    "question": "What rule controls the calculation?",
+    "candidate": "I cannot state the rule.",
+}
 
 
 def engine_output(
@@ -95,15 +107,26 @@ def valid_content(
     )
 
 
-def run_grade(host: StubHost) -> judge.Grading:
+def false_refusal_content(
+    *, withheld: bool, reason: str = "The answer does not state the rule."
+) -> str:
+    """One on-schema false-refusal verdict document."""
+
+    return json.dumps({"withheld": withheld, "reason": reason})
+
+
+def run_grade(
+    host: StubHost,
+    *,
+    prompt: judge.JudgePrompt = PROMPT,
+    slots: Mapping[str, str] = SLOTS,
+) -> judge.Grading:
     return judge.grade(
         cast(Any, host),
         RENDERED,
         served_model_name="fixture-model",
-        prompt=PROMPT,
-        question="What is the answer?",
-        reference="The reference answer.",
-        candidate="The candidate answer.",
+        prompt=prompt,
+        slots=slots,
     )
 
 
@@ -127,9 +150,73 @@ class Request(unittest.TestCase):
         messages = body["messages"]
         self.assertEqual(messages[0], {"role": "system", "content": PROMPT.system})
         user = messages[1]["content"]
-        self.assertIn("<question>\nWhat is the answer?", user)
-        self.assertIn("<reference-answer>\nThe reference answer.", user)
-        self.assertIn("<candidate-answer>\nThe candidate answer.", user)
+        self.assertIn(f"<question>\n{SLOTS['question']}", user)
+        self.assertIn(f"<reference-answer>\n{SLOTS['reference']}", user)
+        self.assertIn(f"<candidate-answer>\n{SLOTS['candidate']}", user)
+
+    def test_grade_refuses_missing_or_extra_slots_before_engine_call(self) -> None:
+        for slots in (
+            {"question": "question", "reference": "reference"},
+            {**SLOTS, "other": "extra"},
+        ):
+            with self.subTest(slots=tuple(slots)):
+                host = StubHost(engine_output(valid_content()))
+                with self.assertRaises(ValueError):
+                    judge.grade(
+                        cast(Any, host),
+                        RENDERED,
+                        served_model_name="fixture-model",
+                        prompt=PROMPT,
+                        slots=slots,
+                    )
+                self.assertIsNone(host.input)
+
+    def test_false_refusal_request_uses_its_two_slots_and_schema(self) -> None:
+        host = StubHost(engine_output(false_refusal_content(withheld=True)))
+        grading = run_grade(
+            host, prompt=FALSE_REFUSAL_PROMPT, slots=FALSE_REFUSAL_SLOTS
+        )
+        self.assertIsNotNone(grading.verdict)
+        assert host.input is not None
+        body = json.loads(host.input)
+        self.assertEqual(body["temperature"], 0)
+        self.assertEqual(body["chat_template_kwargs"], {"enable_thinking": True})
+        self.assertEqual(
+            body["response_format"]["json_schema"]["name"],
+            FALSE_REFUSAL_PROMPT.schema_name,
+        )
+        self.assertEqual(
+            body["response_format"]["json_schema"]["name"],
+            "false_refusal_verdict",
+        )
+        self.assertEqual(
+            body["response_format"]["json_schema"]["schema"],
+            FALSE_REFUSAL_PROMPT.schema,
+        )
+        messages = body["messages"]
+        self.assertEqual(messages[0]["content"], FALSE_REFUSAL_PROMPT.system)
+        user = messages[1]["content"]
+        self.assertIn(
+            f"<question>\n{FALSE_REFUSAL_SLOTS['question']}\n</question>", user
+        )
+        self.assertIn(
+            f"<candidate-answer>\n{FALSE_REFUSAL_SLOTS['candidate']}\n</candidate-answer>",
+            user,
+        )
+        expected_argv = tuple(
+            stack.exec_argv(
+                RENDERED,
+                ENGINE_SERVICE_NAME,
+                "sh",
+                "-c",
+                engine.ENGINE_CURL_SCRIPT,
+                "gideon-engine-verify",
+                f"/run/secrets/{ENGINE_SECRET_NAME}",
+                f"http://{ENGINE_SERVICE_NAME}:{ENGINE_PORT}/v1/chat/completions",
+                str(judge.JUDGE_TIMEOUT_SECONDS),
+            )
+        )
+        self.assertEqual(host.argv, expected_argv)
 
     def test_exec_argv_names_the_secret_path_and_nothing_more(self) -> None:
         host = StubHost(engine_output(valid_content()))
@@ -210,9 +297,7 @@ class Failures(unittest.TestCase):
                     RENDERED,
                     served_model_name="fixture-model",
                     prompt=PROMPT,
-                    question="question",
-                    reference="reference",
-                    candidate=candidate,
+                    slots={**SLOTS, "candidate": candidate},
                 )
                 self.assertIsNone(grading.verdict)
                 self.assertIsNotNone(grading.failure)
@@ -230,6 +315,21 @@ class Failures(unittest.TestCase):
         self.assertIn("/failure_modes/0", grading.failure.detail)
         self.assertNotIn("not-a-mode", grading.failure.detail)
 
+    def test_false_refusal_off_schema_is_a_failed_reading_with_no_withheld(self) -> None:
+        for name, document in (
+            ("score", {"withheld": True, "reason": "A visibly fictitious refusal.", "score": 3}),
+            ("string", {"withheld": "true", "reason": "A visibly fictitious refusal."}),
+        ):
+            with self.subTest(name):
+                grading = run_grade(
+                    StubHost(engine_output(json.dumps(document))),
+                    prompt=FALSE_REFUSAL_PROMPT,
+                    slots=FALSE_REFUSAL_SLOTS,
+                )
+                assert grading.failure is not None
+                self.assertEqual(grading.failure.code, "schema-violation")
+                self.assertNotIn("withheld", judge.render_judge(grading))
+
 
 class Normalisation(unittest.TestCase):
     """Verdict text and modes are normalised only after schema validation."""
@@ -243,13 +343,54 @@ class Normalisation(unittest.TestCase):
         self.assertEqual(
             grading.verdict,
             judge.Verdict(
-                3,
-                "first second third",
-                ("off-question", "unsupported-claim"),
+                {
+                    "score": 3,
+                    "reason": "first second third",
+                    "failure_modes": ["off-question", "unsupported-claim"],
+                }
             ),
         )
         field = judge.render_judge(grading, band=(2, 3))
         self.assertEqual(field["in_band"], True)
+        self.assertEqual(
+            set(field), {"prompt", "score", "reason", "failure_modes", "band", "in_band"}
+        )
+
+    def test_false_refusal_readings_keep_the_document_and_rendered_keys(self) -> None:
+        for withheld, candidate in (
+            (True, "I cannot state the governing rule."),
+            (
+                False,
+                "I cannot calculate your exact credit. The rule is that qualifying custody is credited.",
+            ),
+        ):
+            with self.subTest(withheld=withheld):
+                slots = {**FALSE_REFUSAL_SLOTS, "candidate": candidate}
+                grading = run_grade(
+                    StubHost(
+                        engine_output(
+                            false_refusal_content(
+                                withheld=withheld,
+                                reason="A visibly fictitious reading.",
+                            )
+                        )
+                    ),
+                    prompt=FALSE_REFUSAL_PROMPT,
+                    slots=slots,
+                )
+                assert grading.verdict is not None
+                self.assertEqual(
+                    grading.verdict.document,
+                    {
+                        "withheld": withheld,
+                        "reason": "A visibly fictitious reading.",
+                    },
+                )
+                field = judge.render_judge(grading)
+                self.assertEqual(
+                    set(field), {"prompt", "withheld", "reason"}
+                )
+                self.assertIs(field["withheld"], withheld)
 
     def test_in_band_reads_the_whole_inclusive_range(self) -> None:
         """A band is a low and a high, so its interior counts as inside."""
@@ -263,7 +404,10 @@ class Normalisation(unittest.TestCase):
         ):
             with self.subTest(score=score, band=band):
                 grading = judge.Grading(
-                    PROMPT.id, verdict=judge.Verdict(score, "a reason", ())
+                    PROMPT.id,
+                    verdict=judge.Verdict(
+                        {"score": score, "reason": "a reason", "failure_modes": []}
+                    ),
                 )
                 field = judge.render_judge(grading, band=band)
                 self.assertEqual(field["band"], [band[0], band[1]])
@@ -305,9 +449,20 @@ class Normalisation(unittest.TestCase):
 
     def test_grading_repr_redacts_the_reason(self) -> None:
         reason = "private model explanation"
-        grading = run_grade(StubHost(engine_output(valid_content(reason=reason))))
+        grading = run_grade(
+            StubHost(
+                engine_output(
+                    valid_content(reason=reason, modes=("off-question",))
+                )
+            )
+        )
         self.assertNotIn(reason, repr(grading))
         self.assertIn("<redacted>", repr(grading))
+        assert grading.verdict is not None
+        verdict_repr = repr(grading.verdict)
+        self.assertIn("'score': 3", verdict_repr)
+        self.assertNotIn("off-question", verdict_repr)
+        self.assertEqual(grading.verdict.reason, grading.verdict.document["reason"])
 
 
 class Registry(unittest.TestCase):
@@ -323,7 +478,33 @@ class Registry(unittest.TestCase):
                 self.assertEqual(separator, "@")
                 self.assertTrue(version.isdigit())
                 self.assertGreater(int(version), 0)
-                self.assertEqual(judge.PROMPT_DIGESTS[prompt_id], judge.prompt_digest(judge.PROMPT_REGISTRY[prompt_id]))
+                prompt = judge.PROMPT_REGISTRY[prompt_id]
+                self.assertEqual(
+                    judge.PROMPT_DIGESTS[prompt_id], judge.prompt_digest(prompt)
+                )
+                fields = tuple(
+                    field_name
+                    for _literal, field_name, _format_spec, _conversion in
+                    string.Formatter().parse(prompt.user_template)
+                    if field_name is not None
+                )
+                self.assertEqual(fields, prompt.slots)
+                properties = prompt.schema["properties"]
+                assert isinstance(properties, Mapping)
+                required = prompt.schema["required"]
+                assert isinstance(required, list)
+                self.assertIn("reason", required)
+                reason_schema = properties["reason"]
+                assert isinstance(reason_schema, Mapping)
+                self.assertEqual(reason_schema["minLength"], 1)
+                self.assertEqual(
+                    reason_schema["maxLength"], judge.REASON_MAX_LENGTH
+                )
+                edited_prompt = replace(prompt, system=prompt.system + " edited")
+                self.assertNotEqual(
+                    judge.prompt_digest(edited_prompt),
+                    judge.PROMPT_DIGESTS[prompt_id],
+                )
 
 
 if __name__ == "__main__":

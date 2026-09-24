@@ -39,8 +39,12 @@ def _progress_line(case_id: str, repeat: int, grading: judge.Grading) -> str:
         reason_length = "unknown"
         reason_digest = "unknown"
     else:
-        outcome = str(grading.verdict.score)
-        mode_count = str(len(grading.verdict.failure_modes))
+        score = grading.verdict.document["score"]
+        modes = grading.verdict.document["failure_modes"]
+        assert type(score) is int
+        assert isinstance(modes, list)
+        outcome = str(score)
+        mode_count = str(len(modes))
         reason = grading.verdict.reason.encode("utf-8")
         reason_length = str(len(grading.verdict.reason))
         reason_digest = hashlib.sha256(reason).hexdigest()[:12]
@@ -129,9 +133,11 @@ def run_judge_triples(eval_set: LoadedSet, slice_name: str, context: RunContext)
                 context.rendered_dir,
                 served_model_name=context.served_model_name,
                 prompt=prompt,
-                question=question,
-                reference=reference,
-                candidate=candidate,
+                slots={
+                    "question": question,
+                    "reference": reference,
+                    "candidate": candidate,
+                },
             )
             judge_field = cast(
                 Mapping[str, JSONValue], judge.render_judge(grading, band=bands[case_id])
