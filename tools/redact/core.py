@@ -95,13 +95,13 @@ def _group_entries(
         # A spelled DN is the marked leaf's whole value, replaced whole — its
         # container names a directory object of the office — and its CN as
         # spelled, the escaped form directory tools print, beside the decoded
-        # name (ticket 55's desired behaviour; the code review of v0.1.52).
+        # name when they differ.
         yield placeholder, value
         for attribute, component in parse_group_dn(value):
             if attribute == "cn" and component != name:
                 yield placeholder, component
                 break
-    # Ticket 55 ruling (b): the product's default group name is not an office value.
+    # The product's default group name is not an office value.
     if default is not None and name == default:
         return
     yield placeholder, name
@@ -111,9 +111,9 @@ def _value_entries(
     path: str, value: object, default: object | None, index: int | None = None
 ) -> Iterator[tuple[str, str]]:
     if not isinstance(value, str) or not value:
-        # Ticket 55 ruling (b): empty values are not office evidence.
+        # Empty values are not office evidence.
         return
-    # Ticket 55 ruling (b): loopback and unspecified addresses locate no office.
+    # Loopback and unspecified addresses locate no office.
     if _ignorable_address(value):
         return
     placeholder = f"<{path}{f'[{index}]' if index is not None else ''}>"
@@ -131,7 +131,7 @@ def _office_value_entries(site: SiteConfig) -> Iterator[tuple[str, str]]:
             continue
         value = _resolved_value(site, spec.path)
         if spec.default is not None and value == spec.default:
-            # Ticket 55 ruling (b): a registry default is product content, not office content.
+            # A registry default is product content, not office content.
             continue
         if isinstance(value, list):
             for index, item in enumerate(value):
@@ -141,9 +141,9 @@ def _office_value_entries(site: SiteConfig) -> Iterator[tuple[str, str]]:
 
 
 def _split_placeholder_spans(text: str) -> Iterator[tuple[str, bool]]:
-    """Split text into protected ticket-54 placeholders and ordinary spans."""
+    """Split text into protected redaction placeholders and ordinary spans."""
 
-    # Ticket 55 ruling (c): an existing placeholder is never matched again.
+    # An existing placeholder is never matched again.
     cursor = 0
     for match in _PLACEHOLDER.finditer(text):
         if cursor < match.start():
@@ -166,7 +166,7 @@ def _office_value_pattern(entries: list[tuple[str, str]]) -> re.Pattern[str] | N
         return None
     values = sorted(entries, key=lambda entry: -len(entry[1]))
     alternatives = "|".join(re.escape(value) for _, value in values)
-    # Ticket 55 ruling (c): match the longest bounded value, including a domain suffix.
+    # Match the longest bounded value, including a domain suffix.
     return re.compile(
         rf"(?<![\w-])(?:{alternatives})(?![\w-]|\.(?=[\w-]))",
         re.IGNORECASE,
@@ -218,7 +218,7 @@ def _redact_in_range_addresses(text: str, site: SiteConfig) -> str:
                 return match.group(0)
             for index, network in networks:
                 if address in network:
-                    # Ticket 55 ruling (d): an address inside an office range gets its range placeholder.
+                    # An address inside an office range gets its range placeholder.
                     return f"<address in lan_cidrs[{index}]>"
             return match.group(0)
 

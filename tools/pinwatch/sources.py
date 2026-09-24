@@ -38,7 +38,7 @@ class CloudImage:
 @total_ordering
 @dataclass(frozen=True, slots=True)
 class DebianVersion:
-    """A Debian version split into epoch, upstream, and revision (§2.2)."""
+    """A Debian version split into epoch, upstream, and revision."""
 
     epoch: int
     upstream: str
@@ -142,7 +142,7 @@ def _compare_debian_part(left: str, right: str) -> int:
 
 
 def debian_version_key(text: str) -> DebianVersion:
-    """Return the total-order key for a Debian package version (§2.2)."""
+    """Return the total-order key for a Debian package version."""
 
     return DebianVersion.parse(text)
 
@@ -293,7 +293,7 @@ def nvidia_branches(fetcher: Fetcher, repository: str) -> tuple[int, ...]:
 def apt_package_versions(
     fetcher: Fetcher, apt_index: str, package: str
 ) -> tuple[str, ...]:
-    """Return every version stanza for *package* in an apt Packages index (§2.2)."""
+    """Return every version stanza for *package* in an apt Packages index."""
 
     body = _text(apt_index, fetcher.get(apt_index))
     versions: list[str] = []

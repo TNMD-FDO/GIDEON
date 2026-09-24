@@ -1,6 +1,6 @@
 """Validate research-note pin bindings against the pin-watch vocabulary.
 
-Every note under ``docs/research/`` opens with YAML front matter naming the pins
+Every research note opens with YAML front matter naming the pins
 it was verified against and the version of each — the author's claim, never
 compared to a lock. This module parses that record through the ``Host`` seam,
 derives the pin vocabulary from the checkout's records (the pin watch's
@@ -22,6 +22,7 @@ import yaml  # type: ignore[import-untyped]
 from gideon.host import images, lock, models
 from gideon.host.sysio import Host, RealHost
 from tools.pinwatch import skills
+from tools.pinwatch.paths import PROVENANCE_PATH, RESEARCH_NOTES_PATH
 from tools.pinwatch.pins import Pin, pin_registry
 
 NoteNamespace = Literal["watched", "dev"]
@@ -179,18 +180,18 @@ def parse_front_matter(text: str, note: str) -> tuple[NoteBinding, ...]:
 def read_bindings(host: Host, root: Path) -> tuple[NoteBinding, ...]:
     """Read sorted research notes through the Host seam."""
 
-    directory = root / "docs" / "research"
+    directory = root / RESEARCH_NOTES_PATH
     try:
         names = sorted(name for name in host.listdir(directory) if name.endswith(".md"))
     except OSError as error:
         raise NotesError(
             f"cannot list research notes in checkout {root}: {error}",
-            "Restore the docs/research directory in the checkout and retry.",
+            f"Restore the {RESEARCH_NOTES_PATH} directory in the checkout and retry.",
         ) from error
 
     bindings: list[NoteBinding] = []
     for name in names:
-        relative = Path("docs") / "research" / name
+        relative = Path(RESEARCH_NOTES_PATH) / name
         note = relative.as_posix()
         try:
             text = host.read_text(root / relative)
@@ -297,7 +298,7 @@ def main(
         image_result = images.load_image_lock_text(_read_file(io, checkout, "images.lock"))
         host_result = lock.load_host_lock_text(_read_file(io, checkout, "host.lock"))
         models_result = models.load_models_lock_text(_read_file(io, checkout, "models.lock"))
-        tooling_text = _read_file(io, checkout, "docs/agents/tooling.md")
+        tooling_text = _read_file(io, checkout, PROVENANCE_PATH)
         requirements_text = _read_file(io, checkout, "requirements-dev.txt")
     except NotesError as error:
         _print_notes_error(error)

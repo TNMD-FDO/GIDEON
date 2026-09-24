@@ -27,11 +27,10 @@ from tools.exportboundary import (
 
 ROOT = Path(__file__).resolve().parent.parent
 ATTRIBUTES_PATH = Path(".gitattributes")
-# The list itself and the pin watch's modules, whose subject is the excluded
-# provenance record.
+# The list itself and the pin watch's paths module, which names excluded paths.
 TEXT_RULE_EXEMPT = (
     "tools/exportboundary.py",
-    "tools/pinwatch",
+    "tools/pinwatch/paths.py",
 )
 # Files whose comments cite research notes, each leaving when reworded; none
 # is left, and the seeded case holds the mechanism.
@@ -421,19 +420,19 @@ class SeededTrees(unittest.TestCase):
             excluded = root / "tools" / "tracker.py"
             excluded.parent.mkdir()
             excluded.write_text("docs/1-plans/ignored\n", encoding="utf-8")
-            exempt = root / "tools" / "pinwatch" / "reader.py"
+            exempt = root / "tools" / "pinwatch" / "paths.py"
             exempt.parent.mkdir()
             exempt.write_text("docs/agents/tooling.md\n", encoding="utf-8")
             boundary = root / "tools" / "exportboundary.py"
             boundary.write_text("docs/1-plans/ignored\n", encoding="utf-8")
-            sibling = root / "tools" / "sibling.py"
+            sibling = exempt.with_name("reader.py")
             sibling.write_text("docs/agents/tooling.md\n", encoding="utf-8")
             items = rule_text(root)
         self.assertEqual(len(items), 2)
         self.assertEqual(items[0].path, Path("gideon/source.py"))
         self.assertEqual(items[0].line, 1)
         self.assertIn("Remove or retarget", items[0].fix)
-        self.assertEqual(items[1].path, Path("tools/sibling.py"))
+        self.assertEqual(items[1].path, Path("tools/pinwatch/reader.py"))
         self.assertEqual(items[1].line, 1)
 
     def test_research_note_allowlist_exempts_only_the_named_file(self) -> None:

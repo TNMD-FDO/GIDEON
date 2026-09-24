@@ -247,10 +247,8 @@ def tag_shape(tag: str) -> TagShape | None:
     or several dash-joined words.  The suffix is retained as one string and
     compared whole by ``same_shape``.  A word starts with a letter, so the
     numeric group and suffix never compete.  The separators are retained
-    because they are part of a pin's shape.  The dated-commit grammar belongs
-    to SearXNG's published tags
-    (docs/research/searxng-service-and-owui-search.md §1); its commit hash is
-    not part of the shape.
+    because they are part of a pin's shape. The dated-commit grammar belongs
+    to SearXNG's published tags, and its commit hash is not part of the shape.
     """
 
     dated = _DATED_COMMIT.fullmatch(tag)
@@ -411,7 +409,7 @@ def image_created(fetcher: Fetcher, reference: Reference, tag: str) -> str:
     """Return a tag's registry-recorded configuration creation time.
 
     The manifest/index walk is the same-date tie-break for SearXNG's published
-    tags (docs/research/searxng-service-and-owui-search.md §1).
+    tags.
     """
 
     manifest_url = _manifest_url(reference, tag)

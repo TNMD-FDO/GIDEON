@@ -4,9 +4,8 @@ The Index API is used instead of PyPI's project JSON because its ``releases``
 field is deprecated.  The reader follows PEP 440's Appendix B parser, PEP 503's
 normalized project names, PEP 592's per-file yanks, PEP 629's API versioning,
 PEP 691's JSON representation, PEP 700's separate file/version lists, and
-PEP 792's quarantined-project status.  The research note is
-``docs/research/pypi-index-api-pin-watch.md`` on
-``research/pypi-index-api-pin-watch``.
+PEP 792's quarantined-project status, as described in the verified research
+note.
 """
 
 import json

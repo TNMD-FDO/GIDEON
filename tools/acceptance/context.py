@@ -146,8 +146,7 @@ class HarnessContext:
 def authenticated_messages(ctx: "HarnessContext") -> tuple[SinkMessageLike, ...]:
     """The sink's messages that arrived authenticated as the run's user over TLS.
 
-    What preflight's SMTP check and Grafana's delivery must both produce
-    (ticket 07's item (d), live for the first time).
+    What preflight's SMTP check and Grafana's delivery must both produce.
     """
 
     material = ctx.services

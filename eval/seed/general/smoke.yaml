@@ -1,11 +1,11 @@
-# Slice-1 ticket 39's General smoke set: §18.2's `general-smoke` suite in its
-# first form.  Eleven live cases, each an expectation and its checks over the
-# stored record — General answers a doctrine question, names itself and no
+# General's `general-smoke` suite in its first form. Eleven live cases, each an
+# expectation and its checks over the stored record — General answers a
+# doctrine question, names itself and no
 # other chat, computes and confirms nothing, verifies no citation, has no
 # matter access, and a searched turn stores its sources.  Every prompt is
 # invented and belongs to this file alone.  Never edited in place: a correction
 # is a new case with a new id naming the old with `supersedes:`, the old kept
-# here and retired by the loader (three so far, ticket 83).  Forty-four turns
+# here and retired by the loader (three so far). Forty-four turns
 # under `--repeat 2 --stream` exceed the daytime handful, so the run is in the
 # quiet window, on a weekend, or under `--force`.
 #

@@ -2,7 +2,7 @@
 
 ## What a query is
 
-A query is a real question as a person would put it to the Legal chat — the judgment set's unit (§18.4(a)). Thirty-eight derive from the prototype harvest and ten are written by the CHU attorney. They live one JSON object per line in `queries.jsonl` beside this page, which the export omits until the CSAs rule on publishing harvest-derived material; that is why a public tree has this page and not the file.
+A query is a real question as a person would put it to the Legal chat — the judgment set's unit. Thirty-eight derive from the prototype harvest and ten are written by the CHU attorney. They live one JSON object per line in `queries.jsonl` beside this page, which the export omits until the CSAs rule on publishing harvest-derived material; that is why a public tree has this page and not the file.
 
 ## The rule
 
@@ -15,11 +15,11 @@ Each line's keys, in this order:
 - `id` — `judgments-001`, `judgments-002`, … in file order, one series.
 - `suite`, `category`, `branch` — always `judgments`, `judgments`, and `legal`; the suite has one category, named for it.
 - `question` — the text, one line, no surrounding whitespace.
-- `reference_date` (optional) — an ISO date, only where the question's own text asks for the law as of a date, a partial date resolved to the period's first day (§10.3). When a question was asked is never its reference date.
-- `jurisdiction` (optional) — a list of CourtListener court ids (`ca6`, `tnmd`, `tenn`), only where the question's own text names a court or a state, a state read as its court of last resort (§11.5).
+- `reference_date` (optional) — an ISO date, only where the question's own text asks for the law as of a date, a partial date resolved to the period's first day. When a question was asked is never its reference date.
+- `jurisdiction` (optional) — a list of CourtListener court ids (`ca6`, `tnmd`, `tenn`), only where the question's own text names a court or a state, a state read as its court of last resort.
 - `labels` — a closed vocabulary: the origin, `harvest` or `chu-written`; the wording, `verbatim` or `rewritten`; and for a harvest query its record's type, `doctrinal`, `statute`, `case-specific`, or `other`.
 - `seed` — a harvest query's harvest id (`HARV-NNN`); absent otherwise.
-- `cluster_id` — `harvest-chat-<chat hash>` for a harvest query, since two questions from one chat share a subject and the standard error is clustered (§18.5); a CHU-written query is its own cluster, its `cluster_id` its `id`.
+- `cluster_id` — `harvest-chat-<chat hash>` for a harvest query, since two questions from one chat share a subject and the standard error is clustered; a CHU-written query is its own cluster, its `cluster_id` its `id`.
 - `notes` — a short process note (`follow-up folded`, `reduced to the legal question`) or empty, never question content.
 - `review` — `by`, a **role id**: a harvest role and an ordinal (`CSA-1`, `CHU-attorney-1`), never a name, the CSAs keeping who holds one off the repository; `on`, the review's ISO date; `accepted_flags`, the soft redaction-flag kinds the reviewer accepted for that question, sorted, usually empty.
 - `supersedes` (optional) — the earlier id this line corrects.
@@ -34,15 +34,23 @@ Two records yield no query: `HARV-014`, a prompt-writing request, and `HARV-017`
 
 ## Where grades come from
 
-Grades come through the **grading kit** (slice-2 ticket 08): a **pool** of candidate passages goes in, one **packet** per query per grader comes out, the graders return small **grades files**, and the intake appends the **judgments file** beside this page. The pools come from slice 3's sample index; until it exists the kit is exercised over an invented fixture. Packets, their manifest, and returned grades files are built **outside any checkout** and are never committed — the one committed product is the judgments file.
+Grades come through the **grading kit**: a **pool** of candidate passages goes in, one **packet** per query per grader comes out, the graders return small **grades files**, and the intake appends the **judgments file** beside this page. The pools come from slice 3's sample index; until it exists the kit is exercised over an invented fixture. Packets, their manifest, and returned grades files are built **outside any checkout** and are never committed — the one committed product is the judgments file.
 
-A passage is identified by its **gold-evidence coordinates** — source id, canonical-text SHA-256, and a code-point offset range (§18.6, [21] Q9) — and never by a chunk id, because Phase A's E11 re-chunks the corpus and a grade must survive it.
+A passage is identified by its **gold-evidence coordinates** — source id,
+canonical-text SHA-256, and a code-point offset range — and never by a chunk id,
+because the corpus is later re-chunked and a grade must survive that change.
 
 ### The pool file
 
 The contract slice 3's pool builder writes to: UTF-8 JSONL kept outside the checkout, one line per query, keys `query_id` and `passages` and no others. Each passage carries `source_id`, `sha256`, `start`, `end`, `caption`, `text`, and an optional `provenance` object. `provenance` is where a pool may keep a passage's legs, ranks, and scores; the builder checks only that it is an object and never reads into it, which is the mechanism behind "no packet shows a score, a rank, or which leg found a passage".
 
-The file is checked whole, every finding reported at once, each located by line, query id, and passage ordinal alone: the query id is a known active id and appears once; the coordinates are valid by `gideon/evaluation/judgments.py`'s rule; `end − start` equals the length of `text` **in code points**; the caption is non-empty and one line; and no coordinate repeats within a query. Pool size is reported per query and never bounded — twenty to twenty-five is a starting value (ADR-0017).
+The file is checked whole, every finding reported at once, each located by
+line, query id, and passage ordinal alone: the query id is a known active id
+and appears once; the coordinates are valid by
+`gideon/evaluation/judgments.py`'s rule; `end − start` equals the length of
+`text` **in code points**; the caption is non-empty and one line; and no
+coordinate repeats within a query. Pool size is reported per query and never
+bounded — twenty to twenty-five is a starting value.
 
 ### The packet and the grades file
 
@@ -64,7 +72,7 @@ What comes back is `grades-<query id>-<role id>.txt`: a first line `packet: <que
 - `grader` — an **attorney role id**, `CHU-attorney-N` or `TRAD-attorney-N`, never a name.
 - `assessment` — `primary` or `second`. Primary lines are the yardstick; second lines exist for κ.
 
-A (query, coordinates, grader) triple appears once, and there is at most one `primary` and one `second` line per (query, coordinates). A line carries nothing of a passage, a question, or a person. A grade is never edited: §0.2's supersede rule governs, and the first correction needed opens a ticket that adds a superseding form.
+A (query, coordinates, grader) triple appears once, and there is at most one `primary` and one `second` line per (query, coordinates). A line carries nothing of a passage, a question, or a person. A grade is never edited: the supersede rule governs, and the first correction needed opens a ticket that adds a superseding form.
 
 Agreement is Cohen's κ, unweighted over the four grades and again with grades collapsed at relevant = grade ≥ 2 (recall@50's line), primary against second, pooled over every passage both graded. It is computed from the file's own lines, so it is recomputable at any time.
 
@@ -76,7 +84,13 @@ Put the pool file outside any checkout, then run from a checkout:
 python3 -m tools.judgments.packets <pool file> --out <dir> --grader CHU-attorney-1 --grader TRAD-attorney-1
 ```
 
-Name every grader with a repeated `--grader`; flag order does not matter, since the roster is sorted. A grader must be an attorney role id, and the roster must hold at least one CHU and at least one TRAD attorney (§18.4(a)). Queries with a pool are split evenly, `chu-written` queries dealt first to the CHU attorneys, and ⌈n ∕ 10⌉ of them drawn for a second reader. The run prints a row per stage, then the queries with and without a pool, the packets per grader, and the double-graded query ids — ids and counts only, never a question or a passage.
+Name every grader with a repeated `--grader`; flag order does not matter, since
+the roster is sorted. A grader must be an attorney role id, and the roster must
+hold at least one CHU and at least one TRAD attorney. Queries with a pool are
+split evenly, `chu-written` queries dealt first to the CHU attorneys, and
+⌈n ∕ 10⌉ of them drawn for a second reader. The run prints a row per stage,
+then the queries with and without a pool, the packets per grader, and the
+double-graded query ids — ids and counts only, never a question or a passage.
 
 The refusals, each printed with its fix:
 
@@ -105,7 +119,7 @@ The refusals, each naming the packet by query id and role id and carrying ordina
 - **ordinal N has no grade** — every passage is graded before a packet comes back.
 - **grade N is outside 0 to 3** — the scale is 0, 1, 2, 3.
 - **ordinal N is not in the packet** or **is given twice** — correct the line.
-- **the packet lines are already in the judgments file** — a packet is taken in once; a regrade is not an edit (§0.2).
+- **the packet lines are already in the judgments file** — a packet is taken in once; a regrade is not an edit under the supersede rule.
 - **the judgments file has findings** — restore it before appending.
 
 A successful run appends lines ordered by query id, grader, then coordinates, and prints the count appended, the file's line count and SHA-256, and both κ lines with their pair count, query count, and the role ids that contributed pairs. Where there is no pair, or no variation, the line says so in words and prints no number.
@@ -147,7 +161,7 @@ by at least **half of the shorter of the two ranges**. A chunk inside a judged
 passage and a judged passage inside a larger chunk both meet at 1.0, which is
 what lets a re-chunked index be measured against grades given under another
 chunking; equal offsets in another source never meet. The threshold is a
-starting value (ADR-0017).
+starting value.
 
 **Crediting.** The list is walked from rank 1, and a judged passage is credited
 at most once. A chunk's gain is the highest grade among the not-yet-credited
@@ -189,12 +203,12 @@ it. And a judged passage whose canonical text the index under test does not hold
 reads as not retrieved, since a ranked list states nothing about what that index
 holds: it deflates recall@50 and nDCG@10 without a word. That bites at a corpus
 bump or a canonicalizer change, not at Phase A, whose pools are drawn from the
-very index its arms are scored on. The drop rule of §18.6 arrives with the input
-that can prove absence, as this definition's next `@N`.
+very index its arms are scored on. The drop rule arrives with the input that
+can prove absence, as this definition's next `@N`.
 
-The figures are reported and compared paired, and **never gated** (§18.3,
-ADR-0023). The slice's own verdict is coverage alone: it passes when every
-judged query was scored, and fails when one has no ranked list.
+The figures are reported and compared paired, and **never gated**. The slice's
+own verdict is coverage alone: it passes when every judged query was scored,
+and fails when one has no ranked list.
 
 ## The intake, for a CSA
 

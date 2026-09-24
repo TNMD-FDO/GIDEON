@@ -295,7 +295,7 @@ def _install_stage(ctx: HarnessContext) -> StageResult:
             f"install did not finish with a URL; transcript {transcript}",
             f"Inspect {transcript}, then retry acceptance.",
         )
-    # The VM is a no-GPU host (ADR-0035), so the only row a correct install prints
+    # The VM is a no-GPU host, so the only row a correct install prints
     # for the gate is the skip; the old inert row or any other detail is red here.
     expected_engine_verify = stage_line(
         StageResult("engine-verify", True, install.ENGINE_VERIFY_SKIPPED_DETAIL, "")

@@ -7,8 +7,8 @@ smoke set is its third; the frontend-bump cases are its fourth.
 
 ## `citation-stamp.yaml`
 
-The committed seed for General's citation stamp (spec §15, slice-1 ticket 14),
-the answers two test modules run the stamp over: `tests/test_api_stamp.py`
+This is the committed seed for General's citation stamp; its answers are what
+two test modules run the stamp over: `tests/test_api_stamp.py`
 for the package's detection and the tail it owes, and
 `tests/test_api_judged.py` for the service's whole and streamed paths. Its
 top-level shape is `family: citation`, `pattern_set_version`, and `cases`. Each
@@ -19,7 +19,7 @@ for it (`citation/reporter@1`, `citation/code@1`, `citation/rule@1`,
 and every free answer untouched; the free cases are the shape guard — numbers,
 dates, sums, the words *Section*, *page*, and *Rule* without a symbol, a case
 name without a reporter — chosen so the families stay bounded to citation
-shapes. Over-triggering in the wild is harmless (§15); the seed is where a
+shapes. Over-triggering in the wild is harmless; the seed is where a
 false stamp is a failure.
 
 Every text is invented: no real case, matter, or client. The seed is release
@@ -30,7 +30,7 @@ ticket's assets.
 
 ## `load.yaml`
 
-The load measure's instrument (slice-1 ticket 62, the register's M27): a
+The load measure's instrument recorded as M27 in the register: a
 turn-harness cases file of five invented prompts run under `--concurrent N` —
 four short unsearched answers and one searched turn (`search-01`,
 `search: true`, the managed turn's web-search feature and two engine calls).
@@ -43,7 +43,7 @@ new case with a new id.
 
 ## `smoke.yaml`
 
-General's smoke set (§18.2's `general-smoke`, slice-1 ticket 39): a
+General's `general-smoke` set: a
 turn-harness cases file of eleven live invented prompts, each an expectation
 and its checks over the stored record, run as
 `sudo python3 -B -m tools.turns eval/seed/general/smoke.yaml --repeat 2 --stream --out <dir>`
@@ -69,7 +69,7 @@ in the quiet window, on a weekend, or under `--force`. What each case proves:
 - `search-01` — a searched turn is answered and its stored message carries
   `sources`.
 - `identity-02` — General names itself and what it helps with, and names no
-  other chat (ADR-0043).
+  other chat.
 - `citation-02` — `citation-01`'s prompt draws the one-sentence stamp, not the
   old second sentence, and no affirmation.
 - `verify-02` — a request to verify a citation is declined, naming no other
@@ -79,23 +79,23 @@ in the quiet window, on a weekend, or under `--force`. What each case proves:
 form has nothing to read; `refused` passes the guardrail's replacement or the
 model's decline; `not-confirmed` and `recorded` fail only on a leak, so the
 cases whose point is what the answer says carry it in `must`, `must_not`, and
-`sources`. Every check is a regex or a list's emptiness — nothing is graded
-([21] item 19).
+`sources`. Every check is a regex or a list's emptiness; nothing is graded.
 
 A case is never edited. A correction is a new case with a new id naming the
 old with `supersedes:`; the old stays in this file byte for byte, and the loader
-retires it (in a cases file since slice-1 ticket 39).
+retires it through that link.
 
 The set lives as `eval-v1`'s `general` suite — `eval/sets/eval-v1/general/smoke.jsonl`,
 run as `gideon eval run --slice general-smoke` — and this file is its seed and
 still the turn harness's cases file, the two held equal by
 `tests/test_general_smoke_set.py`, so a correction is appended to both. The
-nightly schedule is slice-2 ticket 17's.
+nightly schedule is set apart from this file.
 
 ## `frontend-bump.yaml`
 
 The seven-case turn-harness file for proving an `images.open-webui` bump in the
-API and browser modes, as required by the pin-watch review's §5 runbook step.
+API and browser modes, as required by the weekly review in the pin-watch
+runbook.
 It grades the bump's frontend behavior, never General's release. Every prompt is
 invented, and a correction is a new case with a new id naming the old with
 `supersedes:`; cases are never edited in place.

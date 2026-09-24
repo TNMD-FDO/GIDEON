@@ -14,6 +14,7 @@ from gideon.host.images import render_errors as render_image_errors
 from gideon.host.lock import load_host_lock_text
 from gideon.host.lock import render_errors as render_host_errors
 from tools.pinwatch import hub
+from tools.pinwatch.paths import PROVENANCE_PATH
 from tools.pinwatch.pins import Bump
 from tools.pinwatch.skills import SkillsRecordError, patch_provenance
 
@@ -24,7 +25,7 @@ class PatchError(ValueError):
 
 # The skill record is patched by its own module; the YAML path below is the
 # product locks'.
-_RECORD_PATCHERS = {"docs/agents/tooling.md": patch_provenance}
+_RECORD_PATCHERS = {PROVENANCE_PATH: patch_provenance}
 
 
 _KEY = re.compile(r"^(?P<indent> *)(?P<key>[A-Za-z0-9][A-Za-z0-9_.-]*):(?P<rest>.*)$")

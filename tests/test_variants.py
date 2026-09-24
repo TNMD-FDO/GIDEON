@@ -282,7 +282,7 @@ class Command(TestCase):
                 )
             self.assertEqual(code, 1)
             self.assertIn("excluded.jsonl", output.getvalue())
-            self.assertIn("development tree", output.getvalue())
+            self.assertIn("full checkout", output.getvalue())
             self.assertEqual(variants.read_text(encoding="utf-8"), "")
 
     def test_write_refuses_a_series_with_a_gap(self) -> None:

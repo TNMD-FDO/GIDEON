@@ -2188,7 +2188,7 @@ class PullRequestContracts(unittest.TestCase):
         sentence = (
             "Before the merge, this bump is proven on the box with the turn "
             "harness in both modes on `eval/seed/general/frontend-bump.yaml`, "
-            "per `docs/runbooks/pin-watch-app-setup.md` §5."
+            "per the weekly review in `docs/runbooks/pin-watch-app-setup.md`."
         )
         frontend = Bump(
             "images.open-webui",
@@ -2420,10 +2420,10 @@ class PullRequestContracts(unittest.TestCase):
         )
         self.assertIn(f"| `{files_path}` | 1 files, 3 bytes | 2 files, 7 bytes |", body)
         self.assertIn("only on a box whose site file selects this pin's profile", body)
-        self.assertIn("maintenance window from go-live (§21)", body)
+        self.assertIn("maintenance window from go-live", body)
         self.assertIn("role `generator`", body)
         self.assertIn("7 GB", body)
-        self.assertIn("Re-judge the memory row per §7.6", body)
+        self.assertIn("Re-judge the profile's memory row", body)
         self.assertIn("python3 tests/regenerate_render_fixtures.py", body)
 
     def test_bound_to_preserves_reading_order(self) -> None:
@@ -2480,7 +2480,10 @@ class PullRequestContracts(unittest.TestCase):
         )
         assert matt_bump is not None
         matt_body = body_for(matt_bump, ())
-        self.assertIn("docs/agents/tooling.md` §3", matt_body)
+        self.assertIn(
+            "per the skills refresh recipe in `docs/agents/tooling.md` before merging",
+            matt_body,
+        )
         self.assertIn(
             "python3 -m tools.pinwatch.skills --source mattpocock/skills <clone>",
             matt_body,

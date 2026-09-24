@@ -2,7 +2,12 @@
 
 ## What a case is
 
-A case is one message to the Legal chat and every exact object in it, labelled by hand: the measure of the extraction grammar (§11.2), the `extraction` category of the `build-gates` suite (§18.2). The grammar runs over the case's `question` and its objects are scored against the case's `expected` objects, per type: precision at least 0.95 and recall at least 0.90 for every type the grammar lands. `gideon/extraction/scoring.py` is the measure and `tests/test_extraction_set.py` the gate.
+A case is one message to the Legal chat and every exact object in it,
+labelled by hand: the measure of the extraction grammar, the `extraction` category of the `build-gates` suite. The grammar runs over the case's `question` and
+its objects are scored against the case's `expected` objects, per type:
+precision at least 0.95 and recall at least 0.90 for every type the grammar
+lands. `gideon/extraction/scoring.py` is the measure and
+`tests/test_extraction_set.py` the gate.
 
 The cases live one JSON object per line in four files beside this page, two pairs: a file of written questions and the file of variants derived from it.
 
@@ -45,7 +50,7 @@ Each line's keys, in this order:
 
 - `id` — `extraction-001` onward, one series across the four files: the forty first, the invented cases after them, then each pair's variants. An id names a case, never its file.
 - `suite`, `category`, `branch` — always `build-gates`, `extraction`, and `legal`.
-- `question` — the message: a harvest case's is its record's question with the surrounding whitespace stripped and nothing else changed, since the offsets index it. Extraction reads the current message only (§11.1), so a follow-up's earlier turns are no part of a case.
+- `question` — the message: a harvest case's is its record's question with the surrounding whitespace stripped and nothing else changed, since the offsets index it. Extraction reads only the current message, so a follow-up's earlier turns are no part of a case.
 - `expected` — `{"objects": [...]}`, the labels ordered by `start`, each `{type, start, end, text, key, subsections}`: `key` exactly on the keyed types, `subsections` exactly on the section-like types.
 - `labels` — a closed vocabulary: the origin first, `harvest`, `invented`, or `variant`. An invented case carries the origin alone; a harvest case carries exactly two, its record's type second, `doctrinal`, `statute`, `case-specific`, or `other`; a variant exactly two, the versioned axis that derived it second (`lower-case@1`).
 - `seed` — a harvest case's harvest id (`HARV-NNN`); absent otherwise, a variant included.
@@ -59,7 +64,7 @@ Each line's keys, in this order:
 
 A label records what the **text** states, not what a lawyer knows.
 
-**The objects.** An exact object is a citation, a statute section, a Guidelines id, a rule cite, a docket number, or a party name present verbatim in the message (`CONTEXT.md`, *Exact object*). A named jurisdiction or court, a year or a date, a quantity (months, days, grams, dollars, an offense level, a criminal history category), an act's popular name, a record or page cite, and a redaction placeholder are not.
+**The objects.** An exact object is a citation, a statute section, a Guidelines id, a rule cite, a docket number, or a party name present verbatim in the message. A named jurisdiction or court, a year or a date, a quantity (months, days, grams, dollars, an offense level, a criminal history category), an act's popular name, a record or page cite, and a redaction placeholder are not.
 
 **The types.** Ten types are the grammar's today; the other three are labelled so the set is whole and a later family edits no label.
 

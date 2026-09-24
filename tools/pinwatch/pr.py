@@ -13,6 +13,12 @@ from gideon.host.images import DIGEST, parse_image_lock
 from gideon.host.sysio import Host
 from tools.pinwatch import skills
 from tools.pinwatch.notes import NoteBinding
+from tools.pinwatch.paths import (
+    APP_SETUP_RUNBOOK_PATH,
+    CI_RUNNER_RUNBOOK_PATH,
+    PROVENANCE_PATH,
+    RESEARCH_NOTES_PATH,
+)
 from tools.pinwatch.pins import Bump
 
 WITHDRAWN_PREFIX = "[withdrawn] "
@@ -27,7 +33,7 @@ FIXTURES_DIR = "tests/fixtures/render"
 _AUTH_FIX = (
     "Check the App token the pin-watch workflow mints (PIN_WATCH_APP_CLIENT_ID and "
     "PIN_WATCH_APP_PRIVATE_KEY, handed to gh as GH_TOKEN) or, on a dev seat, "
-    "gh auth status; see docs/runbooks/pin-watch-app-setup.md, "
+    f"gh auth status; see {APP_SETUP_RUNBOOK_PATH}, "
     "then re-run the pin watch."
 )
 _CHECKOUT_FIX = "Inspect the checkout (git status, git log origin/main), then re-run the pin watch."
@@ -120,7 +126,8 @@ def sync(host: Host, root: Path) -> None:
     A shallow checkout, the hosted runner's default, is completed by the same
     fetch: ``branch_state`` counts ``origin/main..origin/<branch>``, and over a
     cut history that count is the branch's whole fetched ancestry, which reads
-    an untouched proposal as a person's commits (standing ticket 19).
+    an untouched proposal as a person's commits, since a commit count is true
+    only over a whole history.
     """
 
     shallow = _run(host, root, ["git", "rev-parse", "--is-shallow-repository"])
@@ -303,9 +310,9 @@ def body_for(
         )
     if bump.pin_id == skills.MATT_PIN_ID:
         lines.append(
-            "What merging does: complete on this branch per `docs/agents/tooling.md` "
-            "§3 before merging — read the head, install, prove the install against a "
-            "clone at the upstream URL's commit with `python3 -m tools.pinwatch.skills "
+            "What merging does: complete on this branch per the skills refresh recipe "
+            f"in `{PROVENANCE_PATH}` before merging — read the head, install, prove "
+            "the install against a clone at the upstream URL's commit with `python3 -m tools.pinwatch.skills "
             "--source mattpocock/skills <clone>`, then commit. No hosted check can tell "
             "a completed branch from an incomplete one for a branch-tracking source, "
             "so this pull request is green from the start and the checker is the guard."
@@ -315,7 +322,7 @@ def body_for(
             "What merging does: nothing moves on a box until its next `apply`, and "
             "only on a box whose site file selects this pin's profile. The models "
             "stage fetches and verifies the new files into the weights tree and "
-            "recreates the engine — a maintenance window from go-live (§21), with "
+            "recreates the engine — a maintenance window from go-live, with "
             "`engine verify` gating the new weights — and a human tags the release."
         )
     elif bump.pin_id.startswith("images."):
@@ -334,13 +341,13 @@ def body_for(
                 "",
                 "Before the merge, this bump is proven on the box with the turn "
                 "harness in both modes on `eval/seed/general/frontend-bump.yaml`, "
-                "per `docs/runbooks/pin-watch-app-setup.md` §5.",
+                f"per the weekly review in `{APP_SETUP_RUNBOOK_PATH}`.",
             )
         )
     if bump.pin_id == "host.gh_runner":
         lines.append("")
         lines.append(
-            "The runner runs with automatic updates disabled (ADR-0031), so this bump "
+            "The runner runs with automatic updates disabled, so this bump "
             "is its only upgrade path: merge, then on the box bring the checkout that "
             "runs provision to the merged commit or the tagged release (provision "
             "reads `host.lock` from the checkout it runs in, so the merge alone moves "
@@ -349,7 +356,7 @@ def body_for(
             "it. GitHub queues a runner with updates off no jobs past thirty days "
             "of a release, and none at all once a critical security update is out, "
             "so land both inside that window "
-            "(`docs/runbooks/ci-runner.md`, the upgrade path)."
+            f"(`{CI_RUNNER_RUNBOOK_PATH}`, the upgrade path)."
         )
     if bump.proposal and bump.lock not in SKILL_RECORDS:
         lines.append("")
@@ -379,7 +386,7 @@ def body_for(
                 )
                 lines.append(f"Memory rows naming role `{role}`: {rows}.")
             lines.append(
-                "Re-judge the memory row per §7.6 on this branch; after "
+                "Re-judge the profile's memory row on this branch; after "
                 "editing the row, run `python3 tests/regenerate_render_fixtures.py` "
                 "and commit the lock and the fixtures together. A commit here "
                 "completes the proposal, which the watch then leaves alone."
@@ -398,7 +405,7 @@ def body_for(
             lines.append(
                 "This is a proposal: `driver.tested` moves and a floor is raised only "
                 "after an on-box converge. An image major needs an upgrade plan and a "
-                "product major per §2.1."
+                "product major under the product's version rule."
             )
         if bump.pin_id == "images.postgres" and not built_change:
             lines.append(
@@ -433,7 +440,7 @@ def body_for(
             f"| `{note.note}` | {note.version} | {proposed} |" for note in notes
         )
     else:
-        lines.append("No research note under `docs/research/` names this pin.")
+        lines.append(f"No research note under `{RESEARCH_NOTES_PATH}/` names this pin.")
     return "\n".join(lines) + "\n"
 
 

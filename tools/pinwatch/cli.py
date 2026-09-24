@@ -15,6 +15,7 @@ from tools.pinwatch import notes, skills
 from tools.pinwatch.fetch import Fetcher, FetchError, UrllibFetcher
 from tools.pinwatch.oci import UnreadableTagError
 from tools.pinwatch.patch import PatchError, apply_bump
+from tools.pinwatch.paths import PROVENANCE_PATH
 from tools.pinwatch.pins import Bump, ModelPin, Pin, SkillPin, pin_registry
 from tools.pinwatch.pr import (
     WITHDRAWN_PREFIX,
@@ -282,7 +283,7 @@ def main(
         image_text = lock_text(io, checkout, "images.lock")
         host_text = lock_text(io, checkout, "host.lock")
         models_text = lock_text(io, checkout, "models.lock")
-        tooling_text = lock_text(io, checkout, "docs/agents/tooling.md")
+        tooling_text = lock_text(io, checkout, PROVENANCE_PATH)
     except PrError as error:
         _print_pr_error(error)
         return 1
@@ -354,7 +355,7 @@ def main(
         "images.lock": image_text,
         "host.lock": host_text,
         "models.lock": models_text,
-        "docs/agents/tooling.md": tooling_text,
+        PROVENANCE_PATH: tooling_text,
     }
     failed = False
     for pin in pins:

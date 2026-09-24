@@ -328,7 +328,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             missing_files = ", ".join(str(path.name) for path in absent)
             print(
                 f"refused: {missing_files} named by {manifest} is absent; "
-                "a write runs in the development tree, which holds the whole id series"
+                "a write runs in a full checkout, which holds the whole id series"
             )
             return 1
         series = tuple(

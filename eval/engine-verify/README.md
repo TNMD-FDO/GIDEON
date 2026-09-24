@@ -1,8 +1,8 @@
 # Engine-verification sample
 
 `sample.yaml` is the corpus-independent release artifact for the direct engine
-checks required by spec §6.7 and [21] item 18. The host-side sample loader reads
-it from the checkout; `engine verify` and its tests are its readers. It is
+checks a release must pass. The host-side sample loader reads it from the
+checkout; `engine verify` and its tests are its readers. It is
 release content, not site configuration. The needle case is a neutral
 planted-text recall prompt: its filler is repeated into numbered paragraphs, its
 planted sentence is placed at the declared depth, and its expected value is
@@ -24,9 +24,9 @@ report the single-stream rate and the guardrail lags it implies, never a
 threshold.
 
 The work lands in sequence. Slice 2 adds the eight `research-qa` cases with
-frozen evidence and the harness that grades them. Ticket 13 adds the required
-`frontend` section: a non-empty `positives` list and one `trip` case, each with
-an id and prompt. A positive must be finished, store no matched span, and avoid an outlet-only
+frozen evidence and the harness that grades them. The `frontend` section holds
+a non-empty `positives` list and one `trip` case, each with an id and prompt. A
+positive must be finished, store no matched span, and avoid an outlet-only
 replacement; a calendar date the prompt did not carry, in the answer alone, is
 recorded in the kept event and never fails the gate, since
 the family's detector needs deadline vocabulary by design and the model's
@@ -40,9 +40,9 @@ stimulus, supersede it under a new id rather than editing the case. The first tr
 case, `library-due-date` ("…is due on"), was superseded by `library-return-date`
 during its on-box proof: `due` is one of the family's short leads, matched only
 when the date follows within eight characters, and one of five runs was not
-refused; `no later than` is a long lead matched through the family's 80-character
-gap, so a weekday or any other word between the lead and the date still trips. Slice 3
-adds the supporting-model checks with their containers.
+refused; `no later than` is a long lead matched through the family's
+80-character gap, so a weekday or any other word between the lead and the date
+still trips. Slice 3 adds the supporting-model checks with their containers.
 
 Cases are immutable. When a case needs to change, supersede it with a new id;
 never edit the existing case in place.

@@ -7,7 +7,7 @@ on:
 
 jobs:
   checks:
-    # Hosted runner by design (spec §2.6): the cheap checks never need the box.
+    # Hosted runner by design: the cheap checks never need the box.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -17,7 +17,7 @@ jobs:
       - name: Install dev tools
         # The development and CI toolchain is pinned in requirements-dev.txt.
         run: python -m pip install -r requirements-dev.txt
-      - name: Host import boundary (spec §1.5 — stdlib + yaml only)
+      - name: Host import boundary (stdlib + yaml only)
         run: pytest tests/test_host_import_boundary.py
       - name: Gate
         # Environment comparison, then ruff, mypy, and pytest, stopping at the first failure (tools/gate.py);
@@ -26,8 +26,8 @@ jobs:
 
   mirror-images:
     # The one CI step only the box can perform: copy every images.lock pin into
-    # the loopback release registry by digest (spec §1.8, §2.4). Runs only for
-    # code already on main, after the hosted checks — never pull-request code:
+    # the loopback release registry by digest. Runs only for code already on
+    # main, after the hosted checks — never pull-request code:
     # the runner is persistent and holds Docker access, and untrusted PR code
     # could compromise it (runner hardening is deferred to the public flip; the
     # private flag keeps the box jobs off the public export).
@@ -42,16 +42,15 @@ jobs:
         run: python3 -m gideon registry mirror --to 127.0.0.1:5000
       - name: Built-image contract (stdlib unittest, no pip)
         # Every built pin's digest is in the registry, its labels equal the
-        # lock's inputs, and its smoke command passes (slice-0 ticket 16) — a
-        # merge whose lock names an unbuilt digest is red here, the same day.
+        # lock's inputs, and its smoke command passes — a merge whose lock
+        # names an unbuilt digest is red here, the same day.
         run: python3 -m unittest tests/contract/built_images.py
       - name: Sanity
         run: python3 -m gideon --version
 
   frontend-contract:
-    # The Open WebUI contract (spec §3.5, ticket 23 item 11): a throwaway
-    # Postgres + frontend pair on loopback from the mirrored digests proves a
-    # hand-added Function is removed by the apply manifest and that a second
+    # The Open WebUI contract: a throwaway Postgres + frontend pair on loopback
+    # from the mirrored digests proves a hand-added Function is removed by the apply manifest and that a second
     # push changes nothing. Same trust posture as mirror-images: pushes to
     # main only, after the mirror, on the box's runner with Docker access.
     if: github.event_name == 'push' && github.event.repository.private

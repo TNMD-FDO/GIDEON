@@ -1,5 +1,5 @@
 # The arithmetic guardrail's sentence-credit family: the seed of the
-# sentence-credit category (spec §16, §18.2–18.3). The set version is the
+# sentence-credit category. The set version is the
 # family's own — what this seed was tuned against, bumped when one of the
 # family's patterns changes — and the other two seeds carry their families'.
 # Every text is invented; no matter, client, or real computation: the dates
@@ -7,7 +7,7 @@
 # edited — a correction is a new case with a new id. The two controls expected
 # to trip are attribution-01, the authority's figure in the noun form, and
 # case-credit-01, an authority's count of credit — the attribution class, held
-# within the ceiling until ticket 45's attribution construction lands.
+# within the ceiling until an attribution construction lands.
 family: sentence-credit
 pattern_set_version: 1
 cases:

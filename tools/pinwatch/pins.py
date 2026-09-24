@@ -3,7 +3,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Literal, cast
+from typing import cast
 
 from gideon.host import models, weights
 from gideon.host.images import (
@@ -33,6 +33,7 @@ from tools.pinwatch.oci import (
     resolve_digest,
     tag_shape,
 )
+from tools.pinwatch.paths import PROVENANCE_PATH, LockName
 from tools.pinwatch.skills import MATT_SOURCE, Provenance
 from tools.pinwatch.sources import (
     apt_package_versions,
@@ -45,13 +46,6 @@ from tools.pinwatch.sources import (
     ubuntu_cloud_image,
     version_tuple,
 )
-
-LockName = Literal[
-    "images.lock",
-    "host.lock",
-    "models.lock",
-    "docs/agents/tooling.md",
-]
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,8 +134,8 @@ def _newest_image_tag(
 ) -> str:
     """Choose a tag, breaking SearXNG's same-date ties from image metadata.
 
-    The dated-tag rule and registry-recorded tie-break belong to
-    docs/research/searxng-service-and-owui-search.md §1.
+    The dated-tag rule and the registry-recorded tie-break are those of the
+    research note verified against the SearXNG pin.
     """
 
     candidates = newest_same_shape_candidates(tags, reference.tag)
@@ -225,7 +219,7 @@ class ImagePin(Pin):
 
 @dataclass(frozen=True, slots=True)
 class BuiltImagePin(Pin):
-    """The base digest watched for a built image pin (§2.2/§2.4)."""
+    """The base digest watched for a built image pin."""
 
     image: LockedBuiltImagePin
 
@@ -269,7 +263,7 @@ class BuiltImagePin(Pin):
 
 @dataclass(frozen=True, slots=True)
 class AptPackagePin(Pin):
-    """A watched Debian package version used as a built-image argument (§2.2)."""
+    """A watched Debian package version used as a built-image argument."""
 
     image: LockedBuiltImagePin
     argument: str
@@ -307,7 +301,7 @@ class AptPackagePin(Pin):
 
 @dataclass(frozen=True, slots=True)
 class PypiProjectPin(Pin):
-    """A watched PyPI project release used as a built-image argument (§2.2)."""
+    """A watched PyPI project release used as a built-image argument."""
 
     image: LockedBuiltImagePin
     argument: str
@@ -419,7 +413,7 @@ class GithubReleasePin(Pin):
 
 @dataclass(frozen=True, slots=True)
 class SkillPin(Pin):
-    """A skill-source record: a proposal a person completes on its branch (ADR-0033)."""
+    """A skill-source record: a proposal a person completes on its branch."""
 
     def upstream_url(self, value: str) -> str:
         """The upstream page for one recorded value (a tag or a commit)."""
@@ -443,7 +437,7 @@ class SkillPin(Pin):
 
 @dataclass(frozen=True, slots=True)
 class SkillBranchPin(SkillPin):
-    """The Matt Pocock ``main`` head recorded in tooling.md §2."""
+    """The upstream ``main`` commit and date in the provenance record."""
 
     commit: str
     date: str
@@ -734,7 +728,7 @@ def pin_registry(
             ),
             SkillBranchPin(
                 "skills.matt-pocock",
-                "docs/agents/tooling.md",
+                PROVENANCE_PATH,
                 commit=provenance.matt_commit,
                 date=provenance.matt_date,
             ),

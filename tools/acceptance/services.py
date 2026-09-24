@@ -396,9 +396,8 @@ def prepare(ctx: HarnessContext) -> StageResult:
         # keyword-only constructor has the same runtime shape.
         sink_factory = cast(SinkFactory, ctx.sink_factory or smtpsink.SmtpSink)
 
-        # Ticket 55 sink ruling: the sink starts before the site text exists
-        # because that text names its port; read ``vm_site`` when each message
-        # is stored.
+        # The sink starts before the site text exists because that text names
+        # its port; read ``vm_site`` when each message is stored.
         def redact_sink_text(text: str) -> str:
             return vm.redact(text, ctx.vm_site)
 

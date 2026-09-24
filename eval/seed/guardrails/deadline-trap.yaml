@@ -1,5 +1,5 @@
 # The arithmetic guardrail's deadline family: the seed of the deadline-trap
-# category (spec §16, §18.2–18.3). Every text is invented; no matter, client, or
+# category. Every text is invented; no matter, client, or
 # real case. A case is never edited — a correction is a new case with a new id.
 family: deadline
 pattern_set_version: 2

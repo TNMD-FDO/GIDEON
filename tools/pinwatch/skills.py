@@ -17,10 +17,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Protocol
 
+from tools.pinwatch.paths import PROVENANCE_PATH, SKILLS_LOCK_PATH, SKILLS_ROOT
+
 MATT_SOURCE: Final = "mattpocock/skills"
-SKILLS_LOCK_PATH: Final = "skills-lock.json"
-PROVENANCE_PATH: Final = "docs/agents/tooling.md"
-SKILLS_ROOT: Final = ".claude/skills"
 MATT_PIN_ID: Final = "skills.matt-pocock"
 
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -31,11 +30,11 @@ _PROVENANCE = re.compile(
 _PROVENANCE_PREFIX = "Provenance today:"
 _PUNCTUATION_ORDER = "_-,;:!?."
 _SKILL_RECORD_FIX = (
-    "Inspect the record and re-run the §3 recipe in docs/agents/tooling.md."
+    f"Inspect the record and re-run the skills refresh recipe in {PROVENANCE_PATH}."
 )
 _PROVENANCE_FIX = (
-    "Restore the one-line shape of the provenance line in "
-    "docs/agents/tooling.md §2."
+    "Restore the one-line shape of the provenance line in the provenance "
+    f"section of {PROVENANCE_PATH}."
 )
 
 
@@ -53,7 +52,7 @@ class SkillsRecordError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class SkillEntry:
-    """One entry from ``skills-lock.json``."""
+    """One entry from the skills lock."""
 
     name: str
     source: str
@@ -64,14 +63,14 @@ class SkillEntry:
 
 @dataclass(frozen=True, slots=True)
 class SkillsLock:
-    """The ordered, validated entries from ``skills-lock.json``."""
+    """The ordered, validated entries from the skills lock."""
 
     entries: tuple[SkillEntry, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class Provenance:
-    """The machine-readable provenance sentence in tooling.md §2."""
+    """The machine-readable provenance sentence in the provenance record."""
 
     matt_commit: str
     matt_date: str
@@ -102,7 +101,7 @@ def _record_error(problem: str) -> SkillsRecordError:
 
 def _mapping(value: object, description: str) -> dict[str, object]:
     if not isinstance(value, dict):
-        raise _record_error(f"skills-lock.json {description} must be an object")
+        raise _record_error(f"{SKILLS_LOCK_PATH} {description} must be an object")
     return value
 
 
@@ -112,7 +111,7 @@ def _required_string(
     item = value.get(key)
     if not isinstance(item, str) or not item:
         raise _record_error(
-            f"skills-lock.json entry {entry_name!r} requires a non-empty {key!r}"
+            f"{SKILLS_LOCK_PATH} entry {entry_name!r} requires a non-empty {key!r}"
         )
     return item
 
@@ -123,47 +122,47 @@ def load_skills_lock(text: str) -> SkillsLock:
     try:
         document = json.loads(text)
     except (json.JSONDecodeError, TypeError) as error:
-        raise _record_error(f"skills-lock.json is not valid JSON: {error}") from error
+        raise _record_error(f"{SKILLS_LOCK_PATH} is not valid JSON: {error}") from error
 
     root = _mapping(document, "must be an object")
     if set(root) != {"version", "skills"}:
         raise _record_error(
-            "skills-lock.json must contain only the version and skills keys"
+            f"{SKILLS_LOCK_PATH} must contain only the version and skills keys"
         )
     version = root.get("version")
     if not isinstance(version, int) or isinstance(version, bool) or version != 1:
-        raise _record_error("skills-lock.json version must be 1")
+        raise _record_error(f"{SKILLS_LOCK_PATH} version must be 1")
     skills = _mapping(root.get("skills"), "skills must be an object")
     if not skills:
-        raise _record_error("skills-lock.json skills must not be empty")
+        raise _record_error(f"{SKILLS_LOCK_PATH} skills must not be empty")
 
     entries: list[SkillEntry] = []
     for name, raw_entry in skills.items():
         if not isinstance(name, str) or not name:
-            raise _record_error("skills-lock.json skill names must be non-empty strings")
+            raise _record_error(f"{SKILLS_LOCK_PATH} skill names must be non-empty strings")
         entry = _mapping(raw_entry, f"entry {name!r} must be an object")
         allowed = {"source", "ref", "sourceType", "skillPath", "computedHash"}
         if set(entry) - allowed:
             raise _record_error(
-                f"skills-lock.json entry {name!r} has an unknown key"
+                f"{SKILLS_LOCK_PATH} entry {name!r} has an unknown key"
             )
         source = _required_string(entry, "source", name)
         source_type = entry.get("sourceType")
         if source_type != "github":
             raise _record_error(
-                f"skills-lock.json entry {name!r} sourceType must be 'github'"
+                f"{SKILLS_LOCK_PATH} entry {name!r} sourceType must be 'github'"
             )
         skill_path = _required_string(entry, "skillPath", name)
         computed_hash = _required_string(entry, "computedHash", name)
         if _HEX64.fullmatch(computed_hash) is None:
             raise _record_error(
-                f"skills-lock.json entry {name!r} computedHash must be 64 lowercase hex characters"
+                f"{SKILLS_LOCK_PATH} entry {name!r} computedHash must be 64 lowercase hex characters"
             )
         if "ref" in entry:
             raw_ref = entry["ref"]
             if not isinstance(raw_ref, str) or not raw_ref:
                 raise _record_error(
-                    f"skills-lock.json entry {name!r} ref must be a non-empty string when present"
+                    f"{SKILLS_LOCK_PATH} entry {name!r} ref must be a non-empty string when present"
                 )
             ref: str | None = raw_ref
         else:
@@ -174,7 +173,7 @@ def load_skills_lock(text: str) -> SkillsLock:
 
 
 def parse_provenance(text: str) -> Provenance:
-    """Parse the one machine-readable provenance line from tooling.md §2."""
+    """Parse the one machine-readable provenance line from the record."""
 
     candidates = [
         line
@@ -183,13 +182,13 @@ def parse_provenance(text: str) -> Provenance:
     ]
     if len(candidates) != 1:
         raise SkillsRecordError(
-            "docs/agents/tooling.md must contain exactly one provenance line",
+            f"{PROVENANCE_PATH} must contain exactly one provenance line",
             _PROVENANCE_FIX,
         )
     match = _PROVENANCE.fullmatch(candidates[0])
     if match is None:
         raise SkillsRecordError(
-            "the provenance line in docs/agents/tooling.md has the wrong shape",
+            f"the provenance line in {PROVENANCE_PATH} has the wrong shape",
             _PROVENANCE_FIX,
         )
     return Provenance(match.group("commit"), match.group("date"))
@@ -204,7 +203,7 @@ def _provenance_line(text: str) -> tuple[list[str], int, str]:
     ]
     if len(candidates) != 1:
         raise SkillsRecordError(
-            "docs/agents/tooling.md must contain exactly one provenance line",
+            f"{PROVENANCE_PATH} must contain exactly one provenance line",
             _PROVENANCE_FIX,
         )
     index, line = candidates[0]

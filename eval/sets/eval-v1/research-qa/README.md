@@ -3,10 +3,10 @@
 ## What a case is
 
 A case is one legal research question the product is asked to answer, and the
-unit the `research-qa` suite measures (§18.2). The thirty-eight committed here
+unit the `research-qa` suite measures. The thirty-eight committed here
 are the harvest's questions — the same records the `judgments` queries derive
 from — and they are the measured form of "comparable to the prototype" at the
-go/no-go gate (§18.4(b), §21): what the product answers on them, against a
+go/no-go gate: what the product answers on them, against a
 signed expected answer, is what that reading rests on.
 
 They live one JSON object per line in `harvest.jsonl` beside this page, which
@@ -32,16 +32,16 @@ Each line's keys, in this order:
 - `question` — the text, one line, no surrounding whitespace.
 - `reference_date` (optional) — an ISO date, only where the question's own text
   asks for the law as of a date, a partial date resolved to the period's first
-  day (§10.3). When a question was asked is never its reference date.
+  day. When a question was asked is never its reference date.
 - `jurisdiction` (optional) — a list of CourtListener court ids (`ca6`, `tnmd`,
   `tenn`), only where the question's own text names a court or a state, a state
-  read as its court of last resort (§11.5).
+  read as its court of last resort.
 - `labels` — a closed vocabulary: the origin, `harvest` for every case committed
   here; the wording, `verbatim` or `rewritten`; and the harvest record's type,
   `doctrinal`, `statute`, `case-specific`, or `other`.
 - `seed` — the harvest id (`HARV-NNN`) the case derives from.
 - `cluster_id` — `harvest-chat-<chat hash>`, since two questions from one chat
-  share a subject and the standard error is clustered (§18.5).
+  share a subject and the standard error is clustered.
 - `notes` — a short process note (`follow-up folded`, `reduced to the legal
   question`) or empty, never question content.
 - `review` — `by`, a **role id**: a harvest role and an ordinal (`CSA-1`,
@@ -60,7 +60,7 @@ The category is a judgment about what the question asks for, not about what it
 names:
 
 - `lookup` — the question names one object, a citation, a Code section, or a
-  party, and asks for it; a rank-1 answer exists (§18.3).
+  party, and asks for it; a rank-1 answer exists.
 - `edition` — the answer turns on which version of a text is the one asked
   about.
 - `retrieval` — the question asks for authority on a stated proposition, and the
@@ -96,7 +96,7 @@ legal research question, so neither can be one here.
 | `lookup` | 4 |
 | `edition` | 1 |
 
-Thirty-eight in all. §18.2's forty is a starting value (ADR-0017); the harvest
+Thirty-eight in all. Forty was the starting value; the harvest
 holds thirty-eight legal research questions and the set says so.
 
 ## The sign-offs file
@@ -118,7 +118,7 @@ A case id appears once; the file ends with a newline. A sign-off is never
 edited, and there is no superseding form yet: the first correction that is
 needed opens the ticket that adds one, as the grading kit's corrections did.
 The signing procedure — the sheet an attorney reads and the intake that appends
-a line — is slice-2 ticket 24's sign-off kit. No sign-offs file is committed
+a line — is the sign-off kit described below. No sign-offs file is committed
 today, so every case here is unsigned.
 
 ## The sign-off kit

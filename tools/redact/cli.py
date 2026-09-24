@@ -2,7 +2,7 @@
 
 The site file is loaded through the product's own loader, so the derived
 values (the search base, the group names) are the ones the box runs with;
-its refusals are the loader's, each ending in its fix (slice-1 ticket 55).
+its refusals are the loader's, each ending in its fix.
 """
 
 import argparse
@@ -24,15 +24,14 @@ def build_parser() -> argparse.ArgumentParser:
         prog="python3 -m tools.redact",
         description=(
             "Replace every office value the site file declares with its site-key "
-            "placeholder, stdin to stdout (slice-1 ticket 55; the tree is public "
-            "at 1.0, spec §2.6)."
+            "placeholder, stdin to stdout (the tree is public at 1.0)."
         ),
     )
     parser.add_argument(
         "--site",
         required=True,
         metavar="PATH",
-        help="the site file whose marked leaves name the office values (§3.3)",
+        help="the site file whose marked leaves name the office values",
     )
     return parser
 

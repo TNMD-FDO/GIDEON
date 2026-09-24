@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.2.62](docs/release-notes/v0.2.62.md) — 2026-09-24 — tools, eval, and CI citations
 - [v0.2.61](docs/release-notes/v0.2.61.md) — 2026-09-24 — the public documents' citations
 - [v0.2.60](docs/release-notes/v0.2.60.md) — 2026-09-24 — the rendered surface's citations
 - [v0.2.59](docs/release-notes/v0.2.59.md) — 2026-09-24 — the guardrail review

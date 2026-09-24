@@ -57,11 +57,11 @@ def _redact_body(body: bytes, redact: Callable[[str], str]) -> bytes:
 
     Every header is read decoded and every text part through its declared
     charset, so a base64 or quoted-printable part and a non-ASCII value reach
-    the redactor as text (slice-1 ticket 55's sink ruling). The message is
-    re-serialized only when something changed — the stored body is evidence a
-    person reads, not a record that must round-trip — and a body the parser
-    refuses passes through the redactor as text over a byte-preserving
-    decoding, so nothing is ever stored unredacted.
+    the redactor as text. The message is re-serialized only when something
+    changed — the stored body is evidence a person reads, not a record that
+    must round-trip — and a body the parser refuses passes through the
+    redactor as text over a byte-preserving decoding, so nothing is ever
+    stored unredacted.
     """
 
     try:

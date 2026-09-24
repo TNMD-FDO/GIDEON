@@ -1,4 +1,4 @@
-# The citation stamp's seed (spec §15, [06] item 16, slice-1 ticket 14): the
+# The citation stamp's seed: the
 # answers the stamp's unit tests run its outlet over.  A shaped case carries a
 # citation shape and names the family that must hit; a free case carries none
 # and must pass untouched.  Every text is invented; no matter, client, or real

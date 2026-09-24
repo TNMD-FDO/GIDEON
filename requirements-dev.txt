@@ -1,9 +1,10 @@
-# The development and CI toolchain — never the product's. ci.yml's checks job and a
-# fresh .venv (docs/4-unit-tests/TESTING.md) install this file, and
-# tests/test_toolchain_pins.py holds the PyYAML, Playwright, and image copies to it. The
-# box never installs from PyPI: the bare-host path is the standard library and the box's
-# python3-yaml (spec §1.5), and the service's set is built into its image. Exact pins
-# only; the toolchain moved by a person, never the pin watch.
+# The development and CI toolchain — never the product's. The checks job and a
+# fresh virtual environment install this file, and tests/test_toolchain_pins.py
+# holds the PyYAML, Playwright, and image copies to it.
+# The box never installs from PyPI: its bare-host path uses the standard library
+# and system python3-yaml, present on every Ubuntu Server. The service's dependency
+# set is built into its image. Exact pins only; the toolchain is moved by a person,
+# never the pin watch.
 ruff==0.16.5
 mypy==2.3.1
 pytest==9.1.1

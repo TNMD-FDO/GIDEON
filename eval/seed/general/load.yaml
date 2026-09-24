@@ -1,6 +1,6 @@
-# Slice-1 ticket 62's load set: General under concurrent load (M27).  An
+# General under concurrent load (M27). An
 # instrument for timing, not a grading — every case `expect: recorded`, so a
-# row fails only on a leak or a turn error.  Four short unsearched answers, so
+# row fails only on a leak or a turn error. Four short unsearched answers, so
 # a turn's elapsed is the load's and not the thinking's length, and one
 # searched turn (`search: true`), the heavier path.  Every prompt is invented
 # and carries no date, figure, case name, matter, or client.  Never edited in
