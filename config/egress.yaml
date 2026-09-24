@@ -20,8 +20,8 @@ groups:
     # Release-asset downloads (the pinned gh-runner tarball) redirect here.
     - host: objects.githubusercontent.com
       probe_url: https://objects.githubusercontent.com/
-    # Docker Hub's real endpoints for the pinned registry image ("docker.io"
-    # in ticket 02's recorded addition): the v2 API and its token service.
+    # Docker Hub's real endpoints behind "docker.io" for the pinned registry
+    # image: the v2 API and its token service.
     - host: registry-1.docker.io
       probe_url: https://registry-1.docker.io/v2/
     - host: auth.docker.io
@@ -32,8 +32,8 @@ groups:
     - host: production.cloudfront.docker.com
       probe_url: https://production.cloudfront.docker.com/
       expect: [403]
-    # NVIDIA's container registry: the DCGM exporter (images.lock, slice-0
-    # ticket 07) is published there and nowhere else. The v2 probe answers 401
+    # NVIDIA's container registry: the DCGM exporter is published there and
+    # nowhere else. The v2 probe answers 401
     # unauthenticated, which the global rule counts. Layer pulls redirect
     # (307) to the signed-URL blob host below (live-verified 2026-09-03),
     # which answers 403 to every unsigned request.
@@ -48,11 +48,10 @@ groups:
   install-upgrade:
     - host: huggingface.co
       probe_url: https://huggingface.co/
-    # Hugging Face download hosts, live-verified 2026-09-01 (the spec's
-    # "huggingface.co + CDN"; cdn-lfs.huggingface.co is NXDOMAIN — retired).
+    # Hugging Face download hosts, live-verified 2026-09-01; the retired
+    # cdn-lfs.huggingface.co name resolves to NXDOMAIN.
     # These three answer 403 to unsigned requests. The real pull on the box
-    # (slice-1 ticket 03, 2026-09-04) was redirected to us.aws.cdn.hf.co below,
-    # which answers 200; `models pull` prints an `uncovered host` line for any
+    # (2026-09-04) was redirected to us.aws.cdn.hf.co below, which answers 200; `models pull` prints an `uncovered host` line for any
     # host a fetch traverses that this group lacks.
     - host: us.aws.cdn.hf.co
       probe_url: https://us.aws.cdn.hf.co/
@@ -93,8 +92,8 @@ groups:
     - host: www.supremecourt.gov
       probe_url: https://www.supremecourt.gov/
 
-  # The box that builds GIDEON's images (spec §2.4: "GIDEON-built and upstream
-  # stock alike") — TNMD's pre-1.0, the release pipeline at the public flip.
+  # The box that builds GIDEON's images, GIDEON-built and upstream stock alike:
+  # TNMD's before 1.0, the release pipeline from the public flip.
   # Probed by `python3 -m tools.imagebuild` before a build, never by preflight:
   # an office never builds. The base image needs no egress (it comes from the
   # release registry); these serve apt inside the build.

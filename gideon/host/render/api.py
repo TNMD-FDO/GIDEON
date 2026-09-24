@@ -4,7 +4,7 @@ The Compose block in ``render/compose.py``, the blackbox job in
 ``render/prometheus.py``, and the probe rule in ``render/grafana.py`` share
 these names, as ``render/engine.py`` holds the engine's, so neither observer
 imports the document builder. The service listens on the engine's port number
-and the frontend's connection names the service by hostname alone (ticket 09).
+and the frontend's connection names the service by hostname alone.
 The API Compose block reads the email header name through ``API_SOURCE_HEADER``
 for the source word and the chat id through ``API_CHAT_HEADER`` for the trip row;
 it is the one rendered artifact that reads forwarded header names.

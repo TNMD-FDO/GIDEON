@@ -1,7 +1,8 @@
-# Release text for the General preset, governed by spec §15, ADR-0043, [06]
-# items 4–5, and §16. The three parsed values use only the $office_name
-# placeholder; write a literal dollar sign as $$, and do not use the frontend's
-# double-brace variables (see docs/research/owui-preset-system-prompt.md).
+# Release text for the General preset: an everyday assistant with no case
+# files, no research corpus, and no verified citations. The three parsed values
+# use only the $office_name placeholder; write a literal dollar sign as $$, and
+# do not use the frontend's double-brace variables, which the pinned frontend
+# substitutes at request time, an unresolved one becoming empty.
 # Regenerate the GPU fixtures after editing this file.
 name: General
 description: >-

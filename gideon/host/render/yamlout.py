@@ -5,7 +5,7 @@ import re
 from collections.abc import Mapping, Sequence
 
 HEADER = (
-    "# Rendered by gideon render — never hand-edit (spec §3.5). "
+    "# Rendered by gideon render — never hand-edit. "
     "Re-run gideon apply after editing /etc/gideon/site.yaml."
 )
 

@@ -1,5 +1,5 @@
--- §19.5: Grafana reads operational rows through a dedicated read-only role.
--- ADR-0005: this migration is forward-only; corrections are appended later.
+-- Grafana reads operational rows through a dedicated read-only role.
+-- This migration is forward-only; corrections are appended later.
 
 GRANT USAGE ON SCHEMA public TO gideon_ro_metrics;
 GRANT SELECT ON TABLE audit_log TO gideon_ro_metrics;

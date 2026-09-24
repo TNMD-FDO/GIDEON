@@ -1,5 +1,5 @@
-# GIDEON's committed trigger registry. A state moves only by pull request
-# (ADR-0049): entries are watching, acted, or retired. Conditions use above,
+# GIDEON's committed trigger registry. A state moves only by pull request:
+# entries are watching, acted, or retired. Conditions use above,
 # at-least, or below, and `runs` counts releases the clause must hold in a row.
 # Thresholds are starting values; the format is the loader's,
 # gideon/improvement/triggers.py, and a refusal names
@@ -32,4 +32,4 @@ triggers:
         - figure: held_out_ids
           op: at-least
           value: 1
-    says: Learned or weighted fusion and the provisional reranker depths under §6.3 may be proposed when the judgment and held-out conditions hold, opening the effort under ADR-0049 rather than building it automatically.
+    says: Learned or weighted fusion and provisional reranker depths may be proposed when the judgment and held-out conditions hold, opening the effort for review rather than building it automatically.

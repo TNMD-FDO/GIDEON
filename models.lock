@@ -1,27 +1,27 @@
-# Model pins and hardware profiles (spec §1.1, §2.2, §2.4, §5; ADR-0009,
-# ADR-0031). A hardware profile is a named, evaluated configuration within a
-# release: a `requires` block preflight checks against the host as minimums,
-# and the model set with its GPU assignment and the engine baseline each model
-# is served with. The site file's `hardware_profile` selects one; an unknown
-# name refuses, a non-reference one warns. Model facts live here and nowhere
-# else. The pin watch (ADR-0031) proposes a newer revision as a pull request;
-# a person merges and tags. Not here: site facts, corpus membership, product
-# behaviour constants, host facts read at install (GPU UUIDs); OS and driver
-# pins are host.lock's, image digests images.lock's.
+# Model pins and hardware profiles. A hardware profile is a named, evaluated
+# configuration within a release: a `requires` block preflight checks against
+# the host as minimums, and the model set with its GPU assignment and the
+# engine baseline each model is served with. The site file's
+# `hardware_profile` selects one; an unknown name refuses, a non-reference one
+# warns. Model facts live here and nowhere else. The pin watch proposes a
+# newer revision as a pull request; a person merges and tags. Not here: site
+# facts, corpus membership, product behaviour constants, host facts read at
+# install (GPU UUIDs); OS and driver pins are host.lock's, image digests
+# images.lock's.
 version: 1
-# The reference build (§2.1): the one profile TNMD runs and evaluates against.
+# The reference build: the one profile TNMD runs and evaluates against.
 reference: 2x96v-256d
 profiles:
   # Named by GPU layout and DRAM floor — <count>x<per-GPU VRAM>v-<DRAM>d, or
   # <n>u for unified memory — never by box model or VRAM total, because models
-  # bind to whole GPUs (§1.1). The name is a legible floor; the body is
+  # bind to whole GPUs. The name is a legible floor; the body is
   # authoritative. Adding a profile is a minor bump and an eval run.
   2x96v-256d:
-    # Minimums preflight checks against the host (§1.1, §1.5). The memory
-    # figures are decimal gigabytes (10^9 bytes), compared with the kernel's
+    # Minimums preflight checks against the host.  The memory figures are
+    # decimal gigabytes (10^9 bytes), compared with the kernel's
     # MemTotal and nvidia-smi's memory.total converted to bytes; the GPU model
     # is nvidia-smi's spelling. The data-volume floor is a capacity starting
-    # value from §7.6's footprint (ADR-0017), corrected by the measured
+    # value under the corpus footprint rule, corrected by the measured
     # footprint once the corpus lands.
     requires:
       platform: x86_64
@@ -33,27 +33,28 @@ profiles:
         vram_gb: 96
       dram_gb: 256
       data_volume_gb: 4000
-    # The memory table (§7.6): Compose mem_limit starting values in decimal
+    # The memory table gives Compose mem_limit starting values in decimal
     # gigabytes, one row per Compose service the stack knows on any host — a
     # service the site turns off or the no-GPU marker removes still has its
-    # row — and E9 corrects every row from measured RSS (ADR-0017). Render
-    # emits each value as an exact byte count, never a suffix (Compose reads a
+    # row — and E9 corrects every row from measured RSS. Render emits each
+    # value as an exact byte count, never a suffix (Compose reads a
     # `g` suffix as binary, 7.4 % over this lock's unit); mem_limit alone,
     # Docker's default swap allowance standing until slice 3's stores rule on
     # it. The kernel keeps a cgroup limit in whole 4 KiB pages, so a row that
     # is not a multiple of 4,096 bytes reads back up to 4,095 bytes lower in
     # the container's memory.max and in cAdvisor's limit series, while docker
-    # inspect reports the request. Basis: §7.6 names Postgres, the frontend, the generator, and the
-    # ~2 GB Caddy+registry+SearXNG group, Caddy and SearXNG its halves (the
-    # registry is a host service); every other row is the smallest whole
-    # gigabyte at least four times its service's fourteen-day working-set peak
-    # measured 2026-09-07 from the box's cAdvisor series, floor 1 — re-taken
-    # the same way as max by (compose project, compose service) of
+    # inspect reports the request. The footprint rule names Postgres, the
+    # frontend, the generator, and the ~2 GB Caddy+registry+SearXNG group,
+    # with Caddy and SearXNG as its halves; the registry is a host service.
+    # The reserve rule gives every other row the smallest whole gigabyte at
+    # least four times its service's fourteen-day working-set peak, with a
+    # 1 GB floor. Peaks were measured 2026-09-07 from the box's cAdvisor series
+    # and are retaken as max by (compose project, compose service) of
     # max_over_time(container_memory_working_set_bytes[14d]) on loopback port
     # 9090. The generator keeps 32 despite a far lower peak because a limit
     # counts the page cache a container is first to touch and its weights are
     # about 31 GB of file pages. A row's `role` names the model the service
-    # loads, the subject of slice-0 ticket 14's size-change rule. Slice 3's
+    # loads, which is the subject of the size-change rule. Slice 3's
     # services (Qdrant, OpenSearch, the workers) land their rows with their
     # services. Every scalar is a value-only patch for the pin watch.
     memory:
@@ -84,21 +85,21 @@ profiles:
         gb: 1
       gideon-api:
         gb: 1
-    # The chunk guards (§7.7) arrive with index build (ticket 58's).
+    # The chunk guards arrive with index build.
     models:
-      # The generator (§5.1, ADR-0009): GPU 0, whole card, one deployment at the
-      # native window. Pinned by Hugging Face repo + revision commit + per-file
-      # sha256 and size (§2.4); `models pull` fetches and verifies exactly the
-      # files listed. A vanished upstream is republished and repinned here, never
-      # overridden by a directory. Every scalar above `files` is a value-only
-      # patch for the pin watch; `files` is a block it regenerates whole from the
-      # Hub listing at the revision, in sorted path order — every regular file
+      # The generator: GPU 0, whole card, one deployment at the native window.
+      # Pinned by Hugging Face repo + revision commit + per-file sha256 and
+      # size; `models pull` fetches and verifies exactly the files listed. A
+      # vanished upstream is republished and repinned here, never overridden
+      # by a directory. Every scalar above `files` is a value-only patch for
+      # the pin watch; `files` is a block it regenerates whole from the Hub
+      # listing at the revision, in sorted path order — every regular file
       # except git dot-files.
       generator:
         repo: Qwen/Qwen3.8-27B-FP8
         revision: "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a"
         gpu: 0
-        # §5.3's shipped baseline, verbatim. Flag keys are vLLM's without their
+        # The shipped baseline, verbatim. Flag keys are vLLM's without their
         # `--` prefix (render restores it); `true` is a bare flag. Not set, by
         # decision: enable-prefix-caching / mamba-cache-mode (E39),
         # default-chat-template-kwargs (thinking stays the model's default,

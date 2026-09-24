@@ -1,4 +1,4 @@
-# Rendered by gideon render — never hand-edit (spec §3.5). Re-run gideon apply after editing /etc/gideon/site.yaml.
+# Rendered by gideon render — never hand-edit. Re-run gideon apply after editing /etc/gideon/site.yaml.
 use_default_settings:
   engines:
     keep_only:

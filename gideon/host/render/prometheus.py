@@ -1,4 +1,4 @@
-"""Pure Prometheus configuration rendering (spec §19.5)."""
+"""Pure Prometheus configuration rendering."""
 
 from typing import Final
 
@@ -28,7 +28,7 @@ _GPU_JOBS: Final = (
 # The template's $search_jobs line: one blackbox probe of SearXNG's health
 # endpoint, rendered only while the service is (web.search on) and as one
 # blank line otherwise, the $gpu_jobs pattern; its own `probe_success` rule
-# in the Grafana rules file pages on it (slice-1 ticket 15).
+# in the Grafana rules file pages on it.
 _SEARCH_JOBS: Final = (
     f"  - job_name: {SEARXNG_JOB_NAME}\n"
     "    metrics_path: /probe\n"

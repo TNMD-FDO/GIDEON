@@ -1,7 +1,7 @@
 """The engine's identity as its clients see it.
 
-The service name (§20.1; ADR-0009's stable alias — the profile's served name
-is held equal to it by a test), the container port, and the secret name are
+The service name (the stable alias; the profile's served name is held equal to
+it by a test), the container port, and the secret name are
 shared by the Compose service in ``render/compose.py`` and by the frontend's
 connection in ``render/owui.py``; they live here so the frontend module can
 name the engine without importing the document builder that imports it. The

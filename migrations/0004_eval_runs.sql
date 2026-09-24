@@ -1,8 +1,8 @@
--- §19.4: kept event rows carry identifiers only, never user or matter text.
--- ADR-0027: kept events are rows, not log lines or audit-file entries.
--- ADR-0005: this migration is forward-only; corrections are appended later.
--- §18.6, §7.9: an eval run's rows, written insert-only by gideon_eval as
--- the run's closing record and read by gideon_ro_metrics.
+-- Evaluation run events carry identifiers only, never user or matter text.
+-- Events are stored as rows, not log lines or audit-file entries.
+-- This migration is forward-only; corrections are appended later.
+-- An eval run's rows are written insert-only by gideon_eval as the run's
+-- closing record and read by gideon_ro_metrics.
 
 CREATE TABLE eval_runs (
     run_id uuid NOT NULL,

@@ -33,14 +33,9 @@ TEXT_RULE_EXEMPT = (
     "tools/exportboundary.py",
     "tools/pinwatch",
 )
-# These files' comments cite research notes and leave this tuple when reworded.
-RESEARCH_NOTE_TEXT_EXEMPT = (
-    "compose/open-webui/functions/branch_gate.py",
-    "compose/open-webui/general.yaml",
-    "gideon/host/render/compose.py",
-    "gideon/host/render/owui.py",
-    "gideon/host/render/searxng.py",
-)
+# Files whose comments cite research notes, each leaving when reworded; none
+# is left, and the seeded case holds the mechanism.
+RESEARCH_NOTE_TEXT_EXEMPT: tuple[str, ...] = ()
 _TEXT_ROOTS = (Path("gideon"), Path("compose"), Path("config"), Path("tools"))
 _TEXT_FILES = (Path(".github/workflows/ci.yml"), Path("README.md"))
 _SKIP_DIRECTORIES = {

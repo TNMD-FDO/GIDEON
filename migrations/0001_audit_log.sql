@@ -1,5 +1,5 @@
--- §19.4: audit rows carry identifiers only, never user or matter text.
--- ADR-0005: this migration is forward-only; corrections are appended later.
+-- Audit rows carry identifiers only, never user or matter text.
+-- This migration is forward-only; corrections are appended later.
 
 CREATE TABLE audit_log (
     id bigint GENERATED ALWAYS AS IDENTITY,

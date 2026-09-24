@@ -9,16 +9,15 @@ https://$hostname {
     request_body {
         max_size 2GB
     }
-    # No user text in any log (spec §19.4, [22] item 15, slice-1 ticket 69): the
-    # six parameters that carry a user's text or choice are replaced by "redacted"
-    # in the request URI, the Referer, and a redirect's Location — the chat page's
-    # q, redirect, load-url, and youtube, and the frontend's shared and v, which
-    # its middleware redirects into q, youtube, or load-url. Flags and ids (model,
-    # submit, web-search, ...) stay readable on purpose. The list is the pinned
-    # frontend's and is re-read at a frontend bump (slice-1 ticket 41). The filter
-    # re-encodes every query string it touches with its keys sorted; hash is not
-    # used (at this Caddy it hashes a constant). The frontend's own access line is
-    # off by its Compose command.
+    # No user text in any log: the six parameters that carry a user's text or
+    # choice are replaced by "redacted" in the request URI, the Referer, and a
+    # redirect's Location — the chat page's q, redirect, load-url, and youtube,
+    # and the frontend's shared and v, which its middleware redirects into q,
+    # youtube, or load-url. Flags and ids (model, submit, web-search, ...) stay
+    # readable on purpose. The list is the pinned frontend's and is re-read at a
+    # frontend bump. The filter re-encodes every query string it touches with
+    # its keys sorted; hash is not used (at this Caddy it hashes a constant).
+    # The frontend's own access line is off by its Compose command.
     log {
         output stdout
         format filter {

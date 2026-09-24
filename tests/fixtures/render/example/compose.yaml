@@ -1,4 +1,4 @@
-# Rendered by gideon render — never hand-edit (spec §3.5). Re-run gideon apply after editing /etc/gideon/site.yaml.
+# Rendered by gideon render — never hand-edit. Re-run gideon apply after editing /etc/gideon/site.yaml.
 name: "gideon"
 services:
   caddy:
@@ -100,7 +100,7 @@ services:
       - "gideon"
     mem_limit: 3000000000
   postgres:
-    image: "ghcr.io/tnmd-fdo/postgres@sha256:8f7b5321069a4d783752e99d0350eb448ec67406bb9b691ab30c622dab017ea3"
+    image: "ghcr.io/tnmd-fdo/postgres@sha256:131964147511d0b6053c4fd41c95c5cb6801cb900281bdff82a62e40eca20523"
     restart: "unless-stopped"
     environment:
       POSTGRES_PASSWORD_FILE: "/run/secrets/postgres_superuser_password"

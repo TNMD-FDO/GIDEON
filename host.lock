@@ -1,16 +1,16 @@
-# Host provisioning pins.  Source facts are recorded in ticket 28 and ticket 36.
+# Host provisioning pins.
 os_lts: "26.04"
-# The kernel the first on-box preflight pass ran under (ticket 03, 2026-09-01);
-# within-LTS drift from it is preflight's warn row.
+# The kernel the first on-box preflight pass ran under (2026-09-01); within-LTS
+# drift from it is preflight's warn row.
 kernel_tested: "7.0.0-30-generic"
 
 driver:
   package: nvidia-open
   # The driver branch the `repo` index serves (its nvidia-driver-pinning-<NNN>
-  # packages). §1.2 names R580, which the ubuntu2604 CUDA repo never carried —
-  # recorded as a spec bug on slice-0 ticket 02. The pin watch (ADR-0031)
-  # proposes a newer branch as a pull request; `tested` below moves only after
-  # an on-box converge, never with the proposal.
+  # packages). The R580 branch first required was never carried by the
+  # ubuntu2604 CUDA repo. The pin watch proposes a newer branch as a pull
+  # request; `tested` below moves only after an on-box converge, never with
+  # the proposal.
   branch: "595"
   repo: ubuntu2604/x86_64
   # The repo serves its signing key only inside this deb (loose .pub paths 404,
@@ -25,7 +25,7 @@ minimums:
   compose: 5
   toolkit: 1.20.0
 
-# The release registry's own image (ADR-0029): the Docker Hub `registry`
+# The release registry's own image: the Docker Hub `registry`
 # tracking tag + the OCI index digest it resolved to when pinned; the pin
 # watch proposes the next. https://hub.docker.com/_/registry
 registry_image: registry:3@sha256:1be55279f18a2fe1a74edf2664cac61c1bea305b7b4642dab412e7affdcb3e33

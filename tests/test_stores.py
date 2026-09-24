@@ -168,7 +168,8 @@ class Converge(unittest.TestCase):
         self.assertIn(psql("gideon", "gideon", *QUERY), argvs)
         migration_runs = [call for call in host.calls if call[0] == psql("gideon", "gideon", *MIGRATION)]
         self.assertEqual(len(migration_runs), 6)
-        self.assertTrue((migration_runs[0][1] or "").startswith("-- §19.4"))
+        first_migration = MIGRATIONS[f"{ROOT}/migrations/0001_audit_log.sql"]
+        self.assertTrue((migration_runs[0][1] or "").startswith(first_migration))
         self.assertTrue((migration_runs[0][1] or "").endswith("INSERT INTO schema_migrations (version) VALUES ('0001_audit_log');\n"))
         metrics_migration = next(call[1] or "" for call in migration_runs if "0002_metrics_reader" in (call[1] or ""))
         self.assertIn("GRANT USAGE ON SCHEMA public TO gideon_ro_metrics;", metrics_migration)

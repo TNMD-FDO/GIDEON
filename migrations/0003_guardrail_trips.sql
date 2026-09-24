@@ -1,6 +1,6 @@
--- §19.4: kept event rows carry identifiers only, never user or matter text.
--- ADR-0027: kept events are rows, not log lines or audit-file entries.
--- ADR-0005: this migration is forward-only; corrections are appended later.
+-- Guardrail trip events carry identifiers only, never user or matter text.
+-- Events are stored as rows, not log lines or audit-file entries.
+-- This migration is forward-only; corrections are appended later.
 
 CREATE TABLE guardrail_trips (
     id bigint GENERATED ALWAYS AS IDENTITY,

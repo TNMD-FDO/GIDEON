@@ -1,4 +1,4 @@
-# Image pins (spec §2.2, §2.4, ADR-0029): registry-agnostic name + digest —
+# Image pins: registry-agnostic name + digest —
 # what `registry mirror` puts in the release registry and `apply` pulls by
 # digest. Two kinds. A mirrored pin records the upstream tracking tag
 # (`source`) and the multi-platform index digest it resolved to when pinned,
@@ -8,7 +8,7 @@
 # its build inputs (`build_args`, each watched upstream per `watch`), a digest
 # over those inputs (`inputs_digest`), and the digest of the image
 # `python3 -m tools.imagebuild <name>` pushed (`digest`) — both `unbuilt`
-# until the first build. The pin watch (ADR-0031) proposes the next value as
+# until the first build. The pin watch proposes the next value as
 # a pull request; the resolution record lives in git history and in each bump
 # pull request. The release registry's own image is `host.lock`'s, never
 # listed here.
@@ -20,17 +20,16 @@ images:
   open-webui:
     source: ghcr.io/open-webui/open-webui:v0.11.3
     digest: sha256:41daa0cf2561a5d4c8d1ff31ee2a98d93ab4d3ac2605cac69366ff6a3374a933
-  # The generator's engine (spec §5.2, ADR-0009): vLLM's published image,
+  # The generator's engine: vLLM's published image,
   # resolved on the box with `skopeo inspect` on 2026-09-04 — a multi-platform
   # index (amd64 and arm64) the mirror copies whole. The pin watch proposes
   # the newest same-shape tag; a person completes the bump only after the
-  # engine has come up healthy on the box under the new image and, from
-  # slice-1 ticket 12, after `engine verify` passes — an engine-image change
-  # is §6.7's trigger.
+  # engine has come up healthy on the box under the new image and after
+  # `engine verify` passes; an engine-image change requires that check.
   vllm-openai:
     source: docker.io/vllm/vllm-openai:v0.27.1
     digest: sha256:0a51ea5b4ae2dc5d81890e5173f54203d2a3ae0cfffe51b8fd2afd4391bfd967
-  # General's metasearch (spec §15, §20.1, [06] item 9; slice-1 ticket 15):
+  # General's metasearch:
   # SearXNG's published image, run as shipped, resolved on the box with
   # `skopeo inspect` on 2026-09-08 — a three-platform index (amd64, arm64,
   # arm/v7) the mirror copies whole. Its tag is the source commit's committer
@@ -40,12 +39,11 @@ images:
   # dated-commit shape proposes the newest date and breaks a same-date tie by
   # each candidate's image-configuration `created` time, refusing an unbroken
   # tie. A person completes the bump after the service has come up healthy on
-  # the box and one search has run through it (docs/research/
-  # searxng-service-and-owui-search.md §1).
+  # the box and one search has run through it.
   searxng:
     source: docker.io/searxng/searxng:2026.9.7-3e454637f
     digest: sha256:1dab138ea70a8ceb4d1c182f5c8f256088406c1742b99e279976157dbe1e9759
-  # The observability tier (spec §19.5, slice-0 ticket 07): seven mirrored
+  # The observability tier: seven mirrored
   # pins resolved on the box with `skopeo inspect --raw` on 2026-09-03. Docker
   # Hub wherever the upstream publishes there; the DCGM exporter is nvcr.io
   # only and cAdvisor moved to GHCR at v0.53.0.
@@ -80,8 +78,8 @@ images:
       PGBACKREST_VERSION:
         apt_index: https://apt.postgresql.org/pub/repos/apt/dists/trixie-pgdg/main/binary-amd64/Packages
         package: pgbackrest
-    inputs_digest: sha256:a2bc701e38ece034985f160849718fd2cd31b248ce06020799c7a075e2e4aa01
-    digest: sha256:8f7b5321069a4d783752e99d0350eb448ec67406bb9b691ab30c622dab017ea3
+    inputs_digest: sha256:0523493b9a622c5a1d3e4e0ba5a745bb878ab47ecfb09801cf72f0613ca2b790
+    digest: sha256:131964147511d0b6053c4fd41c95c5cb6801cb900281bdff82a62e40eca20523
   # GIDEON's shared Python runtime for the gideon-api and future gideon-worker
   # roles. Its dependencies are pinned as build arguments; the service package
   # is mounted by Compose rather than copied into this image. Resolved on the
@@ -129,5 +127,5 @@ images:
         pypi_project: typing-extensions
       PSYCOPG_VERSION:
         pypi_project: psycopg
-    inputs_digest: sha256:890443bb983d9522f6a005d4548f160a63a5b61146e7952d88229714140cdbe1
+    inputs_digest: sha256:d7da44c829794c433a4e2dacc18adf70ee08df2b0deeecb7f781ef4eacda4d4a
     digest: sha256:2baac5c2bff21a6762c478b99f79a953ded02579df0a65144eaa9ca9a2d85683

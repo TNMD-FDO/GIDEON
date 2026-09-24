@@ -1,9 +1,9 @@
-# Rendered by gideon render — never hand-edit (spec §3.5). Re-run gideon apply after editing /etc/gideon/site.yaml.
+# Rendered by gideon render — never hand-edit. Re-run gideon apply after editing /etc/gideon/site.yaml.
 release: "fixture"
 inputs:
   site_sha256: "0515e1b8d467d98b5ed1762ba2fbb2b18d9595d364fdd894d043dbce3cf7d716"
-  host_lock_sha256: "6207481c43821eb63a08f39174cc4045201e1a51e339c520418b60a32bc4dfd5"
-  models_lock_sha256: "aa1065d07eab91115c3cd77cbdb3c7974b6cc5746c2c95994f8e2c905534b4c7"
+  host_lock_sha256: "24375b4fd1e9e116e2c2f5ca902f8e13476db4b13a15b5975d6afacbb78afd4d"
+  models_lock_sha256: "72a69dae539cc3df989c8bea78a2f4dc131742ecc31419283fc35b41f3569ea7"
   hardware_profile: "2x96v-256d"
   images_lock_version: 1
   api_sources_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
@@ -11,7 +11,7 @@ inputs:
   build_box: false
 files:
   compose.yaml:
-    sha256: "70fbc7081e1f57e135456a1b79175e36c061287e75c803ea680f0fd3712189f9"
+    sha256: "54ad89a52fe57e22a6e711641069980f1e78f9dc73d973ebc0d5fab440214948"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
@@ -80,7 +80,7 @@ files:
     owners:
       - "postgres"
   "caddy/Caddyfile":
-    sha256: "2141ca3bc10af805dd7c2260158a5dec62763ee184a515328417314507a736c8"
+    sha256: "b435ffd0f1d243a786a7d513ceceef2f2147aafae2a437c477c45ed2dd69a2e7"
     mode: "0644"
     owners:
       - "caddy"
@@ -90,7 +90,7 @@ files:
     owners:
       - "open-webui"
   "open-webui/manifest.yaml":
-    sha256: "f3ffa8eca57c21b5fd95304e25e7f52631ea9cc01255ed15b32cd1273e0a8ba8"
+    sha256: "a21534864349c059b52ee32143dfe14208486c2bda0cc3633d598c6895726cc5"
     mode: "0644"
     owners: []
   "systemd/gideon-users-reconcile.service":
@@ -130,7 +130,7 @@ services:
   prometheus: "7a73ab08985ed9765b04f35b0e78d36befc83b80e562755d063bef6565a7b96b"
   node-exporter: "a581b1f8a717fdaab3b3e0ffa46114516da01f2c51c85838380c168d506632df"
   grafana: "52fa41c180c0104195fc8ce1f53bf9316bd6b09571095f953e9c5187988e0c04"
-  postgres: "4a590ddadb50388c39df40b7b3ea5fc7f5b2cf2d683a5fc05b85fd92dc546669"
+  postgres: "28166dcbe7645857c7e325986bbe54091782536983eccc65c65eee3d639d817b"
   open-webui: "17ad23ba708f21fee33fce40ecf6c7e1abb875428164b540e3e4df15f1f220cb"
   gideon-generator: "7e6fb8478dc880dc237408c62456aa742b2612de5c2bb1e2882ad65d8eaf800b"
   gideon-api: "473caf6458d18d5e0b93ea24158fbbb61c8b9ffcce7cc8102e6a436f23b398d9"

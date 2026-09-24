@@ -50,8 +50,8 @@ from gideon.host.render.yamlout import dump
 PROJECT_NAME: Final = "gideon"
 NETWORK_NAME: Final = "gideon"
 
-# The systemd collector's units: the registry and the runner exist on the
-# build box alone (slice-0 ticket 21), so every other host collects GIDEON's.
+# The systemd collector's units: the registry and runner exist on the build
+# box alone, so every other host collects GIDEON's.
 BUILD_BOX_UNIT_PATTERN: Final = r"^(gideon-registry|actions\.runner\..+|gideon-.*)\.service$"
 UNIT_PATTERN: Final = r"^gideon-.*\.service$"
 
@@ -80,17 +80,16 @@ OWUI_HEALTHCHECK: Mapping[str, object] = {
     "retries": 5,
     "start_period": "120s",
 }
-# The frontend's command (slice-1 ticket 69): the image declares no entrypoint
-# and its command is ``bash start.sh``, whose script hands any container
-# argument to uvicorn *in place of* its own defaults, so the two defaults are
-# restated before ``--no-access-log``.  The flag empties the access logger's
+# The frontend's command: the image declares no entrypoint and its command is
+# ``bash start.sh``, whose script hands any container argument to uvicorn
+# *in place of* its own defaults, so the two defaults are restated before
+# ``--no-access-log``. The flag empties the access logger's
 # handlers and stops its propagation, and it holds only because the rendered
 # ``AUDIT_UVICORN_LOGGER_NAMES`` (render/owui.py) keeps the frontend's startup
 # from re-attaching a handler there — each connection asks that logger for
-# handlers once, when it opens.  The pinned image's and uvicorn's facts are
-# docs/research/ingress-log-filter-and-frontend-access-line.md §B4, §C1–C2,
-# re-read at a frontend bump (ticket 41's runbook step); the drill's frontend
-# shares it.  exempt: no figure — a decision.
+# handlers once, when it opens. The frontend details are re-read at a frontend
+# bump, and the drill's frontend shares the command.
+# exempt: no figure — a decision.
 OWUI_COMMAND: Final[tuple[str, ...]] = (
     "bash",
     "start.sh",
@@ -103,12 +102,11 @@ OWUI_COMMAND: Final[tuple[str, ...]] = (
 OWUI_ENV_FILE: tuple[Mapping[str, str], ...] = (
     {"path": "/etc/gideon/rendered/open-webui/env", "format": "raw"},
 )
-# SearXNG (§15, [06] item 9) runs as shipped — the pinned image's entrypoint,
+# SearXNG runs as shipped — the pinned image's entrypoint,
 # default user, and command untouched — on the Compose network alone, and is
-# present iff web.search is on.  The image declares no HEALTHCHECK and carries
-# wget but no curl (docs/research/searxng-service-and-owui-search.md §3); the
-# bounds are starting values (ADR-0017), the start period the seconds granian
-# takes to serve /healthz on the box.
+# present iff web.search is on. The image declares no HEALTHCHECK and carries
+# wget but no curl. These are starting bounds; the start period is the seconds
+# Granian takes to serve /healthz on the box.
 SEARXNG_HEALTHCHECK: Final[Mapping[str, object]] = {
     "test": [
         "CMD",
@@ -141,8 +139,8 @@ API_HEALTHCHECK: Final[Mapping[str, object]] = {
 }
 
 # vLLM v0.27.1's image supplies ``[vllm, serve]`` as its entrypoint and no
-# command.  The wrapper replaces that entrypoint so the Compose secret is read
-# before the same server is exec'd (docs/research/vllm-engine-service.md §1, §3).
+# command. The wrapper replaces that entrypoint to read the mounted API-key
+# file before execing the same server.
 ENGINE_READY_SECONDS: Final = 900
 ENGINE_SERVER: Final = "vllm serve"
 ENGINE_USAGE_SWITCHES: Final[Mapping[str, str]] = {
@@ -150,11 +148,11 @@ ENGINE_USAGE_SWITCHES: Final[Mapping[str, str]] = {
     "DO_NOT_TRACK": "1",
 }
 # The engine's two probes — the container healthcheck's path below and
-# Prometheus's default metrics path — are the lines vLLM's access log excludes
-# (slice-1 ticket 51): render provisions both probes, so render silences what
-# it causes, and a turn's own request line keeps its shape.  The option takes
-# one comma-separated string on v0.27.1, never two arguments
-# (docs/research/vllm-engine-service.md §11).  exempt: no figure — a decision.
+# Prometheus's default metrics path — are the lines vLLM's access log excludes:
+# render provisions both probes, so render silences what it causes, and a
+# turn's own request line keeps its shape. The option takes one
+# comma-separated string on v0.27.1, never two arguments.
+# exempt: no figure — a decision.
 ENGINE_HEALTH_PATH: Final = "/health"
 ENGINE_ACCESS_LOG_EXCLUDED_PATHS: Final[tuple[str, ...]] = (ENGINE_HEALTH_PATH, "/metrics")
 ENGINE_HEALTHCHECK: Mapping[str, object] = {
@@ -278,13 +276,12 @@ def searxng_service(
     upstream's own Compose file runs it), no ``depends_on`` either way (a
     search is a per-turn call, and the frontend must start without it).
     The settings file is a read-only bind mount at the entrypoint's config
-    path, which leaves an existing file untouched (the note's §2); the
-    signing key and any proxy ride the env file, never the settings.  The
-    access log is granian's default off, pinned by name so no request line
-    carrying a query URL is ever written ([22] item 15; the note's §5e).  The
-    logging file separately sets SearXNG's network logger to ERROR: access-log
-    off controls request lines, while this file suppresses application warning
-    lines that carry a failed request URL (research note §B2, §B3, and §B7.4).
+    path, which leaves an existing file untouched; the signing key and any
+    proxy ride the env file, never the settings. The access log is Granian's
+    default off, pinned by name so no request line carrying a query URL is
+    ever written. The logging file separately sets SearXNG's network logger
+    to ERROR: access-log off controls request lines, while this file suppresses
+    application warning lines that carry a failed request URL.
     """
 
     return {
@@ -740,7 +737,7 @@ def _compose_document(inputs: RenderInputs) -> Mapping[str, object]:
         del services["dcgm-exporter"]
     # Every rendered service carries its row's limit, applied here in one place
     # after the marker and the site have settled which services this host runs.
-    # §7.6's key is mem_limit, not deploy.resources.limits.memory, and the value
+    # The key is mem_limit, not deploy.resources.limits.memory, and the value
     # is an exact byte count: Compose reads a g suffix as binary, 7.4 % over the
     # lock's decimal-gigabyte unit.
     limited: dict[str, object] = {}

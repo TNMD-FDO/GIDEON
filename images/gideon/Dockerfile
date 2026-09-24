@@ -1,4 +1,4 @@
-# GIDEON's service image (spec §17.1): the pinned Python interpreter and the
+# GIDEON's service image: the pinned Python interpreter and the
 # service's exact dependency set, one role per Compose block (gideon-api now).
 # Every version is an images.lock value passed in as a build argument, installed
 # without resolution and checked by `pip check`; the only way it is built is

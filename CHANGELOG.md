@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.2.60](docs/release-notes/v0.2.60.md) — 2026-09-24 — the rendered surface's citations (slice-1 90)
 - [v0.2.59](docs/release-notes/v0.2.59.md) — 2026-09-24 — the guardrail review (improvement 07)
 - [v0.2.58](docs/release-notes/v0.2.58.md) — 2026-09-24 — the gate reads a positive's named figure (slice-2 28)
 - [v0.2.57](docs/release-notes/v0.2.57.md) — 2026-09-23 — false refusal read by the judge (slice-2 15)

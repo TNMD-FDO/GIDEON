@@ -1,4 +1,4 @@
-"""Pure Grafana configuration and dashboard rendering (spec §19.5, ADR-0034)."""
+"""Pure Grafana configuration and dashboard rendering."""
 
 import json
 from typing import Final
@@ -27,16 +27,16 @@ RULES_TEMPLATE: Final = "grafana/provisioning/alerting/rules.yaml.tmpl"
 DRIFT_RULE_TEMPLATE: Final = "grafana/provisioning/alerting/driver-drift-rule.yaml.tmpl"
 ENGINE_RULE_TEMPLATE: Final = "grafana/provisioning/alerting/engine-down-rule.yaml.tmpl"
 # The host-unit rule pages on the registry and runner units, which only the
-# build box runs (slice-0 ticket 21).
+# build box runs.
 HOST_UNIT_RULE_TEMPLATE: Final = "grafana/provisioning/alerting/host-unit-rule.yaml.tmpl"
-# The search probe's rule (slice-1 ticket 15): its own template like the two
+# The search probe's rule: its own template like the two
 # GPU-host rules, rendered only while SearXNG is; "Target down" reads a scrape's
 # `up`, which the blackbox exporter keeps at 1 while the probe itself fails,
 # so each probe has a `probe_success` rule of its own.
 SEARCH_RULE_TEMPLATE: Final = "grafana/provisioning/alerting/search-probe-rule.yaml.tmpl"
 # The API probe's rule, rendered while the GPU-only API service is present.
 API_RULE_TEMPLATE: Final = "grafana/provisioning/alerting/api-probe-rule.yaml.tmpl"
-# The local break-glass administrator (§19.5); the password is the generated
+# The local break-glass administrator; the password is the generated
 # print-once secret `grafana_admin_password`.
 GRAFANA_ADMIN_USER: Final = "grafana-admin"
 # Where the container sees the rendered boards; the provisioning provider
@@ -57,7 +57,7 @@ DRILL_MAX_GAP_DAYS: Final[dict[str, int]] = {
     "6m": 189,
     "1y": 371,
 }
-# The "Engine down" rule's pending period. Slice-1 ticket 06 measured the
+# The "Engine down" rule's pending period. A measurement on the box found the
 # engine healthy 57 s after a plain `compose start` and 185 s after a cold
 # recreate (the bound is ENGINE_READY_SECONDS): the period must clear both, so
 # a deliberate stop/start or an apply's recreate never pages, and it stays

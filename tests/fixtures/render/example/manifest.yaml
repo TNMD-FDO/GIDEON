@@ -1,9 +1,9 @@
-# Rendered by gideon render — never hand-edit (spec §3.5). Re-run gideon apply after editing /etc/gideon/site.yaml.
+# Rendered by gideon render — never hand-edit. Re-run gideon apply after editing /etc/gideon/site.yaml.
 release: "fixture"
 inputs:
-  site_sha256: "e7639086e85d038bc7ca7ec4cb820614d5027ced5f9b76065fe7cbf98a844791"
-  host_lock_sha256: "6207481c43821eb63a08f39174cc4045201e1a51e339c520418b60a32bc4dfd5"
-  models_lock_sha256: "aa1065d07eab91115c3cd77cbdb3c7974b6cc5746c2c95994f8e2c905534b4c7"
+  site_sha256: "d93d52b657d04c39b3e3842c029b77eca898f457d021d01a13682e67bdac0f85"
+  host_lock_sha256: "24375b4fd1e9e116e2c2f5ca902f8e13476db4b13a15b5975d6afacbb78afd4d"
+  models_lock_sha256: "72a69dae539cc3df989c8bea78a2f4dc131742ecc31419283fc35b41f3569ea7"
   hardware_profile: "2x96v-256d"
   images_lock_version: 1
   api_sources_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
@@ -11,7 +11,7 @@ inputs:
   build_box: true
 files:
   compose.yaml:
-    sha256: "66afcacde3fe178f51d3b1e57b69e0b273e8141983ec786beb7b49f38a4eded9"
+    sha256: "68b1dacd61fce4876fddff29a11767664379785f1b07e53bedaea30d3005aecf"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
@@ -80,7 +80,7 @@ files:
     owners:
       - "postgres"
   "caddy/Caddyfile":
-    sha256: "3fb93bee0e649d48b82ae2d327adde60cbd0e62f228e676a24d0cea16f12ad19"
+    sha256: "9b6514165374a5ece01427e13cec00c0620bbf1b8cc8ecdeb883d1f1b1f2d132"
     mode: "0644"
     owners:
       - "caddy"
@@ -90,11 +90,11 @@ files:
     owners:
       - "open-webui"
   "open-webui/manifest.yaml":
-    sha256: "19160be4e4f0fdf70895f2e5e3e9e33026bc233352f80205402b2ff2708c3323"
+    sha256: "c3b1c625a5dad604c6fca2af5ee73d090493cda6a1842bfaa8e0b02177bde5cc"
     mode: "0644"
     owners: []
   "searxng/settings.yml":
-    sha256: "ffdcb13dc0743432a8487a4da679c603599f6505b57d8a00ad1eb8f4ba17a637"
+    sha256: "ae506e34c5ba6b3d89b9eeb1b3041962892c3f51fe8e46473705403d1eb02080"
     mode: "0644"
     owners:
       - "searxng"
@@ -145,7 +145,7 @@ services:
   prometheus: "1590c12e98d56b195818d759cbaf4614e8b9d768816bca9efbfae27a7ae0f4bd"
   node-exporter: "372e640d7a5bc260c18cbd0a7cb48c5fd16fea5fc2f76ff1c0fa7b8eeb531134"
   grafana: "86e24511cbb77a0b1bec1a2a8f1355c9b7af147143937b88441071b959f3c7f3"
-  postgres: "7039d090c0ae384766b132e1bbddf593645233c1df0d4d716963776e5f7902c1"
+  postgres: "c646e6eec08c7266e7eb67be874e9dc4d5193cfaeb89f7125f67156bb5924f87"
   open-webui: "67cfe5c71559f1d8e0ad6d30c6761275e41a09db39579c7ecad9837d1ed3c585"
   gideon-generator: "4769d4dcc7e4e3de52094a84573d13c76bc57eaaafc7c39cbec954fe93b5efa9"
   gideon-api: "338611d998929d077611c8b22337900c218221e6e1b7b8c8899832b2a077b3fa"
