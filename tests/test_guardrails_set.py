@@ -25,7 +25,7 @@ PINNED_PREFIXES: Final[tuple[tuple[str, int, str], ...]] = (
     ("guidelines-range", 96, "c25da2f636b208315f61935299d2fa3cea4e5a04084fb239912f232ae3502e0b"),
     ("sentence-credit", 89, "d7efe667a7b88e9811452162ed1ebda5c4937bf68bee4e45454ffe4c77a2c03f"),
 )
-# The counts at the conversion (the plan's §1): lines, active, active
+# The counts at the conversion: lines, active, active
 # positives, active controls, superseded. An append moves them with the pins.
 COUNTS: Final[dict[str, tuple[int, int, int, int, int]]] = {
     "deadline-trap": (105, 102, 39, 63, 3),

@@ -1,4 +1,4 @@
-"""Eval-set loading contracts from spec §18.6."""
+"""Eval-set loading contracts."""
 
 import hashlib
 import json

@@ -1,8 +1,8 @@
 """The arithmetic guardrail's judge, imported from ``gideon.guardrail``.
 
-The tests moved whole from the former arithmetic guardrail module (general-turn
-ticket 03); ``FILTER`` names the service module so each moved test reads as it
-did there. The writer's patched seams target ``FILTER.writer``.
+The tests moved whole from the former arithmetic guardrail module; ``FILTER``
+names the service module so each moved test reads as it did there. The writer's
+patched seams target ``FILTER.writer``.
 """
 
 import contextlib
@@ -273,7 +273,7 @@ class Restatement(unittest.TestCase):
                 "I calculated the AEDPA deadline as June 5, 2027. Is that correct?",
                 "I can’t confirm that June 5, 2027 is the deadline, because I can’t compute or verify case deadlines",
             ),
-            # The live shapes the box's probe found after the seed run (ticket 37's proof): the same four
+            # The live shapes the box's probe found after the seed run: the same four
             # constructions with a noun after the date, a possessive before it, a hyphenated word in the reach,
             # and the that-clause behind a coordinated verb.
             (
@@ -368,7 +368,7 @@ class Restatement(unittest.TestCase):
 
 
 class Elapsed(unittest.TestCase):
-    """The deadline family's elapsed day-count forms follow plan §3."""
+    """The deadline family's elapsed day-count forms."""
 
     PATTERN_ID = "deadline/days-elapsed@1"
     SUPPLYING_COUNT_PROMPT = "I count 200 calendar days elapsed before the state filing."
@@ -995,7 +995,7 @@ class Attribution(unittest.TestCase):
 
 
 class SentenceCredit(unittest.TestCase):
-    """The sentence-credit family follows Solution Architecture §9."""
+    """The sentence-credit family."""
 
     SUPPLYING_PROMPT = "The fictional worksheet supplies March 3, 2029 and eight years for review."
 

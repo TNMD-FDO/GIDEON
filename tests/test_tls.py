@@ -1,4 +1,4 @@
-"""TLS contracts: material validation, the ingress probe, and `tls reload` (spec §1.6)."""
+"""TLS contracts: material validation, the ingress probe, and `tls reload`."""
 
 import argparse
 import contextlib

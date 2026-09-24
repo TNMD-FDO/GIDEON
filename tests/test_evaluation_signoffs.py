@@ -1,4 +1,4 @@
-"""Sign-offs-file shape and serialization contracts from spec §18.6."""
+"""Sign-offs-file shape and serialization contracts."""
 
 from __future__ import annotations
 

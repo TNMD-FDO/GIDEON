@@ -84,7 +84,7 @@ def config_value(config: object, path: str) -> object:
 
 class SiteValidation(unittest.TestCase):
     def test_load_site_text_constructs_and_collects_errors(self) -> None:
-        """Slice-1 ticket 55 loads rendered text through the normal site pipeline."""
+        """The normal site pipeline loads rendered text."""
 
         fixture = (FIXTURES / "redact-office.yaml").read_text(encoding="utf-8")
         loaded = load_site_text(fixture)
@@ -186,7 +186,7 @@ class SiteValidation(unittest.TestCase):
                 self.assertIn(path, {error.key_path for error in result.errors})
 
     def test_web_engines_and_domain_filter_refusals(self) -> None:
-        """§3.3's three web keys (slice-1 ticket 15): six engine names, bare domains."""
+        """The three web keys accept six engine names and bare domains."""
 
         allowed = "duckduckgo, brave, bing, startpage, wikipedia, google"
         self.assertEqual(

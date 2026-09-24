@@ -1,4 +1,4 @@
-"""Hold release notes to the versioned template contract in spec §21 and ADR-0043."""
+"""Hold release notes to the versioned template contract."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ KNOWN_TEMPLATE_HEADINGS: dict[int, tuple[str, ...]] = {
         "## Next maintenance window",
     ),
 }
-# §21's practice rule, the sentence the pre-launch note carries verbatim (ADR-0043).
+# The practice rule is the sentence every pre-launch note carries verbatim.
 PRACTICE_RULE = (
     "Nothing from General goes into a court filing unchecked, and until go-live "
     "there is no Legal chat to check it in."
@@ -76,7 +76,7 @@ def _finding(path: Path, problem: str, fix: str) -> str:
 
 
 def template_findings(path: Path = TEMPLATE) -> list[str]:
-    """Return template-contract findings, each ending with its fix (§21)."""
+    """Return template-contract findings, each ending with its fix."""
 
     findings: list[str] = []
     newest = max(KNOWN_TEMPLATE_HEADINGS)
@@ -145,7 +145,7 @@ def template_findings(path: Path = TEMPLATE) -> list[str]:
 def note_findings(
     path: Path, template_headings: dict[int, tuple[str, ...]] = KNOWN_TEMPLATE_HEADINGS
 ) -> list[str]:
-    """Return conformance findings for one release note, citing spec §21."""
+    """Return conformance findings for one release note."""
 
     findings: list[str] = []
     text = path.read_text(encoding="utf-8")
@@ -297,7 +297,7 @@ def note_findings(
 
 
 def existence_findings(root: Path, current_version: str) -> list[str]:
-    """Return the current-release existence finding required from v0.2.0 (§21)."""
+    """Return the missing-note finding for a current version from 0.2.0 onward."""
 
     current = Version.parse(current_version)
     if current < _MINIMUM_NOTE_VERSION:
@@ -349,29 +349,29 @@ def _good_note_v3() -> str:
 
 
 class ReleaseNoteTests(unittest.TestCase):
-    """Test the release-note artifact and its durable contract from spec §21."""
+    """Test the release-note artifact and its durable contract."""
 
     def test_template_contract(self) -> None:
-        """The committed template declares version 3 and exactly its required sections (§21)."""
+        """The committed template declares version 3 and exactly its required sections."""
 
         if absent_from_export(TEMPLATE.relative_to(ROOT), ROOT):
             self.skipTest("the release-note template is excluded from the public export")
         self.assertEqual(template_findings(), [])
 
     def test_each_committed_note_conforms(self) -> None:
-        """Every committed note follows the template version it names (§21)."""
+        """Every committed note follows the template version it names."""
 
         for path in sorted(RELEASE_NOTES.glob("v*.md")):
             with self.subTest(note=path.name):
                 self.assertEqual(note_findings(path), [])
 
     def test_current_release_has_its_note(self) -> None:
-        """From v0.2.0 every tag ships a note for the version the package declares (§21)."""
+        """From v0.2.0 every tag ships a note for the version the package declares."""
 
         self.assertEqual(existence_findings(RELEASE_NOTES, gideon.__version__), [])
 
     def test_broken_shapes_are_reported_in_isolated_fixtures(self) -> None:
-        """Each malformed note shape is refused with the finding that names its repair (§21)."""
+        """Each malformed note shape is refused with the finding that names its repair."""
 
         good = _good_note()
         cases: tuple[tuple[str, str, str], ...] = (
@@ -485,7 +485,7 @@ class ReleaseNoteTests(unittest.TestCase):
                         self.assertIn(". Fix: ", finding)
 
     def test_existence_rule_starts_at_0_2_0(self) -> None:
-        """A note is required for the current version from 0.2.0 on, never before (§21)."""
+        """A note is required for the current version from 0.2.0 on, never before."""
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

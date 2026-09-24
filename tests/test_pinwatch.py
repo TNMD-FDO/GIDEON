@@ -3383,8 +3383,7 @@ class CliContracts(unittest.TestCase):
     def test_shallow_checkout_is_completed_by_the_one_fetch(self) -> None:
         # The hosted runner's depth-1 checkout: over a cut history
         # ``origin/main..origin/<branch>`` counts the branch's whole fetched
-        # ancestry and read an untouched proposal as completed (standing
-        # ticket 19).
+        # ancestry and read an untouched proposal as completed.
         host = PinWatchHost(shallow=True)
         result, _, _ = _cli_output(
             host,
@@ -3760,7 +3759,7 @@ class CliContracts(unittest.TestCase):
 
 
 class DatedCommitTags(unittest.TestCase):
-    """SearXNG's tag shape (slice-1 ticket 15): a date and a commit hash.
+    """SearXNG's tag shape: a date and a commit hash.
 
     The hash is never part of the shape, a date rollover is never a major
     bump, and a same-date tie is broken by the registry's own creation time

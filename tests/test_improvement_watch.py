@@ -1,4 +1,4 @@
-"""Trigger evaluation and eval-set figures for the read-only report (§19.4)."""
+"""Trigger evaluation and eval-set figures for the read-only report."""
 
 import os
 import subprocess

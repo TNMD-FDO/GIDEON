@@ -1,4 +1,4 @@
-"""Read-only proposals report over the committed trigger registry (§20.2)."""
+"""Read-only proposals report over the committed trigger registry."""
 
 import argparse
 import ast

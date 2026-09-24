@@ -1,4 +1,4 @@
-"""The service citation stamp's seed, detection, and decision (spec §15)."""
+"""The service citation stamp's seed, detection, and decision."""
 
 import ast
 import sys

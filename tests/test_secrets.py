@@ -1,4 +1,4 @@
-"""Generated secrets: the registry, absent-only generation, and the shared reader (spec §1.7)."""
+"""Generated secrets: the registry, absent-only generation, and the shared reader."""
 
 import os
 import subprocess
@@ -357,7 +357,7 @@ class Rotation(unittest.TestCase):
 
 
 class Fingerprint(unittest.TestCase):
-    """The keyed secrets fingerprint a backup manifest carries (§19.1, ticket 06)."""
+    """The keyed secrets fingerprint a backup manifest carries."""
 
     def test_keyed_by_the_session_key_digest_and_order_independent(self) -> None:
         digests = {"webui_secret_key": "1" * 64, "ldap_bind_password": "2" * 64, "tls_key": "3" * 64}

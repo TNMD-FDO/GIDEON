@@ -838,7 +838,7 @@ class ServiceDoor(unittest.TestCase):
     def test_streamed_door_turns_are_the_cases_not_twice_the_cases(self) -> None:
         # A frontend --stream row is a managed turn plus a raw replay, two
         # calls; the door's is the case's one call, delivered streamed, so the
-        # summary must not count it twice (found on the box at ticket 05).
+        # summary must not count it twice.
         with tempfile.TemporaryDirectory() as directory:
             cases_path = Path(directory) / "cases.yaml"
             output = Path(directory) / "out"

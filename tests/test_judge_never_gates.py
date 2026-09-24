@@ -115,8 +115,8 @@ def _run_registered(
     for slice_name, spec in SLICE_RUNNERS.items():
         if slice_name not in loaded.slices:
             # A registered slice the set lacks is the export boundary's doing
-            # and nothing else's: in the development tree every entry is driven,
-            # and an omission here must be one the boundary itself reports.
+            # and nothing else's: where every slice's files are present every
+            # entry is driven, and an omission here must be reported by the boundary.
             assert absent_from_export(SET_ROOT / "slices" / slice_name, ROOT), (
                 f"slice {slice_name} is registered but the set has no id list "
                 "for it, and the export boundary does not omit its directory"

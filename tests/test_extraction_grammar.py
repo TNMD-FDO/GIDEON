@@ -24,7 +24,7 @@ EXTRACTION = ROOT / "gideon" / "extraction"
 
 
 class Contract(unittest.TestCase):
-    """The exact-object invariants from spec §11.2."""
+    """The exact-object extraction invariants."""
 
     def test_source_slices_and_order_are_preserved(self) -> None:
         source = "[FICTIONAL] 18 USC 3663A(b)(1), then Rule 41."
@@ -86,7 +86,7 @@ class Contract(unittest.TestCase):
 
 
 class Imports(unittest.TestCase):
-    """Every import under the package is the standard library or the package (map §9)."""
+    """Every package import comes from the standard library or the package itself."""
 
     def test_every_import_is_standard_library_or_gideon(self) -> None:
         standard_library = set(sys.stdlib_module_names)

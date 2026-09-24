@@ -1,15 +1,13 @@
 """Standard-library HTTP stub for the search sentinel's engine and web paths.
 
 Compose healthchecks consume ``/health``; the frontend consumes ``/v1/models``
-and ``/v1/chat/completions`` (§A1–A2 of
-``docs/research/search-path-logs-audit-telemetry.md``); SearXNG consumes
+and ``/v1/chat/completions``; SearXNG consumes
 ``/json`` through its JSON engine and ``/search`` through the shipped Bing
-module (§B3, §B7.1–B7.2); the frontend's failure path uses ``/searxng/search``
-(§A2), and its loader consumes ``/page/<n>`` (§A3).  Every request is logged
-without its query string so the contract can inspect the request path without
-writing query text. The line is written before the first response byte, so a
-reader holding the stream until the response is read has the line (slice-1
-ticket 77).
+module; the frontend's failure path uses ``/searxng/search``, and its loader
+consumes ``/page/<n>``. Every request is logged without its query string so the
+contract can inspect the request path without writing query text. The line is
+written before the first response byte, so a reader holding the stream until
+the response is read has the line.
 """
 
 import json

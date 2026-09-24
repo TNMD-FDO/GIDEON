@@ -146,8 +146,8 @@ class CommittedLock(unittest.TestCase):
         self.assertEqual(result.errors, ())
         assert result.lock is not None
         self.assertEqual(result.lock.version, 1)
-        # Shape, never values: the pin watch (ADR-0031) moves the values through
-        # pull requests, and this contract must hold on every bump branch.
+        # Shape, never values: the pin watch moves values through its pull
+        # requests, and this contract must hold on every bump branch.
         self.assertEqual(
             [pin.name for pin in result.lock.images],
             [

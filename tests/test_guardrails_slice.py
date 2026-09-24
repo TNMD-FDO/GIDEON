@@ -1,4 +1,4 @@
-"""Guardrails runner and family gate contracts from spec §§18.2, 18.3, and 18.6."""
+"""Guardrails runner and family gate contracts."""
 
 from __future__ import annotations
 

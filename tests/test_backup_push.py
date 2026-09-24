@@ -1,4 +1,4 @@
-"""Backup-push stages over the injectable Host seam (spec §19.1, ADR-0026)."""
+"""Backup-push stages over the injectable Host seam."""
 
 import argparse
 import contextlib

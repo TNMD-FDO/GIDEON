@@ -1,5 +1,5 @@
-"""Tripwire from slice-1 ticket 54: this module names no office value and
-derives its public-suffix set from the allowlist.
+"""This tripwire names no office value and derives its public-suffix set from
+the allowlist.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ _PRIVATE_SUFFIXES = frozenset(
 )
 _RESERVED_LABELS = frozenset({"example", "test", "invalid", "localhost", "internal"})
 # A workflow's expression over the Actions event context is dotted syntax, never
-# a hostname; the exemption holds under .github/workflows/ alone (slice-1 ticket 56).
+# a hostname; the exemption holds under .github/workflows/ alone.
 _ACTIONS_EVENT_CONTEXT = "github.event."
 # Registrable domains the tree cites beyond the egress allowlist's hosts: the
 # documentation hosts of the research notes, the ADRs, the licences, the
@@ -91,7 +91,7 @@ _CURATED_ALLOWLIST: tuple[str, ...] = (
     "whatwg.org",
     "yaml.org",
 )
-# The export tree (ticket 56's boundary) holds about five hundred files; a glob
+# The export tree holds about five hundred files; a glob
 # mistake that walked one directory would fall under this floor.
 MINIMUM_SCANNED_FILES: int = 400
 
@@ -174,7 +174,7 @@ def _walk(root: Path) -> Iterator[Path]:
             marker = relative_parts.index(".claude")
             if len(relative_parts) > marker + 1 and relative_parts[marker + 1] == "worktrees":
                 continue
-            # A skill's Codex run logs under .claude/skills/<name>/state/ are gitignored.
+            # A skill's Codex run logs under its state directory are gitignored.
             if (
                 len(relative_parts) > marker + 4
                 and relative_parts[marker + 1] == "skills"

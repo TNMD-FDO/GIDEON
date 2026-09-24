@@ -1,4 +1,4 @@
-"""Contracts for the local backup-set model (spec §19.1)."""
+"""Contracts for the local backup-set model."""
 
 import json
 import os

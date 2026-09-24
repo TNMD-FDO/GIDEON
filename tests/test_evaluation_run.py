@@ -1,4 +1,4 @@
-"""Evaluation runner and CLI contracts from spec §§18.2 and 18.6."""
+"""Evaluation runner and CLI contracts."""
 
 import ast
 import contextlib

@@ -1,4 +1,4 @@
-"""The rendered stack's secret consumers (spec §1.7 and §3.5)."""
+"""The rendered stack's secret consumers."""
 
 import unittest
 from collections.abc import Iterator, Mapping

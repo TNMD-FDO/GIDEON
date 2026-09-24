@@ -1,10 +1,9 @@
 """The release's two derived records: the release-note index and README's tag.
 
-`bin/release-git` derives both from `gideon.__version__` and the release files
-(slice-1 tickets 60 and 61, workflow tickets 38 and 42); this module holds the
-committed tree to them, with each linked line targeting its release note,
-rejects ticket citations at the end of an index phrase, and fires each index
-rule on a seeded tree.
+The release derives both from `gideon.__version__` and the release files; this
+module holds the committed tree to them, with each linked line targeting its
+release note, rejects ticket citations at the end of an index phrase, and fires
+each index rule on a seeded tree.
 """
 
 from __future__ import annotations

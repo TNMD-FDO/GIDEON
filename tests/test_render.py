@@ -1,4 +1,4 @@
-"""Render contracts: host facts, the artifacts, and the pure core (spec §3.5)."""
+"""Render contracts: host facts, artifacts, and the pure core."""
 
 import argparse
 import contextlib
@@ -754,7 +754,7 @@ class Engine(unittest.TestCase):
         self.assertIn("registry in /etc/gideon/site.yaml", str(ctx.exception))
 
     def test_unbuilt_built_pin_refuses_naming_the_build_tool(self) -> None:
-        """A built pin still at its `unbuilt` sentinels cannot render a reference (ticket 16)."""
+        """A built pin at its `unbuilt` sentinels cannot render a reference."""
 
         text = (
             "version: 1\n"
@@ -1515,7 +1515,7 @@ class RecreateRule(unittest.TestCase):
 
 
 class ByteStableFixtures(unittest.TestCase):
-    """Spec §3.4: both site files render byte-stable against committed fixtures."""
+    """Both site files render byte-stably against committed fixtures."""
 
     REGENERATE = "python3 tests/regenerate_render_fixtures.py"
 

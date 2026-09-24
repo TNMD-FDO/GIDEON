@@ -1,4 +1,4 @@
-"""Contracts for the shared managed-turn recipe over a fake frontend (§1.5)."""
+"""Contracts for the shared managed-turn recipe over a fake frontend."""
 
 import unittest
 from collections.abc import Mapping

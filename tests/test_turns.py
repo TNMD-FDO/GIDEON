@@ -396,8 +396,8 @@ class Frontend:
             while f"chat/{number}" in self.chats:
                 number += 1
             chat_id = f"chat/{number}"
-        # The pinned record: the flat chat.messages list frozen at creation, the
-        # turn's messages under chat.history.messages by id (the note's §1.3, §3.2).
+        # The pinned record stores a flat chat.messages list frozen at creation
+        # and the turn's messages under chat.history.messages by id.
         self.chats[chat_id] = {
             "id": chat_id,
             "title": "New Chat",
@@ -2193,7 +2193,7 @@ class TurnHarness(TestCase):
                 self.assertIn(fragment, loaded.problem)
 
     def test_decline_form_and_plain_doctrinal_answer(self) -> None:
-        # The first two are the generator's own words from ticket 09's transcript,
+        # The first two are the generator's own words from a recorded transcript,
         # typographic apostrophe included; the fourth is a disclaimer opening
         # alone, which is a decline until a body carries it past the bound.
         texts = (
@@ -2321,7 +2321,7 @@ class TurnHarness(TestCase):
 
         # The citation stamp is the product's text, never counted against the
         # bound: a decline of exactly 600 of the model's own characters with the
-        # stamp appended stays a decline (ticket 38's run, control-34#2).
+        # stamp appended stays a decline.
         for own, expected in (
             (classify.DECLINE_MAX_CHARS, "declined"),
             (classify.DECLINE_MAX_CHARS + 1, "disclaimed"),

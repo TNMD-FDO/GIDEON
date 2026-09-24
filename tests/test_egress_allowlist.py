@@ -1,4 +1,4 @@
-"""Contracts for the committed egress allowlist and its loader (spec §2.3)."""
+"""Contracts for the committed egress allowlist and its loader."""
 
 import unittest
 from pathlib import Path
@@ -44,8 +44,8 @@ class CommittedArtifact(unittest.TestCase):
             (400,),
         )
 
-    def test_host_provisioning_group_has_ticket_02_additions(self) -> None:
-        """Ticket 02 spec bug (a): the registry image host and the VM image host."""
+    def test_host_provisioning_group_has_the_image_hosts(self) -> None:
+        """The provisioning group holds the registry image host and the VM image host."""
 
         result = load_egress_allowlist(ARTIFACT)
         assert result.allowlist is not None
@@ -59,7 +59,7 @@ class CommittedArtifact(unittest.TestCase):
         self.assertIn("objects.githubusercontent.com", hosts)
 
     def test_image_build_group_holds_the_build_hosts(self) -> None:
-        """Ticket 16: the hosts apt reaches inside a GIDEON image build (§2.4)."""
+        """The hosts apt reaches inside a GIDEON image build."""
 
         result = load_egress_allowlist(ARTIFACT)
         assert result.allowlist is not None

@@ -1,4 +1,4 @@
-"""Registry mirror contracts: destination, skopeo argv, idempotence, refusals (spec §2.4)."""
+"""Registry mirror contracts: destination, skopeo argv, idempotence, and refusals."""
 
 import argparse
 import contextlib
@@ -17,8 +17,8 @@ ROOT = Path(__file__).resolve().parent.parent
 EXAMPLE = ROOT / "config/site.example.yaml"
 SECOND = ROOT / "tests/fixtures/site/second-office.yaml"
 SITE = "/tmp/site.yaml"
-# Every expectation derives from the committed lock, so a pin-watch bump
-# (ADR-0031) never breaks these contracts.
+# Every expectation derives from the committed lock, so a pin-watch bump that
+# moves values through its pull request never breaks these contracts.
 _COMMITTED_LOCK = load_image_lock(ROOT / "images.lock").lock
 assert _COMMITTED_LOCK is not None, "the committed images.lock must load"
 _PINS = {pin.name: pin for pin in _COMMITTED_LOCK.images}
@@ -177,8 +177,8 @@ def image_ref(destination: str, name: str, digest: str) -> str:
     return f"{destination}/{name}@{digest}"
 
 
-# The test's own statement of which destinations are plain HTTP (loopback and
-# the libvirt bridge, [29] item 13) — never derived from the code under test.
+# The test states which destinations use plain HTTP (loopback and the libvirt
+# bridge); it never derives them from the code under test.
 _PLAIN_PREFIXES = ("127.", "192.168.122.")
 
 

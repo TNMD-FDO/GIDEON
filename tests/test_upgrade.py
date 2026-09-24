@@ -1,4 +1,4 @@
-"""The upgrade command's contracts (§2.1, §3.6 step 7): the forward path over a fake Host."""
+"""The upgrade command's contracts: the forward path over a fake Host."""
 
 import argparse
 import ast

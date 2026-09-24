@@ -4,10 +4,10 @@ CI installs the development toolchain from the one file, so a ruff, mypy, or
 pytest copy cannot drift: there is none. Two copies are read by nothing that
 installs from the file — `pin-watch.yml`'s PyYAML install line and the Playwright
 constant the browser mode checks on the box — and this module holds them equal to
-`requirements-dev.txt` (workflow ticket 42). The `gideon` image's ten packages run
-the other way: `images.lock` is the source and `requirements-dev.txt` carries the
-copy, so mypy and the unit suite see the service's imports (general-turn ticket 01),
-and each build argument is matched to its requirement by normalized project name.
+`requirements-dev.txt`. The `gideon` image's ten packages run the other way:
+`images.lock` is the source and `requirements-dev.txt` carries the copy, so mypy
+and the unit suite see the service's imports, and each build argument is
+matched to its requirement by normalized project name.
 It states no version: every value is read from the tree.
 """
 

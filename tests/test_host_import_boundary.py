@@ -1,4 +1,4 @@
-"""Locks the provisioning seam (spec §§1.5, 2.3; bootstrap brief Phase B).
+"""Locks the bare-host provisioning seam.
 
 ``python3 -m gideon host provision`` runs on a bare Ubuntu Server install
 where only the standard library and python3-yaml exist — never PyPI. Two

@@ -198,7 +198,7 @@ class Overview(unittest.TestCase):
         self.assertTrue(_datasource_uids(dashboard) <= declared)
 
     def test_filesystem_panel_has_four_mountpoint_targets_and_shared_threshold(self) -> None:
-        """Spec §19.5: the Overview filesystem panel follows the page rule."""
+        """The Overview filesystem panel follows the page rule."""
 
         dashboard = json.loads(GrafanaOverviewArtifact.emit(inputs()))
         panel = next(panel for panel in dashboard["panels"] if panel["title"] == "Filesystems free")
@@ -463,7 +463,7 @@ class Alerting(unittest.TestCase):
                     self.assertEqual(rules[uid]["execErrState"], "Alerting")
 
     def test_host_filesystem_rule_covers_both_mountpoints_and_reuses_data_threshold(self) -> None:
-        """Spec §19.5: each rendered host filesystem page has its exact contract."""
+        """Each rendered host filesystem page follows its exact contract."""
 
         for site_path, no_gpu in ((EXAMPLE, False), (SECOND, False), (EXAMPLE, True)):
             with self.subTest(site=site_path.name, no_gpu=no_gpu):

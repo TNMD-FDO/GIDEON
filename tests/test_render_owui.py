@@ -1,4 +1,4 @@
-"""The frontend's rendered artifacts: env, env_file, manifest, and the reconcile units (spec §3.5, §4)."""
+"""The frontend's rendered artifacts: env, env_file, manifest, and reconcile units."""
 
 import unittest
 from collections.abc import Mapping
@@ -239,8 +239,8 @@ class Environment(unittest.TestCase):
                 "WEB_SEARCH_DOMAIN_FILTER_LIST",
             },
         )
-        # Connection-kind assertion ([07] item 10d): with no OPENAI_API_CONFIGS,
-        # the pinned frontend uses the Chat Completions path that supports withholding.
+        # With no OPENAI_API_CONFIGS, the pinned frontend uses the Chat
+        # Completions path that supports withholding.
         for name in ("OPENAI_API_CONFIGS", "TASK_MODEL", "TASK_MODEL_PARAMS", "TEMPERATURE"):
             self.assertNotIn(name, env)
         self.assertEqual(env["ENABLE_VERSION_UPDATE_CHECK"], "false")
@@ -355,7 +355,7 @@ class Environment(unittest.TestCase):
         self.assertEqual(env["LDAP_SEARCH_FILTERS"], "(memberOf=CN=GIDEON \\28Users\\29\\5c, all,OU=Groups,DC=ad,DC=test)")
 
     def test_permission_env_covers_every_leaf_with_the_access_suffix_rule(self) -> None:
-        """The leaves hold §4.2's set, with workspace.knowledge staged off under §21 until Ingestion GA (v0.7.0)."""
+        """Each permission leaf gets an environment entry; workspace.knowledge stays disabled until Ingestion GA (v0.7.0)."""
 
         env = owui_environment(inputs())
         tree = permission_tree(inputs())

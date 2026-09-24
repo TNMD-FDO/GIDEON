@@ -5,8 +5,8 @@ runner: it needs Docker and the box's loopback registry). For every built pin
 in the committed lock it runs the build tool's check — the digest is present,
 the image's labels equal the lock's base and build inputs, and the smoke
 command passes — so a merge whose lock names a digest nobody built, or whose
-inputs moved without a rebuild, is red on the box the same day (slice-0
-ticket 16). No stack, no secrets: one ``docker pull`` per built pin.
+inputs moved without a rebuild, is red on the box the same day. No stack, no
+secrets: one ``docker pull`` per built pin.
 
 Invoked as ``python3 -m unittest tests/contract/built_images.py`` with the
 system Python; the file has no ``test_`` prefix so the hosted pytest never

@@ -1,4 +1,4 @@
-"""The read-only box status report (§20.2)."""
+"""The read-only box status report."""
 
 import argparse
 import ast

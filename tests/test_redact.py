@@ -1,4 +1,4 @@
-"""Contracts for slice-1 ticket 55's capture-time redaction."""
+"""Contracts for capture-time redaction."""
 
 import ast
 import io

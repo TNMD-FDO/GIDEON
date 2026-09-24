@@ -1,4 +1,4 @@
-"""SearXNG's rendered service, settings, env, and logging (spec §15, [06] items 9–14).
+"""SearXNG's rendered service, settings, env, and logging.
 
 The service and its three files exist only while ``web.search`` is on, on a GPU
 host and a no-GPU host alike; the frontend's connection to it is held by

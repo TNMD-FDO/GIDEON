@@ -1,4 +1,4 @@
-"""users reconcile: the membership truth table, the audit protocol, and the refusals (spec §4.1, §19.4)."""
+"""users reconcile: the membership truth table, audit protocol, and refusals."""
 
 import argparse
 import contextlib

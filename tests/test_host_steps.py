@@ -1,4 +1,4 @@
-"""Host-step truth tables, including ticket 28's post-reinstall baseline."""
+"""Host-step truth tables, including the post-reinstall baseline."""
 
 import contextlib
 import io
@@ -233,8 +233,8 @@ def context(host: FakeHost, *, site: SiteConfig | None = None) -> ProvisionConte
     return ProvisionContext(host, lock_result.lock, site)
 
 
-# The committed pins every fake below must agree with (docs/4-unit-tests/TESTING.md,
-# "Lock files in tests"): derived once, never typed.
+# The committed pins every fake below must agree with: derived once from the
+# loaded lock, never typed.
 HOST_LOCK = context(FakeHost()).lock
 
 
@@ -983,9 +983,9 @@ def docker_files(daemon: Mapping[str, object], *, journald: str = "[Journal]\nSt
 
 class DockerStepTests(unittest.TestCase):
     def test_insecure_registries_follows_the_plain_registry_rule(self) -> None:
-        """A plain, non-loopback site registry (the acceptance VM's bridge address)
-        is listed under insecure-registries; loopback is implicit in Docker and a
-        hostname registry is TLS — neither gets the key ([29] item 13)."""
+        """A plain, non-loopback site registry at the VM bridge address is listed
+        under insecure-registries; loopback is implicit in Docker and a hostname
+        registry is TLS, so neither gets the key."""
 
         base_daemon: dict[str, object] = {
             "data-root": "/var/lib/docker",
@@ -1408,7 +1408,7 @@ class NetworkStepTests(unittest.TestCase):
 
 
 class WaitOnlineStepTests(unittest.TestCase):
-    """The boot-time network wait accepts any one link online (slice-0 ticket 08)."""
+    """The boot-time network wait accepts any one link online."""
 
     DROPIN = os.fspath(_WAIT_ONLINE_DROPIN)
 
@@ -2433,7 +2433,7 @@ class ServiceStepTests(unittest.TestCase):
 
 
 class BaselineCheckPass(unittest.TestCase):
-    def test_ticket_28_baseline_has_expected_non_site_dispositions(self) -> None:
+    def test_recorded_baseline_has_expected_non_site_dispositions(self) -> None:
         # The recorded post-reinstall box still has no observability homes;
         # disk-layout's first pass therefore remains drift.
         expected = {
@@ -2463,7 +2463,7 @@ class BaselineCheckPass(unittest.TestCase):
             result = step.check(context(host))
             self.assertEqual(result.disposition, expected[step.name], step.name)
 
-    def test_ticket_28_baseline_disk_replay_sees_the_new_home_after_user_convergence(self) -> None:
+    def test_recorded_baseline_disk_replay_sees_the_new_home_after_user_convergence(self) -> None:
         host = baseline_host()
         host.commands[("getent", "passwd", "gideon")] = completed(
             ("getent", "passwd", "gideon"),

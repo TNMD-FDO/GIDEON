@@ -1,4 +1,4 @@
-"""The frontend contract: the apply manifest is desired state (spec §3.5, ticket 23 item 11).
+"""The frontend contract: the apply manifest is desired state.
 
 Runs on the self-hosted runner after ``mirror-images`` (never on a hosted
 runner: it needs Docker and the release registry's mirrored digests) as
@@ -16,8 +16,7 @@ hand-added, and the next desired-state push restores all of it.
 It also proves the signed-in environment facts: the rendered ``default_models``
 value and the disabled evaluation arena are visible through session-only config
 routes, survive their panel edits only until the frontend restarts, and return
-to the rendered values after restart (see
-``docs/research/owui-default-model-and-arena.md`` §§1–2, 4).
+to the rendered values after restart.
 
 Environment: ``GIDEON_CONTRACT_REGISTRY`` (default ``127.0.0.1:5000``),
 ``GIDEON_CONTRACT_PORT`` (default ``18081``).  The caller needs Docker access.
@@ -244,7 +243,7 @@ class ApplyManifestContract(unittest.TestCase):
         assert isinstance(meta, dict)
         self.assertEqual(meta["capabilities"], dict(BASE_MODEL_CAPABILITIES))
         # Readable by every verified user but hidden from the selector: the base
-        # hop of General's access check (docs/research/owui-preset-system-prompt.md §6).
+        # hop of General's access check.
         self.assertIs(meta["hidden"], True)
         self.assertTrue(
             all(value is None for key, value in meta.items() if key not in {"capabilities", "hidden"})
@@ -269,8 +268,7 @@ class ApplyManifestContract(unittest.TestCase):
         self.assertEqual(presets.status, 200, presets.body)
         assert isinstance(presets.body, dict)
         # The admin preset listing returns General's full params and grants;
-        # the base route is separate (docs/research/owui-preset-system-prompt.md
-        # §2.1–2.3, docs/research/owui-model-record.md §1.3).
+        # the base route is separate.
         items = presets.body["items"]
         assert isinstance(items, list)
         self.assertEqual(len(items), 1)
@@ -360,8 +358,8 @@ class ApplyManifestContract(unittest.TestCase):
         self.assertEqual(listing.status, 200, listing.body)
         assert isinstance(listing.body, list)
         # A set: the pinned list route's order follows neither the ids nor the
-        # push (measured at general-turn ticket 04), and the inlets' running
-        # order is the frontend's own per-request sort by (priority, id).
+        # push, and the inlets' running order is the frontend's own per-request
+        # sort by (priority, id).
         self.assertEqual(sorted(row["id"] for row in listing.body), sorted(expected_ids))
 
         for expected in functions:
@@ -419,15 +417,14 @@ class ApplyManifestContract(unittest.TestCase):
         eval_client = client_factory(api_key=(self.stack.secrets / "gideon_eval_api_key").read_text().strip())
         self._assert_live_model_listing(eval_client)
         self.assertIn(eval_client.request("GET", "/api/v1/users/all").status, (401, 403))
-        # The base listing remains admin-only (docs/research/owui-model-record.md §8.3).
+        # The base listing remains admin-only.
         self.assertIn(eval_client.request("GET", "/api/v1/models/base").status, (401, 403))
         # The admin key is bound to the allowlist too.
         self.assertEqual(admin.request("GET", "/api/v1/auths/").status, 403)
 
-        # The admin model editor uses these full-column update/create routes
-        # (docs/research/owui-model-record.md §6 and §8.2); use its session,
-        # not the API key, for the hand edits.  The base record's edit flips a
-        # capability, drops `hidden`, and empties the grant list at once.
+        # The admin model editor uses full-column update and create routes; use
+        # its session, not the API key, for the hand edits. The base record's
+        # edit flips a capability, drops `hidden`, and empties the grant list.
         edited_capabilities = dict(BASE_MODEL_CAPABILITIES)
         edited_capabilities["builtin_tools"] = True
         edited = session.request(
@@ -446,8 +443,7 @@ class ApplyManifestContract(unittest.TestCase):
         self.assertEqual(edited.status, 200, edited.body)
         # The update route replaces the full preset row, including params,
         # description, grants, and the attachment list; this hand edit adds a
-        # stray Function id (docs/research/owui-preset-system-prompt.md
-        # §2.1–2.3, docs/research/owui-model-record.md §1.2, §6).
+        # stray Function id.
         edited_general = session.request(
             "POST",
             "/api/v1/models/model/update",

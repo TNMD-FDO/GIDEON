@@ -1,4 +1,4 @@
-"""The one refusal shape and a failed command's detail (docs/ARCHI.md §10, §14)."""
+"""The refusal shape and detail returned for a failed command."""
 
 import subprocess
 import unittest

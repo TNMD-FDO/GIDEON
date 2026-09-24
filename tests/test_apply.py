@@ -1,4 +1,4 @@
-"""Apply contracts: stage order, the recreate rule, digest checks, verification (spec §3.5)."""
+"""Apply contracts: stage order, the recreate rule, digest checks, and verification."""
 
 import argparse
 import contextlib
@@ -51,7 +51,7 @@ TEMPLATE_PATHS = tuple(
 SITE = "/etc/gideon/site.yaml"
 RENDERED = "/etc/gideon/rendered"
 # The fakes answer for whatever the committed lock pins, so a pin-watch bump
-# (ADR-0031) never breaks these contracts: the digests are the lock's, not the test's.
+# never breaks these contracts: the digests are the lock's, not the test's.
 _COMMITTED_LOCK = load_image_lock(ROOT / "images.lock").lock
 assert _COMMITTED_LOCK is not None, "the committed images.lock must load"
 _DIGESTS = {pin.name: pin.digest for pin in _COMMITTED_LOCK.images}
@@ -256,8 +256,7 @@ class FakeFrontend:
             if len(parts) == 7 and parts[6] == "valves":
                 return Response(200, (function or {}).get("valves") or {})
             return Response(200, function)
-        # `/list` returns presets while `/base` returns base rows, matching the
-        # pinned frontend's two model listings (docs/research/owui-model-record.md §1.2–1.3, §8).
+        # `/list` returns preset rows while `/base` returns base-model rows.
         if route == "/api/v1/models/base" and method == "GET":
             return Response(200, [model for model in self.models if model.get("base_model_id") is None])
         if route == "/api/v1/models/list" and method == "GET":

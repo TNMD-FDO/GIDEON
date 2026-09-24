@@ -16,8 +16,8 @@ from gideon.host.render.owui import (
 ROOT = Path(__file__).resolve().parent.parent
 GATE_PATH = ROOT / "compose/open-webui/functions/branch_gate.py"
 
-# These entry shapes mirror the preset/base record merge in
-# docs/research/owui-model-record.md §4.1; all ids are visibly fictitious.
+# These entry shapes mirror how the frontend merges preset and base records;
+# all ids are visibly fictitious.
 PRESET_ENTRY: dict[str, object] = {
     "id": "a-preset",
     "name": "a-preset",
@@ -110,7 +110,7 @@ class BranchGate(unittest.TestCase):
         self.assertEqual(GATE.EVAL_IDENTITY_EMAIL, EVAL_IDENTITY.email)
 
     def test_branch_refusal_text_is_pinned(self) -> None:
-        # ADR-0043: a versioned product text, moved from the guardrail unchanged.
+        # A versioned product text, carried over from the guardrail unchanged.
         self.assertEqual(
             GATE.BRANCH_REFUSAL,
             "GIDEON answers only through one of its branches. Start a new chat and ask General.",

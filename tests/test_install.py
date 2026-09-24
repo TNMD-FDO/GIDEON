@@ -1,4 +1,4 @@
-"""The install command's contracts (§3.6 step 5): phase order, refusals, rows, the URL."""
+"""The install command's contracts: phase order, refusals, rows, and the URL."""
 
 import argparse
 import ast

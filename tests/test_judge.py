@@ -1,4 +1,4 @@
-"""The reference-guided judge over a stub engine (spec §18.4)."""
+"""The reference-guided judge over a stub engine."""
 
 import ast
 import json

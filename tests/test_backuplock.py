@@ -1,4 +1,4 @@
-"""Contracts for the shared backup and restore lock (spec §§19.1–19.2)."""
+"""Contracts for the lock shared by backup and restore."""
 
 import json
 import os

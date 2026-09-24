@@ -1,4 +1,4 @@
-"""Store convergence: roles, databases, and the forward-only migration runner (spec §7.2, ADR-0005)."""
+"""Store convergence: roles, databases, and the forward-only migration runner."""
 
 import os
 import subprocess

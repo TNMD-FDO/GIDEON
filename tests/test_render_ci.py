@@ -1,4 +1,4 @@
-"""Contracts for the standing CI sibling render (plan §1)."""
+"""Contracts for the standing CI sibling render."""
 
 import unittest
 from collections.abc import Mapping

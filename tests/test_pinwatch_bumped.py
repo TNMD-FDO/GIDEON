@@ -1,4 +1,4 @@
-"""Contracts for the generated release-note pin history (§21)."""
+"""Contracts for the generated release-note pin history."""
 
 import contextlib
 import io

@@ -1,4 +1,4 @@
-"""Truth tables for the install-time preflight checks (spec §1.5, §2.3)."""
+"""Truth tables for install-time preflight and egress checks."""
 
 import dataclasses
 import os
@@ -292,7 +292,7 @@ class Registry(unittest.TestCase):
 
 
 class Egress(unittest.TestCase):
-    """§2.3: probe both pre-install groups plus the site registry host."""
+    """The check probes both pre-install egress groups and the site's registry host."""
 
     REGISTRY_PROBE = probe_argv("https://ghcr.io/v2/")
 
@@ -561,7 +561,7 @@ class Ntp(unittest.TestCase):
         self.assertEqual(NtpCheck().run(context(host)).severity, Severity.PASS)
 
     def test_unsynchronized_warns_not_refuses(self) -> None:
-        """§1.5 warn table: NTP unsynced warns."""
+        """An unsynchronized NTP clock produces a warning."""
 
         host = FakeHost(commands={self.TIMEDATECTL: completed(self.TIMEDATECTL, "no\n")})
         report = NtpCheck().run(context(host))
@@ -1034,7 +1034,7 @@ class Jurisdiction(unittest.TestCase):
         self.assertIn("district 'fx-distrct' (nearest 'fx-district')", report.detail)
 
     def test_unknown_state_refuses_naming_it(self) -> None:
-        """§1.5 refuse table: an unknown jurisdiction id — states included."""
+        """An unknown jurisdiction ID, including a state ID, refuses."""
 
         site = make_jurisdiction_site(states="fx-stte")
         report = JurisdictionCheck().run(context(FakeHost(), site=site))
@@ -1078,7 +1078,7 @@ class Jurisdiction(unittest.TestCase):
         self.assertTrue(report.fix.endswith("re-run preflight."))
 
     def test_state_without_installed_courts_warns_naming_the_runbook(self) -> None:
-        """§1.5 warn table: a known state whose courts are not yet in courts[]."""
+        """A known state absent from the installed courts list produces a warning."""
 
         site = make_jurisdiction_site(states="fx-state")
         report = JurisdictionCheck({"fx-circuit", "fx-district"}).run(
@@ -1396,7 +1396,7 @@ class DriverTested(unittest.TestCase):
         self.assertEqual(report.severity, Severity.PASS, report.detail)
 
     def test_driver_above_tested_warns(self) -> None:
-        """§1.5 warn table: driver above tested warns."""
+        """A driver above the tested version produces a warning."""
 
         tested = LOCK.driver.tested or "1000.0.0"
         next_major = int(tested.split(".", 1)[0]) + 1

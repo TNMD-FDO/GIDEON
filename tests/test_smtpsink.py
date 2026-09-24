@@ -1,4 +1,4 @@
-"""STARTTLS, AUTH, and slice-1 ticket 55 message-persistence contracts."""
+"""STARTTLS, AUTH, and message-persistence contracts."""
 
 import base64
 import email
@@ -273,7 +273,7 @@ class SmtpStoreContracts(unittest.TestCase):
         return message.as_bytes()
 
     def test_store_redacts_headers_and_each_transfer_encoding(self) -> None:
-        """Ticket 55's sink ruling reaches decoded MIME text before storage."""
+        """The sink redacts decoded MIME text before storage."""
 
         for transfer in ("8bit", "base64", "quoted-printable", "multipart"):
             with self.subTest(transfer=transfer):
@@ -301,7 +301,7 @@ class SmtpStoreContracts(unittest.TestCase):
                 self.assertTrue(any(expected in content for content in text_parts))
 
     def test_store_keeps_unchanged_crlf_bytes(self) -> None:
-        """Ticket 55 keeps an untouched stored body byte-identical, including CRLF."""
+        """An untouched stored body remains byte-identical, including CRLF."""
 
         body = b"Subject: unchanged\r\nX-Test: no-site\r\n\r\nfirst\r\n"
         self.sink.store(
@@ -315,7 +315,7 @@ class SmtpStoreContracts(unittest.TestCase):
         self.assertEqual(record.body_path.read_bytes(), body)
 
     def test_store_falls_back_to_whole_text_when_mime_parser_refuses(self) -> None:
-        """Ticket 55 stores a refused body through surrogateescape text redaction."""
+        """A refused MIME body is redacted as whole text through surrogateescape."""
 
         body = f"not a MIME message https://{self.site.hostname}\n".encode()
         stored = self._store(body)
@@ -323,7 +323,7 @@ class SmtpStoreContracts(unittest.TestCase):
 
     def test_store_redacts_a_base64_part_whose_charset_is_unknown(self) -> None:
         """A charset the codec registry lacks still has its transfer encoding undone,
-        so the value never reaches the disk base64-encoded (ticket 55's code review)."""
+        so the value never reaches the disk base64-encoded."""
 
         text = f"https://{self.site.hostname}/health\n"
         encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")

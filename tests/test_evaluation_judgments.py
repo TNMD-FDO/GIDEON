@@ -1,4 +1,4 @@
-"""Judgments-file shape and agreement contracts for spec §18.4(a)."""
+"""Judgments-file shape and agreement contracts."""
 
 from __future__ import annotations
 

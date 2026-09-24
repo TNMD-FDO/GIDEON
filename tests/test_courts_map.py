@@ -64,7 +64,7 @@ def _assert_lockfile(path: Path, court_map: CourtMap) -> None:
 
 
 class CourtMapContract(unittest.TestCase):
-    """Exercise §8.6's committed artifact contract without a CSV fixture."""
+    """Exercise the committed court-map artifact contract without a CSV fixture."""
 
     def test_committed_map_loads_and_has_closed_lists_and_statute_counts(self) -> None:
         self.assertTrue(COURT_MAP_RESULT.ok, render_errors(COURT_MAP_RESULT.errors))

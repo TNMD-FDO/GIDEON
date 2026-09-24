@@ -1,4 +1,4 @@
-"""Quiet-window judgement contracts from spec §18.5."""
+"""Quiet-window judgement contracts."""
 
 import unittest
 from datetime import UTC, date, datetime, time, timedelta

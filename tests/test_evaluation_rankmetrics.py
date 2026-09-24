@@ -1,4 +1,4 @@
-"""The judgments@1 metric definition from spec §18.2, criteria 1 and 2."""
+"""The judgments@1 metric definition and its first two criteria."""
 
 import itertools
 import math

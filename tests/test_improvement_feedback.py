@@ -1,4 +1,4 @@
-"""The frontend feedback boundary and office rating summary (ADR-0049, §19.4)."""
+"""The frontend feedback boundary and office rating summary."""
 
 import json
 import unittest

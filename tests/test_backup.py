@@ -1,4 +1,4 @@
-"""Backup-run stages over a dict-backed Host seam (spec §19.1)."""
+"""Backup-run stages over a dict-backed Host seam."""
 
 import argparse
 import contextlib

@@ -1,4 +1,4 @@
-"""Contracts for the two-phase preflight runner (spec §1.5)."""
+"""Contracts for the two-phase preflight runner."""
 
 import contextlib
 import io
@@ -296,7 +296,7 @@ class Refusals(unittest.TestCase):
 
 
 class PhaseA(unittest.TestCase):
-    """Provision's check pass: total convergence is enforced (ticket 02 ruling 1)."""
+    """Provision's check pass enforces total convergence."""
 
     def test_converged_step_passes_and_unconverged_refuses(self) -> None:
         steps: list[Step] = [

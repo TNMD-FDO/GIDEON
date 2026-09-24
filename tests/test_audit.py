@@ -1,4 +1,4 @@
-"""The append-only audit writer: ids only, SQL on stdin, values bound through psql variables (spec §19.4)."""
+"""The append-only audit writer: ids only, SQL on stdin, values bound through psql variables."""
 
 import os
 import subprocess

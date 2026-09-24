@@ -1,4 +1,4 @@
-"""Contracts for the stdlib-only CI relay (plan §3)."""
+"""Contracts for the standard-library CI relay."""
 
 import ast
 import contextlib

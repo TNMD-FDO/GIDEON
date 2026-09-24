@@ -1387,7 +1387,7 @@ if __name__ == "__main__":
 
 
 class RestoreBySetLabel(unittest.TestCase):
-    """``--set <label>`` (ADR-0005 rollback): the named set, to its own archive boundary."""
+    """``--set <label>`` selects the named set and restores it to its own archive boundary."""
 
     def run_restore(self, fake: FakeHost, **args: Any) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()

@@ -1,7 +1,7 @@
-# The frontend contract stack (spec §1.8's gideon-ci sibling): Postgres, Open
-# WebUI, and a standard-library model stub, on loopback ports, from the release
-# registry's mirrored digests. Substituted by tests/contract/owui_apply_manifest.py
-# — never started by hand, never part of the product's rendered set.
+# The CI frontend contract stack: Postgres, Open WebUI, and a standard-library
+# model stub, on loopback ports, from the release registry's mirrored digests.
+# Substituted by tests/contract/owui_apply_manifest.py — never started by hand,
+# never part of the product's rendered set.
 name: gideon-ci-contract
 services:
   postgres:

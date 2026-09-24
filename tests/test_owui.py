@@ -1,4 +1,4 @@
-"""The Open WebUI client, readiness wait, and the idempotent bootstrap (spec §3.5, §4.4)."""
+"""The Open WebUI client, readiness wait, and the idempotent bootstrap."""
 
 import contextlib
 import http.server
@@ -194,8 +194,8 @@ class Frontend:
                 del self.members[group_id]
                 return Response(200, True)
         if route == "/api/models":
-            # The merged listing (docs/research/owui-model-record.md §4): the
-            # record under `info` without its params, the preset flag by base id.
+            # The merged listing puts the record under `info` without its
+            # params, and derives the preset flag from the base id.
             entries: list[dict[str, Any]] = []
             for model in self.models:
                 info = {key: value for key, value in model.items() if key != "params"}
@@ -224,8 +224,7 @@ class Frontend:
                 return Response(200, (function or {}).get("valves") or {})
             return Response(200, function)
         # The pinned frontend separates preset and base rows: `/list` is the
-        # paged preset route and `/base` is the unpaged base route
-        # (docs/research/owui-model-record.md §1.2–1.3, §8).
+        # paged preset route and `/base` is the unpaged base route.
         if route == "/api/v1/models/base":
             return Response(200, [model for model in self.models if model.get("base_model_id") is None])
         if route == "/api/v1/functions/sync":

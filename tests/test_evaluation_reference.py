@@ -279,9 +279,9 @@ class Reader(unittest.TestCase):
 class CommittedReferences(unittest.TestCase):
     """The files under eval/reference/ are a contract, not a convenience.
 
-    A kept file's absence is never tolerated (slice-1 tickets 57 and 79); only
-    the harvest reference may be missing, and only in an export tree, where it
-    leaves with the id list and the cases it names.
+    A kept file's absence is never tolerated. Only the harvest reference may
+    be missing in an export tree, where it leaves with the id list and the
+    cases it names.
     """
 
     def _loaded(self) -> LoadedSet:
@@ -385,7 +385,7 @@ def _engine_free_context() -> RunContext:
 
 
 def _plant_one_key(set_root: Path, passing: set[str]) -> str:
-    """Flip one reference-passing case's keyed object, ticket 04's technique."""
+    """Flip one reference-passing case's keyed object to seed a changed result."""
 
     for path in sorted(set_root.glob("build-gates/*.jsonl")):
         lines = path.read_text(encoding="utf-8").splitlines(keepends=True)

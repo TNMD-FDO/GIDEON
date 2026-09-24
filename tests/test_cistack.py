@@ -1,4 +1,4 @@
-"""Contracts for the CI sibling stack tool (plan §4)."""
+"""Contracts for the CI sibling stack tool."""
 
 import contextlib
 import io

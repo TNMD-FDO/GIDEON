@@ -529,9 +529,8 @@ class SearchSentinelContract(unittest.TestCase):
         )
         client = client_factory(token=token)
         # The chat route serves a per-worker model cache that only the listing
-        # refreshes (docs/archi/render-apply.md, the apply-manifest stage), so
-        # the turn is preceded by one listing, which must show General over
-        # the stub's base model.
+        # refreshes, so the turn is preceded by one listing, which must show
+        # General over the stub's base model.
         listing = client.request("GET", "/api/models")
         if listing.status != 200 or not isinstance(listing.body, Mapping):
             raise AssertionError(f"model listing answered HTTP {listing.status}")

@@ -594,11 +594,11 @@ class ApiJudged(unittest.TestCase):
                     self.assertNotIn(private_text, json.dumps(payload))
 
     def test_the_turns_first_reasoning_delta_leaves_as_the_placeholder(self) -> None:
-        """Slice-1 ticket 37's shape: one fixed space, then nothing.
+        """The first reasoning delta leaves one fixed space, then nothing.
 
-        The pinned frontend opens its reasoning block from a reasoning delta on
-        the wire (docs/research/owui-engine-connection.md §4), so the turn's
-        first one leaves as the placeholder and every later one is dropped.
+        The frontend opens its reasoning block when a reasoning delta arrives
+        on the wire, so the turn's first one leaves as the placeholder and every
+        later one is dropped.
         """
 
         for key in ("reasoning", "reasoning_content", "thinking"):

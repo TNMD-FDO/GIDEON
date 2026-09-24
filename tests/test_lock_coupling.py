@@ -1,17 +1,17 @@
-"""No test pins a value it also reads from a lock file (slice-0 ticket 13).
+"""No test pins a value it also reads from a lock file.
 
-The pin watch (ADR-0031) moves ``images.lock``, ``host.lock``, and
-``models.lock`` values on a
-bump branch, and that branch is the only place a test's copy of the value and
-the lock disagree — the release gate runs on ``main``, where they are equal by
-construction (PR #1, hotfix v0.0.14; PR #2 the same day). This tripwire loads
-three locks through the product loaders, plus the Matt Pocock skills' record the
-watch moves (slice-0 ticket 18), and fails when any value the watch can
-move, or a person moves after an on-box converge, appears whole-token in a
-test module: not immediately preceded or followed by a letter or digit, so
+The pin watch moves ``images.lock``, ``host.lock``, and ``models.lock`` values
+on a bump branch, and that branch is the only place a test's copy of the value
+and the lock disagree — the release gate runs on ``main``, where they are
+equal by construction (PR #1, hotfix v0.0.14; PR #2 the same day). This
+tripwire loads three locks through the product loaders, plus the Matt Pocock
+skills' record the watch moves, and fails when any value the watch can move,
+or a person moves after an on-box converge, appears whole-token in a test
+module: not immediately preceded or followed by a letter or digit, so
 ``nvidia-driver-pinning-<branch>`` and ``<tested>-1ubuntu1`` count while a
-digit glued to either side and a branch inside a hex digest do not. Comments count. The rule is in
-docs/4-unit-tests/TESTING.md; the memo is docs/6-memo/lock-coupled-tests.md.
+digit glued to either side and a branch inside a hex digest do not. Comments
+count. A test derives such a value from the loaded lock, or uses a visibly
+fictitious one.
 """
 
 import re

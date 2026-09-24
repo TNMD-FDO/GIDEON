@@ -1,4 +1,4 @@
-"""Judge-triples runner and command contracts from spec §§18.4 and 18.6."""
+"""Judge-triples runner and command contracts."""
 
 import argparse
 import contextlib

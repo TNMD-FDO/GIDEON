@@ -1,8 +1,8 @@
-"""The recorded CLI surface (spec §20.2 + `backup drill` from the [22] Answer).
+"""The recorded CLI surface, with `backup drill` beside it.
 
-Phase B contract (bootstrap brief): ``--help`` lists every command group, and
-every stub prints "not implemented" and exits non-zero. Front-door ticket 01:
-a bare invocation prints the start screen, and every stub names where it lands.
+``--help`` lists every command group, and every stub prints "not
+implemented" and exits non-zero. A bare invocation prints the start screen,
+and every stub names where it lands.
 """
 
 import contextlib
@@ -18,7 +18,8 @@ TOP_LEVEL = [
     "backup", "restore", "audit", "retention", "alerts",
 ]
 
-# Each stub with the phrase its help and refusal must carry (§22.1's slice, or the spec's own words).
+# Each stub with the phrase its help and refusal must carry: the slice it
+# lands in, or the command's own words.
 STUBS = [
     (["host", "gpu"], "escape hatch"),
     (["corpus", "cut"], "slice 3"),

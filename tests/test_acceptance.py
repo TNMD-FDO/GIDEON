@@ -1464,7 +1464,7 @@ class ServicesContracts(unittest.TestCase):
         return host, ctx
 
     def test_services_loads_the_rendered_vm_site_and_binds_the_sink_redactor(self) -> None:
-        """Ticket 55's harness ruling keeps the VM site and sink redactor aligned."""
+        """The harness keeps the VM site and the sink redactor aligned."""
 
         _host, ctx = self._prepared()
         self.assertIsNotNone(ctx.vm_site)
@@ -1480,7 +1480,7 @@ class ServicesContracts(unittest.TestCase):
         )
 
     def test_stored_message_sidecar_and_body_use_the_vm_site_redactor(self) -> None:
-        """Ticket 55 sends both stored message records through the sink callable."""
+        """Both stored message records go through the sink callable."""
 
         _host, ctx = self._prepared()
         assert ctx.vm_site is not None
@@ -1493,7 +1493,7 @@ class ServicesContracts(unittest.TestCase):
         self.assertEqual(redactor(body), "Subject: <hostname>\n\n<hostname>\n")
 
     def test_services_refuses_when_the_rendered_site_does_not_load(self) -> None:
-        """Ticket 55 reports a rendered-site loader refusal as a services row."""
+        """A rendered-site loader refusal is reported as a services row."""
 
         files = base_files()
         files[str(CHECKOUT / "tools/acceptance/site.yaml.tmpl")] = "not: [valid\n"
@@ -1688,7 +1688,7 @@ class ServicesContracts(unittest.TestCase):
         stage = next(stage for stage in STAGES if stage.identifier == "install")
         result = stage.callable(ctx)
         self.assertTrue(result.ok, result.detail)
-        # The transcript is redacted against the VM's site before the URL is read (ticket 55).
+        # The transcript is redacted against the VM's site before the URL is read.
         self.assertEqual(ctx.install_url, "https://<hostname>")
         self.assertIn(ctx.install_url or "", result.detail)
         self.assertIn(host_install.ENGINE_VERIFY_SKIPPED_DETAIL, result.detail)
@@ -1948,7 +1948,7 @@ class VmContracts(unittest.TestCase):
         self.assertEqual(host.files[str(OUT / "07-secrets.txt")], expected)
 
     def test_run_product_writes_vm_site_values_as_placeholders(self) -> None:
-        """Ticket 55 sends product transcripts through the rendered VM site."""
+        """Product transcripts go through the rendered VM site."""
 
         host = FakeHost()
         ctx = harness_context(host)

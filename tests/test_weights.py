@@ -1,4 +1,4 @@
-"""Weights layout, process identity, and pull-record contracts (plan §5.4)."""
+"""Weights layout, process identity, and pull-record contracts."""
 
 import os
 import stat

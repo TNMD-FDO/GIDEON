@@ -1,4 +1,4 @@
-"""The ordered Grafana contact-point command contracts (§19.5)."""
+"""The command contracts for ordered Grafana contact points."""
 
 import argparse
 import contextlib

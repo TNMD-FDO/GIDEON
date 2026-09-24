@@ -72,7 +72,7 @@ def _without_row(identifier: str) -> list[dict[str, object]]:
 
 
 class PureJoin(unittest.TestCase):
-    """Exercise §2's CSV-to-geography join over visibly fictitious data."""
+    """Exercise the CSV-to-geography join over visibly fictitious data."""
 
     def test_codes_federal_unplaced_and_corrections_map_to_levels(self) -> None:
         result = _generate()
