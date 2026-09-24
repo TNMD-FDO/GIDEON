@@ -31,9 +31,11 @@ EXCLUDED_PREFIXES = (
     "docs/box-ledger.md",  # the shared server's ledger
     "tools/tracker.py",  # the tracker board
     "tools/cycles.py",  # the cycles record
+    "tools/proofs.py",  # the proofs queue
     "tools/archi.py",  # the architecture index check
     "tests/test_tracker.py",  # the tracker board's tests
     "tests/test_cycles.py",  # the cycles record's tests
+    "tests/test_proofs.py",  # the proofs queue's tests
     "tests/test_archi.py",  # the architecture index check's tests
     "tests/test_skills_vendored.py",  # the vendored-skills tripwire
     "tests/test_evidence_hygiene.py",  # the tracker assets' secret check

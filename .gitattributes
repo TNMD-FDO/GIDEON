@@ -21,9 +21,11 @@ docs/release-notes/TEMPLATE.md export-ignore
 docs/box-ledger.md export-ignore
 tools/tracker.py export-ignore
 tools/cycles.py export-ignore
+tools/proofs.py export-ignore
 tools/archi.py export-ignore
 tests/test_tracker.py export-ignore
 tests/test_cycles.py export-ignore
+tests/test_proofs.py export-ignore
 tests/test_archi.py export-ignore
 tests/test_skills_vendored.py export-ignore
 tests/test_evidence_hygiene.py export-ignore
