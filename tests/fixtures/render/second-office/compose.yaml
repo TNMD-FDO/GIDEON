@@ -405,7 +405,7 @@ services:
       - "gideon"
     mem_limit: 1000000000
   dcgm-exporter:
-    image: "127.0.0.1:5000/dcgm-exporter@sha256:613ab03c11d442fd960ff515f547e9921537454a712d08160bc8f677f89f1c35"
+    image: "127.0.0.1:5000/dcgm-exporter@sha256:148b0c025e5f2850256816fa33754fbf4733b7a086697a95613fc0ba3db5b003"
     restart: "unless-stopped"
     environment:
       TZ: "America/Denver"
@@ -435,7 +435,7 @@ services:
       - "gideon"
     mem_limit: 1000000000
   cadvisor:
-    image: "127.0.0.1:5000/cadvisor@sha256:763aecf1c32c2be8a1a75f9abfc2fc461005c9dbbaa39cb356b354aac1296dbe"
+    image: "127.0.0.1:5000/cadvisor@sha256:b8e7d1093144fd088f425ff003d75a4aa405de075db78dae3bc563730b1bd07a"
     restart: "unless-stopped"
     environment:
       TZ: "America/Denver"

@@ -57,14 +57,14 @@ images:
     source: docker.io/prom/node-exporter:v1.12.1
     digest: sha256:1b4e4438faca4dd7e001dd445d161a4a2091b0fededa84093b3a8dfeae1f1be0
   dcgm-exporter:
-    source: nvcr.io/nvidia/k8s/dcgm-exporter:4.6.0-4.8.3-distroless
-    digest: sha256:613ab03c11d442fd960ff515f547e9921537454a712d08160bc8f677f89f1c35
+    source: nvcr.io/nvidia/k8s/dcgm-exporter:4.6.1-4.8.4-distroless
+    digest: sha256:148b0c025e5f2850256816fa33754fbf4733b7a086697a95613fc0ba3db5b003
   postgres-exporter:
     source: docker.io/prometheuscommunity/postgres-exporter:v0.20.1
     digest: sha256:ac5ec343104fae0e2d84a27bb8d69b38430a11910c5382cad85d478d2bab713e
   cadvisor:
-    source: ghcr.io/google/cadvisor:v0.60.5
-    digest: sha256:763aecf1c32c2be8a1a75f9abfc2fc461005c9dbbaa39cb356b354aac1296dbe
+    source: ghcr.io/google/cadvisor:v0.60.6
+    digest: sha256:b8e7d1093144fd088f425ff003d75a4aa405de075db78dae3bc563730b1bd07a
   blackbox-exporter:
     source: docker.io/prom/blackbox-exporter:v0.28.0
     digest: sha256:e753ff9f3fc458d02cca5eddab5a77e1c175eee484a8925ac7d524f04366c2fc

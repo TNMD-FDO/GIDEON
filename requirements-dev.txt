@@ -5,7 +5,7 @@
 # and system python3-yaml, present on every Ubuntu Server. The service's dependency
 # set is built into its image. Exact pins only; the toolchain is moved by a person,
 # never the pin watch.
-ruff==0.16.5
+ruff==0.16.8
 mypy==2.3.1
 pytest==9.1.1
 # PyYAML stands in for the box's python3-yaml (the bare-host path's one non-stdlib

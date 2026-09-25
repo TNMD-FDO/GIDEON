@@ -2,7 +2,7 @@
 release: "fixture"
 inputs:
   site_sha256: "d93d52b657d04c39b3e3842c029b77eca898f457d021d01a13682e67bdac0f85"
-  host_lock_sha256: "24375b4fd1e9e116e2c2f5ca902f8e13476db4b13a15b5975d6afacbb78afd4d"
+  host_lock_sha256: "c487a5a60259c393ac20649336ff45b24747e8155aa0e4d5afe84e51e8424680"
   models_lock_sha256: "72a69dae539cc3df989c8bea78a2f4dc131742ecc31419283fc35b41f3569ea7"
   hardware_profile: "2x96v-256d"
   images_lock_version: 1
@@ -11,7 +11,7 @@ inputs:
   build_box: false
 files:
   compose.yaml:
-    sha256: "992c323e86c15c7bb2c05ae344e782a7e4a0b22bd0d16e2c44040157b11da282"
+    sha256: "950563b6baa48e7255132d0c114feea90c41c790ab697a1de70021dfc78d28ea"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
@@ -144,6 +144,6 @@ services:
   open-webui: "c21888a58ecb53cccbe5f06500250402347254f194fc9824828c42f6af51bf71"
   searxng: "790f3d23c5a48d8b2e3c02d12c6615884bb4073095bdf7faa51ccee49aa51c2c"
   postgres-exporter: "71024e25f248a0a94b2ea92c4f48813f8b4f95e3d17d41522f300fa9f1407291"
-  cadvisor: "f7daefbbe23b45c463cbff7d7c9452c9dbca6fb26e2ca5f386ba6f32c40ed8c2"
+  cadvisor: "6e4def0c2cc0e80a5357574ad6a8e81286c1f29140a78422632c6e860d14d83e"
   blackbox-exporter: "959ff7e850d35c00a0a178fca5cf671d37dffa6ea5db86790b9166f5182999d3"
 top_level: "14d69fb5cb52d2ae19e5f8b1df6c1b6429654c47f327bec263d43e0de20426b9"

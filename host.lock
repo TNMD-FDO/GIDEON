@@ -28,7 +28,7 @@ minimums:
 # The release registry's own image: the Docker Hub `registry`
 # tracking tag + the OCI index digest it resolved to when pinned; the pin
 # watch proposes the next. https://hub.docker.com/_/registry
-registry_image: registry:3@sha256:1be55279f18a2fe1a74edf2664cac61c1bea305b7b4642dab412e7affdcb3e33
+registry_image: registry:3@sha256:852b3e4d378c426dda6b318fe9d9bfe8e92a0eccb9926671ec3d3ea17a196696
 
 gh_runner:
   version: 2.337.0
@@ -41,8 +41,8 @@ acceptance_vm_image:
   # Dated build, never the moving current/ alias — the sha256 must stay true of
   # the URL (the build directory's SHA256SUMS under
   # https://cloud-images.ubuntu.com/<series>/); the pin watch proposes the next.
-  url: https://cloud-images.ubuntu.com/resolute/20260823/resolute-server-cloudimg-amd64.img
-  sha256: 8196be9d7958059cb56c6c75c80fdf6cee8a8885bc149ea791d7db1c7ef93035
+  url: https://cloud-images.ubuntu.com/resolute/20260921/resolute-server-cloudimg-amd64.img
+  sha256: 2d3b9b1f76fc204f684a2313113b1d7c2b35eabba19cfcbcec5eae2aed3cc853
 
 reference_host:
   controller:
