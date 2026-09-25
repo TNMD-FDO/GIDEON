@@ -140,6 +140,7 @@ class Request(unittest.TestCase):
         assert host.input is not None
         body = json.loads(host.input)
         self.assertEqual(body["model"], "fixture-model")
+        self.assertEqual(body["max_tokens"], judge.JUDGE_MAX_TOKENS)
         self.assertEqual(body["temperature"], 0)
         self.assertIs(body["stream"], False)
         self.assertEqual(body["chat_template_kwargs"], {"enable_thinking": True})
@@ -179,6 +180,7 @@ class Request(unittest.TestCase):
         self.assertIsNotNone(grading.verdict)
         assert host.input is not None
         body = json.loads(host.input)
+        self.assertEqual(body["max_tokens"], judge.JUDGE_MAX_TOKENS)
         self.assertEqual(body["temperature"], 0)
         self.assertEqual(body["chat_template_kwargs"], {"enable_thinking": True})
         self.assertEqual(

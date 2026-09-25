@@ -110,9 +110,15 @@ FALSE_REFUSAL_VERDICT_SCHEMA: Final[Mapping[str, object]] = {
     "additionalProperties": False,
 }
 
-# exempt: acceptance bounds. The starting reserve for one judge
-# reasoning and verdict response, sized from the structured engine check.
-JUDGE_MAX_TOKENS: Final[int] = 2048
+# exempt: acceptance bounds. The reserve for one judge reasoning and
+# verdict response, first sized at 2048 from the structured engine check and
+# corrected to 4096 by a guardrails measurement: five of 81 false-refusal
+# readings spent the whole 2048 inside the reasoning block, and the largest
+# completed reading used 2010. At the measured 2048 tokens in 43.7 s, a
+# reading that spends the whole reserve takes about 87 s, inside
+# JUDGE_TIMEOUT_SECONDS. A later correction is this constant and this
+# comment under the same prompt ids.
+JUDGE_MAX_TOKENS: Final[int] = 4096
 # exempt: acceptance bounds. The starting request bound for one
 # serial judge grading, sized from the structured engine check.
 JUDGE_TIMEOUT_SECONDS: Final[int] = 180
