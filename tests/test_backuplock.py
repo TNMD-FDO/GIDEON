@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import cast
 
 from gideon.host import backuplock
-from gideon.host.report import Problem
+from gideon.host.report import Problem, StageResult
 from gideon.host.sysio import LockingHost, PathLike, RealHost
 
 NOW = datetime(2026, 9, 2, 12, 0, tzinfo=UTC)
@@ -22,6 +22,7 @@ class LockFake:
     def __init__(self) -> None:
         self.locks: dict[str, str] = {}
         self.mkdir_calls: list[tuple[str, int, bool, bool]] = []
+        self.take_error: OSError | None = None
 
     def mkdir(
         self,
@@ -34,6 +35,8 @@ class LockFake:
         self.mkdir_calls.append((os.fspath(path), mode, parents, exist_ok))
 
     def take_lock(self, path: PathLike, record: str) -> str | None:
+        if self.take_error is not None:
+            raise self.take_error
         key = os.fspath(path)
         if key in self.locks:
             return self.locks[key]
@@ -108,6 +111,10 @@ class LockContracts(unittest.TestCase):
                 "— then retry.",
             ),
         )
+        self.assertEqual(
+            refused.holder,
+            backuplock.Record("restore", os.getpid() + 1, NOW),
+        )
 
     def test_take_refuses_empty_and_malformed_records(self) -> None:
         io = LockFake()
@@ -117,6 +124,7 @@ class LockContracts(unittest.TestCase):
                 io.locks[backuplock.BACKUP_LOCK.path] = text
                 refused = backuplock.take(host, command="restore", now=NOW)
                 self.assertEqual(refused.state, backuplock.State.REFUSED)
+                self.assertIsNone(refused.holder)
                 self.assertEqual(
                     refused.problem,
                     Problem(
@@ -125,11 +133,91 @@ class LockContracts(unittest.TestCase):
                     ),
                 )
 
+    def test_take_holder_is_none_for_held_and_nested_outcomes(self) -> None:
+        host = cast(LockingHost, LockFake())
+        held = backuplock.take(host, command="backup run", now=NOW)
+        nested = backuplock.take(host, command="backup push", now=NOW)
+        self.assertIsNone(held.holder)
+        self.assertIsNone(nested.holder)
+
     def test_release_pops_the_lock_path(self) -> None:
         io = LockFake()
         io.locks[backuplock.BACKUP_LOCK.path] = "record"
         backuplock.release(cast(LockingHost, io))
         self.assertNotIn(backuplock.BACKUP_LOCK.path, io.locks)
+
+    def test_claim_maps_lock_outcomes_and_release_claim_releases_only_taken(self) -> None:
+        io = LockFake()
+        host = cast(LockingHost, io)
+        held = backuplock.claim(host, command="gideon engine verify", now=NOW)
+        self.assertTrue(held.taken)
+        self.assertEqual(held.detail, "engine lock taken")
+        self.assertIsNone(held.holder)
+        self.assertIsNone(held.refusal)
+        backuplock.release_claim(host, held)
+        self.assertNotIn(backuplock.ENGINE_LOCK.path, io.locks)
+
+        io.locks[backuplock.ENGINE_LOCK.path] = backuplock.Record(
+            "gideon engine verify", os.getpid(), NOW
+        ).to_json()
+        nested = backuplock.claim(host, command="nested", now=NOW)
+        self.assertFalse(nested.taken)
+        self.assertEqual(nested.detail, "engine lock held by this process")
+        self.assertIsNone(nested.refusal)
+        backuplock.release_claim(host, nested)
+        self.assertIn(backuplock.ENGINE_LOCK.path, io.locks)
+
+        foreign_record = backuplock.Record("eval run fixture", os.getpid() + 1, NOW)
+        io.locks[backuplock.ENGINE_LOCK.path] = foreign_record.to_json()
+        refused = backuplock.claim(host, command="gideon engine verify", now=NOW)
+        self.assertFalse(refused.taken)
+        self.assertEqual(refused.holder, foreign_record)
+        self.assertEqual(
+            refused.refusal,
+            StageResult(
+                "preconditions",
+                False,
+                f"the engine lock is held by {foreign_record.command} since "
+                f"{NOW.isoformat()} (pid {foreign_record.pid}).",
+                f"Wait for it to finish — ps -p {foreign_record.pid} says whether it still runs "
+                "— then retry.",
+            ),
+        )
+        backuplock.release_claim(host, refused)
+        self.assertIn(backuplock.ENGINE_LOCK.path, io.locks)
+
+    def test_claim_refuses_unreadable_record_and_oserror(self) -> None:
+        io = LockFake()
+        io.locks[backuplock.ENGINE_LOCK.path] = "unreadable fixture record"
+        unreadable = backuplock.claim(
+            cast(LockingHost, io), command="gideon engine verify", now=NOW
+        )
+        self.assertIsNone(unreadable.holder)
+        self.assertEqual(
+            unreadable.refusal,
+            StageResult(
+                "preconditions",
+                False,
+                "the engine lock is held by another gideon command, its record unreadable.",
+                backuplock.ENGINE_LOCK.wait_fix,
+            ),
+        )
+
+        io = LockFake()
+        io.take_error = OSError("fixture lock access failure")
+        unusable = backuplock.claim(
+            cast(LockingHost, io), command="gideon engine verify", now=NOW
+        )
+        self.assertIsNone(unusable.holder)
+        self.assertEqual(
+            unusable.refusal,
+            StageResult(
+                "preconditions",
+                False,
+                "the engine lock could not be taken: fixture lock access failure",
+                "Repair access to the engine lock, then retry.",
+            ),
+        )
 
     def test_lock_values_and_engine_refusal(self) -> None:
         self.assertEqual(

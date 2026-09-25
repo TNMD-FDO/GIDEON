@@ -18,7 +18,7 @@ from urllib.parse import unquote
 
 from gideon import guardrail
 from gideon.evaluation.turns import browser, chromium, classify, run
-from gideon.host import models, site, tls
+from gideon.host import backuplock, models, site, tls
 from gideon.host.owui import Client, OwuiError, Response
 from gideon.host.report import Problem
 from gideon.host.sysio import Command, PathLike
@@ -33,7 +33,14 @@ ALLOWED_EXTERNAL = frozenset(sys.stdlib_module_names) | {"yaml"}
 class FakeHost:
     """A small dict-backed Host for launcher and footprint checks."""
 
-    def __init__(self, *, site_text: str = SITE_TEXT, models_text: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        site_text: str = SITE_TEXT,
+        models_text: str | None = None,
+        lock_holder: str | None = None,
+        lock_error: OSError | None = None,
+    ) -> None:
         self.euid = 0
         self.files: dict[str, str] = {
             str(SITE_PATH): site_text,
@@ -47,6 +54,13 @@ class FakeHost:
         self.stats: dict[str, SimpleNamespace] = {}
         self.commands: list[list[str]] = []
         self.command_results: dict[tuple[str, ...], subprocess.CompletedProcess[str]] = {}
+        self.lock_holder = lock_holder
+        self.lock_error = lock_error
+        self.locks: dict[str, str] = {}
+        if lock_holder is not None:
+            self.locks[backuplock.ENGINE_LOCK.path] = lock_holder
+        self.lock_log: list[tuple[str, str]] = []
+        self.lock_records: list[str] = []
 
     def run(
         self,
@@ -117,6 +131,22 @@ class FakeHost:
     ) -> None:
         del mode, parents, exist_ok
         self.directories.setdefault(os.fspath(path), [])
+
+    def take_lock(self, path: PathLike, record: str) -> str | None:
+        key = os.fspath(path)
+        self.lock_log.append(("take", key))
+        if self.lock_error is not None:
+            raise self.lock_error
+        if key in self.locks:
+            return self.locks[key]
+        self.locks[key] = record
+        self.lock_records.append(record)
+        return None
+
+    def release_lock(self, path: PathLike) -> None:
+        key = os.fspath(path)
+        self.lock_log.append(("release", key))
+        self.locks.pop(key, None)
 
     def geteuid(self) -> int:
         return self.euid
@@ -777,6 +807,10 @@ class BrowserTurnIntegration(TestCase):
         code, stdout, _stderr, frontend, host = self._run(page=page, args=[])
 
         self.assertEqual(code, 0)
+        record = backuplock.parse(host.lock_records[0])
+        self.assertIsNotNone(record)
+        assert record is not None
+        self.assertEqual(record.command, "tools.turns --browser")
         self.assertIn("browser: ok — browser detail", stdout)
         self.assertIn("signin: ok — signed in as gideon-test-user through the LDAP form", stdout)
         self.assertIn(
@@ -1292,6 +1326,42 @@ class BrowserTurnIntegration(TestCase):
             self.assertEqual(code, 1)
             self.assertIn("trust-ca: refuse", output.getvalue())
             self.assertEqual(factory_calls, [])
+
+    def test_lock_releases_when_browser_launch_fails(self) -> None:
+        host = self._host()
+        frontend = FakeFrontend()
+        with TemporaryDirectory() as directory:
+            cases_path = Path(directory) / "cases.yaml"
+            cases_path.write_text(
+                "cases:\n  - {id: answered, prompt: p, expect: answered}\n",
+                encoding="utf-8",
+            )
+            output = StringIO()
+            with (
+                redirect_stdout(output),
+                patch("tools.turns.cli.chromium.playwright_problem", return_value=None),
+                patch("tools.turns.cli.chromium.browser_problem", return_value=None),
+            ):
+                code = cli.main(
+                    [
+                        str(cases_path),
+                        "--browser",
+                        "--out",
+                        str(Path(directory) / "out"),
+                    ],
+                    host=host,
+                    client_factory=frontend.factory,
+                    page_factory=lambda _hostname, _log: (_ for _ in ()).throw(
+                        RuntimeError("launch refused")
+                    ),
+                    checkout=ROOT,
+                )
+        self.assertEqual(code, 1)
+        self.assertIn("browser: refuse", output.getvalue())
+        self.assertEqual(
+            host.lock_log,
+            [("take", backuplock.ENGINE_LOCK.path), ("release", backuplock.ENGINE_LOCK.path)],
+        )
 
     def test_requests_log_and_run_record_include_browser_evidence(self) -> None:
         frontend = FakeFrontend()

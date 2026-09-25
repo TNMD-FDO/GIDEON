@@ -9,11 +9,12 @@ import stat as stat_module
 import subprocess
 import unittest
 from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 
 import yaml  # type: ignore[import-untyped]
 
-from gideon.host import grafana, nogpu, owui, pgbackrest, rotate, weights
+from gideon.host import backuplock, grafana, nogpu, owui, pgbackrest, rotate, weights
 from gideon.host.apply import run_apply
 from gideon.host.egress import EgressAllowlist
 from gideon.host.images import load_image_lock
@@ -397,6 +398,8 @@ class ApplyHost:
         files: Mapping[str, str],
         *,
         euid: int = 0,
+        lock_holder: str | None = None,
+        lock_error: OSError | None = None,
     ) -> None:
         self.commands: dict[tuple[str, ...], Outcome] = dict(commands)
         self.files = dict(files)
@@ -407,6 +410,11 @@ class ApplyHost:
         self.write_modes: dict[str, int] = {}
         self.chown_calls: list[tuple[str, int, int]] = []
         self.chown_failure = False
+        self.lock_holder = lock_holder
+        self.lock_error = lock_error
+        self.locks: dict[str, str] = {}
+        self.lock_records: list[str] = []
+        self.lock_log: list[tuple[str, str]] = []
         self.frontend = FakeFrontend()
         self.grafana = FakeGrafanaClient()
 
@@ -499,6 +507,24 @@ class ApplyHost:
         exist_ok: bool = False,
     ) -> None:
         del path, mode, parents, exist_ok
+
+    def take_lock(self, path: PathLike, record: str) -> str | None:
+        key = os.fspath(path)
+        self.lock_log.append(("take", key))
+        self.lock_records.append(record)
+        if self.lock_error is not None:
+            raise self.lock_error
+        if self.lock_holder is not None:
+            return self.lock_holder
+        if key in self.locks:
+            return self.locks[key]
+        self.locks[key] = record
+        return None
+
+    def release_lock(self, path: PathLike) -> None:
+        key = os.fspath(path)
+        self.lock_log.append(("release", key))
+        self.locks.pop(key, None)
 
     def geteuid(self) -> int:
         return self.euid
@@ -645,7 +671,9 @@ def run_apply_once(host: ApplyHost) -> tuple[int, str, str]:
     return code, out.getvalue(), err.getvalue()
 
 
-def run_rotate(host: ApplyHost, name: str) -> tuple[int, str, str]:
+def run_rotate(
+    host: ApplyHost, name: str, *, now: datetime | None = None
+) -> tuple[int, str, str]:
     out = io.StringIO()
     err = io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -658,6 +686,7 @@ def run_rotate(host: ApplyHost, name: str) -> tuple[int, str, str]:
             clock=lambda: 0.0,
             client_factory=client_factory(host),
             grafana_client_factory=grafana_client_factory(host),
+            now=now,
         )
     return code, out.getvalue(), err.getvalue()
 
@@ -715,15 +744,23 @@ class RealStack(unittest.TestCase):
 class EngineRotation(RealStack):
     def test_engine_rotates_mount_and_carried_consumers_then_converges(self) -> None:
         host = self.applied_host()
+        host.lock_log.clear()
+        host.lock_records.clear()
         path = f"{SECRETS_DIR}/engine_api_key"
         old_value = host.files[path].strip()
         before_manifest = yaml.safe_load(host.files[f"{RENDERED}/applied.yaml"])
         baseline_calls = len(host.calls)
         baseline_writes = len(host.writes)
 
-        code, out, err = run_rotate(host, "engine_api_key")
+        instant = datetime(2026, 9, 3, 1, 0, tzinfo=UTC)
+        code, out, err = run_rotate(host, "engine_api_key", now=instant)
 
         self.assertEqual((code, err), (0, ""), out)
+        self.assertIn("preconditions: ok — Docker Compose is available, a verified apply is recorded, and no change is pending; engine lock taken", out)
+        self.assertEqual(
+            backuplock.parse(host.lock_records[0]),
+            backuplock.Record("gideon secrets rotate engine_api_key", os.getpid(), instant),
+        )
         self.assertEqual(
             stages(out),
             [
@@ -775,7 +812,51 @@ class EngineRotation(RealStack):
         for command, input_text in host.inputs[baseline_calls:]:
             self.assertNotIn(new_value, command)
             self.assertNotIn(new_value, input_text or "")
+        self.assertEqual(
+            host.lock_log,
+            [("take", backuplock.ENGINE_LOCK.path), ("release", backuplock.ENGINE_LOCK.path)],
+        )
         assert_no_secret_text(self, out + err, (new_value,))
+
+    def test_rotation_refuses_a_foreign_claim_before_plan_or_write(self) -> None:
+        host = self.applied_host()
+        host.lock_log.clear()
+        holder = backuplock.Record(
+            "eval run fixture", os.getpid() + 1, datetime(2026, 9, 3, tzinfo=UTC)
+        )
+        host.lock_holder = holder.to_json()
+        before_files = dict(host.files)
+        before_writes = list(host.writes)
+        host.calls.clear()
+
+        code, out, err = run_rotate(host, "engine_api_key")
+
+        self.assertEqual((code, err), (1, ""))
+        self.assertEqual(stages(out), ["preconditions"])
+        self.assertIn(holder.command, out)
+        self.assertIn(f"pid {holder.pid}", out)
+        self.assertIn("ps -p", out)
+        self.assertEqual(host.files, before_files)
+        self.assertEqual(host.writes, before_writes)
+        self.assertEqual(
+            [call for call in argv_calls(host) if call[0] == "docker"], [VERSION]
+        )
+        self.assertEqual(host.lock_log, [("take", backuplock.ENGINE_LOCK.path)])
+
+    def test_rotation_nested_claim_passes_without_releasing(self) -> None:
+        host = self.applied_host()
+        host.lock_log.clear()
+        holder = backuplock.Record(
+            "outer command", os.getpid(), datetime(2026, 9, 3, tzinfo=UTC)
+        )
+        host.locks[backuplock.ENGINE_LOCK.path] = holder.to_json()
+
+        code, out, err = run_rotate(host, "engine_api_key")
+
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertIn("engine lock held by this process", out)
+        self.assertEqual(host.lock_log, [("take", backuplock.ENGINE_LOCK.path)])
+        self.assertIn(backuplock.ENGINE_LOCK.path, host.locks)
 
 
 class ApiRotation(RealStack):
@@ -857,11 +938,13 @@ class RefusalClasses(RealStack):
                 host.calls.clear()
                 host.inputs.clear()
                 host.writes.clear()
+                host.lock_log.clear()
                 code, out, err = run_rotate(host, name)
                 self.assertEqual(code, 1)
                 self.assertEqual(out, "")
                 self.assertEqual(host.calls, [])
                 self.assertEqual(host.writes, [])
+                self.assertEqual(host.lock_log, [])
                 for text in expected:
                     self.assertIn(text, err)
                 assert_no_secret_text(self, out + err)
@@ -873,6 +956,7 @@ class RefusalClasses(RealStack):
         self.assertEqual(out, "")
         self.assertIn("secrets rotate engine_api_key", err)
         self.assertEqual(host.calls, [])
+        self.assertEqual(host.lock_log, [])
         assert_no_secret_text(self, out + err)
 
 
@@ -891,6 +975,7 @@ class Preconditions(RealStack):
         self.assertEqual(host.files[f"{SECRETS_DIR}/engine_api_key"], "fixture-engine_api_key\n")
         self.assertEqual(host.writes, [])
         self.assertEqual(argv_calls(host), [VERSION])
+        self.assertEqual(host.lock_log, [])
         assert_no_secret_text(self, out + err)
 
     def test_pending_render_change_refuses_before_the_secret_write(self) -> None:
@@ -898,6 +983,7 @@ class Preconditions(RealStack):
         host.files[SITE] = host.files[SITE].replace("csa1@example.org", "changed@example.org")
         host.calls.clear()
         host.writes.clear()
+        host.lock_log.clear()
         code, out, err = run_rotate(host, "engine_api_key")
         self.assertEqual(code, 1)
         self.assertEqual(err, "")
@@ -905,6 +991,7 @@ class Preconditions(RealStack):
         self.assertIn("sudo python3 -m gideon apply", out)
         self.assertEqual(host.files[f"{SECRETS_DIR}/engine_api_key"], "fixture-engine_api_key\n")
         self.assertEqual(host.writes, [])
+        self.assertEqual(host.lock_log, [])
         assert_no_secret_text(self, out + err)
 
 
@@ -942,6 +1029,7 @@ class PartialRotation(RealStack):
         self.assertIn(f"logs {API_SERVICE_NAME}", out)
         self.assertIn("sudo python3 -m gideon apply", out)
         self.assertIn("sudo python3 -m gideon secrets rotate gideon_api_key again", out)
+        self.assertEqual(host.lock_log[-1], ("release", backuplock.ENGINE_LOCK.path))
         first_value = host.files[f"{SECRETS_DIR}/gideon_api_key"]
 
         host.calls.clear()
@@ -1024,6 +1112,7 @@ class OtherRotations(RealStack):
         self.assertIn("no service on this host consumes searxng_secret_key", out)
         self.assertEqual(len(off.writes), baseline_writes)
         self.assertEqual(argv_calls(off)[baseline_calls:].count(force_recreate("searxng")), 0)
+        self.assertEqual(off.lock_log[-1], ("release", backuplock.ENGINE_LOCK.path))
         assert_no_secret_text(self, out + err)
 
     def test_minted_key_is_removed_and_reminted_without_recreating_a_service(self) -> None:

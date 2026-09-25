@@ -27,7 +27,7 @@ from gideon import guardrail
 from gideon.evaluation.turns import classify, door, doorclient, session
 from gideon.evaluation.turns import run as run_module
 from gideon.evaluation.turns.cases import Case
-from gideon.host import models, secrets, site
+from gideon.host import backuplock, models, secrets, site
 from gideon.host.render.api import (
     API_SECRET_NAME,
     API_USER_EMAIL_HEADER,
@@ -351,6 +351,8 @@ class FakeHost:
         ignores_stream: bool = False,
         always_streams: bool = False,
         completion_status: int = 200,
+        lock_holder: str | None = None,
+        lock_error: OSError | None = None,
     ) -> None:
         self.files: dict[str, str] = {
             str(SITE_PATH): (ROOT / "config/site.example.yaml").read_text(encoding="utf-8"),
@@ -371,6 +373,13 @@ class FakeHost:
         self.always_streams = always_streams
         self.completion_status = completion_status
         self.euid = 0
+        self.lock_holder = lock_holder
+        self.lock_error = lock_error
+        self.locks: dict[str, str] = {}
+        if lock_holder is not None:
+            self.locks[backuplock.ENGINE_LOCK.path] = lock_holder
+        self.lock_log: list[tuple[str, str]] = []
+        self.lock_records: list[str] = []
 
     def run(
         self,
@@ -500,6 +509,22 @@ class FakeHost:
         del mode, parents, exist_ok
         self.directories.setdefault(os.fspath(path), [])
 
+    def take_lock(self, path: PathLike, record: str) -> str | None:
+        key = os.fspath(path)
+        self.lock_log.append(("take", key))
+        if self.lock_error is not None:
+            raise self.lock_error
+        if key in self.locks:
+            return self.locks[key]
+        self.locks[key] = record
+        self.lock_records.append(record)
+        return None
+
+    def release_lock(self, path: PathLike) -> None:
+        key = os.fspath(path)
+        self.lock_log.append(("release", key))
+        self.locks.pop(key, None)
+
     def geteuid(self) -> int:
         return self.euid
 
@@ -558,6 +583,10 @@ class ServiceDoor(unittest.TestCase):
             code, stdout, stderr = _run_service(host, cases_path, output=output)
 
         self.assertEqual(code, 0, stderr)
+        record = backuplock.parse(host.lock_records[0])
+        self.assertIsNotNone(record)
+        assert record is not None
+        self.assertEqual(record.command, "tools.turns --service")
         self.assertIn("preconditions: ok", stdout)
         self.assertIn("door: ok", stdout)
         self.assertIn("plain: ok — answered", stdout)

@@ -10,10 +10,11 @@ import sys
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
-from gideon.host import apply, grafana, owui, secrets, weights
+from gideon.host import apply, backuplock, grafana, owui, secrets, weights
 from gideon.host.render import RenderedSet, RenderInputs, render_all
 from gideon.host.render import command as render_command
 from gideon.host.render.compose import ENGINE_READY_SECONDS, service_names
@@ -24,7 +25,7 @@ from gideon.host.render.owui import BREAK_GLASS, EVAL_IDENTITY
 from gideon.host.report import StageResult, print_stage, refusal
 from gideon.host.secrets import registry_entry, secret_path
 from gideon.host.stores import ROLE_SPECS
-from gideon.host.sysio import Host, PathLike, RealHost
+from gideon.host.sysio import Host, LockingHost, PathLike, RealHost
 
 _SITE_PATH: Final = "/etc/gideon/site.yaml"
 _RENDERED_DIR: Final = "/etc/gideon/rendered"
@@ -317,7 +318,7 @@ def _recreate(
 def run_secrets_rotate(
     args: object,
     *,
-    host: Host | None = None,
+    host: LockingHost | None = None,
     rendered_dir: PathLike = _RENDERED_DIR,
     site_path: PathLike = _SITE_PATH,
     lock_path: PathLike | None = None,
@@ -330,6 +331,7 @@ def run_secrets_rotate(
     clock: Callable[[], float] = time.monotonic,
     client_factory: Callable[..., owui.Client] | None = None,
     grafana_client_factory: Callable[..., grafana.Client] | None = None,
+    now: datetime | None = None,
 ) -> int:
     """Rotate one generated secret, recreate its mount consumers, and converge the rest."""
 
@@ -360,37 +362,56 @@ def run_secrets_rotate(
         root=checkout,
         name=name,
     )
-    print_stage(preconditions)
     if not preconditions.ok or context is None:
+        print_stage(preconditions)
         return 1
 
-    consumers = context.consumers
-    print_stage(_plan(name, entry, consumers))
-    if entry.rotation == "rewrite" and not consumers.mounts and not consumers.carried:
-        return 0
-
-    rotate_result = _rotate(io, name, entry)
-    print_stage(rotate_result)
-    if not rotate_result.ok:
-        return 1
-
-    recreate_result = _recreate(io, rendered_dir, name, consumers.mounts)
-    print_stage(recreate_result)
-    if not recreate_result.ok:
-        return 1
-
-    return apply.converge(
+    lock_claim = backuplock.claim(
         io,
-        rendered_dir=rendered_dir,
-        site_path=site_path,
-        lock_path=actual_lock,
-        images_path=actual_images,
-        models_path=actual_models,
-        egress_path=actual_egress,
-        pull_models=pull_models or weights.pull_profile,
-        root=checkout,
-        sleep=sleep,
-        clock=clock,
-        client_factory=client_factory,
-        grafana_client_factory=grafana_client_factory,
+        command=f"gideon secrets rotate {name}",
+        now=now if now is not None else datetime.now(UTC),
     )
+    if lock_claim.refusal is not None:
+        print_stage(lock_claim.refusal)
+        return 1
+    preconditions = StageResult(
+        preconditions.name,
+        True,
+        f"{preconditions.detail}; {lock_claim.detail}",
+        preconditions.fix,
+    )
+    print_stage(preconditions)
+
+    try:
+        consumers = context.consumers
+        print_stage(_plan(name, entry, consumers))
+        if entry.rotation == "rewrite" and not consumers.mounts and not consumers.carried:
+            return 0
+
+        rotate_result = _rotate(io, name, entry)
+        print_stage(rotate_result)
+        if not rotate_result.ok:
+            return 1
+
+        recreate_result = _recreate(io, rendered_dir, name, consumers.mounts)
+        print_stage(recreate_result)
+        if not recreate_result.ok:
+            return 1
+
+        return apply.converge(
+            io,
+            rendered_dir=rendered_dir,
+            site_path=site_path,
+            lock_path=actual_lock,
+            images_path=actual_images,
+            models_path=actual_models,
+            egress_path=actual_egress,
+            pull_models=pull_models or weights.pull_profile,
+            root=checkout,
+            sleep=sleep,
+            clock=clock,
+            client_factory=client_factory,
+            grafana_client_factory=grafana_client_factory,
+        )
+    finally:
+        backuplock.release_claim(io, lock_claim)

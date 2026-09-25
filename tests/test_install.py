@@ -9,12 +9,13 @@ import unittest
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
+from unittest.mock import patch
 
-from gideon.host import audit, backupset, install, nogpu
+from gideon.host import audit, backuplock, backupset, install, nogpu
 from gideon.host.report import StageResult
 from gideon.host.site import load_site
-from gideon.host.sysio import PathLike
+from gideon.host.sysio import LockingHost, PathLike
 
 ROOT = Path(__file__).resolve().parent.parent
 EXAMPLE = ROOT / "config/site.example.yaml"
@@ -57,13 +58,24 @@ class FakeHost:
     """Root by default, the example site file, and an optional staging listing."""
 
     def __init__(
-        self, *, euid: int = 0, site: bool = True, sets: Mapping[str, str] | None = None
+        self,
+        *,
+        euid: int = 0,
+        site: bool = True,
+        sets: Mapping[str, str] | None = None,
+        lock_holder: str | None = None,
+        lock_error: OSError | None = None,
     ) -> None:
         self.euid = euid
         self.files: dict[str, str] = {}
         if site:
             self.files[str(EXAMPLE)] = EXAMPLE.read_text()
         self.sets = dict(sets or {})
+        self.lock_holder = lock_holder
+        self.lock_error = lock_error
+        self.locks: dict[str, str] = {}
+        self.lock_records: list[str] = []
+        self.lock_log: list[tuple[str, str]] = []
         for label, text in self.sets.items():
             self.files[os.path.join(backupset.set_dir(label), backupset.MANIFEST_NAME)] = text
 
@@ -81,6 +93,34 @@ class FakeHost:
 
     def geteuid(self) -> int:
         return self.euid
+
+    def mkdir(
+        self,
+        path: PathLike,
+        *,
+        mode: int = 0o755,
+        parents: bool = False,
+        exist_ok: bool = False,
+    ) -> None:
+        del path, mode, parents, exist_ok
+
+    def take_lock(self, path: PathLike, record: str) -> str | None:
+        key = os.fspath(path)
+        self.lock_log.append(("take", key))
+        self.lock_records.append(record)
+        if self.lock_error is not None:
+            raise self.lock_error
+        if self.lock_holder is not None:
+            return self.lock_holder
+        if key in self.locks:
+            return self.locks[key]
+        self.locks[key] = record
+        return None
+
+    def release_lock(self, path: PathLike) -> None:
+        key = os.fspath(path)
+        self.lock_log.append(("release", key))
+        self.locks.pop(key, None)
 
 
 class FakeAudit:
@@ -192,6 +232,114 @@ class InstallTests(unittest.TestCase):
         for row in backend.rows:
             self.assertIsNone(row.actor_user_id)
             self.assertEqual(row.kb_ids, ())
+
+    def test_in_process_holders_take_and_release_in_turn(self) -> None:
+        host = FakeHost()
+        output = io.StringIO()
+        instant = NOW
+
+        def apply_standin(
+            _args: object, *, host: FakeHost, **_kwargs: object
+        ) -> int:
+            locking_host = cast(LockingHost, host)
+            claim = backuplock.claim(
+                locking_host, command="gideon apply", now=instant
+            )
+            self.assertIsNone(claim.refusal)
+            backuplock.release_claim(locking_host, claim)
+            return 0
+
+        def engine_standin(
+            _args: object, *, host: FakeHost, **_kwargs: object
+        ) -> int:
+            locking_host = cast(LockingHost, host)
+            claim = backuplock.claim(
+                locking_host, command="gideon engine verify", now=instant
+            )
+            self.assertIsNone(claim.refusal)
+            backuplock.release_claim(locking_host, claim)
+            return 0
+
+        def reconcile_standin(
+            _args: object, *, host: FakeHost, **_kwargs: object
+        ) -> int:
+            self.assertNotIn(backuplock.ENGINE_LOCK.path, host.locks)
+            return 0
+
+        def success(*_args: object, **_kwargs: object) -> int:
+            return 0
+
+        backend = FakeAudit()
+        with (
+            patch.object(install.apply, "run_apply", apply_standin),
+            patch.object(install.engine, "run_engine_verify", engine_standin),
+            patch.object(install.preflight, "run_preflight", success),
+            patch.object(install.users, "run_reconcile", reconcile_standin),
+            patch.object(install.backup, "run_backup_run", success),
+            patch.object(install.drill, "run_backup_drill", success),
+            contextlib.redirect_stdout(output),
+        ):
+            code = install.run_install(
+                argparse.Namespace(command_path="install"),
+                host=cast(LockingHost, host),
+                site_path=EXAMPLE,
+                rendered_dir=RENDERED,
+                audit=backend,
+            )
+
+        self.assertEqual(code, 0, output.getvalue())
+        self.assertEqual(
+            host.lock_log,
+            [
+                ("take", backuplock.ENGINE_LOCK.path),
+                ("release", backuplock.ENGINE_LOCK.path),
+                ("take", backuplock.ENGINE_LOCK.path),
+                ("release", backuplock.ENGINE_LOCK.path),
+            ],
+        )
+        records = [backuplock.parse(value) for value in host.lock_records]
+        self.assertEqual(
+            [record.command for record in records if record is not None],
+            ["gideon apply", "gideon engine verify"],
+        )
+
+    def test_refused_apply_standin_stops_install_without_releasing_foreign_lock(self) -> None:
+        holder = backuplock.Record(
+            "eval run fixture", os.getpid() + 1, NOW
+        )
+        host = FakeHost(lock_holder=holder.to_json())
+        output = io.StringIO()
+
+        def refused_apply(
+            _args: object, *, host: FakeHost, **_kwargs: object
+        ) -> int:
+            locking_host = cast(LockingHost, host)
+            claim = backuplock.claim(
+                locking_host, command="gideon apply", now=NOW
+            )
+            self.assertIsNotNone(claim.refusal)
+            return 1
+
+        backend = FakeAudit()
+        with (
+            patch.object(install.preflight, "run_preflight", lambda *_args, **_kwargs: 0),
+            patch.object(install.apply, "run_apply", refused_apply),
+            contextlib.redirect_stdout(output),
+        ):
+            code = install.run_install(
+                argparse.Namespace(command_path="install"),
+                host=cast(LockingHost, host),
+                site_path=EXAMPLE,
+                rendered_dir=RENDERED,
+                audit=backend,
+            )
+
+        self.assertEqual(code, 1)
+        self.assertIn("apply: refuse — apply refused (exit 1)", output.getvalue())
+        self.assertEqual(
+            host.lock_log, [("take", backuplock.ENGINE_LOCK.path)]
+        )
+        self.assertEqual(backend.rows, [])
 
     def test_no_staging_listing_leaves_the_set_label_empty(self) -> None:
         code, _, _, _, backend = self.run_install(FakeHost())

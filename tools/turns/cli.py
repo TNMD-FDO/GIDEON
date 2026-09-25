@@ -21,11 +21,11 @@ from gideon.evaluation.turns.run import (
     new_sentinel,
     run,
 )
-from gideon.host import models, nogpu, owui, secrets, site
+from gideon.host import backuplock, models, nogpu, owui, secrets, site
 from gideon.host.render.ci import CI_ROOT, CI_SECRETS_DIR
 from gideon.host.render.owui import GENERAL_PRESET_ID
 from gideon.host.report import Problem, StageResult, print_stage
-from gideon.host.sysio import Host, PathLike, RealHost
+from gideon.host.sysio import Host, LockingHost, PathLike, RealHost
 from tools.ownership import restore_ownership, sudo_ids
 
 DEFAULT_SITE_PATH: Final[Path] = Path("/etc/gideon/site.yaml")
@@ -44,7 +44,7 @@ _BROWSER_STREAM_FIX: Final[str] = (
     "Use --probe-inlet for the users-seat probe; browser mode captures the live screen."
 )
 _BROWSER_CONCURRENT_FIX: Final[str] = (
-    "Run the API mode with --concurrent, and one --browser case beside it for the "
+    "Run the API mode with --concurrent, and one --browser case with --beside for the "
     "screen under load, then retry."
 )
 _BROWSER_SEARCH_FIX: Final[str] = (
@@ -142,6 +142,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--service", action="store_true")
     parser.add_argument("--no-instruction", action="store_true")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument(
+        "--beside", action="store_true", help="run beside the engine lock's holder, naming it"
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--stack", choices=("production", "ci"), default="production")
     return parser
@@ -221,10 +224,28 @@ def _service_refusal(options: argparse.Namespace) -> StageResult | None:
     return None
 
 
+def _lock_command(options: argparse.Namespace) -> str:
+    """Name this run in the engine lock's record: its mode, sessions, and stack."""
+
+    words = ["tools.turns"]
+    for present, flag in (
+        (options.browser, "--browser"),
+        (options.service, "--service"),
+        (options.unfiltered, "--unfiltered"),
+    ):
+        if present:
+            words.append(flag)
+    if options.concurrent > 1:
+        words.extend(("--concurrent", str(options.concurrent)))
+    if options.stack == "ci":
+        words.extend(("--stack", "ci"))
+    return " ".join(words)
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
-    host: Host | None = None,
+    host: LockingHost | None = None,
     client_factory: Callable[..., owui.Client] | None = None,
     page_factory: PageFactory | None = None,
     now: Callable[[], datetime] | None = None,
@@ -576,6 +597,22 @@ def main(
         if options.stack == "ci"
         else ""
     )
+    claim: backuplock.Claim | None = None
+    lock_detail = "engine lock not taken (dry run)"
+    if not options.dry_run:
+        claim = backuplock.claim(io, command=_lock_command(options), now=current)
+        if claim.refusal is not None:
+            if options.beside and claim.holder is not None:
+                holder = claim.holder
+                lock_detail = (
+                    f"beside the engine lock's holder: {holder.command} since "
+                    f"{holder.started.isoformat()} (pid {holder.pid})"
+                )
+            else:
+                print_stage(claim.refusal)
+                return 1
+        else:
+            lock_detail = claim.detail
     print_stage(
         StageResult(
             "preconditions",
@@ -583,140 +620,147 @@ def main(
             precondition_detail
             + f"loaded {loaded_cases.origin}; {turns_detail}; "
             + (f"{engine_call_detail}; " if shows_calls else "")
-            + window_detail,
+            + window_detail
+            + f"; {lock_detail}",
             "",
         )
     )
 
-    if options.trust_ca:
-        trust_detail, trust_problem = chromium.trust_ca(io)
-        if trust_problem is not None:
-            print_stage(
-                StageResult(
-                    "trust-ca",
-                    False,
-                    trust_problem.problem,
-                    trust_problem.fix,
+    try:
+        if options.trust_ca:
+            trust_detail, trust_problem = chromium.trust_ca(io)
+            if trust_problem is not None:
+                print_stage(
+                    StageResult(
+                        "trust-ca",
+                        False,
+                        trust_problem.problem,
+                        trust_problem.fix,
+                    )
                 )
-            )
-            return 1
-        print_stage(StageResult("trust-ca", True, trust_detail, ""))
+                return 1
+            print_stage(StageResult("trust-ca", True, trust_detail, ""))
 
-    if options.dry_run:
-        print("Turn harness dry run:")
-        streamed = ", streamed" if options.stream else ""
-        probed = " + 1 probe" if options.probe_inlet else ""
-        print(f"cases: {loaded_cases.origin}")
-        sessions = f"{options.concurrent} sessions × " if options.concurrent > 1 else ""
-        print(
-            f"turns: {turns} ({sessions}{options.repeat} × {len(case_values)}"
-            f"{streamed}{probed})"
-        )
-        if options.concurrent > 1:
-            print(f"sessions: {options.concurrent} in flight")
-        if shows_calls:
-            print(f"engine calls: {engine_calls}{engine_call_fragment}")
-        print(f"window: {window_detail}")
-        if direct_mode:
-            assert served_model is not None
-            instruction_state = "on" if instruction is not None else "off"
-            print(f"model: {served_model} (instruction: {instruction_state})")
+        if options.dry_run:
+            print("Turn harness dry run:")
+            streamed = ", streamed" if options.stream else ""
+            probed = " + 1 probe" if options.probe_inlet else ""
+            print(f"cases: {loaded_cases.origin}")
+            sessions = f"{options.concurrent} sessions × " if options.concurrent > 1 else ""
+            print(
+                f"turns: {turns} ({sessions}{options.repeat} × {len(case_values)}"
+                f"{streamed}{probed})"
+            )
+            if options.concurrent > 1:
+                print(f"sessions: {options.concurrent} in flight")
+            if shows_calls:
+                print(f"engine calls: {engine_calls}{engine_call_fragment}")
+            print(f"window: {window_detail}")
+            print("engine lock: not taken (dry run)")
+            if direct_mode:
+                assert served_model is not None
+                instruction_state = "on" if instruction is not None else "off"
+                print(f"model: {served_model} (instruction: {instruction_state})")
+            else:
+                print(f"model: {GENERAL_PRESET_ID}")
+            print(f"output directory: {output if output is not None else 'none'}")
+            if options.probe_inlet:
+                print(f"probe: inlet gate ({base_model})")
+            if options.browser:
+                print("mode: browser")
+                print(f"harness home: {chromium.HARNESS_HOME}")
+                print(f"password file: {chromium.PASSWORD_FILE}")
+                print(f"browsers directory: {chromium.BROWSERS_DIR}")
+                print(f"browser home: {chromium.BROWSER_HOME}")
+                print(f"playwright: {chromium.PLAYWRIGHT_VERSION}")
+            elif options.unfiltered:
+                print("mode: unfiltered")
+            elif options.service:
+                print("mode: service")
+            return 0
+
+        if client_factory is not None:
+            chosen_factory = client_factory
         else:
-            print(f"model: {GENERAL_PRESET_ID}")
-        print(f"output directory: {output if output is not None else 'none'}")
-        if options.probe_inlet:
-            print(f"probe: inlet gate ({base_model})")
+            chosen_factory = access.make_client_factory(
+                loaded_site.config.hostname,
+                stack=options.stack,
+                timeout=TURN_TIMEOUT_SECONDS,
+            )
+        browser_setup: BrowserSetup | None = None
         if options.browser:
-            print("mode: browser")
-            print(f"harness home: {chromium.HARNESS_HOME}")
-            print(f"password file: {chromium.PASSWORD_FILE}")
-            print(f"browsers directory: {chromium.BROWSERS_DIR}")
-            print(f"browser home: {chromium.BROWSER_HOME}")
-            print(f"playwright: {chromium.PLAYWRIGHT_VERSION}")
-        elif options.unfiltered:
-            print("mode: unfiltered")
-        elif options.service:
-            print("mode: service")
-        return 0
-
-    if client_factory is not None:
-        chosen_factory = client_factory
-    else:
-        chosen_factory = access.make_client_factory(
-            loaded_site.config.hostname,
-            stack=options.stack,
-            timeout=TURN_TIMEOUT_SECONDS,
-        )
-    browser_setup: BrowserSetup | None = None
-    if options.browser:
-        request_log = chromium.RequestLog(monotonic)
-        try:
-            page, close, detail = (page_factory or _launch_page)(
-                loaded_site.config.hostname, request_log
-            )
-        except Exception as exc:  # noqa: BLE001 - a launch that fails is a row, never a traceback.
-            print_stage(
-                StageResult(
-                    "browser",
-                    False,
-                    f"the browser could not be launched: {type(exc).__name__}",
-                    _LAUNCH_FIX,
+            request_log = chromium.RequestLog(monotonic)
+            try:
+                page, close, detail = (page_factory or _launch_page)(
+                    loaded_site.config.hostname, request_log
                 )
+            except Exception as exc:  # noqa: BLE001 - a launch that fails is a row, never a traceback.
+                print_stage(
+                    StageResult(
+                        "browser",
+                        False,
+                        f"the browser could not be launched: {type(exc).__name__}",
+                        _LAUNCH_FIX,
+                    )
+                )
+                return 1
+            browser_setup = BrowserSetup(
+                page=page,
+                close=close,
+                detail=detail,
+                hostname=loaded_site.config.hostname,
+                account=TEST_ACCOUNT,
+                request_log=request_log,
+                page_timeout=chromium.PAGE_TIMEOUT_SECONDS,
             )
-            return 1
-        browser_setup = BrowserSetup(
-            page=page,
-            close=close,
-            detail=detail,
-            hostname=loaded_site.config.hostname,
-            account=TEST_ACCOUNT,
-            request_log=request_log,
-            page_timeout=chromium.PAGE_TIMEOUT_SECONDS,
+        spec = RunSpec(
+            cases=options.cases,
+            repeat=options.repeat,
+            stream=options.stream,
+            out=output,
+            force=options.force,
+            dry_run=options.dry_run,
+            sentinel=new_sentinel(),
+            concurrent=options.concurrent,
+            browser=options.browser,
+            probe_inlet=options.probe_inlet,
+            trust_ca=options.trust_ca,
+            base_model=base_model,
+            model=served_model if direct_mode and served_model is not None else GENERAL_PRESET_ID,
+            unfiltered=options.unfiltered,
+            case_ids=tuple(case.id for case in case_values) if options.case else (),
+            service=options.service,
+            instruction=not options.no_instruction,
+            stack=options.stack,
+            beside=options.beside,
         )
-    spec = RunSpec(
-        cases=options.cases,
-        repeat=options.repeat,
-        stream=options.stream,
-        out=output,
-        force=options.force,
-        dry_run=options.dry_run,
-        sentinel=new_sentinel(),
-        concurrent=options.concurrent,
-        browser=options.browser,
-        probe_inlet=options.probe_inlet,
-        trust_ca=options.trust_ca,
-        base_model=base_model,
-        model=served_model if direct_mode and served_model is not None else GENERAL_PRESET_ID,
-        unfiltered=options.unfiltered,
-        case_ids=tuple(case.id for case in case_values) if options.case else (),
-        service=options.service,
-        instruction=not options.no_instruction,
-        stack=options.stack,
-    )
-    selected_now = now or _utc_now
+        selected_now = now or _utc_now
 
-    def hand_back(host: Host, output: Path) -> None:
-        owner = sudo_ids()
-        if owner is not None:
-            restore_ownership(host, output, owner, checkout=root)
+        def hand_back(host: Host, output: Path) -> None:
+            owner = sudo_ids()
+            if owner is not None:
+                restore_ownership(host, output, owner, checkout=root)
 
-    return run(
-        spec,
-        cases=case_values,
-        password=password_value,
-        guardrail=guardrail,
-        gate_texts=gate_texts,
-        client_factory=chosen_factory,
-        now=selected_now,
-        monotonic=monotonic,
-        host=io,
-        instruction_text=instruction,
-        origin=loaded_cases.origin,
-        window=window_detail,
-        browser_setup=browser_setup,
-        hand_back=hand_back,
-        rendered_dir=rendered_dir,
-    )
+        return run(
+            spec,
+            cases=case_values,
+            password=password_value,
+            guardrail=guardrail,
+            gate_texts=gate_texts,
+            client_factory=chosen_factory,
+            now=selected_now,
+            monotonic=monotonic,
+            host=io,
+            instruction_text=instruction,
+            origin=loaded_cases.origin,
+            window=window_detail,
+            browser_setup=browser_setup,
+            hand_back=hand_back,
+            rendered_dir=rendered_dir,
+        )
+    finally:
+        if claim is not None:
+            backuplock.release_claim(io, claim)
 
 
 def _launch_page(

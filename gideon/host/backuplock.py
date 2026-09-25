@@ -1,4 +1,4 @@
-"""The box's shared locks: one for backup and restore, one for the engine.
+"""The box's shared locks and the claim shape for their command holders.
 
 Each lock is one specification — its path, the noun its refusal names, and the
 fix its unreadable holder is given — over one mechanism: a flock whose file
@@ -6,6 +6,10 @@ carries the holder's record, a same-process holder passing as nested, and the
 lock dying with its process. The paths stay under ``/run`` because it is a
 root-only tmpfs that needs no cleanup after a reboot, and outside the backup
 staging directory because restore's swap moves that directory as a whole.
+
+``claim`` and ``release_claim`` are the shape a command holding the engine
+lock uses: the claim carries its passing row's fragment or its failed
+``preconditions`` row, and the release lets go only of a lock this claim took.
 """
 
 import dataclasses
@@ -109,6 +113,17 @@ class Outcome:
 
     state: State
     problem: report.Problem | None = None
+    holder: Record | None = None
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class Claim:
+    """A holder's lock claim and any row that refuses the start."""
+
+    taken: bool
+    detail: str
+    holder: Record | None
+    refusal: report.StageResult | None
 
 
 def take(
@@ -146,7 +161,46 @@ def take(
             f"Wait for it to finish — ps -p {holder.pid} says whether it still runs "
             "— then retry.",
         ),
+        holder,
     )
+
+
+def claim(
+    io: sysio.LockingHost,
+    *,
+    command: str,
+    now: datetime.datetime,
+    lock: Lock = ENGINE_LOCK,
+) -> Claim:
+    """Take a command's lock and describe its passing or refusing row."""
+
+    try:
+        outcome = take(io, command=command, now=now, lock=lock)
+    except OSError as exc:
+        refusal = report.StageResult(
+            "preconditions",
+            False,
+            f"the {lock.noun} lock could not be taken: {exc}",
+            f"Repair access to the {lock.noun} lock, then retry.",
+        )
+        return Claim(False, "", None, refusal)
+
+    if outcome.state is State.HELD:
+        return Claim(True, f"{lock.noun} lock taken", None, None)
+    if outcome.state is State.NESTED:
+        return Claim(False, f"{lock.noun} lock held by this process", None, None)
+
+    problem = outcome.problem
+    assert problem is not None
+    refusal = report.StageResult("preconditions", False, problem.problem, problem.fix)
+    return Claim(False, "", outcome.holder, refusal)
+
+
+def release_claim(io: sysio.LockingHost, claim: Claim, *, lock: Lock = ENGINE_LOCK) -> None:
+    """Release the lock only when this claim took it."""
+
+    if claim.taken:
+        release(io, lock=lock)
 
 
 def release(io: sysio.LockingHost, *, lock: Lock = BACKUP_LOCK) -> None:

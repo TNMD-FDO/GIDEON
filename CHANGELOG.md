@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.2.74](docs/release-notes/v0.2.74.md) — 2026-09-25 — no run starts beside a live run
 - [v0.2.73](docs/release-notes/v0.2.73.md) — 2026-09-25 — twenty tier-2 refusals at both paths
 - [v0.2.71](docs/release-notes/v0.2.71.md) — 2026-09-24 — one release at a time, the release lock
 - [v0.2.70](docs/release-notes/v0.2.70.md) — 2026-09-24 — the Dispatch field and the next-ticket listing

@@ -10,12 +10,13 @@ import stat as stat_module
 import subprocess
 import unittest
 from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import unquote
 
 import yaml  # type: ignore[import-untyped]
 
-from gideon.host import grafana, nogpu, owui, pgbackrest, weights
+from gideon.host import backuplock, grafana, nogpu, owui, pgbackrest, weights
 from gideon.host.apply import (
     _VERIFY_ATTEMPTS,
     _VERIFY_SLEEP_SECONDS,
@@ -324,7 +325,15 @@ class FakeGrafanaClient(grafana.Client):
 class ApplyHost:
     """Commands map argv → outcome (or a queue); files is the rendered filesystem plus inputs."""
 
-    def __init__(self, commands: Mapping[tuple[str, ...], Outcome], files: Mapping[str, str], *, euid: int = 0) -> None:
+    def __init__(
+        self,
+        commands: Mapping[tuple[str, ...], Outcome],
+        files: Mapping[str, str],
+        *,
+        euid: int = 0,
+        lock_holder: str | None = None,
+        lock_error: OSError | None = None,
+    ) -> None:
         self.commands: dict[tuple[str, ...], Outcome] = dict(commands)
         self.files = dict(files)
         self.euid = euid
@@ -336,6 +345,11 @@ class ApplyHost:
         self.chmod_calls: list[tuple[str, int]] = []
         self.chown_calls: list[tuple[str, int, int]] = []
         self.pull_calls: list[tuple[SiteConfig, HardwareProfile, EgressAllowlist]] = []
+        self.lock_holder = lock_holder
+        self.lock_error = lock_error
+        self.locks: dict[str, str] = {}
+        self.lock_records: list[str] = []
+        self.lock_log: list[tuple[str, str]] = []
         self.frontend = FakeFrontend()
         self.grafana = FakeGrafanaClient()
 
@@ -397,6 +411,24 @@ class ApplyHost:
 
     def mkdir(self, path: PathLike, *, mode: int = 0o755, parents: bool = False, exist_ok: bool = False) -> None:
         self.mkdir_calls.append((os.fspath(path), mode, parents, exist_ok))
+
+    def take_lock(self, path: PathLike, record: str) -> str | None:
+        key = os.fspath(path)
+        self.lock_log.append(("take", key))
+        self.lock_records.append(record)
+        if self.lock_error is not None:
+            raise self.lock_error
+        if self.lock_holder is not None:
+            return self.lock_holder
+        if key in self.locks:
+            return self.locks[key]
+        self.locks[key] = record
+        return None
+
+    def release_lock(self, path: PathLike) -> None:
+        key = os.fspath(path)
+        self.lock_log.append(("release", key))
+        self.locks.pop(key, None)
 
     def geteuid(self) -> int:
         return self.euid
@@ -502,6 +534,7 @@ def apply(
     egress_path: PathLike | None = None,
     sleep_calls: list[float] | None = None,
     clock: Callable[[], float] | None = None,
+    now: datetime | None = None,
 ) -> tuple[int, str, str]:
     out, err = io.StringIO(), io.StringIO()
     naps: list[float] = []
@@ -551,6 +584,7 @@ def apply(
             clock=clock or (lambda: 0.0),
             client_factory=client_factory,
             grafana_client_factory=grafana_client_factory,
+            now=now,
         )
     return code, out.getvalue(), err.getvalue()
 
@@ -564,6 +598,75 @@ def argv_calls(host: ApplyHost) -> list[tuple[str, ...]]:
 
 
 class HappyPath(unittest.TestCase):
+    def test_apply_claim_uses_command_and_clock_then_releases_last(self) -> None:
+        host = ApplyHost(healthy_commands(), base_files())
+        instant = datetime(2026, 9, 3, 1, 0, tzinfo=UTC)
+
+        code, out, err = apply(host, now=instant)
+
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertIn("preconditions: ok — Docker Compose is available; engine lock taken", out)
+        self.assertEqual(
+            backuplock.parse(host.lock_records[0]),
+            backuplock.Record("gideon apply", os.getpid(), instant),
+        )
+        self.assertEqual(
+            host.lock_log,
+            [("take", backuplock.ENGINE_LOCK.path), ("release", backuplock.ENGINE_LOCK.path)],
+        )
+        self.assertEqual(host.locks, {})
+
+    def test_apply_refuses_a_foreign_claim_after_compose_check(self) -> None:
+        holder = backuplock.Record(
+            "eval run fixture", os.getpid() + 1, datetime(2026, 9, 3, tzinfo=UTC)
+        )
+        host = ApplyHost(healthy_commands(), base_files(), lock_holder=holder.to_json())
+        before_files = dict(host.files)
+
+        code, out, err = apply(host)
+
+        self.assertEqual((code, err), (1, ""))
+        self.assertEqual(stages(out), ["preconditions"])
+        self.assertIn(holder.command, out)
+        self.assertIn(f"pid {holder.pid}", out)
+        self.assertIn("ps -p", out)
+        self.assertEqual(argv_calls(host), [VERSION])
+        self.assertEqual(host.files, before_files)
+        self.assertEqual(host.writes, [])
+        self.assertEqual(host.lock_log, [("take", backuplock.ENGINE_LOCK.path)])
+
+    def test_apply_nested_claim_passes_without_releasing(self) -> None:
+        holder = backuplock.Record(
+            "outer command", os.getpid(), datetime(2026, 9, 3, tzinfo=UTC)
+        )
+        host = ApplyHost(healthy_commands(), base_files())
+        host.locks[backuplock.ENGINE_LOCK.path] = holder.to_json()
+
+        code, out, err = apply(host)
+
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertIn("preconditions: ok — Docker Compose is available; engine lock held by this process", out)
+        self.assertEqual(host.lock_log, [("take", backuplock.ENGINE_LOCK.path)])
+        self.assertIn(backuplock.ENGINE_LOCK.path, host.locks)
+
+    def test_apply_releases_after_a_later_stage_refusal(self) -> None:
+        host = ApplyHost(healthy_commands(), base_files())
+
+        def failed_pull(
+            _io: Host,
+            _site: SiteConfig,
+            _profile: HardwareProfile,
+            _allowlist: EgressAllowlist,
+        ) -> weights.PullOutcome:
+            return weights.PullOutcome((), (), False, "fixture pull failure", "fixture fix")
+
+        code, out, err = apply(host, failed_pull)
+
+        self.assertEqual((code, err), (1, ""))
+        self.assertIn("models: refuse — fixture pull failure", out)
+        self.assertEqual(host.lock_log[-1], ("release", backuplock.ENGINE_LOCK.path))
+        self.assertEqual(host.locks, {})
+
     def test_first_apply_runs_every_stage_and_records_the_applied_manifest(self) -> None:
         host = ApplyHost(healthy_commands(), base_files())
         code, out, err = apply(host)
@@ -778,9 +881,11 @@ class HappyPath(unittest.TestCase):
 
 class Refusals(unittest.TestCase):
     def test_root_required(self) -> None:
-        code, _, err = apply(ApplyHost(healthy_commands(), base_files(), euid=1000))
+        host = ApplyHost(healthy_commands(), base_files(), euid=1000)
+        code, _, err = apply(host)
         self.assertEqual(code, 1)
         self.assertIn("Fix:", err)
+        self.assertEqual(host.lock_log, [])
 
     def test_missing_docker_compose_names_the_provision_step(self) -> None:
         commands = healthy_commands()

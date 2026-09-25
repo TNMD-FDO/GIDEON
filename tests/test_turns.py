@@ -23,13 +23,13 @@ import yaml  # type: ignore[import-untyped]
 from gideon import guardrail
 from gideon.api import stamp
 from gideon.evaluation.turns import access, cases, classify, run, session
-from gideon.host import models, owuiturn, secrets, site
+from gideon.host import backuplock, models, owuiturn, secrets, site
 from gideon.host.owui import Client, OwuiError, Response
 from gideon.host.render.ci import CI_PORT, CI_ROOT, CI_SECRETS_DIR
 from gideon.host.render.owui import EVAL_IDENTITY, GENERAL_PRESET_ID
 from gideon.host.report import Problem
 from gideon.host.secrets import secret_path
-from gideon.host.sysio import Host
+from gideon.host.sysio import Host, LockingHost
 from tools.turns import cli
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -104,11 +104,19 @@ def _records(host: "FakeHost", output: Path) -> dict[str, dict[str, object]]:
 class FakeHost:
     """The small host seam needed by the CLI preconditions."""
 
-    def __init__(self, *, euid: int = 0, password: str | None = PASSWORD) -> None:
+    def __init__(
+        self,
+        *,
+        euid: int = 0,
+        password: str | None = PASSWORD,
+        lock_holder: str | None = None,
+        lock_error: OSError | None = None,
+    ) -> None:
         self.euid = euid
         self.files: dict[str, str] = {str(SITE_PATH): SITE_TEXT}
         if password is not None:
             self.files[str(secret_path("gideon_eval_password"))] = f"{password}\n"
+            self.files[str(Path(CI_SECRETS_DIR) / "gideon_eval_password")] = f"{password}\n"
         self.directories: dict[str, list[str]] = {}
         self.writes: list[str] = []
         self.read_paths: list[str] = []
@@ -116,6 +124,13 @@ class FakeHost:
         self.commands: list[list[str]] = []
         self.refuse_writes = False
         self.refuse_paths: set[str] = set()
+        self.lock_holder = lock_holder
+        self.lock_error = lock_error
+        self.locks: dict[str, str] = {}
+        self.lock_records: list[str] = []
+        if lock_holder is not None:
+            self.locks[backuplock.ENGINE_LOCK.path] = lock_holder
+        self.lock_log: list[tuple[str, str]] = []
 
     def read_text(self, path: object, *, encoding: str = "utf-8") -> str:
         del encoding
@@ -163,6 +178,22 @@ class FakeHost:
     ) -> None:
         del mode, parents, exist_ok
         self.directories.setdefault(str(path), [])
+
+    def take_lock(self, path: object, record: str) -> str | None:
+        key = str(path)
+        self.lock_log.append(("take", key))
+        if self.lock_error is not None:
+            raise self.lock_error
+        if key in self.locks:
+            return self.locks[key]
+        self.locks[key] = record
+        self.lock_records.append(record)
+        return None
+
+    def release_lock(self, path: object) -> None:
+        key = str(path)
+        self.lock_log.append(("release", key))
+        self.locks.pop(key, None)
 
     def chown(self, path: object, uid: int, gid: int) -> None:
         self.chowns.append((str(path), uid, gid))
@@ -710,7 +741,7 @@ def _run_file(
         with redirect_stdout(stdout), redirect_stderr(stderr):
             code = cli.main(
                 [str(path), *effective_args],
-                host=cast(Host, selected_host),
+                host=cast(LockingHost, selected_host),
                 client_factory=selected_factory,
                 now=now or (lambda: FIXED_NOW),
                 monotonic=monotonic or time.monotonic,
@@ -743,7 +774,7 @@ class TurnHarness(TestCase):
             "                              [--browser] [--probe-inlet] [--trust-ca]\n"
             "                              [--out DIR] [--case ID] [--unfiltered]\n"
             "                              [--service] [--no-instruction] [--force]\n"
-            "                              [--dry-run] [--stack {production,ci}]\n"
+            "                              [--beside] [--dry-run] [--stack {production,ci}]\n"
             "                              cases\n\n"
             "positional arguments:\n"
             "  cases\n\n"
@@ -761,9 +792,87 @@ class TurnHarness(TestCase):
             "  --service\n"
             "  --no-instruction\n"
             "  --force\n"
+            "  --beside              run beside the engine lock's holder, naming it\n"
             "  --dry-run\n"
             "  --stack {production,ci}\n",
         )
+
+    def test_engine_lock_refuses_unless_beside_has_a_readable_holder(self) -> None:
+        text = "cases:\n  - {id: lock, prompt: p, expect: answered}\n"
+        holder = backuplock.Record("tools.turns --concurrent 15", os.getpid() + 1, FIXED_NOW)
+        foreign = FakeHost(lock_holder=holder.to_json())
+        frontend = Frontend(self.guardrail, {"lock": "answered"})
+        code, stdout, _ = _run_file(frontend, text, host=foreign)
+        self.assertEqual(code, 1)
+        self.assertIn("preconditions: refuse", stdout)
+        self.assertIn(holder.command, stdout)
+        self.assertEqual(frontend.calls, [])
+        self.assertEqual(foreign.lock_log, [("take", backuplock.ENGINE_LOCK.path)])
+
+        foreign = FakeHost(lock_holder=holder.to_json())
+        frontend = Frontend(self.guardrail, {"lock": "answered"})
+        code, stdout, _ = _run_file(frontend, text, host=foreign, args=["--beside"])
+        self.assertEqual(code, 0)
+        self.assertIn(
+            f"beside the engine lock's holder: {holder.command} since "
+            f"{holder.started.isoformat()} (pid {holder.pid})",
+            stdout,
+        )
+        self.assertIn("lock: ok", stdout)
+        self.assertTrue(frontend.calls)
+        self.assertEqual(foreign.lock_log, [("take", backuplock.ENGINE_LOCK.path)])
+
+        for host in (
+            FakeHost(lock_holder="unreadable"),
+            FakeHost(lock_error=OSError(13, "permission denied")),
+        ):
+            with self.subTest(host=host):
+                frontend = Frontend(self.guardrail, {"lock": "answered"})
+                code, stdout, _ = _run_file(
+                    frontend, text, host=host, args=["--beside"]
+                )
+                self.assertEqual(code, 1)
+                self.assertIn("preconditions: refuse", stdout)
+                self.assertEqual(frontend.calls, [])
+                self.assertEqual(
+                    host.lock_log, [("take", backuplock.ENGINE_LOCK.path)]
+                )
+
+    def test_turn_lock_release_dry_run_and_record_arguments(self) -> None:
+        text = "cases:\n  - {id: lock, prompt: p, expect: answered}\n"
+        original_directory = secrets.current_directory()
+        self.addCleanup(secrets.select_directory, original_directory)
+        frontend = Frontend(self.guardrail, {"lock": "answered"})
+        host = FakeHost()
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "out"
+            code, stdout, _ = _run_file(
+                frontend,
+                text,
+                host=host,
+                args=["--beside", "--concurrent", "2", "--stack", "ci", "--out", str(output)],
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            host.lock_log,
+            [("take", backuplock.ENGINE_LOCK.path), ("release", backuplock.ENGINE_LOCK.path)],
+        )
+        taken = backuplock.parse(host.lock_records[0])
+        self.assertIsNotNone(taken)
+        assert taken is not None
+        self.assertEqual(taken.command, "tools.turns --concurrent 2 --stack ci")
+        run_record = json.loads(host.files[str(output / "run.json")])
+        self.assertTrue(run_record["arguments"]["beside"])
+        self.assertIn("engine lock taken", stdout)
+
+        frontend = Frontend(self.guardrail, {"lock": "answered"})
+        dry_host = FakeHost()
+        code, stdout, _ = _run_file(
+            frontend, text, host=dry_host, args=["--dry-run"]
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(dry_host.lock_log, [])
+        self.assertIn("engine lock not taken (dry run)", stdout)
 
     def test_turn_access_helpers_return_their_refusal_rows(self) -> None:
         with patch.object(
@@ -952,7 +1061,7 @@ class TurnHarness(TestCase):
             with redirect_stdout(stdout):
                 code = cli.main(
                     [str(cases_path), "--stack", "ci"],
-                    host=cast(Host, host),
+                    host=cast(LockingHost, host),
                     checkout=ROOT,
                     site_path=SITE_PATH,
                     now=lambda: FIXED_NOW,
@@ -979,7 +1088,7 @@ class TurnHarness(TestCase):
                 with redirect_stdout(output):
                     code = cli.main(
                         ["missing.yaml", "--stack", "ci", flag, "--out", "/tmp/turns-out"],
-                        host=cast(Host, FakeHost()),
+                        host=cast(LockingHost, FakeHost()),
                     )
                 self.assertEqual(code, 1)
                 text = output.getvalue()
@@ -999,7 +1108,7 @@ class TurnHarness(TestCase):
                 with redirect_stdout(output):
                     code = cli.main(
                         ["missing.yaml", "--stack", stack, "--service"],
-                        host=cast(Host, host),
+                        host=cast(LockingHost, host),
                         checkout=ROOT,
                         site_path=SITE_PATH,
                         now=lambda: FIXED_NOW,
@@ -1434,6 +1543,10 @@ class TurnHarness(TestCase):
             )
             self.assertEqual(code, 0)
             self.assertEqual(stderr, "")
+            record = backuplock.parse(host.lock_records[0])
+            self.assertIsNotNone(record)
+            assert record is not None
+            self.assertEqual(record.command, "tools.turns --unfiltered")
             self.assertNotIn("hidden trip prompt", stdout)
             self.assertNotIn("The filing deadline is March 2, 2027.", stdout)
             self.assertRegex(stdout, r"trip: ok — tripped .+; unsupplied: .+; [0-9.]+s")
@@ -2720,11 +2833,12 @@ class TurnHarness(TestCase):
         office_window = f"office hours (14:00 {timezone_name}, Tuesday)"
         self.assertEqual(
             stdout.replace(dynamic_path, "<fixture-cases>"),
-            f"preconditions: ok — loaded cases file <fixture-cases>: 1 cases; 1 turns; {office_window}\n"
+            f"preconditions: ok — loaded cases file <fixture-cases>: 1 cases; 1 turns; {office_window}; engine lock not taken (dry run)\n"
             "Turn harness dry run:\n"
             "cases: cases file <fixture-cases>: 1 cases\n"
             "turns: 1 (1 × 1)\n"
             f"window: {office_window}\n"
+            "engine lock: not taken (dry run)\n"
             "model: gideon-general\n"
             "output directory: none\n",
         )
@@ -3053,7 +3167,7 @@ class TurnHarness(TestCase):
         )
         self.assertEqual(code, 1)
         self.assertIn("--concurrent is not available with --browser", stdout)
-        self.assertIn("screen under load", stdout)
+        self.assertIn("--beside", stdout)
         self.assertNotIn("root is required", stdout)
         self.assertEqual(frontend.calls, [])
 

@@ -11,11 +11,12 @@ import subprocess
 import tempfile
 import unittest
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
 from gideon import guardrail
-from gideon.host import audit, engine, enginesample, owui, owuiturn, secrets
+from gideon.host import audit, backuplock, engine, enginesample, owui, owuiturn, secrets
 from gideon.host.owui import OwuiError
 from gideon.host.render.engine import (
     ENGINE_PORT,
@@ -150,6 +151,8 @@ class FakeHost:
         structured_finish: str | None = "stop",
         structured_status: int = 200,
         structured_error: str = "",
+        lock_holder: str | None = None,
+        lock_error: OSError | None = None,
     ) -> None:
         self.files = dict(files or {})
         self.euid = euid
@@ -168,6 +171,11 @@ class FakeHost:
         self.structured_status = structured_status
         self.structured_error = structured_error
         self.runs: list[tuple[tuple[str, ...], str | None, float | None]] = []
+        self.lock_holder = lock_holder
+        self.lock_error = lock_error
+        self.locks: dict[str, str] = {}
+        self.lock_log: list[tuple[str, str]] = []
+        self.reads: list[str] = []
 
     def _token_count(self, body: Mapping[str, object]) -> int:
         messages = body.get("messages")
@@ -292,6 +300,7 @@ class FakeHost:
     def read_text(self, path: PathLike, *, encoding: str = "utf-8") -> str:
         del encoding
         key = os.fspath(path)
+        self.reads.append(key)
         if key not in self.files:
             raise FileNotFoundError(key)
         return self.files[key]
@@ -338,8 +347,25 @@ class FakeHost:
         parents: bool = False,
         exist_ok: bool = False,
     ) -> None:
-        del path, mode, parents, exist_ok
-        raise NotImplementedError
+        del mode, parents, exist_ok
+        self.lock_log.append(("mkdir", os.fspath(path)))
+
+    def take_lock(self, path: PathLike, record: str) -> str | None:
+        key = os.fspath(path)
+        self.lock_log.append(("take", key))
+        if self.lock_error is not None:
+            raise self.lock_error
+        if self.lock_holder is not None:
+            return self.lock_holder
+        if key in self.locks:
+            return self.locks[key]
+        self.locks[key] = record
+        return None
+
+    def release_lock(self, path: PathLike) -> None:
+        key = os.fspath(path)
+        self.lock_log.append(("release", key))
+        self.locks.pop(key, None)
 
     def geteuid(self) -> int:
         return self.euid
@@ -698,6 +724,48 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(len(frontend_checks), 3)
         self.assertTrue(all(isinstance(value, Mapping) for value in frontend_checks.values()))
 
+    def test_engine_lock_is_claimed_and_released_after_the_verify_run(self) -> None:
+        host = self.make_host()
+        code, output, _ = self.run_command(host)
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("and audit writer are ready; engine lock taken", output)
+        self.assertEqual(host.lock_log[-1], ("release", backuplock.ENGINE_LOCK.path))
+        self.assertEqual(host.locks, {})
+
+    def test_engine_lock_refusal_stops_before_site_read_and_is_observed(self) -> None:
+        holder = backuplock.Record(
+            "eval run fixture", os.getpid() + 1, datetime(2026, 9, 2, tzinfo=UTC)
+        )
+        host = self.make_host(lock_holder=holder.to_json())
+        host.reads.clear()
+        observed: list[engine.StageResult] = []
+        code, output, backend = self.run_command(host, observe=observed)
+
+        self.assertEqual(code, 1)
+        self.assertIn(f"{holder.command} since {holder.started.isoformat()}", output)
+        self.assertIn(f"pid {holder.pid}", output)
+        self.assertIn("ps -p", output)
+        self.assertFalse(host.runs)
+        self.assertFalse(host.reads)
+        self.assertEqual([row.name for row in observed], ["preconditions"])
+        self.assertFalse(observed[0].ok)
+        self.assertEqual(backend.rows, [])
+        self.assertEqual(host.lock_log[-1], ("take", backuplock.ENGINE_LOCK.path))
+
+    def test_engine_lock_nested_claim_is_not_released(self) -> None:
+        holder = backuplock.Record(
+            "existing holder", os.getpid(), datetime(2026, 9, 2, tzinfo=UTC)
+        )
+        host = self.make_host()
+        host.locks[backuplock.ENGINE_LOCK.path] = holder.to_json()
+        code, output, _ = self.run_command(host)
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("and audit writer are ready; engine lock held by this process", output)
+        self.assertEqual(host.lock_log[-1], ("take", backuplock.ENGINE_LOCK.path))
+        self.assertIn(backuplock.ENGINE_LOCK.path, host.locks)
+
     def test_frontend_requests_use_loaded_cases_and_audit_figures_are_content_free(self) -> None:
         host = self.make_host()
         frontend = self.make_frontend()
@@ -908,6 +976,7 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual([row.name for row in observed], ["engine"])
         self.assertEqual(output, "engine: ok — skipped — no-GPU host\n")
+        self.assertEqual(host.lock_log, [])
 
         host = self.make_host()
         code, output, _ = self.run_command(host)
@@ -1170,6 +1239,10 @@ class CommandTests(unittest.TestCase):
                 self.assertIn("preconditions: refuse", output)
                 self.assertIn(fix, output)
                 self.assertEqual(backend.rows, [])
+                if name == "root":
+                    self.assertEqual(host.lock_log, [])
+                else:
+                    self.assertEqual(host.lock_log[-1], ("release", backuplock.ENGINE_LOCK.path))
 
         host = self.make_host()
         backend = FakeAudit(probe_problem="probe failed")
@@ -1185,6 +1258,7 @@ class CommandTests(unittest.TestCase):
         self.assertIn("preconditions: refuse", output)
         self.assertIn("eval/engine-verify/sample.yaml", output)
         self.assertEqual(backend.rows, [])
+        self.assertEqual(host.lock_log[-1], ("release", backuplock.ENGINE_LOCK.path))
 
     def test_smoke_failure_still_writes_failed_audit_row(self) -> None:
         variants = (
@@ -1203,6 +1277,7 @@ class CommandTests(unittest.TestCase):
                 self.assertIn(detail, output)
                 self.assertEqual(len(backend.rows), 1)
                 self.assertEqual(backend.rows[0].detail["outcome"], "failed")
+                self.assertEqual(host.lock_log[-1], ("release", backuplock.ENGINE_LOCK.path))
 
         host = self.make_host(exec_error=subprocess.TimeoutExpired(["curl"], 1))
         code, output, backend = self.run_command(host)

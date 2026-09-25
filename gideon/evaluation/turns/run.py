@@ -81,6 +81,7 @@ class RunSpec:
     service: bool = False
     instruction: bool = True
     stack: str = "production"
+    beside: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1827,6 +1828,7 @@ def _arguments(spec: RunSpec) -> dict[str, object]:
         "service": spec.service,
         "instruction": spec.instruction,
         "stack": spec.stack,
+        "beside": spec.beside,
     }
 
 

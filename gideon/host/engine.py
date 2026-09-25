@@ -1,6 +1,7 @@
 """The direct serving-engine verification command."""
 
 import argparse
+import datetime
 import json
 import math
 import re
@@ -17,6 +18,7 @@ import yaml  # type: ignore[import-untyped]
 from gideon import guardrail
 from gideon.host import (
     apply,
+    backuplock,
     enginesample,
     models,
     nogpu,
@@ -39,7 +41,7 @@ from gideon.host.render.owui import (
     GENERAL_PRESET_ID,
 )
 from gideon.host.report import Problem, StageResult, print_stage
-from gideon.host.sysio import Host, PathLike, RealHost
+from gideon.host.sysio import Host, LockingHost, PathLike, RealHost
 
 _SITE_PATH: Final[str] = "/etc/gideon/site.yaml"
 _RENDERED_DIR: Final[str] = "/etc/gideon/rendered"
@@ -1142,7 +1144,7 @@ def resolve_engine_target(
 def run_engine_verify(
     args: argparse.Namespace,
     *,
-    host: Host | None = None,
+    host: LockingHost | None = None,
     site_path: PathLike = _SITE_PATH,
     rendered_dir: PathLike = _RENDERED_DIR,
     root: PathLike | None = None,
@@ -1179,167 +1181,180 @@ def run_engine_verify(
         show(StageResult("engine", True, "skipped — no-GPU host", ""))
         return 0
 
-    site_result = site.load_site(Path(site_path), host=io)
-    if site_result.errors or site_result.config is None:
-        show(
-            _failed(
-                "preconditions",
-                site.render_errors(site_result.errors),
-                "Correct the site file, then retry",
-            )
-        )
-        return 1
-    config = site_result.config
-
-    engine_target = resolve_engine_target(
+    lock_claim = backuplock.claim(
         io,
-        rendered_dir,
-        hardware_profile=config.hardware_profile,
-        models_path=actual_models,
-        sleep=sleep,
+        command="gideon engine verify",
+        now=datetime.datetime.now(datetime.UTC),
     )
-    if isinstance(engine_target, Problem):
-        show(_failed("preconditions", engine_target.problem, engine_target.fix))
+    if lock_claim.refusal is not None:
+        show(lock_claim.refusal)
         return 1
-
-    sample_result = enginesample.load_sample(actual_sample, host=io)
-    if sample_result.errors or sample_result.sample is None:
-        fix = sample_result.errors[0].fix if sample_result.errors else _SAMPLE_FIX
-        show(_failed("preconditions", enginesample.render_errors(sample_result.errors), fix))
-        return 1
-    sample = sample_result.sample
-
-    password_result = secrets.read_secret(io, EVAL_PASSWORD_SECRET)
-    if not password_result.ok or password_result.value is None:
-        password_fix = _APPLY_FIX if password_result.missing else password_result.fix
-        show(
-            _failed(
-                "preconditions",
-                password_result.problem or "eval password is unavailable",
-                password_fix or _APPLY_FIX,
-            )
-        )
-        return 1
-    eval_password = password_result.value
 
     try:
-        audit_problem = audit_api.probe(io, rendered_dir)
-    except OSError:
-        audit_problem = "audit writer probe failed"
-    if audit_problem is not None:
-        show(_failed("preconditions", "audit writer is unavailable", _APPLY_FIX))
-        return 1
-
-    show(
-        StageResult(
-            "preconditions",
-            True,
-            f"root, site, rendered engine, profile {engine_target.profile_name}, window {engine_target.window}, "
-            f"sample {sample.sha256[:12]}, eval password, and audit writer are ready",
-            "",
-        )
-    )
-
-    engine_fix = _engine_fix(rendered_dir)
-    served_name = engine_target.served_model_name
-    window = engine_target.window
-    checks: list[CheckOutcome] = []
-
-    def record(outcome: CheckOutcome) -> None:
-        """Print a check's row as it completes, so a long run streams its rows."""
-
-        show(StageResult(outcome.name, outcome.ok, outcome.detail, outcome.fix))
-        checks.append(outcome)
-
-    estimates = _needle_estimates(
-        io, rendered_dir, sample=sample, served_name=served_name, engine_fix=engine_fix
-    )
-    for nominal in NEEDLE_LENGTHS:
-        if isinstance(estimates, Problem):
-            target, floor = _needle_band(nominal, window)
-            figures = _needle_figures(
-                nominal=nominal, target=target, floor=floor, window=window,
-                prompt_tokens=None, blocks=0, sizing_rounds=0,
+        site_result = site.load_site(Path(site_path), host=io)
+        if site_result.errors or site_result.config is None:
+            show(
+                _failed(
+                    "preconditions",
+                    site.render_errors(site_result.errors),
+                    "Correct the site file, then retry",
+                )
             )
-            record(CheckOutcome(_needle_name(nominal), False, estimates.problem, engine_fix, figures))
-            continue
-        per_block_tokens, overhead_tokens = estimates
+            return 1
+        config = site_result.config
+
+        engine_target = resolve_engine_target(
+            io,
+            rendered_dir,
+            hardware_profile=config.hardware_profile,
+            models_path=actual_models,
+            sleep=sleep,
+        )
+        if isinstance(engine_target, Problem):
+            show(_failed("preconditions", engine_target.problem, engine_target.fix))
+            return 1
+
+        sample_result = enginesample.load_sample(actual_sample, host=io)
+        if sample_result.errors or sample_result.sample is None:
+            fix = sample_result.errors[0].fix if sample_result.errors else _SAMPLE_FIX
+            show(_failed("preconditions", enginesample.render_errors(sample_result.errors), fix))
+            return 1
+        sample = sample_result.sample
+
+        password_result = secrets.read_secret(io, EVAL_PASSWORD_SECRET)
+        if not password_result.ok or password_result.value is None:
+            password_fix = _APPLY_FIX if password_result.missing else password_result.fix
+            show(
+                _failed(
+                    "preconditions",
+                    password_result.problem or "eval password is unavailable",
+                    password_fix or _APPLY_FIX,
+                )
+            )
+            return 1
+        eval_password = password_result.value
+
+        try:
+            audit_problem = audit_api.probe(io, rendered_dir)
+        except OSError:
+            audit_problem = "audit writer probe failed"
+        if audit_problem is not None:
+            show(_failed("preconditions", "audit writer is unavailable", _APPLY_FIX))
+            return 1
+
+        show(
+            StageResult(
+                "preconditions",
+                True,
+                f"root, site, rendered engine, profile {engine_target.profile_name}, window {engine_target.window}, "
+                f"sample {sample.sha256[:12]}, eval password, and audit writer are ready; "
+                f"{lock_claim.detail}",
+                "",
+            )
+        )
+
+        engine_fix = _engine_fix(rendered_dir)
+        served_name = engine_target.served_model_name
+        window = engine_target.window
+        checks: list[CheckOutcome] = []
+
+        def record(outcome: CheckOutcome) -> None:
+            """Print a check's row as it completes, so a long run streams its rows."""
+
+            show(StageResult(outcome.name, outcome.ok, outcome.detail, outcome.fix))
+            checks.append(outcome)
+
+        estimates = _needle_estimates(
+            io, rendered_dir, sample=sample, served_name=served_name, engine_fix=engine_fix
+        )
+        for nominal in NEEDLE_LENGTHS:
+            if isinstance(estimates, Problem):
+                target, floor = _needle_band(nominal, window)
+                figures = _needle_figures(
+                    nominal=nominal, target=target, floor=floor, window=window,
+                    prompt_tokens=None, blocks=0, sizing_rounds=0,
+                )
+                record(CheckOutcome(_needle_name(nominal), False, estimates.problem, engine_fix, figures))
+                continue
+            per_block_tokens, overhead_tokens = estimates
+            record(
+                _needle_check(
+                    io,
+                    rendered_dir,
+                    sample=sample,
+                    served_name=served_name,
+                    window=window,
+                    nominal=nominal,
+                    per_block_tokens=per_block_tokens,
+                    overhead_tokens=overhead_tokens,
+                    engine_fix=engine_fix,
+                )
+            )
         record(
-            _needle_check(
+            _structured_check(
                 io,
                 rendered_dir,
                 sample=sample,
                 served_name=served_name,
-                window=window,
-                nominal=nominal,
-                per_block_tokens=per_block_tokens,
-                overhead_tokens=overhead_tokens,
                 engine_fix=engine_fix,
             )
         )
-    record(
-        _structured_check(
-            io,
-            rendered_dir,
-            sample=sample,
-            served_name=served_name,
-            engine_fix=engine_fix,
+        record(
+            _smoke_check(
+                io,
+                rendered_dir,
+                sample=sample,
+                served_name=served_name,
+                engine_fix=engine_fix,
+            )
         )
-    )
-    record(
-        _smoke_check(
-            io,
-            rendered_dir,
-            sample=sample,
-            served_name=served_name,
-            engine_fix=engine_fix,
-        )
-    )
 
-    frontend_factory = client_factory
-    if frontend_factory is None:
-        frontend_factory = owui.ingress_client_factory(
-            config.hostname,
-            ca_path=tls.CA_PATH,
-            timeout=FRONTEND_TURN_TIMEOUT_SECONDS,
-        )
-    run_id = uuid.uuid4()
-    for outcome in _frontend_checks(
-        frontend_factory,
-        sample=sample,
-        password=eval_password,
-        run_token=run_id.hex[:8],
-        frontend_fix=_frontend_fix(rendered_dir),
-    ):
-        record(outcome)
+        frontend_factory = client_factory
+        if frontend_factory is None:
+            frontend_factory = owui.ingress_client_factory(
+                config.hostname,
+                ca_path=tls.CA_PATH,
+                timeout=FRONTEND_TURN_TIMEOUT_SECONDS,
+            )
+        run_id = uuid.uuid4()
+        for outcome in _frontend_checks(
+            frontend_factory,
+            sample=sample,
+            password=eval_password,
+            run_token=run_id.hex[:8],
+            frontend_fix=_frontend_fix(rendered_dir),
+        ):
+            record(outcome)
 
-    row = audit_module.AuditRow(
-        run_id=str(run_id),
-        kind="engine_verify",
-        actor_user_id=None,
-        user_id=None,
-        chat_id=None,
-        kb_ids=(),
-        detail=_audit_detail(
-            "ok" if all(check.ok for check in checks) else "failed",
-            engine_target.profile_name,
-            served_name,
-            window,
-            sample.sha256,
-            tuple(checks),
-        ),
-    )
-    try:
-        audit_problem = audit_api.write_rows(io, rendered_dir, (row,))
-    except OSError:
-        audit_problem = "audit writer failed"
-    if audit_problem is None:
-        audit_result = StageResult("audit", True, "engine_verify audit row recorded", "")
-    else:
-        audit_result = _failed(
-            "audit",
-            "engine_verify audit write failed",
-            stack.logs_fix(rendered_dir, "postgres"),
+        row = audit_module.AuditRow(
+            run_id=str(run_id),
+            kind="engine_verify",
+            actor_user_id=None,
+            user_id=None,
+            chat_id=None,
+            kb_ids=(),
+            detail=_audit_detail(
+                "ok" if all(check.ok for check in checks) else "failed",
+                engine_target.profile_name,
+                served_name,
+                window,
+                sample.sha256,
+                tuple(checks),
+            ),
         )
-    show(audit_result)
-    return int(not (all(check.ok for check in checks) and audit_result.ok))
+        try:
+            audit_problem = audit_api.write_rows(io, rendered_dir, (row,))
+        except OSError:
+            audit_problem = "audit writer failed"
+        if audit_problem is None:
+            audit_result = StageResult("audit", True, "engine_verify audit row recorded", "")
+        else:
+            audit_result = _failed(
+                "audit",
+                "engine_verify audit write failed",
+                stack.logs_fix(rendered_dir, "postgres"),
+            )
+        show(audit_result)
+        return int(not (all(check.ok for check in checks) and audit_result.ok))
+    finally:
+        backuplock.release_claim(io, lock_claim)

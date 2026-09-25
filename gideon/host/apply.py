@@ -8,10 +8,12 @@ import sys
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
 from gideon.host import (
+    backuplock,
     egress,
     grafana,
     owui,
@@ -50,7 +52,7 @@ from gideon.host.render.grafana import GRAFANA_ADMIN_USER
 from gideon.host.render.owui import BREAK_GLASS
 from gideon.host.report import StageResult, command_detail, print_stage, refusal
 from gideon.host.site import SiteConfig
-from gideon.host.sysio import Host, PathLike, RealHost
+from gideon.host.sysio import Host, LockingHost, PathLike, RealHost
 
 _SITE_PATH: Final = "/etc/gideon/site.yaml"
 _RENDERED_DIR: Final = "/etc/gideon/rendered"
@@ -1105,7 +1107,7 @@ def converge(
 def run_apply(
     args: object,
     *,
-    host: Host | None = None,
+    host: LockingHost | None = None,
     rendered_dir: PathLike = _RENDERED_DIR,
     site_path: PathLike = _SITE_PATH,
     lock_path: PathLike | None = None,
@@ -1118,6 +1120,7 @@ def run_apply(
     clock: Callable[[], float] = time.monotonic,
     client_factory: Callable[..., owui.Client] | None = None,
     grafana_client_factory: Callable[..., grafana.Client] | None = None,
+    now: datetime | None = None,
 ) -> int:
     """Run the ordered render/apply/verify stages."""
 
@@ -1127,9 +1130,25 @@ def run_apply(
         print(refusal("apply", "root is required.", _ROOT_FIX), file=sys.stderr)
         return 1
     preconditions_result = preconditions(io)
-    print_stage(preconditions_result)
     if not preconditions_result.ok:
+        print_stage(preconditions_result)
         return 1
+
+    lock_claim = backuplock.claim(
+        io,
+        command="gideon apply",
+        now=now if now is not None else datetime.now(UTC),
+    )
+    if lock_claim.refusal is not None:
+        print_stage(lock_claim.refusal)
+        return 1
+    preconditions_result = StageResult(
+        preconditions_result.name,
+        True,
+        f"{preconditions_result.detail}; {lock_claim.detail}",
+        preconditions_result.fix,
+    )
+    print_stage(preconditions_result)
 
     checkout = Path(__file__).parents[2] if root is None else Path(root)
     actual_lock = checkout / "host.lock" if lock_path is None else lock_path
@@ -1138,18 +1157,21 @@ def run_apply(
     actual_egress = (
         checkout / "config" / "egress.yaml" if egress_path is None else egress_path
     )
-    return converge(
-        io,
-        rendered_dir=rendered_dir,
-        site_path=site_path,
-        lock_path=actual_lock,
-        images_path=actual_images,
-        models_path=actual_models,
-        egress_path=actual_egress,
-        pull_models=pull_models or weights.pull_profile,
-        root=checkout,
-        sleep=sleep,
-        clock=clock,
-        client_factory=client_factory,
-        grafana_client_factory=grafana_client_factory,
-    )
+    try:
+        return converge(
+            io,
+            rendered_dir=rendered_dir,
+            site_path=site_path,
+            lock_path=actual_lock,
+            images_path=actual_images,
+            models_path=actual_models,
+            egress_path=actual_egress,
+            pull_models=pull_models or weights.pull_profile,
+            root=checkout,
+            sleep=sleep,
+            clock=clock,
+            client_factory=client_factory,
+            grafana_client_factory=grafana_client_factory,
+        )
+    finally:
+        backuplock.release_claim(io, lock_claim)
