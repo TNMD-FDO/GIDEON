@@ -1,0 +1,16 @@
+{
+  "cases": {
+    "sentence-credit/ask-01": "pass",
+    "sentence-credit/release-01": "pass"
+  },
+  "corpus_lockfile": null,
+  "eval_set_version": "eval-v1",
+  "format": 1,
+  "hardware_profile": "2x96v-256d",
+  "list": "sentence-credit",
+  "product_version": "0.2.69",
+  "repeats": 1,
+  "set_digest": "cc921273c34c917ecceb2d694ef6ce539b3826a71efb1603efed8b1bb66ee410",
+  "slice": "smoke",
+  "tag": "v0.2.69"
+}
