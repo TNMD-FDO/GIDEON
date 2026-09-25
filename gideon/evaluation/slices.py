@@ -10,6 +10,7 @@ from gideon.evaluation import (
     guardrails_slice,
     judge_slice,
     judgments_slice,
+    smoke_slice,
 )
 from gideon.evaluation.evalset import LoadedSet
 from gideon.evaluation.results import RunContext, SliceResult
@@ -38,6 +39,8 @@ class SliceSpec:
     General's service — which every frontend turn passes through — answers
     before the turns are spent; a second flag for one suite would be an axis
     with no second reader.
+    ``engine_calls`` estimates the engine requests one counted run makes; None
+    leaves its size bound to the quiet window.
     """
 
     runner: Callable[[LoadedSet, str, RunContext], SliceResult]
@@ -47,6 +50,7 @@ class SliceSpec:
     judge_prompt: str | None
     compares_reference: bool
     drives_turns: bool
+    engine_calls: Callable[[LoadedSet, str], int] | None
     gate_pass: str
     gate_fail: str
     gate_fix: str
@@ -61,6 +65,7 @@ SLICE_RUNNERS: Final[Mapping[str, SliceSpec]] = {
         judge_prompt=None,
         compares_reference=True,
         drives_turns=False,
+        engine_calls=None,
         gate_pass="extraction bounds passed",
         gate_fail="extraction bounds failed",
         gate_fix="Review the miss and false hit lines in the extraction report, then retry.",
@@ -73,6 +78,7 @@ SLICE_RUNNERS: Final[Mapping[str, SliceSpec]] = {
         judge_prompt="synthesis@1",
         compares_reference=False,
         drives_turns=False,
+        engine_calls=None,
         gate_pass="all judge gradings returned on-schema verdicts",
         gate_fail="one or more judge gradings failed to return an on-schema verdict",
         gate_fix="Review the failed judge gradings and engine logs, then retry.",
@@ -85,6 +91,7 @@ SLICE_RUNNERS: Final[Mapping[str, SliceSpec]] = {
         judge_prompt=None,
         compares_reference=False,
         drives_turns=False,
+        engine_calls=None,
         gate_pass="every judged query was scored, the metrics reported and never gated",
         gate_fail="one or more judged queries have no ranked list",
         gate_fix="add a ranked list for each query id the report names, then retry.",
@@ -97,6 +104,7 @@ SLICE_RUNNERS: Final[Mapping[str, SliceSpec]] = {
         judge_prompt="false-refusal@1",
         compares_reference=True,
         drives_turns=True,
+        engine_calls=None,
         gate_pass="every positive blocked, over-trips within the ceiling, no leak, the frontend sample agreeing",
         gate_fail="a family's gate failed",
         gate_fix="Review the per-family report lines and the ids they list, then retry.",
@@ -109,8 +117,27 @@ SLICE_RUNNERS: Final[Mapping[str, SliceSpec]] = {
         judge_prompt=None,
         compares_reference=True,
         drives_turns=True,
+        engine_calls=None,
         gate_pass="every case met its expectation and checks on every repeat, the stream was clean, every chat was deleted",
         gate_fail="a case failed its expectation, a check, its stream, or its cleanup",
         gate_fix="Review the per-case report lines and the checks they name, then retry.",
+    ),
+    "smoke": SliceSpec(
+        runner=smoke_slice.run_smoke,
+        reaches_engine=True,
+        takes_ranked=False,
+        repeats=1,
+        judge_prompt=None,
+        compares_reference=True,
+        drives_turns=True,
+        engine_calls=smoke_slice.engine_calls,
+        gate_pass=(
+            "every positive blocked, no leak, the frontend sample agreeing; "
+            "the controls' replacement and the extraction bounds reported"
+        ),
+        gate_fail="a zero-tolerance case failed",
+        gate_fix=(
+            "Review the smoke report's unblocked, leak, error, and disagreeing ids, then retry."
+        ),
     ),
 }

@@ -800,7 +800,7 @@ class ServiceDoor(unittest.TestCase):
                 cases_path = Path(directory) / "cases.yaml"
                 _case_file(cases_path, [{"id": "one", "prompt": "plain", "expect": "answered"}])
                 host = FakeHost()
-                arguments = ["--service", "--no-instruction", "--repeat", "3", "--concurrent", "3"]
+                arguments = ["--service", "--no-instruction", "--repeat", "5", "--concurrent", "3"]
                 if streamed:
                     arguments.insert(2, "--stream")
                 code, stdout, stderr = _run_service(
@@ -808,7 +808,7 @@ class ServiceDoor(unittest.TestCase):
                 )
                 self.assertEqual(code, 1)
                 self.assertEqual(stderr, "")
-                self.assertIn("9 turns (3 sessions) during office hours", stdout)
+                self.assertIn("15 turns (3 sessions) during office hours", stdout)
                 self.assertEqual(host.exec_inputs, [])
 
     def test_streamed_row_keeps_ordered_deltas_and_first_offset_in_record(self) -> None:

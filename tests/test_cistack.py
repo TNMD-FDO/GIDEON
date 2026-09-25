@@ -1,9 +1,12 @@
 """Contracts for the CI sibling stack tool."""
 
+import ast
 import contextlib
 import io
+import json
 import os
 import subprocess
+import sys
 import unittest
 from collections.abc import Callable, Collection, Mapping, Sequence
 from pathlib import Path
@@ -57,6 +60,8 @@ class FakeHost:
         }
         self.directories: set[str] = {CI_ROOT, CI_SECRETS_DIR}
         self.commands: list[tuple[str, ...]] = []
+        self.locks: dict[str, str] = {}
+        self.lock_events: list[tuple[str, str]] = []
         self.writes: list[tuple[str, int]] = []
         self._seed_checkout()
 
@@ -177,6 +182,19 @@ class FakeHost:
     def geteuid(self) -> int:
         return self.euid
 
+    def take_lock(self, path: PathLike, record: str) -> str | None:
+        key = os.fspath(path)
+        self.lock_events.append(("take", key))
+        if key in self.locks:
+            return self.locks[key]
+        self.locks[key] = record
+        return None
+
+    def release_lock(self, path: PathLike) -> None:
+        key = os.fspath(path)
+        self.lock_events.append(("release", key))
+        self.locks.pop(key, None)
+
 
 def ci_stack() -> cistack_run.CiStack:
     return cistack_run.CiStack(
@@ -231,6 +249,115 @@ class Preconditions(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("notes.txt", result.detail)
         self.assertEqual(host.writes, [])
+
+
+class SmokeCommand(unittest.TestCase):
+    def test_busy_engine_skips_without_running_commands_or_touching_the_sibling(self) -> None:
+        host = FakeHost()
+        lock_path = cistack_run.backuplock.ENGINE_LOCK.path
+        host.locks[lock_path] = json.dumps(
+            {
+                "command": "eval run --slice general-smoke",
+                "pid": os.getpid() + 1,
+                "started": "2026-01-01T00:00:00+00:00",
+            }
+        )
+        output = io.StringIO()
+        with (
+            patch.object(cistack_run, "_up_stages") as up_stages,
+            contextlib.redirect_stdout(output),
+        ):
+            code = cli.main(
+                ["smoke"], host=host, checkout=ROOT, site_path=SITE_PATH,
+                run_eval=lambda *args, **kwargs: self.fail("run_eval called while busy"),
+            )
+
+        self.assertEqual(code, 0)
+        self.assertIn("eval run --slice general-smoke", output.getvalue())
+        self.assertIn("skipped: ok", output.getvalue())
+        self.assertEqual(host.commands, [])
+        self.assertEqual(host.writes, [])
+        up_stages.assert_not_called()
+
+    def test_smoke_converges_then_calls_eval_with_selected_checkout(self) -> None:
+        host = FakeHost()
+        events: list[str] = []
+        evaluated: list[tuple[object, dict[str, object]]] = []
+
+        def up_stages(*args: object, **kwargs: object) -> int:
+            del args, kwargs
+            events.append("up")
+            return 0
+
+        def run_eval(args: object, **kwargs: object) -> int:
+            events.append("smoke")
+            evaluated.append((args, kwargs))
+            return 0
+
+        selected = ROOT / "selected-checkout"
+        with (
+            patch.object(cistack_run, "_up_stages", side_effect=up_stages),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            code = cli.main(
+                ["smoke", "--checkout", str(selected)],
+                host=host,
+                checkout=ROOT,
+                site_path=SITE_PATH,
+                run_eval=run_eval,
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(events, ["up", "smoke"])
+        self.assertEqual(len(evaluated), 1)
+        args, kwargs = evaluated[0]
+        self.assertEqual(vars(args), {
+            "slice": "smoke", "stack": "ci", "kind": "smoke", "set": None,
+            "ranked": None, "decision": False, "force": False,
+        })
+        self.assertIs(kwargs["host"], host)
+        self.assertEqual(kwargs["checkout_root"], selected)
+        self.assertNotEqual(kwargs["checkout_root"], ROOT)
+        self.assertEqual(
+            host.lock_events,
+            [("take", cistack_run.backuplock.ENGINE_LOCK.path),
+             ("release", cistack_run.backuplock.ENGINE_LOCK.path)],
+        )
+        self.assertNotIn(cistack_run.backuplock.ENGINE_LOCK.path, host.locks)
+
+    def test_failed_convergence_releases_the_lock_without_evaluating(self) -> None:
+        host = FakeHost()
+        with (
+            patch.object(cistack_run, "_up_stages", return_value=1),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            code = cistack_run.smoke(
+                ci_stack(), host, site_path=SITE_PATH,
+                run_eval=lambda *args, **kwargs: self.fail("run_eval called after failed up"),
+            )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(host.lock_events[-1], ("release", cistack_run.backuplock.ENGINE_LOCK.path))
+        self.assertNotIn(cistack_run.backuplock.ENGINE_LOCK.path, host.locks)
+
+    def test_up_refuses_held_engine_lock_before_any_argv(self) -> None:
+        host = FakeHost()
+        lock_path = cistack_run.backuplock.ENGINE_LOCK.path
+        host.locks[lock_path] = json.dumps(
+            {
+                "command": "tools.cistack smoke",
+                "pid": os.getpid() + 1,
+                "started": "2026-01-01T00:00:00+00:00",
+            }
+        )
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = cistack_run.up(ci_stack(), host, site_path=SITE_PATH)
+
+        self.assertEqual(code, 1)
+        self.assertIn("tools.cistack smoke", output.getvalue())
+        self.assertIn("ps -p", output.getvalue())
+        self.assertEqual(host.commands, [])
 
 
 class Stages(unittest.TestCase):
@@ -549,3 +676,20 @@ class Cli(unittest.TestCase):
         checkout = cast(cistack_run.CiStack, captured["stack"]).checkout
         self.assertTrue(checkout.is_absolute())
         self.assertEqual(checkout, Path.cwd().resolve())
+
+
+class Imports(unittest.TestCase):
+    def test_tool_imports_the_standard_library_yaml_gideon_and_tools_alone(self) -> None:
+        allowed = set(sys.stdlib_module_names) | {"yaml", "gideon", "tools"}
+        for path in sorted((Path(__file__).resolve().parents[1] / "tools" / "cistack").glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    names = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                    names = [node.module]
+                else:
+                    continue
+                for name in names:
+                    with self.subTest(path=path.name, module=name):
+                        self.assertIn(name.split(".", 1)[0], allowed)

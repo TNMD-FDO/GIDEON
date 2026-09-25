@@ -1,8 +1,11 @@
-"""The shared lock for backup and restore operations.
+"""The box's shared locks: one for backup and restore, one for the engine.
 
-The lock lives under ``/run`` because it is a root-only tmpfs that needs no
-cleanup after a reboot, and outside the staging directory because restore's
-swap moves that directory as a whole.
+Each lock is one specification — its path, the noun its refusal names, and the
+fix its unreadable holder is given — over one mechanism: a flock whose file
+carries the holder's record, a same-process holder passing as nested, and the
+lock dying with its process. The paths stay under ``/run`` because it is a
+root-only tmpfs that needs no cleanup after a reboot, and outside the backup
+staging directory because restore's swap moves that directory as a whole.
 """
 
 import dataclasses
@@ -14,7 +17,27 @@ import os
 from gideon.host import report, sysio
 
 LOCK_DIR = "/run/gideon"
-LOCK_PATH = "/run/gideon/backup.lock"
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class Lock:
+    """A box lock's path, operator-facing name, and wait instruction."""
+
+    path: str
+    noun: str
+    wait_fix: str
+
+
+BACKUP_LOCK = Lock(
+    f"{LOCK_DIR}/backup.lock",
+    "backup",
+    "Wait for the running backup or restore to finish, then retry.",
+)
+ENGINE_LOCK = Lock(
+    f"{LOCK_DIR}/engine.lock",
+    "engine",
+    "Wait for the running evaluation to finish, then retry.",
+)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -93,12 +116,13 @@ def take(
     *,
     command: str,
     now: datetime.datetime,
+    lock: Lock = BACKUP_LOCK,
 ) -> Outcome:
     """Take the lock, pass a same-process holder, or describe its refusal."""
 
     io.mkdir(LOCK_DIR, mode=0o700, parents=True, exist_ok=True)
     record = Record(command, os.getpid(), now)
-    holder_text = io.take_lock(LOCK_PATH, record.to_json())
+    holder_text = io.take_lock(lock.path, record.to_json())
     if holder_text is None:
         return Outcome(State.HELD)
 
@@ -110,14 +134,14 @@ def take(
         return Outcome(
             State.REFUSED,
             report.Problem(
-                "the backup lock is held by another gideon command, its record unreadable.",
-                "Wait for the running backup or restore to finish, then retry.",
+                f"the {lock.noun} lock is held by another gideon command, its record unreadable.",
+                lock.wait_fix,
             ),
         )
     return Outcome(
         State.REFUSED,
         report.Problem(
-            f"the backup lock is held by {holder.command} since "
+            f"the {lock.noun} lock is held by {holder.command} since "
             f"{holder.started.isoformat()} (pid {holder.pid}).",
             f"Wait for it to finish — ps -p {holder.pid} says whether it still runs "
             "— then retry.",
@@ -125,7 +149,7 @@ def take(
     )
 
 
-def release(io: sysio.LockingHost) -> None:
+def release(io: sysio.LockingHost, *, lock: Lock = BACKUP_LOCK) -> None:
     """Release the shared lock held by this process."""
 
-    io.release_lock(LOCK_PATH)
+    io.release_lock(lock.path)

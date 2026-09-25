@@ -73,6 +73,8 @@ Every release runs the comparison at its own tag. `current` with exit 0
 needs no commit; `stale` or `absent` with exit 0 calls the writer; and
 `other-version` with exit 1 calls the writer. `regressed`, `malformed`, a
 missing comparison line, or any other combination stops the release.
+The `smoke` slice's comparison runs on the CI sibling through
+`sudo python3 -B -m tools.cistack smoke`, the writer unchanged.
 
 Reference files are never hand-edited. The reader compares each file's bytes
 with the module's canonical serialization and refuses a hand edit; restore

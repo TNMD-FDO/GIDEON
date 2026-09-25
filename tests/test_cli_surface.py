@@ -87,11 +87,18 @@ class Help(unittest.TestCase):
             main(["eval", "run", "--help"])
         self.assertEqual(ctx.exception.code, 0)
         self.assertIn("--slice NAME", command.getvalue())
+        self.assertIn("--stack {production,ci}", command.getvalue())
+        self.assertIn("--kind {manual,smoke}", command.getvalue())
         self.assertIn("--set DIR", command.getvalue())
         self.assertIn("--ranked FILE", command.getvalue())
         self.assertIn("frozen slice to run", command.getvalue())
         self.assertIn("eval set version directory", command.getvalue())
         self.assertIn("ranked-list JSONL file", command.getvalue())
+        self.assertIn(
+            "run the turns against the standing CI sibling instead of production",
+            collapsed(command.getvalue()),
+        )
+        self.assertIn("the word the run's record carries for its purpose", command.getvalue())
 
         reference = io.StringIO()
         with contextlib.redirect_stdout(reference), self.assertRaises(SystemExit) as ctx:

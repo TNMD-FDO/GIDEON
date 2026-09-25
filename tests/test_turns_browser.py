@@ -1370,7 +1370,7 @@ class BrowserTurnIntegration(TestCase):
                 )
 
             refused_cases = Path(directory) / "refused-cases.yaml"
-            write_cases(refused_cases, 3)
+            write_cases(refused_cases, 5)
             refused_frontend = FakeFrontend()
             refused_page = FakePage(refused_frontend)
             refused_factory_calls: list[str] = []
@@ -1398,7 +1398,7 @@ class BrowserTurnIntegration(TestCase):
                 )
             self.assertEqual(code, 1)
             refused_output = output.getvalue()
-            self.assertIn("3 turns, 9 engine calls (3 per browser turn)", refused_output)
+            self.assertIn("5 turns, 15 engine calls (3 per browser turn)", refused_output)
             self.assertIn("--force", refused_output)
             self.assertEqual(refused_factory_calls, [])
             self.assertEqual(refused_frontend.calls, [])
@@ -1457,10 +1457,10 @@ class BrowserTurnIntegration(TestCase):
             self.assertIn("summary: ok — 2 turns", probed_output)
 
             code, forced_output, _frontend, _factory_calls = run_browser_cases(
-                3, "forced", ("--force",)
+                5, "forced", ("--force",)
             )
             self.assertEqual(code, 0)
-            self.assertIn("3 turns; 9 engine calls (3 per browser turn)", forced_output)
+            self.assertIn("5 turns; 15 engine calls (3 per browser turn)", forced_output)
             self.assertIn("window overridden by --force", forced_output)
 
     def test_live_verdict_uses_the_first_painted_state_as_zero(self) -> None:

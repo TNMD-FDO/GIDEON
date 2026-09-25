@@ -83,7 +83,7 @@ class LockContracts(unittest.TestCase):
             io.mkdir_calls,
             [(backuplock.LOCK_DIR, 0o700, True, True)],
         )
-        stored = io.locks[backuplock.LOCK_PATH]
+        stored = io.locks[backuplock.BACKUP_LOCK.path]
         stored_record = backuplock.parse(stored)
         self.assertIsNotNone(stored_record)
         assert stored_record is not None
@@ -93,10 +93,10 @@ class LockContracts(unittest.TestCase):
         nested = backuplock.take(host, command="backup push", now=NOW + timedelta(seconds=1))
         self.assertEqual(nested.state, backuplock.State.NESTED)
         self.assertIsNone(nested.problem)
-        self.assertEqual(io.locks[backuplock.LOCK_PATH], stored)
+        self.assertEqual(io.locks[backuplock.BACKUP_LOCK.path], stored)
 
         foreign = backuplock.Record("restore", os.getpid() + 1, NOW)
-        io.locks[backuplock.LOCK_PATH] = foreign.to_json()
+        io.locks[backuplock.BACKUP_LOCK.path] = foreign.to_json()
         refused = backuplock.take(host, command="backup run", now=NOW)
         self.assertEqual(refused.state, backuplock.State.REFUSED)
         self.assertEqual(
@@ -114,7 +114,7 @@ class LockContracts(unittest.TestCase):
         host = cast(LockingHost, io)
         for text in ("", "not json"):
             with self.subTest(text=text):
-                io.locks[backuplock.LOCK_PATH] = text
+                io.locks[backuplock.BACKUP_LOCK.path] = text
                 refused = backuplock.take(host, command="restore", now=NOW)
                 self.assertEqual(refused.state, backuplock.State.REFUSED)
                 self.assertEqual(
@@ -127,9 +127,47 @@ class LockContracts(unittest.TestCase):
 
     def test_release_pops_the_lock_path(self) -> None:
         io = LockFake()
-        io.locks[backuplock.LOCK_PATH] = "record"
+        io.locks[backuplock.BACKUP_LOCK.path] = "record"
         backuplock.release(cast(LockingHost, io))
-        self.assertNotIn(backuplock.LOCK_PATH, io.locks)
+        self.assertNotIn(backuplock.BACKUP_LOCK.path, io.locks)
+
+    def test_lock_values_and_engine_refusal(self) -> None:
+        self.assertEqual(
+            backuplock.BACKUP_LOCK,
+            backuplock.Lock(
+                "/run/gideon/backup.lock",
+                "backup",
+                "Wait for the running backup or restore to finish, then retry.",
+            ),
+        )
+        self.assertEqual(
+            backuplock.ENGINE_LOCK,
+            backuplock.Lock(
+                "/run/gideon/engine.lock",
+                "engine",
+                "Wait for the running evaluation to finish, then retry.",
+            ),
+        )
+        io = LockFake()
+        io.locks[backuplock.ENGINE_LOCK.path] = backuplock.Record(
+            "eval run smoke", os.getpid() + 1, NOW
+        ).to_json()
+        refused = backuplock.take(
+            cast(LockingHost, io),
+            command="eval run smoke",
+            now=NOW,
+            lock=backuplock.ENGINE_LOCK,
+        )
+        self.assertEqual(refused.state, backuplock.State.REFUSED)
+        self.assertEqual(
+            refused.problem,
+            Problem(
+                f"the engine lock is held by eval run smoke since {NOW.isoformat()} "
+                f"(pid {os.getpid() + 1}).",
+                f"Wait for it to finish — ps -p {os.getpid() + 1} says whether it still runs "
+                "— then retry.",
+            ),
+        )
 
 
 class RealLockContracts(unittest.TestCase):

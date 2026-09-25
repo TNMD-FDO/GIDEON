@@ -8,11 +8,11 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Final
+from typing import Final, cast
 from uuid import uuid4
 
 import gideon
-from gideon.evaluation import ranked, rankmetrics, record, reference, window
+from gideon.evaluation import ranked, rankmetrics, record, reference, stacks, window
 from gideon.evaluation.evalset import (
     SET_ROOT,
     EvalSetLoadResult,
@@ -25,9 +25,9 @@ from gideon.evaluation.evalset import (
 from gideon.evaluation.results import RunContext, SliceResult
 from gideon.evaluation.slices import SLICE_RUNNERS, SliceSpec
 from gideon.evaluation.turns import access, door, run
-from gideon.host import courts, engine, nogpu, site, stack
+from gideon.host import backuplock, courts, engine, nogpu, site, stack
 from gideon.host.report import Problem, StageResult, print_stage, refusal
-from gideon.host.sysio import Host, PathLike, RealHost
+from gideon.host.sysio import Host, LockingHost, PathLike, RealHost
 
 _COMMAND: Final[str] = "eval run"
 _FLAG_FIX: Final[str] = "Run gideon eval run --slice extraction; decision runs land in a later release."
@@ -46,6 +46,13 @@ class _EnginePreconditions:
     provenance: tuple[str | None, bool | None]
     site_config: site.SiteConfig
     turns: access.TurnAccess | None
+
+
+@dataclass(slots=True)
+class _EngineLockClaim:
+    """Whether this command, rather than a caller, took the engine lock."""
+
+    taken: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,6 +178,7 @@ def _reference_gate(
     reference_version: str,
     run_id: str,
     written: bool,
+    command_flags: str,
 ) -> bool:
     """Print the gate of a slice that compares against its reference.
 
@@ -210,7 +218,7 @@ def _reference_gate(
                 f"Run sudo python3 -m gideon eval reference --run {run_id} as root with the stack up, then retry."
             )
         else:
-            fixes.append(_record_root_fix(slice_name, slice_spec))
+            fixes.append(_record_root_fix(slice_name, slice_spec, command_flags))
     elif comparison.outcome == "malformed":
         fixes.append(reference.SLICE_REPAIR_FIX)
 
@@ -270,20 +278,22 @@ def _provenance(
     return (commit.stdout.strip(), bool(status.stdout.splitlines())), None
 
 
-def _engine_root_fix(slice_name: str) -> str:
-    return f"Run sudo python3 -m gideon eval run --slice {slice_name}, then retry."
+def _engine_root_fix(slice_name: str, command_flags: str) -> str:
+    return f"Run sudo python3 -m gideon eval run --slice {slice_name}{command_flags}, then retry."
 
 
-def _record_root_fix(slice_name: str, slice_spec: SliceSpec) -> str:
+def _record_root_fix(
+    slice_name: str, slice_spec: SliceSpec, command_flags: str = ""
+) -> str:
     ranked_flag = " --ranked <file>" if slice_spec.takes_ranked else ""
     return (
-        f"Run sudo python3 -m gideon eval run --slice {slice_name}{ranked_flag} "
+        f"Run sudo python3 -m gideon eval run --slice {slice_name}{ranked_flag}{command_flags} "
         "as root with the stack up, then retry."
     )
 
 
-def _ranked_required_fix(slice_name: str) -> str:
-    return f"Run gideon eval run --slice {slice_name} --ranked <file>, then retry."
+def _ranked_required_fix(slice_name: str, command_flags: str) -> str:
+    return f"Run gideon eval run --slice {slice_name} --ranked <file>{command_flags}, then retry."
 
 
 def _ranked_forbidden_fix(slice_name: str) -> str:
@@ -301,6 +311,10 @@ def _engine_preconditions(
     supplied_set: bool,
     slice_name: str,
     slice_spec: SliceSpec,
+    loaded: LoadedSet,
+    paths: stacks.StackPaths,
+    command_flags: str,
+    lock_claim: _EngineLockClaim,
     sleep: Callable[[float], None],
 ) -> _EnginePreconditions | None:
     """Refuse engine runs before a request when a required seam is unavailable."""
@@ -311,7 +325,7 @@ def _engine_preconditions(
                 "preconditions",
                 False,
                 "root privileges are required",
-                _engine_root_fix(slice_name),
+                _engine_root_fix(slice_name, command_flags),
             )
         )
         return None
@@ -332,17 +346,64 @@ def _engine_preconditions(
         print_stage(StageResult("preconditions", False, detail, fix))
         return None
     config = site_result.config
+    lock_outcome = backuplock.take(
+        cast(LockingHost, io),
+        command=f"gideon eval run --slice {slice_name} --stack {paths.name}",
+        now=started,
+        lock=backuplock.ENGINE_LOCK,
+    )
+    if lock_outcome.state is backuplock.State.REFUSED:
+        assert lock_outcome.problem is not None
+        print_stage(
+            StageResult(
+                "preconditions",
+                False,
+                lock_outcome.problem.problem,
+                lock_outcome.problem.fix,
+            )
+        )
+        return None
+    if lock_outcome.state is backuplock.State.HELD:
+        lock_claim.taken = True
+        lock_detail = "engine lock taken"
+    else:
+        lock_detail = "engine lock held by this process"
+
     judgement = window.window_judgement(started, config.office.timezone)
-    if not judgement.inside:
+    engine_call_count = (
+        None
+        if slice_spec.engine_calls is None
+        else slice_spec.engine_calls(loaded, slice_name)
+    )
+    waived = (
+        not judgement.inside
+        and engine_call_count is not None
+        and engine_call_count <= run.SMOKE_TURNS
+    )
+    if engine_call_count is None:
+        calls_detail = ""
+    elif waived:
+        calls_detail = (
+            f"{engine_call_count} engine calls within the any-hour allowance of {run.SMOKE_TURNS}, "
+        )
+    else:
+        calls_detail = f"{engine_call_count} engine calls, "
+    if not judgement.inside and not waived:
+        over = (
+            ""
+            if engine_call_count is None
+            else f"; {engine_call_count} engine calls exceed the any-hour allowance of {run.SMOKE_TURNS}"
+        )
+        detail = f"outside the quiet window: {judgement.description}{over}"
         fix = (
-            f"Next opening is {judgement.next_opening.isoformat()}; "
+            f"Next opening is {judgement.next_opening.isoformat()}{over}; "
             "--force lands in a later release."
         )
         print_stage(
             StageResult(
                 "preconditions",
                 False,
-                f"outside the quiet window: {judgement.description}",
+                detail,
                 fix,
             )
         )
@@ -359,13 +420,24 @@ def _engine_preconditions(
         print_stage(StageResult("preconditions", False, target.problem, target.fix))
         return None
 
+    if paths.name == "ci" and not io.exists(paths.turns_dir / "compose.yaml"):
+        print_stage(
+            StageResult(
+                "preconditions",
+                False,
+                "the CI sibling's Compose file is unavailable",
+                "Run sudo python3 -m tools.cistack up, then retry.",
+            )
+        )
+        return None
+
     turns: access.TurnAccess | None = None
     if slice_spec.drives_turns:
         instruction = access.load_general_instruction(
             io,
             site_path=site_path,
             root=checkout,
-            stack="production",
+            stack=paths.name,
             command="gideon eval run",
         )
         if isinstance(instruction, Problem):
@@ -379,7 +451,7 @@ def _engine_preconditions(
             return None
         probe = door.probe(
             io,
-            rendered_dir,
+            paths.turns_dir,
             served_name=target.served_model_name,
             max_time=run.TURN_TIMEOUT_SECONDS,
         )
@@ -393,7 +465,7 @@ def _engine_preconditions(
             password=password,
             client_factory=access.make_client_factory(
                 config.hostname,
-                stack="production",
+                stack=paths.name,
                 timeout=run.TURN_TIMEOUT_SECONDS,
             ),
             sentinel=run.new_sentinel(),
@@ -438,6 +510,7 @@ def _engine_preconditions(
             "preconditions",
             True,
             f"root, no-GPU marker absent, site, {judgement.description}, "
+            + f"{calls_detail}{lock_detail}, "
             f"profile {target.profile_name}, served model {target.served_model_name}, "
             f"prompt {prompt_id}, {writer}"
             + (
@@ -471,6 +544,9 @@ def _record(
     supplied_set: bool,
     run_id: str,
     gate_verdict: bool,
+    stack_name: str,
+    kind: str,
+    command_flags: str,
     slice_spec: SliceSpec,
     prepared: _EnginePreconditions | None,
     overrides: Mapping[str, object] = {},
@@ -502,7 +578,7 @@ def _record(
                     "record",
                     True,
                     f"skipped — no database reachable; rows were not written ({probe_problem})",
-                    _record_root_fix(slice_name, slice_spec),
+                    _record_root_fix(slice_name, slice_spec, command_flags),
                 )
             )
             return _RecordOutcome(True, False)
@@ -543,9 +619,9 @@ def _record(
         corpus_lockfile=None,
         eval_set_version=loaded.version,
         hardware_profile=resolved_hardware_profile,
-        stack="production",
+        stack=stack_name,
         generation_id=None,
-        kind="manual",
+        kind=kind,
         slice=slice_name,
         overrides=overrides,
         repeats=slice_spec.repeats,
@@ -605,6 +681,10 @@ def _run_body(
     finished_clock: Callable[[], datetime],
     models_path: PathLike,
     sleep: Callable[[float], None],
+    paths: stacks.StackPaths,
+    kind: str,
+    command_flags: str,
+    lock_claim: _EngineLockClaim,
 ) -> int:
     if getattr(args, "decision", False) or getattr(args, "force", False):
         print(refusal(_COMMAND, "decision and force flags are not implemented", _FLAG_FIX), file=sys.stderr)
@@ -636,18 +716,17 @@ def _run_body(
         )
         return 1
 
-    selected = loaded.slices[slice_name]
-    print_stage(
-        StageResult(
-            "load",
-            True,
-            f"{loaded.version}: {len(loaded.cases_by_id)} cases, {len(selected)} in {slice_name}, digest {loaded.digest}",
-            "",
-        )
-    )
-
     slice_spec = SLICE_RUNNERS.get(slice_name)
     if slice_spec is None:
+        selected = loaded.slices[slice_name]
+        print_stage(
+            StageResult(
+                "load",
+                True,
+                f"{loaded.version}: {len(loaded.cases_by_id)} cases, {len(selected)} in {slice_name}, digest {loaded.digest}",
+                "",
+            )
+        )
         print_stage(
             StageResult(
                 "run",
@@ -657,6 +736,34 @@ def _run_body(
             )
         )
         return 1
+
+    if paths.name == "ci" and (
+        not slice_spec.drives_turns or slice_spec.judge_prompt is not None
+    ):
+        reason = (
+            "the slice does not drive turns"
+            if not slice_spec.drives_turns
+            else "the slice reads a judge prompt"
+        )
+        print_stage(
+            StageResult(
+                "load",
+                False,
+                f"slice {slice_name} cannot run on the CI sibling: {reason}",
+                "Run this slice with --stack production, then retry.",
+            )
+        )
+        return 1
+
+    selected = loaded.slices[slice_name]
+    print_stage(
+        StageResult(
+            "load",
+            True,
+            f"{loaded.version}: {len(loaded.cases_by_id)} cases, {len(selected)} in {slice_name}, digest {loaded.digest}",
+            "",
+        )
+    )
 
     ranked_lists: Mapping[str, tuple[rankmetrics.Coordinates, ...]] | None = None
     run_overrides: Mapping[str, object] = {}
@@ -668,7 +775,7 @@ def _run_body(
                     "ranked",
                     False,
                     f"slice {slice_name} requires --ranked",
-                    _ranked_required_fix(slice_name),
+                    _ranked_required_fix(slice_name, command_flags),
                 )
             )
             return 1
@@ -721,6 +828,10 @@ def _run_body(
             supplied_set=supplied_set,
             slice_name=slice_name,
             slice_spec=slice_spec,
+            loaded=loaded,
+            paths=paths,
+            command_flags=command_flags,
+            lock_claim=lock_claim,
             sleep=sleep,
         )
         if engine_preconditions is None:
@@ -728,7 +839,7 @@ def _run_body(
 
     context = RunContext(
         host=host,
-        rendered_dir=rendered_dir,
+        rendered_dir=paths.turns_dir,
         served_model_name=(
             None
             if engine_preconditions is None
@@ -807,6 +918,9 @@ def _run_body(
         supplied_set=supplied_set,
         run_id=run_id,
         gate_verdict=recorded_verdict,
+        stack_name=paths.name,
+        kind=kind,
+        command_flags=command_flags,
         slice_spec=slice_spec,
         prepared=engine_preconditions,
         overrides=run_overrides,
@@ -823,6 +937,7 @@ def _run_body(
             reference_version=reference_version,
             run_id=run_id,
             written=recorded.written,
+            command_flags=command_flags,
         )
     return 0 if gate_ok and recorded.ok else 1
 
@@ -846,22 +961,38 @@ def run_eval(
     io = RealHost() if host is None else host
     now = (lambda: datetime.now(UTC)) if clock is None else clock
     run_id = str(uuid4()) if run_id_factory is None else run_id_factory()
+    stack_name = getattr(args, "stack", "production")
+    kind = getattr(args, "kind", "manual")
+    paths = stacks.resolve_stack(stack_name, rendered_dir)
+    command_flags = paths.flag_fragment + (
+        f" --kind {kind}" if kind != "manual" else ""
+    )
     actual_models = checkout / "models.lock" if models_path is None else models_path
     supplied_root = getattr(args, "set", None)
     set_root = checkout / SET_ROOT if supplied_root is None else Path(supplied_root)
     selected_court_path = courts.default_courts_path() if court_path is None else Path(court_path)
-    return _run_body(
-        args,
-        set_root=set_root,
-        court_path=selected_court_path,
-        host=io,
-        checkout=checkout,
-        rendered_dir=rendered_dir,
-        site_path=site_path,
-        started=now(),
-        run_id=run_id,
-        supplied_set=supplied_root is not None,
-        finished_clock=now,
-        models_path=actual_models,
-        sleep=sleep,
-    )
+    lock_claim = _EngineLockClaim()
+    try:
+        return _run_body(
+            args,
+            set_root=set_root,
+            court_path=selected_court_path,
+            host=io,
+            checkout=checkout,
+            rendered_dir=rendered_dir,
+            site_path=site_path,
+            started=now(),
+            run_id=run_id,
+            supplied_set=supplied_root is not None,
+            finished_clock=now,
+            models_path=actual_models,
+            sleep=sleep,
+            paths=paths,
+            kind=kind,
+            command_flags=command_flags,
+            lock_claim=lock_claim,
+        )
+    finally:
+        # A nested pass holds nothing of its own; the real host keys one descriptor per path.
+        if lock_claim.taken:
+            backuplock.release(cast(LockingHost, io), lock=backuplock.ENGINE_LOCK)

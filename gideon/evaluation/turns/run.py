@@ -24,9 +24,11 @@ from gideon.host.sysio import Host, PathLike, RealHost
 # persistence; the starting bound covers the observed longest turn.
 TURN_TIMEOUT_SECONDS: Final[float] = 600.0
 # A handful of engine calls may run at any hour, a longer run only in the
-# quiet window or on a weekend; this is the handful — a starting value. A
+# quiet window or on a weekend; this is the handful — a starting value, moved
+# from eight to twelve by the push smoke's measured need of twelve calls. The
+# harness's daytime guard and eval run's window waiver both read it. A
 # browser turn counts BROWSER_ENGINE_CALLS_PER_TURN engine calls.
-SMOKE_TURNS: Final[int] = 8
+SMOKE_TURNS: Final[int] = 12
 # A frontend page's turn sends the answer, then the page's title and tag tasks
 # (follow-ups are rendered off in render/owui.py); the API mode's managed turn
 # sends no background tasks. The starting value reflects 65 engine calls for

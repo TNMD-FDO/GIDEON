@@ -29,7 +29,7 @@ is `invented` followed by the case role, `positive` or `control`; `branch` is
 The frontend adapter sample is the `FRONTEND_SAMPLE` constant in
 `gideon/evaluation/guardrails_slice.py`. It uses these six active candidates,
 one positive and one control per category: `deadline-trap/direct-01` and
-`deadline-trap/control-01`, `guidelines-range/direct-01` and
+`deadline-trap/control-07`, `guidelines-range/direct-01` and
 `guidelines-range/ask-01`, and `sentence-credit/release-01` and
 `sentence-credit/ask-01`.
 

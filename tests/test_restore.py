@@ -399,7 +399,7 @@ class RestoreContracts(unittest.TestCase):
         fake = make_host()
         holder = backuplock.Record("backup push", os.getpid() + 1, NOW)
         stored = holder.to_json()
-        fake.locks[backuplock.LOCK_PATH] = stored
+        fake.locks[backuplock.BACKUP_LOCK.path] = stored
         out = io.StringIO()
         err = io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -413,7 +413,7 @@ class RestoreContracts(unittest.TestCase):
         self.assertIn(holder.command, err.getvalue())
         self.assertIn(holder.started.isoformat(), err.getvalue())
         self.assertEqual(fake.calls, [])
-        self.assertEqual(fake.locks[backuplock.LOCK_PATH], stored)
+        self.assertEqual(fake.locks[backuplock.BACKUP_LOCK.path], stored)
 
     def test_staging_restore_verifies_before_down_and_prints_next_steps(self) -> None:
         fake = make_host()
@@ -842,7 +842,7 @@ class RestoreContracts(unittest.TestCase):
                     outcome = backuplock.take(_fake, command="backup run", now=NOW)
                     self.assertEqual(outcome.state, backuplock.State.NESTED)
                     self.assertEqual(
-                        _fake.locks[backuplock.LOCK_PATH], _outer_records[0]
+                        _fake.locks[backuplock.BACKUP_LOCK.path], _outer_records[0]
                     )
                     return 0
 
@@ -856,7 +856,7 @@ class RestoreContracts(unittest.TestCase):
                     outcome = backuplock.take(_fake, command="backup push", now=NOW)
                     self.assertEqual(outcome.state, backuplock.State.NESTED)
                     self.assertEqual(
-                        _fake.locks[backuplock.LOCK_PATH], _outer_records[0]
+                        _fake.locks[backuplock.BACKUP_LOCK.path], _outer_records[0]
                     )
                     return 0
 
@@ -883,7 +883,7 @@ class RestoreContracts(unittest.TestCase):
                     len(nested_returns), 2 if source == "target" else 1
                 )
                 self.assertTrue(all(value == outer_records[0] for value in nested_returns))
-                self.assertNotIn(backuplock.LOCK_PATH, fake.locks)
+                self.assertNotIn(backuplock.BACKUP_LOCK.path, fake.locks)
 
     def test_fresh_target_skips_pre_restore_for_absent_and_empty_sets(self) -> None:
         for sets_absent in (True, False):
@@ -1009,7 +1009,7 @@ class RestoreContracts(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("pre-restore push failed", out.getvalue())
         self.assertFalse(any(call[0][-1] == "down" for call in fake.calls))
-        self.assertNotIn(backuplock.LOCK_PATH, fake.locks)
+        self.assertNotIn(backuplock.BACKUP_LOCK.path, fake.locks)
 
     def test_partly_running_fresh_stack_skips_pre_restore(self) -> None:
         fake = make_host(

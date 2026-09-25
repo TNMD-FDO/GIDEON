@@ -74,3 +74,34 @@ jobs:
       - uses: actions/checkout@v7
       - name: Search sentinel contract (stdlib unittest, no pip)
         run: python3 -m unittest tests/contract/search_sentinel.py
+
+  smoke:
+    # The push smoke: the frozen smoke slice run against the served engine on
+    # the standing gideon-ci sibling, which the tool first converges from this
+    # pushed tree, gating on a guardrail positive unblocked, a leak, an error,
+    # a frontend sample disagreeing, or a case regressed against its committed
+    # reference. It takes the engine lock first, so a busy engine is a skip
+    # (exit 0, the sibling untouched), never a red push or a disrupted run.
+    # -B keeps root's bytecode out of the runner's checkout, which its next
+    # clean could not remove; the transcript sits in the runner's temporary
+    # directory, so the checkout reads clean, and it holds ids, classes, and
+    # verdicts alone.
+    if: github.event_name == 'push' && github.event.repository.private
+    needs: search-sentinel
+    runs-on: [self-hosted, linux, x64, gpu, dl385-gen11]
+    concurrency: frontend-contract
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Smoke on the sibling
+        shell: bash
+        run: sudo python3 -B -m tools.cistack smoke 2>&1 | tee "$RUNNER_TEMP/smoke.txt"
+      - name: Job summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '```text'
+            if [ -f "$RUNNER_TEMP/smoke.txt" ]; then cat "$RUNNER_TEMP/smoke.txt"; fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

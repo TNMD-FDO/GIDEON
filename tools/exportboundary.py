@@ -58,8 +58,10 @@ EXCLUDED_PREFIXES = (
     "eval/sets/eval-v1/build-gates/extraction.jsonl",  # the labelled harvest questions pending the same ruling
     "eval/sets/eval-v1/build-gates/extraction-variants.jsonl",  # the harvest questions' variants, pending the same ruling
     "eval/sets/eval-v1/slices/extraction/harvest.ids",  # the harvest slice ids must leave with their excluded cases
+    "eval/sets/eval-v1/slices/smoke/harvest.ids",  # the smoke harvest ids must leave with their excluded cases
     "eval/sets/eval-v1/slices/judgments",  # the judgments slice ids must leave with their excluded queries
     "eval/reference/extraction/harvest.json",  # the harvest reference must leave with its id list
+    "eval/reference/smoke/harvest.json",  # the smoke harvest reference must leave with its id list
     ".github/workflows/acceptance.yml",  # the box acceptance workflow
     ".github/workflows/pin-watch.yml",  # the box pin-watch workflow
     ".github/dependabot.yml",  # Dependabot's development-repository trigger

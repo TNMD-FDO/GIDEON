@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import stat
 import subprocess
 import unittest
@@ -79,6 +80,7 @@ from gideon.host.steps.site_dirs import (
 from gideon.host.steps.timezone import TimezoneStep
 from gideon.host.steps.tools import HostToolsStep
 from gideon.host.sysio import Command, PathLike
+from tools.exportboundary import absent_from_export
 
 ROOT = Path(__file__).resolve().parent.parent
 LOCK = ROOT / "host.lock"
@@ -1905,7 +1907,10 @@ def runner_settings_fixture(which: bool | str) -> str:
 RUNNER_REMOVE_ARGV = ("runuser", "-u", "gh-runner", "--", "./config.sh", "remove", "--local")
 RUNNER_SUDOERS = "/etc/sudoers.d/gideon-acceptance"
 RUNNER_SUDOERS_CANDIDATE = "/etc/sudoers.d/gideon-acceptance.candidate"
-RUNNER_SUDOERS_TEXT = "gh-runner ALL=(root) NOPASSWD: /usr/bin/python3 -m tools.acceptance *\n"
+RUNNER_SUDOERS_TEXT = (
+    "gh-runner ALL=(root) NOPASSWD: /usr/bin/python3 -m tools.acceptance *\n"
+    "gh-runner ALL=(root) NOPASSWD: /usr/bin/python3 -B -m tools.cistack smoke\n"
+)
 RUNNER_CONFIG_ARGV = (
     "runuser", "-u", "gh-runner", "--", "./config.sh", "--unattended", "--replace",
     "--disableupdate", "--url", "https://github.com/TNMD-FDO", "--labels",
@@ -2300,6 +2305,58 @@ class ServiceStepTests(unittest.TestCase):
 
                 self.assertEqual(result.disposition, Disposition.DRIFT)
                 self.assertIn(RUNNER_SUDOERS, result.detail)
+
+    def test_runner_sudoers_names_the_acceptance_and_smoke_commands(self) -> None:
+        rules = RUNNER_SUDOERS_TEXT.splitlines()
+        self.assertEqual(len(rules), 2)
+        self.assertEqual(
+            rules[1],
+            "gh-runner ALL=(root) NOPASSWD: /usr/bin/python3 -B -m tools.cistack smoke",
+        )
+
+    def test_runner_sudoers_detects_drift_on_either_command_line(self) -> None:
+        expected = RUNNER_SUDOERS_TEXT.splitlines()
+        step = GhRunnerStep()
+        for index in range(len(expected)):
+            with self.subTest(line=index):
+                host = self._runner_host(
+                    registered="off", service=True, service_enabled=True, service_active=True
+                )
+                changed = expected.copy()
+                changed[index] += " altered"
+                host.files[RUNNER_SUDOERS] = "\n".join(changed) + "\n"
+
+                result = step.check(context(host))
+
+                self.assertEqual(result.disposition, Disposition.DRIFT)
+                self.assertIn("differs from the runner's rules", result.detail)
+
+    def test_workflow_python_commands_are_named_by_runner_sudoers(self) -> None:
+        rules = [line.split("NOPASSWD: ", 1)[1] for line in RUNNER_SUDOERS_TEXT.splitlines()]
+        workflow_paths = [".github/workflows/ci.yml"]
+        acceptance = ".github/workflows/acceptance.yml"
+        if not absent_from_export(acceptance, ROOT):
+            workflow_paths.append(acceptance)
+
+        def allowed(command: str, rule: str) -> bool:
+            # sudo matches a rule without a wildcard exactly, arguments included.
+            if rule.endswith(" *"):
+                return command.startswith(rule.removesuffix("*"))
+            return command == rule
+
+        seen = 0
+        for relative in workflow_paths:
+            for line in (ROOT / relative).read_text(encoding="utf-8").splitlines():
+                if "sudo python3 " not in line or line.lstrip().startswith("#"):
+                    continue
+                command = re.split(r" (?:[12]?>|\|)", line.split("sudo ", 1)[1], maxsplit=1)[0]
+                command = command.strip().replace("python3", "/usr/bin/python3", 1)
+                seen += 1
+                self.assertTrue(
+                    any(allowed(command, rule) for rule in rules),
+                    f"{relative} command has no sudoers rule: {command}",
+                )
+        self.assertGreaterEqual(seen, 1)
 
     def test_runner_sudoers_apply_validates_and_promotes_last(self) -> None:
         host = self._runner_host(

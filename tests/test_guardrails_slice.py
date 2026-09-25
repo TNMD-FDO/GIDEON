@@ -710,6 +710,17 @@ class GuardrailsRunner(unittest.TestCase):
         self.assertEqual(host.judge_requests, [])
         self.assertTrue(all(row.judge is None for row in first.results))
 
+    def test_promptless_context_makes_no_judge_request_and_leaves_judge_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            loaded = _small_set(Path(directory) / "eval-v1")
+            host = JudgingDoorHost()
+            _host, _frontend, context = _fixture_turns(loaded, host=host)
+            result = guardrails_slice.run_guardrails(
+                loaded, "guardrails", replace(context, judge_prompt_id=None)
+            )
+        self.assertEqual(host.judge_requests, [])
+        self.assertTrue(all(row.judge is None for row in result.results))
+
     def test_missing_turn_elapsed_keeps_latency_none(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             loaded = _small_set(Path(directory) / "eval-v1")

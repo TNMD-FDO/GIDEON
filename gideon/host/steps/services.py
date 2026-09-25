@@ -499,8 +499,11 @@ class GhRunnerStep(Step):
     """Install and optionally register the organization GitHub runner.
 
     The runner is already root-equivalent through the docker group and never
-    runs pull-request code. Its sudoers line names one module of the checkout
-    it runs from; hardening waits for the public repository flip.
+    runs pull-request code; hardening waits for the public repository flip.
+    Each sudoers line names one command a box workflow runs as root from the
+    checkout: the acceptance harness, and the push smoke exactly, whose ``-B``
+    is part of the line because root's bytecode written into the runner's
+    checkout could not be removed by its next clean.
     """
 
     name = "gh-runner"
@@ -513,6 +516,8 @@ class GhRunnerStep(Step):
         return (
             f"{_RUNNER_USER} ALL=(root) NOPASSWD: "
             "/usr/bin/python3 -m tools.acceptance *\n"
+            f"{_RUNNER_USER} ALL=(root) NOPASSWD: "
+            "/usr/bin/python3 -B -m tools.cistack smoke\n"
         )
 
     def _sudoers_check(self, context: ProvisionContext) -> CheckResult | None:
@@ -533,7 +538,7 @@ class GhRunnerStep(Step):
         if current != self._sudoers_text():
             return CheckResult(
                 Disposition.DRIFT,
-                f"{_RUNNER_SUDOERS} differs from the acceptance rule",
+                f"{_RUNNER_SUDOERS} differs from the runner's rules",
                 _RUNNER_SUDOERS_FIX,
             )
         try:

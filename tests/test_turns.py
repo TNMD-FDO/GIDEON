@@ -3002,12 +3002,12 @@ class TurnHarness(TestCase):
         timezone_name = cast(dict[str, str], site_document["office"])["timezone"]
         zone = ZoneInfo(timezone_name)
         tuesday = datetime(2026, 9, 8, 14, 0, tzinfo=zone).astimezone(UTC)
-        text = _cases_file("one", "two", "three")
+        text = _cases_file("one", "two", "three", "four", "five")
 
         frontend = Frontend(self.guardrail, {})
         code, stdout, _ = _run_file(frontend, text, now=lambda: tuesday, args=["--concurrent", "3"])
         self.assertEqual(code, 1)
-        self.assertIn("9 turns (3 sessions)", stdout)
+        self.assertIn("15 turns (3 sessions)", stdout)
         self.assertEqual(frontend.calls, [])
 
         for clock, args in ((tuesday, ["--concurrent", "3", "--force"]), (FIXED_NOW, ["--concurrent", "3"])):
@@ -3019,7 +3019,7 @@ class TurnHarness(TestCase):
                     args=args,
                 )
                 self.assertEqual(code, 0)
-                self.assertIn("summary: ok — 9 turns", stdout)
+                self.assertIn("summary: ok — 15 turns", stdout)
 
         code, stdout, _ = _run_file(
             Frontend(self.guardrail, {"one": "answered"}),
@@ -3262,9 +3262,9 @@ class TurnHarness(TestCase):
 
         tuesday = datetime(2026, 9, 8, 14, 0, tzinfo=ZoneInfo("America/Chicago")).astimezone(UTC)
         frontend = Frontend(self.guardrail, {})
-        code, stdout, _ = _run_file(frontend, text, now=lambda: tuesday, args=["--concurrent", "2"])
+        code, stdout, _ = _run_file(frontend, text, now=lambda: tuesday, args=["--concurrent", "3"])
         self.assertEqual(code, 1)
-        self.assertIn("12 engine calls (2 per searched case)", stdout)
+        self.assertIn("18 engine calls (2 per searched case)", stdout)
         self.assertEqual(frontend.calls, [])
 
         frontend = Frontend(self.guardrail, {})

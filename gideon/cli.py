@@ -292,6 +292,18 @@ def build_parser() -> argparse.ArgumentParser:
     eval_run.add_argument("--decision", action="store_true", help="a decision run")
     eval_run.add_argument("--force", action="store_true", help="run despite a dirty state")
     eval_run.add_argument(
+        "--stack",
+        choices=("production", "ci"),
+        default="production",
+        help="run the turns against the standing CI sibling instead of production",
+    )
+    eval_run.add_argument(
+        "--kind",
+        choices=("manual", "smoke"),
+        default="manual",
+        help="the word the run's record carries for its purpose",
+    )
+    eval_run.add_argument(
         "--slice",
         metavar="NAME",
         help="frozen slice to run",

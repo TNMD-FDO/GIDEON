@@ -88,6 +88,7 @@ class JudgeHost:
         self.engine_calls: list[str] = []
         self.write_sql: list[str] = []
         self.git_calls: list[tuple[str, ...]] = []
+        self.locks: dict[str, str] = {}
 
     def run(
         self,
@@ -143,6 +144,26 @@ class JudgeHost:
 
     def geteuid(self) -> int:
         return self._geteuid
+
+    def mkdir(
+        self,
+        path: PathLike,
+        *,
+        mode: int = 0o755,
+        parents: bool = False,
+        exist_ok: bool = False,
+    ) -> None:
+        del path, mode, parents, exist_ok
+
+    def take_lock(self, path: PathLike, record: str) -> str | None:
+        key = os.fspath(path)
+        holder = self.locks.get(key)
+        if holder is None:
+            self.locks[key] = record
+        return holder
+
+    def release_lock(self, path: PathLike) -> None:
+        self.locks.pop(os.fspath(path), None)
 
 
 def _loaded() -> LoadedSet:

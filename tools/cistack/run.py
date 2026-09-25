@@ -1,16 +1,30 @@
-"""Run the CI sibling stack's ordered up, down, and status stages."""
+"""Run stages against the CI sibling whose containers mount the last converged checkout."""
 
 from __future__ import annotations
 
 import json
 import subprocess
 import time
+from argparse import Namespace
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
-from gideon.host import apply, nogpu, owui, render, secrets, site, stack, stages, stores
+from gideon.evaluation import command as evaluation_command
+from gideon.host import (
+    apply,
+    backuplock,
+    nogpu,
+    owui,
+    render,
+    secrets,
+    site,
+    stack,
+    stages,
+    stores,
+)
 from gideon.host.images import load_image_lock
 from gideon.host.lock import load_host_lock
 from gideon.host.models import load_models_lock
@@ -31,7 +45,7 @@ from gideon.host.render.command import load_render_inputs
 from gideon.host.render.engine import ENGINE_PORT
 from gideon.host.render.yamlout import dump
 from gideon.host.report import StageResult, command_detail, print_stage
-from gideon.host.sysio import Host, PathLike
+from gideon.host.sysio import Host, LockingHost, PathLike
 
 CI_SERVICES: Final[tuple[str, ...]] = (
     "postgres",
@@ -39,9 +53,11 @@ CI_SERVICES: Final[tuple[str, ...]] = (
     API_SERVICE_NAME,
     RELAY_SERVICE_NAME,
 )
-_ROOT_FIX: Final = "Run sudo python3 -m tools.cistack <up|down|status>, then retry."
+_ROOT_FIX: Final = "Run sudo python3 -m tools.cistack <up|smoke|down|status>, then retry."
 _UP_ROOT_FIX: Final = "Run sudo python3 -m tools.cistack up, then retry."
 _DOWN_ROOT_FIX: Final = "Run sudo python3 -m tools.cistack down, then retry."
+_SMOKE_ROOT_FIX: Final = "Run sudo python3 -B -m tools.cistack smoke, then retry."
+_SMOKE_FAILED_FIX: Final = "Read the eval run rows above, the gate's first, then retry."
 _DATA_FIX: Final = "Run sudo python3 -m gideon host provision, then retry."
 _NETWORK_FIX: Final = "Run sudo python3 -m gideon apply, then retry."
 _NOGPU_FIX: Final = (
@@ -66,6 +82,7 @@ _RENDERED_NAMES: Final[frozenset[str]] = frozenset(
 _OPEN_WEBUI_NAMES: Final[frozenset[str]] = frozenset(
     {"env", "manifest.yaml"}
 )
+_LOCK_ACCESS_FIX: Final = "Repair access to the engine lock, then retry."
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,7 +105,7 @@ def _error_row(name: str, errors: Sequence[object], fallback: str) -> StageResul
 def _root_row(io: Host, command: str) -> StageResult | None:
     if io.geteuid() == 0:
         return None
-    fix = _UP_ROOT_FIX if command == "up" else _DOWN_ROOT_FIX
+    fix = {"up": _UP_ROOT_FIX, "smoke": _SMOKE_ROOT_FIX}.get(command, _DOWN_ROOT_FIX)
     return StageResult("preconditions", False, "root is required", fix)
 
 
@@ -97,6 +114,7 @@ def _preconditions(
     io: Host,
     *,
     site_path: PathLike,
+    lock_detail: str = "",
 ) -> StageResult:
     root = _root_row(io, "up")
     if root is not None:
@@ -160,9 +178,45 @@ def _preconditions(
     return StageResult(
         "preconditions",
         True,
-        "root, render inputs, CI data root, and production network are available",
+        "root, render inputs, CI data root, and production network are available"
+        + (f"; {lock_detail}" if lock_detail else ""),
         "",
     )
+
+
+def _engine_lock(
+    io: LockingHost, command: str
+) -> tuple[backuplock.Outcome | None, StageResult]:
+    try:
+        outcome = backuplock.take(
+            io,
+            command=command,
+            now=datetime.now(UTC),
+            lock=backuplock.ENGINE_LOCK,
+        )
+    except OSError as exc:
+        return None, StageResult(
+            "preconditions", False, f"engine lock could not be taken: {exc}", _LOCK_ACCESS_FIX
+        )
+    if outcome.state is backuplock.State.REFUSED:
+        problem = outcome.problem
+        return outcome, StageResult(
+            "preconditions",
+            False,
+            problem.problem if problem is not None else "engine lock is held",
+            problem.fix if problem is not None else _LOCK_ACCESS_FIX,
+        )
+    detail = (
+        "engine lock taken"
+        if outcome.state is backuplock.State.HELD
+        else "engine lock held by this process"
+    )
+    return outcome, StageResult("preconditions", True, detail, "")
+
+
+def _release_engine_lock(io: LockingHost, outcome: backuplock.Outcome | None) -> None:
+    if outcome is not None and outcome.state is backuplock.State.HELD:
+        backuplock.release(io, lock=backuplock.ENGINE_LOCK)
 
 
 def _secrets_stage(
@@ -432,17 +486,20 @@ def _verify_stage(
     )
 
 
-def up(
+def _up_stages(
     ci_stack: CiStack,
     io: Host,
     *,
     site_path: PathLike,
     client_factory: Callable[..., owui.Client] | None = None,
     sleep: Callable[[float], None] = time.sleep,
+    lock_detail: str = "",
 ) -> int:
     """Run the CI stack's ordered convergence and verification stages."""
 
-    preconditions = _preconditions(ci_stack, io, site_path=site_path)
+    preconditions = _preconditions(
+        ci_stack, io, site_path=site_path, lock_detail=lock_detail
+    )
     print_stage(preconditions)
     if not preconditions.ok:
         return 1
@@ -480,6 +537,116 @@ def up(
     )
     print_stage(verify_result)
     return int(not verify_result.ok)
+
+
+def up(
+    ci_stack: CiStack,
+    io: LockingHost,
+    *,
+    site_path: PathLike,
+    client_factory: Callable[..., owui.Client] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+) -> int:
+    """Converge the sibling under the engine lock.
+
+    A convergence recreates the containers a sibling run is driving, so it
+    refuses while another process holds the lock.
+    """
+
+    root = _root_row(io, "up")
+    if root is not None:
+        print_stage(root)
+        return 1
+    claim, lock_row = _engine_lock(io, "tools.cistack up")
+    if not lock_row.ok:
+        print_stage(lock_row)
+        return 1
+    try:
+        return _up_stages(
+            ci_stack,
+            io,
+            site_path=site_path,
+            client_factory=client_factory,
+            sleep=sleep,
+            lock_detail=lock_row.detail,
+        )
+    finally:
+        _release_engine_lock(io, claim)
+
+
+def smoke(
+    ci_stack: CiStack,
+    io: LockingHost,
+    *,
+    site_path: PathLike,
+    client_factory: Callable[..., owui.Client] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+    run_eval: Callable[..., int] | None = None,
+) -> int:
+    """Converge the sibling from the selected tree and run the push smoke on it.
+
+    The engine lock is taken before anything of the sibling is touched and held
+    until the run ends. Held by another process, the push's result is neutral:
+    two ok rows and exit 0, the sibling untouched. The evaluation runs
+    in-process under the same lock, which it passes as nested, and reads its
+    cases, reference, and provenance from the selected checkout.
+    """
+
+    root = _root_row(io, "smoke")
+    if root is not None:
+        print_stage(root)
+        return 1
+    claim, lock_row = _engine_lock(io, "tools.cistack smoke")
+    if not lock_row.ok:
+        if claim is None:
+            print_stage(lock_row)
+            return 1
+        print_stage(StageResult("preconditions", True, lock_row.detail, ""))
+        print_stage(
+            StageResult(
+                "skipped",
+                True,
+                "engine busy; the sibling untouched, nothing evaluated, nothing recorded",
+                "",
+            )
+        )
+        return 0
+    try:
+        result = _up_stages(
+            ci_stack,
+            io,
+            site_path=site_path,
+            client_factory=client_factory,
+            sleep=sleep,
+            lock_detail=lock_row.detail,
+        )
+        if result != 0:
+            return result
+        evaluator = evaluation_command.run_eval if run_eval is None else run_eval
+        code = evaluator(
+            Namespace(
+                slice="smoke",
+                stack="ci",
+                kind="smoke",
+                set=None,
+                ranked=None,
+                decision=False,
+                force=False,
+            ),
+            host=io,
+            checkout_root=ci_stack.checkout,
+        )
+        print_stage(
+            StageResult(
+                "smoke",
+                code == 0,
+                f"eval run --slice smoke --stack ci --kind smoke exited {code}",
+                "" if code == 0 else _SMOKE_FAILED_FIX,
+            )
+        )
+        return code
+    finally:
+        _release_engine_lock(io, claim)
 
 
 def _wipe(ci_stack: CiStack, io: Host) -> StageResult:

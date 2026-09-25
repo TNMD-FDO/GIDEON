@@ -48,8 +48,10 @@ tests/test_signoffs_kit.py export-ignore
 eval/sets/eval-v1/build-gates/extraction.jsonl export-ignore
 eval/sets/eval-v1/build-gates/extraction-variants.jsonl export-ignore
 eval/sets/eval-v1/slices/extraction/harvest.ids export-ignore
+eval/sets/eval-v1/slices/smoke/harvest.ids export-ignore
 eval/sets/eval-v1/slices/judgments/ export-ignore
 eval/reference/extraction/harvest.json export-ignore
+eval/reference/smoke/harvest.json export-ignore
 .github/workflows/acceptance.yml export-ignore
 .github/workflows/pin-watch.yml export-ignore
 .github/dependabot.yml export-ignore

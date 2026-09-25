@@ -36,3 +36,11 @@ finding, so it cannot stay where its cases go. In an exported tree the registry
 holds a `judgments` slice the set does not, and `eval run` answers that as it
 answers any unknown slice. The list changes only by append, as every frozen
 slice does; the ten CHU-written queries are the next append.
+
+The `smoke` slice is the push gate's, with one list per source list. Its
+guardrails lists name the frontend sample's six cases, each run at the service
+door and through the frontend. Its two extraction lists mirror `extraction`'s
+and change with them. Every list changes only by append; a successor to a
+superseded sample case is appended beside it. Each later slice adds its
+categories as they land. `harvest.ids` leaves at the export boundary with its
+cases.

@@ -1,4 +1,4 @@
-"""Parse and dispatch the CI sibling stack's three operator commands."""
+"""Parse the CI sibling commands whose containers mount the last converged checkout."""
 
 import argparse
 from collections.abc import Callable, Sequence
@@ -7,7 +7,7 @@ from typing import Final
 
 from gideon.host import owui
 from gideon.host.render.ci import CI_BASE_URL, CI_ROOT, CI_SECRETS_DIR
-from gideon.host.sysio import Host, PathLike, RealHost
+from gideon.host.sysio import LockingHost, PathLike, RealHost
 from tools.cistack import run
 
 DEFAULT_SITE_PATH: Final[Path] = Path("/etc/gideon/site.yaml")
@@ -20,6 +20,9 @@ def _parser() -> argparse.ArgumentParser:
     up = commands.add_parser("up")
     up.add_argument("--checkout", type=Path, metavar="PATH")
 
+    smoke = commands.add_parser("smoke")
+    smoke.add_argument("--checkout", type=Path, metavar="PATH")
+
     down = commands.add_parser("down")
     down.add_argument("--wipe", action="store_true")
 
@@ -30,8 +33,9 @@ def _parser() -> argparse.ArgumentParser:
 def main(
     argv: Sequence[str] | None = None,
     *,
-    host: Host | None = None,
+    host: LockingHost | None = None,
     client_factory: Callable[..., owui.Client] | None = None,
+    run_eval: Callable[..., int] | None = None,
     checkout: Path | None = None,
     site_path: PathLike = DEFAULT_SITE_PATH,
 ) -> int:
@@ -40,7 +44,7 @@ def main(
     options = _parser().parse_args(argv)
     io = host or RealHost()
     tree = checkout or Path(__file__).resolve().parents[2]
-    if options.command == "up" and options.checkout is not None:
+    if options.command in {"up", "smoke"} and options.checkout is not None:
         # Compose resolves a relative mount source against the project
         # directory, /data/ci, so the checkout is made absolute here.
         tree = options.checkout.resolve()
@@ -52,6 +56,14 @@ def main(
     )
     if options.command == "up":
         return run.up(ci_stack, io, site_path=site_path, client_factory=client_factory)
+    if options.command == "smoke":
+        return run.smoke(
+            ci_stack,
+            io,
+            site_path=site_path,
+            client_factory=client_factory,
+            run_eval=run_eval,
+        )
     if options.command == "down":
         return run.down(ci_stack, io, wipe=options.wipe)
     return run.status(ci_stack, io)

@@ -12,21 +12,22 @@ import tempfile
 import unittest
 from collections.abc import Mapping
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
 
 import gideon
 from gideon.cli import main
-from gideon.evaluation import command, judge, reference, signoffs
+from gideon.evaluation import command, judge, reference, signoffs, stacks
 from gideon.evaluation.evalset import SET_ROOT, LoadedSet, load_set, select_cases
 from gideon.evaluation.extraction_slice import run_extraction
 from gideon.evaluation.results import CaseResult, RunContext, SliceResult
 from gideon.evaluation.slices import SLICE_RUNNERS
 from gideon.extraction import KEYED_TYPES, SECTION_TYPES, ExactObject, extract
 from gideon.extraction.scoring import MIN_RECALL
-from gideon.host.sysio import Host
+from gideon.host import backuplock
+from gideon.host.sysio import Host, PathLike
 from tools.exportboundary import absent_from_export
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -49,6 +50,8 @@ class EvalHost:
         status_rc: int = 0,
         status_stdout: str = "",
         no_git: bool = False,
+        ci_stack_present: bool = True,
+        effective_uid: int = 0,
     ) -> None:
         self.probe_rc = probe_rc
         self.write_rc = write_rc
@@ -57,7 +60,11 @@ class EvalHost:
         self.status_rc = status_rc
         self.status_stdout = status_stdout
         self.no_git = no_git
+        self.ci_stack_present = ci_stack_present
+        self.effective_uid = effective_uid
         self.calls: list[tuple[tuple[str, ...], str | None]] = []
+        self.locks: dict[str, str] = {}
+        self.lock_records: list[tuple[str, str]] = []
 
     def run(
         self,
@@ -91,6 +98,8 @@ class EvalHost:
     def exists(self, path: str | os.PathLike[str]) -> bool:
         if Path(path).name == ".git":
             return not self.no_git
+        if Path(path) == Path(stacks.CI_ROOT) / "compose.yaml":
+            return self.ci_stack_present
         return Path(path).exists()
 
     def listdir(self, path: str | os.PathLike[str]) -> list[str]:
@@ -109,10 +118,21 @@ class EvalHost:
         raise NotImplementedError
 
     def mkdir(self, path: str | os.PathLike[str], *, mode: int = 0o755, parents: bool = False, exist_ok: bool = False) -> None:
-        raise NotImplementedError
+        del path, mode, parents, exist_ok
+
+    def take_lock(self, path: str | os.PathLike[str], record: str) -> str | None:
+        key = os.fspath(path)
+        self.lock_records.append((key, record))
+        holder = self.locks.get(key)
+        if holder is None:
+            self.locks[key] = record
+        return holder
+
+    def release_lock(self, path: str | os.PathLike[str]) -> None:
+        self.locks.pop(os.fspath(path), None)
 
     def geteuid(self) -> int:
-        return 0
+        return self.effective_uid
 
 
 def _invoke(argv: list[str], **run_kwargs: Any) -> tuple[int, str, str]:
@@ -839,6 +859,237 @@ class Command(unittest.TestCase):
         self.assertNotIn("gate:", stdout)
 
 
+def _invoke_smoke_command(
+    host: EvalHost,
+    *,
+    stack_name: str = "ci",
+    kind: str = "smoke",
+    rendered_dir: Path | None = None,
+    set_root: Path | None = None,
+) -> tuple[int, str, str, dict[str, list[Any]]]:
+    observed: dict[str, list[Any]] = {
+        "contexts": [],
+        "instruction": [],
+        "client": [],
+        "door": [],
+        "engine_paths": [],
+    }
+
+    def load_instruction(*args: Any, **kwargs: Any) -> str:
+        observed["instruction"].append((args, kwargs))
+        return "A visibly fictitious instruction."
+
+    def make_client(*args: Any, **kwargs: Any) -> object:
+        observed["client"].append((args, kwargs))
+        return object()
+
+    def probe_door(*args: Any, **kwargs: Any) -> command.door.ProbeResult:
+        observed["door"].append((args, kwargs))
+        return command.door.ProbeResult(True, "door ready", None)
+
+    def run_slice(
+        _spec: Any, _loaded: LoadedSet, _slice_name: str, context: RunContext
+    ) -> SliceResult:
+        observed["contexts"].append(context)
+        return SliceResult(True, "smoke run report\n", ())
+
+    def resolve_engine(
+        _host: Host, path: PathLike, **_kwargs: Any
+    ) -> command.engine.EngineTarget:
+        observed["engine_paths"].append(path)
+        return command.engine.EngineTarget("fictitious-profile", "fictitious-model", 1)
+
+    set_args = [] if set_root is None else ["--set", str(set_root)]
+    args = [
+        "eval", "run", "--slice", "smoke", "--stack", stack_name,
+        "--kind", kind, *set_args,
+    ]
+    run_kwargs = _run_kwargs(host)
+    if rendered_dir is not None:
+        run_kwargs["rendered_dir"] = rendered_dir
+    with (
+        patch.object(
+            command.engine,
+            "resolve_engine_target",
+            side_effect=resolve_engine,
+        ),
+        patch.object(command.access, "load_general_instruction", side_effect=load_instruction),
+        patch.object(command.access, "read_eval_password", return_value="fictitious-password"),
+        patch.object(command.access, "make_client_factory", side_effect=make_client),
+        patch.object(command.door, "probe", side_effect=probe_door),
+        patch.object(command, "_run_slice", side_effect=run_slice),
+        patch.object(command.stacks.secrets, "select_directory") as select_directory,
+    ):
+        outcome = _invoke(args, **run_kwargs)
+        if stack_name == "ci":
+            select_directory.assert_called_once_with(Path(stacks.CI_SECRETS_DIR))
+        else:
+            select_directory.assert_not_called()
+    return (*outcome, observed)
+
+
+class EngineStackAndLock(unittest.TestCase):
+    def test_ci_threads_turn_paths_records_identity_and_waives_the_window(self) -> None:
+        host = EvalHost()
+        production_dir = Path("/tmp/fictitious-production-rendered")
+        office = command.window.WindowJudgement(
+            False, "fictitious office hours", NOW + timedelta(hours=1)
+        )
+        with patch.object(command.window, "window_judgement", return_value=office):
+            code, stdout, stderr, observed = _invoke_smoke_command(
+                host, rendered_dir=production_dir
+            )
+        loaded = load_set(ROOT / SET_ROOT).loaded
+        assert loaded is not None
+        engine_calls = SLICE_RUNNERS["smoke"].engine_calls
+        assert engine_calls is not None
+        count = engine_calls(loaded, "smoke")
+
+        self.assertEqual((code, stderr), (0, ""))
+        self.assertIn(
+            f"{count} engine calls within the any-hour allowance of {command.run.SMOKE_TURNS}",
+            stdout,
+        )
+        self.assertIn("engine lock taken", stdout)
+        self.assertEqual(observed["engine_paths"], [production_dir])
+        self.assertEqual(observed["instruction"][0][1]["stack"], "ci")
+        self.assertEqual(observed["client"][0][1]["stack"], "ci")
+        self.assertEqual(observed["door"][0][0][1], Path(stacks.CI_ROOT))
+        self.assertEqual(observed["contexts"][0].rendered_dir, Path(stacks.CI_ROOT))
+        self.assertEqual(host.locks, {})
+        self.assertEqual(len(host.lock_records), 1)
+        lock_record = backuplock.parse(host.lock_records[0][1])
+        self.assertIsNotNone(lock_record)
+        assert lock_record is not None
+        self.assertIn("smoke", lock_record.command)
+        self.assertIn("ci", lock_record.command)
+        write_sql = next(
+            input
+            for argv, input in host.calls
+            if argv[0] == "docker" and input is not None and input != "SELECT 1;\n"
+        )
+        write_argv = next(
+            argv
+            for argv, input in host.calls
+            if argv[0] == "docker" and input is not None and input != "SELECT 1;\n"
+        )
+        self.assertIn("\\set run_stack 'ci'", write_sql)
+        self.assertIn("\\set kind 'smoke'", write_sql)
+        self.assertIn(str(production_dir), write_argv)
+        self.assertNotIn(stacks.CI_ROOT, write_argv)
+
+    def test_ci_refusals_are_registry_driven_before_the_lock(self) -> None:
+        for slice_name, spec in SLICE_RUNNERS.items():
+            if spec.drives_turns and spec.judge_prompt is None:
+                continue
+            with self.subTest(slice_name=slice_name):
+                if absent_from_export(f"eval/sets/eval-v1/slices/{slice_name}", ROOT):
+                    self.skipTest("in an export this slice's lists are absent, so load refuses it first")
+                host = EvalHost()
+                with patch.object(command.stacks.secrets, "select_directory"):
+                    code, stdout, stderr = _invoke(
+                        ["eval", "run", "--slice", slice_name, "--stack", "ci"],
+                        **_run_kwargs(host),
+                    )
+                self.assertEqual(code, 1)
+                self.assertEqual(stderr, "")
+                self.assertIn("load: refuse", stdout)
+                self.assertIn("Run this slice with --stack production", stdout)
+                self.assertEqual(host.lock_records, [])
+
+    def test_engine_lock_refusal_nested_pass_and_post_lock_refusal(self) -> None:
+        lock = backuplock.ENGINE_LOCK
+        other = EvalHost()
+        other_pid = os.getpid() + 1
+        other.locks[lock.path] = backuplock.Record(
+            "fictitious nightly", other_pid, NOW
+        ).to_json()
+        code, stdout, _stderr, _observed = _invoke_smoke_command(other)
+        self.assertEqual(code, 1)
+        self.assertIn("fictitious nightly", stdout)
+        self.assertIn(f"ps -p {other_pid}", stdout)
+        self.assertIn("then retry", stdout)
+        self.assertIn("engine lock is held by", stdout)
+        self.assertIn(lock.path, other.locks)
+
+        unreadable = EvalHost()
+        unreadable.locks[lock.path] = "visibly fictitious unreadable lock record"
+        code, stdout, _stderr, _observed = _invoke_smoke_command(unreadable)
+        self.assertEqual(code, 1)
+        self.assertIn("record unreadable", stdout)
+        self.assertIn(lock.wait_fix, stdout)
+        self.assertEqual(
+            unreadable.locks[lock.path], "visibly fictitious unreadable lock record"
+        )
+
+        nested = EvalHost()
+        own_record = backuplock.Record("caller owns lock", os.getpid(), NOW).to_json()
+        nested.locks[lock.path] = own_record
+        code, stdout, _stderr, _observed = _invoke_smoke_command(nested)
+        self.assertEqual(code, 0)
+        self.assertIn("engine lock held by this process", stdout)
+        self.assertEqual(nested.locks[lock.path], own_record)
+
+        absent = EvalHost(ci_stack_present=False)
+        code, stdout, _stderr, observed = _invoke_smoke_command(absent)
+        self.assertEqual(code, 1)
+        self.assertIn("Run sudo python3 -m tools.cistack up, then retry.", stdout)
+        self.assertEqual(observed["door"], [])
+        self.assertEqual(absent.locks, {})
+
+        unprivileged = EvalHost(effective_uid=1000)
+        code, stdout, _stderr, _observed = _invoke_smoke_command(unprivileged)
+        self.assertEqual(code, 1)
+        self.assertIn("--stack ci --kind smoke", stdout)
+        self.assertEqual(unprivileged.lock_records, [])
+        self.assertIn(
+            "--stack ci --kind smoke",
+            command._record_root_fix(
+                "smoke", SLICE_RUNNERS["smoke"], " --stack ci --kind smoke"
+            ),
+        )
+
+    def test_count_over_allowance_refuses_outside_window_and_releases(self) -> None:
+        spec = SLICE_RUNNERS["smoke"]
+        calls = spec.engine_calls
+        assert calls is not None
+        replacement = dict(SLICE_RUNNERS)
+        replacement["smoke"] = replace(
+            spec,
+            engine_calls=lambda _loaded, _slice: command.run.SMOKE_TURNS + 1,
+        )
+        outside = command.window.WindowJudgement(
+            False, "fictitious office closure", NOW + timedelta(hours=1)
+        )
+        host = EvalHost()
+        with (
+            patch.object(command, "SLICE_RUNNERS", replacement),
+            patch.object(command.window, "window_judgement", return_value=outside),
+        ):
+            code, stdout, _stderr, _observed = _invoke_smoke_command(host)
+        count = command.run.SMOKE_TURNS + 1
+        self.assertEqual(code, 1)
+        self.assertIn(f"{count} engine calls exceed the any-hour allowance", stdout)
+        self.assertIn("Next opening is", stdout)
+        self.assertEqual(host.locks, {})
+
+    def test_in_window_count_is_reported_without_a_waiver(self) -> None:
+        inside = command.window.WindowJudgement(
+            True, "fictitious office hours", NOW + timedelta(hours=1)
+        )
+        host = EvalHost()
+        with patch.object(command.window, "window_judgement", return_value=inside):
+            code, stdout, _stderr, _observed = _invoke_smoke_command(host)
+        loaded = load_set(ROOT / SET_ROOT).loaded
+        assert loaded is not None
+        engine_calls = SLICE_RUNNERS["smoke"].engine_calls
+        assert engine_calls is not None
+        count = engine_calls(loaded, "smoke")
+        self.assertEqual(code, 0)
+        self.assertIn(f"{count} engine calls, engine lock taken", stdout)
+        self.assertNotIn("within the any-hour allowance", stdout)
+
+
 class RunnerSelection(unittest.TestCase):
     """Every registered runner receives only the loader's counted cases."""
 
@@ -903,7 +1154,32 @@ class SliceRegistry(unittest.TestCase):
         for slice_name, spec in SLICE_RUNNERS.items():
             with self.subTest(slice_name=slice_name):
                 self.assertIs(type(spec.drives_turns), bool)
-                self.assertEqual(spec.drives_turns, slice_name in {"guardrails", "general-smoke"})
+                self.assertEqual(
+                    spec.drives_turns,
+                    slice_name in {"guardrails", "general-smoke", "smoke"},
+                )
+
+    def test_stack_resolver_selects_the_ci_secrets_directory_once(self) -> None:
+        with patch.object(stacks.secrets, "select_directory") as select_directory:
+            production = stacks.resolve_stack("production", "/tmp/rendered")
+            select_directory.assert_not_called()
+            self.assertEqual(production.name, "production")
+            self.assertEqual(production.turns_dir, Path("/tmp/rendered"))
+            self.assertIsNone(production.secrets_dir)
+
+            ci = stacks.resolve_stack("ci", "/tmp/rendered")
+            select_directory.assert_called_once_with(Path(stacks.CI_SECRETS_DIR))
+            self.assertEqual(ci.name, "ci")
+            self.assertEqual(ci.turns_dir, Path(stacks.CI_ROOT))
+            self.assertEqual(ci.secrets_dir, Path(stacks.CI_SECRETS_DIR))
+            self.assertEqual(ci.flag_fragment, " --stack ci")
+            self.assertEqual(production.flag_fragment, "")
+
+    def test_engine_call_estimate_is_set_only_for_smoke(self) -> None:
+        self.assertEqual(
+            {name for name, spec in SLICE_RUNNERS.items() if spec.engine_calls is not None},
+            {"smoke"},
+        )
 
 
 class Imports(unittest.TestCase):

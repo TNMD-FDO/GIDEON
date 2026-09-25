@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.2.69](docs/release-notes/v0.2.69.md) — 2026-09-24 — smoke slice on gideon-ci at every push
 - [v0.2.68](docs/release-notes/v0.2.68.md) — 2026-09-24 — the window-bound proofs queue
 - [v0.2.67](docs/release-notes/v0.2.67.md) — 2026-09-24 — Transcribe's Vision hours in the ledger
 - [v0.2.66](docs/release-notes/v0.2.66.md) — 2026-09-24 — the names rule's spec-issue kind

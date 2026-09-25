@@ -301,7 +301,7 @@ class PushContracts(unittest.TestCase):
         fake = host()
         holder = backuplock.Record("restore", os.getpid() + 1, NOW)
         stored = holder.to_json()
-        fake.locks[backuplock.LOCK_PATH] = stored
+        fake.locks[backuplock.BACKUP_LOCK.path] = stored
         out = io.StringIO()
         err = io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -313,7 +313,7 @@ class PushContracts(unittest.TestCase):
         self.assertIn(holder.command, err.getvalue())
         self.assertIn(holder.started.isoformat(), err.getvalue())
         self.assertEqual(fake.calls, [])
-        self.assertEqual(fake.locks[backuplock.LOCK_PATH], stored)
+        self.assertEqual(fake.locks[backuplock.BACKUP_LOCK.path], stored)
 
     def test_listing_parser_and_script(self) -> None:
         parsed = backup._parse_remote_listing(
@@ -365,7 +365,7 @@ class PushContracts(unittest.TestCase):
         assert record is not None
         self.assertEqual(record.command, "backup push")
         self.assertEqual(record.started, NOW)
-        self.assertNotIn(backuplock.LOCK_PATH, fake.locks)
+        self.assertNotIn(backuplock.BACKUP_LOCK.path, fake.locks)
         self.assertEqual(
             [line.split(":", 1)[0] for line in out.getvalue().splitlines()],
             ["record", "list", "push", "finalize", "prune", "check", "audit"],
@@ -520,7 +520,7 @@ class PushContracts(unittest.TestCase):
                 argparse.Namespace(verify_all=False), host=fake, now=NOW
             )
         self.assertEqual(code, 1)
-        self.assertNotIn(backuplock.LOCK_PATH, fake.locks)
+        self.assertNotIn(backuplock.BACKUP_LOCK.path, fake.locks)
         check_row = next(line for line in out.getvalue().splitlines() if line.startswith("check:"))
         self.assertIn("1 path(s)", check_row)
         self.assertNotIn("pgbackrest/file", check_row)
