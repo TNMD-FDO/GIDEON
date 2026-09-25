@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.2.71](docs/release-notes/v0.2.71.md) — 2026-09-24 — one release at a time, the release lock
 - [v0.2.70](docs/release-notes/v0.2.70.md) — 2026-09-24 — the Dispatch field and the next-ticket listing
 - [v0.2.69](docs/release-notes/v0.2.69.md) — 2026-09-24 — smoke slice on gideon-ci at every push
 - [v0.2.68](docs/release-notes/v0.2.68.md) — 2026-09-24 — the window-bound proofs queue

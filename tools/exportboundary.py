@@ -40,6 +40,7 @@ EXCLUDED_PREFIXES = (
     "tests/test_skills_vendored.py",  # the vendored-skills tripwire
     "tests/test_evidence_hygiene.py",  # the tracker assets' secret check
     "tests/test_release_git.py",  # bin/release-git's tests
+    "tests/test_release_lock.py",  # bin/release-lock's tests
     "tests/test_export_tree_check.py",  # bin/export-tree-check's tests
     "tests/test_venv_build.py",  # bin/venv-build's tests
     "tests/test_worktree_claim.py",  # bin/worktree-claim's tests

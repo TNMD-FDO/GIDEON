@@ -30,6 +30,7 @@ tests/test_archi.py export-ignore
 tests/test_skills_vendored.py export-ignore
 tests/test_evidence_hygiene.py export-ignore
 tests/test_release_git.py export-ignore
+tests/test_release_lock.py export-ignore
 tests/test_export_tree_check.py export-ignore
 tests/test_venv_build.py export-ignore
 tests/test_worktree_claim.py export-ignore
