@@ -10,8 +10,10 @@ from unittest.mock import patch
 
 from gideon.evaluation import judgments, signoffs
 from gideon.evaluation.evalset import (
+    GUARDRAIL_ID_PATTERN,
     SET_ROOT,
     SHAPE_REGISTRY,
+    TIER_2_CATEGORY,
     Finding,
     LoadedSet,
     ShapeSpec,
@@ -719,6 +721,22 @@ def _guardrail_case(
     }
 
 
+def _tier_2_case() -> dict[str, object]:
+    case_id = f"{TIER_2_CATEGORY}/restitution-01"
+    return {
+        "id": case_id,
+        "suite": "guardrails",
+        "category": TIER_2_CATEGORY,
+        "branch": "general",
+        "question": SENTINEL,
+        "expected": {"turn": "instructed"},
+        "labels": ["invented", "positive"],
+        "cluster_id": case_id,
+        "review": {"by": "CSA-1", "on": "2026-09-24"},
+        "notes": "",
+    }
+
+
 def _superseding(case_id: str, target: str) -> str:
     record = json.loads(_case(case_id))
     notes = record.pop("notes")
@@ -1099,6 +1117,48 @@ class ShapeRefusals(unittest.TestCase):
             control,
             path="guardrails/deadline-trap.jsonl",
             expected="expected keys or order",
+        )
+
+    def test_tier_two_shape_rejects_family_fields_turns_and_control_role(self) -> None:
+        for extra in ({"pattern": "deadline/example@1"}, {"must_not": "fictional"}):
+            with self.subTest(extra=extra):
+                record = _tier_2_case()
+                cast(dict[str, object], record["expected"]).update(extra)
+                self._assert_case_finding(
+                    record,
+                    path=f"guardrails/{TIER_2_CATEGORY}.jsonl",
+                    expected="expected keys or order",
+                )
+
+        wrong_turn = _tier_2_case()
+        wrong_turn["expected"] = {"turn": "blocked"}
+        self._assert_case_finding(
+            wrong_turn,
+            path=f"guardrails/{TIER_2_CATEGORY}.jsonl",
+            expected="expected.turn role",
+        )
+
+        control = _tier_2_case()
+        control["labels"] = ["invented", "control"]
+        self._assert_case_finding(
+            control,
+            path=f"guardrails/{TIER_2_CATEGORY}.jsonl",
+            expected="labels",
+        )
+
+    def test_family_shape_rejects_instructed_turn_and_id_pattern_accepts_digit_category(self) -> None:
+        family = _guardrail_case()
+        family["expected"] = {
+            "turn": "instructed",
+            "pattern": "deadline/date-near-deadline-word@1",
+        }
+        self._assert_case_finding(
+            family,
+            path="guardrails/deadline-trap.jsonl",
+            expected="expected.turn role",
+        )
+        self.assertIsNotNone(
+            GUARDRAIL_ID_PATTERN.fullmatch(f"{TIER_2_CATEGORY}/restitution-01")
         )
 
     def test_guardrail_positive_must_not_string_and_list_load_clean(self) -> None:

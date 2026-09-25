@@ -22,7 +22,7 @@ from test_turns_door import FakeHost as DoorHost
 
 from gideon import guardrail
 from gideon.evaluation import command, guardrails_slice
-from gideon.evaluation.evalset import SET_ROOT, LoadedSet, load_set
+from gideon.evaluation.evalset import SET_ROOT, TIER_2_CATEGORY, LoadedSet, load_set
 from gideon.evaluation.results import CaseResult, JSONValue, RunContext, SliceResult
 from gideon.evaluation.turns import classify, run
 from gideon.evaluation.turns.access import TurnAccess
@@ -148,8 +148,73 @@ def _run_with_readings(
     return result, progress, host
 
 
+def _tier_2_fixture(
+    loaded: LoadedSet,
+    *,
+    frontend: Frontend | None = None,
+) -> tuple[JudgingDoorHost, Frontend, RunContext]:
+    """Reuse the runner fixture with a door that records any judge request."""
+
+    host = JudgingDoorHost()
+    _host, selected_frontend, context = _fixture_turns(
+        loaded,
+        frontend=frontend,
+        host=host,
+    )
+    return host, selected_frontend, context
+
+
+def _run_tier_2(
+    loaded: LoadedSet,
+    *,
+    door_answers: Mapping[str, str] | None = None,
+    frontend_modes: Mapping[str, str] | None = None,
+    frontend: Frontend | None = None,
+) -> tuple[SliceResult, list[str], JudgingDoorHost, Frontend]:
+    host, selected_frontend, context = _tier_2_fixture(loaded, frontend=frontend)
+    host.answers.update(door_answers or {})
+    selected_frontend.modes.update(frontend_modes or {})
+    progress: list[str] = []
+    result = guardrails_slice.run_guardrails(
+        loaded,
+        "guardrails",
+        replace(context, progress=progress.append),
+    )
+    return result, progress, host, selected_frontend
+
+
+def _tier_2_ids(loaded: LoadedSet) -> tuple[str, ...]:
+    return tuple(loaded.slice_lists["guardrails"][TIER_2_CATEGORY])
+
+
+def _tier_2_id(loaded: LoadedSet, suffix: str) -> str:
+    return next(case_id for case_id in _tier_2_ids(loaded) if case_id.endswith(suffix))
+
+
+def _tier_2_answers() -> dict[str, str]:
+    return {
+        "declined": f"{_DECLINE} Tier-two response marker.",
+        "disclaimed": (
+            f"{_DECLINE} I can offer general context. "
+            + "This is general information only. " * 20
+        ),
+        "answered": "The requested calculation gives a total of 41.",
+        "replaced": guardrail.DEADLINE_REFUSAL,
+    }
+
+
+def _family_lines(report: str) -> tuple[str, ...]:
+    """Return only the three family verdict lines from a runner report."""
+
+    return tuple(
+        line
+        for line in report.splitlines()
+        if line.startswith(("deadline-trap:", "guidelines-range:", "sentence-credit:"))
+    )
+
+
 def _small_set(root: Path) -> LoadedSet:
-    """Copy six sample cases and one active non-sample case per family."""
+    """Copy the sample, one extra per family, and two committed tier-2 cases."""
 
     source_result = load_set(ROOT / SET_ROOT)
     assert source_result.loaded is not None, source_result.findings
@@ -171,6 +236,15 @@ def _small_set(root: Path) -> LoadedSet:
         )
         grouped[family].append(extra)
         selected_ids[family].append(cast(str, extra["id"]))
+
+    tier_2_cases = source.cases_by_file[f"guardrails/{TIER_2_CATEGORY}.jsonl"]
+    selected_tier_2 = tuple(
+        case
+        for case in tier_2_cases
+        if cast(str, case["id"]).endswith(("restitution-01", "count-01"))
+    )
+    grouped[TIER_2_CATEGORY] = list(selected_tier_2)
+    selected_ids[TIER_2_CATEGORY] = [cast(str, case["id"]) for case in selected_tier_2]
 
     for family, cases in grouped.items():
         case_path = root / "guardrails" / f"{family}.jsonl"
@@ -301,9 +375,284 @@ class FamilyGate(unittest.TestCase):
         )
         self.assertFalse(guardrails_slice.family_verdict(counts).passed)
 
+    def test_narrow_report_without_tier_two_rows_has_no_tier_two_block_or_counts(self) -> None:
+        outcomes = (
+            guardrails_slice._Outcome(
+                "fictional/positive-01", "fictional", "positive", "replaced", "clean"
+            ),
+        )
+        passed, report = guardrails_slice._report(outcomes, ())
+        self.assertTrue(passed)
+        self.assertNotIn(f"{TIER_2_CATEGORY}: reported, not gated", report)
+        self.assertNotIn("tier-2 green door", report)
+
 
 class GuardrailsRunner(unittest.TestCase):
     """The service and frontend turns expose only classified, content-free rows."""
+
+    def test_instructed_turns_report_readings_without_gating_or_judging(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            loaded = _small_set(Path(directory) / "eval-v1")
+            first_id, second_id = _tier_2_ids(loaded)
+            answers = _tier_2_answers()
+            control_answers, _declined_id, _disclaimed_id, _positive_id = _decline_answers(
+                loaded
+            )
+            green, progress, host, frontend = _run_tier_2(
+                loaded,
+                door_answers={
+                    **control_answers,
+                    first_id: answers["declined"],
+                    second_id: answers["disclaimed"],
+                },
+                frontend_modes={first_id: "disclaimed", second_id: "declined"},
+            )
+
+            self.assertTrue(green.verdict, green.report)
+            tier_rows = {
+                row.case_id: row for row in green.results if row.metrics["family"] == TIER_2_CATEGORY
+            }
+            self.assertEqual(set(tier_rows), {first_id, second_id})
+            for case_id, door_class, frontend_class in (
+                (first_id, "declined", "disclaimed"),
+                (second_id, "disclaimed", "declined"),
+            ):
+                with self.subTest(case_id=case_id):
+                    row = tier_rows[case_id]
+                    frontend_metrics = cast(Mapping[str, JSONValue], row.metrics["frontend"])
+                    self.assertEqual(row.metrics["class"], door_class)
+                    self.assertEqual(row.metrics["reading"], "green")
+                    self.assertEqual(frontend_metrics["class"], frontend_class)
+                    self.assertEqual(frontend_metrics["reading"], "green")
+                    self.assertIs(frontend_metrics["differs"], False)
+                    self.assertEqual(row.verdict, "pass")
+                    self.assertIsNone(row.judge)
+
+            self.assertEqual(len(host.judge_requests), 2)
+            self.assertTrue(
+                all(
+                    answer not in candidate
+                    for answer in answers.values()
+                    for candidate, _request in host.judge_requests
+                )
+            )
+            for case_id in (first_id, second_id):
+                with self.subTest(path="door", case_id=case_id):
+                    self.assertTrue(any(case_id in repr(request) for request in host.requests))
+                with self.subTest(path="frontend", case_id=case_id):
+                    self.assertTrue(
+                        any(
+                            method == "POST"
+                            and path == "/api/chat/completions"
+                            and case_id in repr(body)
+                            for method, path, body in frontend.calls
+                        )
+                    )
+
+            self.assertIn(f"{TIER_2_CATEGORY}: reported, not gated", green.report)
+            self.assertIn("door: green 2 of 2; declined 1, disclaimed 1; red: none", green.report)
+            self.assertIn(
+                "frontend: green 2 of 2; declined 1, disclaimed 1; red: none", green.report
+            )
+            self.assertIn("differing: none", green.report)
+            self.assertIn("leaks: none", green.report)
+            self.assertIn("errors: none", green.report)
+            self.assertTrue(green.report.rstrip().endswith("tier-2 green door 2, frontend 2"))
+
+            allowed_metrics = {
+                "family", "role", "class", "stream", "pattern", "checks", "reading",
+                "frontend", "problem",
+            }
+            for case_id, row in tier_rows.items():
+                frontend_metrics = cast(Mapping[str, JSONValue], row.metrics["frontend"])
+                self.assertTrue(set(row.metrics) <= allowed_metrics)
+                self.assertTrue(
+                    set(frontend_metrics) <= {"class", "reading", "differs", "pattern"}
+                )
+                observed = repr(row.metrics) + green.report + "\n".join(progress)
+                self.assertNotIn(cast(str, loaded.cases_by_id[case_id]["question"]), observed)
+                self.assertNotIn(answers["declined"], observed)
+                self.assertNotIn(answers["disclaimed"], observed)
+                self.assertNotIn(answers["answered"], observed)
+                self.assertNotIn(answers["replaced"], observed)
+                self.assertIn(
+                    f"guardrails {case_id}: {row.metrics['class']}; seconds ",
+                    next(line for line in progress if case_id in line),
+                )
+                self.assertIn(
+                    f"; frontend {frontend_metrics['class']}",
+                    next(line for line in progress if case_id in line),
+                )
+
+            red, _red_progress, _red_host, _red_frontend = _run_tier_2(
+                loaded,
+                door_answers={first_id: answers["answered"], second_id: answers["replaced"]},
+                frontend_modes={first_id: "replaced", second_id: "answered"},
+            )
+            red_rows = {
+                row.case_id: row for row in red.results if row.metrics["family"] == TIER_2_CATEGORY
+            }
+            self.assertTrue(red.verdict, red.report)
+            self.assertEqual(_family_lines(red.report), _family_lines(green.report))
+            self.assertTrue(red.report.rstrip().splitlines()[-1].startswith("guardrails: pass;"))
+            for row in red_rows.values():
+                frontend_metrics = cast(Mapping[str, JSONValue], row.metrics["frontend"])
+                self.assertEqual(row.verdict, "pass")
+                self.assertEqual(row.metrics["reading"], "red")
+                self.assertEqual(frontend_metrics["reading"], "red")
+                self.assertIsNone(row.judge)
+            self.assertIn(f"{first_id} answered", red.report)
+            self.assertIn(f"{first_id} replaced", red.report)
+            self.assertIn(f"{second_id} replaced", red.report)
+            self.assertIn(f"{second_id} answered", red.report)
+            self.assertTrue(red.report.rstrip().endswith("tier-2 green door 0, frontend 0"))
+
+    def test_differing_readings_are_reported_without_failing_the_row(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            loaded = _small_set(Path(directory) / "eval-v1")
+            first_id, _second_id = _tier_2_ids(loaded)
+            answers = _tier_2_answers()
+            result, _progress, _host, _frontend = _run_tier_2(
+                loaded,
+                door_answers={first_id: answers["declined"]},
+                frontend_modes={first_id: "answered"},
+            )
+
+        row = next(row for row in result.results if row.case_id == first_id)
+        frontend_metrics = cast(Mapping[str, JSONValue], row.metrics["frontend"])
+        self.assertEqual(row.metrics["reading"], "green")
+        self.assertEqual(frontend_metrics["reading"], "red")
+        self.assertIs(frontend_metrics["differs"], True)
+        self.assertIn(f"differing: {first_id}", result.report)
+        self.assertEqual(row.verdict, "pass")
+        self.assertTrue(result.verdict, result.report)
+
+    def test_tier_two_leaks_and_harness_errors_fail_only_their_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            loaded = _small_set(Path(directory) / "eval-v1")
+            count_id = _tier_2_id(loaded, "count-01")
+            restitution_id = _tier_2_id(loaded, "restitution-01")
+            baseline, _baseline_progress, _baseline_host, _baseline_frontend = _run_tier_2(
+                loaded,
+                door_answers={
+                    count_id: guardrail.DEADLINE_REFUSAL,
+                    restitution_id: guardrail.DEADLINE_REFUSAL,
+                },
+                frontend_modes={count_id: "answered", restitution_id: "answered"},
+            )
+
+            door_leak, _progress, _host, _frontend = _run_tier_2(
+                loaded,
+                door_answers={count_id: "The motion is due by March 2, 2027."},
+                frontend_modes={count_id: "answered", restitution_id: "leak"},
+            )
+            leak_rows = {row.case_id: row for row in door_leak.results}
+            for case_id, path in ((count_id, "door"), (restitution_id, "frontend")):
+                with self.subTest(path=path, case_id=case_id):
+                    row = leak_rows[case_id]
+                    self.assertEqual(row.verdict, "fail")
+                    self.assertNotIn("problem", row.metrics)
+                    if path == "door":
+                        self.assertEqual(row.metrics["stream"], "leak")
+                    else:
+                        frontend_metrics = cast(
+                            Mapping[str, JSONValue], row.metrics["frontend"]
+                        )
+                        self.assertEqual(frontend_metrics["class"], "leak")
+            self.assertTrue(door_leak.verdict, door_leak.report)
+            self.assertEqual(_family_lines(door_leak.report), _family_lines(baseline.report))
+            self.assertIn(f"leaks: {count_id}, {restitution_id}", door_leak.report)
+
+            host, frontend, context = _tier_2_fixture(loaded)
+            actual_service_turn = run.service_turn
+
+            def fail_selected_door_turn(*args: Any, **kwargs: Any) -> run.TurnRow:
+                row = actual_service_turn(*args, **kwargs)
+                case_id = cast(Any, kwargs["case"]).id
+                if case_id == count_id:
+                    return replace(row, verdict_kind=None, stream_kind=None)
+                if case_id == restitution_id:
+                    checks = dict(row.checks)
+                    checks["fictional_check"] = False
+                    return replace(row, checks=checks)
+                return row
+
+            with patch.object(run, "service_turn", side_effect=fail_selected_door_turn):
+                door_errors = guardrails_slice.run_guardrails(loaded, "guardrails", context)
+            error_rows = {row.case_id: row for row in door_errors.results}
+            self.assertEqual(error_rows[count_id].metrics["problem"], "turn-error")
+            self.assertEqual(error_rows[restitution_id].metrics["problem"], "check-failed")
+            self.assertEqual(error_rows[count_id].verdict, "fail")
+            self.assertEqual(error_rows[restitution_id].verdict, "fail")
+            self.assertTrue(door_errors.verdict, door_errors.report)
+            self.assertEqual(_family_lines(door_errors.report), _family_lines(baseline.report))
+            self.assertIn(f"{count_id} turn-error", door_errors.report)
+            self.assertIn(f"{restitution_id} check-failed", door_errors.report)
+
+            _host, selected_frontend, context = _tier_2_fixture(loaded)
+            actual_runner_turn = guardrails_slice._Frontend.turn
+            actual_frontend_turn = run.frontend_turn
+
+            def preserve_frontend_signin(
+                runner: guardrails_slice._Frontend, turn_case: Any
+            ) -> tuple[str | None, Mapping[str, bool] | None, str | None, str | None]:
+                if turn_case.id == restitution_id:
+                    runner._driver = None
+                    selected_frontend.refuse_signin_after = selected_frontend._signins
+                return actual_runner_turn(runner, turn_case)
+
+            def leave_selected_chat(
+                *args: Any, **kwargs: Any
+            ) -> run.TurnRow:
+                row = actual_frontend_turn(*args, **kwargs)
+                if cast(Any, kwargs["case"]).id == count_id:
+                    return replace(row, deleted=False)
+                return row
+
+            with (
+                patch.object(guardrails_slice._Frontend, "turn", new=preserve_frontend_signin),
+                patch.object(run, "frontend_turn", side_effect=leave_selected_chat),
+            ):
+                frontend_errors = guardrails_slice.run_guardrails(
+                    loaded, "guardrails", context
+                )
+            frontend_error_rows = {
+                row.case_id: row for row in frontend_errors.results
+            }
+            self.assertEqual(frontend_error_rows[count_id].metrics["problem"], "cleanup-failed")
+            self.assertEqual(frontend_error_rows[restitution_id].metrics["problem"], "frontend-signin")
+            self.assertEqual(frontend_error_rows[count_id].verdict, "fail")
+            self.assertEqual(frontend_error_rows[restitution_id].verdict, "fail")
+            self.assertTrue(frontend_errors.verdict, frontend_errors.report)
+            self.assertEqual(_family_lines(frontend_errors.report), _family_lines(baseline.report))
+            self.assertIn(f"{count_id} cleanup-failed", frontend_errors.report)
+            self.assertIn(f"{restitution_id} frontend-signin", frontend_errors.report)
+
+    def test_frontend_leak_pattern_is_kept_for_tier_two_and_sample_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            loaded = _small_set(Path(directory) / "eval-v1")
+            tier_2_id = _tier_2_id(loaded, "count-01")
+            result, _progress, _host, _frontend = _run_tier_2(
+                loaded,
+                frontend_modes={tier_2_id: "leak", SAMPLE_IDS[0]: "leak"},
+            )
+
+        rows = {row.case_id: row for row in result.results}
+        for case_id in (tier_2_id, SAMPLE_IDS[0]):
+            with self.subTest(case_id=case_id):
+                frontend_metrics = cast(Mapping[str, JSONValue], rows[case_id].metrics["frontend"])
+                self.assertEqual(frontend_metrics["class"], "leak")
+                self.assertIsInstance(frontend_metrics["pattern"], str)
+                self.assertTrue(cast(str, frontend_metrics["pattern"]))
+        expected_sample_pattern = cast(
+            dict[str, object], loaded.cases_by_id[SAMPLE_IDS[0]]["expected"]
+        )["pattern"]
+        self.assertEqual(
+            cast(Mapping[str, JSONValue], rows[SAMPLE_IDS[0]].metrics["frontend"])["pattern"],
+            expected_sample_pattern,
+        )
+        self.assertIn(f"{tier_2_id} leak", result.report)
+        self.assertIn(f"sample {SAMPLE_IDS[0]}: door replaced, frontend leak", result.report)
 
     def test_reads_only_control_declines_after_all_turns_and_reports_both_figures(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -379,7 +728,20 @@ class GuardrailsRunner(unittest.TestCase):
             f"differing: {disclaimed_id}; unread: none",
             result.report,
         )
-        self.assertTrue(result.report.rstrip().endswith("false refusal 1, judge withheld 2, differing 1"))
+        tier_2_rows = tuple(
+            row for row in result.results if row.metrics["family"] == TIER_2_CATEGORY
+        )
+        door_green = sum(row.metrics.get("reading") == "green" for row in tier_2_rows)
+        frontend_green = sum(
+            cast(Mapping[str, JSONValue], row.metrics["frontend"]).get("reading") == "green"
+            for row in tier_2_rows
+        )
+        self.assertTrue(
+            result.report.rstrip().endswith(
+                f"false refusal 1, judge withheld 2, differing 1; "
+                f"tier-2 green door {door_green}, frontend {frontend_green}"
+            )
+        )
 
         observed = repr(result.results) + "\n" + "\n".join(progress) + "\n" + result.report
         for _case_id, case in loaded.cases_by_id.items():
@@ -537,7 +899,7 @@ class GuardrailsRunner(unittest.TestCase):
             )
 
         self.assertTrue(result.verdict, result.report)
-        self.assertEqual(len(result.results), 9)
+        self.assertEqual(len(result.results), len(loaded.active_ids))
         self.assertEqual(len(progress), len(result.results))
         self.assertEqual(
             tuple(line.split(":", 1)[0] for line in progress),
@@ -606,7 +968,7 @@ class GuardrailsRunner(unittest.TestCase):
             _host, _frontend, context = _fixture_turns(loaded, frontend=frontend)
             result = guardrails_slice.run_guardrails(loaded, "guardrails", context)
         for row in result.results:
-            if row.case_id in SAMPLE_IDS:
+            if row.case_id in SAMPLE_IDS or row.metrics["family"] == TIER_2_CATEGORY:
                 self.assertEqual(row.metrics["problem"], "frontend-signin")
             else:
                 self.assertNotIn("problem", row.metrics)
@@ -657,7 +1019,7 @@ class GuardrailsRunner(unittest.TestCase):
                 result = guardrails_slice.run_guardrails(loaded, "guardrails", context)
         self.assertFalse(result.verdict)
         for row in result.results:
-            if row.case_id in SAMPLE_IDS:
+            if row.case_id in SAMPLE_IDS or row.metrics["family"] == TIER_2_CATEGORY:
                 self.assertEqual(row.verdict, "fail")
                 self.assertEqual(row.metrics["problem"], "check-failed")
             else:
@@ -672,7 +1034,7 @@ class GuardrailsRunner(unittest.TestCase):
             result = guardrails_slice.run_guardrails(loaded, "guardrails", context)
         self.assertFalse(result.verdict)
         for row in result.results:
-            if row.case_id in SAMPLE_IDS:
+            if row.case_id in SAMPLE_IDS or row.metrics["family"] == TIER_2_CATEGORY:
                 self.assertEqual(row.verdict, "fail")
                 self.assertEqual(row.metrics["problem"], "cleanup-failed")
             else:
@@ -685,7 +1047,7 @@ class GuardrailsRunner(unittest.TestCase):
             host = DoorHost(fail_probe=True)
             _host, _frontend, context = _fixture_turns(loaded, host=host)
             result = guardrails_slice.run_guardrails(loaded, "guardrails", context)
-        self.assertEqual(len(result.results), 9)
+        self.assertEqual(len(result.results), len(loaded.active_ids))
         self.assertTrue(all(row.metrics["problem"] == "door-unavailable" for row in result.results))
         self.assertEqual(len(host.requests), 1)
 
@@ -704,7 +1066,7 @@ class GuardrailsRunner(unittest.TestCase):
             first = guardrails_slice.run_guardrails(loaded, "guardrails", context)
             second = guardrails_slice.run_guardrails(loaded, "guardrails", context)
         self.assertEqual(first, second)
-        self.assertEqual(len(first.results), 9)
+        self.assertEqual(len(first.results), len(loaded.active_ids))
         self.assertTrue(all(row.metrics["problem"] == "turns-unavailable" for row in first.results))
         self.assertEqual(host.requests, [])
         self.assertEqual(host.judge_requests, [])
@@ -863,7 +1225,15 @@ class GuardrailsCommand(unittest.TestCase):
         committed = load_set(ROOT / SET_ROOT).loaded
         assert committed is not None
         active_id = next(case_id for case_id in committed.active_ids if case_id.startswith("deadline-trap/"))
-        recorded = SliceResult(True, "fixture runner report\n", (CaseResult(active_id, 1, "pass", {}),))
+        tier_2_ids = committed.slice_lists["guardrails"][TIER_2_CATEGORY]
+        recorded = SliceResult(
+            True,
+            "fixture runner report\n",
+            tuple(
+                CaseResult(case_id, 1, "pass", {})
+                for case_id in (active_id, *tier_2_ids)
+            ),
+        )
         with (
             patch.object(
                 command.engine,
@@ -891,4 +1261,8 @@ class GuardrailsCommand(unittest.TestCase):
             for argv, input_text in host.calls
             if argv[0] == "docker" and input_text != "SELECT 1;\n"
         )
-        self.assertIn(active_id, cast(str, write_sql))
+        recorded_sql = cast(str, write_sql)
+        self.assertIn(active_id, recorded_sql)
+        for case_id in tier_2_ids:
+            self.assertIn(case_id, recorded_sql)
+        self.assertEqual(recorded_sql.count("INSERT INTO eval_results"), len(recorded.results))

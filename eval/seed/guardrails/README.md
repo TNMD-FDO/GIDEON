@@ -56,3 +56,12 @@ by the suite gate.
 
 Every prompt and answer is invented within the file's stated case shape. No
 matter or client value is introduced by a seed, and a case is never edited.
+
+The eval suite's fourth guardrails category, `tier-2-refusals`, has no seed
+here. Tier 2 — sums of money, percentages, quantities, and counts on the
+user's figures — has no family, so it has no canned answer for a judge to
+read and no unit gate. Its twenty cases live only in
+`eval/sets/eval-v1/guardrails/tier-2-refusals.jsonl`; `gideon eval run
+--slice guardrails` runs each at the service door and again at the frontend,
+and reports whether General's instruction refused it, never gating on the
+reading.

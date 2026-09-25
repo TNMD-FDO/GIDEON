@@ -13,8 +13,10 @@ from typing import Final, cast
 
 import yaml  # type: ignore[import-untyped]
 
-from gideon.evaluation.evalset import SET_ROOT, load_set
+from gideon.evaluation.evalset import SET_ROOT, TIER_2_CATEGORY, load_set
 from gideon.evaluation.guardrails_slice import FRONTEND_SAMPLE
+from gideon.guardrail.families import FAMILIES
+from gideon.guardrail.judge import judge_message
 from tools.exportboundary import absent_from_export, is_excluded
 
 ROOT: Final[Path] = Path(__file__).resolve().parents[1]
@@ -263,3 +265,104 @@ class GuardrailsSetContract(unittest.TestCase):
                 for family in ("deadline-trap", "guidelines-range", "sentence-credit")
             },
         )
+
+
+TIER_2_PATH: Final[Path] = GUARDRAILS_PATH / f"{TIER_2_CATEGORY}.jsonl"
+TIER_2_IDS: Final[tuple[str, ...]] = tuple(
+    f"{TIER_2_CATEGORY}/{stem}-{index:02d}"
+    for stem in ("restitution", "percent", "quantity", "count")
+    for index in range(1, 6)
+)
+TIER_2_PIN: Final[tuple[int, str]] = (
+    20,
+    "87334606295977e6b1245a417249eb61edcdfcca5e09f0894d7e3275acc74329",
+)
+
+
+class TierTwoRefusalsContract(unittest.TestCase):
+    """The instructed-refusal cases: invented, fixed, and outside every family's reach."""
+
+    def test_file_is_pinned_by_an_append_only_prefix(self) -> None:
+        count, digest = TIER_2_PIN
+        lines = (ROOT / TIER_2_PATH).read_bytes().splitlines(keepends=True)
+        self.assertGreaterEqual(len(lines), count)
+        self.assertTrue(lines[-1].endswith(b"\n"))
+        self.assertEqual(hashlib.sha256(b"".join(lines[:count])).hexdigest(), digest)
+
+    def test_case_fields_ids_and_list_match(self) -> None:
+        cases = _records(ROOT / TIER_2_PATH)
+        self.assertEqual(tuple(case["id"] for case in cases), TIER_2_IDS)
+        for case in cases:
+            with self.subTest(case=case["id"]):
+                self.assertEqual(
+                    tuple(case),
+                    (
+                        "id", "suite", "category", "branch", "question", "expected",
+                        "labels", "cluster_id", "review", "notes",
+                    ),
+                )
+                self.assertEqual(case["suite"], "guardrails")
+                self.assertEqual(case["category"], TIER_2_CATEGORY)
+                self.assertEqual(case["branch"], "general")
+                self.assertEqual(case["expected"], {"turn": "instructed"})
+                self.assertEqual(case["labels"], ["invented", "positive"])
+                self.assertEqual(case["cluster_id"], case["id"])
+                self.assertEqual(case["review"], {"by": "CSA-1", "on": "2026-09-24"})
+                self.assertEqual(case["notes"], "")
+                self.assertNotIn("supersedes", case)
+        id_path = ROOT / SET_ROOT / "slices" / "guardrails" / f"{TIER_2_CATEGORY}.ids"
+        self.assertEqual(id_path.read_text(encoding="utf-8").splitlines(), list(TIER_2_IDS))
+
+    def test_prompts_are_distinct_from_seeds_and_do_not_trip_guardrails(self) -> None:
+        cases = _records(ROOT / TIER_2_PATH)
+        prompts = [cast(str, case["question"]) for case in cases]
+        seed_prompts: set[str] = set()
+        for seed_path in (ROOT / SEED_PATH).glob("*.yaml"):
+            seed = yaml.safe_load(seed_path.read_text(encoding="utf-8"))
+            seed_prompts.update(" ".join(str(case["prompt"]).split()) for case in seed["cases"])
+        general_seed = yaml.safe_load(
+            (ROOT / "eval/seed/general/smoke.yaml").read_text(encoding="utf-8")
+        )
+        seed_prompts.update(
+            " ".join(str(case["prompt"]).split()) for case in general_seed["cases"]
+        )
+        for prompt in prompts:
+            with self.subTest(prompt=prompt):
+                normalized = " ".join(prompt.split())
+                self.assertNotIn(normalized, seed_prompts)
+                self.assertTrue(all(not family.figures(prompt) for family in FAMILIES))
+                # The prompt's own figures, echoed as an answer, trip no family.
+                message = {"role": "assistant", "content": prompt}
+                self.assertIsNone(
+                    judge_message(message, [{"role": "user", "content": prompt}, message], 1)
+                )
+
+    def test_loader_keeps_all_twenty_cases_in_tree_and_export_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            roots = [ROOT / SET_ROOT]
+            export_root = Path(directory)
+            for source in (ROOT / SET_ROOT).rglob("*"):
+                if not source.is_file():
+                    continue
+                relative = source.relative_to(ROOT).as_posix()
+                if is_excluded(relative):
+                    continue
+                destination = export_root / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, destination)
+            roots.append(export_root / SET_ROOT)
+            for set_root in roots:
+                with self.subTest(set_root=set_root):
+                    result = load_set(set_root)
+                    self.assertTrue(result.ok, result.findings)
+                    assert result.loaded is not None
+                    active = [
+                        case_id
+                        for case_id in result.loaded.active_ids
+                        if case_id.startswith(f"{TIER_2_CATEGORY}/")
+                    ]
+                    self.assertEqual(len(active), len(TIER_2_IDS))
+                    self.assertEqual(
+                        result.loaded.slice_lists["guardrails"][TIER_2_CATEGORY],
+                        tuple(sorted(TIER_2_IDS)),
+                    )

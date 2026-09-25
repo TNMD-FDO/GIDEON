@@ -6,8 +6,9 @@ triple is an invented reference-and-candidate grading case. A research-qa case
 is one reviewed research question carrying no expected answer: its signed
 answer lives in the sign-offs file, and a case with no line there is unsigned —
 it loads, and a selection keeps it out of what a gate counts.
-Guardrails cases carry an expected turn class and, for positives, a pattern id
-with an optional ``must_not`` string or list of regular expressions.
+Guardrails family cases carry an expected turn class and, for positives, a
+pattern id with an optional ``must_not`` string or list of regular expressions.
+Tier-2 cases carry the instructed turn expectation without a family pattern.
 General smoke cases carry the turn harness's expected class and checks.
 """
 
@@ -55,8 +56,9 @@ _HARVEST_ID: Final[re.Pattern[str]] = re.compile(r"HARV-[0-9]{3}")
 _HARVEST_CLUSTER: Final[re.Pattern[str]] = re.compile(r"harvest-chat-[0-9a-f]+")
 _JUDGMENT_CLUSTER: Final[re.Pattern[str]] = re.compile(r"harvest-chat-[A-Za-z0-9_-]+")
 RESEARCH_QA_ID_PATTERN: Final[re.Pattern[str]] = re.compile(r"research-qa-[0-9]{3,}")
+TIER_2_CATEGORY: Final[str] = "tier-2-refusals"
 GUARDRAIL_ID_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"[a-z]+(?:-[a-z]+)*/[a-z]+(?:-[a-z]+)*(?:-[0-9]+)?-[0-9]{2,}"
+    r"[a-z]+(?:-[a-z0-9]+)*/[a-z]+(?:-[a-z]+)*(?:-[0-9]+)?-[0-9]{2,}"
 )
 GENERAL_SMOKE_ID_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"[a-z]+(?:-[a-z]+)*-[0-9]{2,}"
@@ -64,7 +66,7 @@ GENERAL_SMOKE_ID_PATTERN: Final[re.Pattern[str]] = re.compile(
 _GUARDRAIL_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"[a-z]+(?:-[a-z]+)*/[a-z]+(?:-[a-z]+)*@[1-9][0-9]*"
 )
-_GUARDRAIL_TURNS: Final[frozenset[str]] = frozenset({"blocked", "clean"})
+_GUARDRAIL_TURNS: Final[frozenset[str]] = frozenset({"blocked", "clean", "instructed"})
 _SMOKE_EXPECTED_KEYS: Final[tuple[str, ...]] = (
     "expect",
     "block",
@@ -272,6 +274,15 @@ SHAPE_REGISTRY: Final[Mapping[tuple[str, str], ShapeSpec]] = {
         "sentence-credit",
         _EXPECTED_BASE_KEYS,
         {"suite": "guardrails", "category": "sentence-credit", "branch": "general"},
+        GUARDRAIL_ID_PATTERN,
+        GUARDRAIL_ID_PATTERN,
+        ("by", "on"),
+    ),
+    ("guardrails", TIER_2_CATEGORY): ShapeSpec(
+        "guardrails",
+        TIER_2_CATEGORY,
+        _EXPECTED_BASE_KEYS,
+        {"suite": "guardrails", "category": TIER_2_CATEGORY, "branch": "general"},
         GUARDRAIL_ID_PATTERN,
         GUARDRAIL_ID_PATTERN,
         ("by", "on"),
@@ -751,6 +762,16 @@ def _validate_guardrail_fields(
         return
 
     role = labels[1]
+    if category == TIER_2_CATEGORY:
+        if role != "positive":
+            findings.append(Finding(file, case_id, line, "labels", _CASE_FIX))
+        if tuple(expected) != ("turn",):
+            findings.append(Finding(file, case_id, line, "expected keys or order", _CASE_FIX))
+            return
+        if expected.get("turn") != "instructed":
+            findings.append(Finding(file, case_id, line, "expected.turn role", _CASE_FIX))
+        return
+
     expected_keys = ("turn", "pattern") if role == "positive" else ("turn",)
     actual_keys = tuple(expected)
     if actual_keys != expected_keys and not (

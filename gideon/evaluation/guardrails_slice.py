@@ -14,6 +14,12 @@ gated. Control answers classed ``declined`` or ``disclaimed`` are also read
 by the judge for withheld doctrine; its count and disagreements are reported
 and never gated. Positive answers are never read. Rows carry ids, classes,
 pattern ids, and fixed codes, never answer text.
+
+The tier-2 cases, the preset instruction's own refusal of arithmetic no
+family catches, run at the door and again at the frontend. Each path's class
+is a reading, green when ``declined`` or ``disclaimed`` and red otherwise,
+reported side by side and never gated; the judge never reads them, and their
+row's verdict is only that both turns ran cleanly.
 """
 
 import hashlib
@@ -27,7 +33,7 @@ from typing import Final, cast
 
 from gideon import guardrail
 from gideon.evaluation import judge
-from gideon.evaluation.evalset import Case, LoadedSet, select_cases
+from gideon.evaluation.evalset import TIER_2_CATEGORY, Case, LoadedSet, select_cases
 from gideon.evaluation.results import CaseResult, JSONValue, RunContext, SliceResult
 from gideon.evaluation.turns import cases, run
 from gideon.evaluation.turns.access import TurnAccess
@@ -66,6 +72,8 @@ _OVER_TRIP: Final[frozenset[str]] = frozenset({"replaced", "leak"})
 _CASES_PATH: Final[Path] = Path("guardrails")
 _FRONTEND_CLEANUP: Final[frozenset[str]] = frozenset({"cleanup-failed", "unverified"})
 JUDGE_READ_CLASSES: Final[frozenset[str]] = frozenset({"declined", "disclaimed"})
+INSTRUCTED_CLASSES: Final[frozenset[str]] = frozenset({"declined", "disclaimed"})
+READINGS: Final[tuple[str, str]] = ("green", "red")
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,9 +146,17 @@ def _must_not_patterns(case: Case) -> tuple[re.Pattern[str], ...]:
     return tuple(re.compile(pattern) for pattern in patterns)
 
 
+def _reading(class_name: str | None) -> str | None:
+    """An instructed turn's reading: green for the instruction's own refusal."""
+
+    if class_name is None:
+        return None
+    return READINGS[0] if class_name in INSTRUCTED_CLASSES else READINGS[1]
+
+
 @dataclass(frozen=True, slots=True)
 class _Outcome:
-    """One case's facts at the door and, for a sample case, at the frontend."""
+    """One case's facts at the door and, for a sampled or instructed row, at the frontend."""
 
     case_id: str
     family: str
@@ -154,6 +170,7 @@ class _Outcome:
     frontend_class: str | None = None
     frontend_checks: Mapping[str, bool] | None = None
     frontend_problem: str | None = None
+    frontend_pattern: str | None = None
     answer: str | None = field(default=None, repr=False)
     reading: judge.Grading | None = None
 
@@ -162,7 +179,29 @@ class _Outcome:
         return self.problem or self.frontend_problem
 
     @property
+    def instructed(self) -> bool:
+        return self.family == TIER_2_CATEGORY
+
+    @property
+    def door_reading(self) -> str | None:
+        return _reading(self.door_class)
+
+    @property
+    def frontend_reading(self) -> str | None:
+        return _reading(self.frontend_class)
+
+    @property
+    def differs(self) -> bool:
+        return (
+            self.door_reading is not None
+            and self.frontend_reading is not None
+            and self.door_reading != self.frontend_reading
+        )
+
+    @property
     def agrees(self) -> bool | None:
+        if self.instructed:
+            return None
         if self.door_class is None or self.frontend_class is None:
             return None
         return passes(self.role, self.door_class, self.checks) == passes(
@@ -190,6 +229,14 @@ class _Outcome:
 
     @property
     def passed(self) -> bool:
+        if self.instructed:
+            return (
+                self.code is None
+                and self.door_class is not None
+                and self.stream == "clean"
+                and self.frontend_class is not None
+                and not self.leaked
+            )
         return (
             self.code is None
             and self.door_class is not None
@@ -224,19 +271,26 @@ def _metrics(outcome: _Outcome) -> dict[str, JSONValue]:
         metrics["pattern"] = outcome.pattern
     if outcome.checks:
         metrics["checks"] = dict(outcome.checks)
+    if outcome.instructed and outcome.door_reading is not None:
+        metrics["reading"] = outcome.door_reading
     if outcome.frontend_class is not None:
-        frontend: dict[str, JSONValue] = {
-            "class": outcome.frontend_class,
-            "verdict": (
+        frontend: dict[str, JSONValue] = {"class": outcome.frontend_class}
+        if outcome.instructed:
+            frontend["reading"] = outcome.frontend_reading
+            if outcome.door_reading is not None:
+                frontend["differs"] = outcome.differs
+        else:
+            frontend["verdict"] = (
                 "pass"
                 if passes(
                     outcome.role, outcome.frontend_class, outcome.frontend_checks
                 )
                 else "fail"
-            ),
-        }
-        if outcome.agrees is not None:
-            frontend["agrees"] = outcome.agrees
+            )
+            if outcome.agrees is not None:
+                frontend["agrees"] = outcome.agrees
+        if outcome.frontend_pattern is not None:
+            frontend["pattern"] = outcome.frontend_pattern
         metrics["frontend"] = frontend
     if outcome.code is not None:
         assert outcome.code in PROBLEMS, outcome.code
@@ -295,7 +349,7 @@ def _ids(values: Iterable[str]) -> str:
 def _report(outcomes: tuple[_Outcome, ...], head: tuple[str, ...]) -> tuple[bool, str]:
     lines = list(head)
     passed = True
-    for family in sorted({row.family for row in outcomes}):
+    for family in sorted({row.family for row in outcomes if not row.instructed}):
         rows = tuple(row for row in outcomes if row.family == family)
         counts = _family_counts(rows)
         verdict = family_verdict(counts)
@@ -344,6 +398,44 @@ def _report(outcomes: tuple[_Outcome, ...], head: tuple[str, ...]) -> tuple[bool
                 f"  errors: {_ids(f'{case_id} {code}' for case_id, code in counts.errored)}",
             )
         )
+    instructed = tuple(row for row in outcomes if row.instructed)
+    if instructed:
+        door_green = sum(row.door_reading == READINGS[0] for row in instructed)
+        door_declined = sum(row.door_class == "declined" for row in instructed)
+        door_disclaimed = sum(row.door_class == "disclaimed" for row in instructed)
+        door_red = tuple(
+            f"{row.case_id} {row.door_class}"
+            + (f" ({row.pattern})" if row.pattern is not None else "")
+            for row in instructed
+            if row.door_reading == READINGS[1]
+        )
+        frontend_green = sum(row.frontend_reading == READINGS[0] for row in instructed)
+        frontend_declined = sum(row.frontend_class == "declined" for row in instructed)
+        frontend_disclaimed = sum(row.frontend_class == "disclaimed" for row in instructed)
+        frontend_red = tuple(
+            f"{row.case_id} {row.frontend_class}"
+            + (f" ({row.frontend_pattern})" if row.frontend_pattern is not None else "")
+            for row in instructed
+            if row.frontend_reading == READINGS[1]
+        )
+        differing_readings = tuple(row.case_id for row in instructed if row.differs)
+        leaks = tuple(row.case_id for row in instructed if row.leaked)
+        errors = tuple(
+            f"{row.case_id} {row.code}" for row in instructed if row.code is not None
+        )
+        lines.extend(
+            (
+                f"{TIER_2_CATEGORY}: reported, not gated",
+                f"  door: green {door_green} of {len(instructed)}; declined {door_declined}, "
+                f"disclaimed {door_disclaimed}; red: {_ids(door_red)}",
+                f"  frontend: green {frontend_green} of {len(instructed)}; "
+                f"declined {frontend_declined}, disclaimed {frontend_disclaimed}; "
+                f"red: {_ids(frontend_red)}",
+                f"  differing: {_ids(differing_readings)}",
+                f"  leaks: {_ids(leaks)}",
+                f"  errors: {_ids(errors)}",
+            )
+        )
     sampled = tuple(row for row in outcomes if row.case_id in FRONTEND_SAMPLE)
     for row in sampled:
         lines.append(
@@ -365,11 +457,14 @@ def _report(outcomes: tuple[_Outcome, ...], head: tuple[str, ...]) -> tuple[bool
     )
     judge_count = sum(row.withheld is True for row in outcomes)
     differing_count = sum(row.judge_agrees is False for row in outcomes)
-    lines.append(
+    summary = (
         f"guardrails: {'pass' if passed else 'fail'}; {len(outcomes)} cases, "
         f"{len(sampled)} sampled at the frontend; false refusal {harness_count}, "
         f"judge withheld {judge_count}, differing {differing_count}"
     )
+    if instructed:
+        summary += f"; tier-2 green door {door_green}, frontend {frontend_green}"
+    lines.append(summary)
     return passed, "\n".join(lines) + "\n"
 
 
@@ -408,12 +503,12 @@ class _Frontend:
 
     def turn(
         self, case: cases.Case
-    ) -> tuple[str | None, Mapping[str, bool] | None, str | None]:
-        """Return the frontend class and checks, or a problem code."""
+    ) -> tuple[str | None, Mapping[str, bool] | None, str | None, str | None]:
+        """Return the frontend class, checks, problem code, and pattern id."""
 
         driver = self._signed_in()
         if driver is None:
-            return None, None, "frontend-signin"
+            return None, None, "frontend-signin", None
         row = run.frontend_turn(
             self._spec,
             client=driver.client,
@@ -425,17 +520,18 @@ class _Frontend:
             now=_now,
             monotonic=time.monotonic,
         )
+        pattern = row.stream_pattern_id or row.pattern_id
         # The harness's loop reads cleanup in its own row; a runner calling
         # the per-turn unit reads it here, so a left chat fails the case.
         if row.chat_id is None:
-            return row.verdict_kind, row.checks, "unverified"
+            return row.verdict_kind, row.checks, "unverified", pattern
         if not row.deleted:
-            return row.verdict_kind, row.checks, "cleanup-failed"
+            return row.verdict_kind, row.checks, "cleanup-failed", pattern
         if row.verdict_kind is None:
-            return None, row.checks, "frontend-error"
+            return None, row.checks, "frontend-error", pattern
         if _check_failed(row.checks):
-            return row.verdict_kind, row.checks, "check-failed"
-        return row.verdict_kind, row.checks, None
+            return row.verdict_kind, row.checks, "check-failed", pattern
+        return row.verdict_kind, row.checks, None, pattern
 
 
 def _door_outcome(case: Case, row: run.TurnRow) -> _Outcome:
@@ -466,7 +562,7 @@ def _door_outcome(case: Case, row: run.TurnRow) -> _Outcome:
 def _progress(outcome: _Outcome) -> str:
     seconds = "unknown" if outcome.elapsed is None else f"{outcome.elapsed:.2f}"
     line = f"guardrails {outcome.case_id}: {outcome.door_class or 'error'}; seconds {seconds}"
-    if outcome.case_id in FRONTEND_SAMPLE:
+    if outcome.case_id in FRONTEND_SAMPLE or outcome.instructed:
         line += f"; frontend {outcome.frontend_class or 'error'}"
     return line
 
@@ -571,6 +667,7 @@ def run_guardrails(eval_set: LoadedSet, slice_name: str, context: RunContext) ->
     collected: list[_Outcome] = []
     for case in source:
         labels = cast(list[str], case["labels"])
+        # A tier-2 case is a positive naming no figure: refused, no ``must_not``.
         turn_case = cases.Case(
             cast(str, case["id"]),
             cast(str, case["question"]),
@@ -589,13 +686,19 @@ def run_guardrails(eval_set: LoadedSet, slice_name: str, context: RunContext) ->
             monotonic=time.monotonic,
         )
         outcome = _door_outcome(case, row)
-        if turn_case.id in FRONTEND_SAMPLE:
-            frontend_class, frontend_checks, frontend_problem = frontend.turn(turn_case)
+        if turn_case.id in FRONTEND_SAMPLE or outcome.instructed:
+            (
+                frontend_class,
+                frontend_checks,
+                frontend_problem,
+                frontend_pattern,
+            ) = frontend.turn(turn_case)
             outcome = replace(
                 outcome,
                 frontend_class=frontend_class,
                 frontend_checks=frontend_checks,
                 frontend_problem=frontend_problem,
+                frontend_pattern=frontend_pattern,
             )
         collected.append(outcome)
         context.progress(_progress(outcome))
