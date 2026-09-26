@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.2.80](docs/release-notes/v0.2.80.md) — 2026-09-26 — the guardrails gate derives its figures
 - [v0.2.79](docs/release-notes/v0.2.79.md) — 2026-09-25 — the lister drops a finished run's journal row
 - [v0.2.78](docs/release-notes/v0.2.78.md) — 2026-09-25 — the dispatcher sends its events to the developer's phone
 - [v0.2.77](docs/release-notes/v0.2.77.md) — 2026-09-25 — the dispatcher targets the session form

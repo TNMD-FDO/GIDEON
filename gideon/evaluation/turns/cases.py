@@ -1,10 +1,12 @@
 """Load turn cases and compile their checks.
 
-A seed positive may carry ``must_not``, the patterns naming the figure its
-prompt resolves; the row shows the check beside the turn class, while the
-positive's expectation stays ``refused``. A seed control cannot carry
-``must_not``, and no seed case carries ``must``, so a seed never holds a check
-the eval set's copy of it cannot.
+A seed positive's ``must_not`` is its written patterns, then the named
+figures its canned answer states and its prompt does not, derived through its
+family's normaliser (``figures``); the row shows the check beside the turn
+class, while the positive's expectation stays ``refused``. A seed control
+cannot carry ``must_not`` and derives nothing, and no seed case carries
+``must``. The eval set's copy holds the written patterns alone, and the
+guardrails runner reads the seed for the rest.
 """
 
 import re
@@ -15,6 +17,7 @@ from typing import Final
 
 import yaml  # type: ignore[import-untyped]
 
+from gideon.evaluation.turns import figures
 from gideon.host.report import Problem
 
 _ID: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9_.-]+")
@@ -86,6 +89,7 @@ def _case_entry(
     index: int,
     *,
     seed: bool,
+    family_name: str = "",
 ) -> Case | Problem:
     if not isinstance(value, dict):
         return _problem(case_path, f"case {index} must be a mapping.")
@@ -121,7 +125,7 @@ def _case_entry(
             )
         if "must" in value:
             return _problem(case_path, f"seed case {identifier!r} cannot carry must.")
-        seed_must_not: tuple[re.Pattern[str], ...] = ()
+        written_must_not: tuple[re.Pattern[str], ...] = ()
         if "must_not" in value:
             if kind != "positive":
                 return _problem(
@@ -131,7 +135,15 @@ def _case_entry(
             loaded = _compile_checks(case_path, identifier, value["must_not"], "must_not")
             if isinstance(loaded, Problem):
                 return loaded
-            seed_must_not = loaded
+            written_must_not = loaded
+        seed_must_not = written_must_not
+        answer = value.get("answer")
+        if kind == "positive" and isinstance(answer, str):
+            sources = figures.merge(
+                tuple(pattern.pattern for pattern in written_must_not),
+                figures.derive(family_name, prompt, answer),
+            )
+            seed_must_not = tuple(re.compile(source) for source in sources)
         expect = "refused" if kind == "positive" else "recorded"
         return Case(identifier, prompt, expect, must_not=seed_must_not, kind=kind)
 
@@ -168,7 +180,11 @@ def _case_entry(
 
 
 def _retained_cases(
-    case_path: Path, values: list[object], *, seed: bool
+    case_path: Path,
+    values: list[object],
+    *,
+    seed: bool,
+    family_name: str = "",
 ) -> tuple[list[Case], int] | Problem:
     """Load every entry, then drop each case another names by ``supersedes:``."""
 
@@ -176,7 +192,9 @@ def _retained_cases(
     identifiers: set[str] = set()
     superseded: set[str] = set()
     for index, value in enumerate(values, start=1):
-        case = _case_entry(case_path, value, index, seed=seed)
+        case = _case_entry(
+            case_path, value, index, seed=seed, family_name=family_name
+        )
         if isinstance(case, Problem):
             return case
         if case.id in identifiers:
@@ -204,7 +222,7 @@ def _load_seed(case_path: Path, document: dict[object, object]) -> CaseSet | Pro
     values = document.get("cases")
     if not isinstance(values, list) or not values:
         return _problem(case_path, "seed must contain a non-empty cases list.")
-    retained = _retained_cases(case_path, values, seed=True)
+    retained = _retained_cases(case_path, values, seed=True, family_name=family)
     if isinstance(retained, Problem):
         return retained
     loaded, _ = retained

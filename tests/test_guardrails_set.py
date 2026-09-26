@@ -15,6 +15,8 @@ import yaml  # type: ignore[import-untyped]
 
 from gideon.evaluation.evalset import SET_ROOT, TIER_2_CATEGORY, load_set
 from gideon.evaluation.guardrails_slice import FRONTEND_SAMPLE
+from gideon.evaluation.turns import figures
+from gideon.guardrail import grammar
 from gideon.guardrail.families import FAMILIES
 from gideon.guardrail.judge import judge_message
 from tools.exportboundary import absent_from_export, is_excluded
@@ -33,6 +35,13 @@ COUNTS: Final[dict[str, tuple[int, int, int, int, int]]] = {
     "deadline-trap": (105, 102, 39, 63, 3),
     "guidelines-range": (96, 87, 45, 42, 9),
     "sentence-credit": (89, 86, 39, 47, 3),
+}
+# Active positives with no written pattern and nothing derived from the canned
+# answer, so a normaliser change that silently empties a case moves a count.
+UNNAMED_POSITIVES: Final[dict[str, int]] = {
+    "deadline-trap": 13,
+    "guidelines-range": 8,
+    "sentence-credit": 8,
 }
 
 _UNDER_TWENTY: Final[tuple[str, ...]] = (
@@ -86,9 +95,26 @@ def _number_words(value: int) -> str:
 
 
 def _spell_small_numbers(text: str) -> str:
-    """Spell prose numerals below one thousand while preserving four-digit years."""
+    """Spell prose numerals below one thousand while keeping dates intact."""
 
-    return _SMALL_NUMBER.sub(lambda match: _number_words(int(match.group(1))), text)
+    parts: list[str] = []
+    offset = 0
+    for date in grammar.RELEASE_DATE_FORM.finditer(text):
+        prose = text[offset : date.start()]
+        parts.append(_SMALL_NUMBER.sub(lambda match: _number_words(int(match.group(1))), prose))
+        parts.append(date.group())
+        offset = date.end()
+    prose = text[offset:]
+    parts.append(_SMALL_NUMBER.sub(lambda match: _number_words(int(match.group(1))), prose))
+    return "".join(parts)
+
+
+def _numeral_figure(key: str) -> bool:
+    return (
+        key.startswith("level-")
+        or re.fullmatch(r"\d+(?:\.\d+)?-(?:point|day|month|year)", key) is not None
+        or re.fullmatch(r"\d+-(?:\d+|life)", key) is not None
+    )
 
 
 def _records(path: Path) -> tuple[dict[str, object], ...]:
@@ -132,6 +158,7 @@ class GuardrailsSetContract(unittest.TestCase):
 
                 retired: set[str] = set()
                 role_counts = {"positive": 0, "control": 0}
+                unnamed: set[str] = set()
                 for source, converted in zip(seed["cases"], cases, strict=True):
                     source_id = f"{category}/{source['id']}"
                     self.assertEqual(
@@ -149,6 +176,31 @@ class GuardrailsSetContract(unittest.TestCase):
                     )
                     if source["kind"] == "positive":
                         self.assertEqual(expected["pattern"], source["pattern"])
+                        answer = cast(str, source["answer"])
+                        prompt = cast(str, source["prompt"])
+                        derived = figures.derive(cast(str, seed["family"]), prompt, answer)
+                        for key, alternatives in derived:
+                            with self.subTest(case=source["id"], figure=key):
+                                derived_patterns = tuple(
+                                    re.compile(pattern) for pattern in alternatives
+                                )
+                                self.assertTrue(
+                                    any(pattern.search(answer) for pattern in derived_patterns)
+                                )
+                                self.assertFalse(
+                                    any(pattern.search(prompt) for pattern in derived_patterns)
+                                )
+                                if _numeral_figure(key):
+                                    spelled = _spell_small_numbers(answer)
+                                    self.assertTrue(
+                                        any(
+                                            pattern.search(spelled)
+                                            for pattern in derived_patterns
+                                        ),
+                                        (source["id"], key, spelled),
+                                    )
+                        if "must_not" not in source and not derived:
+                            unnamed.add(source_id)
                     if source["kind"] == "control":
                         self.assertNotIn("must_not", source)
                     if "must_not" not in source:
@@ -205,6 +257,7 @@ class GuardrailsSetContract(unittest.TestCase):
                     ),
                     COUNTS[category],
                 )
+                self.assertEqual(len(unnamed & active_ids), UNNAMED_POSITIVES[category])
 
     def test_committed_suite_loads_in_the_tree_and_an_export_copy(self) -> None:
         if absent_from_export(GUARDRAILS_PATH / "deadline-trap.jsonl", ROOT):

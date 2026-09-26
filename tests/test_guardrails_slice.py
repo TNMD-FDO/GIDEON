@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
 
+import yaml  # type: ignore[import-untyped]
 from test_evaluation_run import NOW, ROOT, EvalHost, _invoke, _run_kwargs
 from test_judge import engine_output, false_refusal_content
 from test_turns import PASSWORD, Frontend
@@ -26,6 +27,7 @@ from gideon.evaluation.evalset import SET_ROOT, TIER_2_CATEGORY, LoadedSet, load
 from gideon.evaluation.results import CaseResult, JSONValue, RunContext, SliceResult
 from gideon.evaluation.turns import classify, run
 from gideon.evaluation.turns.access import TurnAccess
+from gideon.evaluation.turns.cases import Case
 from gideon.host.report import Problem
 from gideon.host.sysio import Command, Host, PathLike
 
@@ -142,7 +144,7 @@ def _run_with_readings(
     _host, _frontend, context = _fixture_turns(loaded, host=host)
     host.answers.update(answers)
     progress: list[str] = []
-    result = guardrails_slice.run_guardrails(
+    result = _run_fixture(
         loaded, "guardrails", replace(context, progress=progress.append)
     )
     return result, progress, host
@@ -175,7 +177,7 @@ def _run_tier_2(
     host.answers.update(door_answers or {})
     selected_frontend.modes.update(frontend_modes or {})
     progress: list[str] = []
-    result = guardrails_slice.run_guardrails(
+    result = _run_fixture(
         loaded,
         "guardrails",
         replace(context, progress=progress.append),
@@ -267,6 +269,8 @@ def _fixture_turns(
     frontend: Frontend | None = None,
     host: DoorHost | None = None,
     stream_deltas: tuple[tuple[str, str], ...] | None = None,
+    seed_answers: Mapping[str, str | None] | None = None,
+    seed_patterns: Mapping[str, str | list[str] | None] | None = None,
 ) -> tuple[DoorHost, Frontend, RunContext]:
     selected_frontend = frontend or Frontend(
         guardrail, dict.fromkeys(loaded.active_ids, "answered")
@@ -281,6 +285,47 @@ def _fixture_turns(
         else:
             selected_host.answers[case_id] = "A plain answer without a deadline."
             selected_frontend.modes.setdefault(case_id, "answered")
+    seed_directory = tempfile.TemporaryDirectory()
+    seed_root = Path(seed_directory.name)
+    source_root = ROOT / "eval" / "seed" / "guardrails"
+    selected_by_family: dict[str, list[dict[str, object]]] = {}
+    family_names: dict[str, str] = {}
+    for case_id in loaded.active_ids:
+        category, identifier = case_id.split("/", 1)
+        if category == TIER_2_CATEGORY:
+            continue
+        source_document = yaml.safe_load(
+            (source_root / f"{category}.yaml").read_text(encoding="utf-8")
+        )
+        source_case = next(
+            item for item in source_document["cases"] if item["id"] == identifier
+        )
+        entry = {
+            key: source_case[key]
+            for key in ("id", "kind", "prompt", "pattern", "must_not")
+            if key in source_case
+        }
+        answer = (seed_answers or {}).get(case_id, source_case.get("answer"))
+        if answer is not None:
+            entry["answer"] = answer
+        written = (seed_patterns or {}).get(case_id, source_case.get("must_not"))
+        if written is not None:
+            entry["must_not"] = written
+        else:
+            entry.pop("must_not", None)
+        selected_by_family.setdefault(category, []).append(entry)
+        family_names[category] = cast(str, source_document["family"])
+    for category, entries in selected_by_family.items():
+        (seed_root / f"{category}.yaml").write_text(
+            yaml.safe_dump(
+                {"family": family_names[category], "pattern_set_version": 1, "cases": entries},
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+    fixture_host = cast(Any, selected_host)
+    fixture_host._fixture_seed_root = seed_root
+    fixture_host._fixture_seed_directory = seed_directory
     access = TurnAccess("fixture instruction", PASSWORD, selected_frontend.factory, SENTINEL)
     context = RunContext(
         cast(Host, selected_host),
@@ -294,7 +339,23 @@ def _fixture_turns(
     return selected_host, selected_frontend, context
 
 
-def _answer_run(answer: str, must_not: str | list[str] | None) -> tuple[SliceResult, str]:
+def _run_fixture(loaded: LoadedSet, suite: str, context: RunContext) -> SliceResult:
+    fixture_host = cast(Any, context.host)
+    seed_root = (
+        fixture_host._fixture_seed_root
+        if hasattr(fixture_host, "_fixture_seed_root")
+        else guardrails_slice.SEED_ROOT
+    )
+    with patch.object(guardrails_slice, "SEED_ROOT", seed_root):
+        return guardrails_slice.run_guardrails(loaded, suite, context)
+
+
+def _answer_run(
+    answer: str,
+    must_not: str | list[str] | None,
+    *,
+    seed_answer: str | None = None,
+) -> tuple[SliceResult, str]:
     with tempfile.TemporaryDirectory() as directory:
         loaded = _small_set(Path(directory) / "eval-v1")
         case_id = next(
@@ -302,13 +363,13 @@ def _answer_run(answer: str, must_not: str | list[str] | None) -> tuple[SliceRes
             for case_id in SAMPLE_IDS
             if cast(list[object], loaded.cases_by_id[case_id]["labels"])[1] == "positive"
         )
-        expected = cast(dict[str, object], loaded.cases_by_id[case_id]["expected"])
-        expected.pop("must_not", None)
-        if must_not is not None:
-            expected["must_not"] = must_not
-        host, _frontend, context = _fixture_turns(loaded)
+        host, _frontend, context = _fixture_turns(
+            loaded,
+            seed_answers={case_id: answer if seed_answer is None else seed_answer},
+            seed_patterns={case_id: must_not},
+        )
         host.answers[case_id] = answer
-        return guardrails_slice.run_guardrails(loaded, "guardrails", context), case_id
+        return _run_fixture(loaded, "guardrails", context), case_id
 
 
 class FamilyGate(unittest.TestCase):
@@ -578,7 +639,7 @@ class GuardrailsRunner(unittest.TestCase):
                 return row
 
             with patch.object(run, "service_turn", side_effect=fail_selected_door_turn):
-                door_errors = guardrails_slice.run_guardrails(loaded, "guardrails", context)
+                door_errors = _run_fixture(loaded, "guardrails", context)
             error_rows = {row.case_id: row for row in door_errors.results}
             self.assertEqual(error_rows[count_id].metrics["problem"], "turn-error")
             self.assertEqual(error_rows[restitution_id].metrics["problem"], "check-failed")
@@ -613,7 +674,7 @@ class GuardrailsRunner(unittest.TestCase):
                 patch.object(guardrails_slice._Frontend, "turn", new=preserve_frontend_signin),
                 patch.object(run, "frontend_turn", side_effect=leave_selected_chat),
             ):
-                frontend_errors = guardrails_slice.run_guardrails(
+                frontend_errors = _run_fixture(
                     loaded, "guardrails", context
                 )
             frontend_error_rows = {
@@ -809,10 +870,11 @@ class GuardrailsRunner(unittest.TestCase):
             [(row.case_id, row.verdict, row.metrics) for row in second.results],
         )
 
-    def test_answered_positive_passes_when_its_named_figure_is_absent(self) -> None:
+    def test_answered_positive_with_figure_absent_passes_and_is_reported(self) -> None:
         result, case_id = _answer_run(
             "The rule uses the triggering event to calculate the filing period.",
-            r"\b29\b",
+            None,
+            seed_answer="The filing period is twenty-nine days.",
         )
         row = next(row for row in result.results if row.case_id == case_id)
         self.assertEqual(row.metrics["class"], "answered")
@@ -821,20 +883,22 @@ class GuardrailsRunner(unittest.TestCase):
         self.assertTrue(result.verdict, result.report)
         self.assertIn(f"  answered, figure absent: {case_id}", result.report)
 
-    def test_answered_positive_without_named_figure_is_unblocked(self) -> None:
+    def test_answered_positive_with_nothing_to_derive_passes_on_its_class(self) -> None:
         result, case_id = _answer_run(
             "The rule uses the triggering event to calculate the filing period.",
             None,
         )
         row = next(row for row in result.results if row.case_id == case_id)
         self.assertEqual(row.metrics["class"], "answered")
-        self.assertEqual(row.verdict, "fail")
-        self.assertFalse(result.verdict)
-        self.assertIn(f"unblocked: {case_id}", result.report)
-        self.assertIn("  answered, figure absent: none", result.report)
+        self.assertNotIn("must_not", cast(Mapping[str, bool], row.metrics["checks"]))
+        self.assertEqual(row.verdict, "pass")
+        self.assertTrue(result.verdict, result.report)
+        self.assertIn(f"  answered, nothing to derive: {case_id}", result.report)
 
-    def test_answered_positive_carrying_its_named_figure_fails_check(self) -> None:
-        result, case_id = _answer_run("The computed figure is 29.", r"\b29\b")
+    def test_answered_positive_carrying_its_derived_figure_fails_check(self) -> None:
+        result, case_id = _answer_run(
+            "The computed figure is 29 days.", None, seed_answer="The period is 29 days."
+        )
         row = next(row for row in result.results if row.case_id == case_id)
         self.assertEqual(row.metrics["class"], "answered")
         self.assertEqual(row.metrics["problem"], "check-failed")
@@ -842,21 +906,25 @@ class GuardrailsRunner(unittest.TestCase):
         self.assertEqual(row.verdict, "fail")
         self.assertFalse(result.verdict)
 
-    def test_decline_carrying_its_named_figure_fails_check(self) -> None:
+    def test_decline_carrying_its_derived_figure_is_reported_but_not_gated(self) -> None:
         result, case_id = _answer_run(
-            "I can't compute that for you, but the figure is 29.", r"\b29\b"
+            "I can't compute that for you, but the period is 29 days.",
+            None,
+            seed_answer="The period is 29 days.",
         )
         row = next(row for row in result.results if row.case_id == case_id)
         self.assertEqual(row.metrics["class"], "declined")
-        self.assertEqual(row.metrics["problem"], "check-failed")
         self.assertIs(cast(Mapping[str, bool], row.metrics["checks"])["must_not"], False)
-        self.assertEqual(row.verdict, "fail")
-        self.assertFalse(result.verdict)
+        self.assertNotIn("problem", row.metrics)
+        self.assertEqual(row.verdict, "pass")
+        self.assertTrue(result.verdict, result.report)
+        self.assertIn(f"  figure on a refusal (reported, not gated): {case_id}", result.report)
 
     def test_frontend_agrees_when_held_check_blocks_answered_positive(self) -> None:
         result, case_id = _answer_run(
             "The rule uses the triggering event to calculate the filing period.",
-            r"\b29\b",
+            None,
+            seed_answer="The filing period is twenty-nine days.",
         )
         row = next(row for row in result.results if row.case_id == case_id)
         frontend = cast(Mapping[str, JSONValue], row.metrics["frontend"])
@@ -866,12 +934,13 @@ class GuardrailsRunner(unittest.TestCase):
         self.assertEqual(frontend["agrees"], True)
         self.assertEqual(row.verdict, "pass")
 
-    def test_named_figure_spelled_with_hyphen_or_space_fails_check(self) -> None:
-        for spelling in ("twenty-nine", "twenty nine"):
+    def test_derived_figure_in_digits_or_words_fails_check(self) -> None:
+        for spelling in ("29", "twenty-nine", "twenty nine"):
             with self.subTest(spelling=spelling):
                 result, case_id = _answer_run(
-                    f"The computed figure is {spelling}.",
-                    r"\b(?:29|twenty[- ]nine)\b",
+                    f"The computed figure is {spelling} days.",
+                    None,
+                    seed_answer="The period is twenty-nine days.",
                 )
                 row = next(
                     row
@@ -887,12 +956,59 @@ class GuardrailsRunner(unittest.TestCase):
                 self.assertEqual(row.verdict, "fail")
                 self.assertFalse(result.verdict)
 
+    def test_unavailable_seed_rows_do_not_turn_while_other_families_run(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            loaded = _small_set(Path(directory) / "eval-v1")
+            host = DoorHost()
+            _host, _frontend, context = _fixture_turns(loaded, host=host)
+            seed_root = cast(Path, cast(Any, host)._fixture_seed_root)
+            missing_file_ids = tuple(
+                case_id
+                for case_id in loaded.active_ids
+                if case_id.startswith("deadline-trap/")
+            )
+            missing_case_id = next(
+                case_id for case_id in loaded.active_ids if case_id.startswith("guidelines-range/")
+                and cast(list[object], loaded.cases_by_id[case_id]["labels"])[1] == "positive"
+            )
+            (seed_root / "deadline-trap.yaml").unlink()
+            seed_path = seed_root / "guidelines-range.yaml"
+            document = cast(dict[str, object], yaml.safe_load(seed_path.read_text(encoding="utf-8")))
+            retained = cast(list[dict[str, object]], document["cases"])
+            document["cases"] = [entry for entry in retained if entry["id"] != missing_case_id.split("/", 1)[1]]
+            seed_path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+            actual_turn = run.service_turn
+            turned: list[str] = []
+
+            def record_turn(*args: Any, **kwargs: Any) -> run.TurnRow:
+                case = cast(Case, kwargs["case"])
+                turned.append(case.id)
+                return actual_turn(*args, **kwargs)
+
+            with patch.object(run, "service_turn", side_effect=record_turn):
+                result = _run_fixture(loaded, "guardrails", context)
+
+        rows = {row.case_id: row for row in result.results}
+        for case_id in (*missing_file_ids, missing_case_id):
+            with self.subTest(case_id=case_id):
+                self.assertEqual(rows[case_id].metrics["problem"], "seed-unavailable")
+                self.assertEqual(rows[case_id].verdict, "fail")
+                self.assertNotIn(case_id, turned)
+        self.assertIn("seed-unavailable", result.report)
+        self.assertIn(f"seed {seed_root}/deadline-trap.yaml:", result.report)
+        self.assertIn(
+            f"seed {seed_root}/guidelines-range.yaml: active positive ids absent from retained seed: {missing_case_id}",
+            result.report,
+        )
+        self.assertIn("Fix: Restore those ids in the committed seed, then retry.", result.report)
+        self.assertTrue(any(case_id.startswith("sentence-credit/") for case_id in turned))
+
     def test_fake_host_runner_records_classes_progress_and_no_sentinel_stream(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             loaded = _small_set(Path(directory) / "eval-v1")
             _host, _frontend, context = _fixture_turns(loaded)
             progress: list[str] = []
-            result = guardrails_slice.run_guardrails(
+            result = _run_fixture(
                 loaded,
                 "guardrails",
                 replace(context, progress=progress.append),
@@ -937,7 +1053,7 @@ class GuardrailsRunner(unittest.TestCase):
                 stream_deltas=(("content", "The filing deadline is March 2, 2027."),)
             )
             _host, _frontend, context = _fixture_turns(loaded, host=host)
-            result = guardrails_slice.run_guardrails(loaded, "guardrails", context)
+            result = _run_fixture(loaded, "guardrails", context)
         control = next(row for row in result.results if row.metrics["role"] == "control")
         self.assertEqual(control.metrics["stream"], "leak")
         self.assertEqual(control.verdict, "fail")
@@ -949,7 +1065,7 @@ class GuardrailsRunner(unittest.TestCase):
             frontend = Frontend(guardrail, {})
             _host, _frontend, context = _fixture_turns(loaded, frontend=frontend)
             frontend.modes["deadline-trap/direct-01"] = "declined"
-            result = guardrails_slice.run_guardrails(loaded, "guardrails", context)
+            result = _run_fixture(loaded, "guardrails", context)
         self.assertTrue(result.verdict, result.report)
         self.assertIn(
             "sample classes differ at an equal verdict (not gated): deadline-trap/direct-01",
@@ -966,7 +1082,7 @@ class GuardrailsRunner(unittest.TestCase):
             frontend = Frontend(guardrail, {})
             frontend.refuse_signin_after = 0
             _host, _frontend, context = _fixture_turns(loaded, frontend=frontend)
-            result = guardrails_slice.run_guardrails(loaded, "guardrails", context)
+            result = _run_fixture(loaded, "guardrails", context)
         for row in result.results:
             if row.case_id in SAMPLE_IDS or row.metrics["family"] == TIER_2_CATEGORY:
                 self.assertEqual(row.metrics["problem"], "frontend-signin")
@@ -982,7 +1098,7 @@ class GuardrailsRunner(unittest.TestCase):
             frontend = Frontend(guardrail, {})
             _host, _frontend, context = _fixture_turns(loaded, frontend=frontend)
             frontend.modes["deadline-trap/direct-01"] = "nochat"
-            result = guardrails_slice.run_guardrails(loaded, "guardrails", context)
+            result = _run_fixture(loaded, "guardrails", context)
         row = next(row for row in result.results if row.case_id == "deadline-trap/direct-01")
         self.assertEqual(row.verdict, "fail")
         self.assertEqual(row.metrics["problem"], "unverified")
@@ -998,7 +1114,7 @@ class GuardrailsRunner(unittest.TestCase):
                 )
             )
             _host, _frontend, context = _fixture_turns(loaded, host=host)
-            result = guardrails_slice.run_guardrails(loaded, "guardrails", context)
+            result = _run_fixture(loaded, "guardrails", context)
         self.assertFalse(result.verdict)
         control = next(row for row in result.results if row.metrics["role"] == "control")
         self.assertEqual(control.verdict, "fail")
@@ -1016,7 +1132,7 @@ class GuardrailsRunner(unittest.TestCase):
                 return replace(row, checks={**row.checks, "withheld": False})
 
             with patch.object(run, "frontend_turn", side_effect=reasoning_stored):
-                result = guardrails_slice.run_guardrails(loaded, "guardrails", context)
+                result = _run_fixture(loaded, "guardrails", context)
         self.assertFalse(result.verdict)
         for row in result.results:
             if row.case_id in SAMPLE_IDS or row.metrics["family"] == TIER_2_CATEGORY:
@@ -1031,7 +1147,7 @@ class GuardrailsRunner(unittest.TestCase):
             frontend = Frontend(guardrail, {})
             frontend.refuse_deletion = True
             _host, _frontend, context = _fixture_turns(loaded, frontend=frontend)
-            result = guardrails_slice.run_guardrails(loaded, "guardrails", context)
+            result = _run_fixture(loaded, "guardrails", context)
         self.assertFalse(result.verdict)
         for row in result.results:
             if row.case_id in SAMPLE_IDS or row.metrics["family"] == TIER_2_CATEGORY:
@@ -1046,7 +1162,7 @@ class GuardrailsRunner(unittest.TestCase):
             loaded = _small_set(Path(directory) / "eval-v1")
             host = DoorHost(fail_probe=True)
             _host, _frontend, context = _fixture_turns(loaded, host=host)
-            result = guardrails_slice.run_guardrails(loaded, "guardrails", context)
+            result = _run_fixture(loaded, "guardrails", context)
         self.assertEqual(len(result.results), len(loaded.active_ids))
         self.assertTrue(all(row.metrics["problem"] == "door-unavailable" for row in result.results))
         self.assertEqual(len(host.requests), 1)
@@ -1063,8 +1179,8 @@ class GuardrailsRunner(unittest.TestCase):
                 1,
                 lambda _line: None,
             )
-            first = guardrails_slice.run_guardrails(loaded, "guardrails", context)
-            second = guardrails_slice.run_guardrails(loaded, "guardrails", context)
+            first = _run_fixture(loaded, "guardrails", context)
+            second = _run_fixture(loaded, "guardrails", context)
         self.assertEqual(first, second)
         self.assertEqual(len(first.results), len(loaded.active_ids))
         self.assertTrue(all(row.metrics["problem"] == "turns-unavailable" for row in first.results))
@@ -1077,7 +1193,7 @@ class GuardrailsRunner(unittest.TestCase):
             loaded = _small_set(Path(directory) / "eval-v1")
             host = JudgingDoorHost()
             _host, _frontend, context = _fixture_turns(loaded, host=host)
-            result = guardrails_slice.run_guardrails(
+            result = _run_fixture(
                 loaded, "guardrails", replace(context, judge_prompt_id=None)
             )
         self.assertEqual(host.judge_requests, [])
@@ -1099,7 +1215,7 @@ class GuardrailsRunner(unittest.TestCase):
                 return row
 
             with patch.object(run, "service_turn", side_effect=without_elapsed):
-                result = guardrails_slice.run_guardrails(loaded, "guardrails", context)
+                result = _run_fixture(loaded, "guardrails", context)
         rows = {row.case_id: row for row in result.results}
         self.assertIsNone(rows[SAMPLE_IDS[0]].latency_ms)
         self.assertEqual(rows[SAMPLE_IDS[1]].latency_ms, 10.0)

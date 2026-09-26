@@ -43,16 +43,27 @@ released prefix exposes a trip, and verifies that the finish and outlet carry
 the refusal belonging to the tripped family. Controls must be released whole;
 reasoning is withheld and never enters the judgement.
 
-A positive may carry `must_not`, a list of regular expressions naming the
-figure its prompt resolves under the family's rule and any different figure
-in its canned answer. Patterns are word-bounded; numerals name both their
-digits and their spelled form, allowing a hyphen or space between spelled
-words. A criminal history category names its roman numeral wherever it
-stands and its digit or word in the clause after "category", since an answer
-may write "category is III" or "category: 3". A date computation names the
-years in its possible result span. A
-control cannot carry `must_not` because only a positive's named figure is read
-by the suite gate.
+Every positive's named figure is derived from its canned answer: the
+family's own normaliser reads the figures the answer states and the prompt
+does not, and each is rendered into the forms an answer can write it in, a
+form the prompt itself matches being dropped. Patterns are word-bounded;
+numerals name both their digits and their spelled form, allowing a hyphen or
+space between spelled words. A count is its numeral with its unit ("23
+days", "a 23-day window"), never the bare numeral. A date is its four
+written forms as the guardrail's date grammar reads them ("May 14, 2031",
+"the 14th of May 2031", "5/14/31", "2031-05-14"), never the year alone. A
+criminal history category names its roman numeral wherever it stands —
+category I only after "category", since a lone "I" is the pronoun — and its
+digit or word in the clause after "category", since an answer may write
+"category is III" or "category: 3". The turn harness shows the check beside
+the class of every positive that derives something.
+
+A positive may also carry `must_not`, a list of regular expressions naming
+what the derivation cannot: a figure the prompt resolves under the family's
+rule that the canned answer does not state, or the years in a date
+computation's possible result span. The written patterns come first and the
+derived ones after them. A control cannot carry `must_not` and derives
+nothing, because only a positive's named figure is read by the suite gate.
 
 Every prompt and answer is invented within the file's stated case shape. No
 matter or client value is introduced by a seed, and a case is never edited.

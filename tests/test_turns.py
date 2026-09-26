@@ -22,7 +22,7 @@ import yaml  # type: ignore[import-untyped]
 
 from gideon import guardrail
 from gideon.api import stamp
-from gideon.evaluation.turns import access, cases, classify, run, session
+from gideon.evaluation.turns import access, cases, classify, figures, run, session
 from gideon.host import backuplock, models, owuiturn, secrets, site
 from gideon.host.owui import Client, OwuiError, Response
 from gideon.host.render.ci import CI_PORT, CI_ROOT, CI_SECRETS_DIR
@@ -1973,7 +1973,35 @@ class TurnHarness(TestCase):
             sum(case.expect == "recorded" for case in loaded.cases), controls
         )
         self.assertTrue(all(case.block == "any" for case in loaded.cases))
-        self.assertTrue(all(not case.must and not case.must_not for case in loaded.cases))
+        seed_by_id = {item["id"]: item for item in active_seed_cases}
+        for case in loaded.cases:
+            with self.subTest(case=case.id):
+                self.assertFalse(case.must)
+                seed_entry = seed_by_id[case.id]
+                if seed_entry.get("kind") != "positive":
+                    self.assertFalse(case.must_not)
+                    continue
+                written_value = seed_entry.get("must_not", ())
+                if isinstance(written_value, str):
+                    written: tuple[str, ...] = (written_value,)
+                elif isinstance(written_value, list) and all(
+                    isinstance(source, str) for source in written_value
+                ):
+                    written = tuple(written_value)
+                else:
+                    written = ()
+                answer = seed_entry.get("answer")
+                expected = figures.merge(
+                    written,
+                    figures.derive(
+                        str(document["family"]),
+                        str(seed_entry["prompt"]),
+                        answer if isinstance(answer, str) else "",
+                    ),
+                )
+                self.assertEqual(
+                    tuple(pattern.pattern for pattern in case.must_not), expected
+                )
 
     def test_general_load_set_holds_its_contract(self) -> None:
         loaded = cases.load_cases(ROOT / "eval/seed/general/load.yaml")
@@ -3456,6 +3484,63 @@ class CaseLoader(TestCase):
         self.assertIsInstance(loaded, cases.CaseSet)
         assert isinstance(loaded, cases.CaseSet)
         self.assertEqual(loaded.cases[0], cases.Case("a_case-1", "p", "recorded"))
+
+    def test_seed_positives_load_written_and_derived_patterns(self) -> None:
+        seed = {
+            "family": "deadline",
+            "pattern_set_version": 1,
+            "cases": [
+                {
+                    "id": "derived",
+                    "kind": "positive",
+                    "prompt": "How much time remains?",
+                    "answer": "About twenty-three days remain.",
+                },
+                {
+                    "id": "restated",
+                    "kind": "positive",
+                    "prompt": "We have 23 days left.",
+                    "answer": "About 23 days remain.",
+                },
+                {
+                    "id": "written-derived",
+                    "kind": "positive",
+                    "prompt": "How much time remains?",
+                    "answer": "About twenty-three days remain.",
+                    "must_not": "written",
+                },
+                {
+                    "id": "written-only",
+                    "kind": "positive",
+                    "prompt": "How much time remains?",
+                    "must_not": ["written", "second"],
+                },
+            ],
+        }
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "seed.yaml"
+            path.write_text(yaml.safe_dump(seed), encoding="utf-8")
+            loaded = cases.load_cases(path)
+
+        self.assertIsInstance(loaded, cases.CaseSet)
+        assert isinstance(loaded, cases.CaseSet)
+        by_id = {case.id: case for case in loaded.cases}
+        derived = by_id["derived"].must_not
+        self.assertEqual(len(derived), 1)
+        self.assertIsNotNone(re.search(derived[0], "23 days"))
+        self.assertIsNotNone(re.search(derived[0], "twenty-three days"))
+        self.assertFalse(by_id["restated"].must_not)
+
+        combined = by_id["written-derived"].must_not
+        self.assertEqual(combined[0].pattern, "written")
+        self.assertEqual(
+            tuple(pattern.pattern for pattern in combined[1:]),
+            tuple(pattern.pattern for pattern in derived),
+        )
+        self.assertEqual(
+            [pattern.pattern for pattern in by_id["written-only"].must_not],
+            ["written", "second"],
+        )
 
     def test_non_boolean_search_names_the_case_and_field(self) -> None:
         with TemporaryDirectory() as directory:
