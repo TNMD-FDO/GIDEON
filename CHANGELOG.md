@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.2.83](docs/release-notes/v0.2.83.md) — 2026-09-26 — the export's wait follows the public run
 - [v0.2.82](docs/release-notes/v0.2.82.md) — 2026-09-26 — the tracker checks every open box's home
 - [v0.2.81](docs/release-notes/v0.2.81.md) — 2026-09-26 — the dispatcher's notice is shaped for the phone
 - [v0.2.80](docs/release-notes/v0.2.80.md) — 2026-09-26 — the guardrails gate derives its figures
