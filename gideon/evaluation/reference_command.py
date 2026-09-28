@@ -77,6 +77,11 @@ def _check(
             f"recorded run is for {run.eval_set_version}, not {loaded.version}",
             _READER_FIX,
         )
+    if run.partial:
+        return Problem(
+            "recorded run is partial",
+            "Use a run that completed every repeat, then retry.",
+        )
     if run.set_digest != loaded.digest:
         return Problem("recorded run has a different eval-set digest", _READER_FIX)
 

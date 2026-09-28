@@ -99,6 +99,13 @@ class Help(unittest.TestCase):
             collapsed(command.getvalue()),
         )
         self.assertIn("the word the run's record carries for its purpose", command.getvalue())
+        run_help = collapsed(command.getvalue())
+        self.assertIn(
+            "--decision a decision run: five repeats paired against --against's recorded run",
+            run_help,
+        )
+        self.assertIn("--force start outside the window, recorded on the run row", run_help)
+        self.assertIn("--against ID recorded run a --decision run pairs against", run_help)
 
         reference = io.StringIO()
         with contextlib.redirect_stdout(reference), self.assertRaises(SystemExit) as ctx:

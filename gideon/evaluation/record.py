@@ -53,6 +53,9 @@ class RunRow:
     git_dirty: bool | None
     set_digest: str
     verdict: str
+    forced: bool
+    partial: bool
+    decision: Mapping[str, object] | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,7 +106,24 @@ class RecordedRun:
     git_dirty: bool | None
     set_digest: str
     verdict: str
+    forced: bool
+    partial: bool
+    decision: Mapping[str, object] | None
     results: tuple[tuple[str, int, str], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ComparandRun:
+    """The content-free measurements needed to compare a recorded run."""
+
+    run_id: str
+    slice: str | None
+    eval_set_version: str
+    set_digest: str
+    repeats: int
+    kind: str
+    partial: bool
+    results: tuple[tuple[str, int, Mapping[str, object]], ...]
 
 
 def _contains_forbidden_text(value: object) -> bool:
@@ -169,6 +189,7 @@ def _validate_row(value: RunRow | ResultRow) -> None:
             value.git_sha,
             value.set_digest,
             value.verdict,
+            value.decision,
         )
     else:
         fields = (value.run_id, value.case_id, value.verdict, value.metrics, value.judge, value.provenance_ref)
@@ -196,12 +217,17 @@ def _run_sql(row: RunRow, lines: list[str]) -> str:
         _bool_variable("git_dirty", row.git_dirty, lines),
         _set_variable("set_digest", row.set_digest, lines),
         _set_variable("run_verdict", row.verdict, lines),
+        _bool_variable("forced", row.forced, lines),
+        _bool_variable("partial", row.partial, lines),
+        "NULL"
+        if row.decision is None
+        else _json_variable("decision", row.decision, lines) + "::jsonb",
     ]
     return (
         "INSERT INTO eval_runs ("
         "run_id, started_at, finished_at, product_version, corpus_lockfile, "
         "eval_set_version, hardware_profile, stack, generation_id, kind, slice, "
-        "overrides, repeats, git_sha, git_dirty, set_digest, verdict) VALUES ("
+        "overrides, repeats, git_sha, git_dirty, set_digest, verdict, forced, partial, decision) VALUES ("
         + ", ".join(values)
         + ");"
     )
@@ -280,6 +306,9 @@ def _read_sql(run_id: str) -> str:
         slice,
         overrides,
         repeats,
+        forced,
+        partial,
+        decision,
         git_sha,
         git_dirty,
         set_digest,
@@ -300,6 +329,9 @@ SELECT json_build_object(
             'slice', slice,
             'overrides', overrides,
             'repeats', repeats,
+            'forced', forced,
+            'partial', partial,
+            'decision', decision,
             'git_sha', git_sha,
             'git_dirty', git_dirty,
             'set_digest', set_digest,
@@ -329,10 +361,6 @@ SELECT json_build_object(
     return "\n".join(lines) + "\n"
 
 
-def _read_problem(problem: str, run_id: str) -> Problem:
-    return Problem(problem, _reader_fix(run_id))
-
-
 class _ReadRefusal(Exception):
     """One refusal raised while decoding the reader's document.
 
@@ -346,31 +374,55 @@ class _ReadRefusal(Exception):
         self.problem = problem
 
 
-def _text_field(value: object, name: str, run_id: str) -> str:
+def _invalid(name: str, fix: str) -> _ReadRefusal:
+    return _ReadRefusal(Problem(f"recorded run has an invalid {name}", fix))
+
+
+def _text_field(value: object, name: str, fix: str) -> str:
     if isinstance(value, str) and value:
         return value
-    raise _ReadRefusal(_read_problem(f"recorded run has an invalid {name}", run_id))
+    raise _invalid(name, fix)
 
 
-def _optional_text_field(value: object, name: str, run_id: str) -> str | None:
+def _optional_text_field(value: object, name: str, fix: str) -> str | None:
     if value is None or isinstance(value, str):
         return value
-    raise _ReadRefusal(_read_problem(f"recorded run has an invalid {name}", run_id))
+    raise _invalid(name, fix)
 
 
-def _int_field(value: object, name: str, run_id: str) -> int:
+def _int_field(value: object, name: str, fix: str) -> int:
     if isinstance(value, int) and not isinstance(value, bool):
         return value
-    raise _ReadRefusal(_read_problem(f"recorded run has an invalid {name}", run_id))
+    raise _invalid(name, fix)
 
 
-def _decoded_run(stdout: str, run_id: str) -> RecordedRun:
+def _bool_field(value: object, name: str, fix: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    raise _invalid(name, fix)
+
+
+def _mapping_field(value: object, name: str, fix: str) -> Mapping[str, object]:
+    if isinstance(value, Mapping):
+        return value
+    raise _invalid(name, fix)
+
+
+def _reader_payload(
+    stdout: str, run_id: str, fix: str
+) -> tuple[Mapping[str, object], tuple[Mapping[str, object], ...]]:
+    """Decode the reader's document into its run object and result objects.
+
+    *fix* answers a malformed document; an absent run and a run with no
+    results answer with the id to use instead, whichever command read it.
+    """
+
     try:
         document = json.loads(stdout)
     except json.JSONDecodeError as exc:
-        raise _ReadRefusal(_read_problem("eval reader returned invalid JSON", run_id)) from exc
+        raise _ReadRefusal(Problem("eval reader returned invalid JSON", fix)) from exc
     if not isinstance(document, Mapping):
-        raise _ReadRefusal(_read_problem("eval reader returned an invalid document", run_id))
+        raise _ReadRefusal(Problem("eval reader returned an invalid document", fix))
 
     run = document.get("run")
     if run is None:
@@ -381,11 +433,11 @@ def _decoded_run(stdout: str, run_id: str) -> RecordedRun:
             )
         )
     if not isinstance(run, Mapping):
-        raise _ReadRefusal(_read_problem("eval reader returned an invalid run", run_id))
+        raise _ReadRefusal(Problem("eval reader returned an invalid run", fix))
 
     raw_results = document.get("results")
     if not isinstance(raw_results, list):
-        raise _ReadRefusal(_read_problem("eval reader returned invalid results", run_id))
+        raise _ReadRefusal(Problem("eval reader returned invalid results", fix))
     if not raw_results:
         raise _ReadRefusal(
             Problem(
@@ -393,48 +445,139 @@ def _decoded_run(stdout: str, run_id: str) -> RecordedRun:
                 "Use a completed evaluation run with result rows, then retry.",
             )
         )
+    rows = tuple(row for row in raw_results if isinstance(row, Mapping))
+    if len(rows) != len(raw_results):
+        raise _ReadRefusal(Problem("eval reader returned an invalid result", fix))
+    return run, rows
+
+
+def _decoded_run(stdout: str, run_id: str) -> RecordedRun:
+    fix = _reader_fix(run_id)
+    run, rows = _reader_payload(stdout, run_id, fix)
 
     overrides = run.get("overrides")
     if not isinstance(overrides, Mapping):
-        raise _ReadRefusal(_read_problem("recorded run has invalid overrides", run_id))
+        raise _ReadRefusal(Problem("recorded run has invalid overrides", fix))
     git_dirty = run.get("git_dirty")
     if git_dirty is not None and not isinstance(git_dirty, bool):
-        raise _ReadRefusal(_read_problem("recorded run has an invalid git dirty state", run_id))
-
-    results = tuple(
-        (
-            _text_field(row.get("case_id"), "case id", run_id),
-            _int_field(row.get("repeat"), "repeat", run_id),
-            _text_field(row.get("verdict"), "result verdict", run_id),
-        )
-        for row in raw_results
-        if isinstance(row, Mapping)
-    )
-    if len(results) != len(raw_results):
-        raise _ReadRefusal(_read_problem("eval reader returned an invalid result", run_id))
+        raise _ReadRefusal(Problem("recorded run has an invalid git dirty state", fix))
+    decision = run.get("decision")
+    if decision is not None and not isinstance(decision, Mapping):
+        raise _invalid("decision", fix)
 
     return RecordedRun(
-        run_id=_text_field(run.get("run_id"), "run id", run_id),
-        product_version=_text_field(run.get("product_version"), "product version", run_id),
-        corpus_lockfile=_optional_text_field(run.get("corpus_lockfile"), "corpus lockfile", run_id),
-        eval_set_version=_text_field(run.get("eval_set_version"), "eval-set version", run_id),
-        hardware_profile=_text_field(run.get("hardware_profile"), "hardware profile", run_id),
-        slice=_optional_text_field(run.get("slice"), "slice", run_id),
+        run_id=_text_field(run.get("run_id"), "run id", fix),
+        product_version=_text_field(run.get("product_version"), "product version", fix),
+        corpus_lockfile=_optional_text_field(run.get("corpus_lockfile"), "corpus lockfile", fix),
+        eval_set_version=_text_field(run.get("eval_set_version"), "eval-set version", fix),
+        hardware_profile=_text_field(run.get("hardware_profile"), "hardware profile", fix),
+        slice=_optional_text_field(run.get("slice"), "slice", fix),
         overrides=overrides,
-        repeats=_int_field(run.get("repeats"), "repeats", run_id),
-        git_sha=_optional_text_field(run.get("git_sha"), "git sha", run_id),
+        repeats=_int_field(run.get("repeats"), "repeats", fix),
+        git_sha=_optional_text_field(run.get("git_sha"), "git sha", fix),
         git_dirty=git_dirty,
-        set_digest=_text_field(run.get("set_digest"), "set digest", run_id),
-        verdict=_text_field(run.get("verdict"), "verdict", run_id),
-        results=results,
+        set_digest=_text_field(run.get("set_digest"), "set digest", fix),
+        verdict=_text_field(run.get("verdict"), "verdict", fix),
+        forced=_bool_field(run.get("forced"), "forced state", fix),
+        partial=_bool_field(run.get("partial"), "partial state", fix),
+        decision=decision,
+        results=tuple(
+            (
+                _text_field(row.get("case_id"), "case id", fix),
+                _int_field(row.get("repeat"), "repeat", fix),
+                _text_field(row.get("verdict"), "result verdict", fix),
+            )
+            for row in rows
+        ),
     )
 
 
-def _decode_run(stdout: str, run_id: str) -> tuple[RecordedRun | None, Problem | None]:
+def _metrics_read_sql(run_id: str) -> str:
+    lines: list[str] = []
+    bound_id = _text_variable("run_id", run_id, lines, "::uuid")
+    lines.append(
+        f"""WITH selected_run AS (
+    SELECT run_id, started_at, slice, eval_set_version, set_digest, repeats, kind, partial
+    FROM eval_runs
+    WHERE run_id = {bound_id}
+    ORDER BY started_at DESC
+    LIMIT 1
+)
+SELECT json_build_object(
+    'run', (
+        SELECT json_build_object(
+            'run_id', run_id::text,
+            'slice', slice,
+            'eval_set_version', eval_set_version,
+            'set_digest', set_digest,
+            'repeats', repeats,
+            'kind', kind,
+            'partial', partial
+        )
+        FROM selected_run
+    ),
+    'results', COALESCE(
+        (
+            SELECT json_agg(
+                json_build_object(
+                    'case_id', result.case_id,
+                    'repeat', result.repeat,
+                    'metrics', result.metrics
+                )
+                ORDER BY result.case_id, result.repeat
+            )
+            FROM eval_results AS result
+            JOIN selected_run AS run
+              ON run.run_id = result.run_id
+             AND run.started_at = result.run_started_at
+        ),
+        '[]'::json
+    )
+);"""
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _decoded_comparand(stdout: str, run_id: str, fix: str) -> ComparandRun:
+    run, rows = _reader_payload(stdout, run_id, fix)
+    return ComparandRun(
+        run_id=_text_field(run.get("run_id"), "run id", fix),
+        slice=_optional_text_field(run.get("slice"), "slice", fix),
+        eval_set_version=_text_field(run.get("eval_set_version"), "eval-set version", fix),
+        set_digest=_text_field(run.get("set_digest"), "set digest", fix),
+        repeats=_int_field(run.get("repeats"), "repeats", fix),
+        kind=_text_field(run.get("kind"), "kind", fix),
+        partial=_bool_field(run.get("partial"), "partial state", fix),
+        results=tuple(
+            (
+                _text_field(row.get("case_id"), "case id", fix),
+                _int_field(row.get("repeat"), "repeat", fix),
+                _mapping_field(row.get("metrics"), "result metrics", fix),
+            )
+            for row in rows
+        ),
+    )
+
+
+def _read_document(
+    io: Host, rendered_dir: PathLike, run_id: str, sql: str, fix: str
+) -> str | Problem:
+    """Run one reader statement as the metrics role and return its stdout."""
+
     try:
-        return _decoded_run(stdout, run_id), None
-    except _ReadRefusal as refused:
-        return None, refused.problem
+        UUID(run_id)
+    except (AttributeError, TypeError, ValueError):
+        return Problem(
+            f"run id is not a UUID: {run_id!r}",
+            "Supply the id of a recorded evaluation run, then retry.",
+        )
+    try:
+        result = io.run(_reader_argv(rendered_dir), input=sql)
+    except (OSError, subprocess.SubprocessError):
+        return Problem("eval reader failed: command could not run", fix)
+    if result.returncode != 0:
+        return Problem(f"eval reader failed: exit {result.returncode}", fix)
+    return result.stdout
 
 
 def read_run(
@@ -442,20 +585,34 @@ def read_run(
 ) -> tuple[RecordedRun | None, Problem | None]:
     """Read one recorded run and its content-free verdicts, or return a refusal."""
 
+    stdout = _read_document(io, rendered_dir, run_id, _read_sql(run_id), _reader_fix(run_id))
+    if isinstance(stdout, Problem):
+        return None, stdout
     try:
-        UUID(run_id)
-    except (AttributeError, TypeError, ValueError):
-        return None, Problem(
-            f"run id is not a UUID: {run_id!r}",
-            "Supply the id of a recorded evaluation run, then retry.",
-        )
+        return _decoded_run(stdout, run_id), None
+    except _ReadRefusal as refused:
+        return None, refused.problem
+
+
+def read_run_metrics(
+    io: Host, rendered_dir: PathLike, run_id: str
+) -> tuple[ComparandRun | None, Problem | None]:
+    """Read a recorded run's code-computed metrics, never its judge mapping.
+
+    A decision pairs against these per-case metrics; the statement selects each
+    result's case id, repeat, and ``metrics`` alone, so no judge-derived value
+    can reach a paired figure. A reader that cannot run answers with the
+    database's logs, since the id itself was well formed.
+    """
+
+    fix = stack.logs_fix(rendered_dir, POSTGRES_SERVICE)
+    stdout = _read_document(io, rendered_dir, run_id, _metrics_read_sql(run_id), fix)
+    if isinstance(stdout, Problem):
+        return None, stdout
     try:
-        result = io.run(_reader_argv(rendered_dir), input=_read_sql(run_id))
-    except (OSError, subprocess.SubprocessError):
-        return None, _read_problem("eval reader failed: command could not run", run_id)
-    if result.returncode != 0:
-        return None, _read_problem(f"eval reader failed: exit {result.returncode}", run_id)
-    return _decode_run(result.stdout, run_id)
+        return _decoded_comparand(stdout, run_id, fix), None
+    except _ReadRefusal as refused:
+        return None, refused.problem
 
 
 def _run(io: Host, rendered_dir: PathLike, sql: str) -> str | None:

@@ -12,6 +12,7 @@ from gideon.evaluation import (
     judgments_slice,
     smoke_slice,
 )
+from gideon.evaluation.decision import DecisionMetric
 from gideon.evaluation.evalset import LoadedSet
 from gideon.evaluation.results import RunContext, SliceResult
 
@@ -41,6 +42,8 @@ class SliceSpec:
     with no second reader.
     ``engine_calls`` estimates the engine requests one counted run makes; None
     leaves its size bound to the quiet window.
+    A slice with a decision metric runs one repeat per call so the command can
+    repeat it; its ``repeats`` value is one.
     """
 
     runner: Callable[[LoadedSet, str, RunContext], SliceResult]
@@ -54,6 +57,7 @@ class SliceSpec:
     gate_pass: str
     gate_fail: str
     gate_fix: str
+    decision: DecisionMetric | None = None
 
 
 SLICE_RUNNERS: Final[Mapping[str, SliceSpec]] = {
@@ -108,6 +112,7 @@ SLICE_RUNNERS: Final[Mapping[str, SliceSpec]] = {
         gate_pass="every positive blocked, over-trips within the ceiling, no leak, the frontend sample agreeing",
         gate_fail="a family's gate failed",
         gate_fix="Review the per-family report lines and the ids they list, then retry.",
+        decision=guardrails_slice.FALSE_REFUSAL,
     ),
     "general-smoke": SliceSpec(
         runner=general_smoke_slice.run_general_smoke,

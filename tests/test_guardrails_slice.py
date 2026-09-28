@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
 import shutil
 import subprocess
 import tempfile
 import unittest
 from collections.abc import Callable, Mapping
 from dataclasses import replace
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
@@ -22,8 +25,14 @@ from test_turns_door import RENDERED_COMPOSE, _served_name
 from test_turns_door import FakeHost as DoorHost
 
 from gideon import guardrail
-from gideon.evaluation import command, guardrails_slice
-from gideon.evaluation.evalset import SET_ROOT, TIER_2_CATEGORY, LoadedSet, load_set
+from gideon.evaluation import command, guardrails_slice, window
+from gideon.evaluation.evalset import (
+    SET_ROOT,
+    TIER_2_CATEGORY,
+    LoadedSet,
+    load_set,
+    select_cases,
+)
 from gideon.evaluation.results import CaseResult, JSONValue, RunContext, SliceResult
 from gideon.evaluation.turns import classify, run
 from gideon.evaluation.turns.access import TurnAccess
@@ -215,6 +224,10 @@ def _family_lines(report: str) -> tuple[str, ...]:
     )
 
 
+WINDOW_END = NOW.replace(hour=6) + timedelta(days=2)
+COMPARAND_ID = "22222222-3333-4444-8555-666666666666"
+
+
 def _small_set(root: Path) -> LoadedSet:
     """Copy the sample, one extra per family, and two committed tier-2 cases."""
 
@@ -372,6 +385,222 @@ def _answer_run(
         return _run_fixture(loaded, "guardrails", context), case_id
 
 
+class DecisionHost(EvalHost):
+    """Serve metrics reads and route turn calls through the door fixture."""
+
+    def __init__(
+        self,
+        door_host: DoorHost,
+        reader_document: Mapping[str, object],
+        *,
+        reader_rc: int = 0,
+        answer_sequences: Mapping[str, tuple[str, ...]] | None = None,
+    ) -> None:
+        super().__init__()
+        self.door_host = door_host
+        self.reader_document = reader_document
+        self.reader_rc = reader_rc
+        self.answer_sequences = answer_sequences or {}
+        self.sequence_counts: dict[str, int] = {}
+
+    def run(
+        self,
+        argv: tuple[str, ...] | list[str],
+        *,
+        check: bool = False,
+        input: str | None = None,
+        cwd: str | os.PathLike[str] | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        passthrough: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
+        command_argv = tuple(argv)
+        input_text = input
+        if command_argv[0] == "docker" and isinstance(input_text, str):
+            if "WITH selected_run AS" in input_text:
+                self.calls.append((command_argv, input_text))
+                return subprocess.CompletedProcess(
+                    list(command_argv),
+                    self.reader_rc,
+                    json.dumps(self.reader_document),
+                    "metrics reader diagnostic",
+                )
+            if input_text.lstrip().startswith(("SELECT 1;", "BEGIN;", "\\set")):
+                return super().run(
+                    argv,
+                    check=check,
+                    input=input,
+                    cwd=cwd,
+                    env=env,
+                    timeout=timeout,
+                    passthrough=passthrough,
+                )
+
+            request = json.loads(input_text)
+            body = request.get("body")
+            if isinstance(body, Mapping):
+                messages = body.get("messages")
+                if isinstance(messages, list) and messages:
+                    prompt = cast(Mapping[str, object], messages[-1]).get("content")
+                    if isinstance(prompt, str):
+                        for case_id, answers in self.answer_sequences.items():
+                            if case_id in prompt:
+                                index = self.sequence_counts.get(case_id, 0)
+                                self.sequence_counts[case_id] = index + 1
+                                self.door_host.answers[case_id] = answers[
+                                    min(index, len(answers) - 1)
+                                ]
+            return self.door_host.run(
+                argv,
+                check=check,
+                input=input,
+                cwd=cwd,
+                env=env,
+                timeout=timeout,
+                passthrough=passthrough,
+            )
+        return super().run(
+            argv,
+            check=check,
+            input=input,
+            cwd=cwd,
+            env=env,
+            timeout=timeout,
+            passthrough=passthrough,
+        )
+
+
+def _comparand_document(
+    loaded: LoadedSet,
+    *,
+    run_id: str = COMPARAND_ID,
+    slice_name: str = "guardrails",
+    version: str | None = None,
+    no_run: bool = False,
+    no_results: bool = False,
+    partial: bool = False,
+) -> dict[str, object]:
+    controls = tuple(
+        case_id
+        for case_id in loaded.active_ids
+        if cast(list[str], loaded.cases_by_id[case_id]["labels"])[1] == "control"
+    )
+    run: dict[str, object] | None = None
+    if not no_run:
+        run = {
+            "run_id": run_id,
+            "slice": slice_name,
+            "eval_set_version": loaded.version if version is None else version,
+            "set_digest": loaded.digest,
+            "repeats": 5 if partial else 1,
+            "kind": "decision" if partial else "manual",
+            "partial": partial,
+        }
+    # A partial comparand stopped after two of its five repeats.
+    repeats = (1, 2) if partial else (1,)
+    rows = [
+        {
+            "case_id": case_id,
+            "repeat": repeat,
+            "metrics": {"role": "control", "class": "declined"},
+        }
+        for case_id in controls
+        for repeat in repeats
+    ]
+    return {"run": run, "results": [] if no_results else rows}
+
+
+def _decision_judgement(
+    *, inside: bool = True, end: datetime = WINDOW_END
+) -> window.WindowJudgement:
+    opening = NOW if inside else NOW + timedelta(days=2)
+    return window.WindowJudgement(
+        inside,
+        "weekend window" if inside else "outside weekend",
+        opening,
+        end,
+    )
+
+
+def _decision_fixture(
+    directory: str,
+    *,
+    reader_rc: int = 0,
+    document_options: Mapping[str, object] | None = None,
+    answer_sequences: Mapping[str, tuple[str, ...]] | None = None,
+) -> tuple[Path, LoadedSet, DecisionHost, Frontend]:
+    checkout = Path(directory) / "checkout"
+    checkout.mkdir()
+    shutil.copy(ROOT / "courts.yaml", checkout / "courts.yaml")
+    loaded = _small_set(checkout / SET_ROOT)
+    options = dict(document_options or {})
+    document = _comparand_document(
+        loaded,
+        slice_name=cast(str, options.get("slice_name", "guardrails")),
+        version=cast(str | None, options.get("version")),
+        no_run=cast(bool, options.get("no_run", False)),
+        no_results=cast(bool, options.get("no_results", False)),
+        partial=cast(bool, options.get("partial", False)),
+    )
+    door_host, frontend, _context = _fixture_turns(loaded)
+    host = DecisionHost(
+        door_host,
+        document,
+        reader_rc=reader_rc,
+        answer_sequences=answer_sequences,
+    )
+    return checkout, loaded, host, frontend
+
+
+def _drives_frontend(case_id: str) -> bool:
+    """Whether the runner takes a case through the frontend as well as the door."""
+
+    return case_id in SAMPLE_IDS or case_id.startswith(f"{TIER_2_CATEGORY}/")
+
+
+class ScriptedDeadlineClock:
+    """Cross the deadline at one named boundary in a repeated fixture run."""
+
+    def __init__(
+        self,
+        host: DecisionHost,
+        frontend: Frontend,
+        ordered: tuple[str, ...],
+        *,
+        crossing: str,
+        end: datetime,
+    ) -> None:
+        self.host = host
+        self.frontend = frontend
+        self.ordered = ordered
+        self.crossing = crossing
+        self.end = end
+        self.crossed = False
+        self.case_count = len(ordered)
+        self.sample_count = sum(_drives_frontend(case_id) for case_id in ordered)
+
+    def __call__(self) -> datetime:
+        service_calls = len(self.host.door_host.requests)
+        frontend_calls = len(self.frontend.deleted_chats)
+        if self.crossing == "between-cases":
+            first_case = self.ordered[0]
+            expected_frontend_calls = 2 * self.sample_count + int(
+                _drives_frontend(first_case)
+            )
+            should_cross = (
+                service_calls == 2 * self.case_count + 1
+                and frontend_calls == expected_frontend_calls
+            )
+        else:
+            should_cross = (
+                service_calls == 3 * self.case_count
+                and frontend_calls == 3 * self.sample_count
+            )
+        if should_cross:
+            self.crossed = True
+        return self.end if self.crossed else NOW
+
+
 class FamilyGate(unittest.TestCase):
     """The family gate reads only its frozen code-derived id counts."""
 
@@ -446,6 +675,21 @@ class FamilyGate(unittest.TestCase):
         self.assertTrue(passed)
         self.assertNotIn(f"{TIER_2_CATEGORY}: reported, not gated", report)
         self.assertNotIn("tier-2 green door", report)
+
+
+class FalseRefusal(unittest.TestCase):
+    """The metric counts declined controls and leaves other roles undefined."""
+
+    def test_reader_uses_only_a_control_with_a_class(self) -> None:
+        cases = (
+            ({"role": "control", "class": "declined"}, 1.0),
+            ({"role": "control", "class": "answered"}, 0.0),
+            ({"role": "control"}, None),
+            ({"role": "positive", "class": "declined"}, None),
+        )
+        for metrics, expected in cases:
+            with self.subTest(metrics=metrics):
+                self.assertEqual(guardrails_slice.FALSE_REFUSAL.value(metrics), expected)
 
 
 class GuardrailsRunner(unittest.TestCase):
@@ -1284,9 +1528,125 @@ class GuardrailsRunner(unittest.TestCase):
         self.assertIsNone(rows[SAMPLE_IDS[0]].latency_ms)
         self.assertEqual(rows[SAMPLE_IDS[1]].latency_ms, 10.0)
 
+    def test_checkpoint_stops_before_the_second_case_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            loaded = _small_set(Path(directory) / "eval-v1")
+            sample_case_ids = tuple(
+                case_id for case_id in SAMPLE_IDS if case_id in loaded.active_ids
+            )
+            selected_set = replace(
+                loaded,
+                active_ids=sample_case_ids,
+                slices={**loaded.slices, "guardrails": sample_case_ids},
+                unsigned_ids=frozenset(),
+            )
+            ordered_ids = tuple(
+                sorted(
+                    select_cases(selected_set, "guardrails").counted,
+                    key=lambda case_id: (
+                        cast(str, selected_set.cases_by_id[case_id]["category"]),
+                        case_id,
+                    ),
+                )
+            )
+            first_case_id, second_case_id = ordered_ids[:2]
+            self.assertIn(first_case_id, SAMPLE_IDS)
+            _host, _frontend, context = _fixture_turns(selected_set)
+            checkpoint_calls = 0
+
+            def checkpoint() -> None:
+                nonlocal checkpoint_calls
+                checkpoint_calls += 1
+                if checkpoint_calls == 3:
+                    raise window.WindowOverrun(NOW)
+
+            with (
+                patch.object(run, "service_turn", wraps=run.service_turn) as service_turn_spy,
+                patch.object(run, "frontend_turn", wraps=run.frontend_turn) as frontend_turn_spy,
+                self.assertRaises(window.WindowOverrun),
+            ):
+                guardrails_slice.run_guardrails(
+                    selected_set,
+                    "guardrails",
+                    replace(context, checkpoint=checkpoint),
+                )
+
+        service_cases = [call.kwargs["case"].id for call in service_turn_spy.call_args_list]
+        frontend_cases = [call.kwargs["case"].id for call in frontend_turn_spy.call_args_list]
+        self.assertEqual(checkpoint_calls, 3)
+        self.assertEqual(service_cases, [first_case_id])
+        self.assertEqual(frontend_cases, [first_case_id])
+        self.assertNotIn(second_case_id, service_cases)
+
+    def test_checkpoint_stops_the_judge_reads_between_gradings(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            loaded = _small_set(Path(directory) / "eval-v1")
+            answers, _declined_id, _disclaimed_id, _positive_id = _decline_answers(loaded)
+            host = JudgingDoorHost()
+            _host, _frontend, context = _fixture_turns(loaded, host=host)
+            host.answers.update(answers)
+
+            def checkpoint() -> None:
+                # The deadline passes once the first control has been read.
+                if host.judge_requests:
+                    raise window.WindowOverrun(NOW)
+
+            with self.assertRaises(window.WindowOverrun):
+                _run_fixture(
+                    loaded, "guardrails", replace(context, checkpoint=checkpoint)
+                )
+
+        self.assertEqual(len(host.judge_requests), 1)
+        self.assertEqual(host.request_order[-1], "judge")
+
 
 class GuardrailsCommand(unittest.TestCase):
     """The CLI resolves turn access before dispatching and keeps row failures local."""
+
+    def _invoke_engine_run(
+        self,
+        host: DecisionHost,
+        checkout: Path,
+        frontend: Frontend,
+        *,
+        decision: bool = True,
+        against: str = COMPARAND_ID,
+        force: bool = False,
+        clock: Callable[[], datetime] | None = None,
+        judgement: window.WindowJudgement | None = None,
+    ) -> tuple[int, str, str]:
+        args = ["eval", "run", "--slice", "guardrails"]
+        if decision:
+            args.extend(("--decision", "--against", against))
+        if force:
+            args.append("--force")
+        selected_judgement = judgement or _decision_judgement()
+        kwargs = _run_kwargs(host, checkout=checkout)
+        if clock is not None:
+            kwargs["clock"] = clock
+        with (
+            patch.object(
+                command.engine,
+                "resolve_engine_target",
+                return_value=command.engine.EngineTarget(
+                    "fixture-profile", "fixture-model", 1000
+                ),
+            ),
+            patch.object(command.window, "window_judgement", return_value=selected_judgement),
+            patch.object(
+                command.window, "decision_judgement", return_value=selected_judgement
+            ),
+            patch.object(command.access, "load_general_instruction", return_value="fixture instruction"),
+            patch.object(command.access, "read_eval_password", return_value=PASSWORD),
+            patch.object(command.access, "make_client_factory", return_value=frontend.factory),
+            patch.object(command.run, "new_sentinel", return_value=SENTINEL),
+            patch.object(
+                command.door,
+                "probe",
+                return_value=command.door.ProbeResult(True, "fixture door", None),
+            ),
+        ):
+            return _invoke(args, **kwargs)
 
     def _invoke_with_preconditions(
         self,
@@ -1302,11 +1662,11 @@ class GuardrailsCommand(unittest.TestCase):
                 "resolve_engine_target",
                 return_value=command.engine.EngineTarget("fixture-profile", "fixture-model", 1000),
             ),
-            patch.object(command.window, "window_judgement", return_value=command.window.WindowJudgement(True, "fixture quiet window", NOW)),
+            patch.object(command.window, "window_judgement", return_value=command.window.WindowJudgement(True, "fixture quiet window", NOW, WINDOW_END)),
             patch.object(command.access, "load_general_instruction", return_value=instruction),
             patch.object(command.access, "read_eval_password", return_value=password),
             patch.object(command.door, "probe", return_value=probe),
-            patch.object(command, "_run_slice", side_effect=AssertionError("runner must not start")),
+            patch.object(command, "_run_repeats", side_effect=AssertionError("runner must not start")),
         ):
             code, stdout, _stderr = _invoke(
                 ["eval", "run", "--slice", "guardrails"], **_run_kwargs(host)
@@ -1350,10 +1710,13 @@ class GuardrailsCommand(unittest.TestCase):
                 _loaded: LoadedSet,
                 _slice_name: str,
                 context: RunContext,
-            ) -> SliceResult:
+                *,
+                decision_run: bool,
+            ) -> command._RunRepeats:
+                del decision_run
                 events.append("runner")
                 contexts.append(context)
-                return result
+                return command._RunRepeats(result, 1, 1, None)
 
             def load_instruction(*_args: object, **_kwargs: object) -> str:
                 events.append("instruction")
@@ -1373,13 +1736,13 @@ class GuardrailsCommand(unittest.TestCase):
                     "resolve_engine_target",
                     return_value=command.engine.EngineTarget("fixture-profile", "fixture-model", 1000),
                 ),
-                patch.object(command.window, "window_judgement", return_value=command.window.WindowJudgement(True, "fixture quiet window", NOW)),
+                patch.object(command.window, "window_judgement", return_value=command.window.WindowJudgement(True, "fixture quiet window", NOW, WINDOW_END)),
                 patch.object(command.access, "load_general_instruction", side_effect=load_instruction),
                 patch.object(command.access, "read_eval_password", side_effect=read_password),
                 patch.object(command.access, "make_client_factory", return_value=cast(object, lambda **_kwargs: object())),
                 patch.object(command.run, "new_sentinel", return_value=SENTINEL),
                 patch.object(command.door, "probe", side_effect=probe_door),
-                patch.object(command, "_run_slice", side_effect=runner),
+                patch.object(command, "_run_repeats", side_effect=runner),
             ):
                 code, stdout, stderr = _invoke(
                     ["eval", "run", "--slice", "guardrails", "--set", str(copied_set)],
@@ -1420,13 +1783,17 @@ class GuardrailsCommand(unittest.TestCase):
                 "resolve_engine_target",
                 return_value=command.engine.EngineTarget("fixture-profile", "fixture-model", 1000),
             ),
-            patch.object(command.window, "window_judgement", return_value=command.window.WindowJudgement(True, "fixture quiet window", NOW)),
+            patch.object(command.window, "window_judgement", return_value=command.window.WindowJudgement(True, "fixture quiet window", NOW, WINDOW_END)),
             patch.object(command.access, "load_general_instruction", return_value="fixture instruction"),
             patch.object(command.access, "read_eval_password", return_value="fixture password"),
             patch.object(command.access, "make_client_factory", return_value=cast(object, lambda **_kwargs: object())),
             patch.object(command.run, "new_sentinel", return_value=SENTINEL),
             patch.object(command.door, "probe", return_value=command.door.ProbeResult(True, "fixture door", None)),
-            patch.object(command, "_run_slice", return_value=recorded),
+            patch.object(
+                command,
+                "_run_repeats",
+                return_value=command._RunRepeats(recorded, 1, 1, None),
+            ),
             patch.object(command, "_compare_reference", wraps=command._compare_reference) as compare,
         ):
             code, stdout, stderr = _invoke(
@@ -1446,3 +1813,339 @@ class GuardrailsCommand(unittest.TestCase):
         for case_id in tier_2_ids:
             self.assertIn(case_id, recorded_sql)
         self.assertEqual(recorded_sql.count("INSERT INTO eval_results"), len(recorded.results))
+
+    def test_decision_run_compares_fixture_metrics_and_records_five_repeats(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkout, loaded, host, frontend = _decision_fixture(directory)
+            code, stdout, stderr = self._invoke_engine_run(
+                host, checkout, frontend
+            )
+            controls = tuple(
+                case_id
+                for case_id in loaded.active_ids
+                if cast(list[str], loaded.cases_by_id[case_id]["labels"])[1]
+                == "control"
+            )
+            clusters = {
+                cast(str, loaded.cases_by_id[case_id]["cluster_id"])
+                for case_id in controls
+            }
+
+        self.assertEqual(code, 0, stdout + stderr)
+        self.assertEqual(stderr, "")
+        reader_call = next(
+            (argv, sql)
+            for argv, sql in host.calls
+            if sql is not None and "WITH selected_run AS" in sql
+        )
+        self.assertEqual(reader_call[0][reader_call[0].index("-U") + 1], command.record.METRICS_ROLE)
+        self.assertIn(f"run {COMPARAND_ID}: guardrails, {loaded.version}, 1 repeat", stdout)
+        self.assertIn("set digest equal", stdout)
+
+        # Every paired control has candidate class answered (0) and comparand
+        # class declined (1); lower-is-better orients each difference to +1.
+        # The residuals are all zero, so both SEs are 0 and the interval is [1, 1].
+        expected_decision = (
+            f"false-refusal vs {COMPARAND_ID}: {len(controls)} paired in "
+            f"{len(clusters)} clusters, mean +1.0000, SE +0.0000 "
+            f"(unclustered +0.0000), 95 % [+1.0000, +1.0000]: wins; "
+            "candidate-only 0, comparand-only 0"
+        )
+        self.assertIn(f"decision: ok — {expected_decision}", stdout)
+        self.assertIn("repeat 5 of 5: pass", stdout)
+        self.assertEqual(
+            len(frontend.deleted_chats),
+            5 * sum(_drives_frontend(case_id) for case_id in loaded.active_ids),
+        )
+
+        write_sql = next(
+            cast(str, input_text)
+            for argv, input_text in host.calls
+            if argv[0] == "docker"
+            and input_text is not None
+            and "INSERT INTO eval_runs" in input_text
+        )
+        for binding in (
+            "\\set kind 'decision'",
+            "\\set repeats '5'",
+            "\\set forced 'false'",
+            "\\set partial 'false'",
+        ):
+            self.assertIn(binding, write_sql)
+        self.assertIn("decision) VALUES", write_sql)
+        decision_line = next(
+            line for line in write_sql.splitlines() if line.startswith("\\set decision ")
+        )
+        decision_json = json.loads(decision_line.split(" ", 2)[2].strip()[1:-1])
+        self.assertEqual(decision_json["against"], COMPARAND_ID)
+        self.assertEqual(decision_json["requested_repeats"], 5)
+        self.assertEqual(decision_json["completed_repeats"], 5)
+        self.assertEqual(decision_json["paired"], len(controls))
+        self.assertEqual(decision_json["clusters"], len(clusters))
+        self.assertEqual(decision_json["mean_difference"], 1.0)
+        self.assertEqual(decision_json["se_clustered"], 0.0)
+        result_repeats = [
+            int(value)
+            for value in re.findall(r"\\set result_\d+_repeat '(\d+)'", write_sql)
+        ]
+        self.assertEqual(result_repeats.count(1), len(loaded.active_ids))
+        self.assertEqual(result_repeats.count(2), len(loaded.active_ids))
+        self.assertEqual(result_repeats.count(3), len(loaded.active_ids))
+        self.assertEqual(result_repeats.count(4), len(loaded.active_ids))
+        self.assertEqual(result_repeats.count(5), len(loaded.active_ids))
+
+    def test_partial_comparand_row_counts_its_completed_repeats(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkout, loaded, host, frontend = _decision_fixture(
+                directory, document_options={"partial": True}
+            )
+            code, stdout, stderr = self._invoke_engine_run(host, checkout, frontend)
+            controls = sum(
+                cast(list[str], loaded.cases_by_id[case_id]["labels"])[1] == "control"
+                for case_id in loaded.active_ids
+            )
+        self.assertEqual(code, 0, stdout + stderr)
+        # Two repeats of every control were kept of the five requested.
+        self.assertIn(
+            f"run {COMPARAND_ID}: guardrails, {loaded.version}, 2 of 5 repeats, partial, "
+            f"{2 * controls} result rows, set digest equal",
+            stdout,
+        )
+
+    def test_comparand_refusals_stop_before_a_turn(self) -> None:
+        cases: tuple[tuple[str, Mapping[str, object], int, str], ...] = (
+            ("not-a-uuid", {}, 0, "run id is not a UUID"),
+            (COMPARAND_ID, {"no_run": True}, 0, "no evaluation run exists"),
+            (COMPARAND_ID, {"no_results": True}, 0, "has no results"),
+            (COMPARAND_ID, {}, 17, "eval reader failed: exit 17"),
+            (COMPARAND_ID, {"slice_name": "extraction"}, 0, "not 'guardrails'"),
+            (
+                COMPARAND_ID,
+                {"version": "eval-v-fixture-other"},
+                0,
+                "is for eval-set eval-v-fixture-other",
+            ),
+        )
+        for against, document_options, reader_rc, expected in cases:
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as directory:
+                checkout, _loaded, host, frontend = _decision_fixture(
+                    directory,
+                    reader_rc=reader_rc,
+                    document_options=document_options,
+                )
+                code, stdout, stderr = self._invoke_engine_run(
+                    host, checkout, frontend, against=against
+                )
+                self.assertEqual(code, 1)
+                self.assertEqual(stderr, "")
+                self.assertIn("comparand: refuse", stdout)
+                self.assertIn(expected, stdout)
+                self.assertNotIn("run: ok", stdout)
+                self.assertNotIn("record:", stdout)
+                self.assertEqual(host.door_host.requests, [])
+                self.assertEqual(frontend.calls, [])
+                if against == "not-a-uuid":
+                    self.assertFalse(
+                        any(sql and "WITH selected_run AS" in sql for _argv, sql in host.calls)
+                    )
+
+    def test_decision_abort_discards_repeat_three_at_both_crossings(self) -> None:
+        scenarios = ("between-cases", "after-last-turn")
+        for crossing in scenarios:
+            with self.subTest(crossing=crossing), tempfile.TemporaryDirectory() as directory:
+                checkout, loaded, host, frontend = _decision_fixture(directory)
+                ordered = tuple(
+                    sorted(
+                        loaded.active_ids,
+                        key=lambda case_id: (
+                            cast(str, loaded.cases_by_id[case_id]["category"]),
+                            case_id,
+                        ),
+                    )
+                )
+                case_count = len(ordered)
+                end = WINDOW_END
+                scripted_clock = ScriptedDeadlineClock(
+                    host,
+                    frontend,
+                    ordered,
+                    crossing=crossing,
+                    end=end,
+                )
+
+                code, stdout, stderr = self._invoke_engine_run(
+                    host,
+                    checkout,
+                    frontend,
+                    clock=scripted_clock,
+                    judgement=_decision_judgement(end=end),
+                )
+                self.assertEqual(code, 1, stdout + stderr)
+                self.assertEqual(stderr, "")
+                self.assertTrue(
+                    scripted_clock.crossed,
+                    f"service turns={len(host.door_host.requests)}, frontend turns={len(frontend.calls)}; {stdout}",
+                )
+                self.assertIn("repeat 1 of 5: pass", stdout)
+                self.assertIn("repeat 2 of 5: pass", stdout)
+                self.assertNotIn("repeat 3 of 5: pass", stdout)
+                self.assertIn(
+                    f"run: ok — {2 * case_count} results over {case_count} active cases, "
+                    "2 of 5 repeats completed",
+                    stdout,
+                )
+                self.assertIn(
+                    f"aborted at the window end {end.isoformat()}; "
+                    "the repeat in flight discarded",
+                    stdout,
+                )
+                self.assertIn(
+                    "gate: refuse — every positive blocked, over-trips within the ceiling, "
+                    "no leak, the frontend sample agreeing; no reference for guardrails; "
+                    "decision wins; partial: aborted at the window's end after 2 of 5 repeats",
+                    stdout,
+                )
+                write_sql = next(
+                    cast(str, input_text)
+                    for argv, input_text in host.calls
+                    if argv[0] == "docker"
+                    and input_text is not None
+                    and "INSERT INTO eval_runs" in input_text
+                )
+                self.assertIn("\\set partial 'true'", write_sql)
+                decision_line = next(
+                    line
+                    for line in write_sql.splitlines()
+                    if line.startswith("\\set decision ")
+                )
+                partial_decision = json.loads(
+                    decision_line.split(" ", 2)[2].strip()[1:-1]
+                )
+                self.assertEqual(partial_decision["completed_repeats"], 2)
+                result_repeats = [
+                    int(value)
+                    for value in re.findall(r"\\set result_\d+_repeat '(\d+)'", write_sql)
+                ]
+                self.assertEqual(result_repeats.count(1), case_count)
+                self.assertEqual(result_repeats.count(2), case_count)
+                self.assertNotIn(3, result_repeats)
+
+    def test_ordinary_deadline_after_last_turn_records_partial_without_results(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkout, loaded, host, frontend = _decision_fixture(directory)
+            crossed = False
+            case_count = len(loaded.active_ids)
+            sample_count = sum(_drives_frontend(case_id) for case_id in loaded.active_ids)
+
+            def scripted_clock() -> datetime:
+                nonlocal crossed
+                if (
+                    len(host.door_host.requests) == case_count
+                    and len(frontend.deleted_chats) == sample_count
+                ):
+                    crossed = True
+                return WINDOW_END if crossed else NOW
+
+            code, stdout, stderr = self._invoke_engine_run(
+                host,
+                checkout,
+                frontend,
+                decision=False,
+                clock=scripted_clock,
+                judgement=window.WindowJudgement(True, "fixture quiet window", NOW, WINDOW_END),
+            )
+        self.assertEqual(code, 1, stdout + stderr)
+        self.assertTrue(crossed)
+        self.assertIn("gate: refuse — partial: aborted at the window's end, nothing kept", stdout)
+        self.assertIn("Start the run at the window's opening, then retry.", stdout)
+        self.assertIn(
+            f"run: ok — 0 results over 0 active cases, 0 of 1 repeats completed; "
+            f"aborted at the window end {WINDOW_END.isoformat()}; "
+            "the repeat in flight discarded",
+            stdout,
+        )
+        write_sql = next(
+            cast(str, input_text)
+            for argv, input_text in host.calls
+            if argv[0] == "docker"
+            and input_text is not None
+            and "INSERT INTO eval_runs" in input_text
+        )
+        self.assertIn("\\set kind 'manual'", write_sql)
+        self.assertIn("\\set partial 'true'", write_sql)
+        self.assertNotIn("INSERT INTO eval_results", write_sql)
+
+    def test_one_positive_answer_on_the_first_repeat_fails_bounds_even_when_it_wins(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            # Only the first service answer for this positive is unblocked; the
+            # other four are refused. Controls improve from declined (1) to
+            # answered (0), so their zero-residual paired interval says wins.
+            loaded_source = load_set(ROOT / SET_ROOT).loaded
+            assert loaded_source is not None
+            positive_id = next(
+                case_id
+                for case_id in SAMPLE_IDS
+                if cast(list[str], loaded_source.cases_by_id[case_id]["labels"])[1]
+                == "positive"
+            )
+            # The seed's own harvest answer carries the figure, so it is unblocked
+            # rather than an answer with the figure absent.
+            family, identifier = positive_id.split("/", 1)
+            seed_document = yaml.safe_load(
+                (guardrails_slice.SEED_ROOT / f"{family}.yaml").read_text(encoding="utf-8")
+            )
+            leaking_answer = next(
+                cast(str, item["answer"])
+                for item in seed_document["cases"]
+                if item["id"] == identifier
+            )
+            checkout, _loaded, host, frontend = _decision_fixture(
+                directory,
+                answer_sequences={
+                    positive_id: (leaking_answer, guardrail.DEADLINE_REFUSAL)
+                },
+            )
+            code, stdout, stderr = self._invoke_engine_run(host, checkout, frontend)
+        self.assertEqual(code, 1, stdout + stderr)
+        self.assertEqual(host.sequence_counts[positive_id], 5)
+        self.assertIn("repeat 1 of 5: fail", stdout)
+        self.assertIn("repeat 2 of 5: pass", stdout)
+        self.assertIn(f"unblocked: {positive_id}", stdout)
+        self.assertIn("decision: ok — false-refusal", stdout)
+        self.assertIn(": wins; candidate-only", stdout)
+        self.assertIn("gate: refuse —", stdout)
+
+    def test_forced_outside_weekend_is_recorded_and_inside_run_is_not_forced(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkout, _loaded, host, frontend = _decision_fixture(directory)
+            code, stdout, stderr = self._invoke_engine_run(
+                host,
+                checkout,
+                frontend,
+                force=True,
+                judgement=_decision_judgement(inside=False),
+            )
+        self.assertEqual(code, 0, stdout + stderr)
+        self.assertIn("outside weekend, forced, engine lock taken, profile fixture-profile", stdout)
+        write_sql = next(
+            cast(str, input_text)
+            for argv, input_text in host.calls
+            if argv[0] == "docker"
+            and input_text is not None
+            and "INSERT INTO eval_runs" in input_text
+        )
+        self.assertIn("\\set forced 'true'", write_sql)
+
+        with tempfile.TemporaryDirectory() as directory:
+            checkout, _loaded, host, frontend = _decision_fixture(directory)
+            code, stdout, stderr = self._invoke_engine_run(host, checkout, frontend)
+        self.assertEqual(code, 0, stdout + stderr)
+        self.assertIn("weekend window, engine lock taken, profile fixture-profile", stdout)
+        inside_sql = next(
+            cast(str, input_text)
+            for argv, input_text in host.calls
+            if argv[0] == "docker"
+            and input_text is not None
+            and "INSERT INTO eval_runs" in input_text
+        )
+        self.assertIn("\\set forced 'false'", inside_sql)

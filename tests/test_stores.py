@@ -24,6 +24,7 @@ MIGRATIONS = {
     f"{ROOT}/migrations/0002_metrics_reader.sql": (ROOT / "migrations/0002_metrics_reader.sql").read_text(),
     f"{ROOT}/migrations/0003_guardrail_trips.sql": (ROOT / "migrations/0003_guardrail_trips.sql").read_text(),
     f"{ROOT}/migrations/0004_eval_runs.sql": (ROOT / "migrations/0004_eval_runs.sql").read_text(),
+    f"{ROOT}/migrations/0005_eval_runs_decision.sql": (ROOT / "migrations/0005_eval_runs_decision.sql").read_text(),
     f"{ROOT}/migrations/0006_guardrail_trips_chat_id.sql": (ROOT / "migrations/0006_guardrail_trips_chat_id.sql").read_text(),
     f"{ROOT}/migrations/0007_second.sql": "CREATE TABLE second (id int);\n",
     f"{ROOT}/migrations/README.md": "not a migration",
@@ -142,6 +143,7 @@ class Converge(unittest.TestCase):
                 "0002_metrics_reader",
                 "0003_guardrail_trips",
                 "0004_eval_runs",
+                "0005_eval_runs_decision",
                 "0006_guardrail_trips_chat_id",
                 "0007_second",
             ),
@@ -167,7 +169,7 @@ class Converge(unittest.TestCase):
         self.assertIn(psql("gideon", "gideon", *STATEMENT), argvs)
         self.assertIn(psql("gideon", "gideon", *QUERY), argvs)
         migration_runs = [call for call in host.calls if call[0] == psql("gideon", "gideon", *MIGRATION)]
-        self.assertEqual(len(migration_runs), 6)
+        self.assertEqual(len(migration_runs), 7)
         first_migration = MIGRATIONS[f"{ROOT}/migrations/0001_audit_log.sql"]
         self.assertTrue((migration_runs[0][1] or "").startswith(first_migration))
         self.assertTrue((migration_runs[0][1] or "").endswith("INSERT INTO schema_migrations (version) VALUES ('0001_audit_log');\n"))
@@ -264,6 +266,7 @@ class Converge(unittest.TestCase):
                 "0002_metrics_reader",
                 "0003_guardrail_trips",
                 "0004_eval_runs",
+                "0005_eval_runs_decision",
                 "0006_guardrail_trips_chat_id",
             ),
         )
@@ -274,6 +277,7 @@ class Converge(unittest.TestCase):
                 "0002_metrics_reader",
                 "0003_guardrail_trips",
                 "0004_eval_runs",
+                "0005_eval_runs_decision",
                 "0006_guardrail_trips_chat_id",
             ],
         )
@@ -289,6 +293,7 @@ class Converge(unittest.TestCase):
                 "0002_metrics_reader",
                 "0003_guardrail_trips",
                 "0004_eval_runs",
+                "0005_eval_runs_decision",
                 "0006_guardrail_trips_chat_id",
                 "0007_second",
             ),
@@ -376,3 +381,12 @@ class Migration0004(unittest.TestCase):
         self.assertNotIn("GRANT SELECT ON TABLE eval_results TO gideon_eval", text)
         self.assertNotIn("REFERENCES", text)
         self.assertNotIn("schema_migrations", text)
+
+
+class Migration0005(unittest.TestCase):
+    def test_decision_columns_keep_existing_runs_and_allow_no_decision(self) -> None:
+        text = MIGRATIONS[f"{ROOT}/migrations/0005_eval_runs_decision.sql"]
+        self.assertIn("ALTER TABLE eval_runs", text)
+        self.assertIn("ADD COLUMN forced boolean NOT NULL DEFAULT false", text)
+        self.assertIn("ADD COLUMN partial boolean NOT NULL DEFAULT false", text)
+        self.assertIn("ADD COLUMN decision jsonb", text)

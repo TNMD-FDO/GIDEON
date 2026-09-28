@@ -6,10 +6,11 @@ import subprocess
 import unittest
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from unittest.mock import patch
 
 import gideon
 from gideon.evaluation import record
-from gideon.host import audit, stores
+from gideon.host import audit, stack, stores
 from gideon.host.stack import exec_argv
 from gideon.host.sysio import Command, PathLike
 
@@ -120,6 +121,9 @@ def run_row(**overrides: object) -> record.RunRow:
         "git_dirty": False,
         "set_digest": "b" * 64,
         "verdict": "pass",
+        "forced": False,
+        "partial": False,
+        "decision": None,
     }
     values.update(overrides)
     return record.RunRow(**values)  # type: ignore[arg-type]
@@ -200,6 +204,9 @@ class WriteRows(unittest.TestCase):
         self.assertLess(second, insert)
         self.assertLess(result_a, result_z)
         self.assertIn("\\set overrides '{\"a\": 1, \"z\": 2}'", sql)
+        self.assertIn("\\set forced 'false'", sql)
+        self.assertIn("\\set partial 'false'", sql)
+        self.assertIn("forced, partial, decision", sql)
         self.assertIn("\\set result_0_metrics '{\"alpha\": {\"hits\": 1}, \"zeta\": {\"misses\": 0}}'", sql)
         self.assertIn("::jsonb", sql)
         self.assertEqual(sql.count("INSERT INTO eval_results"), 2)
@@ -292,6 +299,30 @@ class WriteRows(unittest.TestCase):
         self.assertEqual(problem, "eval writer failed: exit 1")
         self.assertNotIn("diagnostic with row values", problem or "")
 
+    def test_run_decision_json_is_bound_and_none_is_sql_null(self) -> None:
+        decision = {"metric": "fixture-rate", "paired": 3, "verdict": "undecided"}
+        for value in (decision, None):
+            with self.subTest(value=value):
+                host = FakeHost()
+                self.assertIsNone(
+                    record.write_rows(
+                        host,
+                        RENDERED,
+                        run_row(forced=True, partial=True, decision=value),
+                        (),
+                    )
+                )
+                sql = host.calls[0][1]
+                assert sql is not None
+                insert = sql[sql.index("INSERT INTO eval_runs"):]
+                if value is None:
+                    self.assertNotIn("\\set decision ", sql)
+                    self.assertTrue(insert.rstrip().endswith("NULL);"))
+                else:
+                    line = next(line for line in sql.splitlines() if line.startswith("\\set decision "))
+                    self.assertEqual(json.loads(read_psql_set(line, "decision")), decision)
+                    self.assertIn("::jsonb", insert)
+
     def test_probe_uses_the_evaluation_role_and_selects_one(self) -> None:
         host = FakeHost()
         self.assertIsNone(record.probe(host, RENDERED))
@@ -311,6 +342,9 @@ class ReadRows(unittest.TestCase):
                 "slice": "extraction",
                 "overrides": {},
                 "repeats": 1,
+                "forced": False,
+                "partial": True,
+                "decision": {"metric": "fixture-rate", "verdict": "wins"},
                 "git_sha": "a" * 40,
                 "git_dirty": False,
                 "set_digest": "b" * 64,
@@ -326,6 +360,9 @@ class ReadRows(unittest.TestCase):
         self.assertIsNotNone(loaded)
         assert loaded is not None
         self.assertEqual(loaded.run_id, run_id)
+        self.assertFalse(loaded.forced)
+        self.assertTrue(loaded.partial)
+        self.assertEqual(loaded.decision, {"metric": "fixture-rate", "verdict": "wins"})
         self.assertEqual(loaded.results, (("extraction-001", 1, "pass"),))
         argv, sql = host.calls[0]
         self.assertEqual(argv, READER_PSQL)
@@ -335,6 +372,100 @@ class ReadRows(unittest.TestCase):
         self.assertEqual(sql.count(run_id), 1)
         self.assertNotIn("metrics", sql)
         self.assertNotIn("judge", sql)
+
+    def test_read_run_metrics_uses_metrics_reader_and_decodes_measurements(self) -> None:
+        run_id = "11111111-2222-4333-8444-555555555555"
+        document = {
+            "run": {
+                "run_id": run_id,
+                "slice": "guardrails",
+                "eval_set_version": "eval-v-fictitious-test",
+                "set_digest": "c" * 64,
+                "repeats": 1,
+                "kind": "manual",
+                "partial": False,
+            },
+            "results": [
+                {"case_id": "guardrails-fixture-001", "repeat": 1, "metrics": {"false_refusal": 1.0}}
+            ],
+        }
+        host = FakeHost(stdout=json.dumps(document))
+
+        loaded, problem = record.read_run_metrics(host, RENDERED, run_id)
+
+        self.assertIsNone(problem)
+        self.assertIsNotNone(loaded)
+        assert loaded is not None
+        self.assertEqual(loaded.run_id, run_id)
+        self.assertEqual(loaded.results, (("guardrails-fixture-001", 1, {"false_refusal": 1.0}),))
+        argv, sql = host.calls[0]
+        self.assertEqual(argv, READER_PSQL)
+        self.assertIn(record.METRICS_ROLE, argv)
+        assert sql is not None
+        self.assertIn(f"\\set run_id '{run_id}'", sql)
+        self.assertIn("WHERE run_id = :'run_id'::uuid", sql)
+        self.assertEqual(sql.count(run_id), 1)
+        self.assertNotIn("judge", sql)
+
+    def test_read_run_metrics_refusals_carry_their_fixes(self) -> None:
+        run_id = "11111111-2222-4333-8444-555555555555"
+        base_run = {
+            "run_id": run_id,
+            "slice": "guardrails",
+            "eval_set_version": "eval-v-fictitious-test",
+            "set_digest": "c" * 64,
+            "repeats": 1,
+            "kind": "manual",
+            "partial": False,
+        }
+        logs_fix = stack.logs_fix(RENDERED, record.POSTGRES_SERVICE)
+        cases = (
+            (
+                FakeHost(stdout=json.dumps({"run": None, "results": []})),
+                "no evaluation run exists",
+                "Use the id of a recorded evaluation run, then retry.",
+            ),
+            (
+                FakeHost(stdout=json.dumps({"run": base_run, "results": []})),
+                "has no results",
+                "Use a completed evaluation run with result rows, then retry.",
+            ),
+            (FakeHost(rc=2), "exit 2", logs_fix),
+            (
+                FakeHost(stdout=json.dumps({"run": base_run, "results": [{"case_id": "x", "repeat": 1}]})),
+                "invalid result metrics",
+                logs_fix,
+            ),
+        )
+        for host, expected, fix in cases:
+            with self.subTest(expected=expected):
+                loaded, problem = record.read_run_metrics(host, RENDERED, run_id)
+                self.assertIsNone(loaded)
+                self.assertIsNotNone(problem)
+                assert problem is not None
+                self.assertIn(expected, problem.problem)
+                self.assertEqual(problem.fix, fix)
+
+    def test_read_run_metrics_refuses_when_reader_cannot_run(self) -> None:
+        host = FakeHost()
+        run_id = "11111111-2222-4333-8444-555555555555"
+        with patch.object(host, "run", side_effect=OSError("psql is unavailable")):
+            loaded, problem = record.read_run_metrics(host, RENDERED, run_id)
+        self.assertIsNone(loaded)
+        self.assertIsNotNone(problem)
+        assert problem is not None
+        self.assertIn("command could not run", problem.problem)
+        self.assertEqual(problem.fix, stack.logs_fix(RENDERED, record.POSTGRES_SERVICE))
+        self.assertEqual(host.calls, [])
+
+    def test_read_run_metrics_rejects_invalid_uuid_before_reader_io(self) -> None:
+        host = FakeHost()
+        loaded, problem = record.read_run_metrics(host, RENDERED, "not-a-uuid")
+        self.assertIsNone(loaded)
+        self.assertIsNotNone(problem)
+        assert problem is not None
+        self.assertIn("not a UUID", problem.problem)
+        self.assertEqual(host.calls, [])
 
     def test_non_uuid_is_refused_before_reader_io(self) -> None:
         host = FakeHost()

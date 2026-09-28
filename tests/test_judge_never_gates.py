@@ -39,12 +39,27 @@ REFERENCE_GATE_ATTRIBUTES: frozenset[str] = GATE_ATTRIBUTES | frozenset(
         "join",
     }
 )
+DECISION_GATE_ATTRIBUTES: frozenset[str] = REFERENCE_GATE_ATTRIBUTES | frozenset(
+    {
+        # the paired verdict word and whether all requested repeats completed
+        "PairedDecision",
+        "LOSES",
+        "verdict",
+        "partial",
+        "requested_repeats",
+        "completed_repeats",
+    }
+)
 GATE_FUNCTIONS: tuple[tuple[ModuleType, str, frozenset[str]], ...] = (
     (command, "_gate", GATE_ATTRIBUTES),
     (command, "_reference_gate", REFERENCE_GATE_ATTRIBUTES),
+    (command, "_decision_gate", DECISION_GATE_ATTRIBUTES),
+    (command, "_reference_detail", REFERENCE_GATE_ATTRIBUTES),
+    (command, "_reference_fix", REFERENCE_GATE_ATTRIBUTES),
 )
-"""Every function that prints a gate row, with the attributes it may read. A
-ticket whose gate reads something new adds its function and its names here."""
+"""Every function that prints a gate row, and every helper a gate reads through,
+with the attributes it may read. A ticket whose gate reads something new adds
+its function and its names here."""
 FORBIDDEN_METRIC_NAMES: frozenset[str] = frozenset(
     {"judge", "score", "band", "failure_mode"}
 )
@@ -345,7 +360,18 @@ class GateAST(unittest.TestCase):
             and node.args[0].value == "gate"
         }
         walked = {name for module, name, _allowed in GATE_FUNCTIONS if module is command}
-        self.assertEqual(printers, walked)
+        self.assertLessEqual(printers, walked)
+        # A walked function that prints no row is a helper a gate reads through,
+        # so it must be called from a printer or its entry holds nothing.
+        called = {
+            node.func.id
+            for function in ast.walk(tree)
+            if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and function.name in printers
+            for node in ast.walk(function)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        self.assertLessEqual(walked - printers, called)
 
 
 if __name__ == "__main__":

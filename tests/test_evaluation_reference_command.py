@@ -156,6 +156,9 @@ def _document(loaded, **overrides: object) -> dict[str, object]:
         "git_dirty": False,
         "set_digest": loaded.digest,
         "verdict": "pass",
+        "forced": False,
+        "partial": False,
+        "decision": None,
     }
     run.update(overrides)
     return {"run": run, "results": results if result_rows is None else result_rows}
@@ -246,6 +249,20 @@ class CheckRefusals(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("does not name the recorded git sha", stdout)
         self.assertIn("rev-parse --verify", stdout)
+
+    def test_partial_recorded_run_refuses_before_digest_check(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = _checkout(directory)
+            loaded = _loaded(checkout)
+            host = WriterHost(
+                _document(loaded, partial=True, set_digest="fictitious-other-digest")
+            )
+            code, stdout, stderr = _invoke(host, checkout)
+        self.assertEqual(code, 1)
+        self.assertIn("recorded run is partial", stdout)
+        self.assertIn("Use a run that completed every repeat, then retry.", stdout)
+        self.assertNotIn("different eval-set digest", stderr + stdout)
+        self.assertNotIn("write: ok", stdout)
 
     def test_regression_names_ids_and_the_remove_path(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

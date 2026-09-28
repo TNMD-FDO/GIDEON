@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 from collections.abc import Mapping
 from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
@@ -13,7 +14,7 @@ from test_evaluation_run import NOW, ROOT, EvalHost, _invoke, _run_kwargs
 from test_turns import PASSWORD, Frontend, _tagged_case_id
 
 from gideon import guardrail
-from gideon.evaluation import command, general_smoke_slice
+from gideon.evaluation import command, general_smoke_slice, window
 from gideon.evaluation.evalset import SET_ROOT, LoadedSet, load_set, select_cases
 from gideon.evaluation.results import CaseResult, RunContext
 from gideon.evaluation.turns import run
@@ -303,6 +304,29 @@ class GeneralSmokeRunner(unittest.TestCase):
         self.assertIn("cleanup-failed", result.report)
         self.assertIn(run.unverified_fix("gideon-eval"), result.report)
 
+    def test_checkpoint_stops_before_the_next_turn(self) -> None:
+        loaded = _loaded()
+        frontend = SmokeFrontend(loaded)
+        _host, context = _context(frontend, [])
+        checkpoint_calls = 0
+
+        def checkpoint() -> None:
+            nonlocal checkpoint_calls
+            checkpoint_calls += 1
+            if checkpoint_calls == 3:
+                raise window.WindowOverrun(NOW)
+
+        with (
+            patch.object(run, "frontend_turn", wraps=run.frontend_turn) as turn_spy,
+            self.assertRaises(window.WindowOverrun),
+        ):
+            general_smoke_slice.run_general_smoke(
+                loaded, "general-smoke", replace(context, checkpoint=checkpoint)
+            )
+
+        self.assertEqual(turn_spy.call_count, 2)
+        self.assertEqual(len(frontend.deleted_chats), 2)
+
     def test_signin_refusal_fails_every_result_without_making_turns(self) -> None:
         loaded = _loaded()
         frontend = SmokeFrontend(loaded)
@@ -360,7 +384,9 @@ class GeneralSmokeCommand(unittest.TestCase):
             patch.object(
                 command.window,
                 "window_judgement",
-                return_value=command.window.WindowJudgement(True, "fixture quiet window", NOW),
+                return_value=command.window.WindowJudgement(
+                    True, "fixture quiet window", NOW, NOW + timedelta(days=1)
+                ),
             ),
             patch.object(command.access, "load_general_instruction", return_value="fictional instruction"),
             patch.object(command.access, "read_eval_password", return_value=PASSWORD),

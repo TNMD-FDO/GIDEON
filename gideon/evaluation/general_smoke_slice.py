@@ -280,6 +280,7 @@ def run_general_smoke(eval_set: LoadedSet, slice_name: str, context: RunContext)
     chats_deleted = 0
     for repeat in repeats:
         for record in records:
+            context.checkpoint()
             case = _turn_case(record)
             row = run.frontend_turn(
                 spec,

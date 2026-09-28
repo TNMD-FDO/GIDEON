@@ -56,12 +56,21 @@ class SliceResult:
     results: tuple[CaseResult, ...]
 
 
+def _no_checkpoint() -> None:
+    """Let a run with no deadline pass every checkpoint."""
+
+
 @dataclass(frozen=True, slots=True)
 class RunContext:
     """The host seams and runner settings for one evaluation slice.
 
     ``turns`` is present for a slice that drives turns through the harness's
     service or managed frontend drivers.
+    ``checkpoint`` is called by a runner between cases and before a case's
+    further turns, and a runner never catches what it raises: past the run's
+    deadline it raises ``window.WindowOverrun``, so no turn starts after the
+    window's end. The command also calls it around every runner call, which
+    bounds a runner that never calls it; the default is a no-op.
     """
 
     host: Host
@@ -72,3 +81,4 @@ class RunContext:
     progress: Callable[[str], None]
     ranked: Mapping[str, tuple[Coordinates, ...]] | None = None
     turns: TurnAccess | None = None
+    checkpoint: Callable[[], None] = _no_checkpoint

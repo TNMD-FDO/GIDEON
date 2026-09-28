@@ -127,6 +127,7 @@ def run_judge_triples(eval_set: LoadedSet, slice_name: str, context: RunContext)
     case_results: list[CaseResult] = []
     for repeat in range(1, context.repeats + 1):
         for case_id in case_ids:
+            context.checkpoint()
             question, reference, candidate = inputs[case_id]
             grading = judge.grade(
                 context.host,

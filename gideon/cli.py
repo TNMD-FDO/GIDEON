@@ -289,8 +289,21 @@ def build_parser() -> argparse.ArgumentParser:
     eval_ = commands.add_parser("eval", help="evaluation suites")
     eval_sub = eval_.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)
     eval_run = eval_sub.add_parser("run", help="run the eval suites")
-    eval_run.add_argument("--decision", action="store_true", help="a decision run")
-    eval_run.add_argument("--force", action="store_true", help="run despite a dirty state")
+    eval_run.add_argument(
+        "--decision",
+        action="store_true",
+        help="a decision run: five repeats paired against --against's recorded run",
+    )
+    eval_run.add_argument(
+        "--force",
+        action="store_true",
+        help="start outside the window, recorded on the run row",
+    )
+    eval_run.add_argument(
+        "--against",
+        metavar="ID",
+        help="recorded run a --decision run pairs against",
+    )
     eval_run.add_argument(
         "--stack",
         choices=("production", "ci"),

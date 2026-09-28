@@ -19,7 +19,7 @@ from unittest.mock import patch
 
 import gideon
 from gideon.cli import main
-from gideon.evaluation import command, judge, reference, signoffs, stacks
+from gideon.evaluation import command, judge, reference, signoffs, stacks, window
 from gideon.evaluation.evalset import SET_ROOT, LoadedSet, load_set, select_cases
 from gideon.evaluation.extraction_slice import run_extraction
 from gideon.evaluation.results import CaseResult, RunContext, SliceResult
@@ -338,6 +338,88 @@ class Runner(unittest.TestCase):
 class Command(unittest.TestCase):
     """The in-process CLI exposes the ordered run and its refusals."""
 
+    def test_quiet_window_refusal_fix_names_force(self) -> None:
+        opening = NOW + timedelta(days=1)
+        judgement = window.WindowJudgement(
+            False,
+            "fixture quiet window",
+            opening,
+            NOW + timedelta(days=2),
+        )
+        with patch.object(command.window, "window_judgement", return_value=judgement):
+            code, stdout, stderr = _invoke(
+                ["eval", "run", "--slice", "guardrails"],
+                **_run_kwargs(EvalHost()),
+            )
+        self.assertEqual(code, 1)
+        self.assertEqual(stderr, "")
+        self.assertIn("preconditions: refuse", stdout)
+        self.assertIn(
+            f"Next opening is {opening.isoformat()}; add --force for an announced window.",
+            stdout,
+        )
+        self.assertNotIn("run: ok", stdout)
+
+    def test_force_outside_quiet_window_runs_engine_slice(self) -> None:
+        host = EvalHost()
+        loaded = load_set(ROOT / SET_ROOT).loaded
+        assert loaded is not None
+        case_id = next(
+            case_id
+            for case_id in loaded.active_ids
+            if case_id in loaded.slices["guardrails"]
+        )
+        result = SliceResult(True, "fixture runner report\n", (CaseResult(case_id, 1, "pass", {}),))
+        opening = NOW + timedelta(days=1)
+        judgement = window.WindowJudgement(
+            False,
+            "fixture quiet window",
+            opening,
+            NOW + timedelta(days=2),
+        )
+        with (
+            patch.object(
+                command.engine,
+                "resolve_engine_target",
+                return_value=command.engine.EngineTarget(
+                    "fixture-profile", "fixture-model", 1000
+                ),
+            ),
+            patch.object(command.window, "window_judgement", return_value=judgement),
+            patch.object(command.access, "load_general_instruction", return_value="fixture instruction"),
+            patch.object(command.access, "read_eval_password", return_value="fixture password"),
+            patch.object(command.access, "make_client_factory", return_value=cast(object, lambda **_kwargs: object())),
+            patch.object(command.run, "new_sentinel", return_value="fixture-sentinel"),
+            patch.object(
+                command.door,
+                "probe",
+                return_value=command.door.ProbeResult(True, "fixture door", None),
+            ),
+            patch.object(
+                command,
+                "_run_repeats",
+                return_value=command._RunRepeats(result, 1, 1, None),
+            ) as runner,
+        ):
+            code, stdout, stderr = _invoke(
+                ["eval", "run", "--slice", "guardrails", "--force"],
+                **_run_kwargs(host),
+            )
+        self.assertEqual(code, 0, stdout + stderr)
+        self.assertEqual(stderr, "")
+        self.assertIn("preconditions: ok", stdout)
+        self.assertIn("fixture quiet window, forced, engine lock taken, profile fixture-profile", stdout)
+        self.assertIn("run: ok", stdout)
+        runner.assert_called_once()
+        write_sql = next(
+            cast(str, input_text)
+            for argv, input_text in host.calls
+            if argv[0] == "docker"
+            and input_text is not None
+            and "INSERT INTO eval_runs" in input_text
+        )
+        self.assertIn("\\set forced 'true'", write_sql)
+
     def test_clean_committed_run_prints_ordered_rows(self) -> None:
         host = EvalHost()
         code, stdout, stderr = _invoke(
@@ -467,7 +549,9 @@ class Command(unittest.TestCase):
             ),
              *clean.results[1:]),
         )
-        with patch.object(command, "_run_slice", return_value=failing_result):
+        with patch.object(
+            command, "_run_repeats", return_value=command._RunRepeats(failing_result, 1, 1, None)
+        ):
             code, stdout, _ = _invoke(
                 ["eval", "run", "--slice", "extraction"], **_run_kwargs(host)
             )
@@ -489,7 +573,7 @@ class Command(unittest.TestCase):
             _reference_files(checkout, loaded, clean.results)
             host = EvalHost()
             failing = _changed_result(loaded, {target: "fail"})
-            with patch.object(command, "_run_slice", return_value=failing):
+            with patch.object(command, "_run_repeats", return_value=command._RunRepeats(failing, 1, 1, None)):
                 code, stdout, stderr = _invoke(
                     ["eval", "run", "--slice", "extraction"],
                     **_run_kwargs(host, checkout=checkout),
@@ -564,7 +648,7 @@ class Command(unittest.TestCase):
             _reference_files(checkout, loaded, clean.results)
             failing = _changed_result(loaded, {target: "fail"})
             failing = replace(failing, verdict=False)
-            with patch.object(command, "_run_slice", return_value=failing):
+            with patch.object(command, "_run_repeats", return_value=command._RunRepeats(failing, 1, 1, None)):
                 code, stdout, stderr = _invoke(
                     ["eval", "run", "--slice", "extraction"],
                     **_run_kwargs(EvalHost(), checkout=checkout),
@@ -633,7 +717,7 @@ class Command(unittest.TestCase):
             _reference_files(checkout, loaded, clean.results)
             host = EvalHost()
             failing = _changed_result(loaded, {target: "fail"})
-            with patch.object(command, "_run_slice", return_value=failing):
+            with patch.object(command, "_run_repeats", return_value=command._RunRepeats(failing, 1, 1, None)):
                 code, stdout, stderr = _invoke(
                     ["eval", "run", "--slice", "extraction", "--set", str(copied)],
                     **_run_kwargs(host, checkout=checkout),
@@ -722,36 +806,44 @@ class Command(unittest.TestCase):
                 )
                 self.assertIn("as the checkout owner", stdout)
 
-    def test_flags_and_slice_selection_refuse_with_fixes(self) -> None:
+    def test_flag_rules_refuse_before_any_stage(self) -> None:
         cases = (
-            ["eval", "run", "--slice", "extraction", "--decision"],
-            ["eval", "run", "--slice", "extraction", "--force"],
-            ["eval", "run"],
-            ["eval", "run", "--slice", "missing-slice"],
+            (["eval", "run", "--slice", "guardrails", "--decision"], "--decision requires --against"),
+            (["eval", "run", "--slice", "guardrails", "--against", RUN_ID], "--against requires --decision"),
+            (["eval", "run", "--slice", "extraction", "--decision", "--against", RUN_ID], "no decision metric"),
+            (["eval", "run", "--slice", "extraction", "--force"], "does not reach the engine"),
         )
-        for argv in cases:
+        for argv, expected in cases:
+            with self.subTest(argv=argv):
+                host = EvalHost()
+                code, stdout, stderr = _invoke(argv, **_run_kwargs(host))
+                self.assertEqual(code, 1)
+                self.assertEqual(stdout, "")
+                self.assertIn("gideon eval run:", stderr)
+                self.assertIn(expected, stderr)
+                self.assertIn("Fix:", stderr)
+                self.assertEqual(host.calls, [])
+
+    def test_slice_selection_refuses_with_fixes(self) -> None:
+        for argv in (["eval", "run"], ["eval", "run", "--slice", "missing-slice"]):
             with self.subTest(argv=argv):
                 code, stdout, stderr = _invoke(argv, **_run_kwargs(EvalHost()))
                 self.assertEqual(code, 1)
                 refusal_text = stderr if stderr else stdout
                 self.assertIn("Fix:", refusal_text)
-                if argv[-1] == "--decision":
-                    self.assertIn(
-                        "Run gideon eval run --slice extraction; decision runs "
-                        "land in a later release.",
-                        refusal_text,
-                    )
                 self.assertNotIn("reference:", stdout)
 
         next_opening = datetime(2026, 9, 21, 19, 0, tzinfo=UTC)
-        outside = command.window.WindowJudgement(False, "office hours", next_opening)
+        outside = command.window.WindowJudgement(
+            False, "office hours", next_opening, NOW + timedelta(days=1)
+        )
         with patch.object(command.window, "window_judgement", return_value=outside):
             code, stdout, stderr = _invoke(
                 ["eval", "run", "--slice", "judge-triples"],
                 **_run_kwargs(EvalHost()),
             )
         self.assertEqual(code, 1)
-        self.assertIn("--force lands in a later release.", stderr or stdout)
+        self.assertIn("add --force for an announced window.", stderr or stdout)
 
     def test_refused_load_prints_no_reference_line(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -847,7 +939,7 @@ class Command(unittest.TestCase):
             "unsigned result report\n",
             (CaseResult(unsigned_id, 1, "pass", {}, None, None),),
         )
-        with patch.object(command, "_run_slice", return_value=bad_result):
+        with patch.object(command, "_run_repeats", return_value=command._RunRepeats(bad_result, 1, 1, None)):
             code, stdout, stderr = _invoke(
                 ["eval", "run", "--slice", "extraction"], **_run_kwargs(EvalHost())
             )
@@ -933,7 +1025,7 @@ class EngineStackAndLock(unittest.TestCase):
         host = EvalHost()
         production_dir = Path("/tmp/fictitious-production-rendered")
         office = command.window.WindowJudgement(
-            False, "fictitious office hours", NOW + timedelta(hours=1)
+            False, "fictitious office hours", NOW + timedelta(hours=1), NOW + timedelta(days=1)
         )
         with patch.object(command.window, "window_judgement", return_value=office):
             code, stdout, stderr, observed = _invoke_smoke_command(
@@ -1061,7 +1153,7 @@ class EngineStackAndLock(unittest.TestCase):
             engine_calls=lambda _loaded, _slice: command.run.SMOKE_TURNS + 1,
         )
         outside = command.window.WindowJudgement(
-            False, "fictitious office closure", NOW + timedelta(hours=1)
+            False, "fictitious office closure", NOW + timedelta(hours=1), NOW + timedelta(days=1)
         )
         host = EvalHost()
         with (
@@ -1077,7 +1169,7 @@ class EngineStackAndLock(unittest.TestCase):
 
     def test_in_window_count_is_reported_without_a_waiver(self) -> None:
         inside = command.window.WindowJudgement(
-            True, "fictitious office hours", NOW + timedelta(hours=1)
+            True, "fictitious office hours", NOW + timedelta(hours=1), NOW + timedelta(days=1)
         )
         host = EvalHost()
         with patch.object(command.window, "window_judgement", return_value=inside):
@@ -1182,6 +1274,12 @@ class SliceRegistry(unittest.TestCase):
             {name for name, spec in SLICE_RUNNERS.items() if spec.engine_calls is not None},
             {"smoke"},
         )
+
+    def test_decision_slices_run_one_repeat_per_call(self) -> None:
+        for slice_name, spec in SLICE_RUNNERS.items():
+            if spec.decision is not None:
+                with self.subTest(slice_name=slice_name):
+                    self.assertEqual(spec.repeats, 1)
 
 
 class Imports(unittest.TestCase):

@@ -5,13 +5,14 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final, cast
 from uuid import uuid4
 
 import gideon
+from gideon.evaluation import decision as decision_stats
 from gideon.evaluation import ranked, rankmetrics, record, reference, stacks, window
 from gideon.evaluation.evalset import (
     SET_ROOT,
@@ -22,7 +23,7 @@ from gideon.evaluation.evalset import (
     print_findings,
     select_cases,
 )
-from gideon.evaluation.results import RunContext, SliceResult
+from gideon.evaluation.results import CaseResult, JSONValue, RunContext, SliceResult
 from gideon.evaluation.slices import SLICE_RUNNERS, SliceSpec
 from gideon.evaluation.turns import access, door, run
 from gideon.host import backuplock, courts, engine, nogpu, site, stack
@@ -30,11 +31,13 @@ from gideon.host.report import Problem, StageResult, print_stage, refusal
 from gideon.host.sysio import Host, LockingHost, PathLike, RealHost
 
 _COMMAND: Final[str] = "eval run"
-_FLAG_FIX: Final[str] = "Run gideon eval run --slice extraction; decision runs land in a later release."
 _SLICE_FIX: Final[str] = "Run gideon eval run --slice extraction."
 _LOAD_FIX: Final[str] = "Correct every listed eval-set finding, then retry."
 _NO_GPU_FIX: Final[str] = "Run the evaluation on a GPU host, then retry."
 _UNSIGNED_RESULT_FIX: Final[str] = "The runner must select through the loader, then retry."
+_WINDOW_START_FIX: Final[str] = "Start the run at the window's opening, then retry."
+_LOSES_FIX: Final[str] = "A change that loses is not adopted; keep the default."
+_PARTIAL_DETAIL: Final[str] = "partial: aborted at the window's end, nothing kept"
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +49,8 @@ class _EnginePreconditions:
     provenance: tuple[str | None, bool | None]
     site_config: site.SiteConfig
     turns: access.TurnAccess | None
+    end: datetime
+    forced: bool
 
 
 @dataclass(slots=True)
@@ -66,6 +71,22 @@ class _RecordOutcome:
 
     ok: bool
     written: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _RunRepeats:
+    """The kept results and counts needed to report a bounded run."""
+
+    result: SliceResult
+    requested_repeats: int
+    completed_repeats: int
+    overrun: datetime | None
+
+    @property
+    def partial(self) -> bool:
+        """Whether the run reached its deadline before every repeat completed."""
+
+        return self.overrun is not None
 
 
 def load_set_with_courts(
@@ -97,15 +118,79 @@ def _run_slice(
     return spec.runner(loaded, slice_name, context)
 
 
-def _gate(slice_result: SliceResult, slice_spec: SliceSpec) -> bool:
+def _run_repeats(
+    spec: SliceSpec,
+    loaded: LoadedSet,
+    slice_name: str,
+    context: RunContext,
+    *,
+    decision_run: bool,
+) -> _RunRepeats:
+    """Call the runner inside the run's deadline and keep only completed calls.
+
+    A decision run calls the runner once per repeat, relabelling each call's
+    results with its repeat number, since the runner itself runs one repeat;
+    an ordinary run is one call whose results keep the runner's numbering. The
+    checkpoint is called before and after every call, so a call whose last turn
+    crossed the deadline is discarded rather than kept: work past the window's
+    end never reaches a record. The overrun ends the loop here and is never
+    re-raised, so the completed repeats are still recorded and gated.
+    """
+
+    requested = decision_stats.DECISION_REPEATS if decision_run else spec.repeats
+    calls = requested if decision_run else 1
+    completed: list[SliceResult] = []
+    kept_results: list[CaseResult] = []
+    report_lines: list[str] = []
+    overrun: datetime | None = None
+
+    for repeat in range(1, calls + 1):
+        try:
+            context.checkpoint()
+            result = _run_slice(spec, loaded, slice_name, context)
+            context.checkpoint()
+        except window.WindowOverrun as exc:
+            overrun = exc.end
+            break
+        completed.append(result)
+        if decision_run:
+            kept_results.extend(replace(case, repeat=repeat) for case in result.results)
+            verdict = "pass" if result.verdict else "fail"
+            report_lines.append(f"repeat {repeat} of {requested}: {verdict}\n")
+            report_lines.append(result.report)
+            if result.report and not result.report.endswith("\n"):
+                report_lines.append("\n")
+
+    if decision_run:
+        # Zero tolerance holds on every repeat: one failing repeat fails the run.
+        return _RunRepeats(
+            SliceResult(
+                verdict=bool(completed) and all(repeat.verdict for repeat in completed),
+                report="".join(report_lines),
+                results=tuple(kept_results),
+            ),
+            requested,
+            len(completed),
+            overrun,
+        )
+    if completed:
+        return _RunRepeats(completed[0], requested, requested, None)
+    return _RunRepeats(SliceResult(False, "", ()), requested, 0, overrun)
+
+
+def _gate(slice_result: SliceResult, slice_spec: SliceSpec, *, partial: bool) -> bool:
     """Print the gate from only the slice verdict and the spec's gate texts.
 
     The gate of a slice that keeps no reference; ``_reference_gate`` is the
     other. The tripwire in ``tests/test_judge_never_gates.py`` reads this
     function's attributes and keeps score, metrics, judge fields, and case
-    results out of the gate.
+    results out of the gate. A partial run kept nothing, so its row names the
+    abort rather than a verdict the slice never reached.
     """
 
+    if partial:
+        print_stage(StageResult("gate", False, _PARTIAL_DETAIL, _WINDOW_START_FIX))
+        return False
     if slice_result.verdict:
         print_stage(StageResult("gate", True, slice_spec.gate_pass, ""))
         return True
@@ -168,6 +253,59 @@ def _compare_reference(
     return comparison, reference_version
 
 
+def _reference_detail(
+    comparison: reference.Comparison,
+    *,
+    slice_name: str,
+    set_version: str,
+    reference_version: str,
+    run_id: str,
+    written: bool,
+) -> str:
+    """Word the reference half of a gate row from the comparison alone.
+
+    Shared by ``_reference_gate`` and ``_decision_gate`` and walked by the
+    tripwire beside them, since a gate's reads include its helpers'.
+    """
+
+    if comparison.outcome == "absent":
+        return f"no reference for {slice_name}"
+    if comparison.outcome == "malformed":
+        return "reference malformed"
+    if comparison.outcome == "other-version":
+        return f"reference is for {reference_version}, not {set_version}"
+    if comparison.regressed:
+        count = len(comparison.regressed)
+        noun = "regression" if count == 1 else "regressions"
+        return f"{count} {noun} against {comparison.tag}"
+    detail = f"no regression against {comparison.tag}"
+    if comparison.outcome == "stale" and written:
+        detail += f"; re-record with gideon eval reference --run {run_id}"
+    return detail
+
+
+def _reference_fix(
+    comparison: reference.Comparison,
+    slice_spec: SliceSpec,
+    *,
+    slice_name: str,
+    run_id: str,
+    written: bool,
+    command_flags: str,
+) -> str:
+    """Return the fix for a failing reference half, or empty when it held."""
+
+    if comparison.regressed:
+        return reference.REGRESSION_FIX
+    if comparison.outcome == "other-version":
+        if written:
+            return f"Run sudo python3 -m gideon eval reference --run {run_id} as root with the stack up, then retry."
+        return _record_root_fix(slice_name, slice_spec, command_flags)
+    if comparison.outcome == "malformed":
+        return reference.SLICE_REPAIR_FIX
+    return ""
+
+
 def _reference_gate(
     slice_result: SliceResult,
     slice_spec: SliceSpec,
@@ -179,6 +317,7 @@ def _reference_gate(
     run_id: str,
     written: bool,
     command_flags: str,
+    partial: bool,
 ) -> bool:
     """Print the gate of a slice that compares against its reference.
 
@@ -187,40 +326,35 @@ def _reference_gate(
     which ``_compare_reference`` folds from per-case verdicts.
     """
 
+    if partial:
+        print_stage(StageResult("gate", False, _PARTIAL_DETAIL, _WINDOW_START_FIX))
+        return False
     bounds_ok = slice_result.verdict
     comparison_refused = comparison.outcome in {"other-version", "malformed"}
     gate_verdict = bounds_ok and not comparison.regressed and not comparison_refused
 
     bounds_detail = slice_spec.gate_pass if bounds_ok else slice_spec.gate_fail
-    if comparison.outcome == "absent":
-        reference_detail = f"no reference for {slice_name}"
-    elif comparison.outcome == "malformed":
-        reference_detail = "reference malformed"
-    elif comparison.outcome == "other-version":
-        reference_detail = f"reference is for {reference_version}, not {set_version}"
-    elif comparison.regressed:
-        count = len(comparison.regressed)
-        noun = "regression" if count == 1 else "regressions"
-        reference_detail = f"{count} {noun} against {comparison.tag}"
-    else:
-        reference_detail = f"no regression against {comparison.tag}"
-        if comparison.outcome == "stale" and written:
-            reference_detail += f"; re-record with gideon eval reference --run {run_id}"
-
+    reference_detail = _reference_detail(
+        comparison,
+        slice_name=slice_name,
+        set_version=set_version,
+        reference_version=reference_version,
+        run_id=run_id,
+        written=written,
+    )
     fixes: list[str] = []
     if not bounds_ok:
         fixes.append(slice_spec.gate_fix)
-    if comparison.regressed:
-        fixes.append(reference.REGRESSION_FIX)
-    elif comparison.outcome == "other-version":
-        if written:
-            fixes.append(
-                f"Run sudo python3 -m gideon eval reference --run {run_id} as root with the stack up, then retry."
-            )
-        else:
-            fixes.append(_record_root_fix(slice_name, slice_spec, command_flags))
-    elif comparison.outcome == "malformed":
-        fixes.append(reference.SLICE_REPAIR_FIX)
+    reference_fix = _reference_fix(
+        comparison,
+        slice_spec,
+        slice_name=slice_name,
+        run_id=run_id,
+        written=written,
+        command_flags=command_flags,
+    )
+    if reference_fix:
+        fixes.append(reference_fix)
 
     print_stage(
         StageResult(
@@ -230,6 +364,77 @@ def _reference_gate(
             "; ".join(fixes),
         )
     )
+    return gate_verdict
+
+
+def _decision_gate(
+    slice_result: SliceResult,
+    slice_spec: SliceSpec,
+    comparison: reference.Comparison,
+    paired: decision_stats.PairedDecision,
+    run_result: _RunRepeats,
+    *,
+    slice_name: str,
+    set_version: str,
+    reference_version: str,
+    run_id: str,
+    written: bool,
+    command_flags: str,
+) -> bool:
+    """Print the gate of a decision run: bounds, reference, decision, completion.
+
+    Walked by ``tests/test_judge_never_gates.py`` beside the other two gates:
+    beyond the reference gate's reads it reads the decision's verdict word and
+    the run's repeat counts alone, never a paired figure, so an interval can
+    reject a change but no judge-derived value can reach the gate. The slice
+    verdict is already every repeat's, so a bound broken on any one repeat
+    fails the run whatever the interval says. The fix is the first failing
+    half's.
+    """
+
+    bounds_ok = slice_result.verdict
+    reference_ok = not comparison.regressed and comparison.outcome not in {
+        "other-version",
+        "malformed",
+    }
+    loses = paired.verdict == decision_stats.LOSES
+    gate_verdict = bounds_ok and reference_ok and not loses and not run_result.partial
+
+    bounds_detail = slice_spec.gate_pass if bounds_ok else slice_spec.gate_fail
+    reference_detail = _reference_detail(
+        comparison,
+        slice_name=slice_name,
+        set_version=set_version,
+        reference_version=reference_version,
+        run_id=run_id,
+        written=written,
+    )
+    detail = f"{bounds_detail}; {reference_detail}; decision {paired.verdict}"
+    if run_result.partial:
+        detail += (
+            f"; partial: aborted at the window's end after {run_result.completed_repeats} "
+            f"of {run_result.requested_repeats} repeats"
+        )
+
+    if not bounds_ok:
+        fix = slice_spec.gate_fix
+    elif not reference_ok:
+        fix = _reference_fix(
+            comparison,
+            slice_spec,
+            slice_name=slice_name,
+            run_id=run_id,
+            written=written,
+            command_flags=command_flags,
+        )
+    elif loses:
+        fix = _LOSES_FIX
+    elif run_result.partial:
+        fix = _WINDOW_START_FIX
+    else:
+        fix = ""
+
+    print_stage(StageResult("gate", gate_verdict, detail, fix))
     return gate_verdict
 
 
@@ -300,6 +505,125 @@ def _ranked_forbidden_fix(slice_name: str) -> str:
     return f"Remove --ranked when running --slice {slice_name}, then retry."
 
 
+def _paired_flag_problem(
+    slice_name: str, *, decision: bool, against: object, kind: str
+) -> Problem | None:
+    if decision and (not isinstance(against, str) or not against):
+        return Problem(
+            "--decision requires --against",
+            f"Run gideon eval run --slice {slice_name} --decision --against <run id>, then retry.",
+        )
+    if against is not None and not decision:
+        return Problem("--against requires --decision", "Remove --against or add --decision, then retry.")
+    if decision and kind != "manual":
+        # A decision run's record carries the word decision, so another word would be lost.
+        return Problem(
+            f"--decision records its own kind, not {kind!r}",
+            f"Remove --kind {kind} when running --decision, then retry.",
+        )
+    return None
+
+
+def _flag_problem(
+    slice_name: str,
+    slice_spec: SliceSpec | None,
+    *,
+    decision: bool,
+    force: bool,
+) -> Problem | None:
+    """Refuse a flag the named slice cannot honour.
+
+    A slice no registry entry names is left to ``load``, whose refusal lists
+    the slices the set has, so a flag never masks the real mistake.
+    """
+
+    if slice_spec is None:
+        return None
+    if decision and slice_spec.decision is None:
+        names = ", ".join(sorted(name for name, spec in SLICE_RUNNERS.items() if spec.decision))
+        return Problem(
+            f"slice {slice_name!r} has no decision metric",
+            f"Choose a decision slice ({names}), then run gideon eval run --slice <name> "
+            "--decision --against <run id> and retry.",
+        )
+    if force and not slice_spec.reaches_engine:
+        return Problem(
+            f"--force is not valid for slice {slice_name!r}, which does not reach the engine",
+            f"Remove --force when running --slice {slice_name}, then retry.",
+        )
+    return None
+
+
+def _read_comparand(
+    io: Host,
+    rendered_dir: PathLike,
+    loaded: LoadedSet,
+    slice_name: str,
+    run_id: str,
+) -> record.ComparandRun | Problem:
+    """Read the recorded run a decision pairs against, or the refusal.
+
+    Pairing is by case id, so the comparand must be a run of the same slice
+    over the same eval-set version; a differing set digest is reported by the
+    stage, not refused, since a case's text never changes under its id.
+    """
+
+    comparand, problem = record.read_run_metrics(io, rendered_dir, run_id)
+    if problem is not None:
+        return problem
+    assert comparand is not None
+    if comparand.slice != slice_name:
+        return Problem(
+            f"comparand run {run_id} is for slice {comparand.slice!r}, not {slice_name!r}",
+            f"Pass --against the id of a recorded {slice_name} run, then retry.",
+        )
+    if comparand.eval_set_version != loaded.version:
+        return Problem(
+            f"comparand run {run_id} is for eval-set {comparand.eval_set_version}, not {loaded.version}",
+            f"Pass --against the id of a recorded {slice_name} run over {loaded.version}, then retry.",
+        )
+    return comparand
+
+
+def _paired_decision(
+    loaded: LoadedSet,
+    slice_result: SliceResult,
+    slice_spec: SliceSpec,
+    comparand: record.ComparandRun,
+    *,
+    requested_repeats: int,
+    completed_repeats: int,
+) -> decision_stats.PairedDecision:
+    metric = slice_spec.decision
+    assert metric is not None
+    candidate = decision_stats.per_case_values(
+        ((result.case_id, result.repeat, result.metrics) for result in slice_result.results),
+        metric,
+    )
+    against = decision_stats.per_case_values(
+        (
+            (case_id, repeat, cast(Mapping[str, JSONValue], metrics))
+            for case_id, repeat, metrics in comparand.results
+        ),
+        metric,
+    )
+    paired_ids = candidate.keys() & against.keys()
+    clusters = {
+        case_id: cast(str, loaded.cases_by_id[case_id]["cluster_id"])
+        for case_id in paired_ids
+    }
+    return decision_stats.paired_decision(
+        candidate,
+        against,
+        clusters,
+        metric,
+        against=comparand.run_id,
+        requested_repeats=requested_repeats,
+        completed_repeats=completed_repeats,
+        digest_equal=comparand.set_digest == loaded.digest,
+    )
+
+
 def _engine_preconditions(
     io: Host,
     rendered_dir: PathLike,
@@ -309,6 +633,8 @@ def _engine_preconditions(
     site_path: PathLike,
     started: datetime,
     supplied_set: bool,
+    decision: bool,
+    force: bool,
     slice_name: str,
     slice_spec: SliceSpec,
     loaded: LoadedSet,
@@ -369,14 +695,21 @@ def _engine_preconditions(
     else:
         lock_detail = "engine lock held by this process"
 
-    judgement = window.window_judgement(started, config.office.timezone)
+    judgement = (
+        window.decision_judgement(started, config.office.timezone)
+        if decision
+        else window.window_judgement(started, config.office.timezone)
+    )
     engine_call_count = (
         None
         if slice_spec.engine_calls is None
         else slice_spec.engine_calls(loaded, slice_name)
     )
+    # The any-hour allowance sizes one ordinary run; a decision repeats the
+    # slice, so it answers to the weekend window whatever one repeat costs.
     waived = (
-        not judgement.inside
+        not decision
+        and not judgement.inside
         and engine_call_count is not None
         and engine_call_count <= run.SMOKE_TURNS
     )
@@ -388,16 +721,21 @@ def _engine_preconditions(
         )
     else:
         calls_detail = f"{engine_call_count} engine calls, "
-    if not judgement.inside and not waived:
+    if not judgement.inside and not waived and not force:
         over = (
             ""
             if engine_call_count is None
             else f"; {engine_call_count} engine calls exceed the any-hour allowance of {run.SMOKE_TURNS}"
         )
-        detail = f"outside the quiet window: {judgement.description}{over}"
+        # The weekend judgement's description already says which window it missed.
+        detail = (
+            judgement.description
+            if decision
+            else f"outside the quiet window: {judgement.description}"
+        ) + over
         fix = (
             f"Next opening is {judgement.next_opening.isoformat()}{over}; "
-            "--force lands in a later release."
+            "add --force for an announced window."
         )
         print_stage(
             StageResult(
@@ -500,6 +838,7 @@ def _engine_preconditions(
     # states the guarantee and no more: the probe proves the role connects, so a
     # write can still fail after the run and is reported at the record stage.
     prompt_id = slice_spec.judge_prompt or "none"
+    window_detail = judgement.description + (", forced" if force else "")
     writer = (
         "set supplied, so no writer probe"
         if supplied_set
@@ -509,7 +848,7 @@ def _engine_preconditions(
         StageResult(
             "preconditions",
             True,
-            f"root, no-GPU marker absent, site, {judgement.description}, "
+            f"root, no-GPU marker absent, site, {window_detail}, "
             + f"{calls_detail}{lock_detail}, "
             f"profile {target.profile_name}, served model {target.served_model_name}, "
             f"prompt {prompt_id}, {writer}"
@@ -527,6 +866,8 @@ def _engine_preconditions(
         provenance,
         config,
         turns,
+        judgement.end,
+        force,
     )
 
 
@@ -547,6 +888,10 @@ def _record(
     stack_name: str,
     kind: str,
     command_flags: str,
+    forced: bool,
+    partial: bool,
+    requested_repeats: int,
+    decision_json: Mapping[str, JSONValue] | None,
     slice_spec: SliceSpec,
     prepared: _EnginePreconditions | None,
     overrides: Mapping[str, object] = {},
@@ -624,11 +969,14 @@ def _record(
         kind=kind,
         slice=slice_name,
         overrides=overrides,
-        repeats=slice_spec.repeats,
+        repeats=requested_repeats,
         git_sha=git_sha,
         git_dirty=git_dirty,
         set_digest=loaded.digest,
         verdict="pass" if gate_verdict else "fail",
+        forced=forced,
+        partial=partial,
+        decision=decision_json,
     )
     results = tuple(
         record.ResultRow(
@@ -686,13 +1034,33 @@ def _run_body(
     command_flags: str,
     lock_claim: _EngineLockClaim,
 ) -> int:
-    if getattr(args, "decision", False) or getattr(args, "force", False):
-        print(refusal(_COMMAND, "decision and force flags are not implemented", _FLAG_FIX), file=sys.stderr)
-        return 1
-
+    decision = bool(getattr(args, "decision", False))
+    force = bool(getattr(args, "force", False))
+    against = getattr(args, "against", None)
     slice_name = getattr(args, "slice", None)
+    slice_label = slice_name if isinstance(slice_name, str) and slice_name else "<name>"
+    paired_problem = _paired_flag_problem(
+        slice_label,
+        decision=decision,
+        against=against,
+        kind=kind,
+    )
+    if paired_problem is not None:
+        print(refusal(_COMMAND, paired_problem.problem, paired_problem.fix), file=sys.stderr)
+        return 1
     if not isinstance(slice_name, str) or not slice_name:
         print(refusal(_COMMAND, "no slice was selected", _SLICE_FIX), file=sys.stderr)
+        return 1
+
+    slice_spec = SLICE_RUNNERS.get(slice_name)
+    flag_problem = _flag_problem(
+        slice_name,
+        slice_spec,
+        decision=decision,
+        force=force,
+    )
+    if flag_problem is not None:
+        print(refusal(_COMMAND, flag_problem.problem, flag_problem.fix), file=sys.stderr)
         return 1
 
     loaded_result = load_set_with_courts(set_root, court_path=court_path, host=host)
@@ -716,7 +1084,6 @@ def _run_body(
         )
         return 1
 
-    slice_spec = SLICE_RUNNERS.get(slice_name)
     if slice_spec is None:
         selected = loaded.slices[slice_name]
         print_stage(
@@ -826,6 +1193,8 @@ def _run_body(
             site_path=site_path,
             started=started,
             supplied_set=supplied_set,
+            decision=decision,
+            force=force,
             slice_name=slice_name,
             slice_spec=slice_spec,
             loaded=loaded,
@@ -836,6 +1205,44 @@ def _run_body(
         )
         if engine_preconditions is None:
             return 1
+
+    comparand: record.ComparandRun | None = None
+    if decision:
+        comparand_result = _read_comparand(
+            host,
+            rendered_dir,
+            loaded,
+            slice_name,
+            cast(str, against),
+        )
+        if isinstance(comparand_result, Problem):
+            print_stage(
+                StageResult(
+                    "comparand",
+                    False,
+                    comparand_result.problem,
+                    comparand_result.fix,
+                )
+            )
+            return 1
+        comparand = comparand_result
+        repeats_word = "repeat" if comparand.repeats == 1 else "repeats"
+        repeats_detail = f"{comparand.repeats} {repeats_word}"
+        if comparand.partial:
+            # A partial comparand pairs what it holds, so the row says how much.
+            completed = len({repeat for _case_id, repeat, _metrics in comparand.results})
+            repeats_detail = f"{completed} of {comparand.repeats} {repeats_word}, partial"
+        digest = "equal" if comparand.set_digest == loaded.digest else "differs"
+        print_stage(
+            StageResult(
+                "comparand",
+                True,
+                f"run {comparand.run_id}: {comparand.slice}, {comparand.eval_set_version}, "
+                f"{repeats_detail}, {len(comparand.results)} result rows, "
+                f"set digest {digest}",
+                "",
+            )
+        )
 
     context = RunContext(
         host=host,
@@ -851,7 +1258,19 @@ def _run_body(
         ranked=ranked_lists,
         turns=None if engine_preconditions is None else engine_preconditions.turns,
     )
-    slice_result = _run_slice(slice_spec, loaded, slice_name, context)
+    if engine_preconditions is not None:
+        context = replace(
+            context,
+            checkpoint=window.deadline_checkpoint(finished_clock, engine_preconditions.end),
+        )
+    run_result = _run_repeats(
+        slice_spec,
+        loaded,
+        slice_name,
+        context,
+        decision_run=decision,
+    )
+    slice_result = run_result.result
     selection = select_cases(loaded, slice_name)
     # Any unsigned id, not the slice's alone: a runner that reached past its
     # own selection must not put the case it found into a gate's count either.
@@ -872,9 +1291,20 @@ def _run_body(
             )
         )
         return 1
+    if decision or run_result.partial:
+        cases = len({result.case_id for result in slice_result.results})
+        run_detail = (
+            f"{len(slice_result.results)} results over {cases} active cases, "
+            f"{run_result.completed_repeats} of {run_result.requested_repeats} repeats completed"
+        )
+        if run_result.overrun is not None:
+            run_detail += (
+                f"; aborted at the window end {run_result.overrun.isoformat()}; "
+                "the repeat in flight discarded"
+            )
     # A repeated slice returns one result per case AND repeat, so counting the
     # results would call four gradings of two cases "four cases".
-    if slice_spec.repeats == 1:
+    elif slice_spec.repeats == 1:
         run_detail = f"{len(slice_result.results)} active cases evaluated"
     else:
         cases = len({result.case_id for result in slice_result.results})
@@ -897,12 +1327,27 @@ def _run_body(
             checkout=checkout,
             host=host,
         )
+    paired: decision_stats.PairedDecision | None = None
+    if decision:
+        assert comparand is not None
+        paired = _paired_decision(
+            loaded,
+            slice_result,
+            slice_spec,
+            comparand,
+            requested_repeats=run_result.requested_repeats,
+            completed_repeats=run_result.completed_repeats,
+        )
+        print_stage(StageResult("decision", True, decision_stats.describe(paired), ""))
     # A refused comparison judges nothing, so the run row carries the slice
     # gate's verdict alone; the gate row still refuses, and its fix is the
     # writer's or the restore. Refusing at load would leave the first run of a
     # new set version unrecordable, and that run is the writer's own input.
-    recorded_verdict = slice_result.verdict and not (
-        comparison is not None and comparison.regressed
+    recorded_verdict = (
+        slice_result.verdict
+        and not (comparison is not None and comparison.regressed)
+        and not (paired is not None and paired.verdict == decision_stats.LOSES)
+        and not run_result.partial
     )
 
     recorded = _record(
@@ -919,14 +1364,34 @@ def _run_body(
         run_id=run_id,
         gate_verdict=recorded_verdict,
         stack_name=paths.name,
-        kind=kind,
+        kind="decision" if decision else kind,
         command_flags=command_flags,
+        forced=False if engine_preconditions is None else engine_preconditions.forced,
+        partial=run_result.partial,
+        requested_repeats=run_result.requested_repeats,
+        decision_json=None if paired is None else decision_stats.to_json(paired),
         slice_spec=slice_spec,
         prepared=engine_preconditions,
         overrides=run_overrides,
     )
-    if comparison is None:
-        gate_ok = _gate(slice_result, slice_spec)
+    if decision:
+        assert paired is not None
+        assert comparison is not None
+        gate_ok = _decision_gate(
+            slice_result,
+            slice_spec,
+            comparison,
+            paired,
+            run_result,
+            slice_name=slice_name,
+            set_version=loaded.version,
+            reference_version=reference_version,
+            run_id=run_id,
+            written=recorded.written,
+            command_flags=command_flags,
+        )
+    elif comparison is None:
+        gate_ok = _gate(slice_result, slice_spec, partial=run_result.partial)
     else:
         gate_ok = _reference_gate(
             slice_result,
@@ -938,6 +1403,7 @@ def _run_body(
             run_id=run_id,
             written=recorded.written,
             command_flags=command_flags,
+            partial=run_result.partial,
         )
     return 0 if gate_ok and recorded.ok else 1
 
@@ -967,6 +1433,11 @@ def run_eval(
     command_flags = paths.flag_fragment + (
         f" --kind {kind}" if kind != "manual" else ""
     )
+    against = getattr(args, "against", None)
+    if getattr(args, "decision", False) and isinstance(against, str) and against:
+        command_flags += f" --decision --against {against}"
+    if getattr(args, "force", False):
+        command_flags += " --force"
     actual_models = checkout / "models.lock" if models_path is None else models_path
     supplied_root = getattr(args, "set", None)
     set_root = checkout / SET_ROOT if supplied_root is None else Path(supplied_root)
