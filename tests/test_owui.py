@@ -11,6 +11,7 @@ import unittest
 from collections.abc import Callable, Generator, Mapping
 from pathlib import Path
 from typing import Any, ClassVar, cast
+from unittest.mock import patch
 from urllib.parse import unquote
 
 import yaml  # type: ignore[import-untyped]
@@ -18,6 +19,7 @@ import yaml  # type: ignore[import-untyped]
 from gideon.host.owui import (
     Client,
     OwuiError,
+    OwuiTimeout,
     Response,
     bootstrap,
     ingress_client_factory,
@@ -408,6 +410,12 @@ class ClientOverLoopback(unittest.TestCase):
             Client("http://127.0.0.1:1").request("GET", "/ready")
         self.assertIn("then retry", ctx.exception.fix)
 
+    def test_request_timeout_names_path_and_client_bound(self) -> None:
+        with self.assertRaises(OwuiTimeout) as ctx:
+            self.client(timeout=0.05).request("GET", "/slow")
+        self.assertIn("/slow", ctx.exception.problem)
+        self.assertIn("0.05 seconds", ctx.exception.problem)
+
     def test_credentials_never_enter_the_response_repr(self) -> None:
         response = self.client(token="t").request("GET", "/echo-auth")
         self.assertNotIn("Bearer", repr(response))
@@ -443,7 +451,7 @@ class ClientOverLoopback(unittest.TestCase):
         self.assertNotIn("body must not appear", str(ctx.exception))
 
     def test_stream_deadline_applies_to_each_read(self) -> None:
-        with self.assertRaises(OwuiError) as ctx:
+        with self.assertRaises(OwuiTimeout) as ctx:
             list(
                 self.client(timeout=2.0).stream(
                     "GET",
@@ -455,7 +463,7 @@ class ClientOverLoopback(unittest.TestCase):
         self.assertIn("then retry", ctx.exception.fix)
 
     def test_stream_deadline_already_expired_before_first_read(self) -> None:
-        with self.assertRaises(OwuiError) as ctx:
+        with self.assertRaises(OwuiTimeout) as ctx:
             list(
                 self.client().stream(
                     "GET", "/sse", deadline=10.0, monotonic=lambda: 11.0
@@ -481,6 +489,22 @@ class ClientOverLoopback(unittest.TestCase):
         default = ingress_client_factory("gideon.example", ca_path=None)(token="t")
         self.assertEqual(given._timeout, 2.0)
         self.assertEqual(default._timeout, Client("http://fake")._timeout)
+
+
+class ConnectTimeout(unittest.TestCase):
+    def test_connect_timeout_is_a_plain_error_for_requests_and_streams(self) -> None:
+        for method in ("request", "stream"):
+            with self.subTest(method=method):
+                client = Client("http://frontend.invalid", timeout=0.01)
+                with (
+                    patch("http.client.HTTPConnection.connect", side_effect=TimeoutError),
+                    self.assertRaises(OwuiError) as ctx,
+                ):
+                    if method == "request":
+                        client.request("GET", "/ready")
+                    else:
+                        list(client.stream("GET", "/sse"))
+                self.assertNotIsInstance(ctx.exception, OwuiTimeout)
 
 
 class ClientConstruction(unittest.TestCase):

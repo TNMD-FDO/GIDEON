@@ -17,12 +17,20 @@ from gideon.evaluation.turns.cases import CASE_KINDS, Case
 from gideon.host import engine, owui, owuiturn
 from gideon.host.owui import Client
 from gideon.host.render.owui import EVAL_IDENTITY, GENERAL_PRESET_ID
-from gideon.host.report import Problem, StageResult, print_stage
+from gideon.host.report import Problem, StageResult, Timeout, print_stage
 from gideon.host.sysio import Host, PathLike, RealHost
 
-# A managed turn waits for the frontend to finish the engine, outlet, and
-# persistence; the starting bound covers the observed longest turn.
-TURN_TIMEOUT_SECONDS: Final[float] = 600.0
+# This whole-turn bound covers every driver: the managed-turn socket, the door
+# client and its subprocess margin, the raw-route replay deadline, the browser
+# page deadline, and the unfiltered engine call. Corrected from 600 s after
+# four suite runs: 1,136 timed turns, four cuts; medians 18–23 s, p95 177–225 s,
+# p99 291–368 s, maxima 394–495 s. The instrument for the next correction is
+# the recorded rows' maximum latency and cut count per run, read from the run
+# record as the metrics role.
+TURN_TIMEOUT_SECONDS: Final[float] = 1200.0
+# A row the bound cut names the bound, so the operator reads the harness's
+# limit rather than the frontend's logs.
+CUT_AT: Final[str] = f"cut at {TURN_TIMEOUT_SECONDS:.0f} s"
 # A handful of engine calls may run at any hour, a longer run only in the
 # quiet window or on a weekend; this is the handful — a starting value, moved
 # from eight to twelve by the push smoke's measured need of twelve calls. The
@@ -130,6 +138,7 @@ class TurnRow:
     started: float | None
     offline_kind: str | None = None
     elapsed: float | None = None
+    cut: bool = False
     checks: Mapping[str, bool] = field(default_factory=dict)
     pattern_id: str | None = None
     stream_pattern_id: str | None = None
@@ -260,7 +269,9 @@ class ApiTurnDriver:
             timestamp=_timestamp(now),
             features={"web_search": True} if case.search else None,
         )
-        elapsed = monotonic() - started
+        elapsed = (
+            None if isinstance(managed_problem, Timeout) else monotonic() - started
+        )
 
         def find() -> owuiturn.TurnChat:
             return owuiturn.find_turn_chat(
@@ -747,6 +758,7 @@ def _case_record(
     checks: Mapping[str, bool],
     elapsed: float | None,
     problem: Problem | None,
+    cut: bool,
     stream_capture: session.StreamCapture | None,
     stream_verdict: classify.StreamVerdict | None,
     browser_turn: browser.BrowserTurn | None,
@@ -771,6 +783,7 @@ def _case_record(
         "checks": dict(checks),
         "elapsed": elapsed,
         "problem": _problem_data(problem),
+        "cut": cut,
         "stream": _stream_data(stream_capture, stream_verdict),
         "browser": browser_data,
     }
@@ -788,6 +801,7 @@ def _service_record(
     checks: Mapping[str, bool],
     elapsed: float | None,
     problem: Problem | None,
+    cut: bool,
     stream_verdict: classify.StreamVerdict | None,
 ) -> dict[str, object]:
     """Build the service row's safe record, retaining answer text only in --out."""
@@ -826,6 +840,7 @@ def _service_record(
         "checks": dict(checks),
         "elapsed": elapsed,
         "problem": _problem_data(problem),
+        "cut": cut,
     }
     if stream is not None:
         record["stream"] = stream
@@ -1210,12 +1225,13 @@ def _replay(
     guardrail: Any,
     prompt: str,
     monotonic: Callable[[], float],
-) -> tuple[session.StreamCapture, classify.StreamVerdict | None, str, bool, str]:
+) -> tuple[session.StreamCapture, classify.StreamVerdict | None, str, bool, str, bool]:
     """The raw-route replay after a case's managed turn.
 
     Returns the capture, its verdict, the row's suffix, whether the row fails,
-    and the stream verdict kind: a stream the tool could not observe always
-    fails it; a released prefix leak fails it under the shared stream policy.
+    its stream verdict kind, and whether a bound cut the stream. A stream the
+    tool could not observe always fails it; a released prefix leak fails it
+    under the shared stream policy.
     """
 
     capture = session.raw_stream(
@@ -1226,12 +1242,18 @@ def _replay(
         monotonic=monotonic,
     )
     if capture.problem is not None:
-        return capture, None, f"; stream error: {capture.problem.problem}", True, "error"
+        cut = isinstance(capture.problem, Timeout)
+        detail = (
+            f"; stream {CUT_AT}: {capture.problem.problem}"
+            if cut
+            else f"; stream error: {capture.problem.problem}"
+        )
+        return capture, None, detail, True, "error", cut
     verdict = classify.stream_verdict(guardrail, capture.deltas, prompt)
     if verdict.clean:
-        return capture, verdict, "; stream clean", False, "clean"
+        return capture, verdict, "; stream clean", False, "clean", False
     suffix = f"; stream leak@{verdict.pattern_id} at {verdict.offset} chars"
-    return capture, verdict, suffix, STREAM_LEAK_FAILS, "leak"
+    return capture, verdict, suffix, STREAM_LEAK_FAILS, "leak", False
 
 
 def _units(cases: Sequence[Case], repeat: int) -> tuple[tuple[Case, int], ...]:
@@ -1372,6 +1394,7 @@ def service_turn(
     started: float | None = None
     stream_verdict: classify.StreamVerdict | None = None
     stream_kind: str | None = None
+    cut = False
     deltas: tuple[tuple[str, str], ...] = ()
     result: StageResult
     try:
@@ -1387,6 +1410,7 @@ def service_turn(
         elapsed = outcome.elapsed
         started = outcome.started
         problem = outcome.problem
+        cut = isinstance(problem, Timeout)
         if isinstance(outcome.extras, door.DoorReply):
             reply = outcome.extras
         elif problem is None:
@@ -1411,8 +1435,11 @@ def service_turn(
             result = StageResult(
                 row_name,
                 False,
-                f"turn error: {detail}"
-                + (f"; {elapsed:.2f}s" if elapsed is not None else ""),
+                (
+                    f"turn {CUT_AT}: {detail}"
+                    if cut
+                    else f"turn error: {detail}"
+                ) + (f"; {elapsed:.2f}s" if elapsed is not None else ""),
                 # A door problem names the act that repairs it — the service's
                 # logs and an apply, or `secrets rotate` for a refused key —
                 # which is worth more than a record that may not exist.
@@ -1475,6 +1502,7 @@ def service_turn(
             checks=checks,
             elapsed=elapsed,
             problem=problem,
+            cut=cut,
             stream_verdict=stream_verdict,
         )
         if spec.out is not None
@@ -1493,6 +1521,7 @@ def service_turn(
         session=session_number,
         started=started,
         elapsed=elapsed,
+        cut=cut,
         checks=checks,
         pattern_id=verdict.pattern_id if verdict is not None else None,
         stream_pattern_id=(
@@ -1541,6 +1570,7 @@ def frontend_turn(
     stream_capture: session.StreamCapture | None = None
     stream_verdict: classify.StreamVerdict | None = None
     stream_kind: str | None = None
+    cut = False
     browser_turn: browser.BrowserTurn | None = None
     live_verdict: classify.LiveVerdict | None = None
     deleted = False
@@ -1569,6 +1599,7 @@ def frontend_turn(
         elapsed = outcome.elapsed
         started = outcome.started
         problem = outcome.problem
+        cut = isinstance(problem, Timeout)
         unidentified = outcome.unidentified
         if isinstance(outcome.extras, browser.BrowserTurn):
             browser_turn = outcome.extras
@@ -1582,7 +1613,11 @@ def frontend_turn(
             result = StageResult(
                 row_name,
                 False,
-                f"turn error: {problem.problem}{live_detail}",
+                (
+                    f"turn {CUT_AT}: {problem.problem}"
+                    if cut
+                    else f"turn error: {problem.problem}"
+                ) + live_detail,
                 _browser_turn_fix(spec, browser_turn)
                 if browser_turn is not None
                 else _turn_fix(spec),
@@ -1626,7 +1661,9 @@ def frontend_turn(
                     stream_detail,
                     stream_failed,
                     stream_kind,
+                    stream_cut,
                 ) = _replay(client, spec, guardrail, prompt, monotonic)
+                cut = cut or stream_cut
                 if stream_failed:
                     row_ok, row_fix = False, _turn_fix(spec)
             result = StageResult(
@@ -1677,6 +1714,7 @@ def frontend_turn(
             checks=checks,
             elapsed=elapsed,
             problem=problem,
+            cut=cut,
             stream_capture=stream_capture,
             stream_verdict=stream_verdict,
             browser_turn=browser_turn,
@@ -1698,6 +1736,7 @@ def frontend_turn(
         session=session_number,
         started=started,
         elapsed=elapsed,
+        cut=cut,
         checks=checks,
         pattern_id=verdict.pattern_id if verdict is not None else None,
         stream_pattern_id=(

@@ -36,7 +36,7 @@ from gideon.host.render.api import (
 )
 from gideon.host.render.ci import CI_ROOT, CI_SECRET_NAMES
 from gideon.host.render.owui import EVAL_IDENTITY
-from gideon.host.report import Problem
+from gideon.host.report import Problem, Timeout
 from gideon.host.sysio import Command, Host, PathLike
 from tools.turns import cli
 
@@ -351,6 +351,7 @@ class FakeHost:
         ignores_stream: bool = False,
         always_streams: bool = False,
         completion_status: int = 200,
+        failure_exception: str | None = None,
         lock_holder: str | None = None,
         lock_error: OSError | None = None,
     ) -> None:
@@ -372,6 +373,7 @@ class FakeHost:
         self.ignores_stream = ignores_stream
         self.always_streams = always_streams
         self.completion_status = completion_status
+        self.failure_exception = failure_exception
         self.euid = 0
         self.lock_holder = lock_holder
         self.lock_error = lock_error
@@ -407,6 +409,11 @@ class FakeHost:
             response: object = {"data": [{"id": _served_name()}]}
         else:
             body_mapping = cast(dict[str, object], body)
+            if self.failure_exception is not None:
+                failure = {"kind": "failure", "exception": self.failure_exception}
+                return subprocess.CompletedProcess(
+                    command, 0, json.dumps(failure) + "\n", ""
+                )
             messages = cast(list[dict[str, str]], body_mapping["messages"])
             prompt = messages[-1]["content"]
             answer = next(
@@ -821,6 +828,28 @@ class ServiceDoor(unittest.TestCase):
         self.assertNotIn(KEY_VALUE, command_text)
         self.assertNotIn(KEY_VALUE, stdout)
 
+    def test_timeout_failure_record_marks_the_service_row_as_cut(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cases_path = Path(directory) / "cases.yaml"
+            output = Path(directory) / "out"
+            _case_file(
+                cases_path,
+                [{"id": "cut", "prompt": "plain", "expect": "answered"}],
+            )
+            host = FakeHost(failure_exception="TimeoutError")
+            code, stdout, stderr = _run_service(host, cases_path, output=output)
+            row = json.loads(host.files[str(output / "cut.json")])
+
+        self.assertEqual(code, 1)
+        self.assertEqual(stderr, "")
+        self.assertIn(
+            "cut: refuse — turn cut at 1200 s: door client failed: TimeoutError",
+            stdout,
+        )
+        self.assertTrue(row["cut"])
+        self.assertIsNone(row["elapsed"])
+        self.assertIn("cut", row)
+
     def test_service_guard_counts_stream_as_one_call_per_case(self) -> None:
         # The door makes one call per case whichever way the answer is
         # delivered, so the two runs are refused at the same count.
@@ -1151,6 +1180,87 @@ class DoorBody(unittest.TestCase):
         messages = cast(list[dict[str, str]], body["messages"])
         self.assertEqual(messages[0], {"role": "system", "content": "You are General."})
         self.assertEqual(messages[1]["content"], "tagged prompt [turn harness abcd1234 one]")
+
+    def test_client_timeout_failure_discards_stream_prefix_and_is_typed(self) -> None:
+        records = (
+            {"kind": "head", "status": 200, "media_type": door.EVENT_STREAM_MEDIA_TYPE},
+            {
+                "kind": "data",
+                "offset": 0.1,
+                "payload": json.dumps({"choices": [{"delta": {"content": "partial"}}]}),
+            },
+            {"kind": "failure", "exception": "TimeoutError"},
+        )
+        reply = door._parse_envelope(
+            "\n".join(json.dumps(record) for record in records),
+            RENDERED_COMPOSE.parent,
+        )
+
+        self.assertIsInstance(reply.problem, Timeout)
+        self.assertEqual(reply.events, ())
+        self.assertIsNone(reply.elapsed)
+
+        other = door._parse_envelope(
+            json.dumps({"kind": "failure", "exception": "OSError"}),
+            RENDERED_COMPOSE.parent,
+        )
+        self.assertIsInstance(other.problem, Problem)
+        self.assertNotIsInstance(other.problem, Timeout)
+        self.assertEqual(other.events, ())
+        self.assertIsNone(other.elapsed)
+
+    def test_runner_timeout_is_typed_as_a_cut(self) -> None:
+        host = FakeHost()
+        with patch.object(
+            host,
+            "run",
+            side_effect=subprocess.TimeoutExpired("fixture", 1.0),
+        ):
+            reply = door._run(
+                host,
+                RENDERED_COMPOSE.parent,
+                url="http://fixture.invalid/completions",
+                body={"stream": True},
+                max_time=1.0,
+            )
+
+        self.assertIsInstance(reply.problem, Timeout)
+        self.assertEqual(reply.events, ())
+        self.assertIsNone(reply.elapsed)
+
+    def test_service_driver_carries_one_bound_to_probe_and_completion(self) -> None:
+        host = FakeHost()
+        driver = run_module.ServiceTurnDriver(
+            host,
+            RENDERED_COMPOSE.parent,
+            model="fixture-model",
+            instruction=None,
+        )
+        reply = door.DoorReply(
+            status=200,
+            media_type="application/json",
+            body_text=json.dumps({"choices": [{"message": {"content": "A plain answer."}}]}),
+            events=(),
+            done=False,
+            elapsed=0.1,
+            problem=None,
+        )
+        with (
+            patch.object(door, "probe", return_value=door.ProbeResult(True, "ready", None)) as probe,
+            patch.object(door, "complete", return_value=reply) as complete,
+        ):
+            driver.signin()
+            driver.turn(
+                Case("fixture", "prompt", "answered"),
+                "prompt",
+                now=lambda: FIXED_NOW,
+                monotonic=lambda: 1.0,
+                ids_before=frozenset(),
+                row_name="fixture",
+            )
+
+        self.assertEqual(probe.call_args.kwargs["max_time"], run_module.TURN_TIMEOUT_SECONDS)
+        self.assertEqual(complete.call_args.kwargs["max_time"], run_module.TURN_TIMEOUT_SECONDS)
 
     def test_service_refusals_happen_before_any_exec(self) -> None:
         early_refusals = (

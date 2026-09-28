@@ -689,6 +689,70 @@ class GuardrailsRunner(unittest.TestCase):
             self.assertIn(f"{count_id} cleanup-failed", frontend_errors.report)
             self.assertIn(f"{restitution_id} frontend-signin", frontend_errors.report)
 
+    def test_door_timeout_is_a_family_error_with_a_cut_progress_line(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            loaded = _small_set(Path(directory) / "eval-v1")
+            host, _frontend, context = _fixture_turns(loaded)
+            cast(Any, host).failure_exception = "TimeoutError"
+            progress: list[str] = []
+            result = _run_fixture(
+                loaded,
+                "guardrails",
+                replace(context, progress=progress.append),
+            )
+
+        row = result.results[0]
+        self.assertFalse(result.verdict)
+        self.assertEqual(row.verdict, "fail")
+        self.assertEqual(row.metrics["problem"], "turn-cut")
+        self.assertIn(f"errors: {row.case_id} turn-cut", result.report)
+        self.assertTrue(
+            any(
+                line
+                == f"guardrails {row.case_id}: cut at {run.TURN_TIMEOUT_SECONDS:.0f} s; seconds unknown"
+                for line in progress
+            )
+        )
+
+    def test_sampled_frontend_cut_keeps_the_door_latency(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            loaded = _small_set(Path(directory) / "eval-v1")
+            _host, _frontend, context = _fixture_turns(loaded)
+            actual_frontend_turn = run.frontend_turn
+            actual_service_turn = run.service_turn
+
+            def cut_sample_frontend(*args: Any, **kwargs: Any) -> run.TurnRow:
+                row = actual_frontend_turn(*args, **kwargs)
+                if cast(Any, kwargs["case"]).id == SAMPLE_IDS[0]:
+                    return replace(row, cut=True, verdict_kind=None)
+                return row
+
+            def measured_door_turn(*args: Any, **kwargs: Any) -> run.TurnRow:
+                row = actual_service_turn(*args, **kwargs)
+                if cast(Any, kwargs["case"]).id == SAMPLE_IDS[0]:
+                    return replace(row, elapsed=0.125)
+                return row
+
+            progress: list[str] = []
+            with (
+                patch.object(run, "frontend_turn", side_effect=cut_sample_frontend),
+                patch.object(run, "service_turn", side_effect=measured_door_turn),
+            ):
+                result = _run_fixture(
+                    loaded,
+                    "guardrails",
+                    replace(context, progress=progress.append),
+                )
+
+        row = next(row for row in result.results if row.case_id == SAMPLE_IDS[0])
+        self.assertEqual(row.verdict, "fail")
+        self.assertEqual(row.metrics["problem"], "turn-cut")
+        self.assertEqual(row.latency_ms, 125.0)
+        self.assertIn(
+            f"; frontend cut at {run.TURN_TIMEOUT_SECONDS:.0f} s",
+            next(line for line in progress if row.case_id in line),
+        )
+
     def test_frontend_leak_pattern_is_kept_for_tier_two_and_sample_rows(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             loaded = _small_set(Path(directory) / "eval-v1")

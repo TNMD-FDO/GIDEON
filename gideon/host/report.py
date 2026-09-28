@@ -39,6 +39,16 @@ class Problem:
 
 
 @dataclass(frozen=True, slots=True)
+class Timeout(Problem):
+    """A problem that is a bound's expiry.
+
+    The caller's own time bound ended the request with the answer still
+    coming.  It prints as any problem and is typed so a caller can tell the
+    bound from a failure.
+    """
+
+
+@dataclass(frozen=True, slots=True)
 class StageResult:
     """The operator-facing result of one ordered host-command stage."""
 

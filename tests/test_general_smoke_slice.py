@@ -242,6 +242,54 @@ class GeneralSmokeRunner(unittest.TestCase):
         self.assertIn("doctrine-01: fail", result.report)
         self.assertTrue(any("doctrine-01#" in line and "stream leak" in line for line in progress))
 
+    def test_turn_cuts_fail_and_report_distinct_progress_slots(self) -> None:
+        loaded = _loaded()
+        frontend = SmokeFrontend(loaded)
+        progress: list[str] = []
+        _host, context = _context(frontend, progress)
+        actual = run.frontend_turn
+
+        def cut_rows(*args: Any, **kwargs: Any) -> run.TurnRow:
+            row = actual(*args, **kwargs)
+            case_id = cast(str, kwargs["case"].id)
+            if case_id == "doctrine-01":
+                return replace(row, cut=True, verdict_kind=None, stream_kind=None)
+            if case_id == "doctrine-02":
+                if cast(str, kwargs["row_name"]).endswith("#1"):
+                    return replace(row, cut=True, stream_kind="error")
+                return replace(row, verdict_kind=None, stream_kind=None)
+            return row
+
+        with patch.object(run, "frontend_turn", side_effect=cut_rows):
+            result = general_smoke_slice.run_general_smoke(
+                loaded, "general-smoke", context
+            )
+
+        rows = {(row.case_id, row.repeat): row for row in result.results}
+        self.assertFalse(result.verdict)
+        for case_id in ("doctrine-01", "doctrine-02"):
+            self.assertEqual(rows[(case_id, 1)].verdict, "fail")
+            self.assertEqual(rows[(case_id, 1)].metrics["problem"], "turn-cut")
+            self.assertIn(f"{case_id}: fail", result.report)
+        self.assertIn("repeat 1 error, turn-cut", result.report)
+        self.assertTrue(
+            any(
+                line.startswith(
+                    "general-smoke doctrine-01#1: "
+                    f"cut at {run.TURN_TIMEOUT_SECONDS:.0f} s;"
+                )
+                for line in progress
+            )
+        )
+        self.assertTrue(
+            any(
+                "general-smoke doctrine-02#1:" in line
+                and f"stream cut at {run.TURN_TIMEOUT_SECONDS:.0f} s" in line
+                for line in progress
+            )
+        )
+        self.assertEqual(rows[("doctrine-02", 2)].metrics["problem"], "turn-error")
+
     def test_refused_deletion_fails_and_reports_the_cleanup_fix(self) -> None:
         loaded = _loaded()
         frontend = SmokeFrontend(loaded)

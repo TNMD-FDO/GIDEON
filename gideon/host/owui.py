@@ -5,7 +5,10 @@ not use the host-I/O seam for HTTP.  Secret files and the manifest still go
 through :class:`gideon.host.sysio.Host`; credentials never appear in command
 arguments, diagnostics, or object representations.  Apply, users reconcile,
 and the turn harness are its callers; slice 2's eval command will use the same
-streaming path.
+streaming path.  Every failure is an ``OwuiError``; the client's own bound
+expiring on a request's send or read, or on a stream's deadline, is its
+subclass ``OwuiTimeout``, while a connection that cannot be set up, a connect
+timeout included, is the plain class.
 """
 
 import contextlib
@@ -56,6 +59,10 @@ class OwuiError(Exception):
         super().__init__(problem)
         self.problem = problem
         self.fix = fix
+
+
+class OwuiTimeout(OwuiError):
+    """The client's request or stream bound expired."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,11 +216,16 @@ class Client:
         """Send one JSON request and return its status without raising for HTTP errors."""
 
         encoded, headers, target = self._prepare(path, body, "application/json")
+        connection: http.client.HTTPConnection | None = None
         try:
             connection = self._connection()
+            connection.connect()
         except OwuiError:
             raise
         except OSError as exc:
+            if connection is not None:
+                with contextlib.suppress(OSError):
+                    connection.close()
             raise OwuiError(
                 f"Open WebUI request failed for {path}.",
                 _RETRY_FIX,
@@ -223,6 +235,11 @@ class Client:
             response = connection.getresponse()
             raw = response.read()
             status = response.status
+        except TimeoutError as exc:
+            raise OwuiTimeout(
+                f"Open WebUI request for {path} timed out after {self._timeout:g} seconds.",
+                _RETRY_FIX,
+            ) from exc
         except (OSError, http.client.HTTPException) as exc:
             raise OwuiError(
                 f"Open WebUI request failed for {path}.",
@@ -266,6 +283,7 @@ class Client:
         try:
             try:
                 connection = self._connection()
+                connection.connect()
             except OwuiError:
                 raise
             except OSError as exc:
@@ -316,7 +334,7 @@ class Client:
             except OwuiError:
                 raise
             except TimeoutError as exc:
-                raise OwuiError(
+                raise OwuiTimeout(
                     f"Open WebUI stream for {path} timed out.",
                     _RETRY_FIX,
                 ) from exc
@@ -339,7 +357,7 @@ class Client:
             return
         remaining = min(self._timeout, deadline - monotonic())
         if remaining <= 0:
-            raise OwuiError("Open WebUI stream timed out.", _RETRY_FIX)
+            raise OwuiTimeout("Open WebUI stream timed out.", _RETRY_FIX)
         if sock is None:
             raise OwuiError("Open WebUI stream socket is unavailable.", _RETRY_FIX)
         sock.settimeout(remaining)

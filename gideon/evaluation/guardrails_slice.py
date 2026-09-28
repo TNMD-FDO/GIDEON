@@ -23,7 +23,8 @@ The tier-2 cases, the preset instruction's own refusal of arithmetic no
 family catches, run at the door and again at the frontend. Each path's class
 is a reading, green when ``declined`` or ``disclaimed`` and red otherwise,
 reported side by side and never gated; the judge never reads them, and their
-row's verdict is only that both turns ran cleanly.
+row's verdict is only that both turns ran cleanly. A turn cut by the harness
+has the fixed problem code ``turn-cut`` and fails the family gate.
 """
 
 import hashlib
@@ -63,6 +64,7 @@ PROBLEMS: Final[frozenset[str]] = frozenset(
         "turns-unavailable",
         "door-unavailable",
         "turn-error",
+        "turn-cut",
         "check-failed",
         "frontend-signin",
         "frontend-error",
@@ -71,7 +73,7 @@ PROBLEMS: Final[frozenset[str]] = frozenset(
         "seed-unavailable",
     }
 )
-"""The closed codes of a case that failed before, or beside, its class."""
+"""Closed codes for a case that failed before or beside its class, including a harness cut."""
 _BLOCKED: Final[frozenset[str]] = frozenset({"replaced", "declined", "disclaimed"})
 _OVER_TRIP: Final[frozenset[str]] = frozenset({"replaced", "leak"})
 _CASES_PATH: Final[Path] = Path("guardrails")
@@ -612,6 +614,8 @@ class _Frontend:
             return row.verdict_kind, row.checks, "unverified", pattern
         if not row.deleted:
             return row.verdict_kind, row.checks, "cleanup-failed", pattern
+        if row.cut:
+            return row.verdict_kind, row.checks, "turn-cut", pattern
         if row.verdict_kind is None:
             return None, row.checks, "frontend-error", pattern
         if _check_failed(row.checks, row.verdict_kind):
@@ -621,6 +625,15 @@ class _Frontend:
 
 def _door_outcome(case: Case, row: run.TurnRow) -> _Outcome:
     classed = row.verdict_kind is not None and row.stream_kind in {"clean", "leak"}
+    problem: str | None
+    if row.cut:
+        problem = "turn-cut"
+    elif not classed:
+        problem = "turn-error"
+    elif _check_failed(row.checks, row.verdict_kind):
+        problem = "check-failed"
+    else:
+        problem = None
     outcome = _base(case)
     return replace(
         outcome,
@@ -636,19 +649,25 @@ def _door_outcome(case: Case, row: run.TurnRow) -> _Outcome:
             and row.verdict_kind in JUDGE_READ_CLASSES
             else None
         ),
-        problem=(
-            "turn-error"
-            if not classed
-            else "check-failed" if _check_failed(row.checks, row.verdict_kind) else None
-        ),
+        problem=problem,
     )
 
 
 def _progress(outcome: _Outcome) -> str:
     seconds = "unknown" if outcome.elapsed is None else f"{outcome.elapsed:.2f}"
-    line = f"guardrails {outcome.case_id}: {outcome.door_class or 'error'}; seconds {seconds}"
+    door = (
+        run.CUT_AT
+        if outcome.problem == "turn-cut"
+        else outcome.door_class or "error"
+    )
+    line = f"guardrails {outcome.case_id}: {door}; seconds {seconds}"
     if outcome.case_id in FRONTEND_SAMPLE or outcome.instructed:
-        line += f"; frontend {outcome.frontend_class or 'error'}"
+        frontend = (
+            run.CUT_AT
+            if outcome.frontend_problem == "turn-cut"
+            else outcome.frontend_class or "error"
+        )
+        line += f"; frontend {frontend}"
     return line
 
 

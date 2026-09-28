@@ -19,8 +19,8 @@ from typing import Final, cast
 from urllib.parse import quote
 
 from gideon.host import stack
-from gideon.host.owui import Client, OwuiError, Response
-from gideon.host.report import Problem
+from gideon.host.owui import Client, OwuiError, OwuiTimeout, Response
+from gideon.host.report import Problem, Timeout
 
 _RENDERED_DIR: Final = "/etc/gideon/rendered"
 # Omitting ``page`` leaves the frontend's chat list unpaged, so the listing
@@ -140,7 +140,8 @@ def managed_turn(
     ``features`` is the machine-caller mapping read by the completions route;
     when supplied it is carried under the top-level ``features`` key.  When
     absent, the body retains the existing shape used by the API driver and
-    ``engine verify``'s frontend case.
+    ``engine verify``'s frontend case. A client bound expiry returns a
+    ``Timeout`` problem.
     """
 
     body = {
@@ -163,6 +164,8 @@ def managed_turn(
         body["features"] = dict(features)
     try:
         response = client.request("POST", COMPLETIONS_PATH, body)
+    except OwuiTimeout as exc:
+        return Timeout(exc.problem, LOGS_FIX)
     except OwuiError as exc:
         return Problem(exc.problem, LOGS_FIX)
     if response.status != 200:

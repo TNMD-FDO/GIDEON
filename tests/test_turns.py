@@ -24,7 +24,7 @@ from gideon import guardrail
 from gideon.api import stamp
 from gideon.evaluation.turns import access, cases, classify, figures, run, session
 from gideon.host import backuplock, models, owuiturn, secrets, site
-from gideon.host.owui import Client, OwuiError, Response
+from gideon.host.owui import Client, OwuiError, OwuiTimeout, Response
 from gideon.host.render.ci import CI_PORT, CI_ROOT, CI_SECRETS_DIR
 from gideon.host.render.owui import EVAL_IDENTITY, GENERAL_PRESET_ID
 from gideon.host.report import Problem
@@ -297,7 +297,8 @@ class FakeClient(Client):
         deadline: float | None = None,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> Any:
-        del deadline, monotonic
+        del monotonic
+        self.frontend.stream_deadlines.append(deadline)
         credential = self._api_key if self._api_key is not None else self._token
         return self.frontend.stream(method, path, body, credential)
 
@@ -330,6 +331,7 @@ class Frontend:
         self.deleted_chats: list[tuple[str, dict[str, object]]] = []
         self.calls: list[tuple[str, str, object | None]] = []
         self.stream_calls: list[tuple[str, str, object | None]] = []
+        self.stream_deadlines: list[float | None] = []
         self.refuse_deletion = False
         self.refuse_deletion_ids: set[str] = set()
         self.fail_listing_after_turn = False
@@ -600,6 +602,12 @@ class Frontend:
                 case_id = _tagged_case_id(prompt)
                 mode = self.modes.get(case_id, "answered")
                 self._turns_made += 1
+                if mode == "turn-timeout":
+                    raise OwuiTimeout(
+                        "Open WebUI request for /api/chat/completions timed out after 0.05 seconds."
+                    )
+                if mode == "turn-error":
+                    raise OwuiError("fixture completion failed")
                 if mode == "nochat":
                     barrier = self._barrier
                 elif mode == "twochat":
@@ -1928,6 +1936,7 @@ class TurnHarness(TestCase):
         self.assertEqual(frontend.calls, [])
 
     def test_production_factory_receives_turn_timeout(self) -> None:
+        self.assertEqual(run.TURN_TIMEOUT_SECONDS, 1200.0)
         frontend = Frontend(self.guardrail, {"factory": "answered"})
         with patch(
             "tools.turns.cli.access.owui.ingress_client_factory",
@@ -1944,6 +1953,102 @@ class TurnHarness(TestCase):
             yaml.safe_load(SITE_TEXT)["hostname"],
             ca_path=cli.access.tls.CA_PATH,
             timeout=run.TURN_TIMEOUT_SECONDS,
+        )
+
+    def test_cut_turns_and_other_failures_keep_distinct_rows_and_records(self) -> None:
+        for case_id, mode, expected_detail, expected_cut in (
+            (
+                "timeout",
+                "turn-timeout",
+                "turn cut at 1200 s: Open WebUI request for /api/chat/completions timed out after 0.05 seconds.",
+                True,
+            ),
+            ("failed", "turn-error", "turn error: fixture completion failed", False),
+        ):
+            with self.subTest(case_id=case_id), TemporaryDirectory() as directory:
+                frontend = Frontend(self.guardrail, {case_id: mode})
+                output = Path(directory) / "out"
+                host = FakeHost()
+                code, stdout, _ = _run_file(
+                    frontend,
+                    f"cases:\n  - id: {case_id}\n    prompt: hidden\n    expect: answered\n",
+                    host=host,
+                    args=["--out", str(output)],
+                )
+                self.assertEqual(code, 1)
+                self.assertIn(f"{case_id}: refuse — {expected_detail}", stdout)
+                record = json.loads(host.files[str(output / f"{case_id}.json")])
+                self.assertEqual(record["cut"], expected_cut)
+                self.assertEqual(record["elapsed"] is None, expected_cut)
+
+    def test_browser_and_unfiltered_drivers_receive_the_shared_turn_bound(self) -> None:
+        self.assertEqual(run.TURN_TIMEOUT_SECONDS, 1200.0)
+        response = run.engine.EngineReply(
+            status=200,
+            body_text="{}",
+            json={"choices": [{"message": {"content": "A clean doctrinal answer."}}]},
+            events=(),
+            done=False,
+            time_to_first_byte=None,
+            elapsed=0.1,
+            problem=None,
+        )
+        host = EngineHost({})
+        driver = run.UnfilteredTurnDriver(
+            cast(Host, host),
+            "/etc/gideon/rendered",
+            model="fixture-model",
+            instruction=None,
+        )
+        with patch.object(run.engine, "call_engine", return_value=response) as call_engine:
+            driver.turn(
+                cases.Case("fixture", "prompt", "answered"),
+                "prompt",
+                now=lambda: FIXED_NOW,
+                monotonic=lambda: 1.0,
+                ids_before=frozenset(),
+                row_name="fixture",
+            )
+        self.assertEqual(call_engine.call_args.kwargs["max_time"], run.TURN_TIMEOUT_SECONDS)
+
+        with TemporaryDirectory() as directory:
+            setup = run.BrowserSetup(
+                page=cast(run.browser.Page, object()),
+                close=lambda: None,
+                detail="fixture page",
+                hostname="gideon.example.invalid",
+                account=EVAL_IDENTITY.username,
+                request_log=run.chromium.RequestLog(lambda: 10.0),
+                page_timeout=3.0,
+            )
+            browser_turn = run.browser.BrowserTurn(
+                chat_id=None,
+                entries=(),
+                texts={},
+                block_opened_at=None,
+                screenshot=Path(directory) / "turn.png",
+                regions={},
+                elapsed=0.1,
+            )
+            browser_driver = run.BrowserTurnDriver(
+                setup,
+                lambda **_: cast(Client, object()),
+                PASSWORD,
+                guardrail=self.guardrail,
+                out=Path(directory),
+            )
+            with patch.object(run.browser, "turn", return_value=browser_turn) as browser_call:
+                browser_driver.turn(
+                    cases.Case("fixture", "prompt", "answered"),
+                    "prompt",
+                    now=lambda: FIXED_NOW,
+                    monotonic=lambda: 10.0,
+                    ids_before=frozenset(),
+                    row_name="fixture",
+                )
+        self.assertEqual(
+            browser_call.call_args.kwargs["deadline"],
+            10.0 + run.TURN_TIMEOUT_SECONDS,
         )
 
     def test_seed_is_loaded_and_counts_are_derived_from_the_file(self) -> None:
@@ -2989,10 +3094,10 @@ class TurnHarness(TestCase):
         self.assertNotIn("engine failed", stdout)
 
     def test_stream_timeout_keeps_partial_record_and_summary_counts(self) -> None:
-        values = iter((0.0, 0.0, 0.0, 0.0, 1.0, 601.0))
+        values = iter((0.0, 0.0, 0.0, 0.0, 1.0, 1201.0))
 
         def monotonic() -> float:
-            return next(values, 601.0)
+            return next(values, 1201.0)
 
         frontend = Frontend(self.guardrail, {"timeout": "stream-timeout"})
         with TemporaryDirectory() as directory:
@@ -3007,12 +3112,15 @@ class TurnHarness(TestCase):
             )
             self.assertEqual(code, 1)
             self.assertIn("timeout: refuse", stdout)
-            self.assertIn("stream error: Open WebUI stream timed out.", stdout)
+            self.assertIn("stream cut at 1200 s: Open WebUI stream timed out.", stdout)
             self.assertIn("summary: refuse", stdout)
             self.assertIn("stream: 0 clean, 0 leak, 1 error", stdout)
             record = json.loads(host.files[str(output / "timeout.json")])
             self.assertEqual(record["stream"]["deltas"], [["reasoning", "partial"]])
             self.assertIn("timed out", record["stream"]["problem"]["problem"])
+            self.assertTrue(record["cut"])
+            self.assertEqual(record["elapsed"], 0.0)
+            self.assertEqual(frontend.stream_deadlines, [run.TURN_TIMEOUT_SECONDS])
             run_record = json.loads(host.files[str(output / "run.json")])
             self.assertEqual(run_record["summary"]["stream"], {"clean": 0, "leak": 0, "error": 1})
 

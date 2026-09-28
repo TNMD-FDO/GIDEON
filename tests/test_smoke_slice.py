@@ -174,7 +174,7 @@ class SmokeRunner(unittest.TestCase):
                     elif failure == "leaked":
                         metrics["stream"] = "leak"
                     elif failure == "errored":
-                        metrics["problem"] = next(iter(guardrails_slice.PROBLEMS))
+                        metrics["problem"] = "turn-cut"
                     else:
                         frontend = cast(Mapping[str, JSONValue], metrics["frontend"])
                         metrics["frontend"] = {**frontend, "agrees": False}

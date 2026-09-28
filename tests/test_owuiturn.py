@@ -5,8 +5,8 @@ from collections.abc import Mapping
 from typing import Any, cast
 
 from gideon.host import owui, owuiturn
-from gideon.host.owui import OwuiError, Response
-from gideon.host.report import Problem
+from gideon.host.owui import OwuiError, OwuiTimeout, Response
+from gideon.host.report import Problem, Timeout
 
 PASSWORD = "fixture-password"
 USER_ID = "fixture-user-id"
@@ -157,11 +157,12 @@ class ManagedTurnTests(unittest.TestCase):
 
     def test_managed_turn_refuses_non_null_http_and_transport_failures(self) -> None:
         cases = (
-            (Response(200, {"unexpected": True}), "non-null response body"),
-            (Response(502, None), "HTTP 502"),
-            (OwuiError("fixture frontend transport failed"), "fixture frontend transport failed"),
+            (Response(200, {"unexpected": True}), "non-null response body", False),
+            (Response(502, None), "HTTP 502", False),
+            (OwuiError("fixture frontend transport failed"), "fixture frontend transport failed", False),
+            (OwuiTimeout("fixture request bound expired"), "fixture request bound expired", True),
         )
-        for response, fragment in cases:
+        for response, fragment, timed_out in cases:
             with self.subTest(fragment=fragment):
                 client = FakeClient({("POST", owuiturn.COMPLETIONS_PATH): response})
                 problem = owuiturn.managed_turn(
@@ -174,6 +175,7 @@ class ManagedTurnTests(unittest.TestCase):
                 )
                 self.assertIsInstance(problem, Problem)
                 assert problem is not None
+                self.assertEqual(isinstance(problem, Timeout), timed_out)
                 self.assertIn(fragment, problem.problem)
                 self.assertTrue(problem.fix)
                 self.assertNotIn(PASSWORD, problem.problem)

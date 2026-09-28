@@ -6,8 +6,9 @@ under test, replayed on the raw streaming route and judged by the turn
 harness's own checks over the stored record. A turn passes iff the harness's
 row holds — its expectation, ``must``, ``must_not``, ``block``, ``sources``,
 ``withheld``, and a clean stream — and its chat was identified and deleted;
-nothing is graded, and no judge gates. Rows carry ids, classes, check names,
-and fixed codes, never text.
+nothing is graded, and no judge gates. A harness cut has the fixed problem
+code ``turn-cut`` and fails the slice gate. Rows carry ids, classes, check
+names, and fixed codes, never text.
 """
 
 import re
@@ -32,6 +33,7 @@ PROBLEMS: Final[frozenset[str]] = frozenset(
         "turns-unavailable",
         "frontend-signin",
         "turn-error",
+        "turn-cut",
         "unverified",
         "cleanup-failed",
         "stream-error",
@@ -39,7 +41,7 @@ PROBLEMS: Final[frozenset[str]] = frozenset(
         "check-failed",
     }
 )
-"""The closed codes of a turn that failed."""
+"""Closed codes of a failed turn, including one cut by the harness bound."""
 _CASES_PATH: Final[Path] = Path("general")
 _CLEANUP: Final[frozenset[str]] = frozenset({"unverified", "cleanup-failed"})
 
@@ -106,6 +108,8 @@ def _turn_outcome(record: EvalCase, repeat: int, row: run.TurnRow) -> _Outcome:
         problem = "unverified"
     elif not row.deleted:
         problem = "cleanup-failed"
+    elif row.cut:
+        problem = "turn-cut"
     elif row.verdict_kind is None:
         problem = "turn-error"
     elif row.stream_kind == "leak":
@@ -163,10 +167,14 @@ def _result(outcome: _Outcome) -> CaseResult:
 def _progress(outcome: _Outcome) -> str:
     checks = ", ".join(outcome.failed) or ("ok" if outcome.checks else "none")
     seconds = "unknown" if outcome.elapsed is None else f"{outcome.elapsed:.2f}"
+    cut = outcome.problem == "turn-cut"
+    class_detail = outcome.class_name or (run.CUT_AT if cut else "error")
+    # A classed turn that is cut was cut on its replay.
+    stream = run.CUT_AT if cut and outcome.class_name is not None else outcome.stream or "none"
     return (
         f"general-smoke {outcome.case_id}#{outcome.repeat}: "
-        f"{outcome.class_name or 'error'}; checks {checks}; "
-        f"stream {outcome.stream or 'none'}; seconds {seconds}"
+        f"{class_detail}; checks {checks}; "
+        f"stream {stream}; seconds {seconds}"
     )
 
 

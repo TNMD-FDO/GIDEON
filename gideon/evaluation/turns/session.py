@@ -10,9 +10,9 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Final
 
-from gideon.host.owui import Client, OwuiError
+from gideon.host.owui import Client, OwuiError, OwuiTimeout
 from gideon.host.owuiturn import COMPLETIONS_PATH, LOGS_FIX
-from gideon.host.report import Problem
+from gideon.host.report import Problem, Timeout
 
 PROBE_PROMPT: Final[str] = (
     "My client's conviction became final on March 2, 2026 and nothing has been filed since. "
@@ -109,14 +109,18 @@ def raw_stream(
         )
         while True:
             if monotonic() >= deadline:
-                problem = Problem("Open WebUI stream timed out.", LOGS_FIX)
+                problem = Timeout("Open WebUI stream timed out.", LOGS_FIX)
                 break
             try:
                 payload = next(source)
             except StopIteration:
                 break
             except OwuiError as exc:
-                problem = Problem(exc.problem, LOGS_FIX)
+                problem = (
+                    Timeout(exc.problem, LOGS_FIX)
+                    if isinstance(exc, OwuiTimeout)
+                    else Problem(exc.problem, LOGS_FIX)
+                )
                 break
             parsed = parse_stream_payload(payload)
             if parsed.problem is not None:
@@ -124,14 +128,18 @@ def raw_stream(
                 break
             deltas.extend(parsed.deltas)
     except OwuiError as exc:
-        problem = Problem(exc.problem, LOGS_FIX)
+        problem = (
+            Timeout(exc.problem, LOGS_FIX)
+            if isinstance(exc, OwuiTimeout)
+            else Problem(exc.problem, LOGS_FIX)
+        )
     finally:
         close = getattr(source, "close", None)
         if callable(close):
             close()
     elapsed = monotonic() - started
     if problem is None and started + elapsed > deadline:
-        problem = Problem("Open WebUI stream timed out.", LOGS_FIX)
+        problem = Timeout("Open WebUI stream timed out.", LOGS_FIX)
     return StreamCapture(tuple(deltas), elapsed, problem)
 
 

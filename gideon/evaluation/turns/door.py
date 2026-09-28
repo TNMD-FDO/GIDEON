@@ -46,7 +46,7 @@ from gideon.host.render.api import (
     api_base_url,
 )
 from gideon.host.render.owui import EVAL_IDENTITY
-from gideon.host.report import Problem
+from gideon.host.report import Problem, Timeout
 from gideon.host.sysio import Host, PathLike
 
 _CLIENT_INTERPRETER: Final[str] = "python3"
@@ -186,6 +186,12 @@ def _failure_reply(
     exception = record.get("exception")
     if not isinstance(exception, str) or not exception or not exception.isidentifier():
         return _invalid_envelope(rendered_dir)
+    exception_problem = f"door client failed: {exception}"
+    problem = (
+        Timeout(exception_problem, _api_fix(rendered_dir))
+        if exception == "TimeoutError"
+        else _problem(rendered_dir, exception_problem)
+    )
     return DoorReply(
         status,
         "",
@@ -193,7 +199,7 @@ def _failure_reply(
         (),
         False,
         None,
-        _problem(rendered_dir, f"door client failed: {exception}"),
+        problem,
     )
 
 
@@ -321,7 +327,9 @@ def _run(
             timeout=max_time + RUN_TIMEOUT_MARGIN_SECONDS,
         )
     except subprocess.TimeoutExpired:
-        return _empty_reply(_problem(rendered_dir, "door request failed: TimeoutExpired"))
+        return _empty_reply(
+            Timeout("door request failed: TimeoutExpired", _api_fix(rendered_dir))
+        )
     except OSError:
         return _empty_reply(_problem(rendered_dir, "door request failed: OSError"))
     if result.returncode != 0:

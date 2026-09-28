@@ -2,8 +2,9 @@
 
 import subprocess
 import unittest
+from dataclasses import fields
 
-from gideon.host.report import command_detail, refusal
+from gideon.host.report import Problem, Timeout, command_detail, refusal
 
 
 class CommandDetail(unittest.TestCase):
@@ -17,3 +18,15 @@ class CommandDetail(unittest.TestCase):
 
     def test_refusal_shape(self) -> None:
         self.assertEqual(refusal("restore", "no set.", "Run it."), "gideon restore: no set. Fix: Run it.")
+
+
+class TimeoutProblem(unittest.TestCase):
+    def test_timeout_is_a_problem_with_the_same_printed_shape(self) -> None:
+        timeout = Timeout("the bound expired", "Check the service, then retry.")
+
+        self.assertIsInstance(timeout, Problem)
+        self.assertEqual(tuple(field.name for field in fields(timeout)), ("problem", "fix"))
+        self.assertEqual(
+            refusal("eval run", timeout.problem, timeout.fix),
+            "gideon eval run: the bound expired Fix: Check the service, then retry.",
+        )

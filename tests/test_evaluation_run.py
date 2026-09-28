@@ -955,6 +955,8 @@ class EngineStackAndLock(unittest.TestCase):
         self.assertEqual(observed["instruction"][0][1]["stack"], "ci")
         self.assertEqual(observed["client"][0][1]["stack"], "ci")
         self.assertEqual(observed["door"][0][0][1], Path(stacks.CI_ROOT))
+        self.assertEqual(observed["door"][0][1]["max_time"], command.run.TURN_TIMEOUT_SECONDS)
+        self.assertEqual(observed["client"][0][1]["timeout"], command.run.TURN_TIMEOUT_SECONDS)
         self.assertEqual(observed["contexts"][0].rendered_dir, Path(stacks.CI_ROOT))
         self.assertEqual(host.locks, {})
         self.assertEqual(len(host.lock_records), 1)
