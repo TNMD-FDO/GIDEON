@@ -177,6 +177,8 @@ def _registered_artifacts() -> tuple[Artifact, ...]:
         BackupTimerArtifact,
         DrillServiceArtifact,
         DrillTimerArtifact,
+        NightlyServiceArtifact,
+        NightlyTimerArtifact,
         ReconcileServiceArtifact,
         ReconcileTimerArtifact,
         VerifyServiceArtifact,
@@ -212,6 +214,8 @@ def _registered_artifacts() -> tuple[Artifact, ...]:
         DrillTimerArtifact(),
         VerifyServiceArtifact(),
         VerifyTimerArtifact(),
+        NightlyServiceArtifact(),
+        NightlyTimerArtifact(),
     )
 
 

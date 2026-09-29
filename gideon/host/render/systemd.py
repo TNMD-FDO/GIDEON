@@ -14,10 +14,19 @@ _DRILL_SERVICE_TEMPLATE = "systemd/gideon-backup-drill.service.tmpl"
 _DRILL_TIMER_TEMPLATE = "systemd/gideon-backup-drill.timer.tmpl"
 _VERIFY_SERVICE_TEMPLATE = "systemd/gideon-backup-verify.service.tmpl"
 _VERIFY_TIMER_TEMPLATE = "systemd/gideon-backup-verify.timer.tmpl"
+_NIGHTLY_SERVICE_TEMPLATE = "systemd/gideon-eval-nightly.service.tmpl"
+_NIGHTLY_TIMER_TEMPLATE = "systemd/gideon-eval-nightly.timer.tmpl"
 
 RECONCILE_CALENDAR: Final = "*-*-* 03:00:00"
 BACKUP_CALENDAR: Final = "*-*-* 01:00:00"
 VERIFY_ALL_CALENDAR: Final = "Sat *-01,04,07,10-8..14 04:00:00"
+# The box ledger's earliest GIDEON hour: general-smoke's measured nine minutes
+# and guardrails' four hours end near 01:30, the 01:00 backup shares the disk
+# and not the engine, and the rest of the night before 06:00 is a hand run's.
+NIGHTLY_CALENDAR: Final = "*-*-* 21:00:00"
+# Ten hours, 21:00 to 06:00 plus the last judge readings and one turn's bound:
+# a backstop the command's own 06:00 deadline is meant to make unreachable.
+NIGHTLY_TIMEOUT_START_SECONDS: Final = 36000
 
 DRILL_CALENDAR: Final[Mapping[str, str]] = {
     "1w": "Sat *-*-* 04:00:00",
@@ -149,4 +158,40 @@ class VerifyTimerArtifact(_SystemdArtifact):
     def _substitutions(self, inputs: RenderInputs) -> Mapping[str, str]:
         substitutions = dict(super()._substitutions(inputs))
         substitutions["calendar"] = _calendar_with_zone(VERIFY_ALL_CALENDAR, inputs)
+        return substitutions
+
+
+class NightlyServiceArtifact(_SystemdArtifact):
+    """Render the nightly eval service only where its suites can reach an engine."""
+
+    name = "gideon-eval-nightly-service"
+    relative_path = "systemd/gideon-eval-nightly.service"
+    template_paths = (_NIGHTLY_SERVICE_TEMPLATE,)
+
+    def applies(self, inputs: RenderInputs) -> bool:
+        """Omit the service on no-GPU hosts, where its suites would refuse."""
+
+        return not inputs.no_gpu
+
+    def _substitutions(self, inputs: RenderInputs) -> Mapping[str, str]:
+        substitutions = dict(super()._substitutions(inputs))
+        substitutions["timeout_start_seconds"] = str(NIGHTLY_TIMEOUT_START_SECONDS)
+        return substitutions
+
+
+class NightlyTimerArtifact(_SystemdArtifact):
+    """Render the office-zoned nightly timer for the eval suites."""
+
+    name = "gideon-eval-nightly-timer"
+    relative_path = "systemd/gideon-eval-nightly.timer"
+    template_paths = (_NIGHTLY_TIMER_TEMPLATE,)
+
+    def applies(self, inputs: RenderInputs) -> bool:
+        """Omit the timer on no-GPU hosts so it never starts a refusing service."""
+
+        return not inputs.no_gpu
+
+    def _substitutions(self, inputs: RenderInputs) -> Mapping[str, str]:
+        substitutions = dict(super()._substitutions(inputs))
+        substitutions["calendar"] = _calendar_with_zone(NIGHTLY_CALENDAR, inputs)
         return substitutions

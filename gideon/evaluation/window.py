@@ -139,6 +139,26 @@ def decision_judgement(clock: datetime, timezone_name: str) -> WindowJudgement:
     )
 
 
+def nightly_judgement(clock: datetime, timezone_name: str) -> WindowJudgement:
+    """Bound a nightly to one night, including weekends, ending at 06:00.
+
+    Weekend daytime and a Monday deadline could let a nightly wait into
+    Transcribe's evening hours after a weekend decision run releases the lock.
+    """
+
+    local = _local_clock(clock, timezone_name)
+    inside = local.hour >= QUIET_WINDOW_START_HOUR or local.hour < QUIET_WINDOW_END_HOUR
+    # Outside the night is the day's own daytime, so the opening is that evening.
+    opening = datetime.combine(local.date(), time(QUIET_WINDOW_START_HOUR), tzinfo=local.tzinfo)
+    end_date = local.date()
+    if local.hour >= QUIET_WINDOW_END_HOUR:
+        end_date += timedelta(days=1)
+    end = datetime.combine(end_date, time(QUIET_WINDOW_END_HOUR), tzinfo=local.tzinfo)
+    label = "inside the night" if inside else "outside the night"
+    description = f"{label} ({local.strftime('%A %H:%M')} {timezone_name})"
+    return WindowJudgement(inside, description, local if inside else opening, end)
+
+
 def deadline_checkpoint(clock: Callable[[], datetime], end: datetime) -> Callable[[], None]:
     """Return a check that raises when the injected clock reaches the deadline."""
 

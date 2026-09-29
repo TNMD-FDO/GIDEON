@@ -140,6 +140,14 @@ files:
     sha256: "ccaca960e7b26607e588a70df717b9c10aeef55536f52919fb86b222fe0f406c"
     mode: "0644"
     owners: []
+  "systemd/gideon-eval-nightly.service":
+    sha256: "29a61ce813d5393ca847429932dbb9d6469b0681dfe4c407d6cdc2e447acbeaf"
+    mode: "0644"
+    owners: []
+  "systemd/gideon-eval-nightly.timer":
+    sha256: "8effe56310ca6ff4b1b1bfe5a0492269aa9fd84c0133462ca3e727bc602cf9a6"
+    mode: "0644"
+    owners: []
 services:
   caddy: "86b607a02fc284aad98149418e2c5dca70fb57282377143a35ceb8ad09ae3cc8"
   prometheus: "1590c12e98d56b195818d759cbaf4614e8b9d768816bca9efbfae27a7ae0f4bd"

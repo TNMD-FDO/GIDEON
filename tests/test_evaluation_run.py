@@ -10,12 +10,13 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 import gideon
 from gideon.cli import main
@@ -346,10 +347,11 @@ class Command(unittest.TestCase):
             opening,
             NOW + timedelta(days=2),
         )
+        host = EvalHost()
         with patch.object(command.window, "window_judgement", return_value=judgement):
             code, stdout, stderr = _invoke(
                 ["eval", "run", "--slice", "guardrails"],
-                **_run_kwargs(EvalHost()),
+                **_run_kwargs(host),
             )
         self.assertEqual(code, 1)
         self.assertEqual(stderr, "")
@@ -359,6 +361,7 @@ class Command(unittest.TestCase):
             stdout,
         )
         self.assertNotIn("run: ok", stdout)
+        self.assertEqual(host.lock_records, [])
 
     def test_force_outside_quiet_window_runs_engine_slice(self) -> None:
         host = EvalHost()
@@ -811,6 +814,7 @@ class Command(unittest.TestCase):
             (["eval", "run", "--slice", "guardrails", "--decision"], "--decision requires --against"),
             (["eval", "run", "--slice", "guardrails", "--against", RUN_ID], "--against requires --decision"),
             (["eval", "run", "--slice", "extraction", "--decision", "--against", RUN_ID], "no decision metric"),
+            (["eval", "run", "--slice", "guardrails", "--kind", "nightly", "--decision", "--against", RUN_ID], "records its own kind, not 'nightly'"),
             (["eval", "run", "--slice", "extraction", "--force"], "does not reach the engine"),
         )
         for argv, expected in cases:
@@ -822,6 +826,8 @@ class Command(unittest.TestCase):
                 self.assertIn("gideon eval run:", stderr)
                 self.assertIn(expected, stderr)
                 self.assertIn("Fix:", stderr)
+                if "nightly" in argv:
+                    self.assertIn("Remove --kind nightly", stderr)
                 self.assertEqual(host.calls, [])
 
     def test_slice_selection_refuses_with_fixes(self) -> None:
@@ -951,13 +957,17 @@ class Command(unittest.TestCase):
         self.assertNotIn("gate:", stdout)
 
 
-def _invoke_smoke_command(
+def _invoke_engine_command(
     host: EvalHost,
     *,
+    slice_name: str = "smoke",
     stack_name: str = "ci",
     kind: str = "smoke",
     rendered_dir: Path | None = None,
     set_root: Path | None = None,
+    clock: Callable[[], datetime] | None = None,
+    sleep: Callable[[float], None] | None = None,
+    on_run: Callable[[RunContext], SliceResult] | None = None,
 ) -> tuple[int, str, str, dict[str, list[Any]]]:
     observed: dict[str, list[Any]] = {
         "contexts": [],
@@ -983,6 +993,8 @@ def _invoke_smoke_command(
         _spec: Any, _loaded: LoadedSet, _slice_name: str, context: RunContext
     ) -> SliceResult:
         observed["contexts"].append(context)
+        if on_run is not None:
+            return on_run(context)
         return SliceResult(True, "smoke run report\n", ())
 
     def resolve_engine(
@@ -993,12 +1005,16 @@ def _invoke_smoke_command(
 
     set_args = [] if set_root is None else ["--set", str(set_root)]
     args = [
-        "eval", "run", "--slice", "smoke", "--stack", stack_name,
+        "eval", "run", "--slice", slice_name, "--stack", stack_name,
         "--kind", kind, *set_args,
     ]
     run_kwargs = _run_kwargs(host)
     if rendered_dir is not None:
         run_kwargs["rendered_dir"] = rendered_dir
+    if clock is not None:
+        run_kwargs["clock"] = clock
+    if sleep is not None:
+        run_kwargs["sleep"] = sleep
     with (
         patch.object(
             command.engine,
@@ -1020,6 +1036,12 @@ def _invoke_smoke_command(
     return (*outcome, observed)
 
 
+def _nightly_start() -> datetime:
+    site_result = command.site.load_site(ROOT / "config/site.example.yaml")
+    assert site_result.config is not None, site_result.errors
+    return datetime.combine(NOW.date(), time(21), tzinfo=ZoneInfo(site_result.config.office.timezone))
+
+
 class EngineStackAndLock(unittest.TestCase):
     def test_ci_threads_turn_paths_records_identity_and_waives_the_window(self) -> None:
         host = EvalHost()
@@ -1028,7 +1050,7 @@ class EngineStackAndLock(unittest.TestCase):
             False, "fictitious office hours", NOW + timedelta(hours=1), NOW + timedelta(days=1)
         )
         with patch.object(command.window, "window_judgement", return_value=office):
-            code, stdout, stderr, observed = _invoke_smoke_command(
+            code, stdout, stderr, observed = _invoke_engine_command(
                 host, rendered_dir=production_dir
             )
         loaded = load_set(ROOT / SET_ROOT).loaded
@@ -1098,7 +1120,7 @@ class EngineStackAndLock(unittest.TestCase):
         other.locks[lock.path] = backuplock.Record(
             "fictitious nightly", other_pid, NOW
         ).to_json()
-        code, stdout, _stderr, _observed = _invoke_smoke_command(other)
+        code, stdout, _stderr, _observed = _invoke_engine_command(other)
         self.assertEqual(code, 1)
         self.assertIn("fictitious nightly", stdout)
         self.assertIn(f"ps -p {other_pid}", stdout)
@@ -1108,7 +1130,7 @@ class EngineStackAndLock(unittest.TestCase):
 
         unreadable = EvalHost()
         unreadable.locks[lock.path] = "visibly fictitious unreadable lock record"
-        code, stdout, _stderr, _observed = _invoke_smoke_command(unreadable)
+        code, stdout, _stderr, _observed = _invoke_engine_command(unreadable)
         self.assertEqual(code, 1)
         self.assertIn("record unreadable", stdout)
         self.assertIn(lock.wait_fix, stdout)
@@ -1119,20 +1141,20 @@ class EngineStackAndLock(unittest.TestCase):
         nested = EvalHost()
         own_record = backuplock.Record("caller owns lock", os.getpid(), NOW).to_json()
         nested.locks[lock.path] = own_record
-        code, stdout, _stderr, _observed = _invoke_smoke_command(nested)
+        code, stdout, _stderr, _observed = _invoke_engine_command(nested)
         self.assertEqual(code, 0)
         self.assertIn("engine lock held by this process", stdout)
         self.assertEqual(nested.locks[lock.path], own_record)
 
         absent = EvalHost(ci_stack_present=False)
-        code, stdout, _stderr, observed = _invoke_smoke_command(absent)
+        code, stdout, _stderr, observed = _invoke_engine_command(absent)
         self.assertEqual(code, 1)
         self.assertIn("Run sudo python3 -m tools.cistack up, then retry.", stdout)
         self.assertEqual(observed["door"], [])
         self.assertEqual(absent.locks, {})
 
         unprivileged = EvalHost(effective_uid=1000)
-        code, stdout, _stderr, _observed = _invoke_smoke_command(unprivileged)
+        code, stdout, _stderr, _observed = _invoke_engine_command(unprivileged)
         self.assertEqual(code, 1)
         self.assertIn("--stack ci --kind smoke", stdout)
         self.assertEqual(unprivileged.lock_records, [])
@@ -1160,12 +1182,13 @@ class EngineStackAndLock(unittest.TestCase):
             patch.object(command, "SLICE_RUNNERS", replacement),
             patch.object(command.window, "window_judgement", return_value=outside),
         ):
-            code, stdout, _stderr, _observed = _invoke_smoke_command(host)
+            code, stdout, _stderr, _observed = _invoke_engine_command(host)
         count = command.run.SMOKE_TURNS + 1
         self.assertEqual(code, 1)
         self.assertIn(f"{count} engine calls exceed the any-hour allowance", stdout)
         self.assertIn("Next opening is", stdout)
         self.assertEqual(host.locks, {})
+        self.assertEqual(host.lock_records, [])
 
     def test_in_window_count_is_reported_without_a_waiver(self) -> None:
         inside = command.window.WindowJudgement(
@@ -1173,7 +1196,7 @@ class EngineStackAndLock(unittest.TestCase):
         )
         host = EvalHost()
         with patch.object(command.window, "window_judgement", return_value=inside):
-            code, stdout, _stderr, _observed = _invoke_smoke_command(host)
+            code, stdout, _stderr, _observed = _invoke_engine_command(host)
         loaded = load_set(ROOT / SET_ROOT).loaded
         assert loaded is not None
         engine_calls = SLICE_RUNNERS["smoke"].engine_calls
@@ -1182,6 +1205,268 @@ class EngineStackAndLock(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn(f"{count} engine calls, engine lock taken", stdout)
         self.assertNotIn("within the any-hour allowance", stdout)
+
+
+class NightlyCommand(unittest.TestCase):
+    """Bound the timer's runs to one night so a wait cannot carry into daytime."""
+
+    def test_free_lock_starts_at_once_and_uses_the_nights_deadline(self) -> None:
+        host = EvalHost()
+        started = _nightly_start()
+        end = datetime.combine(started.date() + timedelta(days=1), time(6), tzinfo=started.tzinfo)
+        now = [started]
+
+        def unexpected_sleep(_seconds: float) -> None:
+            self.fail("an available lock must not sleep")
+
+        code, stdout, stderr, observed = _invoke_engine_command(
+            host,
+            slice_name="general-smoke",
+            stack_name="production",
+            kind=command.NIGHTLY_KIND,
+            clock=lambda: now[0],
+            sleep=unexpected_sleep,
+        )
+        self.assertEqual((code, stderr), (0, ""), stdout + stderr)
+        self.assertIn("preconditions: ok", stdout)
+        self.assertIn("inside the night", stdout)
+        self.assertIn("engine lock taken", stdout)
+        self.assertNotIn("waiting for the engine lock", stdout)
+        self.assertEqual(len(host.lock_records), 1)
+        lock_record = backuplock.parse(host.lock_records[0][1])
+        assert lock_record is not None
+        self.assertEqual(lock_record.started, started)
+        self.assertEqual(host.locks, {})
+        write_sql = next(
+            cast(str, statement)
+            for argv, statement in host.calls
+            if argv[0] == "docker" and statement is not None and "INSERT INTO eval_runs" in statement
+        )
+        self.assertIn("\\set kind 'nightly'", write_sql)
+        self.assertIn(f"\\set run_started_at '{started.isoformat()}'", write_sql)
+        context = cast(RunContext, observed["contexts"][0])
+        now[0] = end - timedelta(microseconds=1)
+        context.checkpoint()
+        now[0] = end
+        with self.assertRaises(window.WindowOverrun) as raised:
+            context.checkpoint()
+        self.assertEqual(raised.exception.end, end)
+
+    def test_reaching_the_deadline_records_a_partial_nightly_run(self) -> None:
+        host = EvalHost()
+        started = _nightly_start()
+        end = datetime.combine(started.date() + timedelta(days=1), time(6), tzinfo=started.tzinfo)
+        now = [started]
+
+        def finish_at_deadline(_context: RunContext) -> SliceResult:
+            now[0] = end
+            return SliceResult(True, "visibly fictitious completed turn\n", ())
+
+        def unexpected_sleep(_seconds: float) -> None:
+            self.fail("an available lock must not sleep")
+
+        code, stdout, stderr, _observed = _invoke_engine_command(
+            host,
+            slice_name="general-smoke",
+            stack_name="production",
+            kind=command.NIGHTLY_KIND,
+            clock=lambda: now[0],
+            sleep=unexpected_sleep,
+            on_run=finish_at_deadline,
+        )
+        self.assertEqual((code, stderr), (1, ""))
+        self.assertIn(f"aborted at the window end {end.isoformat()}", stdout)
+        self.assertIn("1 run row, 0 result rows", stdout)
+        self.assertIn("gate: refuse", stdout)
+        write_sql = next(
+            cast(str, statement)
+            for argv, statement in host.calls
+            if argv[0] == "docker" and statement is not None and "INSERT INTO eval_runs" in statement
+        )
+        self.assertIn("\\set kind 'nightly'", write_sql)
+        self.assertIn("\\set partial 'true'", write_sql)
+        self.assertIn("\\set run_verdict 'fail'", write_sql)
+        self.assertIn(f"\\set run_started_at '{started.isoformat()}'", write_sql)
+
+    def test_held_lock_waits_for_each_poll_and_records_the_effective_start(self) -> None:
+        host = EvalHost()
+        started = _nightly_start()
+        held_by = backuplock.Record(
+            "visibly fictitious hand run", os.getpid() + 1, started - timedelta(minutes=5)
+        )
+        host.locks[backuplock.ENGINE_LOCK.path] = held_by.to_json()
+        now = [started]
+        sleeps: list[float] = []
+        poll_count = 3
+
+        def advance(seconds: float) -> None:
+            sleeps.append(seconds)
+            now[0] += timedelta(seconds=seconds)
+            if len(sleeps) == poll_count:
+                del host.locks[backuplock.ENGINE_LOCK.path]
+
+        code, stdout, stderr, _observed = _invoke_engine_command(
+            host,
+            slice_name="general-smoke",
+            stack_name="production",
+            kind=command.NIGHTLY_KIND,
+            clock=lambda: now[0],
+            sleep=advance,
+        )
+        self.assertEqual((code, stderr), (0, ""), stdout + stderr)
+        self.assertEqual(sleeps, [command.NIGHTLY_LOCK_POLL_SECONDS] * poll_count)
+        self.assertEqual(stdout.count("waiting for the engine lock held by"), 1)
+        self.assertIn(
+            f"{held_by.command} (pid {held_by.pid}) since {held_by.started.isoformat()}",
+            stdout,
+        )
+        self.assertIn(
+            f"polling every {command.NIGHTLY_LOCK_POLL_SECONDS} s until "
+            f"{datetime.combine(started.date() + timedelta(days=1), time(6), tzinfo=started.tzinfo).isoformat()}",
+            stdout,
+        )
+        self.assertIn(
+            f"engine lock taken after 0 h {poll_count} min behind "
+            f"{held_by.command} (pid {held_by.pid})",
+            stdout,
+        )
+        self.assertEqual(len(host.lock_records), poll_count + 1)
+        taken = backuplock.parse(host.lock_records[-1][1])
+        assert taken is not None
+        self.assertEqual(taken.started, now[0])
+        self.assertEqual(host.locks, {})
+        write_sql = next(
+            cast(str, statement)
+            for argv, statement in host.calls
+            if argv[0] == "docker" and statement is not None and "INSERT INTO eval_runs" in statement
+        )
+        self.assertIn(f"\\set run_started_at '{now[0].isoformat()}'", write_sql)
+
+    def test_held_lock_at_the_nights_end_skips_without_a_run(self) -> None:
+        host = EvalHost()
+        night = _nightly_start()
+        end = datetime.combine(night.date() + timedelta(days=1), time(6), tzinfo=night.tzinfo)
+        now = [end - timedelta(minutes=1)]
+        held_by = backuplock.Record("visibly fictitious weekend decision", os.getpid() + 1, night)
+        held_text = held_by.to_json()
+        host.locks[backuplock.ENGINE_LOCK.path] = held_text
+        sleeps: list[float] = []
+
+        def advance(seconds: float) -> None:
+            sleeps.append(seconds)
+            now[0] += timedelta(seconds=seconds)
+
+        code, stdout, stderr, _observed = _invoke_engine_command(
+            host,
+            slice_name="general-smoke",
+            stack_name="production",
+            kind=command.NIGHTLY_KIND,
+            clock=lambda: now[0],
+            sleep=advance,
+        )
+        self.assertEqual((code, stderr), (1, ""))
+        self.assertEqual(sleeps, [command.NIGHTLY_LOCK_POLL_SECONDS])
+        self.assertIn("preconditions: refuse", stdout)
+        self.assertIn(f"engine lock held by {held_by.command} (pid {held_by.pid})", stdout)
+        self.assertIn(f"through the night's end {end.isoformat()}; waited 0 h 1 min", stdout)
+        self.assertIn("The next nightly fires at 21:00 office time", stdout)
+        self.assertIn("sudo python3 -m gideon eval run --slice general-smoke", stdout)
+        self.assertNotIn("run: ok", stdout)
+        self.assertNotIn("record:", stdout)
+        self.assertEqual(len(host.lock_records), 1)
+        self.assertEqual(host.locks[backuplock.ENGINE_LOCK.path], held_text)
+        self.assertFalse(any("INSERT INTO eval_runs" in (statement or "") for _, statement in host.calls))
+
+    def test_outside_the_night_refuses_before_lock_for_weekday_and_weekend(self) -> None:
+        night = _nightly_start()
+        cases = (
+            (night + timedelta(days=2), "general-smoke"),
+            (night, "smoke"),
+        )
+        for day, slice_name in cases:
+            now = day.replace(hour=9 if slice_name == "general-smoke" else 12)
+            with self.subTest(now=now, slice_name=slice_name):
+                host = EvalHost()
+                sleeps: list[float] = []
+
+                def read_clock(instant: datetime = now) -> datetime:
+                    return instant
+
+                code, stdout, stderr, _observed = _invoke_engine_command(
+                    host,
+                    slice_name=slice_name,
+                    stack_name="production",
+                    kind=command.NIGHTLY_KIND,
+                    clock=read_clock,
+                    sleep=sleeps.append,
+                )
+                self.assertEqual((code, stderr), (1, ""))
+                self.assertIn("preconditions: refuse", stdout)
+                self.assertIn("outside the night", stdout)
+                self.assertIn("Next opening is", stdout)
+                self.assertEqual(sleeps, [])
+                self.assertEqual(host.lock_records, [])
+                self.assertNotIn("record:", stdout)
+
+    def test_two_suites_across_sunday_morning_skip_then_refuse(self) -> None:
+        host = EvalHost()
+        night = _nightly_start()
+        end = datetime.combine(night.date() + timedelta(days=1), time(6), tzinfo=night.tzinfo)
+        now = [end - timedelta(minutes=1)]
+        held_by = backuplock.Record("visibly fictitious decision run", os.getpid() + 1, night)
+        host.locks[backuplock.ENGINE_LOCK.path] = held_by.to_json()
+        sleeps: list[float] = []
+
+        def advance(seconds: float) -> None:
+            sleeps.append(seconds)
+            now[0] += timedelta(seconds=seconds)
+
+        first_code, first_out, first_err, _ = _invoke_engine_command(
+            host,
+            slice_name="general-smoke",
+            stack_name="production",
+            kind=command.NIGHTLY_KIND,
+            clock=lambda: now[0],
+            sleep=advance,
+        )
+        probes_after_first = len(host.lock_records)
+        second_code, second_out, second_err, _ = _invoke_engine_command(
+            host,
+            slice_name="guardrails",
+            stack_name="production",
+            kind=command.NIGHTLY_KIND,
+            clock=lambda: now[0],
+            sleep=advance,
+        )
+        self.assertEqual((first_code, first_err, second_code, second_err), (1, "", 1, ""))
+        self.assertIn("through the night's end", first_out)
+        self.assertIn("outside the night", second_out)
+        self.assertNotIn("waiting for the engine lock", second_out)
+        self.assertEqual(sleeps, [command.NIGHTLY_LOCK_POLL_SECONDS])
+        self.assertEqual(len(host.lock_records), probes_after_first)
+        self.assertEqual(probes_after_first, 1)
+        self.assertFalse(any("INSERT INTO eval_runs" in (statement or "") for _, statement in host.calls))
+
+    def test_manual_with_a_held_lock_refuses_without_waiting(self) -> None:
+        host = EvalHost()
+        night = _nightly_start()
+        held_by = backuplock.Record("visibly fictitious first holder", os.getpid() + 1, night)
+        host.locks[backuplock.ENGINE_LOCK.path] = held_by.to_json()
+        sleeps: list[float] = []
+        code, stdout, stderr, _observed = _invoke_engine_command(
+            host,
+            slice_name="general-smoke",
+            stack_name="production",
+            kind="manual",
+            clock=lambda: night,
+            sleep=sleeps.append,
+        )
+        self.assertEqual((code, stderr), (1, ""))
+        self.assertIn("engine lock is held by", stdout)
+        self.assertIn(f"ps -p {held_by.pid}", stdout)
+        self.assertNotIn("waiting for the engine lock", stdout)
+        self.assertEqual(sleeps, [])
+        self.assertEqual(len(host.lock_records), 1)
 
 
 class RunnerSelection(unittest.TestCase):

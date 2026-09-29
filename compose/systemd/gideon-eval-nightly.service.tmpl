@@ -1,0 +1,14 @@
+[Unit]
+Description=Run the nightly GIDEON general-smoke and guardrails eval suites
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=$checkout
+ExecStart=-/usr/bin/python3 -m gideon eval run --slice general-smoke --kind nightly
+ExecStart=/usr/bin/python3 -m gideon eval run --slice guardrails --kind nightly
+TimeoutStartSec=$timeout_start_seconds
+StandardOutput=journal
+StandardError=journal

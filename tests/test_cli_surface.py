@@ -88,7 +88,7 @@ class Help(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 0)
         self.assertIn("--slice NAME", command.getvalue())
         self.assertIn("--stack {production,ci}", command.getvalue())
-        self.assertIn("--kind {manual,smoke}", command.getvalue())
+        self.assertIn("--kind {manual,smoke,nightly}", command.getvalue())
         self.assertIn("--set DIR", command.getvalue())
         self.assertIn("--ranked FILE", command.getvalue())
         self.assertIn("frozen slice to run", command.getvalue())
@@ -100,6 +100,7 @@ class Help(unittest.TestCase):
         )
         self.assertIn("the word the run's record carries for its purpose", command.getvalue())
         run_help = collapsed(command.getvalue())
+        self.assertIn("nightly also waits for a held engine and stops at 06:00", run_help)
         self.assertIn(
             "--decision a decision run: five repeats paired against --against's recorded run",
             run_help,

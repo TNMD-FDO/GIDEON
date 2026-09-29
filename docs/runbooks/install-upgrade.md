@@ -265,7 +265,11 @@ running process.
 users; before them the rules below do not bind. The **quiet window** is
 weeknights 19:00–06:00 and Friday 19:00 to Monday 06:00 in the site's timezone
 (TNMD: America/Chicago). Work is window-bound when it sends requests to the
-engine on GPU 0; nothing scheduled in this release does. A **maintenance
+engine on GPU 0. The one scheduled thing that does is the nightly:
+`gideon-eval-nightly.timer` fires at 21:00 office time every night, weekends
+included, and runs the `general-smoke` and `guardrails` suites of kind
+`nightly`; each is refused outside 19:00–06:00, waits while another GIDEON run
+holds the engine, and is stopped at 06:00 and recorded partial. A **maintenance
 window** is a span inside the quiet window, announced at least one working day
 ahead, weekend nights by default — the only sanctioned unavailability. An
 engine swap, a driver, engine, or Docker change, and every upgrade on a

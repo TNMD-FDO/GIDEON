@@ -312,9 +312,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     eval_run.add_argument(
         "--kind",
-        choices=("manual", "smoke"),
+        choices=("manual", "smoke", "nightly"),
         default="manual",
-        help="the word the run's record carries for its purpose",
+        help="the word the run's record carries for its purpose; nightly also waits for a held engine and stops at 06:00",
     )
     eval_run.add_argument(
         "--slice",

@@ -31,6 +31,8 @@ from gideon.host.report import Problem, StageResult, print_stage, refusal
 from gideon.host.sysio import Host, LockingHost, PathLike, RealHost
 
 _COMMAND: Final[str] = "eval run"
+NIGHTLY_KIND: Final[str] = "nightly"
+NIGHTLY_LOCK_POLL_SECONDS: Final[int] = 60
 _SLICE_FIX: Final[str] = "Run gideon eval run --slice extraction."
 _LOAD_FIX: Final[str] = "Correct every listed eval-set finding, then retry."
 _NO_GPU_FIX: Final[str] = "Run the evaluation on a GPU host, then retry."
@@ -49,6 +51,7 @@ class _EnginePreconditions:
     provenance: tuple[str | None, bool | None]
     site_config: site.SiteConfig
     turns: access.TurnAccess | None
+    started: datetime
     end: datetime
     forced: bool
 
@@ -487,6 +490,27 @@ def _engine_root_fix(slice_name: str, command_flags: str) -> str:
     return f"Run sudo python3 -m gideon eval run --slice {slice_name}{command_flags}, then retry."
 
 
+def _waits_for_engine_lock(kind: str) -> bool:
+    """Manual refuses a holder, smoke passes its caller's nested lock, nightly waits."""
+
+    return kind == NIGHTLY_KIND
+
+
+def _waited_duration(started: datetime, finished: datetime) -> str:
+    """Describe the time spent waiting for the engine lock in hours and minutes."""
+
+    seconds = max(0, int((finished - started).total_seconds()))
+    hours, minutes = divmod(seconds // 60, 60)
+    return f"{hours} h {minutes} min"
+
+
+def _holder_text(holder: backuplock.Record | None) -> str:
+    # A holder between its flock and its write has no record yet, and is waited on.
+    if holder is None:
+        return "another gideon command (record unreadable)"
+    return f"{holder.command} (pid {holder.pid})"
+
+
 def _record_root_fix(
     slice_name: str, slice_spec: SliceSpec, command_flags: str = ""
 ) -> str:
@@ -634,6 +658,7 @@ def _engine_preconditions(
     started: datetime,
     supplied_set: bool,
     decision: bool,
+    kind: str,
     force: bool,
     slice_name: str,
     slice_spec: SliceSpec,
@@ -642,6 +667,7 @@ def _engine_preconditions(
     command_flags: str,
     lock_claim: _EngineLockClaim,
     sleep: Callable[[float], None],
+    clock: Callable[[], datetime],
 ) -> _EnginePreconditions | None:
     """Refuse engine runs before a request when a required seam is unavailable."""
 
@@ -672,43 +698,25 @@ def _engine_preconditions(
         print_stage(StageResult("preconditions", False, detail, fix))
         return None
     config = site_result.config
-    lock_outcome = backuplock.take(
-        cast(LockingHost, io),
-        command=f"gideon eval run --slice {slice_name} --stack {paths.name}",
-        now=started,
-        lock=backuplock.ENGINE_LOCK,
-    )
-    if lock_outcome.state is backuplock.State.REFUSED:
-        assert lock_outcome.problem is not None
-        print_stage(
-            StageResult(
-                "preconditions",
-                False,
-                lock_outcome.problem.problem,
-                lock_outcome.problem.fix,
-            )
-        )
-        return None
-    if lock_outcome.state is backuplock.State.HELD:
-        lock_claim.taken = True
-        lock_detail = "engine lock taken"
-    else:
-        lock_detail = "engine lock held by this process"
-
     judgement = (
         window.decision_judgement(started, config.office.timezone)
         if decision
-        else window.window_judgement(started, config.office.timezone)
+        else (
+            window.nightly_judgement(started, config.office.timezone)
+            if kind == NIGHTLY_KIND
+            else window.window_judgement(started, config.office.timezone)
+        )
     )
     engine_call_count = (
         None
         if slice_spec.engine_calls is None
         else slice_spec.engine_calls(loaded, slice_name)
     )
-    # The any-hour allowance sizes one ordinary run; a decision repeats the
-    # slice, so it answers to the weekend window whatever one repeat costs.
+    # The any-hour allowance sizes a person's ordinary run, not a decision
+    # repeat or a scheduled nightly run.
     waived = (
         not decision
+        and kind != NIGHTLY_KIND
         and not judgement.inside
         and engine_call_count is not None
         and engine_call_count <= run.SMOKE_TURNS
@@ -746,6 +754,72 @@ def _engine_preconditions(
             )
         )
         return None
+
+    lock_command = f"gideon eval run --slice {slice_name} --stack {paths.name}"
+    effective_start = started
+    lock_outcome = backuplock.take(
+        cast(LockingHost, io),
+        command=lock_command,
+        now=effective_start,
+        lock=backuplock.ENGINE_LOCK,
+    )
+    waited_for_lock = (
+        lock_outcome.state is backuplock.State.REFUSED and _waits_for_engine_lock(kind)
+    )
+    first_holder = lock_outcome.holder
+    if waited_for_lock:
+        since = (
+            ""
+            if first_holder is None
+            else f" since {first_holder.started.isoformat()}"
+        )
+        print(
+            f"waiting for the engine lock held by {_holder_text(first_holder)}{since}; "
+            f"polling every {NIGHTLY_LOCK_POLL_SECONDS} s until {judgement.end.isoformat()}"
+        )
+        while lock_outcome.state is backuplock.State.REFUSED:
+            sleep(NIGHTLY_LOCK_POLL_SECONDS)
+            effective_start = clock()
+            if effective_start >= judgement.end:
+                print_stage(
+                    StageResult(
+                        "preconditions",
+                        False,
+                        f"engine lock held by {_holder_text(lock_outcome.holder)} through the night's end "
+                        f"{judgement.end.isoformat()}; waited {_waited_duration(started, effective_start)}",
+                        "The next nightly fires at 21:00 office time; run this suite by hand "
+                        "inside the window with "
+                        f"sudo python3 -m gideon eval run --slice {slice_name}.",
+                    )
+                )
+                return None
+            lock_outcome = backuplock.take(
+                cast(LockingHost, io),
+                command=lock_command,
+                now=effective_start,
+                lock=backuplock.ENGINE_LOCK,
+            )
+    if lock_outcome.state is backuplock.State.REFUSED:
+        assert lock_outcome.problem is not None
+        print_stage(
+            StageResult(
+                "preconditions",
+                False,
+                lock_outcome.problem.problem,
+                lock_outcome.problem.fix,
+            )
+        )
+        return None
+    if lock_outcome.state is backuplock.State.HELD:
+        lock_claim.taken = True
+        lock_detail = "engine lock taken"
+        if waited_for_lock:
+            lock_detail += (
+                f" after {_waited_duration(started, effective_start)} "
+                f"behind {_holder_text(first_holder)}"
+            )
+    else:
+        lock_detail = "engine lock held by this process"
 
     target = engine.resolve_engine_target(
         io,
@@ -866,6 +940,7 @@ def _engine_preconditions(
         provenance,
         config,
         turns,
+        effective_start,
         judgement.end,
         force,
     )
@@ -1194,6 +1269,7 @@ def _run_body(
             started=started,
             supplied_set=supplied_set,
             decision=decision,
+            kind=kind,
             force=force,
             slice_name=slice_name,
             slice_spec=slice_spec,
@@ -1202,6 +1278,7 @@ def _run_body(
             command_flags=command_flags,
             lock_claim=lock_claim,
             sleep=sleep,
+            clock=finished_clock,
         )
         if engine_preconditions is None:
             return 1
@@ -1354,7 +1431,7 @@ def _run_body(
         loaded,
         slice_name,
         slice_result,
-        started=started,
+        started=started if engine_preconditions is None else engine_preconditions.started,
         finished=finished_clock(),
         checkout=checkout,
         host=host,

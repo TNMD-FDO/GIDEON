@@ -93,6 +93,9 @@ SYSTEMCTL_ACTIVE_DRILL = ("systemctl", "is-active", "gideon-backup-drill.timer")
 SYSTEMCTL_LINK_VERIFY = ("systemctl", "link", f"{RENDERED}/systemd/gideon-backup-verify.service")
 SYSTEMCTL_ENABLE_VERIFY = ("systemctl", "enable", "--now", f"{RENDERED}/systemd/gideon-backup-verify.timer")
 SYSTEMCTL_ACTIVE_VERIFY = ("systemctl", "is-active", "gideon-backup-verify.timer")
+SYSTEMCTL_LINK_NIGHTLY = ("systemctl", "link", f"{RENDERED}/systemd/gideon-eval-nightly.service")
+SYSTEMCTL_ENABLE_NIGHTLY = ("systemctl", "enable", "--now", f"{RENDERED}/systemd/gideon-eval-nightly.timer")
+SYSTEMCTL_ACTIVE_NIGHTLY = ("systemctl", "is-active", "gideon-eval-nightly.timer")
 CERT = CERT_PATH
 HANDSHAKE = ("openssl", "s_client", "-connect", "127.0.0.1:443", "-servername", "gideon.example.org", "-verify_hostname", "gideon.example.org", "-CAfile", CA_PATH, "-verify_return_error")
 SERVED_FP = ("openssl", "x509", "-noout", "-fingerprint", "-sha256")
@@ -502,6 +505,9 @@ def healthy_commands(
         SYSTEMCTL_LINK_VERIFY: done(SYSTEMCTL_LINK_VERIFY),
         SYSTEMCTL_ENABLE_VERIFY: done(SYSTEMCTL_ENABLE_VERIFY),
         SYSTEMCTL_ACTIVE_VERIFY: done(SYSTEMCTL_ACTIVE_VERIFY, stdout="active\n"),
+        SYSTEMCTL_LINK_NIGHTLY: done(SYSTEMCTL_LINK_NIGHTLY),
+        SYSTEMCTL_ENABLE_NIGHTLY: done(SYSTEMCTL_ENABLE_NIGHTLY),
+        SYSTEMCTL_ACTIVE_NIGHTLY: done(SYSTEMCTL_ACTIVE_NIGHTLY, stdout="active\n"),
         PS: done(PS, stdout=running_rows(include_searxng=include_searxng)),
         **healthy_ingress(),
     }
@@ -1206,10 +1212,19 @@ class NoGpuModeSwitch(unittest.TestCase):
                 include_dcgm=False, include_engine=False, include_api=False
             ),
         )
+        nightly_disables = (
+            ("systemctl", "disable", "--now", "gideon-eval-nightly.timer"),
+            ("systemctl", "disable", "--now", "gideon-eval-nightly.service"),
+        )
+        for argv in nightly_disables:
+            host.commands[argv] = done(argv)
         host.calls.clear()
 
         code, out, _ = apply(host)
         self.assertEqual(code, 0, out)
+        # The suites refuse without an engine, so the nightly's units leave with it.
+        for argv in nightly_disables:
+            self.assertIn(argv, argv_calls(host))
         self.assertNotIn(f"{RENDERED}/grafana/dashboards/gpu.json", host.files)
         self.assertNotIn("dcgm-exporter", yaml.safe_load(host.files[f"{RENDERED}/compose.yaml"])["services"])
         self.assertNotIn("dcgm-exporter:9400", host.files[f"{RENDERED}/prometheus/prometheus.yml"])

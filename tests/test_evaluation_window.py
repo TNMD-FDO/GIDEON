@@ -231,5 +231,59 @@ class DecisionWindow(unittest.TestCase):
         self.assertEqual(raised.exception.end, end)
 
 
+class NightlyWindow(unittest.TestCase):
+    """End each nightly at 06:00 so weekend waits cannot span daytime."""
+
+    def test_nightly_edges_openings_and_ends(self) -> None:
+        monday = _monday()
+        tuesday = monday + timedelta(days=1)
+        saturday = monday + timedelta(days=5)
+        sunday = saturday + timedelta(days=1)
+        cases = (
+            (monday, time(21), True, _morning(tuesday)),
+            (tuesday, time(3), True, _morning(tuesday)),
+            (tuesday, time(6), False, _morning(tuesday + timedelta(days=1))),
+            (saturday, time(12), False, _morning(sunday)),
+            (saturday, time(21), True, _morning(sunday)),
+            (sunday, time(6), False, _morning(monday + timedelta(days=7))),
+        )
+        for day, local_time, inside, end in cases:
+            clock = datetime.combine(day, local_time, tzinfo=ZoneInfo(ZONE))
+            with self.subTest(clock=clock):
+                result = window.nightly_judgement(clock, ZONE)
+                label = "inside the night" if inside else "outside the night"
+                self.assertEqual(result.inside, inside)
+                self.assertEqual(result.description, f"{label} ({clock.strftime('%A %H:%M')} {ZONE})")
+                self.assertEqual(result.next_opening, clock if inside else _opening(day))
+                self.assertEqual(result.end, end)
+        saturday_noon = datetime.combine(saturday, time(12), tzinfo=ZoneInfo(ZONE))
+        self.assertTrue(window.window_judgement(saturday_noon, ZONE).inside)
+        self.assertFalse(window.nightly_judgement(saturday_noon, ZONE).inside)
+
+    def test_daylight_saving_weekend_ends_on_sunday_morning(self) -> None:
+        zone_name = "America/Chicago"
+        zone = ZoneInfo(zone_name)
+        first = datetime(2099, 1, 1, 12, tzinfo=zone)
+        saturday = next(
+            (first + timedelta(days=offset)).date()
+            for offset in range(366)
+            if (first + timedelta(days=offset)).utcoffset()
+            != (first + timedelta(days=offset + 1)).utcoffset()
+        )
+        night = datetime.combine(saturday, time(21), tzinfo=zone)
+        result = window.nightly_judgement(night, zone_name)
+        self.assertTrue(result.inside)
+        self.assertEqual(result.next_opening, night)
+        self.assertEqual(result.end, _morning(saturday + timedelta(days=1), zone_name))
+        self.assertNotEqual(result.end.utcoffset(), night.utcoffset())
+
+    def test_naive_clock_is_read_as_utc(self) -> None:
+        naive = datetime.combine(_monday(), time(3))
+        self.assertEqual(
+            window.nightly_judgement(naive, "America/Chicago"),
+            window.nightly_judgement(naive.replace(tzinfo=UTC), "America/Chicago"),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

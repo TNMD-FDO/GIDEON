@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 
 import yaml  # type: ignore[import-untyped]
 
-from gideon.host import nogpu, weights
+from gideon.host import nogpu, secrets, weights
 from gideon.host.images import (
     ImageLock,
     MirroredImagePin,
@@ -32,7 +32,7 @@ from gideon.host.models import (
     load_models_lock,
     select_profile,
 )
-from gideon.host.render import ARTIFACTS, RenderInputs, render_all
+from gideon.host.render import ARTIFACTS, RenderInputs, render_all, systemd
 from gideon.host.render.api import (
     API_JOB_NAME,
     API_SERVICE_NAME,
@@ -296,6 +296,8 @@ class Registry(unittest.TestCase):
                 "systemd/gideon-backup-drill.timer",
                 "systemd/gideon-backup-verify.service",
                 "systemd/gideon-backup-verify.timer",
+                "systemd/gideon-eval-nightly.service",
+                "systemd/gideon-eval-nightly.timer",
             ],
         )
         self.assertEqual(ARTIFACTS[0].owners, ())
@@ -937,8 +939,37 @@ class Core(unittest.TestCase):
         self.assertTrue(all(artifact.applies(gpu) for artifact in ARTIFACTS))
         self.assertEqual(
             [artifact.name for artifact in ARTIFACTS if not artifact.applies(no_gpu)],
-            ["grafana-gpu"],
+            ["grafana-gpu", "gideon-eval-nightly-service", "gideon-eval-nightly-timer"],
         )
+
+    def test_nightly_units_are_zoned_bounded_and_carry_no_secrets(self) -> None:
+        self.assertEqual(systemd.NIGHTLY_CALENDAR, "*-*-* 21:00:00")
+        for site_path in (EXAMPLE, SECOND):
+            rendered_inputs = inputs(site_path)
+            rendered = render_all(rendered_inputs)
+            with self.subTest(site=site_path):
+                service = rendered.by_path["systemd/gideon-eval-nightly.service"].content
+                timer = rendered.by_path["systemd/gideon-eval-nightly.timer"].content
+                self.assertEqual(
+                    [line for line in service.splitlines() if line.startswith("ExecStart=")],
+                    [
+                        "ExecStart=-/usr/bin/python3 -m gideon eval run --slice general-smoke --kind nightly",
+                        "ExecStart=/usr/bin/python3 -m gideon eval run --slice guardrails --kind nightly",
+                    ],
+                )
+                self.assertIn(
+                    f"TimeoutStartSec={systemd.NIGHTLY_TIMEOUT_START_SECONDS}", service
+                )
+                self.assertNotIn("--force", service)
+                self.assertNotIn("password", service.lower())
+                self.assertNotIn(str(secrets.current_directory()), service)
+                for value in rendered_inputs.secrets.values():
+                    self.assertNotIn(value, service)
+                self.assertIn(
+                    f"OnCalendar={systemd.NIGHTLY_CALENDAR} {rendered_inputs.site.office.timezone}",
+                    timer,
+                )
+                self.assertIn("Persistent=false", timer)
 
     def test_manifest_records_the_host_modes(self) -> None:
         for no_gpu, build_box in ((False, False), (False, True), (True, False)):
@@ -999,6 +1030,8 @@ class Core(unittest.TestCase):
                 "systemd/gideon-backup-drill.timer",
                 "systemd/gideon-backup-verify.service",
                 "systemd/gideon-backup-verify.timer",
+                "systemd/gideon-eval-nightly.service",
+                "systemd/gideon-eval-nightly.timer",
             },
         )
         self.assertEqual(first.by_path["caddy/Caddyfile"].owners, ("caddy",))
@@ -1308,7 +1341,7 @@ class RenderCommand(unittest.TestCase):
         code, out, _ = render(host, diff=True)
         self.assertEqual(code, 0)
         self.assertNotIn("+++ ", out)
-        self.assertIn("Summary: 28 unchanged.", out)
+        self.assertIn(f"Summary: {len(render_all(inputs()).files)} unchanged.", out)
 
     def test_corrupt_applied_manifest_refuses_under_diff(self) -> None:
         host = DirHost(checkout_files())
@@ -1526,6 +1559,17 @@ class ByteStableFixtures(unittest.TestCase):
             rendered = render_all(rendered_inputs)
             expected_dir = FIXTURES / name
             with self.subTest(fixture=name):
+                fixture_paths = {
+                    path.relative_to(expected_dir).as_posix()
+                    for path in expected_dir.rglob("*")
+                    if path.is_file()
+                }
+                self.assertEqual(fixture_paths, set(rendered.by_path) | {"manifest.yaml"})
+                nightly_paths = {
+                    "systemd/gideon-eval-nightly.service",
+                    "systemd/gideon-eval-nightly.timer",
+                }
+                self.assertEqual(nightly_paths <= fixture_paths, not no_gpu)
                 for rendered_file in rendered.files:
                     expected = (expected_dir / rendered_file.relative_path).read_text()
                     self.assertEqual(rendered_file.content, expected, f"{name}/{rendered_file.relative_path} drifted; run {self.REGENERATE}")
