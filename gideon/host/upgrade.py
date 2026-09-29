@@ -24,9 +24,11 @@ import yaml  # type: ignore[import-untyped]
 import gideon
 from gideon.host import audit as audit_module
 from gideon.host import backup, backupset, preflight, site, stack
+from gideon.host.checks import PreflightCheck, Severity
 from gideon.host.render.engine import ENGINE_SERVICE_NAME
 from gideon.host.report import StageResult, command_detail, print_stage, refusal
 from gideon.host.stages import aware_now, site_problem
+from gideon.host.steps import Step
 from gideon.host.steps.site_dirs import AGE_IDENTITY_PATH
 from gideon.host.sysio import Host, LockingHost, PathLike, RealHost
 
@@ -57,6 +59,10 @@ _PRE_RELEASE_SET_SUFFIX: Final = re.compile(r"-\d{8}T\d{6}Z$")
 # the previous release; at or after its apply only a rollback goes back.
 _BEFORE_NEW_TREE_FIX: Final = (
     "Correct the refusal, then re-run sudo python3 -m gideon upgrade {tag}."
+)
+_PREFLIGHT_ADVISORY_FIX: Final = (
+    "The new release's provision stage converges this step after checkout, and its "
+    "preflight judges it. No operator action is needed now."
 )
 _AFTER_CHECKOUT_FIX: Final = (
     "Reboot if asked or correct the refusal, then re-run sudo python3 -m gideon upgrade "
@@ -618,13 +624,42 @@ def _version_stage(
     )
 
 
+def _run_current_preflight(
+    child: argparse.Namespace,
+    *,
+    host: Host,
+    site_path: PathLike,
+    lock_path: PathLike | None = None,
+    models_path: PathLike | None = None,
+    egress_path: PathLike | None = None,
+    courts_path: PathLike | None = None,
+    steps: Sequence[Step] | None = None,
+    checks: Sequence[PreflightCheck] | None = None,
+) -> int:
+    """Run the current tree's checks before the new release converges the host."""
+
+    return preflight.run_preflight(
+        child,
+        host=host,
+        site_path=site_path,
+        lock_path=lock_path,
+        models_path=models_path,
+        egress_path=egress_path,
+        courts_path=courts_path,
+        steps=steps,
+        checks=checks,
+        advisory_fix=_PREFLIGHT_ADVISORY_FIX,
+        observer=getattr(child, "observe", None),
+    )
+
+
 def _default_runners(
     io: LockingHost, *, site_path: PathLike, rendered_dir: PathLike
 ) -> dict[str, Runner]:
     """The current tree's in-process commands with the keyword arguments they take."""
 
     return {
-        "preflight": lambda child: preflight.run_preflight(
+        "preflight": lambda child: _run_current_preflight(
             child, host=io, site_path=site_path
         ),
         "backup": lambda child: backup.run_backup_run(
@@ -637,6 +672,30 @@ def _runner_stage(name: str, command_path: str, code: int, fix: str) -> StageRes
     if code == 0:
         return StageResult(name, True, f"{command_path} completed", "")
     return StageResult(name, False, f"{command_path} refused (exit {code})", fix)
+
+
+def _preflight_stage(
+    code: int, observed: Sequence[preflight.ObservedRow], fix: str
+) -> StageResult:
+    """The pre-checkout row, naming the provision steps left to the new release.
+
+    An injected runner that observes nothing gets the generic forms.
+    """
+
+    result = _runner_stage("preflight", "preflight", code, fix)
+    warned = [
+        row.name
+        for row in observed
+        if row.provision_step and row.report.severity is Severity.WARN
+    ]
+    if not result.ok or not warned:
+        return result
+    noun, pronoun = ("step", "it") if len(warned) == 1 else ("steps", "them")
+    return replace(
+        result,
+        detail=f"{result.detail}; {len(warned)} unconverged provision {noun}: "
+        f"{', '.join(warned)}; the new release's provision converges {pronoun}",
+    )
 
 
 def _backup_label_pattern(tag: str) -> re.Pattern[str]:
@@ -1579,11 +1638,13 @@ def run_upgrade(
     if not version_result.ok or current_version is None or target_version is None:
         return 1
 
+    observed: list[preflight.ObservedRow] = []
     with timer.timed("preflight"):
-        current_preflight = _runner_stage(
-            "preflight",
-            "preflight",
-            phase_runners["preflight"](argparse.Namespace(command_path="preflight")),
+        current_preflight = _preflight_stage(
+            phase_runners["preflight"](
+                argparse.Namespace(command_path="preflight", observe=observed.append)
+            ),
+            observed,
             before_fix,
         )
     print_stage(current_preflight)

@@ -2,10 +2,13 @@
 
 Preflight refuses before running checks when the host lock, models lock, egress
 allowlist, court map, or site cannot be read and validated.
+Under the advisory reading, which upgrade's pre-checkout stage alone passes, an
+unconverged provision step warns with the caller's fix instead of refusing.
 """
 
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
@@ -41,6 +44,15 @@ from gideon.host.sysio import Host, PathLike, RealHost
 
 _SITE_PATH: Final = "/etc/gideon/site.yaml"
 _ROOT_FIX: Final = "Run gideon preflight as root, for example with sudo."
+
+
+@dataclass(frozen=True, slots=True)
+class ObservedRow:
+    """A printed preflight row and whether it came from a provision step."""
+
+    name: str
+    report: CheckReport
+    provision_step: bool
 
 
 def _one_line(value: str) -> str:
@@ -81,6 +93,7 @@ def _run_step_checks(
     *,
     no_gpu: bool,
     build_box: bool,
+    advisory_fix: str | None,
 ) -> list[tuple[str, CheckReport]]:
     reports: list[tuple[str, CheckReport]] = []
     for step in steps:
@@ -98,12 +111,13 @@ def _run_step_checks(
             )
             continue
         result = check_step(step, context)
-        severity = (
-            Severity.PASS
-            if result.disposition is Disposition.CONVERGED
-            else Severity.REFUSE
-        )
-        reports.append((step.name, CheckReport(severity, result.detail, result.fix)))
+        if result.disposition is Disposition.CONVERGED:
+            report = CheckReport(Severity.PASS, result.detail, result.fix)
+        elif advisory_fix is not None:
+            report = CheckReport(Severity.WARN, result.detail, advisory_fix)
+        else:
+            report = CheckReport(Severity.REFUSE, result.detail, result.fix)
+        reports.append((step.name, report))
     return reports
 
 
@@ -131,6 +145,8 @@ def run_preflight(
     checks: Sequence[PreflightCheck] | None = None,
     egress_path: PathLike | None = None,
     courts_path: PathLike | None = None,
+    advisory_fix: str | None = None,
+    observer: Callable[[ObservedRow], None] | None = None,
 ) -> int:
     """Run provisioning checks and install-time checks without applying state."""
 
@@ -208,12 +224,15 @@ def run_preflight(
         provision_context,
         no_gpu=preflight_context.no_gpu,
         build_box=preflight_context.build_box,
+        advisory_fix=advisory_fix,
     )
     check_reports = _run_preflight_checks(
         tuple(CHECKS if checks is None else checks), preflight_context
     )
     reports = step_reports + check_reports
-    for name, report in reports:
+    for index, (name, report) in enumerate(reports):
         _render_report(name, report)
+        if observer is not None:
+            observer(ObservedRow(name, report, index < len(step_reports)))
     _render_summary([report for _, report in reports])
     return int(any(report.severity is Severity.REFUSE for _, report in reports))

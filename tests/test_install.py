@@ -182,6 +182,16 @@ def row_names(text: str) -> list[str]:
 
 
 class InstallTests(unittest.TestCase):
+    def test_default_preflight_runner_keeps_the_refusing_reading(self) -> None:
+        host = FakeHost()
+        child = argparse.Namespace(command_path="preflight")
+        with patch.object(install.preflight, "run_preflight", return_value=0) as run:
+            code = install._default_runners(
+                cast(LockingHost, host), site_path=EXAMPLE, rendered_dir=RENDERED
+            )["preflight"](child)
+        self.assertEqual(code, 0)
+        run.assert_called_once_with(child, host=host, site_path=EXAMPLE)
+
     def run_install(
         self,
         host: Any,

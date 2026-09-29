@@ -12,14 +12,16 @@ import unittest
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 import gideon
 from gideon.host import audit, backupset, nogpu, upgrade
+from gideon.host.checks import CheckReport, PreflightCheck, PreflightContext, Severity
 from gideon.host.site import load_site
+from gideon.host.steps import CheckResult, Disposition, ProvisionContext, Step
 from gideon.host.steps.site_dirs import AGE_IDENTITY_PATH
-from gideon.host.sysio import Command, PathLike
+from gideon.host.sysio import Command, Host, LockingHost, PathLike
 
 ROOT = Path(__file__).resolve().parent.parent
 EXAMPLE = ROOT / "config/site.example.yaml"
@@ -106,6 +108,33 @@ HEALTHY = [
 ]
 
 
+class FixedStep(Step):
+    def __init__(self, name: str, disposition: Disposition) -> None:
+        self.name = name
+        self.summary = name
+        self.disposition = disposition
+        self.apply_calls = 0
+
+    def check(self, context: ProvisionContext) -> CheckResult:
+        del context
+        return CheckResult(self.disposition, self.disposition.value, "step fix")
+
+    def apply(self, context: ProvisionContext) -> None:
+        del context
+        self.apply_calls += 1
+
+
+class FixedCheck(PreflightCheck):
+    def __init__(self, name: str, report: CheckReport) -> None:
+        self.name = name
+        self.summary = name
+        self.report = report
+
+    def run(self, context: PreflightContext) -> CheckReport:
+        del context
+        return self.report
+
+
 class FakeHost:
     """A checkout owned by ``owner_uid``, git answering as configured, children by exit code."""
 
@@ -155,6 +184,13 @@ class FakeHost:
         self.tag = ""
         self.calls: list[tuple[tuple[str, ...], str | None, bool]] = []
         self.files: dict[str, str] = {str(EXAMPLE): EXAMPLE.read_text()}
+        for path in (
+            ROOT / "host.lock",
+            ROOT / "models.lock",
+            ROOT / "config/egress.yaml",
+            ROOT / "courts.yaml",
+        ):
+            self.files[os.fspath(path)] = path.read_text()
         if identity_present:
             self.files[os.fspath(AGE_IDENTITY_PATH)] = "identity\n"
         self.sets = dict(sets or {})
@@ -259,6 +295,9 @@ class FakeHost:
         except KeyError as exc:
             raise FileNotFoundError(os.fspath(path)) from exc
 
+    def exists(self, path: PathLike) -> bool:
+        return os.fspath(path) in self.files
+
     def write_text(self, path: PathLike, text: str, *, encoding: str = "utf-8", mode: int = 0o644) -> None:
         del encoding, mode
         self.writes.append((os.fspath(path), text))
@@ -358,11 +397,15 @@ class CommandRunner(unittest.TestCase):
         rollback: bool = False,
         runners: FakeRunners | None = None,
         audit_backend: FakeAudit | None = None,
+        preflight_runner: upgrade.Runner | None = None,
     ) -> tuple[int, str, str, FakeRunners, FakeAudit]:
         nested = runners or FakeRunners()
         if isinstance(host, FakeHost):
             nested.host = host
         backend = audit_backend or FakeAudit()
+        phase_runners = nested.mapping()
+        if preflight_runner is not None:
+            phase_runners["preflight"] = preflight_runner
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = upgrade.run_upgrade(
@@ -371,12 +414,159 @@ class CommandRunner(unittest.TestCase):
                 site_path=EXAMPLE,
                 rendered_dir=RENDERED,
                 checkout=CHECKOUT,
-                runners=nested.mapping(),
+                runners=phase_runners,
                 python=PYTHON,
                 now=NOW,
                 audit=backend,
             )
         return code, out.getvalue(), err.getvalue(), nested, backend
+
+
+def current_preflight_runner(
+    host: FakeHost,
+    *,
+    steps: Sequence[Step],
+    checks: Sequence[PreflightCheck],
+) -> upgrade.Runner:
+    def run(child: argparse.Namespace) -> int:
+        return upgrade._run_current_preflight(
+            child,
+            host=cast(Host, host),
+            site_path=EXAMPLE,
+            lock_path=ROOT / "host.lock",
+            models_path=ROOT / "models.lock",
+            egress_path=ROOT / "config/egress.yaml",
+            courts_path=ROOT / "courts.yaml",
+            steps=steps,
+            checks=checks,
+        )
+
+    return run
+
+
+class PrecheckoutPreflight(CommandRunner):
+    """The current tree reports provision state before backup and checkout."""
+
+    def test_unconverged_steps_reach_new_tree_provision(self) -> None:
+        for disposition in (
+            Disposition.DRIFT,
+            Disposition.UNFIXABLE,
+            Disposition.PENDING_INPUT,
+            Disposition.REBOOT_REQUIRED,
+        ):
+            with self.subTest(disposition=disposition):
+                host = FakeHost(applied_release=HIGHER.removeprefix("v"))
+                step = FixedStep("lagging", disposition)
+                code, out, err, runners, backend = self.run_upgrade(
+                    host,
+                    preflight_runner=current_preflight_runner(
+                        host, steps=[step], checks=[]
+                    ),
+                )
+                self.assertEqual(code, 0, out + err)
+                self.assertIn(
+                    f"lagging: warn — {disposition.value} "
+                    f"Fix: {upgrade._PREFLIGHT_ADVISORY_FIX}",
+                    out,
+                )
+                self.assertIn(
+                    "preflight: ok — preflight completed; 1 unconverged provision "
+                    "step: lagging; the new release's provision converges it",
+                    out,
+                )
+                self.assertIn(
+                    ((PYTHON, "-m", "gideon", "host", "provision"), CHECKOUT, True),
+                    host.calls,
+                )
+                self.assertEqual([name for name, _ in runners.calls], ["backup"])
+                self.assertEqual(
+                    [row.detail["phase"] for row in backend.rows],
+                    ["intent", "applied"],
+                )
+                self.assertEqual(step.apply_calls, 0)
+
+    def test_stage_names_only_warned_steps_in_registry_order(self) -> None:
+        host = FakeHost(applied_release=HIGHER.removeprefix("v"))
+        code, out, err, _, _ = self.run_upgrade(
+            host,
+            preflight_runner=current_preflight_runner(
+                host,
+                steps=[
+                    FixedStep("first", Disposition.DRIFT),
+                    FixedStep("ready", Disposition.CONVERGED),
+                    FixedStep("last", Disposition.PENDING_INPUT),
+                ],
+                checks=[FixedCheck("service", CheckReport(Severity.WARN, "caution"))],
+            ),
+        )
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("service: warn — caution", out)
+        self.assertIn(
+            "preflight: ok — preflight completed; 2 unconverged provision "
+            "steps: first, last; the new release's provision converges them",
+            out,
+        )
+
+    def test_install_time_warning_does_not_change_stage_row(self) -> None:
+        host = FakeHost(applied_release=HIGHER.removeprefix("v"))
+        code, out, err, _, _ = self.run_upgrade(
+            host,
+            preflight_runner=current_preflight_runner(
+                host,
+                steps=[FixedStep("ready", Disposition.CONVERGED)],
+                checks=[FixedCheck("service", CheckReport(Severity.WARN, "caution"))],
+            ),
+        )
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("service: warn — caution", out)
+        self.assertIn("preflight: ok — preflight completed\n", out)
+        self.assertNotIn("unconverged provision", out)
+
+    def test_install_time_refusal_stops_before_backup_and_audit(self) -> None:
+        host = FakeHost()
+        code, out, err, runners, backend = self.run_upgrade(
+            host,
+            preflight_runner=current_preflight_runner(
+                host,
+                steps=[FixedStep("lagging", Disposition.DRIFT)],
+                checks=[
+                    FixedCheck(
+                        "service", CheckReport(Severity.REFUSE, "unavailable", "repair")
+                    )
+                ],
+            ),
+        )
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("lagging: warn — drift", out)
+        self.assertIn("service: refuse — unavailable Fix: repair", out)
+        self.assertIn("preflight: refuse — preflight refused (exit 1)", out)
+        self.assertEqual(runners.calls, [])
+        self.assertEqual(host.sets, {})
+        self.assertEqual(backend.rows, [])
+        self.assertNotIn(("checkout", "--detach", HIGHER), [call[-3:] for call in host.git_calls()])
+
+    def test_default_runner_passes_advisory_fix_and_observer(self) -> None:
+        host = FakeHost()
+        observed: list[upgrade.preflight.ObservedRow] = []
+        child = argparse.Namespace(command_path="preflight", observe=observed.append)
+        with patch.object(upgrade.preflight, "run_preflight", return_value=0) as run:
+            code = upgrade._default_runners(
+                cast(LockingHost, host), site_path=EXAMPLE, rendered_dir=RENDERED
+            )["preflight"](child)
+        self.assertEqual(code, 0)
+        run.assert_called_once_with(
+            child,
+            host=host,
+            site_path=EXAMPLE,
+            lock_path=None,
+            models_path=None,
+            egress_path=None,
+            courts_path=None,
+            steps=None,
+            checks=None,
+            advisory_fix=upgrade._PREFLIGHT_ADVISORY_FIX,
+            observer=observed.append,
+        )
 
 
 class UpgradeTests(CommandRunner):

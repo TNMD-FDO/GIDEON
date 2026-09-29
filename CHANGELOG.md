@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.2.89](docs/release-notes/v0.2.89.md) — 2026-09-29 — upgrade's pre-checkout preflight warns on an unconverged provision step
 - [v0.2.88](docs/release-notes/v0.2.88.md) — 2026-09-29 — the stream check judges the final text
 - [v0.2.87](docs/release-notes/v0.2.87.md) — 2026-09-29 — the nightly run's pages and Eval board
 - [v0.2.86](docs/release-notes/v0.2.86.md) — 2026-09-29 — the nightly eval suites at 21:00, waiting behind a held engine and stopped at 06:00

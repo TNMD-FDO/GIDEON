@@ -5,7 +5,7 @@ import io
 import os
 import subprocess
 import unittest
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from gideon.host.checks import (
@@ -17,7 +17,7 @@ from gideon.host.checks import (
 )
 from gideon.host.courts import CourtMap
 from gideon.host.nogpu import BUILD_BOX_PATH, NO_GPU_PATH, NOT_BUILD_BOX_DETAIL
-from gideon.host.preflight import run_preflight
+from gideon.host.preflight import ObservedRow, run_preflight
 from gideon.host.steps import CheckResult, Disposition, ProvisionContext, Step
 from gideon.host.sysio import Command, PathLike
 
@@ -179,6 +179,8 @@ def preflight(
     commands: Mapping[tuple[str, ...], subprocess.CompletedProcess[str]] | None = None,
     read_errors: Mapping[str, OSError] | None = None,
     courts_path: PathLike | None = None,
+    advisory_fix: str | None = None,
+    observer: Callable[[ObservedRow], None] | None = None,
 ) -> tuple[int, str, str]:
     stdout = io.StringIO()
     stderr = io.StringIO()
@@ -202,6 +204,8 @@ def preflight(
             site_path=site_path,
             models_path=models_path,
             courts_path=courts_path,
+            advisory_fix=advisory_fix,
+            observer=observer,
         )
     return code, stdout.getvalue(), stderr.getvalue()
 
@@ -417,6 +421,69 @@ class PhaseB(unittest.TestCase):
         self.assertIn("Fix:", out)
 
 
+class AdvisoryReading(unittest.TestCase):
+    """The advisory reading reports unconverged steps as warnings, never refusals."""
+
+    def test_every_unconverged_disposition_warns_with_supplied_fix(self) -> None:
+        fix = "The new release will converge this step."
+        for disposition in (
+            Disposition.DRIFT,
+            Disposition.UNFIXABLE,
+            Disposition.PENDING_INPUT,
+            Disposition.REBOOT_REQUIRED,
+        ):
+            with self.subTest(disposition=disposition):
+                step = FixedStep("step", disposition)
+                code, out, error = preflight(steps=[step], advisory_fix=fix)
+                self.assertEqual(code, 0, error)
+                self.assertEqual(
+                    out,
+                    f"step: warn — {disposition.value} Fix: {fix}\n"
+                    "Summary: 1 check(s); 1 warn.\n",
+                )
+                self.assertEqual(step.apply_calls, 0)
+
+    def test_raising_step_warns_with_its_detail_and_supplied_fix(self) -> None:
+        class RaisingStep(FixedStep):
+            def check(self, context: ProvisionContext) -> CheckResult:
+                del context
+                raise RuntimeError("broken check")
+
+        code, out, error = preflight(
+            steps=[RaisingStep("raised", Disposition.DRIFT)],
+            advisory_fix="Wait for the new release.",
+        )
+        self.assertEqual(code, 0, error)
+        self.assertIn("raised: warn — check raised RuntimeError: broken check", out)
+        self.assertIn("Fix: Wait for the new release.", out)
+        self.assertNotIn("re-run provision", out)
+
+    def test_install_time_refusal_still_blocks_and_summary_counts_warn(self) -> None:
+        code, out, error = preflight(
+            steps=[FixedStep("drifted", Disposition.DRIFT)],
+            checks=[FixedCheck("broken", CheckReport(Severity.REFUSE, "bad", "repair"))],
+            advisory_fix="New release handles drift.",
+        )
+        self.assertEqual(code, 1, error)
+        self.assertIn("drifted: warn — drift Fix: New release handles drift.", out)
+        self.assertIn("broken: refuse — bad Fix: repair", out)
+        self.assertIn("Summary: 2 check(s); 1 warn, 1 refuse.", out)
+
+    def test_skipped_rows_remain_passes(self) -> None:
+        gpu_step = FixedStep("gpu", Disposition.DRIFT, gpu_host_only=True)
+        build_step = FixedStep("build", Disposition.DRIFT, build_box_only=True)
+        code, out, error = preflight(
+            steps=[gpu_step, build_step],
+            files={os.fspath(NO_GPU_PATH): "declared\n"},
+            advisory_fix="New release handles drift.",
+        )
+        self.assertEqual(code, 0, error)
+        self.assertIn("gpu: pass — skipped: no-GPU host", out)
+        self.assertIn(f"build: pass — skipped: {NOT_BUILD_BOX_DETAIL}", out)
+        self.assertIn("Summary: 2 check(s); 2 pass.", out)
+        self.assertEqual((gpu_step.check_calls, build_step.check_calls), (0, 0))
+
+
 class Reporting(unittest.TestCase):
     def test_steps_report_before_checks_and_summary_counts(self) -> None:
         steps: list[Step] = [FixedStep("good", Disposition.CONVERGED)]
@@ -442,3 +509,43 @@ class Reporting(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("good: pass", out)
         self.assertIn("fine: pass", out)
+
+    def test_observer_receives_each_printed_row_in_order_and_phase(self) -> None:
+        rows: list[ObservedRow] = []
+        code, out, error = preflight(
+            steps=[
+                FixedStep("good", Disposition.CONVERGED),
+                FixedStep("drifted", Disposition.DRIFT),
+            ],
+            checks=[FixedCheck("warning", CheckReport(Severity.WARN, "caution"))],
+            advisory_fix="New release handles drift.",
+            observer=rows.append,
+        )
+        self.assertEqual(code, 0, error)
+        self.assertEqual(
+            [(row.name, row.report.severity, row.provision_step) for row in rows],
+            [
+                ("good", Severity.PASS, True),
+                ("drifted", Severity.WARN, True),
+                ("warning", Severity.WARN, False),
+            ],
+        )
+        self.assertEqual(rows[1].report.detail, "drift")
+        self.assertEqual(rows[1].report.fix, "New release handles drift.")
+        self.assertLess(out.index("good:"), out.index("drifted:"))
+        self.assertLess(out.index("drifted:"), out.index("warning:"))
+
+    def test_observer_sees_default_refusals_and_no_pre_run_rows(self) -> None:
+        rows: list[ObservedRow] = []
+        code, _, _ = preflight(
+            steps=[FixedStep("drifted", Disposition.DRIFT)], observer=rows.append
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(rows[0].report.severity, Severity.REFUSE)
+
+        rows.clear()
+        code, out, error = preflight(host=FakeHost(euid=1000), observer=rows.append)
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertIn("root is required", error)
+        self.assertEqual(rows, [])
