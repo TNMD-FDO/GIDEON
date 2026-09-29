@@ -128,12 +128,21 @@ class Verdict:
 
 
 @dataclass(frozen=True, slots=True)
+class StreamTrip:
+    """One pattern trip read in a released stream prefix."""
+
+    pattern_id: str | None
+    offset: int
+
+
+@dataclass(frozen=True, slots=True)
 class StreamVerdict:
-    """The first guardrail trip observed in released raw-stream prefixes."""
+    """The final released text's verdict and its unconfirmed prefix trips."""
 
     clean: bool
     pattern_id: str | None = None
     offset: int | None = None
+    withdrawn: tuple[StreamTrip, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,6 +289,23 @@ def _replacement_prefix(guardrail: Any, text: str) -> str | None:
         suffix = f"{separator}{refusal}"
         if normalised.endswith(suffix):
             return normalised[: -len(suffix)]
+    return None
+
+
+def _released_prefix(guardrail: Any, text: str) -> str | None:
+    """Return the text sent before a trailing refusal, preserving its spacing."""
+
+    separator = _normalise_whitespace(str(guardrail.REFUSAL_SEPARATOR)) or " "
+    separator_pattern = re.escape(separator).replace(r"\ ", r"\s+")
+    for refusal in guardrail.REFUSALS:
+        refusal_pattern = re.escape(_normalise_whitespace(str(refusal))).replace(
+            r"\ ", r"\s+"
+        )
+        if re.fullmatch(rf"\s*{refusal_pattern}\s*", text):
+            return ""
+        suffix = re.search(rf"{separator_pattern}{refusal_pattern}\s*$", text)
+        if suffix is not None:
+            return text[: suffix.start()]
     return None
 
 
@@ -647,32 +673,50 @@ def stream_verdict(
     deltas: Sequence[tuple[str, str]],
     user_content: str,
 ) -> StreamVerdict:
-    """Judge every released prefix in stream order; the first trip is the verdict.
+    """Judge what the client was shown, taken whole, after reading its prefixes.
 
-    A delta extends one of two texts. Each field is judged over the guardrail's
-    bounded floor since its previously judged length; the offset is the length
-    of the extended text at the trip, never any of its characters.
+    Content prefixes use the guardrail's bounded floor since their previously
+    judged length, and a prefix's trip is provisional: the final released text,
+    judged whole, decides, and a clean one withdraws every provisional trip. A
+    released reasoning character is a leak at once. Offsets are lengths of the
+    extended text, never any of its characters.
     """
 
     content = ""
     reasoning_length = 0
     previous_length = 0
+    provisional: list[StreamTrip] = []
+    # The previous content prefix's trip, so a run on one pattern is read once.
+    previous_trip: StreamTrip | None = None
     for field, text in deltas:
         if field == "reasoning":
             reasoning_length += len(text)
             if text not in ("", guardrail.REASONING_PLACEHOLDER):
                 return StreamVerdict(False, REASONING_RELEASED, reasoning_length)
             continue
-        if field == "content":
-            content += text
-            offset = len(content)
-            trip = _window_judgement(guardrail, content, user_content, previous_length)
-            previous_length = len(content)
-        else:
+        if field != "content":
             continue
-        if trip is not None:
-            return StreamVerdict(False, _trip_pattern(trip), offset)
-    return StreamVerdict(True)
+        content += text
+        trip = _window_judgement(guardrail, content, user_content, previous_length)
+        previous_length = len(content)
+        if trip is None:
+            previous_trip = None
+            continue
+        pattern_id = _trip_pattern(trip)
+        if previous_trip is None or previous_trip.pattern_id != pattern_id:
+            previous_trip = StreamTrip(pattern_id, len(content))
+            provisional.append(previous_trip)
+    released_prefix = _released_prefix(guardrail, content)
+    released = content if released_prefix is None else released_prefix
+    final_trip = _judge_answer(guardrail, released, user_content)
+    if final_trip is not None:
+        pattern_id = _trip_pattern(final_trip)
+        offset = next(
+            (trip.offset for trip in provisional if trip.pattern_id == pattern_id),
+            len(released),
+        )
+        return StreamVerdict(False, pattern_id, offset)
+    return StreamVerdict(True, withdrawn=tuple(provisional))
 
 
 def case_checks(case: Case, verdict: Verdict, content: str) -> dict[str, bool]:

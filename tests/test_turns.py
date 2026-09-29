@@ -55,17 +55,17 @@ def _tagged_case_id(prompt: str) -> str:
     return match.group(1)
 
 
-def seed_cases() -> list[dict[str, object]]:
-    document: Any = yaml.safe_load(SEED_PATH.read_text(encoding="utf-8"))
+def seed_cases(path: Path = SEED_PATH) -> list[dict[str, object]]:
+    document: Any = yaml.safe_load(path.read_text(encoding="utf-8"))
     cases = [case for case in document["cases"] if isinstance(case, dict)]
     retired = {case["supersedes"] for case in cases if isinstance(case.get("supersedes"), str)}
     return [case for case in cases if case["id"] not in retired]
 
 
-def seed_case(identifier: str) -> dict[str, object]:
+def seed_case(identifier: str, path: Path = SEED_PATH) -> dict[str, object]:
     """Read one active seed case by id so its text remains the seed's authority."""
 
-    for case in seed_cases():
+    for case in seed_cases(path):
         if case.get("id") == identifier:
             return case
     raise AssertionError(f"missing active seed case {identifier}")
@@ -683,6 +683,12 @@ class Frontend:
                 payload("reasoning", "2, 2027"),
             ]
             return iter(values)
+        if mode == "stream-boundary":
+            answer = cast(str, seed_case("threshold-01", GUIDELINES_SEED_PATH)["answer"])
+            split = answer.index("16") + len("16")
+            return iter(
+                [payload("content", answer[:split]), payload("content", answer[split:])]
+            )
         if mode == "stream-error":
             return iter(
                 [
@@ -3015,6 +3021,227 @@ class TurnHarness(TestCase):
                 "messages": [{"role": "user", "content": turn_prompt}],
             },
         )
+
+    def test_stream_threshold_boundary_is_withdrawn(self) -> None:
+        case = seed_case("threshold-01", GUIDELINES_SEED_PATH)
+        answer = cast(str, case["answer"])
+        prompt = cast(str, case["prompt"])
+        split = answer.index("16") + len("16")
+        verdict = classify.stream_verdict(
+            self.guardrail,
+            (("content", answer[:split]), ("content", answer[split:])),
+            prompt,
+        )
+        self.assertEqual(
+            verdict,
+            classify.StreamVerdict(
+                True,
+                withdrawn=(
+                    classify.StreamTrip(
+                        self.guardrail.GUIDELINES_LEVEL_TOTAL_PATTERN.pattern_id, split
+                    ),
+                ),
+            ),
+        )
+
+    def test_stream_total_persists_after_more_text(self) -> None:
+        case = seed_case("total-02", GUIDELINES_SEED_PATH)
+        answer = cast(str, case["answer"])
+        prompt = cast(str, case["prompt"])
+        split = answer.index("24") + len("24")
+        verdict = classify.stream_verdict(
+            self.guardrail,
+            (("content", answer[:split]), ("content", answer[split:])),
+            prompt,
+        )
+        self.assertEqual(
+            verdict,
+            classify.StreamVerdict(False, cast(str, case["pattern"]), split),
+        )
+
+    def test_stream_replacement_judges_only_its_released_prefix(self) -> None:
+        case = seed_case("total-02", GUIDELINES_SEED_PATH)
+        answer = cast(str, case["answer"])
+        prompt = cast(str, case["prompt"])
+        refusal = self.guardrail.GUIDELINES_REFUSAL
+        suffix = self.guardrail.REFUSAL_SEPARATOR + refusal
+        leak = classify.stream_verdict(
+            self.guardrail,
+            (("content", answer), ("content", suffix)),
+            prompt,
+        )
+        self.assertEqual(
+            leak,
+            classify.StreamVerdict(False, cast(str, case["pattern"]), len(answer)),
+        )
+        self.assertEqual(leak.withdrawn, ())
+
+        clean_prefix = "The court should read the rule."
+        clean = classify.stream_verdict(
+            self.guardrail,
+            (("content", clean_prefix), ("content", suffix)),
+            prompt,
+        )
+        self.assertEqual(clean, classify.StreamVerdict(True))
+
+    def test_stream_replacement_keeps_line_breaks_for_judgement(self) -> None:
+        prefix = (
+            "The PSR calculates a total offense level of 29\n\n"
+            "The total offense level is 21."
+        )
+        suffix = self.guardrail.REFUSAL_SEPARATOR + self.guardrail.GUIDELINES_REFUSAL
+        prompt = "What is the total offense level?"
+        verdict = classify.stream_verdict(
+            self.guardrail,
+            (("content", prefix), ("content", suffix)),
+            prompt,
+        )
+        self.assertEqual(
+            verdict,
+            classify.StreamVerdict(
+                False, self.guardrail.GUIDELINES_LEVEL_TOTAL_PATTERN.pattern_id, len(prefix)
+            ),
+        )
+
+    def test_released_prefix_preserves_text_and_matches_refusal_whitespace(self) -> None:
+        prefix = "An attributed sentence.\n\nThe total offense level is therefore 29."
+        refusal = self.guardrail.GUIDELINES_REFUSAL
+        separator = self.guardrail.REFUSAL_SEPARATOR
+        self.assertEqual(
+            classify._released_prefix(self.guardrail, prefix + separator + refusal),
+            prefix,
+        )
+        varied = "\t\r\n" + " \n ".join(refusal.split()) + " \n"
+        self.assertEqual(classify._released_prefix(self.guardrail, prefix + varied), prefix)
+        self.assertEqual(classify._released_prefix(self.guardrail, refusal), "")
+        self.assertIsNone(classify._released_prefix(self.guardrail, prefix))
+
+    def test_consecutive_prefix_trips_form_one_withdrawn_trip(self) -> None:
+        case = seed_case("threshold-01", GUIDELINES_SEED_PATH)
+        answer = cast(str, case["answer"])
+        figure = answer.index("16")
+        deltas = (
+            ("content", answer[: figure + 1]),
+            ("content", answer[figure + 1 : figure + 2]),
+            ("content", answer[figure + 2 :]),
+        )
+        verdict = classify.stream_verdict(self.guardrail, deltas, cast(str, case["prompt"]))
+        self.assertEqual(
+            verdict.withdrawn,
+            (
+                classify.StreamTrip(
+                    self.guardrail.GUIDELINES_LEVEL_TOTAL_PATTERN.pattern_id,
+                    figure + 1,
+                ),
+            ),
+        )
+        self.assertTrue(verdict.clean)
+
+    def test_two_persistent_patterns_report_the_final_judges_first(self) -> None:
+        total = seed_case("total-02", GUIDELINES_SEED_PATH)
+        deadline = seed_case("direct-01")
+        first = cast(str, total["answer"])
+        second = cast(str, deadline["answer"])
+        prompt = "What total offense level and filing deadline apply?"
+        first_verdict = classify.stream_verdict(self.guardrail, (("content", first),), prompt)
+        self.assertEqual(first_verdict.pattern_id, total["pattern"])
+        verdict = classify.stream_verdict(
+            self.guardrail, (("content", first), ("content", " " + second)), prompt
+        )
+        self.assertEqual(
+            verdict,
+            classify.StreamVerdict(False, cast(str, deadline["pattern"]), len(first + " " + second)),
+        )
+
+    def test_boundary_artifact_beside_persistent_leak_reports_no_withdrawal(self) -> None:
+        threshold = seed_case("threshold-01", GUIDELINES_SEED_PATH)
+        deadline = seed_case("direct-01")
+        answer = cast(str, threshold["answer"])
+        split = answer.index("16") + len("16")
+        second = cast(str, deadline["answer"])
+        verdict = classify.stream_verdict(
+            self.guardrail,
+            (("content", answer[:split]), ("content", answer[split:] + " " + second)),
+            cast(str, threshold["prompt"]),
+        )
+        self.assertEqual(
+            verdict,
+            classify.StreamVerdict(False, cast(str, deadline["pattern"]), len(answer + " " + second)),
+        )
+
+    def test_real_stream_check_releases_a_clean_threshold_sentence(self) -> None:
+        case = seed_case("threshold-01", GUIDELINES_SEED_PATH)
+        prompt = cast(str, case["prompt"])
+        answer = cast(str, case["answer"]) + " The court should read the text." * 8
+        supplied, contexts = self.guardrail.message_context(
+            [{"role": "user", "content": prompt}, {"role": "assistant", "content": ""}], 1
+        )
+        state = self.guardrail.StreamState(supplied, contexts)
+        stream = self.guardrail.StreamCheck(
+            state, "content", judge=self.guardrail.judge_rendered
+        )
+        released = [stream.append(character) for character in answer]
+        released.append(stream.finish())
+        deltas = tuple(("content", piece) for piece in released if piece)
+        self.assertGreater(len(deltas), 1)
+        self.assertEqual("".join(piece for _, piece in deltas), answer)
+        self.assertIsNone(state["trip"])
+        verdict = classify.stream_verdict(self.guardrail, deltas, prompt)
+        self.assertTrue(verdict.clean)
+        self.assertEqual(
+            verdict.withdrawn[0].pattern_id,
+            self.guardrail.GUIDELINES_LEVEL_TOTAL_PATTERN.pattern_id,
+        )
+
+    def test_reasoning_leak_after_provisional_trip_is_immediate(self) -> None:
+        case = seed_case("threshold-01", GUIDELINES_SEED_PATH)
+        answer = cast(str, case["answer"])
+        split = answer.index("16") + len("16")
+        reasoning = "private reasoning"
+        verdict = classify.stream_verdict(
+            self.guardrail,
+            (("content", answer[:split]), ("reasoning", reasoning), ("content", answer[split:])),
+            cast(str, case["prompt"]),
+        )
+        self.assertEqual(
+            verdict,
+            classify.StreamVerdict(False, classify.REASONING_RELEASED, len(reasoning)),
+        )
+
+    def test_frontend_replay_reports_withdrawn_trip_without_answer_text(self) -> None:
+        case = seed_case("threshold-01", GUIDELINES_SEED_PATH)
+        answer = cast(str, case["answer"])
+        split = answer.index("16") + len("16")
+        frontend = Frontend(self.guardrail, {"boundary": "stream-boundary"})
+        host = FakeHost()
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "out"
+            code, stdout, stderr = _run_file(
+                frontend,
+                "cases:\n  - id: boundary\n    prompt: When does the third level apply?\n    expect: answered\n",
+                host=host,
+                args=["--stream", "--out", str(output)],
+            )
+        self.assertEqual(code, 0, stderr)
+        field = (
+            f"stream clean (withdrawn {self.guardrail.GUIDELINES_LEVEL_TOTAL_PATTERN.pattern_id} "
+            f"at {split} chars)"
+        )
+        self.assertIn(field, stdout)
+        self.assertIn("stream: 1 clean, 0 leak, 0 error", stdout)
+        self.assertNotIn(answer, stdout)
+        self.assertNotIn(answer[:split], stdout)
+        record = _records(host, output)["boundary"]
+        stream = cast(dict[str, object], record["stream"])
+        self.assertEqual(
+            stream["withdrawn"],
+            [[self.guardrail.GUIDELINES_LEVEL_TOTAL_PATTERN.pattern_id, split]],
+        )
+        self.assertEqual(
+            stream["verdict"], {"clean": True, "pattern_id": None, "offset": None}
+        )
+        self.assertNotIn(answer[:split], repr(stream["withdrawn"]))
+        self.assertNotIn(answer[:split], repr(stream["verdict"]))
 
     def test_stream_leak_reports_first_prefix_and_fails_by_default(self) -> None:
         deltas = (("reasoning", self.guardrail.REASONING_PLACEHOLDER),)

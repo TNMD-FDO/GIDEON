@@ -44,7 +44,7 @@ SMOKE_TURNS: Final[int] = 12
 # Correct it from the engine access log's POST /v1/chat/completions lines over a
 # run's span, divided by that run's browser turns.
 BROWSER_ENGINE_CALLS_PER_TURN: Final[int] = 3
-# A released-prefix leak on the raw route and a flash from a seat are failures;
+# A leak in the final released stream text and a flash from a seat are failures;
 # this is the one policy both fields share, enforced by the Filter stream hook
 # (v0.1.18).
 STREAM_LEAK_FAILS: Final[bool] = True
@@ -143,6 +143,7 @@ class TurnRow:
     pattern_id: str | None = None
     stream_pattern_id: str | None = None
     stream_offset: int | None = None
+    stream_withdrawn: tuple[classify.StreamTrip, ...] = ()
     answer: str | None = field(default=None, repr=False)
 
 
@@ -668,12 +669,7 @@ def _verdict_data(verdict: classify.Verdict | None) -> dict[str, object] | None:
     }
 
 
-def _stream_data(
-    capture: session.StreamCapture | None,
-    verdict: classify.StreamVerdict | None,
-) -> dict[str, object] | None:
-    if capture is None:
-        return None
+def _stream_verdict_data(verdict: classify.StreamVerdict | None) -> dict[str, object]:
     verdict_data = None
     if verdict is not None:
         verdict_data = {
@@ -682,9 +678,25 @@ def _stream_data(
             "offset": verdict.offset,
         }
     return {
+        "verdict": verdict_data,
+        "withdrawn": (
+            [[trip.pattern_id, trip.offset] for trip in verdict.withdrawn]
+            if verdict is not None
+            else []
+        ),
+    }
+
+
+def _stream_data(
+    capture: session.StreamCapture | None,
+    verdict: classify.StreamVerdict | None,
+) -> dict[str, object] | None:
+    if capture is None:
+        return None
+    return {
         "deltas": [list(delta) for delta in capture.deltas],
         "elapsed": capture.elapsed,
-        "verdict": verdict_data,
+        **_stream_verdict_data(verdict),
         "problem": _problem_data(capture.problem),
     }
 
@@ -816,15 +828,7 @@ def _service_record(
                 for delta in event.deltas
             ],
             "first_offset": reply.events[0].offset if reply.events else None,
-            "verdict": (
-                {
-                    "clean": stream_verdict.clean,
-                    "pattern_id": stream_verdict.pattern_id,
-                    "offset": stream_verdict.offset,
-                }
-                if stream_verdict is not None
-                else None
-            ),
+            **_stream_verdict_data(stream_verdict),
             "problem": _problem_data(reply.problem),
         }
     record = {
@@ -1219,6 +1223,16 @@ def _summary_detail(
     return "; ".join(parts)
 
 
+def _stream_text(verdict: classify.StreamVerdict) -> str:
+    if not verdict.clean:
+        return f"; stream leak@{verdict.pattern_id} at {verdict.offset} chars"
+    if not verdict.withdrawn:
+        return "; stream clean"
+    first = verdict.withdrawn[0]
+    count = f", {len(verdict.withdrawn)} in all" if len(verdict.withdrawn) > 1 else ""
+    return f"; stream clean (withdrawn {first.pattern_id} at {first.offset} chars{count})"
+
+
 def _replay(
     client: Client,
     spec: RunSpec,
@@ -1230,7 +1244,7 @@ def _replay(
 
     Returns the capture, its verdict, the row's suffix, whether the row fails,
     its stream verdict kind, and whether a bound cut the stream. A stream the
-    tool could not observe always fails it; a released prefix leak fails it
+    tool could not observe always fails it; a released text leak fails it
     under the shared stream policy.
     """
 
@@ -1250,10 +1264,9 @@ def _replay(
         )
         return capture, None, detail, True, "error", cut
     verdict = classify.stream_verdict(guardrail, capture.deltas, prompt)
-    if verdict.clean:
-        return capture, verdict, "; stream clean", False, "clean", False
-    suffix = f"; stream leak@{verdict.pattern_id} at {verdict.offset} chars"
-    return capture, verdict, suffix, STREAM_LEAK_FAILS, "leak", False
+    failed = not verdict.clean and STREAM_LEAK_FAILS
+    kind = "clean" if verdict.clean else "leak"
+    return capture, verdict, _stream_text(verdict), failed, kind, False
 
 
 def _units(cases: Sequence[Case], repeat: int) -> tuple[tuple[Case, int], ...]:
@@ -1461,15 +1474,11 @@ def service_turn(
             stream_failed = False
             if spec.stream:
                 stream_verdict = classify.stream_verdict(guardrail, deltas, prompt)
+                stream_detail = _stream_text(stream_verdict)
                 if stream_verdict.clean:
                     stream_kind = "clean"
-                    stream_detail = "; stream clean"
                 else:
                     stream_kind = "leak"
-                    stream_detail = (
-                        f"; stream leak@{stream_verdict.pattern_id} at "
-                        f"{stream_verdict.offset} chars"
-                    )
                     stream_failed = STREAM_LEAK_FAILS
             result = StageResult(
                 row_name,
@@ -1534,6 +1543,7 @@ def service_turn(
             if stream_verdict is not None and not stream_verdict.clean
             else None
         ),
+        stream_withdrawn=stream_verdict.withdrawn if stream_verdict is not None else (),
         answer=answer if verdict is not None else None,
     )
 
@@ -1749,6 +1759,7 @@ def frontend_turn(
             if stream_verdict is not None and not stream_verdict.clean
             else None
         ),
+        stream_withdrawn=stream_verdict.withdrawn if stream_verdict is not None else (),
     )
 
 

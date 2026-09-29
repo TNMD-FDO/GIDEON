@@ -48,17 +48,19 @@ SITE_SOURCE = ROOT / "config/site.example.yaml"
 RENDERED_COMPOSE = Path("/etc/gideon/rendered/compose.yaml")
 FIXED_NOW = datetime(2026, 9, 7, 12, 0, tzinfo=UTC)
 KEY_VALUE = "planted-api-key"
+GUIDELINES_SEED_PATH = ROOT / "eval/seed/guardrails/guidelines-range.yaml"
 
 
-def _seed_case(identifier: str) -> tuple[str, str]:
+def _seed_case(
+    identifier: str,
+    path: Path = ROOT / "eval/seed/guardrails/deadline-trap.yaml",
+) -> tuple[str, str]:
     """Load a seed prompt and answer so the guardrail remains the authority."""
 
     document = cast(
         dict[str, object],
         yaml.safe_load(
-            (ROOT / "eval/seed/guardrails/deadline-trap.yaml").read_text(
-                encoding="utf-8"
-            )
+            path.read_text(encoding="utf-8")
         ),
     )
     values = document["cases"]
@@ -892,6 +894,91 @@ class ServiceDoor(unittest.TestCase):
         self.assertEqual(row["stream"]["first_offset"], 0.01)
         self.assertEqual(row["stream"]["verdict"], {"clean": True, "pattern_id": None, "offset": None})
         self.assertEqual(row["answer"], "A plain answer.")
+
+    def test_boundary_stream_rows_keep_withdrawn_trips_content_free(self) -> None:
+        prompt, answer = _seed_case("threshold-01", GUIDELINES_SEED_PATH)
+        split = answer.index("16") + len("16")
+        pattern_id = guardrail.GUIDELINES_LEVEL_TOTAL_PATTERN.pattern_id
+        for count in (1, 2):
+            with self.subTest(count=count), tempfile.TemporaryDirectory() as directory:
+                combined = "\n\n".join([answer] * count)
+                boundaries = [
+                    ("content", answer[:split]),
+                    ("content", answer[split:]),
+                ]
+                if count == 2:
+                    boundaries[1] = ("content", answer[split:] + "\n\n")
+                    boundaries.extend(
+                        (("content", answer[:split]), ("content", answer[split:]))
+                    )
+                expected = tuple(
+                    classify.StreamTrip(pattern_id, index * (len(answer) + 2) + split)
+                    for index in range(count)
+                )
+                cases_path = Path(directory) / "cases.yaml"
+                output = Path(directory) / "out"
+                _case_file(
+                    cases_path,
+                    [{"id": "boundary", "prompt": prompt, "expect": "recorded"}],
+                )
+                host = FakeHost(stream_deltas=boundaries)
+                code, stdout, stderr = _run_service(
+                    host,
+                    cases_path,
+                    arguments=("--service", "--no-instruction", "--stream"),
+                    output=output,
+                )
+                self.assertEqual(code, 0, stderr)
+                suffix = f", {count} in all" if count > 1 else ""
+                detail = f"stream clean (withdrawn {pattern_id} at {split} chars{suffix})"
+                self.assertIn(detail, stdout)
+                self.assertIn("stream: 1 clean, 0 leak, 0 error", stdout)
+                self.assertNotIn(answer[:split], stdout)
+
+                record = json.loads(host.files[str(output / "boundary.json")])
+                stream = record["stream"]
+                self.assertEqual(stream["withdrawn"], [[trip.pattern_id, trip.offset] for trip in expected])
+                self.assertEqual(
+                    stream["verdict"],
+                    {"clean": True, "pattern_id": None, "offset": None},
+                )
+                self.assertNotIn(answer[:split], repr(stream["withdrawn"]))
+                self.assertNotIn(answer[:split], repr(stream["verdict"]))
+
+                row_host = FakeHost(stream_deltas=boundaries)
+                spec = run_module.RunSpec(
+                    cases=cases_path,
+                    repeat=1,
+                    stream=True,
+                    out=None,
+                    force=False,
+                    dry_run=False,
+                    sentinel="turn-boundary-test",
+                    service=True,
+                )
+                row = run_module.service_turn(
+                    spec,
+                    driver=run_module.ServiceTurnDriver(
+                        cast(Host, row_host),
+                        RENDERED_COMPOSE.parent,
+                        model=_served_name(),
+                        instruction=None,
+                        stream=True,
+                    ),
+                    guardrail=guardrail,
+                    case=Case("boundary", prompt, "recorded"),
+                    session_number=1,
+                    row_name="boundary",
+                    now=lambda: FIXED_NOW,
+                    monotonic=lambda: 10.0,
+                )
+                self.assertTrue(row.result.ok)
+                self.assertEqual(row.stream_kind, "clean")
+                self.assertIsNone(row.stream_pattern_id)
+                self.assertIsNone(row.stream_offset)
+                self.assertEqual(row.stream_withdrawn, expected)
+                self.assertEqual(row.answer, combined)
+                self.assertNotIn(answer[:split], repr(row))
 
     def test_streamed_door_turns_are_the_cases_not_twice_the_cases(self) -> None:
         # A frontend --stream row is a managed turn plus a raw replay, two
