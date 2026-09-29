@@ -24,6 +24,7 @@ VERIFY_ALL_CALENDAR: Final = "Sat *-01,04,07,10-8..14 04:00:00"
 # and guardrails' four hours end near 01:30, the 01:00 backup shares the disk
 # and not the engine, and the rest of the night before 06:00 is a hand run's.
 NIGHTLY_CALENDAR: Final = "*-*-* 21:00:00"
+NIGHTLY_SUITES: Final = ("general-smoke", "guardrails")
 # Ten hours, 21:00 to 06:00 plus the last judge readings and one turn's bound:
 # a backstop the command's own 06:00 deadline is meant to make unreachable.
 NIGHTLY_TIMEOUT_START_SECONDS: Final = 36000

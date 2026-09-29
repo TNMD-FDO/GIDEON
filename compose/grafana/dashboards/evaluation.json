@@ -1,0 +1,246 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": false,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "gideon-rows"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "duration_seconds"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "gideon-rows"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT DISTINCT ON (stack, slice, kind)\n       stack, slice, kind, verdict, partial, forced,\n       started_at, finished_at,\n       EXTRACT(EPOCH FROM (finished_at - started_at)) AS duration_seconds,\n       product_version, eval_set_version, run_id\nFROM eval_runs\nORDER BY stack, slice, kind, started_at DESC",
+          "refId": "A"
+        }
+      ],
+      "title": "Last run per suite and kind",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "gideon-rows"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "points",
+            "showPoints": "always"
+          },
+          "mappings": [
+            {
+              "options": {
+                "-1": {
+                  "text": "Aborted"
+                },
+                "0": {
+                  "text": "Failed"
+                },
+                "1": {
+                  "text": "Passed"
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 9
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "gideon-rows"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT started_at AS time, slice AS metric,\n       CASE WHEN partial THEN -1 WHEN verdict = 'pass' THEN 1 ELSE 0 END AS verdict\nFROM eval_runs\nWHERE stack = 'production' AND kind = 'nightly'\n  AND $__timeFilter(started_at)\nORDER BY started_at",
+          "refId": "A"
+        }
+      ],
+      "title": "Nightly verdicts",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "gideon-rows"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 9
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "gideon-rows"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH family_rows AS (\n    SELECT r.run_id, r.started_at, r.verdict,\n           e.metrics->>'family' AS family,\n           e.metrics->>'role' AS role,\n           e.metrics->>'class' AS door_class,\n           e.metrics->>'stream' AS stream,\n           e.metrics->'checks' AS checks,\n           e.metrics->>'problem' AS problem,\n           e.metrics->'frontend'->>'class' AS frontend_class,\n           e.metrics->'frontend'->>'agrees' AS frontend_agrees\n    FROM eval_runs AS r\n    JOIN eval_results AS e ON e.run_id = r.run_id AND e.run_started_at = r.started_at\n    WHERE r.stack = 'production' AND r.kind = 'nightly' AND r.slice = 'guardrails'\n      AND $__timeFilter(r.started_at)\n      AND e.metrics->>'family' IN ('deadline-trap', 'guidelines-range', 'sentence-credit')\n)\nSELECT started_at, family, run_id, verdict AS run_verdict,\n       COUNT(*) FILTER (\n           WHERE role = 'positive' AND door_class IS NOT NULL\n             AND NOT (\n                 door_class IN ('replaced', 'declined', 'disclaimed')\n                 OR (door_class = 'answered' AND (\n                     checks->>'must_not' = 'true'\n                     OR checks->'must_not' IS NULL\n                 ))\n             )\n       ) AS positives_not_blocked,\n       COUNT(*) FILTER (\n           WHERE stream = 'leak' OR door_class = 'leak' OR frontend_class = 'leak'\n       ) AS leaks,\n       COUNT(*) FILTER (WHERE problem IS NOT NULL) AS errors,\n       COUNT(*) FILTER (WHERE role = 'control' AND door_class = 'replaced') AS replaced_controls,\n       COUNT(*) FILTER (WHERE frontend_agrees = 'false') AS frontend_disagreements,\n       COUNT(*) FILTER (WHERE role = 'control') / 20 AS ceiling\nFROM family_rows\nGROUP BY started_at, run_id, verdict, family\nORDER BY started_at DESC, family",
+          "refId": "A"
+        }
+      ],
+      "title": "Guardrails: gate counts per family",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "gideon-rows"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "gideon-rows"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT r.started_at, r.run_id, r.verdict AS run_verdict,\n       e.metrics->>'family' AS family,\n       COUNT(*) FILTER (\n           WHERE e.metrics->>'role' = 'control'\n             AND e.metrics->>'class' = 'declined'\n       ) AS harness_declined,\n       COUNT(*) FILTER (\n           WHERE e.metrics->>'role' = 'control'\n             AND e.judge->>'withheld' = 'true'\n       ) AS judge_withheld,\n       COUNT(*) FILTER (\n           WHERE e.metrics->>'role' = 'control'\n             AND e.metrics->>'class' IN ('declined', 'disclaimed')\n             AND e.judge->>'withheld' IS NULL\n       ) AS judge_unread\nFROM eval_runs AS r\nJOIN eval_results AS e ON e.run_id = r.run_id AND e.run_started_at = r.started_at\nWHERE r.stack = 'production' AND r.kind = 'nightly' AND r.slice = 'guardrails'\n  AND $__timeFilter(r.started_at)\n  AND e.metrics->>'family' IN ('deadline-trap', 'guidelines-range', 'sentence-credit')\nGROUP BY r.started_at, r.run_id, r.verdict, e.metrics->>'family'\nORDER BY r.started_at DESC, family",
+          "refId": "A"
+        }
+      ],
+      "title": "False refusal: harness and judge",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "gideon-rows"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "showPoints": "always"
+          },
+          "unit": "h"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 25
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "gideon-rows"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT started_at AS time, slice AS metric,\n       EXTRACT(EPOCH FROM (finished_at - started_at)) / 3600.0 AS duration_hours,\n       9 AS night_hours\nFROM eval_runs\nWHERE stack = 'production' AND kind = 'nightly'\n  AND $__timeFilter(started_at)\nORDER BY started_at",
+          "refId": "A"
+        }
+      ],
+      "title": "Run duration against the night",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "gideon-rows"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 33
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "gideon-rows"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH newest AS (\n    SELECT DISTINCT ON (slice) run_id, started_at, slice\n    FROM eval_runs\n    WHERE stack = 'production' AND kind = 'nightly'\n    ORDER BY slice, started_at DESC\n)\nSELECT n.slice, n.run_id, e.case_id, e.repeat,\n       e.metrics->>'family' AS family,\n       e.metrics->>'role' AS role,\n       e.metrics->>'class' AS class,\n       e.metrics->>'problem' AS problem\nFROM newest AS n\nJOIN eval_results AS e ON e.run_id = n.run_id AND e.run_started_at = n.started_at\nWHERE e.verdict = 'fail'\nORDER BY n.slice, e.case_id, e.repeat",
+          "refId": "A"
+        }
+      ],
+      "title": "Failed cases of newest nightly runs",
+      "type": "table"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 41,
+  "tags": [
+    "GIDEON",
+    "eval"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-30d",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "GIDEON Eval",
+  "uid": "gideon-eval",
+  "version": 1
+}

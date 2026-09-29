@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.2.87](docs/release-notes/v0.2.87.md) — 2026-09-29 — the nightly run's pages and Eval board
 - [v0.2.86](docs/release-notes/v0.2.86.md) — 2026-09-29 — the nightly eval suites at 21:00, waiting behind a held engine and stopped at 06:00
 - [v0.2.85](docs/release-notes/v0.2.85.md) — 2026-09-28 — decision runs paired by case, weekend-bound
 - [v0.2.84](docs/release-notes/v0.2.84.md) — 2026-09-27 — the turn bound corrected to 1,200 s, a cut turn named by its own code

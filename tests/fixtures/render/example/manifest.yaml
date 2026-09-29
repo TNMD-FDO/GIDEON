@@ -55,7 +55,7 @@ files:
     owners:
       - "grafana"
   "grafana/provisioning/alerting/rules.yaml":
-    sha256: "05dfb23d9072442c4b7284b484e620007709c625908ff062f24de32048d41b54"
+    sha256: "ff149c6c1b374c21b53afaaa4b2cdf6fd86da32c71d5b292be3eda106553bcd0"
     mode: "0644"
     owners:
       - "grafana"
@@ -71,6 +71,11 @@ files:
       - "grafana"
   "grafana/dashboards/gpu.json":
     sha256: "ffef85f3b9e16bf1f1f39fd20977c05b5a7bcfb8d669eec8a666d7dbbeca792d"
+    mode: "0644"
+    owners:
+      - "grafana"
+  "grafana/dashboards/evaluation.json":
+    sha256: "4bd0ee6995f95e605a929101efabe83000b1334d92103f64c6c393e8e9e1c396"
     mode: "0644"
     owners:
       - "grafana"

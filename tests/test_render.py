@@ -281,6 +281,7 @@ class Registry(unittest.TestCase):
                 "grafana/dashboards/overview.json",
                 "grafana/dashboards/backup.json",
                 "grafana/dashboards/gpu.json",
+                "grafana/dashboards/evaluation.json",
                 "postgres/pgbackrest.conf",
                 "caddy/Caddyfile",
                 "open-webui/env",
@@ -316,21 +317,22 @@ class Registry(unittest.TestCase):
         self.assertEqual(ARTIFACTS[10].owners, ("grafana",))
         self.assertEqual(ARTIFACTS[11].owners, ("grafana",))
         self.assertEqual(ARTIFACTS[12].owners, ("grafana",))
-        self.assertEqual(ARTIFACTS[13].owners, ("postgres",))
-        self.assertEqual(ARTIFACTS[14].owners, ("caddy",))
-        self.assertEqual(ARTIFACTS[15].owners, ("open-webui",))
-        self.assertTrue(ARTIFACTS[15].secret)
-        self.assertEqual(ARTIFACTS[15].mode, 0o600)
-        self.assertEqual(ARTIFACTS[16].owners, ())
-        self.assertEqual(ARTIFACTS[17].owners, ("searxng",))
-        self.assertEqual(ARTIFACTS[17].mode, 0o644)
+        self.assertEqual(ARTIFACTS[13].owners, ("grafana",))
+        self.assertEqual(ARTIFACTS[14].owners, ("postgres",))
+        self.assertEqual(ARTIFACTS[15].owners, ("caddy",))
+        self.assertEqual(ARTIFACTS[16].owners, ("open-webui",))
+        self.assertTrue(ARTIFACTS[16].secret)
+        self.assertEqual(ARTIFACTS[16].mode, 0o600)
+        self.assertEqual(ARTIFACTS[17].owners, ())
         self.assertEqual(ARTIFACTS[18].owners, ("searxng",))
-        self.assertTrue(ARTIFACTS[18].secret)
-        self.assertEqual(ARTIFACTS[18].mode, 0o600)
-        self.assertEqual(ARTIFACTS[19].relative_path, "searxng/logging.json")
+        self.assertEqual(ARTIFACTS[18].mode, 0o644)
         self.assertEqual(ARTIFACTS[19].owners, ("searxng",))
-        self.assertFalse(ARTIFACTS[19].secret)
-        self.assertEqual(ARTIFACTS[19].mode, 0o644)
+        self.assertTrue(ARTIFACTS[19].secret)
+        self.assertEqual(ARTIFACTS[19].mode, 0o600)
+        self.assertEqual(ARTIFACTS[20].relative_path, "searxng/logging.json")
+        self.assertEqual(ARTIFACTS[20].owners, ("searxng",))
+        self.assertFalse(ARTIFACTS[20].secret)
+        self.assertEqual(ARTIFACTS[20].mode, 0o644)
         self.assertTrue(
             all(
                 artifact.mode == 0o644
@@ -939,7 +941,7 @@ class Core(unittest.TestCase):
         self.assertTrue(all(artifact.applies(gpu) for artifact in ARTIFACTS))
         self.assertEqual(
             [artifact.name for artifact in ARTIFACTS if not artifact.applies(no_gpu)],
-            ["grafana-gpu", "gideon-eval-nightly-service", "gideon-eval-nightly-timer"],
+            ["grafana-gpu", "grafana-eval", "gideon-eval-nightly-service", "gideon-eval-nightly-timer"],
         )
 
     def test_nightly_units_are_zoned_bounded_and_carry_no_secrets(self) -> None:
@@ -950,12 +952,17 @@ class Core(unittest.TestCase):
             with self.subTest(site=site_path):
                 service = rendered.by_path["systemd/gideon-eval-nightly.service"].content
                 timer = rendered.by_path["systemd/gideon-eval-nightly.timer"].content
+                exec_lines = [line for line in service.splitlines() if line.startswith("ExecStart=")]
                 self.assertEqual(
-                    [line for line in service.splitlines() if line.startswith("ExecStart=")],
+                    exec_lines,
                     [
                         "ExecStart=-/usr/bin/python3 -m gideon eval run --slice general-smoke --kind nightly",
                         "ExecStart=/usr/bin/python3 -m gideon eval run --slice guardrails --kind nightly",
                     ],
+                )
+                self.assertEqual(
+                    [line.split(" --slice ", 1)[1].split(" ", 1)[0] for line in exec_lines],
+                    list(systemd.NIGHTLY_SUITES),
                 )
                 self.assertIn(
                     f"TimeoutStartSec={systemd.NIGHTLY_TIMEOUT_START_SECONDS}", service
@@ -1015,6 +1022,7 @@ class Core(unittest.TestCase):
                 "grafana/dashboards/overview.json",
                 "grafana/dashboards/backup.json",
                 "grafana/dashboards/gpu.json",
+                "grafana/dashboards/evaluation.json",
                 "postgres/pgbackrest.conf",
                 "caddy/Caddyfile",
                 "open-webui/env",

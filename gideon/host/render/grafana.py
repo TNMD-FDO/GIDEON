@@ -13,6 +13,7 @@ from gideon.host.render import (
 from gideon.host.render.api import API_JOB_NAME, api_enabled
 from gideon.host.render.engine import ENGINE_JOB_NAME
 from gideon.host.render.searxng import SEARXNG_JOB_NAME, search_enabled
+from gideon.host.render.systemd import NIGHTLY_SUITES
 
 LDAP_TEMPLATE: Final = "grafana/ldap.toml.tmpl"
 DATASOURCES_TEMPLATE: Final = "grafana/provisioning/datasources/datasources.yaml.tmpl"
@@ -20,6 +21,7 @@ DASHBOARDS_TEMPLATE: Final = "grafana/provisioning/dashboards/provider.yaml.tmpl
 OVERVIEW_TEMPLATE: Final = "grafana/dashboards/overview.json"
 BACKUP_TEMPLATE: Final = "grafana/dashboards/backup.json"
 GPU_TEMPLATE: Final = "grafana/dashboards/gpu.json"
+EVAL_TEMPLATE: Final = "grafana/dashboards/evaluation.json"
 CONTACT_POINTS_TEMPLATE: Final = "grafana/provisioning/alerting/contact-points.yaml.tmpl"
 POLICIES_TEMPLATE: Final = "grafana/provisioning/alerting/policies.yaml.tmpl"
 TIME_INTERVALS_TEMPLATE: Final = "grafana/provisioning/alerting/time-intervals.yaml.tmpl"
@@ -36,6 +38,7 @@ HOST_UNIT_RULE_TEMPLATE: Final = "grafana/provisioning/alerting/host-unit-rule.y
 SEARCH_RULE_TEMPLATE: Final = "grafana/provisioning/alerting/search-probe-rule.yaml.tmpl"
 # The API probe's rule, rendered while the GPU-only API service is present.
 API_RULE_TEMPLATE: Final = "grafana/provisioning/alerting/api-probe-rule.yaml.tmpl"
+NIGHTLY_RULE_TEMPLATE: Final = "grafana/provisioning/alerting/nightly-run-rules.yaml.tmpl"
 # The local break-glass administrator; the password is the generated
 # print-once secret `grafana_admin_password`.
 GRAFANA_ADMIN_USER: Final = "grafana-admin"
@@ -65,6 +68,10 @@ DRILL_MAX_GAP_DAYS: Final[dict[str, int]] = {
 # while the engine is away (its model list keeps the last fetch). A first
 # start that outruns it pages once and resolves by itself.
 ENGINE_PENDING_PERIOD: Final = "5m"
+# The timer starts at 21:00, but an engine wait may defer a run until 06:00.
+# Consecutive starts can be 33 hours apart; 36 hours leaves room for that
+# wait and pages a missed night at about 09:00. This is a starting value.
+NIGHTLY_OVERDUE_SECONDS: Final = 36 * 3600
 
 
 def drill_overdue_seconds(interval: str) -> int:
@@ -186,13 +193,17 @@ class GrafanaRulesArtifact(Artifact):
         HOST_UNIT_RULE_TEMPLATE,
         SEARCH_RULE_TEMPLATE,
         API_RULE_TEMPLATE,
+        NIGHTLY_RULE_TEMPLATE,
     )
 
     def emit(self, inputs: RenderInputs) -> str:
-        # The two GPU-host rules are their own templates so the rules file
+        # The engine and drift rules are their own templates so the rules file
         # carries no code: the engine rule on every GPU host, the drift rule
         # only when host.lock records a tested driver version. A no-GPU host
         # renders neither; the host-unit rule belongs only to the build box.
+        # The nightly run's rules render where its unit does, on a GPU host,
+        # each query enumerating the unit's suites so one that never ran
+        # still has a series.
         # Target down's exclusion of the engine job is one text on every host,
         # inert where no engine job exists.
         driver = inputs.lock.driver.tested
@@ -227,6 +238,19 @@ class GrafanaRulesArtifact(Artifact):
             if inputs.build_box
             else ""
         )
+        nightly_rules = (
+            substitute_template(
+                inputs,
+                NIGHTLY_RULE_TEMPLATE,
+                {
+                    "nightly_suites": ", ".join(f"('{suite}')" for suite in NIGHTLY_SUITES),
+                    "overdue_seconds": NIGHTLY_OVERDUE_SECONDS,
+                    "missing_age_seconds": NIGHTLY_OVERDUE_SECONDS + 1,
+                },
+            ).removesuffix("\n")
+            if not inputs.no_gpu
+            else ""
+        )
         return substitute_template(
             inputs,
             RULES_TEMPLATE,
@@ -236,6 +260,7 @@ class GrafanaRulesArtifact(Artifact):
                 "api_rules": api_rule,
                 "gpu_rules": engine_rule + driver_rule,
                 "host_unit_rules": host_unit_rule,
+                "nightly_rules": nightly_rules,
                 "engine_job": ENGINE_JOB_NAME,
             },
         )
@@ -259,6 +284,14 @@ GrafanaGpuArtifact = VerbatimArtifact(
     name="grafana-gpu",
     relative_path="grafana/dashboards/gpu.json",
     template_path=GPU_TEMPLATE,
+    owners=("grafana",),
+    applies=lambda inputs: not inputs.no_gpu,
+)
+
+GrafanaEvalArtifact = VerbatimArtifact(
+    name="grafana-eval",
+    relative_path="grafana/dashboards/evaluation.json",
+    template_path=EVAL_TEMPLATE,
     owners=("grafana",),
     applies=lambda inputs: not inputs.no_gpu,
 )

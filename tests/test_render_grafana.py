@@ -1,4 +1,4 @@
-"""Grafana's LDAP, datasource, provider, and Overview render contracts."""
+"""Grafana configuration, alerting, and dashboard render contracts."""
 
 import json
 import re
@@ -10,6 +10,9 @@ from typing import Any
 
 import yaml  # type: ignore[import-untyped]
 
+from gideon.evaluation.evalset import SHAPE_REGISTRY, TIER_2_CATEGORY
+from gideon.evaluation.guardrails_slice import OVER_TRIP_DIVISOR
+from gideon.evaluation.window import QUIET_WINDOW_END_HOUR
 from gideon.host.images import load_image_lock
 from gideon.host.lock import load_host_lock, load_host_lock_text
 from gideon.host.models import HardwareProfile, load_models_lock, select_profile
@@ -21,10 +24,13 @@ from gideon.host.render.grafana import (
     DASHBOARDS_MOUNT,
     DATASOURCES_TEMPLATE,
     DRILL_MAX_GAP_DAYS,
+    EVAL_TEMPLATE,
+    NIGHTLY_OVERDUE_SECONDS,
     OVERVIEW_TEMPLATE,
     GrafanaContactPointsArtifact,
     GrafanaDashboardsProviderArtifact,
     GrafanaDatasourcesArtifact,
+    GrafanaEvalArtifact,
     GrafanaGpuArtifact,
     GrafanaLdapArtifact,
     GrafanaOverviewArtifact,
@@ -33,6 +39,7 @@ from gideon.host.render.grafana import (
     GrafanaTimeIntervalsArtifact,
 )
 from gideon.host.render.searxng import search_enabled
+from gideon.host.render.systemd import NIGHTLY_CALENDAR, NIGHTLY_SUITES
 from gideon.host.site import load_site
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -298,6 +305,153 @@ class Dashboards(unittest.TestCase):
                 self.assertTrue(_datasource_uids(dashboard) <= declared)
 
 
+class EvalBoard(unittest.TestCase):
+    def test_board_is_verbatim_and_only_applies_on_gpu_hosts(self) -> None:
+        self.assertEqual(GrafanaEvalArtifact.emit(inputs()), inputs().templates[EVAL_TEMPLATE])
+        self.assertEqual(GrafanaEvalArtifact.owners, ("grafana",))
+        self.assertTrue(GrafanaEvalArtifact.applies(inputs()))
+        self.assertFalse(GrafanaEvalArtifact.applies(inputs(no_gpu=True)))
+        self.assertIn(GrafanaEvalArtifact, ARTIFACTS)
+        self.assertNotIn(
+            GrafanaEvalArtifact.relative_path,
+            render_all(
+                inputs(
+                    no_gpu=True,
+                    secrets={
+                        "ldap_bind_password": "bind",
+                        "postgres_openwebui_password": "postgres",
+                        "gideon_admin_password": "admin",
+                        "searxng_secret_key": "searxng",
+                    },
+                )
+            ).by_path,
+        )
+
+    def test_six_panels_show_only_recorded_eval_fields(self) -> None:
+        board = json.loads(GrafanaEvalArtifact.emit(inputs()))
+        gpu_board = json.loads(GrafanaGpuArtifact.emit(inputs()))
+        self.assertEqual(board["uid"], "gideon-eval")
+        self.assertEqual(board["title"], "GIDEON Eval")
+        self.assertNotIn("id", board)
+        self.assertEqual(board["schemaVersion"], gpu_board["schemaVersion"])
+        self.assertEqual(board["refresh"], gpu_board["refresh"])
+        self.assertEqual(board["time"], {"from": "now-30d", "to": "now"})
+        panels = {panel["title"]: panel for panel in board["panels"]}
+        self.assertEqual(
+            set(panels),
+            {
+                "Last run per suite and kind",
+                "Nightly verdicts",
+                "Guardrails: gate counts per family",
+                "False refusal: harness and judge",
+                "Run duration against the night",
+                "Failed cases of newest nightly runs",
+            },
+        )
+        self.assertEqual(len(panels), len(board["panels"]))
+        for title, panel in panels.items():
+            with self.subTest(panel=title):
+                self.assertNotIn("id", panel)
+                self.assertEqual(panel["datasource"], {"type": "postgres", "uid": "gideon-rows"})
+                self.assertEqual(len(panel["targets"]), 1)
+                target = panel["targets"][0]
+                self.assertEqual(target["datasource"], panel["datasource"])
+                self.assertEqual(target["format"], "table" if panel["type"] == "table" else "time_series")
+                sql = target["rawSql"]
+                tables = re.findall(r"\b(?:FROM|JOIN)\s+(eval_\w+)", sql, re.IGNORECASE)
+                self.assertTrue(tables)
+                self.assertTrue(set(tables) <= {"eval_runs", "eval_results"})
+                self.assertNotRegex(sql, r"(?i)\b(?:question|answer|candidate|reason|prompt)\b")
+                self.assertNotRegex(sql, r"(?i)\b(?:metrics|judge)\b(?!\s*->)")
+                self.assertNotIn("AT TIME ZONE", sql.upper())
+
+        last = panels["Last run per suite and kind"]["targets"][0]["rawSql"]
+        for column in ("stack", "slice", "kind", "verdict", "partial", "forced", "started_at", "finished_at", "product_version", "eval_set_version", "run_id"):
+            self.assertIn(column, last)
+        self.assertIn("DISTINCT ON (stack, slice, kind)", last)
+        self.assertIn("duration_seconds", last)
+
+        verdicts = panels["Nightly verdicts"]["targets"][0]["rawSql"]
+        self.assertIn("partial THEN -1", verdicts)
+        self.assertIn("verdict = 'pass' THEN 1 ELSE 0", verdicts)
+        self.assertIn("slice AS metric", verdicts)
+        self.assertEqual(
+            panels["Nightly verdicts"]["fieldConfig"]["defaults"]["custom"],
+            {"drawStyle": "points", "showPoints": "always"},
+        )
+
+        for title in (
+            "Nightly verdicts",
+            "Guardrails: gate counts per family",
+            "False refusal: harness and judge",
+            "Run duration against the night",
+        ):
+            self.assertIn("$__timeFilter(", panels[title]["targets"][0]["rawSql"])
+
+        failed = panels["Failed cases of newest nightly runs"]["targets"][0]["rawSql"]
+        self.assertIn("DISTINCT ON (slice)", failed)
+        self.assertIn("WHERE e.verdict = 'fail'", failed)
+        for column in ("n.slice", "n.run_id", "e.case_id", "e.repeat", "family", "role", "class", "problem"):
+            self.assertIn(column, failed)
+
+    def test_guardrails_counts_match_the_family_gate(self) -> None:
+        board = json.loads(GrafanaEvalArtifact.emit(inputs()))
+        panel = next(panel for panel in board["panels"] if panel["title"] == "Guardrails: gate counts per family")
+        sql = panel["targets"][0]["rawSql"]
+        self.assertIn("r.slice = 'guardrails'", sql)
+        self.assertIn("r.kind = 'nightly'", sql)
+        self.assertIn("r.stack = 'production'", sql)
+        gated_families = sorted(
+            category
+            for suite, category in SHAPE_REGISTRY
+            if suite == "guardrails" and category != TIER_2_CATEGORY
+        )
+        family_filter = "e.metrics->>'family' IN (" + ", ".join(
+            f"'{family}'" for family in gated_families
+        ) + ")"
+        self.assertIn(family_filter, sql)
+        self.assertIn("verdict AS run_verdict", sql)
+        self.assertIn("door_class IS NOT NULL", sql)
+        self.assertIn("door_class IN ('replaced', 'declined', 'disclaimed')", sql)
+        self.assertIn("checks->>'must_not' = 'true'", sql)
+        self.assertIn("checks->'must_not' IS NULL", sql)
+        self.assertNotIn(" ? ", sql)
+        self.assertIn("stream = 'leak' OR door_class = 'leak' OR frontend_class = 'leak'", sql)
+        self.assertIn("problem IS NOT NULL", sql)
+        self.assertIn("role = 'control' AND door_class = 'replaced'", sql)
+        self.assertIn("frontend_agrees = 'false'", sql)
+        divisor = re.search(r"COUNT\(\*\) FILTER \(WHERE role = 'control'\) / (\d+) AS ceiling", sql)
+        self.assertIsNotNone(divisor)
+        assert divisor is not None
+        self.assertEqual(int(divisor.group(1)), OVER_TRIP_DIVISOR)
+
+    def test_false_refusal_and_duration_follow_recorded_readings_and_night(self) -> None:
+        board = json.loads(GrafanaEvalArtifact.emit(inputs()))
+        panels = {panel["title"]: panel for panel in board["panels"]}
+        refusal = panels["False refusal: harness and judge"]["targets"][0]["rawSql"]
+        gated_families = sorted(
+            category
+            for suite, category in SHAPE_REGISTRY
+            if suite == "guardrails" and category != TIER_2_CATEGORY
+        )
+        self.assertIn(
+            "e.metrics->>'family' IN (" + ", ".join(f"'{family}'" for family in gated_families) + ")",
+            refusal,
+        )
+        self.assertIn("e.metrics->>'class' = 'declined'", refusal)
+        self.assertIn("e.judge->>'withheld' = 'true'", refusal)
+        self.assertIn("e.metrics->>'class' IN ('declined', 'disclaimed')", refusal)
+        self.assertIn("e.judge->>'withheld' IS NULL", refusal)
+        duration = panels["Run duration against the night"]["targets"][0]["rawSql"]
+        self.assertIn("finished_at - started_at", duration)
+        self.assertIn("slice AS metric", duration)
+        hours = re.search(r"(\d+) AS night_hours", duration)
+        self.assertIsNotNone(hours)
+        assert hours is not None
+        start_hour = int(NIGHTLY_CALENDAR.split(" ")[1].split(":")[0])
+        self.assertEqual(int(hours.group(1)), (QUIET_WINDOW_END_HOUR - start_hour) % 24)
+
+
 class Alerting(unittest.TestCase):
     def test_contact_point_uses_each_sites_recipients_and_subject(self) -> None:
         for site_path in (EXAMPLE, SECOND):
@@ -357,6 +511,9 @@ class Alerting(unittest.TestCase):
             "gideon-engine-down",
             "gideon-heartbeat",
             "gideon-api-probe-failing",
+            "gideon-nightly-run-failed",
+            "gideon-nightly-run-aborted",
+            "gideon-nightly-run-overdue",
         }
         for site_path, build_box in (
             (EXAMPLE, False),
@@ -461,6 +618,78 @@ class Alerting(unittest.TestCase):
                 ):
                     self.assertEqual(rules[uid]["noDataState"], "Alerting")
                     self.assertEqual(rules[uid]["execErrState"], "Alerting")
+
+    def test_nightly_rules_cover_each_suite_and_only_gpu_hosts(self) -> None:
+        nightly_uids = {
+            "gideon-nightly-run-failed",
+            "gideon-nightly-run-aborted",
+            "gideon-nightly-run-overdue",
+        }
+        uids_by_host: dict[bool, set[str]] = {}
+        for no_gpu in (False, True):
+            with self.subTest(no_gpu=no_gpu):
+                groups = yaml.safe_load(GrafanaRulesArtifact().emit(inputs(no_gpu=no_gpu)))[
+                    "groups"
+                ]
+                uids_by_host[no_gpu] = {
+                    rule["uid"] for group in groups for rule in group["rules"]
+                }
+                nightly = {
+                    rule["uid"]: rule
+                    for group in groups
+                    for rule in group["rules"]
+                    if rule["uid"] in nightly_uids
+                }
+                self.assertEqual(set(nightly), set() if no_gpu else nightly_uids)
+                if no_gpu:
+                    continue
+                rows = next(group for group in groups if group["name"] == "rows")
+                for uid, rule in nightly.items():
+                    self.assertIn(rule, rows["rules"])
+                    self.assertEqual(rule["condition"], "C")
+                    self.assertEqual(rule["for"], "0s")
+                    self.assertEqual(rule["labels"], {"class": "page"})
+                    self.assertEqual(rule["annotations"]["runbook"], "docs/runbooks/observability.md §4")
+                    self.assertEqual(rule["annotations"]["summary"].count("$"), 1)
+                    self.assertIn("{{ $labels.slice }}", rule["annotations"]["summary"])
+                    query = rule["data"][0]
+                    self.assertEqual(query["datasourceUid"], "gideon-rows")
+                    self.assertEqual(query["model"]["datasource"]["uid"], "gideon-rows")
+                    self.assertEqual(query["model"]["format"], "table")
+                    sql = query["model"]["rawSql"]
+                    self.assertEqual(
+                        re.findall(r"\('([^']+)'\)", sql), list(NIGHTLY_SUITES)
+                    )
+                    self.assertIn("SELECT suites.slice AS slice,", sql)
+                    self.assertIn("AS value", sql)
+                    self.assertIn("FROM suites", sql)
+                    self.assertIn("LEFT JOIN LATERAL", sql)
+                    self.assertIn("FROM eval_runs", sql)
+                    self.assertIn("kind = 'nightly'", sql)
+                    self.assertIn("stack = 'production'", sql)
+                    self.assertIn("slice = suites.slice", sql)
+                    self.assertIn("ORDER BY started_at DESC LIMIT 1", sql)
+                    self.assertEqual(rule["data"][1]["model"]["expression"], "A")
+                    threshold = rule["data"][2]["model"]["conditions"][0]["evaluator"]
+                    self.assertEqual(threshold["type"], "gt")
+                    if uid == "gideon-nightly-run-overdue":
+                        self.assertEqual(threshold["params"], [NIGHTLY_OVERDUE_SECONDS])
+                        self.assertIn(f", {NIGHTLY_OVERDUE_SECONDS + 1}) AS value", sql)
+                        self.assertEqual(rule["noDataState"], "Alerting")
+                        self.assertEqual(rule["execErrState"], "Alerting")
+                    else:
+                        self.assertEqual(threshold["params"], [0])
+                        self.assertIn("ELSE 0 END AS value", sql)
+                        self.assertEqual(rule["noDataState"], "OK")
+                        self.assertEqual(rule["execErrState"], "OK")
+                self.assertIn("NOT latest.partial", nightly["gideon-nightly-run-failed"]["data"][0]["model"]["rawSql"])
+                self.assertIn("WHEN latest.partial", nightly["gideon-nightly-run-aborted"]["data"][0]["model"]["rawSql"])
+        gpu_only_rules = nightly_uids | {
+            "gideon-engine-down",
+            "gideon-driver-drift",
+            "gideon-api-probe-failing",
+        }
+        self.assertEqual(uids_by_host[True], uids_by_host[False] - gpu_only_rules)
 
     def test_host_filesystem_rule_covers_both_mountpoints_and_reuses_data_threshold(self) -> None:
         """Each rendered host filesystem page follows its exact contract."""

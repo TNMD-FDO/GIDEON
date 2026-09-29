@@ -58,6 +58,13 @@ and stays Normal, inert until the directory is recreated.
   from the engine's own `/metrics`, its KV-cache usage and its queue depth
   (requests waiting and running), which show the engine's share of a card while
   DCGM reports only per-GPU totals.
+- **Eval** (GPU hosts only) — the newest run of each suite and kind; each
+  nightly verdict as a point, with an aborted run distinct from a failed run;
+  the guardrails gate's counts per family beside the run verdict and the
+  replaced-control ceiling; the harness's and judge's false-refusal counts and
+  unread controls; run duration against the nine-hour night; and the failed
+  case IDs of the newest nightly runs. M17 and M18 have no panel yet; their
+  measurements arrive with the user and synthesis work.
 
 The node exporter runs on the private network with the host's root mounted, so
 its network-device series describe the container's interfaces, not the host's;
@@ -76,6 +83,9 @@ condition is re-sent daily; acknowledgement follows business hours.
 | push overdue | no `backup_push` row in 26 h | same unit's journal; the NAS side (`backup-restore.md` §4); then `backup push` |
 | drill overdue | no passing `backup_drill` row within the drill calendar's longest possible gap + 3 days (`1m`: 35 + 3 days; the table is in `render/grafana.py`) | `journalctl -u gideon-backup-drill.service`; then `backup drill` |
 | drill failed | the newest `backup_drill` row did not pass | read its row (`backup-restore.md` §6); the drill's journal |
+| nightly run failed | the newest nightly run of a suite failed its gate and is complete | the Eval board's failed-cases table names the case IDs; `journalctl -u gideon-eval-nightly.service` carries the same IDs with their checks. The page clears on the next passing nightly run of that suite, by timer or by hand as kind `nightly` |
+| nightly run aborted | the newest nightly run of a suite is partial | read `journalctl -u gideon-eval-nightly.service` for the wait and its holder. One abort behind a long run can be the night's design; a repeat means the suite no longer fits its night and needs a ticket |
+| nightly run overdue | the newest nightly start of a suite is more than 36 hours old, or there is no nightly row. A fresh GPU install pages until its first night has run | check the timer's next elapse and `journalctl -u gideon-eval-nightly.service`; a skip names the holder. `sudo python3 -m gideon apply` re-enables a stopped timer. A decision weekend's skip is planned and silenced ahead (§5) |
 | backup unit failed | `gideon-backup`, `gideon-backup-drill`, or `gideon-backup-verify` is in systemd's `failed` state — a failed push or off-box check lands here too, since a failed push writes no row, and so does a nightly refused because a restore or a push held the backup lock, the unit's journal naming the holder | the unit's journal; fix the cause; `systemctl reset-failed <unit>` after a hand-run succeeds |
 | engine down | for 5 minutes the engine's scrape target is down (`up{job="engine"}` is 0): the container stopped, crash-looping, or reloading its model. A plain `start` is healthy in about a minute and a cold recreate in about three, so neither pages; a first start that outruns five minutes pages once and resolves by itself. Users see General listed and a turn that never answers — the frontend keeps its last model list | `docker compose -f /etc/gideon/rendered/compose.yaml ps gideon-generator` and `logs gideon-generator`; `journalctl CONTAINER_NAME=gideon-gideon-generator-1` for the start-up lines (`GPU KV cache size`, `Maximum concurrency`); `sudo python3 -m gideon apply` brings it back to desired state |
 | core service down | for 10 minutes: a scrape target other than the engine's `up` is 0, `pg_up` is 0, the ingress, frontend, or search probe fails, or the registry/runner unit on the build box is not active; also when Prometheus itself cannot answer | `docker compose -f /etc/gideon/rendered/compose.yaml ps` and `logs <service>`; `systemctl status gideon-registry`; `sudo python3 -m gideon apply` brings the project back to desired state |
@@ -104,6 +114,9 @@ restart expected to take longer than five minutes — a model or image bump's
 cold recreate on a box whose compile cache is gone, a first install — gets a
 silence on `Engine down` first; a plain stop/start and an ordinary apply's
 recreate stay under the rule's period and need none.
+
+Before a decision weekend's run starts, silence `Nightly run overdue` for
+the planned skip and let the silence expire after the next nightly run.
 
 ## 6. Retention and where things are kept
 
@@ -143,6 +156,9 @@ notice.
 9. **heartbeat**: the first Saturday after `apply`; before that, `alerts test`.
 10. **engine down**: `docker compose -f /etc/gideon/rendered/compose.yaml stop gideon-generator`; wait a little over five minutes; `start` it. Exactly one page arrives (Engine down); Target down stays Normal, since its expression excludes the engine job. Do it in the quiet window — General is unavailable meanwhile. (Verified 2026-09-06: stopped 20:39:05, `up` 0 within a scrape, the rule Pending from 20:39:22 and Alerting at 20:44:20, the notifier handed the alert at 20:44:22; started 20:45:28, the container healthy at 20:46:29, `up` 1 at 20:46:49, the rule Normal at 20:47:22 and the resolved notice sent.)
 11. **API probe failing**: on a GPU host, `docker compose -f /etc/gideon/rendered/compose.yaml stop gideon-api`; watch `probe_success{job="api"}` until the rule is pending, then `start` the container again inside the ten-minute pending period. Confirm the probe clears and no page is sent; use `logs gideon-api` and `sudo python3 -m gideon apply` for a real failure.
+12. **nightly run failed**: silence `Search probe failing` for thirty minutes, stop SearXNG, and check `search-01` alone through the turn harness fails rather than refuses. Run `general-smoke` as kind `nightly` (with `--force` outside the night); confirm its row says `fail`, its rule instance is Alerting at the next minute's evaluation, and the `guardrails` instance stays Normal. Start SearXNG, confirm its probe is green, run the suite again, and confirm a `pass` row and a Normal rule instance. Read both transitions from Grafana's history (`api/v1/rules/history?ruleUID=gideon-nightly-run-failed`; its `from` and `to` are seconds, its `time` column microseconds) and confirm the page and resolved notice at the receiver. Keep SearXNG's stop inside the silence: its probe pages ten minutes after it fails, and a silence that ends first sends that page. (Verified 2026-09-29: the failing run 13:44:16–13:50:06, its instance Alerting at 13:51:00; the passing run 14:12:26–14:21:24, Normal at 14:22:00.)
+13. **nightly run overdue**: read the rule's SQL as `gideon_ro_metrics`, as in item 3, and its provisioned state in Grafana. For the firing side, evaluate a copy of the rule's data with only its bound lowered below the recorded age of each suite; confirm both instances fire. Do not save the copy or send a page. If Grafana cannot evaluate the copy, the SQL read and the provisioned state remain the check.
+14. **nightly run aborted**: do not induce an abort. Read its query as `gideon_ro_metrics` and the newest partial row if one exists. Where a partial row exists, evaluate a copy scoped to that exact `run_id`; a later completed nightly row must not hide it. Record whether the firing side was available to check.
 
 ## 8. Secrets and the service group
 
