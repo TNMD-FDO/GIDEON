@@ -290,6 +290,11 @@ def build_parser() -> argparse.ArgumentParser:
     eval_sub = eval_.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)
     eval_run = eval_sub.add_parser("run", help="run the eval suites")
     eval_run.add_argument(
+        "--challenger",
+        action="store_true",
+        help="run the committed configuration experiment beside the release's configuration on the CI sibling",
+    )
+    eval_run.add_argument(
         "--decision",
         action="store_true",
         help="a decision run: five repeats paired against --against's recorded run",

@@ -176,6 +176,7 @@ def _run_registered(
         context = RunContext(
             cast(Host, host),
             rendered_dir,
+            rendered_dir,
             served_model,
             spec.judge_prompt,
             spec.repeats,

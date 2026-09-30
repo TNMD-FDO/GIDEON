@@ -116,6 +116,7 @@ def _context(
     context = RunContext(
         cast(Host, host),
         Path("/tmp/evaluation-rendered"),
+        Path("/tmp/evaluation-rendered"),
         None,
         None,
         2,

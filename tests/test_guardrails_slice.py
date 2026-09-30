@@ -25,7 +25,7 @@ from test_turns_door import RENDERED_COMPOSE, _served_name
 from test_turns_door import FakeHost as DoorHost
 
 from gideon import guardrail
-from gideon.evaluation import command, guardrails_slice, window
+from gideon.evaluation import command, guardrails_slice, stacks, window
 from gideon.evaluation.evalset import (
     SET_ROOT,
     TIER_2_CATEGORY,
@@ -63,6 +63,7 @@ class JudgingDoorHost(DoorHost):
             2.5,
         )
         self.judge_requests: list[tuple[str, dict[str, object]]] = []
+        self.judge_argv: list[tuple[str, ...]] = []
         self.request_order: list[str] = []
 
     def run(
@@ -87,6 +88,7 @@ class JudgingDoorHost(DoorHost):
                     "\n</candidate-answer>", 1
                 )[0]
                 self.judge_requests.append((candidate, request))
+                self.judge_argv.append(tuple(str(value) for value in argv))
                 self.request_order.append("judge")
                 reply, prompt_tokens, completion_tokens, elapsed = self.readings.get(
                     candidate, self.default
@@ -342,6 +344,7 @@ def _fixture_turns(
     access = TurnAccess("fixture instruction", PASSWORD, selected_frontend.factory, SENTINEL)
     context = RunContext(
         cast(Host, selected_host),
+        RENDERED_COMPOSE.parent,
         RENDERED_COMPOSE.parent,
         _served_name(),
         "false-refusal@1",
@@ -1482,6 +1485,7 @@ class GuardrailsRunner(unittest.TestCase):
             context = RunContext(
                 cast(Host, host),
                 RENDERED_COMPOSE.parent,
+                RENDERED_COMPOSE.parent,
                 _served_name(),
                 None,
                 1,
@@ -1602,6 +1606,31 @@ class GuardrailsRunner(unittest.TestCase):
 
 class GuardrailsCommand(unittest.TestCase):
     """The CLI resolves turn access before dispatching and keeps row failures local."""
+
+    def test_door_and_judge_use_their_stack_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            loaded = _small_set(Path(directory) / "eval-v1")
+            answers, _declined, _disclaimed, _positive = _decline_answers(loaded)
+            production = Path("/tmp/fictitious-production-rendered")
+            for stack_name in ("ci", "production"):
+                with self.subTest(stack=stack_name):
+                    host = JudgingDoorHost()
+                    _host, _frontend, context = _fixture_turns(loaded, host=host)
+                    host.answers.update(answers)
+                    with patch.object(stacks.secrets, "select_directory"):
+                        turns_dir = stacks.resolve_stack(stack_name, production).turns_dir
+                    _run_fixture(
+                        loaded, "guardrails",
+                        replace(context, rendered_dir=turns_dir, engine_dir=production),
+                    )
+                    self.assertTrue(host.judge_requests)
+                    judge_argv = host.judge_argv
+                    door_argv = [argv for argv, text in zip(host.exec_argv, host.exec_inputs, strict=True)
+                                 if "body" in json.loads(text)]
+                    self.assertTrue(judge_argv)
+                    self.assertTrue(door_argv)
+                    self.assertTrue(all(str(production) in argv for argv in judge_argv))
+                    self.assertTrue(all(str(turns_dir) in argv for argv in door_argv))
 
     def _invoke_engine_run(
         self,

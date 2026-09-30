@@ -742,7 +742,7 @@ def _read_controls(
         assert isinstance(question, str)
         grading = judge.grade(
             context.host,
-            context.rendered_dir,
+            context.engine_dir,
             served_model_name=context.served_model_name,
             prompt=prompt,
             slots={"question": question, "candidate": outcome.answer},

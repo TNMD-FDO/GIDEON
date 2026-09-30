@@ -50,3 +50,9 @@ If a box refuses `courts.yaml`, restore the file from the installed release tag;
 This file lists improvement triggers, each with a condition and one of three states: `watching`, `acted`, or `retired`. A state changes only through a pull request, so the release history records each decision.
 
 `gideon proposals` reads the registry and reports which watching triggers meet their conditions and which remain unmeasurable. A refusal naming the file is fixed by restoring it from the installed release tag, then running `gideon proposals` again.
+
+## 8. `config/challenger.yaml`
+
+This file names the challenger: at most one configuration experiment, run beside the release's configuration on the build box's CI sibling so both are recorded paired. The entry names the experiment, the subject it changes, the release's value, the challenger's value, and the date and pull request or tag that set it; a null `challenger` means none is set and nothing runs. The file changes only through a pull request. A challenger found better is promoted by a pull request that changes the product's own configuration and this file together, so the challenger never reaches production by itself.
+
+`gideon eval run --challenger --stack ci` reads the file on the build box alone; an office's box receives it and never reads it. A refusal naming the file is fixed by restoring it from the installed release tag; the person changing the file in a release corrects the named key so the `release` value is the one the release runs and the two values name the same kind of setting, then runs the command again.

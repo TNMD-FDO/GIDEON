@@ -32,6 +32,24 @@ unsourced-length, and off-question. An empty failure_modes list is a clean
 answer.
 """
 
+_SYNTHESIS_V2_SYSTEM_TEXT: Final[str] = """You are a reference-guided answer judge.
+
+The reference answer is the truth for grading. Your own recall is not a source.
+Length earns nothing. Apply these tests in order, with the lowest score cap
+governing. Score 0 if the candidate contradicts the reference on a point the
+question asks for, or does not address the question. Otherwise, score at most
+1 if the candidate states claims the reference does not support and that carry
+no source, or pads itself with length that adds none of the reference's points.
+Otherwise, score at most 2 if the candidate states nothing wrong but omits a
+key point of the reference. Score 3 if none of these tests apply. A score below
+3 must name at least one failure mode; a score of 3 must name none.
+
+Return the score, a concise reason, and zero or more failure modes. Use only
+these failure modes: contradicts-reference, omits-key-point, unsupported-claim,
+unsourced-length, and off-question. An empty failure_modes list is a clean
+answer.
+"""
+
 _USER_TEMPLATE: Final[str] = """Grade the candidate answer for the question below.
 
 <question>
@@ -136,13 +154,25 @@ class JudgePrompt:
     schema: Mapping[str, object]
 
 
+_SYNTHESIS_SLOTS: Final[tuple[str, ...]] = ("question", "reference", "candidate")
+_SYNTHESIS_SCHEMA_NAME: Final[str] = "synthesis_verdict"
+
+
 PROMPT_REGISTRY: Final[Mapping[str, JudgePrompt]] = {
     "synthesis@1": JudgePrompt(
         id="synthesis@1",
         system=_SYSTEM_TEXT,
         user_template=_USER_TEMPLATE,
-        slots=("question", "reference", "candidate"),
-        schema_name="synthesis_verdict",
+        slots=_SYNTHESIS_SLOTS,
+        schema_name=_SYNTHESIS_SCHEMA_NAME,
+        schema=VERDICT_SCHEMA,
+    ),
+    "synthesis@2": JudgePrompt(
+        id="synthesis@2",
+        system=_SYNTHESIS_V2_SYSTEM_TEXT,
+        user_template=_USER_TEMPLATE,
+        slots=_SYNTHESIS_SLOTS,
+        schema_name=_SYNTHESIS_SCHEMA_NAME,
         schema=VERDICT_SCHEMA,
     ),
     "false-refusal@1": JudgePrompt(
@@ -173,6 +203,7 @@ def prompt_digest(prompt: JudgePrompt) -> str:
 # A prompt or schema edit must take a new ``@N`` id and a new pinned digest.
 PROMPT_DIGESTS: Final[Mapping[str, str]] = {
     "synthesis@1": "91e7a40a7ac342b977d02b61bf44b572c14baa53bd14532ed7719aafc2b33046",
+    "synthesis@2": "754ba8f2ed08b5fcb323dc5727ce1ca366ad24e55cfb50f19a6ae94c7155521e",
     "false-refusal@1": "23705cefbb4e78aa6ff07a688846ce36405827560bc274e22136a5af0cc13481",
 }
 

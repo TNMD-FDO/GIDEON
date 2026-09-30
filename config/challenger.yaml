@@ -1,0 +1,11 @@
+# The committed configuration experiment beside the release's configuration.
+# Change it only by pull request. A null challenger means no run.
+# gideon/evaluation/challenger.py loads it; a refusal names
+# docs/runbooks/release-files.md §8.
+version: 1
+challenger:
+  name: synthesis-rubric
+  subject: judge-prompt
+  release: synthesis@1
+  challenger: synthesis@2
+  set: 2026-09-29 v0.2.90

@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 from test_evaluation_record import read_psql_set
 from test_judge import engine_output, valid_content
 
-from gideon.evaluation import command, window
+from gideon.evaluation import command, stacks, window
 from gideon.evaluation.evalset import SET_ROOT, LoadedSet, load_set
 from gideon.evaluation.results import CaseResult, RunContext, SliceResult
 from gideon.evaluation.slices import SLICE_RUNNERS
@@ -140,6 +140,8 @@ class JudgeHost:
             return self.no_gpu
         if path_text == str(ROOT / ".git"):
             return self.git_available
+        if path_text == str(Path(stacks.CI_ROOT) / "compose.yaml"):
+            return True
         return Path(path).exists()
 
     def geteuid(self) -> int:
@@ -179,6 +181,7 @@ def _runner_context(host: JudgeHost, progress: list[str]) -> RunContext:
     return RunContext(
         cast(Host, host),
         RENDERED,
+        RENDERED,
         "fixture-model",
         spec.judge_prompt,
         spec.repeats,
@@ -205,12 +208,14 @@ def _invoke_command(
     site_path: PathLike = SITE_PATH,
     set_path: PathLike | None = None,
     target: object | None = None,
+    stack_name: str = "production",
 ) -> tuple[int, str, str]:
     args = argparse.Namespace(
         slice="judge-triples",
         decision=False,
         force=False,
         set=set_path,
+        stack=stack_name,
     )
     stdout = io.StringIO()
     stderr = io.StringIO()
@@ -243,6 +248,17 @@ def _supplied_set() -> tempfile.TemporaryDirectory[str]:
 
 class Runner(unittest.TestCase):
     """The runner's order, report, and never-gates result are observable."""
+
+    def test_judge_uses_production_engine_directory_on_both_stacks(self) -> None:
+        for stack_name in ("ci", "production"):
+            with self.subTest(stack=stack_name), patch.object(stacks.secrets, "select_directory"):
+                host = JudgeHost(engine_output(valid_content()))
+                code, _stdout, _stderr = _invoke_command(host, stack_name=stack_name)
+                self.assertEqual(code, 0)
+                engine_calls = [argv for argv, content in host.calls if content in host.engine_calls]
+                self.assertTrue(engine_calls)
+                self.assertTrue(all(RENDERED in argv for argv in engine_calls))
+                self.assertTrue(all(stacks.CI_ROOT not in argv for argv in engine_calls))
 
     def test_progress_is_repeat_major_and_id_ordered(self) -> None:
         loaded, result, progress = _run_runner(engine_output(valid_content()))

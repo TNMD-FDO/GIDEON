@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.2.96](docs/release-notes/v0.2.96.md) — 2026-09-29 — `eval run --challenger` records a configuration experiment beside the release's, as a pair on the CI sibling
 - [v0.2.94](docs/release-notes/v0.2.94.md) — 2026-09-29 — a painted trip is provisional
 - [v0.2.93](docs/release-notes/v0.2.93.md) — 2026-09-29 — the model-upgrade runbook
 - [v0.2.92](docs/release-notes/v0.2.92.md) — 2026-09-29 — a weekly email counting waiting proposals, and the Eval board panel

@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
-from gideon.evaluation import judge, record, results
+from gideon.evaluation import challenger, judge, record, results
 from gideon.host import engine, stack
 from gideon.host.render.engine import (
     ENGINE_PORT,
@@ -132,6 +132,29 @@ def run_grade(
 
 class Request(unittest.TestCase):
     """The request preserves the prompt contract and the secret boundary."""
+
+    def test_challenger_prompt_uses_shared_document_and_its_own_rubric(self) -> None:
+        loaded = challenger.load_challenger(Path(__file__).resolve().parents[1] / challenger.CHALLENGER_PATH)
+        assert loaded.config is not None and loaded.config.challenger is not None
+        entry = loaded.config.challenger
+        release = judge.PROMPT_REGISTRY[entry.release]
+        candidate = judge.PROMPT_REGISTRY[entry.challenger]
+        self.assertEqual(candidate.id, entry.challenger)
+        self.assertEqual(candidate.user_template, release.user_template)
+        self.assertEqual(candidate.slots, release.slots)
+        self.assertEqual(candidate.schema, release.schema)
+        self.assertEqual(candidate.schema_name, release.schema_name)
+        self.assertNotEqual(candidate.system, release.system)
+        host = StubHost(engine_output(valid_content()))
+        self.assertIsNotNone(run_grade(host, prompt=candidate).verdict)
+        assert host.input is not None
+        request = json.loads(host.input)
+        self.assertEqual(request["temperature"], 0)
+        self.assertEqual(request["response_format"]["json_schema"]["name"], candidate.schema_name)
+        self.assertEqual(request["messages"][0]["content"], candidate.system)
+        user = request["messages"][1]["content"]
+        for slot in candidate.slots:
+            self.assertIn(SLOTS[slot], user)
 
     def test_request_contains_prompt_schema_slots_and_thinking_flag(self) -> None:
         host = StubHost(engine_output(valid_content()))

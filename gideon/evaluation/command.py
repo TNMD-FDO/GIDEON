@@ -12,8 +12,16 @@ from typing import Final, cast
 from uuid import uuid4
 
 import gideon
+from gideon.evaluation import (
+    challenger,
+    ranked,
+    rankmetrics,
+    record,
+    reference,
+    stacks,
+    window,
+)
 from gideon.evaluation import decision as decision_stats
-from gideon.evaluation import ranked, rankmetrics, record, reference, stacks, window
 from gideon.evaluation.evalset import (
     SET_ROOT,
     EvalSetLoadResult,
@@ -74,6 +82,15 @@ class _RecordOutcome:
 
     ok: bool
     written: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _RunBodyOutcome:
+    """The pass exit code and whether its row can anchor another pass."""
+
+    exit_code: int
+    written: bool = False
+    partial: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -295,6 +312,7 @@ def _reference_fix(
     run_id: str,
     written: bool,
     command_flags: str,
+    challenger_mode: bool = False,
 ) -> str:
     """Return the fix for a failing reference half, or empty when it held."""
 
@@ -303,7 +321,9 @@ def _reference_fix(
     if comparison.outcome == "other-version":
         if written:
             return f"Run sudo python3 -m gideon eval reference --run {run_id} as root with the stack up, then retry."
-        return _record_root_fix(slice_name, slice_spec, command_flags)
+        return _record_root_fix(
+            slice_name, slice_spec, command_flags, challenger_mode=challenger_mode
+        )
     if comparison.outcome == "malformed":
         return reference.SLICE_REPAIR_FIX
     return ""
@@ -321,6 +341,7 @@ def _reference_gate(
     written: bool,
     command_flags: str,
     partial: bool,
+    challenger_mode: bool = False,
 ) -> bool:
     """Print the gate of a slice that compares against its reference.
 
@@ -355,6 +376,7 @@ def _reference_gate(
         run_id=run_id,
         written=written,
         command_flags=command_flags,
+        challenger_mode=challenger_mode,
     )
     if reference_fix:
         fixes.append(reference_fix)
@@ -486,8 +508,24 @@ def _provenance(
     return (commit.stdout.strip(), bool(status.stdout.splitlines())), None
 
 
-def _engine_root_fix(slice_name: str, command_flags: str) -> str:
-    return f"Run sudo python3 -m gideon eval run --slice {slice_name}{command_flags}, then retry."
+def _retry_command(
+    slice_name: str,
+    command_flags: str = "",
+    *,
+    challenger_mode: bool = False,
+    ranked_flag: str = "",
+) -> str:
+    """Build the command that retries the selected evaluation mode."""
+
+    if challenger_mode:
+        return f"eval run --challenger --stack ci{command_flags}"
+    return f"eval run --slice {slice_name}{ranked_flag}{command_flags}"
+
+
+def _engine_root_fix(
+    slice_name: str, command_flags: str, *, challenger_mode: bool = False
+) -> str:
+    return f"Run sudo python3 -m gideon {_retry_command(slice_name, command_flags, challenger_mode=challenger_mode)}, then retry."
 
 
 def _waits_for_engine_lock(kind: str) -> bool:
@@ -512,11 +550,15 @@ def _holder_text(holder: backuplock.Record | None) -> str:
 
 
 def _record_root_fix(
-    slice_name: str, slice_spec: SliceSpec, command_flags: str = ""
+    slice_name: str,
+    slice_spec: SliceSpec,
+    command_flags: str = "",
+    *,
+    challenger_mode: bool = False,
 ) -> str:
     ranked_flag = " --ranked <file>" if slice_spec.takes_ranked else ""
     return (
-        f"Run sudo python3 -m gideon eval run --slice {slice_name}{ranked_flag}{command_flags} "
+        f"Run sudo python3 -m gideon {_retry_command(slice_name, command_flags, challenger_mode=challenger_mode, ranked_flag=ranked_flag)} "
         "as root with the stack up, then retry."
     )
 
@@ -668,6 +710,8 @@ def _engine_preconditions(
     lock_claim: _EngineLockClaim,
     sleep: Callable[[float], None],
     clock: Callable[[], datetime],
+    challenger_mode: bool = False,
+    side_prompt_id: str | None = None,
 ) -> _EnginePreconditions | None:
     """Refuse engine runs before a request when a required seam is unavailable."""
 
@@ -677,7 +721,9 @@ def _engine_preconditions(
                 "preconditions",
                 False,
                 "root privileges are required",
-                _engine_root_fix(slice_name, command_flags),
+                _engine_root_fix(
+                    slice_name, command_flags, challenger_mode=challenger_mode
+                ),
             )
         )
         return None
@@ -755,7 +801,11 @@ def _engine_preconditions(
         )
         return None
 
-    lock_command = f"gideon eval run --slice {slice_name} --stack {paths.name}"
+    lock_command = "gideon " + _retry_command(
+        slice_name,
+        command_flags if challenger_mode else f" --stack {paths.name}",
+        challenger_mode=challenger_mode,
+    )
     effective_start = started
     lock_outcome = backuplock.take(
         cast(LockingHost, io),
@@ -789,7 +839,7 @@ def _engine_preconditions(
                         f"{judgement.end.isoformat()}; waited {_waited_duration(started, effective_start)}",
                         "The next nightly fires at 21:00 office time; run this suite by hand "
                         "inside the window with "
-                        f"sudo python3 -m gideon eval run --slice {slice_name}.",
+                        f"sudo python3 -m gideon {_retry_command(slice_name, command_flags if challenger_mode else '', challenger_mode=challenger_mode)}.",
                     )
                 )
                 return None
@@ -911,7 +961,8 @@ def _engine_preconditions(
     # One row for the stage, as engine verify prints one. The writer clause
     # states the guarantee and no more: the probe proves the role connects, so a
     # write can still fail after the run and is reported at the record stage.
-    prompt_id = slice_spec.judge_prompt or "none"
+    prompt_id = side_prompt_id if challenger_mode else slice_spec.judge_prompt
+    prompt_id = prompt_id or "none"
     window_detail = judgement.description + (", forced" if force else "")
     writer = (
         "set supplied, so no writer probe"
@@ -970,6 +1021,7 @@ def _record(
     slice_spec: SliceSpec,
     prepared: _EnginePreconditions | None,
     overrides: Mapping[str, object] = {},
+    challenger_mode: bool = False,
 ) -> _RecordOutcome:
     """Write the run and its results.
 
@@ -998,7 +1050,12 @@ def _record(
                     "record",
                     True,
                     f"skipped — no database reachable; rows were not written ({probe_problem})",
-                    _record_root_fix(slice_name, slice_spec, command_flags),
+                    _record_root_fix(
+                        slice_name,
+                        slice_spec,
+                        command_flags,
+                        challenger_mode=challenger_mode,
+                    ),
                 )
             )
             return _RecordOutcome(True, False)
@@ -1108,11 +1165,16 @@ def _run_body(
     kind: str,
     command_flags: str,
     lock_claim: _EngineLockClaim,
-) -> int:
+    challenger_mode: bool = False,
+    side_slice: str | None = None,
+    side_prompt_id: str | None = None,
+    subject_change: Callable[[RunContext, str], RunContext] | None = None,
+    overrides: Mapping[str, object] | None = None,
+) -> _RunBodyOutcome:
     decision = bool(getattr(args, "decision", False))
     force = bool(getattr(args, "force", False))
     against = getattr(args, "against", None)
-    slice_name = getattr(args, "slice", None)
+    slice_name = side_slice if challenger_mode else getattr(args, "slice", None)
     slice_label = slice_name if isinstance(slice_name, str) and slice_name else "<name>"
     paired_problem = _paired_flag_problem(
         slice_label,
@@ -1122,10 +1184,10 @@ def _run_body(
     )
     if paired_problem is not None:
         print(refusal(_COMMAND, paired_problem.problem, paired_problem.fix), file=sys.stderr)
-        return 1
+        return _RunBodyOutcome(1)
     if not isinstance(slice_name, str) or not slice_name:
         print(refusal(_COMMAND, "no slice was selected", _SLICE_FIX), file=sys.stderr)
-        return 1
+        return _RunBodyOutcome(1)
 
     slice_spec = SLICE_RUNNERS.get(slice_name)
     flag_problem = _flag_problem(
@@ -1136,17 +1198,17 @@ def _run_body(
     )
     if flag_problem is not None:
         print(refusal(_COMMAND, flag_problem.problem, flag_problem.fix), file=sys.stderr)
-        return 1
+        return _RunBodyOutcome(1)
 
     loaded_result = load_set_with_courts(set_root, court_path=court_path, host=host)
     if loaded_result.findings:
         print_findings(loaded_result.findings)
         print_stage(StageResult("load", False, "eval set refused", _LOAD_FIX))
-        return 1
+        return _RunBodyOutcome(1)
     loaded = loaded_result.loaded
     if loaded is None:
         print_stage(StageResult("load", False, "eval set was not loaded", _LOAD_FIX))
-        return 1
+        return _RunBodyOutcome(1)
     if slice_name not in loaded.slices:
         available = ", ".join(sorted(loaded.slices)) or "none"
         print_stage(
@@ -1157,7 +1219,7 @@ def _run_body(
                 _SLICE_FIX,
             )
         )
-        return 1
+        return _RunBodyOutcome(1)
 
     if slice_spec is None:
         selected = loaded.slices[slice_name]
@@ -1177,25 +1239,18 @@ def _run_body(
                 "Implement the runner named by the slice, then retry.",
             )
         )
-        return 1
+        return _RunBodyOutcome(1)
 
-    if paths.name == "ci" and (
-        not slice_spec.drives_turns or slice_spec.judge_prompt is not None
-    ):
-        reason = (
-            "the slice does not drive turns"
-            if not slice_spec.drives_turns
-            else "the slice reads a judge prompt"
-        )
+    if paths.name == "ci" and not slice_spec.drives_turns and slice_spec.judge_prompt is None:
         print_stage(
             StageResult(
                 "load",
                 False,
-                f"slice {slice_name} cannot run on the CI sibling: {reason}",
+                f"slice {slice_name} cannot run on the CI sibling: the slice reaches nothing a stack names",
                 "Run this slice with --stack production, then retry.",
             )
         )
-        return 1
+        return _RunBodyOutcome(1)
 
     selected = loaded.slices[slice_name]
     print_stage(
@@ -1208,7 +1263,7 @@ def _run_body(
     )
 
     ranked_lists: Mapping[str, tuple[rankmetrics.Coordinates, ...]] | None = None
-    run_overrides: Mapping[str, object] = {}
+    run_overrides: Mapping[str, object] = {} if overrides is None else overrides
     ranked_path = getattr(args, "ranked", None)
     if slice_spec.takes_ranked:
         if not isinstance(ranked_path, str) or not ranked_path:
@@ -1220,7 +1275,7 @@ def _run_body(
                     _ranked_required_fix(slice_name, command_flags),
                 )
             )
-            return 1
+            return _RunBodyOutcome(1)
         active_ids = set(loaded.active_ids)
         allowed_ids = tuple(case_id for case_id in selected if case_id in active_ids)
         ranked_result = ranked.read(ranked_path, allowed_ids)
@@ -1229,7 +1284,7 @@ def _run_body(
             print_stage(
                 StageResult("ranked", False, "ranked file refused", ranked.RANKED_FIX)
             )
-            return 1
+            return _RunBodyOutcome(1)
         assert ranked_result.ranked is not None and ranked_result.sha256 is not None
         ranked_lists = ranked_result.ranked
         run_overrides = {
@@ -1256,7 +1311,7 @@ def _run_body(
                 _ranked_forbidden_fix(slice_name),
             )
         )
-        return 1
+        return _RunBodyOutcome(1)
 
     engine_preconditions: _EnginePreconditions | None = None
     if slice_spec.reaches_engine:
@@ -1279,9 +1334,11 @@ def _run_body(
             lock_claim=lock_claim,
             sleep=sleep,
             clock=finished_clock,
+            challenger_mode=challenger_mode,
+            side_prompt_id=side_prompt_id,
         )
         if engine_preconditions is None:
-            return 1
+            return _RunBodyOutcome(1)
 
     comparand: record.ComparandRun | None = None
     if decision:
@@ -1301,7 +1358,7 @@ def _run_body(
                     comparand_result.fix,
                 )
             )
-            return 1
+            return _RunBodyOutcome(1)
         comparand = comparand_result
         repeats_word = "repeat" if comparand.repeats == 1 else "repeats"
         repeats_detail = f"{comparand.repeats} {repeats_word}"
@@ -1324,6 +1381,7 @@ def _run_body(
     context = RunContext(
         host=host,
         rendered_dir=paths.turns_dir,
+        engine_dir=rendered_dir,
         served_model_name=(
             None
             if engine_preconditions is None
@@ -1335,6 +1393,9 @@ def _run_body(
         ranked=ranked_lists,
         turns=None if engine_preconditions is None else engine_preconditions.turns,
     )
+    if subject_change is not None:
+        assert side_prompt_id is not None
+        context = subject_change(context, side_prompt_id)
     if engine_preconditions is not None:
         context = replace(
             context,
@@ -1367,7 +1428,7 @@ def _run_body(
                 _UNSIGNED_RESULT_FIX,
             )
         )
-        return 1
+        return _RunBodyOutcome(1)
     if decision or run_result.partial:
         cases = len({result.case_id for result in slice_result.results})
         run_detail = (
@@ -1450,6 +1511,7 @@ def _run_body(
         slice_spec=slice_spec,
         prepared=engine_preconditions,
         overrides=run_overrides,
+        challenger_mode=challenger_mode,
     )
     if decision:
         assert paired is not None
@@ -1481,8 +1543,48 @@ def _run_body(
             written=recorded.written,
             command_flags=command_flags,
             partial=run_result.partial,
+            challenger_mode=challenger_mode,
         )
-    return 0 if gate_ok and recorded.ok else 1
+    return _RunBodyOutcome(
+        0 if gate_ok and recorded.ok else 1,
+        written=recorded.written,
+        partial=run_result.partial,
+    )
+
+
+def _side_overrides(
+    entry: challenger.ChallengerEntry, side: str, value: str, *, pairs: str | None = None
+) -> Mapping[str, object]:
+    """The run row's ``overrides`` for one side of a challenger pair."""
+
+    fields: dict[str, object] = {
+        challenger.NAME_FIELD: entry.name,
+        challenger.SUBJECT_FIELD: entry.subject,
+        challenger.SIDE_FIELD: side,
+        challenger.VALUE_FIELD: value,
+    }
+    if pairs is not None:
+        fields[challenger.PAIRS_FIELD] = pairs
+    return {challenger.OVERRIDE_KEY: fields}
+
+
+def _challenger_flag_problem(args: argparse.Namespace) -> Problem | None:
+    """Refuse flags that cannot describe a committed challenger pair."""
+
+    kind = getattr(args, "kind", "manual")
+    flags = (f" --kind {kind}" if kind == NIGHTLY_KIND else "") + (
+        " --force" if getattr(args, "force", False) else ""
+    )
+    fix = f"Run gideon {_retry_command('', flags, challenger_mode=True)}, then retry."
+    for name in ("slice", "set", "ranked", "decision", "against"):
+        value = getattr(args, name, None)
+        if value is not None and value is not False:
+            return Problem(f"--challenger cannot be combined with --{name}", fix)
+    if getattr(args, "stack", "production") != "ci":
+        return Problem("--challenger requires --stack ci", fix)
+    if kind == "smoke":
+        return Problem("--challenger cannot use --kind smoke", fix)
+    return None
 
 
 def run_eval(
@@ -1503,11 +1605,66 @@ def run_eval(
     checkout = Path(__file__).parents[2] if checkout_root is None else Path(checkout_root)
     io = RealHost() if host is None else host
     now = (lambda: datetime.now(UTC)) if clock is None else clock
-    run_id = str(uuid4()) if run_id_factory is None else run_id_factory()
+    new_run_id = (lambda: str(uuid4())) if run_id_factory is None else run_id_factory
+    challenger_mode = bool(getattr(args, "challenger", False))
+    entry: challenger.ChallengerEntry | None = None
+    subject: challenger.ChallengerSubject | None = None
+    if challenger_mode:
+        flag_problem = _challenger_flag_problem(args)
+        if flag_problem is not None:
+            print(refusal(_COMMAND, flag_problem.problem, flag_problem.fix), file=sys.stderr)
+            return 1
+        if not nogpu.is_build_box(io):
+            print_stage(
+                StageResult(
+                    "challenger",
+                    False,
+                    nogpu.NOT_BUILD_BOX_DETAIL,
+                    "The challenger runs on the build box alone; on this box run "
+                    "sudo python3 -m gideon eval run --slice <name> instead.",
+                )
+            )
+            return 1
+        challenger_result = challenger.load_challenger(
+            checkout / challenger.CHALLENGER_PATH, host=io
+        )
+        if challenger_result.findings:
+            print(challenger.render_findings(challenger_result.findings), file=sys.stderr)
+            print_stage(
+                StageResult(
+                    "challenger",
+                    False,
+                    "committed challenger refused",
+                    challenger_result.findings[0].fix,
+                )
+            )
+            return 1
+        assert challenger_result.config is not None
+        entry = challenger_result.config.challenger
+        if entry is None:
+            print_stage(
+                StageResult(
+                    "challenger",
+                    True,
+                    "skipped — none set; nothing was evaluated and nothing recorded",
+                    "",
+                )
+            )
+            return 0
+        subject = next(item for item in challenger.SUBJECTS if item.name == entry.subject)
+        print_stage(
+            StageResult(
+                "challenger",
+                True,
+                f"{entry.name}: subject {entry.subject}, slice {subject.slice_name}, "
+                f"release {entry.release}, challenger {entry.challenger}",
+                "",
+            )
+        )
     stack_name = getattr(args, "stack", "production")
     kind = getattr(args, "kind", "manual")
     paths = stacks.resolve_stack(stack_name, rendered_dir)
-    command_flags = paths.flag_fragment + (
+    command_flags = ("" if challenger_mode else paths.flag_fragment) + (
         f" --kind {kind}" if kind != "manual" else ""
     )
     against = getattr(args, "against", None)
@@ -1520,7 +1677,15 @@ def run_eval(
     set_root = checkout / SET_ROOT if supplied_root is None else Path(supplied_root)
     selected_court_path = courts.default_courts_path() if court_path is None else Path(court_path)
     lock_claim = _EngineLockClaim()
-    try:
+
+    def run_pass(
+        run_id: str,
+        *,
+        side_slice: str | None = None,
+        side_prompt_id: str | None = None,
+        subject_change: Callable[[RunContext, str], RunContext] | None = None,
+        overrides: Mapping[str, object] | None = None,
+    ) -> _RunBodyOutcome:
         return _run_body(
             args,
             set_root=set_root,
@@ -1539,7 +1704,62 @@ def run_eval(
             kind=kind,
             command_flags=command_flags,
             lock_claim=lock_claim,
+            challenger_mode=challenger_mode,
+            side_slice=side_slice,
+            side_prompt_id=side_prompt_id,
+            subject_change=subject_change,
+            overrides=overrides,
         )
+
+    try:
+        if not challenger_mode:
+            return run_pass(new_run_id()).exit_code
+
+        assert entry is not None and subject is not None
+        release_id, challenger_id = new_run_id(), new_run_id()
+        print_stage(
+            StageResult(
+                "side", True, f"release run {release_id}: {entry.release}", ""
+            )
+        )
+        release_outcome = run_pass(
+            release_id,
+            side_slice=subject.slice_name,
+            side_prompt_id=entry.release,
+            overrides=_side_overrides(entry, challenger.RELEASE_SIDE, entry.release),
+        )
+        if not release_outcome.written or release_outcome.partial:
+            print_stage(
+                StageResult(
+                    "side",
+                    False,
+                    f"challenger run {challenger_id} did not start: release run {release_id} "
+                    "was not recorded or was partial, so nothing can pair",
+                    _engine_root_fix(
+                        subject.slice_name, command_flags, challenger_mode=True
+                    ),
+                )
+            )
+            return 1
+
+        print_stage(
+            StageResult(
+                "side",
+                True,
+                f"challenger run {challenger_id}: {entry.challenger}, pairs {release_id}",
+                "",
+            )
+        )
+        challenger_outcome = run_pass(
+            challenger_id,
+            side_slice=subject.slice_name,
+            side_prompt_id=entry.challenger,
+            subject_change=subject.change,
+            overrides=_side_overrides(
+                entry, challenger.CHALLENGER_SIDE, entry.challenger, pairs=release_id
+            ),
+        )
+        return 0 if release_outcome.exit_code == challenger_outcome.exit_code == 0 else 1
     finally:
         # A nested pass holds nothing of its own; the real host keys one descriptor per path.
         if lock_claim.taken:

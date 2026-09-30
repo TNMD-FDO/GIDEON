@@ -64,6 +64,8 @@ def _no_checkpoint() -> None:
 class RunContext:
     """The host seams and runner settings for one evaluation slice.
 
+    ``rendered_dir`` is the rendered directory of the stack whose turns run.
+    ``engine_dir`` is the rendered directory of the project whose engine the judge calls.
     ``turns`` is present for a slice that drives turns through the harness's
     service or managed frontend drivers.
     ``checkpoint`` is called by a runner between cases and before a case's
@@ -75,6 +77,7 @@ class RunContext:
 
     host: Host
     rendered_dir: PathLike
+    engine_dir: PathLike
     served_model_name: str | None
     judge_prompt_id: str | None
     repeats: int

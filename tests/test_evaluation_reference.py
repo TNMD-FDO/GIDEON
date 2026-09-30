@@ -381,7 +381,7 @@ class CommittedReferences(unittest.TestCase):
 def _engine_free_context() -> RunContext:
     """The context of a slice that reaches no engine; the extraction runner ignores it."""
 
-    return RunContext(RealHost(), "/rendered", None, None, 1, lambda _line: None)
+    return RunContext(RealHost(), "/rendered", "/rendered", None, None, 1, lambda _line: None)
 
 
 def _plant_one_key(set_root: Path, passing: set[str]) -> str:

@@ -5,6 +5,8 @@ import contextlib
 import io
 import json
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -18,16 +20,27 @@ from typing import Any, cast
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
+from test_evaluation_record import read_psql_set
+from test_judge import engine_output, valid_content
+
 import gideon
 from gideon.cli import main
-from gideon.evaluation import command, judge, reference, signoffs, stacks, window
+from gideon.evaluation import (
+    challenger,
+    command,
+    judge,
+    reference,
+    signoffs,
+    stacks,
+    window,
+)
 from gideon.evaluation.evalset import SET_ROOT, LoadedSet, load_set, select_cases
 from gideon.evaluation.extraction_slice import run_extraction
 from gideon.evaluation.results import CaseResult, RunContext, SliceResult
 from gideon.evaluation.slices import SLICE_RUNNERS
 from gideon.extraction import KEYED_TYPES, SECTION_TYPES, ExactObject, extract
 from gideon.extraction.scoring import MIN_RECALL
-from gideon.host import backuplock
+from gideon.host import backuplock, nogpu
 from gideon.host.sysio import Host, PathLike
 from tools.exportboundary import absent_from_export
 
@@ -260,7 +273,7 @@ def _runner_case(case_id: str, question: str, expected: list[dict[str, object]])
 
 
 def _run_context() -> RunContext:
-    return RunContext(cast(Host, EvalHost()), "/tmp/evaluation-rendered", None, None, 1, lambda _line: None)
+    return RunContext(cast(Host, EvalHost()), "/tmp/evaluation-rendered", "/tmp/evaluation-rendered", None, None, 1, lambda _line: None)
 
 
 def _passing_selection_runner(
@@ -1072,6 +1085,7 @@ class EngineStackAndLock(unittest.TestCase):
         self.assertEqual(observed["door"][0][1]["max_time"], command.run.TURN_TIMEOUT_SECONDS)
         self.assertEqual(observed["client"][0][1]["timeout"], command.run.TURN_TIMEOUT_SECONDS)
         self.assertEqual(observed["contexts"][0].rendered_dir, Path(stacks.CI_ROOT))
+        self.assertEqual(observed["contexts"][0].engine_dir, production_dir)
         self.assertEqual(host.locks, {})
         self.assertEqual(len(host.lock_records), 1)
         lock_record = backuplock.parse(host.lock_records[0][1])
@@ -1096,7 +1110,7 @@ class EngineStackAndLock(unittest.TestCase):
 
     def test_ci_refusals_are_registry_driven_before_the_lock(self) -> None:
         for slice_name, spec in SLICE_RUNNERS.items():
-            if spec.drives_turns and spec.judge_prompt is None:
+            if spec.drives_turns or spec.judge_prompt is not None:
                 continue
             with self.subTest(slice_name=slice_name):
                 if absent_from_export(f"eval/sets/eval-v1/slices/{slice_name}", ROOT):
@@ -1110,6 +1124,7 @@ class EngineStackAndLock(unittest.TestCase):
                 self.assertEqual(code, 1)
                 self.assertEqual(stderr, "")
                 self.assertIn("load: refuse", stdout)
+                self.assertIn("the slice reaches nothing a stack names", stdout)
                 self.assertIn("Run this slice with --stack production", stdout)
                 self.assertEqual(host.lock_records, [])
 
@@ -1232,6 +1247,9 @@ class NightlyCommand(unittest.TestCase):
         self.assertIn("inside the night", stdout)
         self.assertIn("engine lock taken", stdout)
         self.assertNotIn("waiting for the engine lock", stdout)
+        production_dir = _run_kwargs(host)["rendered_dir"]
+        self.assertEqual(observed["contexts"][0].rendered_dir, Path(production_dir))
+        self.assertEqual(observed["contexts"][0].engine_dir, production_dir)
         self.assertEqual(len(host.lock_records), 1)
         lock_record = backuplock.parse(host.lock_records[0][1])
         assert lock_record is not None
@@ -1489,6 +1507,7 @@ class RunnerSelection(unittest.TestCase):
                 context = RunContext(
                     cast(Host, EvalHost()),
                     "/tmp/fictitious-rendered",
+                    "/tmp/fictitious-rendered",
                     "fictitious-model",
                     "synthesis@1",
                     spec.repeats,
@@ -1595,6 +1614,257 @@ class Imports(unittest.TestCase):
                         top in standard_library or top in {"yaml", "gideon"},
                         f"{path}: non-standard import {name}",
                     )
+
+
+class ChallengerHost(EvalHost):
+    """A build-box host that serves the committed file and canned judge replies."""
+
+    def __init__(self, *, document: str | None = None, build_box: bool = True, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.document = (ROOT / challenger.CHALLENGER_PATH).read_text() if document is None else document
+        self.files = {
+            str(ROOT / challenger.CHALLENGER_PATH): self.document,
+            str(ROOT / "config/site.example.yaml"): (ROOT / "config/site.example.yaml").read_text(),
+            str(ROOT / "courts.yaml"): (ROOT / "courts.yaml").read_text(),
+        }
+        self.build_box = build_box
+        self.reads: list[str] = []
+        self.exists_calls: list[str] = []
+        self.releases = 0
+        self.acquisitions = 0
+        self.judge_requests: list[dict[str, Any]] = []
+
+    def read_text(self, path: PathLike, *, encoding: str = "utf-8") -> str:
+        name = os.fspath(path)
+        self.reads.append(name)
+        if name not in self.files:
+            raise FileNotFoundError(name)
+        return self.files[name]
+
+    def exists(self, path: PathLike) -> bool:
+        name = os.fspath(path)
+        self.exists_calls.append(name)
+        if name == str(nogpu.BUILD_BOX_PATH):
+            return self.build_box
+        if name == str(nogpu.NO_GPU_PATH):
+            return False
+        if name == str(ROOT / ".git"):
+            return not self.no_git
+        if name == str(Path(stacks.CI_ROOT) / "compose.yaml"):
+            return self.ci_stack_present
+        return False
+
+    def run(self, argv: tuple[str, ...] | list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        payload = kwargs.get("input")
+        if isinstance(payload, str) and payload.startswith("{"):
+            request = json.loads(payload)
+            if "response_format" in request:
+                self.calls.append((tuple(argv), payload))
+                self.judge_requests.append(request)
+                return subprocess.CompletedProcess(list(argv), 0, engine_output(valid_content()), "")
+        return super().run(argv, **kwargs)
+
+    def release_lock(self, path: PathLike) -> None:
+        self.releases += 1
+        super().release_lock(path)
+
+    def take_lock(self, path: PathLike, record: str) -> str | None:
+        holder = super().take_lock(path, record)
+        if holder is None:
+            self.acquisitions += 1
+        return holder
+
+
+def _challenger_invoke(
+    host: ChallengerHost,
+    *,
+    run_results: tuple[bool, ...] = (True, True),
+    partial_release: bool = False,
+    extra: tuple[str, ...] = (),
+) -> tuple[int, str, str, list[RunContext]]:
+    contexts: list[RunContext] = []
+    ids = iter((RUN_ID, "22222222-3333-4444-8555-666666666666"))
+
+    def run_slice(_spec: object, loaded: LoadedSet, slice_name: str, context: RunContext) -> SliceResult:
+        contexts.append(context)
+        prompt_id = context.judge_prompt_id
+        assert prompt_id is not None and context.served_model_name is not None
+        slots = {slot: f"visibly fictitious {slot}" for slot in judge.PROMPT_REGISTRY[prompt_id].slots}
+        slots["candidate"] = "visibly-fictitious-case-text-sentinel"
+        judge.grade(
+            cast(Host, host), context.engine_dir,
+            served_model_name=context.served_model_name,
+            prompt=judge.PROMPT_REGISTRY[prompt_id], slots=slots,
+        )
+        case_id = next(case_id for case_id in loaded.slices[slice_name] if case_id in loaded.active_ids)
+        verdict = run_results[len(contexts) - 1]
+        return SliceResult(verdict, "fixture report\n", (CaseResult(case_id, 1, "pass" if verdict else "fail", {}),))
+
+    def repeats(*args: Any, **kwargs: Any) -> command._RunRepeats:
+        result = run_slice(args[0], args[1], args[2], args[3])
+        return command._RunRepeats(result, 1, 0 if partial_release else 1, NOW if partial_release else None)
+
+    kwargs = _run_kwargs(host)
+    kwargs["run_id_factory"] = lambda: next(ids)
+    with (
+        patch.object(command.engine, "resolve_engine_target", return_value=command.engine.EngineTarget("fixture-profile", "fixture-model", 1000)),
+        patch.object(command.window, "window_judgement", return_value=window.WindowJudgement(True, "fixture window", NOW, NOW + timedelta(hours=1))),
+        patch.object(command.stacks.secrets, "select_directory"),
+        patch.object(command, "_run_slice", side_effect=run_slice) if not partial_release else patch.object(command, "_run_repeats", side_effect=repeats),
+    ):
+        code, stdout, stderr = _invoke(["eval", "run", "--challenger", "--stack", "ci", *extra], **kwargs)
+    return code, stdout, stderr, contexts
+
+
+class ChallengerPair(unittest.TestCase):
+    def test_retry_commands_parse_in_their_mode_and_ordinary_fix_is_unchanged(self) -> None:
+        from gideon.cli import build_parser
+
+        transcripts: list[str] = []
+        for argv in (
+            ["eval", "run", "--challenger", "--stack", "ci", "--slice", "judge-triples"],
+            ["eval", "run", "--challenger", "--stack", "ci", "--kind", "smoke"],
+        ):
+            host = ChallengerHost()
+            _code, stdout, stderr = _invoke(argv, **_run_kwargs(host))
+            transcripts.append(stdout + stderr)
+        host = ChallengerHost(write_rc=1)
+        _code, stdout, stderr, _contexts = _challenger_invoke(host)
+        transcripts.append(stdout + stderr)
+        commands = [
+            match.group(1)
+            for transcript in transcripts
+            for match in re.finditer(r"(?:Run (?:sudo python3 -m )?gideon )(eval run [^,\n]+), then retry", transcript)
+        ]
+        self.assertGreaterEqual(len(commands), 3)
+        for text in commands:
+            with self.subTest(command=text):
+                args = build_parser().parse_args(shlex.split(text))
+                self.assertIsNone(command._challenger_flag_problem(args))
+        code, stdout, stderr = _invoke(["eval", "run"], **_run_kwargs(EvalHost()))
+        self.assertEqual((code, stdout), (1, ""))
+        self.assertEqual(stderr, "gideon eval run: no slice was selected Fix: Run gideon eval run --slice extraction.\n")
+
+    def test_flag_refusals_are_early_and_retry_is_parseable(self) -> None:
+        from gideon.cli import build_parser
+
+        flags = (("--slice", "judge-triples"), ("--set", "/tmp/fictitious-set"),
+                 ("--ranked", "/tmp/fictitious-rank"), ("--decision",),
+                 ("--against", RUN_ID), ("--kind", "smoke"))
+        for extra in flags:
+            with self.subTest(extra=extra):
+                host = ChallengerHost()
+                code, stdout, stderr = _invoke(
+                    ["eval", "run", "--challenger", "--stack", "ci", *extra], **_run_kwargs(host)
+                )
+                self.assertEqual((code, stdout), (1, ""))
+                self.assertIn("Fix:", stderr)
+                self.assertFalse(host.calls)
+                self.assertFalse(host.exists_calls)
+                command_text = stderr.split("Run gideon ", 1)[1].split(", then retry", 1)[0]
+                parsed = build_parser().parse_args(command_text.split())
+                self.assertIsNone(command._challenger_flag_problem(parsed))
+        for stack_flags in ((), ("--stack", "production")):
+            host = ChallengerHost()
+            args = ["eval", "run", "--challenger", *stack_flags]
+            code, stdout, stderr = _invoke(args, **_run_kwargs(host))
+            self.assertEqual((code, stdout), (1, ""))
+            self.assertIn("--stack ci", stderr)
+            self.assertFalse(host.exists_calls)
+        host = ChallengerHost(build_box=False)
+        code, stdout, stderr = _invoke(
+            ["eval", "run", "--challenger", "--stack", "ci", "--force"], **_run_kwargs(host)
+        )
+        self.assertEqual((code, stderr), (1, ""))
+        self.assertIn("build box", stdout)
+        self.assertEqual(host.exists_calls, [str(nogpu.BUILD_BOX_PATH)])
+
+    def test_loader_none_and_build_box_stages_stop_before_engine(self) -> None:
+        for document, expected_code, expected in (
+            ("version: 1\nchallenger: null\n", 0, "skipped — none set"),
+            ("version: 1\nchallenger: [bad]\n", 1, "committed challenger refused"),
+        ):
+            with self.subTest(expected=expected):
+                host = ChallengerHost(document=document)
+                code, stdout, stderr = _challenger_invoke(host)[:3]
+                self.assertEqual(code, expected_code)
+                self.assertIn(expected, stdout)
+                self.assertFalse(host.calls)
+                self.assertFalse(host.lock_records)
+                self.assertEqual(host.reads, [str(ROOT / challenger.CHALLENGER_PATH)])
+                if expected_code:
+                    self.assertIn("Fix:", stderr)
+                else:
+                    self.assertIn("nothing was evaluated and nothing recorded", stdout)
+        host = ChallengerHost(build_box=False)
+        code, stdout, _stderr = _challenger_invoke(host)[:3]
+        self.assertEqual(code, 1)
+        self.assertIn("challenger: refuse", stdout)
+        self.assertFalse(host.reads)
+
+    def test_two_passes_record_pair_and_grade_each_prompt(self) -> None:
+        host = ChallengerHost()
+        code, stdout, stderr, contexts = _challenger_invoke(host)
+        self.assertEqual((code, stderr), (0, ""), stdout)
+        self.assertNotIn("visibly-fictitious-case-text-sentinel", stdout + stderr)
+        loaded = challenger.load_challenger(ROOT / challenger.CHALLENGER_PATH)
+        assert loaded.config is not None and loaded.config.challenger is not None
+        entry = loaded.config.challenger
+        subject = next(item for item in challenger.SUBJECTS if item.name == entry.subject)
+        self.assertEqual(entry.release, SLICE_RUNNERS[subject.slice_name].judge_prompt)
+        self.assertEqual([context.judge_prompt_id for context in contexts], [entry.release, entry.challenger])
+        self.assertEqual(len(host.judge_requests), 2)
+        self.assertEqual(
+            [request["messages"][0]["content"] for request in host.judge_requests],
+            [judge.PROMPT_REGISTRY[entry.release].system, judge.PROMPT_REGISTRY[entry.challenger].system],
+        )
+        rows = [payload for argv, payload in host.calls if argv[0] == "docker" and isinstance(payload, str) and payload.startswith("\\set")]
+        self.assertEqual(len(rows), 2)
+        ids = [read_psql_set(next(line for line in row.splitlines() if line.startswith("\\set run_id ")), "run_id") for row in rows]
+        self.assertNotEqual(*ids)
+        for index, row in enumerate(rows):
+            self.assertIn("\\set run_stack 'ci'", row)
+            self.assertIn("\\set kind 'manual'", row)
+            value = json.loads(read_psql_set(next(line for line in row.splitlines() if line.startswith("\\set overrides ")), "overrides"))
+            expected = {
+                challenger.NAME_FIELD: entry.name, challenger.SUBJECT_FIELD: entry.subject,
+                challenger.SIDE_FIELD: (challenger.RELEASE_SIDE, challenger.CHALLENGER_SIDE)[index],
+                challenger.VALUE_FIELD: (entry.release, entry.challenger)[index],
+            }
+            if index:
+                expected[challenger.PAIRS_FIELD] = ids[0]
+            self.assertEqual(value, {challenger.OVERRIDE_KEY: expected})
+        lines = stdout.splitlines()
+        release_side = next(i for i, line in enumerate(lines) if line.startswith("side: ok") and "release run" in line)
+        release_record = next(i for i, line in enumerate(lines) if line.startswith("record: ok"))
+        candidate_side = next(i for i, line in enumerate(lines) if line.startswith("side: ok") and "challenger run" in line)
+        candidate_record = next(i for i, line in enumerate(lines) if line.startswith("record: ok") and ids[1] in line)
+        self.assertLess(release_side, release_record)
+        self.assertLess(release_record, candidate_side)
+        self.assertLess(candidate_side, candidate_record)
+        self.assertIn(ids[0], lines[release_side])
+        self.assertIn(ids[1], lines[candidate_side])
+        self.assertEqual(sum("side: ok" in line for line in lines), 2)
+        self.assertEqual(sum("record: ok" in line for line in lines), 2)
+        self.assertEqual((host.acquisitions, host.releases), (1, 1))
+        self.assertEqual(len({path for path, _record in host.lock_records}), 1)
+
+    def test_stop_rule_and_exit_codes(self) -> None:
+        for outcomes, expected_code in (((True, True), 0), ((False, True), 1), ((True, False), 1), ((False, False), 1)):
+            with self.subTest(outcomes=outcomes):
+                host = ChallengerHost()
+                code, stdout, _stderr, contexts = _challenger_invoke(host, run_results=outcomes)
+                self.assertEqual(code, expected_code)
+                self.assertEqual(len(contexts), 2)
+                self.assertEqual(stdout.count("side: ok"), 2)
+        for host, partial in ((ChallengerHost(write_rc=1), False), (ChallengerHost(), True)):
+            with self.subTest(partial=partial):
+                code, stdout, _stderr, contexts = _challenger_invoke(host, partial_release=partial)
+                self.assertEqual(code, 1)
+                self.assertEqual(len(contexts), 1)
+                self.assertIn("side: refuse", stdout)
+                self.assertIn("--challenger --stack ci", stdout)
+                self.assertEqual(host.releases, 1)
 
 
 if __name__ == "__main__":

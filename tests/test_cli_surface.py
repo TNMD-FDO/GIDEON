@@ -107,6 +107,10 @@ class Help(unittest.TestCase):
         )
         self.assertIn("--force start outside the window, recorded on the run row", run_help)
         self.assertIn("--against ID recorded run a --decision run pairs against", run_help)
+        self.assertIn(
+            "--challenger run the committed configuration experiment beside the release's configuration on the CI sibling",
+            run_help,
+        )
 
         reference = io.StringIO()
         with contextlib.redirect_stdout(reference), self.assertRaises(SystemExit) as ctx:
