@@ -279,6 +279,8 @@ needs it. Before the window, send the release's note from
 `docs/release-notes/<tag>.md` to the users and inform the supervisor, both at
 least one working day ahead. The release note's `## Breaking` section is what
 the `version` stage below prints.
+A model upgrade's proof window precedes its tag: announce it under
+`docs/runbooks/model-upgrade.md` §4, then send the release's note with the tag.
 
 | Stage | What happens | Fix on a refusal |
 |---|---|---|

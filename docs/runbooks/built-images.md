@@ -22,6 +22,9 @@ does not rebuild.
   lock's `inputs_digest` stops matching and the hosted checks go red.
 - A new built pin, written with `digest: unbuilt` and `inputs_digest: unbuilt`.
 
+A pin-watch pull request on a model pin is not an image build. Decide it with
+`docs/runbooks/model-upgrade.md` before merging it.
+
 ## 2. The order: build → record → commit → merge (never the reverse)
 
 On the box, in a checkout of the branch that carries the change (for a proposal
