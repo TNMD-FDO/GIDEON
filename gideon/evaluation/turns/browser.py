@@ -39,9 +39,11 @@ class LiveState:
 class LiveEntry:
     """The compact record of one painted state: its shape, and what the judge said of it.
 
-    The texts themselves are kept only for the states that matter (the first
-    trip, the replacement, the end), so a turn of tens of thousands of frames
-    costs linear memory.
+    The texts themselves are kept only for the states that matter (each
+    trip's first state and the state that cleared it, the refusal, the
+    replacement, the end), so a turn of tens of thousands of frames costs
+    linear memory. ``replaced`` is a refusal painted after any state tripped;
+    the verdict, not the flag, says whether a trip was replaced.
     """
 
     instant: float
@@ -59,6 +61,12 @@ class LiveEntry:
     # The block carried text beyond whitespace in this state: the withholding
     # check's flag, whether the state was painted or read at the end.
     block_text: bool = False
+    # The answer before this state is the opening of this one, set-aside marks
+    # aside; false wherever the comparison cannot tell.
+    answer_continued: bool = False
+    # This quiet state's whole answer judged clean while a trip was open, so
+    # every open trip ends here.
+    cleared: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +81,7 @@ class BrowserTurn:
     regions: Mapping[str, str]
     elapsed: float
     problem: Problem | None = None
+    final_trip: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -352,9 +361,13 @@ class _Watch:
         self,
         judge: Callable[[str, str], str | None],
         is_replacement: Callable[[str], bool],
+        continues: Callable[[str, str], bool],
+        whole_judge: Callable[[str], str | None],
     ) -> None:
         self._judge = judge
         self._is_replacement = is_replacement
+        self._continues = continues
+        self._whole_judge = whole_judge
         self.entries: list[LiveEntry] = []
         self.texts: dict[int, tuple[str, str]] = {}
         self.block = ""
@@ -366,11 +379,28 @@ class _Watch:
         self._refused_once = False
         self._replaced_once = False
         self._reasoning_once = False
+        self._trip_open = False
+        self._previous_trip: str | None = None
+        self.final_trip: str | None = None
 
     def take(self, state: LiveState, *, painted: bool = True) -> None:
+        answer_continued = self._continues(self.answer, state.answer)
         tripped = self._judge(state.block, state.answer)
         refused = self._is_replacement(state.answer)
         replaced = self._tripped_once and refused
+        cleared = False
+        if tripped is not None:
+            self._trip_open = True
+        elif (
+            self._trip_open
+            and (
+                self._previous_trip is not None
+                or not state.answer.startswith(self.answer)
+            )
+            and self._whole_judge(state.answer) is None
+        ):
+            cleared = True
+            self._trip_open = False
         index = len(self.entries)
         self.entries.append(
             LiveEntry(
@@ -386,11 +416,16 @@ class _Watch:
                 replaced=replaced,
                 painted=painted,
                 block_text=bool(state.block.strip()),
+                answer_continued=answer_continued,
+                cleared=cleared,
             )
         )
+        if tripped is not None and tripped != self._previous_trip:
+            self.texts[index] = (state.block, state.answer)
+        if cleared:
+            self.texts[index] = (state.block, state.answer)
         if tripped is not None and not self._tripped_once:
             self._tripped_once = True
-            self.texts[index] = (state.block, state.answer)
         if refused and not self._refused_once:
             self._refused_once = True
             self.texts[index] = (state.block, state.answer)
@@ -403,6 +438,7 @@ class _Watch:
             self._reasoning_once = True
             self.texts[index] = (state.block, state.answer)
         self.block, self.answer = state.block, state.answer
+        self._previous_trip = tripped
         self._summary, self._expanded, self._instant = state.summary, state.expanded, state.instant
 
     def take_frames(self, frames: Sequence[Frame]) -> None:
@@ -437,6 +473,7 @@ class _Watch:
     def finish(self) -> None:
         if self.entries:
             self.texts[len(self.entries) - 1] = (self.block, self.answer)
+            self.final_trip = self._whole_judge(self.answer)
 
 
 def turn(
@@ -445,6 +482,8 @@ def turn(
     *,
     judge: Callable[[str, str], str | None],
     is_replacement: Callable[[str], bool],
+    continues: Callable[[str, str], bool],
+    whole_judge: Callable[[str], str | None],
     monotonic: Callable[[], float],
     poll: float,
     page_timeout: float,
@@ -475,7 +514,7 @@ def turn(
 
     started = monotonic()
     screenshot = out / f"{row_name}.png"
-    watch = _Watch(judge, is_replacement)
+    watch = _Watch(judge, is_replacement, continues, whole_judge)
     block_opened_at: float | None = None
     regions: Mapping[str, str] = {"block": "", "answer": ""}
     chat_id: str | None = None
@@ -561,4 +600,5 @@ def turn(
         regions=regions,
         elapsed=monotonic() - started,
         problem=problem,
+        final_trip=watch.final_trip,
     )

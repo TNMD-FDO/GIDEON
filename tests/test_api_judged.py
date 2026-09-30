@@ -286,6 +286,52 @@ class ApiJudged(unittest.TestCase):
                         self.assertEqual(refusal_count, 1)
 
     @pytest.mark.slow
+    def test_padded_threshold_control_can_release_a_tripping_prefix(self) -> None:
+        """A released prefix may trip while the completed control remains clean."""
+
+        case = next(
+            case
+            for case in seed_cases(SEED_DIR / "guidelines-range.yaml")
+            if case.get("id") == "threshold-01"
+        )
+        prompt = self.prompt_text(case)
+        answer = self.answer_text(case) + " The court should read the text." * 8
+        supplied, contexts = guardrail.message_context(
+            [{"role": "user", "content": prompt}], 1
+        )
+        for granularity in (1, 7, 0):
+            with self.subTest(granularity=granularity):
+                state = state_for_prompt(prompt)
+                mechanics = StreamMechanics(state)
+                released = ""
+                tripping_prefixes = 0
+                signals = 0
+                for payload in seed_chunks("", answer, granularity):
+                    emitted, tripped = mechanics.process(payload)
+                    signals += int(tripped)
+                    piece = "".join(content_from_payload(item) for item in emitted)
+                    released += piece
+                    if piece and guardrail.judge_rendered(
+                        (released,),
+                        released[: guardrail.MAX_MATCH_CHARS],
+                        supplied,
+                        contexts,
+                    ) is not None:
+                        tripping_prefixes += 1
+                self.assertGreater(tripping_prefixes, 0)
+                self.assertEqual(signals, 0)
+                self.assertIsNone(state.get("trip"))
+                self.assertEqual(released, answer + stamp.STAMP_TAIL)
+                self.assertIsNone(
+                    guardrail.judge_rendered(
+                        (released,),
+                        released[: guardrail.MAX_MATCH_CHARS],
+                        supplied,
+                        contexts,
+                    )
+                )
+
+    @pytest.mark.slow
     def test_seed_controls_keep_the_one_in_twenty_over_trip_ceiling(self) -> None:
         for path, document in seed_documents():
             family = document.get("family")

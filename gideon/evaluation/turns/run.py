@@ -46,7 +46,8 @@ SMOKE_TURNS: Final[int] = 12
 BROWSER_ENGINE_CALLS_PER_TURN: Final[int] = 3
 # A leak in the final released stream text and a flash from a seat are failures;
 # this is the one policy both fields share, enforced by the Filter stream hook
-# (v0.1.18).
+# (v0.1.18). A flash is a painted trip the final text does not confirm, replaced
+# by the refusal or cleared by a state that does not continue it.
 STREAM_LEAK_FAILS: Final[bool] = True
 # The browser mode drains its frame observer this often; the observer captures
 # every painted frame regardless, so this is the drain interval, not the
@@ -573,6 +574,8 @@ class BrowserTurnDriver:
             prompt,
             judge=classify.live_judge(self._guardrail, case.prompt),
             is_replacement=classify.refusal_test(self._guardrail),
+            continues=classify.continuity_test(),
+            whole_judge=classify.whole_judge(self._guardrail, case.prompt),
             monotonic=monotonic,
             poll=self._setup.poll,
             page_timeout=self._setup.page_timeout,
@@ -730,6 +733,11 @@ def _browser_data(
         "refused_at": verdict.refused_at,
         "ended_at": verdict.ended_at,
         "on_screen_at_end": verdict.on_screen_at_end,
+        "final_trip": turn.final_trip,
+        "withdrawn": [
+            [trip.pattern_id, trip.at, trip.answer_length]
+            for trip in verdict.withdrawn
+        ],
         "reasoning_painted_at": verdict.reasoning_painted_at,
         "states": [classify.entry_record(entry) for entry in turn.entries],
         "texts": {
@@ -1613,7 +1621,7 @@ def frontend_turn(
         unidentified = outcome.unidentified
         if isinstance(outcome.extras, browser.BrowserTurn):
             browser_turn = outcome.extras
-            live_verdict = classify.live_verdict(browser_turn.entries)
+            live_verdict = classify.live_verdict(browser_turn.entries, browser_turn.final_trip)
         live_detail = (
             f"; {classify.live_field(live_verdict)}"
             if live_verdict is not None

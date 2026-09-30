@@ -136,6 +136,15 @@ class StreamTrip:
 
 
 @dataclass(frozen=True, slots=True)
+class LiveTrip:
+    """One withdrawn painted trip, recorded without its answer text."""
+
+    pattern_id: str | None
+    at: float
+    answer_length: int
+
+
+@dataclass(frozen=True, slots=True)
 class StreamVerdict:
     """The final released text's verdict and its unconfirmed prefix trips."""
 
@@ -171,6 +180,10 @@ class OfflineJudgement:
 class LiveVerdict:
     """The guardrail's verdict over the states painted for one browser turn.
 
+    The trip fields name the trip the final painted text confirms, or else the
+    first flash; ``withdrawn`` holds the painted trips a clean final text
+    withdrew, reported and never gated.
+
     Built from the compact entries the turn judged as they arrived; the
     instants are seconds from the first painted state of the message (the
     frames carry the page's own millisecond clock, whose zero is the page's
@@ -191,6 +204,8 @@ class LiveVerdict:
     refused_index: int | None = None
     refused_at: float | None = None
     ended_at: float | None = None
+    pattern_id: str | None = None
+    withdrawn: tuple[LiveTrip, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -275,6 +290,18 @@ def live_judge(guardrail: Any, user_content: str) -> Callable[[str, str], str | 
     return judge
 
 
+def whole_judge(guardrail: Any, user_content: str) -> Callable[[str], str | None]:
+    """Judge a painted answer whole, using only its released prefix after a refusal."""
+
+    def judge(answer: str) -> str | None:
+        prefix = _released_prefix(guardrail, answer)
+        return _trip_pattern(
+            _judge_answer(guardrail, answer if prefix is None else prefix, user_content)
+        )
+
+    return judge
+
+
 def _replacement_prefix(guardrail: Any, text: str) -> str | None:
     """Return the text before a refusal suffix, or ``None`` when there is none."""
 
@@ -318,8 +345,35 @@ def refusal_test(guardrail: Any) -> Callable[[str], bool]:
     return is_refusal
 
 
-def live_verdict(entries: Sequence[browser.LiveEntry]) -> LiveVerdict:
-    """The first trip, the replacement or the disappearance after it, and the end state."""
+# Whitespace and the emphasis marks are set aside when a painted answer is
+# compared with the one before it, since the page drops a closed bold's marks;
+# no other mark is, so a backtick, a list marker, or a heading mark that
+# vanishes reads as not carried on: doubt reads as a flash.
+_SET_ASIDE_MARKS: Final[re.Pattern[str]] = re.compile(r"[\s*_]")
+
+
+def continuity_test() -> Callable[[str, str], bool]:
+    """Whether the earlier painted answer continues in the later one."""
+
+    def continues(earlier: str, later: str) -> bool:
+        kept_earlier = _SET_ASIDE_MARKS.sub("", earlier)
+        kept_later = _SET_ASIDE_MARKS.sub("", later)
+        return kept_later.startswith(kept_earlier)
+
+    return continues
+
+
+def live_verdict(
+    entries: Sequence[browser.LiveEntry], final_trip: str | None
+) -> LiveVerdict:
+    """The final painted text's judgement, the first flash, and the withdrawn trips.
+
+    A run of states tripping on one pattern is one provisional trip. A
+    *final_trip* confirms it, on screen at end; otherwise each run ends at the
+    first state after it flagged cleared, or the last state, and is withdrawn
+    where every state from its second to that one carried its predecessor on,
+    else a flash, replaced where that state is the refusal and gone where not.
+    """
 
     if not entries:
         return LiveVerdict(no_states=True)
@@ -347,10 +401,48 @@ def live_verdict(entries: Sequence[browser.LiveEntry]) -> LiveVerdict:
     def seconds(index: int) -> float:
         return (entries[index].instant - zero) / 1000.0
 
-    first_index = next((index for index, trip in enumerate(trips) if trip is not None), None)
     refused_at = seconds(refused_index) if refused_index is not None else None
     ended_at = seconds(len(entries) - 1)
-    if first_index is None:
+    if final_trip is not None:
+        first_index = next(
+            (index for index, trip in enumerate(trips) if trip == final_trip),
+            len(entries) - 1,
+        )
+        replaced_index = next(
+            (index for index in range(first_index + 1, len(entries)) if entries[index].refused),
+            None,
+        )
+        return LiveVerdict(
+            no_states=False,
+            no_frames=no_frames,
+            trips=trips,
+            first_trip_index=first_index,
+            replaced_index=replaced_index,
+            first_trip_at=seconds(first_index),
+            replaced_at=seconds(replaced_index) if replaced_index is not None else None,
+            on_screen_at_end=True,
+            reasoning_painted_at=reasoning_painted_at,
+            refused_index=refused_index,
+            refused_at=refused_at,
+            ended_at=ended_at,
+            pattern_id=final_trip,
+        )
+
+    withdrawn: list[LiveTrip] = []
+    first_flash: tuple[int, int] | None = None
+    for index, trip in enumerate(trips):
+        if trip is None or (index > 0 and trip == trips[index - 1]):
+            continue
+        clear_index = next(
+            (later for later in range(index + 1, len(entries)) if entries[later].cleared),
+            len(entries) - 1,
+        )
+        if all(entries[later].answer_continued for later in range(index + 1, clear_index + 1)):
+            withdrawn.append(LiveTrip(trip, seconds(index), entries[index].answer_length))
+        elif first_flash is None:
+            first_flash = index, clear_index
+
+    if first_flash is None:
         return LiveVerdict(
             no_states=False,
             no_frames=no_frames,
@@ -359,22 +451,11 @@ def live_verdict(entries: Sequence[browser.LiveEntry]) -> LiveVerdict:
             refused_index=refused_index,
             refused_at=refused_at,
             ended_at=ended_at,
+            withdrawn=tuple(withdrawn),
         )
-
-    replaced_index = next(
-        (index for index in range(first_index + 1, len(entries)) if entries[index].replaced),
-        None,
-    )
-    gone_index = None
-    if replaced_index is None:
-        gone_index = next(
-            (
-                index
-                for index in range(first_index + 1, len(entries))
-                if entries[index].tripped is None
-            ),
-            None,
-        )
+    first_index, clear_index = first_flash
+    replaced_index = clear_index if entries[clear_index].refused else None
+    gone_index = clear_index if replaced_index is None else None
     return LiveVerdict(
         no_states=False,
         no_frames=no_frames,
@@ -385,11 +466,12 @@ def live_verdict(entries: Sequence[browser.LiveEntry]) -> LiveVerdict:
         first_trip_at=seconds(first_index),
         replaced_at=seconds(replaced_index) if replaced_index is not None else None,
         gone_at=seconds(gone_index) if gone_index is not None else None,
-        on_screen_at_end=trips[-1] is not None,
         reasoning_painted_at=reasoning_painted_at,
         refused_index=refused_index,
         refused_at=refused_at,
         ended_at=ended_at,
+        pattern_id=trips[first_index],
+        withdrawn=tuple(withdrawn),
     )
 
 
@@ -404,14 +486,19 @@ def live_field(verdict: LiveVerdict) -> str:
     if verdict.reasoning_painted_at is not None:
         return f"live: reasoning painted at {verdict.reasoning_painted_at:.1f}s"
     if verdict.first_trip_index is None:
+        withdrawn = ""
+        if verdict.withdrawn:
+            first = verdict.withdrawn[0]
+            count = f", {len(verdict.withdrawn)} in all" if len(verdict.withdrawn) > 1 else ""
+            withdrawn = f" (withdrawn {first.pattern_id} at {first.at:.1f}s{count})"
         if verdict.refused_at is not None:
             ended_at = verdict.ended_at or 0.0
             return (
-                f"live: clean, refused at {verdict.refused_at:.1f}s, "
+                f"live: clean{withdrawn}, refused at {verdict.refused_at:.1f}s, "
                 f"ended at {ended_at:.1f}s"
             )
-        return "live: clean"
-    pattern = verdict.trips[verdict.first_trip_index]
+        return f"live: clean{withdrawn}"
+    pattern = verdict.pattern_id
     first_at = verdict.first_trip_at or 0.0
     if verdict.replaced_at is not None:
         end = ", on screen at end" if verdict.on_screen_at_end else ""
@@ -424,10 +511,8 @@ def live_field(verdict: LiveVerdict) -> str:
 def live_fails(verdict: LiveVerdict, flash_fails: bool) -> bool:
     """Whether the live result fails the row.
 
-    Nothing painted (no state, or no painted frame) and a date still on screen
-    at the end always fail; a date
-    that showed and was replaced or re-rendered away is the flash the lag
-    window removes, failing only under the flipped constant.
+    No state, no painted frame, reasoning, and a confirmed final trip always
+    fail. A flash fails under the shared policy; withdrawn trips do not.
     """
 
     return (
@@ -455,6 +540,8 @@ def entry_record(entry: browser.LiveEntry) -> dict[str, object]:
         "refused": entry.refused,
         "painted": entry.painted,
         "block_text": entry.block_text,
+        "answer_continued": entry.answer_continued,
+        "cleared": entry.cleared,
     }
 
 
