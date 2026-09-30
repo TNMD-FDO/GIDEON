@@ -365,7 +365,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     proposals = commands.add_parser(
         "proposals",
-        help="read the improvement proposals; read-only report",
+        help="read the improvement proposals; read-only report unless --record writes one count row as root",
+    )
+    proposals.add_argument(
+        "--record",
+        action="store_true",
+        help="write the count as one row; needs root (bare form reads and writes nothing)",
     )
     proposals.set_defaults(handler=_run_proposals, command_path="proposals")
 

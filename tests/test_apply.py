@@ -96,6 +96,9 @@ SYSTEMCTL_ACTIVE_VERIFY = ("systemctl", "is-active", "gideon-backup-verify.timer
 SYSTEMCTL_LINK_NIGHTLY = ("systemctl", "link", f"{RENDERED}/systemd/gideon-eval-nightly.service")
 SYSTEMCTL_ENABLE_NIGHTLY = ("systemctl", "enable", "--now", f"{RENDERED}/systemd/gideon-eval-nightly.timer")
 SYSTEMCTL_ACTIVE_NIGHTLY = ("systemctl", "is-active", "gideon-eval-nightly.timer")
+SYSTEMCTL_LINK_PROPOSALS = ("systemctl", "link", f"{RENDERED}/systemd/gideon-proposals-tally.service")
+SYSTEMCTL_ENABLE_PROPOSALS = ("systemctl", "enable", "--now", f"{RENDERED}/systemd/gideon-proposals-tally.timer")
+SYSTEMCTL_ACTIVE_PROPOSALS = ("systemctl", "is-active", "gideon-proposals-tally.timer")
 CERT = CERT_PATH
 HANDSHAKE = ("openssl", "s_client", "-connect", "127.0.0.1:443", "-servername", "gideon.example.org", "-verify_hostname", "gideon.example.org", "-CAfile", CA_PATH, "-verify_return_error")
 SERVED_FP = ("openssl", "x509", "-noout", "-fingerprint", "-sha256")
@@ -508,6 +511,9 @@ def healthy_commands(
         SYSTEMCTL_LINK_NIGHTLY: done(SYSTEMCTL_LINK_NIGHTLY),
         SYSTEMCTL_ENABLE_NIGHTLY: done(SYSTEMCTL_ENABLE_NIGHTLY),
         SYSTEMCTL_ACTIVE_NIGHTLY: done(SYSTEMCTL_ACTIVE_NIGHTLY, stdout="active\n"),
+        SYSTEMCTL_LINK_PROPOSALS: done(SYSTEMCTL_LINK_PROPOSALS),
+        SYSTEMCTL_ENABLE_PROPOSALS: done(SYSTEMCTL_ENABLE_PROPOSALS),
+        SYSTEMCTL_ACTIVE_PROPOSALS: done(SYSTEMCTL_ACTIVE_PROPOSALS, stdout="active\n"),
         PS: done(PS, stdout=running_rows(include_searxng=include_searxng)),
         **healthy_ingress(),
     }
@@ -697,6 +703,9 @@ class HappyPath(unittest.TestCase):
         )
         self.assertIn("recreate: ok — recreated postgres: first apply", out)
         self.assertIn("engine_api_key", out)
+        self.assertIn(SYSTEMCTL_LINK_PROPOSALS, argv_calls(host))
+        self.assertIn(SYSTEMCTL_ENABLE_PROPOSALS, argv_calls(host))
+        self.assertIn(SYSTEMCTL_ACTIVE_PROPOSALS, argv_calls(host))
         started = ", ".join(service for service in _FIXTURE_SERVICES if service != "postgres")
         self.assertIn(f"start: ok — recreated {started}: first apply", out)
         self.assertIn(RECREATE_CADDY, argv_calls(host))

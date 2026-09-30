@@ -40,22 +40,22 @@ files:
     owners:
       - "grafana"
   "grafana/provisioning/alerting/contact-points.yaml":
-    sha256: "cbe599beb2d3ff0ab81229a6491c1683a7c78008f75e8fdffcf6180bb6825c95"
+    sha256: "7d83a844b5317313f2abd8f9247769f403da12ccd79f58e2d37af7f70a21499d"
     mode: "0644"
     owners:
       - "grafana"
   "grafana/provisioning/alerting/policies.yaml":
-    sha256: "d218ffbc2d57f2ed494d636e4f572b9bf2855e6e440d39ace2cd38df98c060c7"
+    sha256: "5409debf513dcd2ce2ba9ac39f114a50dde8d28e338b2d157d209fbd0064302d"
     mode: "0644"
     owners:
       - "grafana"
   "grafana/provisioning/alerting/time-intervals.yaml":
-    sha256: "31f46692da4a02f00ef5dc55b6c24ad820f0e0de9c5b24bb4099308f1ac68a4a"
+    sha256: "47bfb420afdc41bd36ab3795b52df5d1b540b26bc1475e61c7e10ca8c51b9080"
     mode: "0644"
     owners:
       - "grafana"
   "grafana/provisioning/alerting/rules.yaml":
-    sha256: "d5bd637a803c5abc9cf71a2bfc76be4733ff82a38c85978ab815a768c484eeee"
+    sha256: "e8c20cd7fda91841bb2c8d6a5a1aed67b6d5149217dd6b609d9b0832a4ac973f"
     mode: "0644"
     owners:
       - "grafana"
@@ -75,7 +75,7 @@ files:
     owners:
       - "grafana"
   "grafana/dashboards/evaluation.json":
-    sha256: "4bd0ee6995f95e605a929101efabe83000b1334d92103f64c6c393e8e9e1c396"
+    sha256: "aebedbfe48b5ff89d90682f8243118162e96b74a586f1eed349462bcc01e1f81"
     mode: "0644"
     owners:
       - "grafana"
@@ -136,6 +136,14 @@ files:
     owners: []
   "systemd/gideon-eval-nightly.timer":
     sha256: "0654f862b7c0303b45eca44d007bef5efc9bde7ccfea1bfd786335b58e4a0006"
+    mode: "0644"
+    owners: []
+  "systemd/gideon-proposals-tally.service":
+    sha256: "e19f1781e1adbec3e96e71092c9853ee02bb1fe3d95ca1439e3b0ef452bb9466"
+    mode: "0644"
+    owners: []
+  "systemd/gideon-proposals-tally.timer":
+    sha256: "4ce40b17f8e07247d185012d6754c07fd7aa588fdf814ec13df6b3bdbe5afbf6"
     mode: "0644"
     owners: []
 services:

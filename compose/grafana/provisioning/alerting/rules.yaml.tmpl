@@ -191,6 +191,45 @@ groups:
         annotations: {summary: The newest backup drill failed, runbook: docs/runbooks/observability.md §4}
         labels: {class: page}
         isPaused: false
+      - uid: gideon-proposals-waiting
+        title: Proposals waiting
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 60, to: 0}
+            datasourceUid: gideon-rows
+            model:
+              datasource: {type: postgres, uid: gideon-rows}
+              format: table
+              rawQuery: true
+              rawSql: |
+                SELECT (detail->>'fired')::double precision AS value
+                FROM audit_log
+                WHERE kind = 'proposals_tally'
+                ORDER BY at DESC LIMIT 1
+              refId: A
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model: {datasource: {type: __expr__, uid: __expr__}, expression: A, reducer: last, refId: B, type: reduce}
+          - refId: C
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - {evaluator: {params: [0], type: gt}, operator: {type: and}, query: {params: [B, 5m, now]}, reducer: {params: [], type: avg}, type: query}
+              datasource: {type: __expr__, uid: __expr__}
+              expression: B
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: threshold
+        for: 0s
+        noDataState: OK
+        execErrState: OK
+        annotations: {summary: Proposals are waiting for review, runbook: docs/runbooks/observability.md §10}
+        labels: {class: dashboard, nudge: 'true'}
+        isPaused: false
 $nightly_rules
   - orgId: 1
     name: metrics

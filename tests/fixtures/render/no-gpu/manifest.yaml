@@ -40,22 +40,22 @@ files:
     owners:
       - "grafana"
   "grafana/provisioning/alerting/contact-points.yaml":
-    sha256: "0b605d7482e5f636aacccb9ee2b710d76ee4a281e355d2897eb15ba7db11c13d"
+    sha256: "1901ccb51c48669b3dec5296c179b5e1005373be4ee3013c7839841303afae7d"
     mode: "0644"
     owners:
       - "grafana"
   "grafana/provisioning/alerting/policies.yaml":
-    sha256: "d218ffbc2d57f2ed494d636e4f572b9bf2855e6e440d39ace2cd38df98c060c7"
+    sha256: "5409debf513dcd2ce2ba9ac39f114a50dde8d28e338b2d157d209fbd0064302d"
     mode: "0644"
     owners:
       - "grafana"
   "grafana/provisioning/alerting/time-intervals.yaml":
-    sha256: "354f8d98386d5f15e4cf86d8cb9f3db2eaad32bb819b779b8f1fcbd8993eea65"
+    sha256: "4af35c91b8cb54ff48b7f565881a2d54035eafd2972c3f1cff322d7d35a45a58"
     mode: "0644"
     owners:
       - "grafana"
   "grafana/provisioning/alerting/rules.yaml":
-    sha256: "50b75ce5f91bd8df58f363856acd2301c2ba0dd16315eed8db5aa12e1d87ca36"
+    sha256: "165c2f4b0ed656a436fbd1e1e61751a55807347ece4466b2284224e2f38f9ee2"
     mode: "0644"
     owners:
       - "grafana"
@@ -133,6 +133,14 @@ files:
     owners: []
   "systemd/gideon-backup-verify.timer":
     sha256: "ccaca960e7b26607e588a70df717b9c10aeef55536f52919fb86b222fe0f406c"
+    mode: "0644"
+    owners: []
+  "systemd/gideon-proposals-tally.service":
+    sha256: "e19f1781e1adbec3e96e71092c9853ee02bb1fe3d95ca1439e3b0ef452bb9466"
+    mode: "0644"
+    owners: []
+  "systemd/gideon-proposals-tally.timer":
+    sha256: "146f6d4265909219848cf81833e9a839fa54e1fb111014bb838a7883aaf76bc4"
     mode: "0644"
     owners: []
 services:

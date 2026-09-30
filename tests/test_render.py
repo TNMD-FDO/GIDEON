@@ -299,6 +299,8 @@ class Registry(unittest.TestCase):
                 "systemd/gideon-backup-verify.timer",
                 "systemd/gideon-eval-nightly.service",
                 "systemd/gideon-eval-nightly.timer",
+                "systemd/gideon-proposals-tally.service",
+                "systemd/gideon-proposals-tally.timer",
             ],
         )
         self.assertEqual(ARTIFACTS[0].owners, ())
@@ -978,6 +980,31 @@ class Core(unittest.TestCase):
                 )
                 self.assertIn("Persistent=false", timer)
 
+    def test_proposals_tally_units_run_daily_on_every_host_kind(self) -> None:
+        self.assertEqual(systemd.PROPOSALS_TALLY_CALENDAR, "*-*-* 07:00:00")
+        for name, site_path, no_gpu, build_box in FIXTURE_CASES:
+            with self.subTest(host=name):
+                rendered_inputs = inputs(site_path, no_gpu=no_gpu, build_box=build_box)
+                rendered = render_all(rendered_inputs)
+                service = rendered.by_path["systemd/gideon-proposals-tally.service"].content
+                timer = rendered.by_path["systemd/gideon-proposals-tally.timer"].content
+                self.assertIn("Requires=docker.service", service)
+                self.assertIn("Type=oneshot", service)
+                self.assertIn(f"WorkingDirectory={rendered_inputs.checkout}", service)
+                self.assertEqual(
+                    [line for line in service.splitlines() if line.startswith("ExecStart=")],
+                    ["ExecStart=/usr/bin/python3 -m gideon proposals --record"],
+                )
+                self.assertIn("TimeoutStartSec=900", service)
+                self.assertIn("StandardOutput=journal", service)
+                self.assertIn("StandardError=journal", service)
+                self.assertIn(
+                    f"OnCalendar={systemd.PROPOSALS_TALLY_CALENDAR} "
+                    f"{rendered_inputs.site.office.timezone}",
+                    timer,
+                )
+                self.assertIn("Persistent=true", timer)
+
     def test_manifest_records_the_host_modes(self) -> None:
         for no_gpu, build_box in ((False, False), (False, True), (True, False)):
             with self.subTest(no_gpu=no_gpu, build_box=build_box):
@@ -1040,6 +1067,8 @@ class Core(unittest.TestCase):
                 "systemd/gideon-backup-verify.timer",
                 "systemd/gideon-eval-nightly.service",
                 "systemd/gideon-eval-nightly.timer",
+                "systemd/gideon-proposals-tally.service",
+                "systemd/gideon-proposals-tally.timer",
             },
         )
         self.assertEqual(first.by_path["caddy/Caddyfile"].owners, ("caddy",))

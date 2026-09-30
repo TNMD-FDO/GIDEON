@@ -224,6 +224,36 @@
       ],
       "title": "Failed cases of newest nightly runs",
       "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "gideon-rows"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 42
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "gideon-rows"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT tally.at AS instant,\n       (tally.detail->>'fired')::integer AS fired,\n       (tally.detail->>'refused')::integer AS refused,\n       CASE WHEN (tally.detail->>'refused')::integer > 0\n            THEN 'incomplete' ELSE 'complete' END AS completeness,\n       trigger_row.entry->>'id' AS id,\n       trigger_row.entry->>'state' AS state,\n       trigger_row.entry->>'detail' AS detail\nFROM (\n    SELECT at, detail\n    FROM audit_log\n    WHERE kind = 'proposals_tally'\n    ORDER BY at DESC\n    LIMIT 1\n) AS tally\nLEFT JOIN LATERAL jsonb_array_elements(tally.detail->'triggers') AS trigger_row(entry) ON true\nORDER BY id NULLS LAST",
+          "refId": "A"
+        }
+      ],
+      "title": "Proposals waiting",
+      "type": "table"
     }
   ],
   "refresh": "30s",

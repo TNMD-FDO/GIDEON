@@ -41,6 +41,7 @@ from gideon.host.render.grafana import (
 from gideon.host.render.searxng import search_enabled
 from gideon.host.render.systemd import NIGHTLY_CALENDAR, NIGHTLY_SUITES
 from gideon.host.site import load_site
+from gideon.improvement import tally
 
 ROOT = Path(__file__).resolve().parent.parent
 EXAMPLE = ROOT / "config/site.example.yaml"
@@ -327,7 +328,7 @@ class EvalBoard(unittest.TestCase):
             ).by_path,
         )
 
-    def test_six_panels_show_only_recorded_eval_fields(self) -> None:
+    def test_seven_panels_show_only_recorded_fields(self) -> None:
         board = json.loads(GrafanaEvalArtifact.emit(inputs()))
         gpu_board = json.loads(GrafanaGpuArtifact.emit(inputs()))
         self.assertEqual(board["uid"], "gideon-eval")
@@ -346,10 +347,12 @@ class EvalBoard(unittest.TestCase):
                 "False refusal: harness and judge",
                 "Run duration against the night",
                 "Failed cases of newest nightly runs",
+                "Proposals waiting",
             },
         )
         self.assertEqual(len(panels), len(board["panels"]))
-        for title, panel in panels.items():
+        for panel in board["panels"][:6]:
+            title = panel["title"]
             with self.subTest(panel=title):
                 self.assertNotIn("id", panel)
                 self.assertEqual(panel["datasource"], {"type": "postgres", "uid": "gideon-rows"})
@@ -393,6 +396,38 @@ class EvalBoard(unittest.TestCase):
         self.assertIn("WHERE e.verdict = 'fail'", failed)
         for column in ("n.slice", "n.run_id", "e.case_id", "e.repeat", "family", "role", "class", "problem"):
             self.assertIn(column, failed)
+
+    def test_proposals_panel_reads_the_newest_tally_and_keeps_empty_lists_visible(self) -> None:
+        board = json.loads(GrafanaEvalArtifact.emit(inputs()))
+        panel = board["panels"][-1]
+        self.assertEqual(panel["title"], "Proposals waiting")
+        self.assertEqual(panel["type"], "table")
+        self.assertEqual(panel["datasource"], {"type": "postgres", "uid": "gideon-rows"})
+        sixth = board["panels"][-2]["gridPos"]
+        self.assertEqual(panel["gridPos"]["y"], sixth["y"] + sixth["h"])
+        self.assertEqual(panel["gridPos"]["w"], 24)
+        self.assertEqual(panel["gridPos"]["x"], 0)
+        self.assertEqual(len(panel["targets"]), 1)
+        target = panel["targets"][0]
+        self.assertEqual(target["datasource"], panel["datasource"])
+        self.assertEqual(target["format"], "table")
+        sql = target["rawSql"]
+        self.assertEqual(re.findall(r"\bFROM\s+([a-z_]+)\b", sql, re.IGNORECASE), ["audit_log"])
+        self.assertEqual(re.findall(r"\bkind\s*=\s*'([^']+)'", sql), [tally.TALLY_KIND])
+        detail_keys = set(re.findall(r"\bdetail->>?'([^']+)'", sql))
+        self.assertEqual(detail_keys, {"fired", "refused", "triggers"})
+        self.assertTrue(detail_keys <= set(tally.DETAIL_KEYS))
+        self.assertIn("ORDER BY at DESC", sql)
+        self.assertIn("LIMIT 1", sql)
+        self.assertIn("tally.at AS instant", sql)
+        self.assertIn("::integer AS fired", sql)
+        self.assertIn("::integer AS refused", sql)
+        self.assertIn("(tally.detail->>'refused')::integer > 0", sql)
+        self.assertIn("THEN 'incomplete' ELSE 'complete' END AS completeness", sql)
+        self.assertIn("LEFT JOIN LATERAL jsonb_array_elements(tally.detail->'triggers')", sql)
+        self.assertIn("AS trigger_row(entry) ON true", sql)
+        for column in ("id", "state", "detail"):
+            self.assertIn(f"trigger_row.entry->>'{column}' AS {column}", sql)
 
     def test_guardrails_counts_match_the_family_gate(self) -> None:
         board = json.loads(GrafanaEvalArtifact.emit(inputs()))
@@ -457,9 +492,11 @@ class Alerting(unittest.TestCase):
         for site_path in (EXAMPLE, SECOND):
             with self.subTest(site=site_path.name):
                 site_inputs = inputs(site_path)
-                document = yaml.safe_load(GrafanaContactPointsArtifact().emit(site_inputs))
+                text = GrafanaContactPointsArtifact().emit(site_inputs)
+                document = yaml.safe_load(text)
                 contact = document["contactPoints"][0]
                 receiver = contact["receivers"][0]
+                self.assertEqual([item["name"] for item in document["contactPoints"]], ["page", "nudge"])
                 self.assertEqual(contact["name"], "page")
                 self.assertEqual(receiver["uid"], "page-email")
                 self.assertEqual(receiver["type"], "email")
@@ -472,25 +509,75 @@ class Alerting(unittest.TestCase):
                     receiver["settings"]["subject"],
                     f"[GIDEON {site_inputs.site.office.short_name}] {{{{ .Status | toUpper }}}}: {{{{ .CommonLabels.alertname }}}}",
                 )
+                recipients = ";".join(site_inputs.site.alerts.recipients)
+                page_text = (
+                    "apiVersion: 1\ncontactPoints:\n"
+                    "  - orgId: 1\n    name: page\n    receivers:\n"
+                    "      - uid: page-email\n        type: email\n        settings:\n"
+                    f'          addresses: "{recipients}"\n'
+                    "          singleEmail: true\n"
+                    f'          subject: "[GIDEON {site_inputs.site.office.short_name}] '
+                    '{{ .Status | toUpper }}: {{ .CommonLabels.alertname }}"\n'
+                )
+                self.assertEqual(text.split("  - orgId: 1\n    name: nudge", 1)[0], page_text)
+
+                nudge = document["contactPoints"][1]
+                self.assertEqual(nudge["orgId"], 1)
+                self.assertEqual(nudge["name"], "nudge")
+                self.assertEqual(len(nudge["receivers"]), 1)
+                nudge_receiver = nudge["receivers"][0]
+                self.assertEqual(nudge_receiver["uid"], "nudge-email")
+                self.assertEqual(nudge_receiver["type"], "email")
+                self.assertTrue(nudge_receiver["disableResolveMessage"])
+                settings = nudge_receiver["settings"]
+                self.assertEqual(settings["addresses"], ";".join(site_inputs.site.alerts.recipients))
+                self.assertTrue(settings["singleEmail"])
+                self.assertEqual(settings["subject"], f"[GIDEON {site_inputs.site.office.short_name}] Proposals waiting")
+                message = settings["message"]
+                self.assertEqual(
+                    message,
+                    "Proposals waiting on this box: {{ (index .Alerts 0).Values.B }}\n"
+                    "Read them with gideon proposals.\n",
+                )
+                self.assertEqual(
+                    [expression.strip() for expression in re.findall(r"{{(.*?)}}", message)],
+                    ["(index .Alerts 0).Values.B"],
+                )
+                self.assertNotIn(".Values.C", message)
+                self.assertNotIn(".Labels", message)
+                self.assertNotIn(".Annotations", message)
 
     def test_policy_and_time_interval_use_the_site_timezone(self) -> None:
         for site_path in (EXAMPLE, SECOND):
             with self.subTest(site=site_path.name):
                 site_inputs = inputs(site_path)
                 policy = yaml.safe_load(GrafanaPoliciesArtifact().emit(site_inputs))["policies"][0]
+                self.assertEqual(len(policy["routes"]), 2)
                 child = policy["routes"][0]
                 self.assertEqual(policy["receiver"], "page")
                 self.assertEqual(policy["group_by"], ["alertname"])
                 self.assertEqual(child["repeat_interval"], "6d")
                 self.assertEqual(child["active_time_intervals"], ["saturday-morning"])
                 self.assertFalse(child["continue"])
+                nudge_route = policy["routes"][1]
+                self.assertEqual(nudge_route["receiver"], "nudge")
+                self.assertEqual(nudge_route["object_matchers"], [["nudge", "=", "true"]])
+                self.assertEqual(nudge_route["repeat_interval"], "6d")
+                self.assertEqual(nudge_route["active_time_intervals"], ["monday-morning"])
+                self.assertFalse(nudge_route["continue"])
                 # `muteTimes` is the provisioning key for time intervals; a
                 # route uses one as an active window, not only as a mute.
-                interval = yaml.safe_load(GrafanaTimeIntervalsArtifact().emit(site_inputs))["muteTimes"][0]
+                intervals = yaml.safe_load(GrafanaTimeIntervalsArtifact().emit(site_inputs))["muteTimes"]
+                self.assertEqual([item["name"] for item in intervals], ["saturday-morning", "monday-morning"])
+                interval = intervals[0]
                 entry = interval["time_intervals"][0]
                 self.assertEqual(entry["weekdays"], ["saturday"])
                 self.assertEqual(entry["times"], [{"start_time": "08:00", "end_time": "09:00"}])
                 self.assertEqual(entry["location"], site_inputs.site.office.timezone)
+                monday = intervals[1]["time_intervals"][0]
+                self.assertEqual(monday["weekdays"], ["monday"])
+                self.assertEqual(monday["times"], [{"start_time": "08:00", "end_time": "09:00"}])
+                self.assertEqual(monday["location"], site_inputs.site.office.timezone)
 
     def test_rules_have_expected_groups_thresholds_and_states(self) -> None:
         expected_uids = {
@@ -510,6 +597,7 @@ class Alerting(unittest.TestCase):
             "gideon-driver-drift",
             "gideon-engine-down",
             "gideon-heartbeat",
+            "gideon-proposals-waiting",
             "gideon-api-probe-failing",
             "gideon-nightly-run-failed",
             "gideon-nightly-run-aborted",
@@ -540,8 +628,12 @@ class Alerting(unittest.TestCase):
                 for rule in rules.values():
                     self.assertIn(rule["condition"], {item["refId"] for item in rule["data"]})
                     self.assertFalse(rule["isPaused"])
-                    self.assertEqual(rule["labels"]["class"], "page")
-                    self.assertIn("docs/runbooks/observability.md §4", rule["annotations"]["runbook"])
+                    if rule["uid"] == "gideon-proposals-waiting":
+                        self.assertEqual(rule["labels"], {"class": "dashboard", "nudge": "true"})
+                        self.assertEqual(rule["annotations"]["runbook"], "docs/runbooks/observability.md §10")
+                    else:
+                        self.assertEqual(rule["labels"]["class"], "page")
+                        self.assertIn("docs/runbooks/observability.md §4", rule["annotations"]["runbook"])
                     for item in rule["data"]:
                         self.assertIn(item["datasourceUid"], {"prometheus", "gideon-rows", "__expr__"})
                 self.assertEqual(
@@ -618,6 +710,64 @@ class Alerting(unittest.TestCase):
                 ):
                     self.assertEqual(rules[uid]["noDataState"], "Alerting")
                     self.assertEqual(rules[uid]["execErrState"], "Alerting")
+
+    def test_proposals_rule_uses_the_newest_tally_count_and_reduced_value(self) -> None:
+        for site_path, no_gpu in ((EXAMPLE, False), (SECOND, False), (EXAMPLE, True)):
+            with self.subTest(site=site_path.name, no_gpu=no_gpu):
+                groups = yaml.safe_load(
+                    GrafanaRulesArtifact().emit(inputs(site_path, no_gpu=no_gpu))
+                )["groups"]
+                rows = next(group for group in groups if group["name"] == "rows")
+                rule = next(
+                    item for item in rows["rules"]
+                    if item["uid"] == "gideon-proposals-waiting"
+                )
+                if not no_gpu:
+                    nightly_index = next(
+                        index for index, item in enumerate(rows["rules"])
+                        if item["uid"] == "gideon-nightly-run-failed"
+                    )
+                    self.assertLess(rows["rules"].index(rule), nightly_index)
+                self.assertEqual(rule["title"], "Proposals waiting")
+                self.assertEqual(rule["condition"], "C")
+                self.assertEqual(rule["for"], "0s")
+                self.assertEqual(rule["noDataState"], "OK")
+                self.assertEqual(rule["execErrState"], "OK")
+                self.assertEqual(rule["labels"], {"class": "dashboard", "nudge": "true"})
+                self.assertNotEqual(rule["labels"]["class"], "page")
+                self.assertEqual(rule["annotations"], {
+                    "summary": "Proposals are waiting for review",
+                    "runbook": "docs/runbooks/observability.md §10",
+                })
+                self.assertNotIn("{{", json.dumps(rule["annotations"]))
+                self.assertNotIn("$", json.dumps(rule["annotations"]))
+
+                query, reduce, threshold = rule["data"]
+                self.assertEqual(query["refId"], "A")
+                self.assertEqual(query["datasourceUid"], "gideon-rows")
+                self.assertEqual(query["model"]["datasource"]["uid"], "gideon-rows")
+                self.assertEqual(query["model"]["format"], "table")
+                sql = query["model"]["rawSql"]
+                self.assertEqual(
+                    re.findall(r"\b(?:FROM|JOIN)\s+(\w+)", sql, re.IGNORECASE),
+                    ["audit_log"],
+                )
+                self.assertEqual(re.findall(r"WHERE kind = '([^']+)'", sql), [tally.TALLY_KIND])
+                self.assertEqual(re.findall(r"detail->>'([^']+)'", sql), ["fired"])
+                self.assertIn("fired", tally.DETAIL_KEYS)
+                self.assertIn("AS value", sql)
+                self.assertIn("ORDER BY at DESC LIMIT 1", sql)
+                self.assertEqual(reduce["refId"], "B")
+                self.assertEqual(reduce["model"]["type"], "reduce")
+                self.assertEqual(reduce["model"]["expression"], "A")
+                self.assertEqual(reduce["model"]["reducer"], "last")
+                self.assertEqual(threshold["refId"], "C")
+                self.assertEqual(threshold["model"]["type"], "threshold")
+                self.assertEqual(threshold["model"]["expression"], "B")
+                self.assertEqual(
+                    threshold["model"]["conditions"][0]["evaluator"],
+                    {"params": [0], "type": "gt"},
+                )
 
     def test_nightly_rules_cover_each_suite_and_only_gpu_hosts(self) -> None:
         nightly_uids = {

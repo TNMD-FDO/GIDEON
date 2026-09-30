@@ -63,8 +63,10 @@ and stays Normal, inert until the directory is recreated.
   the guardrails gate's counts per family beside the run verdict and the
   replaced-control ceiling; the harness's and judge's false-refusal counts and
   unread controls; run duration against the nine-hour night; and the failed
-  case IDs of the newest nightly runs. M17 and M18 have no panel yet; their
-  measurements arrive with the user and synthesis work.
+  case IDs of the newest nightly runs. The Proposals waiting table shows the
+  newest daily tally, its completeness, and its recorded trigger rows. M17 and
+  M18 have no panel yet; their measurements arrive with the user and synthesis
+  work.
 
 The node exporter runs on the private network with the host's root mounted, so
 its network-device series describe the container's interfaces, not the host's;
@@ -160,6 +162,19 @@ notice.
 13. **nightly run overdue**: read the rule's SQL as `gideon_ro_metrics`, as in item 3, and its provisioned state in Grafana. For the firing side, evaluate a copy of the rule's data with only its bound lowered below the recorded age of each suite; confirm both instances fire. Do not save the copy or send a page. If Grafana cannot evaluate the copy, the SQL read and the provisioned state remain the check.
 14. **nightly run aborted**: do not induce an abort. Read its query as `gideon_ro_metrics` and the newest partial row if one exists. Where a partial row exists, evaluate a copy scoped to that exact `run_id`; a later completed nightly row must not hide it. Record whether the firing side was available to check.
 
+To induce the weekly nudge, temporarily lower the `learned-components` bounds
+in `config/triggers.yaml` below the box's recorded figures, and set the
+`monday-morning` interval in
+`compose/grafana/provisioning/alerting/time-intervals.yaml.tmpl` to the current
+weekday and an hour that includes the current time. Run
+`sudo python3 -m gideon apply`, then
+`sudo python3 -m gideon proposals --record`. Confirm the nudge arrives and the
+Proposals waiting panel shows the tally. Restore both file edits, run
+`sudo python3 -m gideon proposals --record` again so the newest tally holds
+the real count (the rule reads Normal within a minute, and no resolve email is
+sent), then run `sudo python3 -m gideon apply` again for the released
+interval.
+
 ## 8. Secrets and the service group
 
 Every secret file under `/etc/gideon/secrets/` is `root:gideon` 0440 (the
@@ -175,3 +190,20 @@ The DCGM exporter image comes from `nvcr.io` (the only registry that publishes
 it); the office firewall must allow it for `registry mirror` and the CI runner
 (`config/egress.yaml`, `office-services-setup.md`). cAdvisor comes from
 GHCR, already allowed.
+
+## 10. The weekly nudge
+
+The weekly email, subject `[GIDEON <office>] Proposals waiting`, says
+`Proposals waiting on this box: <count>` and then `Read them with gideon
+proposals.`, and nothing else: no proposal, trigger, or figure. It is a nudge,
+not a page, and `gideon status` does not list it. It comes on Monday between
+08:00 and 09:00 office time while the count is above zero, and no email says
+the count went back to zero. The count comes from the latest daily tally. The Eval board's Proposals
+waiting panel shows the tally's instant, so check its age before acting on a
+count. Run `sudo python3 -m gideon proposals` to read the current proposals.
+If the tally stops, read `journalctl -u gideon-proposals-tally.service`.
+
+After a rollback to a release before this nudge, the provisioned rule keeps
+evaluating. Without its route, a firing rule pages through the root policy
+daily. Silence Proposals waiting in Grafana as described in §5 until the rule
+is restored or removed.

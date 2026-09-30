@@ -4,6 +4,7 @@ import argparse
 import ast
 import contextlib
 import io
+import json
 import os
 import subprocess
 import sys
@@ -20,12 +21,14 @@ from gideon.host.nogpu import BUILD_BOX_PATH, NO_GPU_PATH
 from gideon.host.render.owui import FEEDBACK_LIST_ROUTE
 from gideon.host.report import Problem
 from gideon.host.sysio import Command, PathLike
-from gideon.improvement import proposals, triggers, watch
+from gideon.improvement import proposals, tally, triggers, watch
 from gideon.improvement.feedback import FeedbackReading, FeedbackRecord
 from gideon.improvement.sections import (
     Context,
     Row,
+    RowState,
     Scope,
+    Section,
     SectionReport,
 )
 
@@ -183,6 +186,55 @@ class ReadOnlyHost:
     def _refuse_write(self) -> NoReturn:
         self.write_attempted = True
         raise AssertionError("the proposals report attempted a write")
+
+
+class RecordingHost(ReadOnlyHost):
+    """Root host with separate probe and audit-write results."""
+
+    def __init__(
+        self,
+        *,
+        root: bool = True,
+        registry_text: str | None = None,
+        returncodes: tuple[int, ...] = (0, 0),
+        run_error: OSError | None = None,
+    ) -> None:
+        files = {
+            _key(REGISTRY_PATH): (
+                REGISTRY_PATH.read_text(encoding="utf-8")
+                if registry_text is None else registry_text
+            ),
+            _key(BUILD_BOX_PATH): "fictional marker\n",
+        }
+        super().__init__(files=files)
+        self.root = root
+        self.returncodes = returncodes
+        self.run_error = run_error
+
+    def geteuid(self) -> int:
+        return 0 if self.root else 1000
+
+    def run(
+        self,
+        argv: Command,
+        *,
+        check: bool = False,
+        input: str | None = None,
+        cwd: PathLike | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        passthrough: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
+        del check, cwd, env, timeout, passthrough
+        command = tuple(argv)
+        if not command or command[0] != "docker":
+            raise AssertionError(f"unexpected command: {command}")
+        self.calls.append((command, input))
+        if self.run_error is not None:
+            raise self.run_error
+        return subprocess.CompletedProcess(
+            list(command), self.returncodes[len(self.calls) - 1], "", "fictional diagnostic"
+        )
 
 
 def _base_host(
@@ -682,6 +734,138 @@ triggers:
         self.assertIn("proposals", help_text)
         self.assertIn("read the improvement proposals", help_text)
         self.assertIn("read-only report", help_text)
+
+
+class RecordCase(unittest.TestCase):
+    """The record flag writes one audit row after its preflight and report."""
+
+    def _cli(
+        self, host: RecordingHost, sections: Sequence[Section]
+    ) -> tuple[int, str, str]:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with (
+            patch.object(proposals, "RealHost", return_value=host),
+            patch.object(proposals, "SECTIONS", tuple(sections)),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            code = cli.main(["proposals", "--record"])
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def _section(self, state: RowState = "not fired") -> Section:
+        return FakeSection(
+            "fictional-office",
+            "office",
+            [],
+            SectionReport("fictional detail", (Row("fictional-row", state, "1"),)),
+        )
+
+    def _write_input(self, host: RecordingHost) -> str:
+        writes = [stdin for _argv, stdin in host.calls if stdin and "INSERT INTO audit_log" in stdin]
+        self.assertEqual(len(writes), 1)
+        return writes[0]
+
+    def _detail(self, sql: str) -> dict[str, object]:
+        line = next(line for line in sql.splitlines() if line.startswith("\\set v_detail '"))
+        return cast(dict[str, object], json.loads(line.removeprefix("\\set v_detail '").removesuffix("'")))
+
+    def test_pre_run_refusals_print_nothing_and_do_not_write(self) -> None:
+        cases = (
+            ("root", RecordingHost(root=False), "root is required"),
+            (
+                "registry",
+                RecordingHost(registry_text="version: 1\ntriggers: []\n"),
+                "trigger registry could not be loaded",
+            ),
+            ("probe", RecordingHost(returncodes=(9,)), "audit writer is unavailable"),
+            (
+                "probe-unavailable",
+                RecordingHost(run_error=FileNotFoundError("fictional docker")),
+                "audit writer is unavailable",
+            ),
+        )
+        for name, host, problem in cases:
+            with self.subTest(name=name):
+                order: list[str] = []
+                section = FakeSection("fictional-office", "office", order, SectionReport("ok", ()))
+                code, stdout, stderr = self._cli(host, (section,))
+                self.assertEqual(code, 1)
+                self.assertEqual(stdout, "")
+                self.assertIn(problem, stderr)
+                self.assertIn("Fix:", stderr)
+                self.assertEqual(order, [])
+                self.assertFalse(host.write_attempted)
+                self.assertFalse(any(stdin and "INSERT INTO audit_log" in stdin for _, stdin in host.calls))
+                if name in ("root", "registry"):
+                    self.assertEqual(host.calls, [])
+                else:
+                    self.assertEqual(len(host.calls), 1)
+                    self.assertEqual(host.calls[0][1], "SELECT 1;\n")
+
+    def test_success_writes_one_audit_row_and_prints_recorded_count(self) -> None:
+        host = RecordingHost()
+        section = FakeSection(
+            watch.TRIGGERS_SECTION.name,
+            "product",
+            [],
+            SectionReport("fictional figures", (Row("fictional-trigger", "fired", "figure 2 above 1"),)),
+        )
+        code, stdout, stderr = self._cli(host, (section,))
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr, "")
+        self.assertEqual(len(host.calls), 2)
+        expected_argv = tuple(stack.exec_argv(
+            RENDERED, "postgres", "psql", "-U", "gideon_audit", "-d", "gideon",
+            "-v", "ON_ERROR_STOP=1", "--single-transaction", "-f", "-",
+        ))
+        self.assertEqual(host.calls[0], (expected_argv, "SELECT 1;\n"))
+        self.assertEqual(host.calls[1][0], expected_argv)
+        sql = self._write_input(host)
+        self.assertIn("\\set v_kind '" + tally.TALLY_KIND + "'", sql)
+        self.assertIn("INSERT INTO audit_log", sql)
+        detail = self._detail(sql)
+        self.assertEqual(set(detail), set(tally.DETAIL_KEYS))
+        self.assertEqual(detail["fired"], 1)
+        self.assertEqual(detail["sections"], 1)
+        self.assertEqual(detail["skipped"], 0)
+        self.assertEqual(detail["refused"], 0)
+        self.assertIsNone(detail["git_dirty"])
+        self.assertEqual(detail["triggers"], [
+            {"id": "fictional-trigger", "state": "fired", "detail": "figure 2 above 1"}
+        ])
+        self.assertEqual(stdout.splitlines()[-2:], [
+            "proposals: 1 fired, 1 sections, 0 skipped",
+            proposals.RECORDED_LINE.format(fired=1),
+        ])
+
+    def test_refused_section_still_writes_count_and_exits_one(self) -> None:
+        host = RecordingHost()
+        section = FakeSection(
+            "fictional-office", "office", [], Problem("fictional failure", "Fix the reader.")
+        )
+        code, stdout, stderr = self._cli(host, (section,))
+        self.assertEqual(code, 1)
+        self.assertEqual(stderr, "")
+        self.assertIn("fictional-office: refuse", stdout)
+        self.assertEqual(self._detail(self._write_input(host))["refused"], 1)
+        self.assertEqual(stdout.splitlines()[-1], proposals.RECORDED_LINE.format(fired=0))
+
+    def test_unfired_section_succeeds_and_failed_write_refuses(self) -> None:
+        for write_code, expected_code in ((0, 0), (9, 1)):
+            with self.subTest(write_code=write_code):
+                host = RecordingHost(returncodes=(0, write_code))
+                code, stdout, stderr = self._cli(host, (self._section(),))
+                self.assertEqual(code, expected_code)
+                self.assertEqual(self._detail(self._write_input(host))["fired"], 0)
+                self.assertIn("proposals: 0 fired, 1 sections, 0 skipped", stdout)
+                if write_code == 0:
+                    self.assertEqual(stderr, "")
+                    self.assertEqual(stdout.splitlines()[-1], proposals.RECORDED_LINE.format(fired=0))
+                else:
+                    self.assertNotIn("recorded", stdout)
+                    self.assertIn("the tally row was not written: audit writer failed: exit 9", stderr)
+                    self.assertIn("Fix:", stderr)
 
 
 class FakeSection:

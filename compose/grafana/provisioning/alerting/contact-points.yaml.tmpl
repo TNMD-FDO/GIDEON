@@ -9,3 +9,16 @@ contactPoints:
           addresses: "$recipients"
           singleEmail: true
           subject: "[GIDEON $short_name] {{ .Status | toUpper }}: {{ .CommonLabels.alertname }}"
+  - orgId: 1
+    name: nudge
+    receivers:
+      - uid: nudge-email
+        type: email
+        disableResolveMessage: true
+        settings:
+          addresses: "$recipients"
+          singleEmail: true
+          subject: "[GIDEON $short_name] Proposals waiting"
+          message: |
+            Proposals waiting on this box: {{ (index .Alerts 0).Values.B }}
+            Read them with gideon proposals.

@@ -61,7 +61,10 @@ def _has_forbidden_text(value: object) -> bool:
 
 
 def _escape(value: str) -> str:
-    return value.replace("'", "''")
+    # psql applies backslash escapes inside a quoted \set argument, so a
+    # JSON escape such as \u00a7 or \" would reach the server without its
+    # backslash unless it is doubled first.
+    return value.replace("\\", "\\\\").replace("'", "''")
 
 
 def _set_variable(name: str, value: str) -> str:

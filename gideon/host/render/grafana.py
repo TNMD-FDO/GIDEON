@@ -134,7 +134,7 @@ class GrafanaDashboardsProviderArtifact(Artifact):
 
 
 class GrafanaContactPointsArtifact(Artifact):
-    """Provision the single page email contact point."""
+    """Provision the page and weekly nudge email contact points."""
 
     name = "grafana-contact-points"
     relative_path = "grafana/provisioning/alerting/contact-points.yaml"
@@ -153,7 +153,7 @@ class GrafanaContactPointsArtifact(Artifact):
 
 
 class GrafanaPoliciesArtifact(Artifact):
-    """Provision the page policy and the weekly heartbeat route."""
+    """Provision the page policy, heartbeat route, and weekly nudge route."""
 
     name = "grafana-policies"
     relative_path = "grafana/provisioning/alerting/policies.yaml"
@@ -165,7 +165,7 @@ class GrafanaPoliciesArtifact(Artifact):
 
 
 class GrafanaTimeIntervalsArtifact(Artifact):
-    """Provision the office-time Saturday heartbeat window."""
+    """Provision the office-time Saturday heartbeat and Monday nudge windows."""
 
     name = "grafana-time-intervals"
     relative_path = "grafana/provisioning/alerting/time-intervals.yaml"

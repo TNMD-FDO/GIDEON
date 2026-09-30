@@ -73,13 +73,17 @@ def _alert(
     *,
     alert_class: str = "page",
     heartbeat: str = "false",
+    nudge: str | None = None,
     state: str = "active",
     summary: str = "Fictitious summary",
     runbook: str = "docs/runbooks/observability.md#example",
     silenced: bool = False,
 ) -> grafana.Alert:
+    labels = {"alertname": title, "class": alert_class, "heartbeat": heartbeat}
+    if nudge is not None:
+        labels["nudge"] = nudge
     return grafana.Alert(
-        labels={"alertname": title, "class": alert_class, "heartbeat": heartbeat},
+        labels=labels,
         annotations={"summary": summary, "runbook": runbook},
         starts_at=started_at,
         state=state,
@@ -462,6 +466,31 @@ class Status(unittest.TestCase):
         self.assertNotIn("Heartbeat:", stdout)
         self.assertNotIn("DashboardAlert:", stdout)
         self.assertTrue(stdout.rstrip().endswith("status: 2 need attention"))
+
+    def test_nudge_dashboard_does_not_enter_needs_attention_or_change_exit(self) -> None:
+        for with_page in (False, True):
+            with self.subTest(with_page=with_page):
+                alerts = [
+                    _alert(
+                        "Proposals waiting",
+                        NOW.isoformat(),
+                        alert_class="dashboard",
+                        nudge="true",
+                    )
+                ]
+                if with_page:
+                    alerts.append(_alert("Fictitious page", NOW.isoformat()))
+                code, stdout, stderr, _ = self.run_status(
+                    self.make_host(), FakeGrafana(tuple(alerts))
+                )
+                self.assertEqual((code, stderr), (int(with_page), ""))
+                needs_attention = stdout.split("waiting on you", 1)[0]
+                self.assertNotIn("Proposals waiting", needs_attention)
+                self.assertEqual("Fictitious page:" in needs_attention, with_page)
+                self.assertTrue(stdout.rstrip().endswith(
+                    "status: 1 need attention" if with_page
+                    else "status: nothing needs attention"
+                ))
 
     def test_unreachable_grafana_and_factory_error_exit_two_but_print_other_blocks(self) -> None:
         cases = (

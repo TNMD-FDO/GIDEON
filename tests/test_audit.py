@@ -1,5 +1,6 @@
 """The append-only audit writer: ids only, SQL on stdin, values bound through psql variables."""
 
+import json
 import os
 import subprocess
 import unittest
@@ -84,7 +85,7 @@ class WriteRows(unittest.TestCase):
         self.assertIn('\\set v_detail \'{"from": "user", "reason": "in GIDEON-Admins", "to": "admin"}\'', sql)
         self.assertIn("VALUES (:'v_run_id'::uuid, :'v_kind', :'v_actor', :'v_user', NULL, :'v_kb'::text[], :'v_release', :'v_detail'::jsonb);", sql)
         self.assertIn("VALUES (:'v_run_id'::uuid, :'v_kind', :'v_actor', NULL, NULL,", sql)
-        self.assertIn('\\set v_kb \'{"kb-1","kb \\"2\\""}\'', sql)
+        self.assertIn('\\set v_kb \'{"kb-1","kb \\\\"2\\\\""}\'', sql)
         self.assertEqual(sql.count("INSERT INTO audit_log"), 2)
         for value in ("u-42", "u-admin", "kb-1"):
             self.assertNotIn(value, " ".join(argv))
@@ -98,6 +99,19 @@ class WriteRows(unittest.TestCase):
         self.assertIsNotNone(problem)
         self.assertIn("CR, LF, or NUL", problem or "")
         self.assertEqual(len(host.calls), 1)
+
+    def test_backslashes_are_doubled_so_psql_keeps_json_escapes(self) -> None:
+        host = FakeHost()
+        detail = {"figure": "reopens \u00a712.3", "word": 'a "quoted" word'}
+        self.assertIsNone(write_rows(host, RENDERED, [row(detail=detail)]))
+        sql = host.calls[0][1]
+        assert sql is not None
+        line = next(item for item in sql.splitlines() if item.startswith("\\set v_detail "))
+        self.assertIn("\\\\u00a7", line)
+        self.assertIn('\\\\"quoted\\\\"', line)
+        # psql turns each doubled backslash back into one, leaving the JSON text.
+        value = line.removeprefix("\\set v_detail '").removesuffix("'").replace("\\\\", "\\")
+        self.assertEqual(json.loads(value), detail)
 
     def test_failure_reports_the_exit_status_never_the_diagnostic(self) -> None:
         problem = write_rows(FakeHost(rc=1), RENDERED, [row()])

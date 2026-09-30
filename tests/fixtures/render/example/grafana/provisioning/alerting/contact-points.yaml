@@ -9,3 +9,16 @@ contactPoints:
           addresses: "csa1@example.org;csa2@example.org"
           singleEmail: true
           subject: "[GIDEON TNMD-FDO] {{ .Status | toUpper }}: {{ .CommonLabels.alertname }}"
+  - orgId: 1
+    name: nudge
+    receivers:
+      - uid: nudge-email
+        type: email
+        disableResolveMessage: true
+        settings:
+          addresses: "csa1@example.org;csa2@example.org"
+          singleEmail: true
+          subject: "[GIDEON TNMD-FDO] Proposals waiting"
+          message: |
+            Proposals waiting on this box: {{ (index .Alerts 0).Values.B }}
+            Read them with gideon proposals.

@@ -167,6 +167,13 @@ SYSTEMCTL_ENABLE_NIGHTLY = (
     f"{RENDERED}/systemd/gideon-eval-nightly.timer",
 )
 SYSTEMCTL_ACTIVE_NIGHTLY = ("systemctl", "is-active", "gideon-eval-nightly.timer")
+SYSTEMCTL_LINK_PROPOSALS = (
+    "systemctl", "link", f"{RENDERED}/systemd/gideon-proposals-tally.service",
+)
+SYSTEMCTL_ENABLE_PROPOSALS = (
+    "systemctl", "enable", "--now", f"{RENDERED}/systemd/gideon-proposals-tally.timer",
+)
+SYSTEMCTL_ACTIVE_PROPOSALS = ("systemctl", "is-active", "gideon-proposals-tally.timer")
 CERT = CERT_PATH
 HANDSHAKE = (
     "openssl",
@@ -610,6 +617,9 @@ def healthy_commands(
         SYSTEMCTL_LINK_NIGHTLY: done(SYSTEMCTL_LINK_NIGHTLY),
         SYSTEMCTL_ENABLE_NIGHTLY: done(SYSTEMCTL_ENABLE_NIGHTLY),
         SYSTEMCTL_ACTIVE_NIGHTLY: done(SYSTEMCTL_ACTIVE_NIGHTLY, stdout="active\n"),
+        SYSTEMCTL_LINK_PROPOSALS: done(SYSTEMCTL_LINK_PROPOSALS),
+        SYSTEMCTL_ENABLE_PROPOSALS: done(SYSTEMCTL_ENABLE_PROPOSALS),
+        SYSTEMCTL_ACTIVE_PROPOSALS: done(SYSTEMCTL_ACTIVE_PROPOSALS, stdout="active\n"),
         PS: done(
             PS,
             stdout=running_rows(

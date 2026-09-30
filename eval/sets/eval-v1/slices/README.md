@@ -35,7 +35,7 @@ with the queries file it names: an id list resolving to no case is a loader
 finding, so it cannot stay where its cases go. In an exported tree the registry
 holds a `judgments` slice the set does not, and `eval run` answers that as it
 answers any unknown slice. The list changes only by append, as every frozen
-slice does; the ten CHU-written queries are the next append.
+slice does; the fifteen CHU-written queries were its first append.
 
 The `smoke` slice is the push gate's, with one list per source list. Its
 guardrails lists name the frontend sample's six cases, each run at the service

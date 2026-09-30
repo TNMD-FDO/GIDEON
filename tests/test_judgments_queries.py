@@ -21,6 +21,7 @@ FLAGGER_PATH: Final[Path] = Path("eval/seed/prototype-qa/scripts/redaction_flags
 # Append-only: an intake's summary prints the next pair, added beside these and never in place of one.
 PINNED_PREFIXES: Final[tuple[tuple[int, str], ...]] = (
     (38, "0fba5d51cd44750b78f0c7940994dd8aa13ca9a84dd2ce3da8d2ad428b9b8b40"),  # the harvest's, CSA-1 2026-09-19
+    (53, "8973f29eefb862cb38f1514cfd9de64646867e8da839111b7bda4ab996a2dd73"),  # the CHU attorneys', CSA-1 2026-09-29
 )
 EXCLUDED_HARVEST_IDS: Final[frozenset[str]] = frozenset({"HARV-014", "HARV-017"})
 # HARV-014 is a prompt-writing request; HARV-017 is a word-processor how-to.

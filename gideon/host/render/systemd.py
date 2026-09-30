@@ -16,6 +16,8 @@ _VERIFY_SERVICE_TEMPLATE = "systemd/gideon-backup-verify.service.tmpl"
 _VERIFY_TIMER_TEMPLATE = "systemd/gideon-backup-verify.timer.tmpl"
 _NIGHTLY_SERVICE_TEMPLATE = "systemd/gideon-eval-nightly.service.tmpl"
 _NIGHTLY_TIMER_TEMPLATE = "systemd/gideon-eval-nightly.timer.tmpl"
+_PROPOSALS_TALLY_SERVICE_TEMPLATE = "systemd/gideon-proposals-tally.service.tmpl"
+_PROPOSALS_TALLY_TIMER_TEMPLATE = "systemd/gideon-proposals-tally.timer.tmpl"
 
 RECONCILE_CALENDAR: Final = "*-*-* 03:00:00"
 BACKUP_CALENDAR: Final = "*-*-* 01:00:00"
@@ -24,6 +26,8 @@ VERIFY_ALL_CALENDAR: Final = "Sat *-01,04,07,10-8..14 04:00:00"
 # and guardrails' four hours end near 01:30, the 01:00 backup shares the disk
 # and not the engine, and the rest of the night before 06:00 is a hand run's.
 NIGHTLY_CALENDAR: Final = "*-*-* 21:00:00"
+# After the quiet window's 06:00 close, so Monday's message reads that morning's count.
+PROPOSALS_TALLY_CALENDAR: Final = "*-*-* 07:00:00"
 NIGHTLY_SUITES: Final = ("general-smoke", "guardrails")
 # Ten hours, 21:00 to 06:00 plus the last judge readings and one turn's bound:
 # a backstop the command's own 06:00 deadline is meant to make unreachable.
@@ -195,4 +199,25 @@ class NightlyTimerArtifact(_SystemdArtifact):
     def _substitutions(self, inputs: RenderInputs) -> Mapping[str, str]:
         substitutions = dict(super()._substitutions(inputs))
         substitutions["calendar"] = _calendar_with_zone(NIGHTLY_CALENDAR, inputs)
+        return substitutions
+
+
+class ProposalsTallyServiceArtifact(_SystemdArtifact):
+    """Render the daily proposals tally service on every host."""
+
+    name = "gideon-proposals-tally-service"
+    relative_path = "systemd/gideon-proposals-tally.service"
+    template_paths = (_PROPOSALS_TALLY_SERVICE_TEMPLATE,)
+
+
+class ProposalsTallyTimerArtifact(_SystemdArtifact):
+    """Render the persistent office-zoned proposals tally timer."""
+
+    name = "gideon-proposals-tally-timer"
+    relative_path = "systemd/gideon-proposals-tally.timer"
+    template_paths = (_PROPOSALS_TALLY_TIMER_TEMPLATE,)
+
+    def _substitutions(self, inputs: RenderInputs) -> Mapping[str, str]:
+        substitutions = dict(super()._substitutions(inputs))
+        substitutions["calendar"] = _calendar_with_zone(PROPOSALS_TALLY_CALENDAR, inputs)
         return substitutions

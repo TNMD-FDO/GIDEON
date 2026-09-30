@@ -76,20 +76,26 @@ class FakeAudit:
 
 
 class FakeGrafana:
-    def __init__(self, *, ready: bool = True, receiver: grafana.Receiver | None = None, result: grafana.TestResult | None = None) -> None:
+    def __init__(self, *, ready: bool = True, receiver: grafana.Receiver | None = None, nudge_receiver: grafana.Receiver | None = None, result: grafana.TestResult | None = None) -> None:
         self.ready = ready
         self.receiver = receiver
+        self.nudge_receiver = nudge_receiver
         self.result = result or grafana.TestResult(True, 200)
         self.credentials: list[tuple[str, str] | None] = []
         self.tested: tuple[grafana.Receiver, Mapping[str, object], tuple[str, ...]] | None = None
+        self.receiver_reads: list[str] = []
 
     def request(self, method: str, path: str) -> grafana.Response:
         del method, path
         return grafana.Response(200 if self.ready else 503)
 
     def get_receiver(self, name: str) -> grafana.Receiver | None:
-        assert name == "page"
-        return self.receiver
+        self.receiver_reads.append(name)
+        if name == "page":
+            return self.receiver
+        if name == "nudge":
+            return self.nudge_receiver
+        raise AssertionError(f"unexpected receiver: {name}")
 
     def test_receiver(self, receiver: grafana.Receiver, integration: Mapping[str, object], *, recipients: Sequence[str]) -> grafana.TestResult:
         self.tested = (receiver, integration, tuple(recipients))
@@ -178,6 +184,25 @@ class CommandTests(unittest.TestCase):
             },
         )
         self.assertNotIn("csa1@example.org", json.dumps(detail))
+
+    def test_alerts_test_reads_and_sends_only_page_beside_nudge(self) -> None:
+        nudge = grafana.Receiver(
+            "nudge-email",
+            "nudge",
+            ({
+                "uid": "nudge-email",
+                "type": "email",
+                "settings": {"addresses": "csa1@example.org;csa2@example.org", "singleEmail": True},
+            },),
+        )
+        fake = FakeGrafana(receiver=self.receiver(), nudge_receiver=nudge)
+        code, out, backend = self.run_command(FakeHost(), fake)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(fake.receiver_reads, ["page"])
+        assert fake.tested is not None
+        self.assertEqual(fake.tested[0].title, "page")
+        self.assertEqual(fake.tested[1]["uid"], "page-email-0")
+        self.assertEqual(len(backend.rows), 1)
 
     def test_failed_send_still_records_audit_and_returns_one(self) -> None:
         fake = FakeGrafana(

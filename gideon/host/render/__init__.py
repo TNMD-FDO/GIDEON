@@ -180,6 +180,8 @@ def _registered_artifacts() -> tuple[Artifact, ...]:
         DrillTimerArtifact,
         NightlyServiceArtifact,
         NightlyTimerArtifact,
+        ProposalsTallyServiceArtifact,
+        ProposalsTallyTimerArtifact,
         ReconcileServiceArtifact,
         ReconcileTimerArtifact,
         VerifyServiceArtifact,
@@ -218,6 +220,8 @@ def _registered_artifacts() -> tuple[Artifact, ...]:
         VerifyTimerArtifact(),
         NightlyServiceArtifact(),
         NightlyTimerArtifact(),
+        ProposalsTallyServiceArtifact(),
+        ProposalsTallyTimerArtifact(),
     )
 
 

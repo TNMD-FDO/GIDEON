@@ -15,3 +15,10 @@ policies:
         active_time_intervals:
           - saturday-morning
         continue: false
+      - receiver: nudge
+        object_matchers:
+          - [nudge, "=", "true"]
+        repeat_interval: 6d
+        active_time_intervals:
+          - monday-morning
+        continue: false

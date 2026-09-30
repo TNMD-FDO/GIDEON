@@ -2,7 +2,7 @@
 
 ## What a query is
 
-A query is a real question as a person would put it to the Legal chat — the judgment set's unit. Thirty-eight derive from the prototype harvest and ten are written by the CHU attorney. They live one JSON object per line in `queries.jsonl` beside this page, which the export omits until the CSAs rule on publishing harvest-derived material; that is why a public tree has this page and not the file.
+A query is a real question as a person would put it to the Legal chat — the judgment set's unit. Thirty-eight derive from the prototype harvest and fifteen are written by CHU attorneys. They live one JSON object per line in `queries.jsonl` beside this page, which the export omits until the CSAs rule on publishing harvest-derived material; that is why a public tree has this page and not the file.
 
 ## The rule
 
@@ -240,4 +240,4 @@ Each question gets one row — its ordinal and line, then `ok → <id>` or `refu
 - **duplicate** — the same text as an existing query (its id named) or an earlier question in the file (its ordinal named): remove it.
 - **empty** — a marker with no question under it.
 
-A run is all or nothing: any refusal appends nothing, so fix the file and run it again; a run after a success refuses every question as a duplicate. After a successful run, add the pair its summary prints to `PINNED_PREFIXES` in `tests/test_judgments_queries.py` — beside the earlier pairs, never in place of one — in the same commit as the appended lines, then run the gate. The questions file is the CSA's to delete once the commit is made.
+A run is all or nothing: any refusal appends nothing, so fix the file and run it again; a run after a success refuses every question as a duplicate. After a successful run, add the pair its summary prints to `PINNED_PREFIXES` in `tests/test_judgments_queries.py` — beside the earlier pairs, never in place of one — and append the new ids, one a line, to the `judgments` slice's id list, `../slices/judgments/queries.ids`, which the intake does not write and the eval loader's test holds to the file's ids; both in the same commit as the appended lines, then run the gate. The questions file is the CSA's to delete once the commit is made.
