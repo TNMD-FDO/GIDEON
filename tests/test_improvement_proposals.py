@@ -15,7 +15,7 @@ from typing import NoReturn, cast
 from unittest.mock import patch
 
 from gideon import cli
-from gideon.evaluation import evalset, judgments, record
+from gideon.evaluation import challenger, evalset, judgments, record
 from gideon.host import owui, report, secrets, stack
 from gideon.host.nogpu import BUILD_BOX_PATH, NO_GPU_PATH
 from gideon.host.render.owui import FEEDBACK_LIST_ROUTE
@@ -253,6 +253,7 @@ def _base_host(
         files[_key(REGISTRY_PATH)] = registry_text
     if build_box:
         files[_key(BUILD_BOX_PATH)] = "fixture marker\n"
+        files[_key(ROOT / challenger.CHALLENGER_PATH)] = "version: 1\nchallenger: null\n"
     if no_gpu:
         files[_key(NO_GPU_PATH)] = "fixture marker\n"
     return ReadOnlyHost(
@@ -587,6 +588,7 @@ triggers:
             IMPROVEMENT / "packet.py",
             IMPROVEMENT / "ratings.py",
             IMPROVEMENT / "trips.py",
+            IMPROVEMENT / "pairs.py",
         }
         self.assertTrue(new_modules.issubset(set(IMPROVEMENT.rglob("*.py"))))
         for path in sorted(IMPROVEMENT.rglob("*.py")):
@@ -604,7 +606,7 @@ triggers:
     def test_feedback_section_follows_triggers_and_rated_is_not_fired(self) -> None:
         self.assertEqual(
             tuple(section.name for section in proposals.SECTIONS),
-            ("triggers", "feedback", "guardrail"),
+            ("triggers", "feedback", "guardrail", "challenger"),
         )
         self.assertIn("rated", proposals.ROW_STATES)
         host = self._host(build_box=True)
@@ -634,6 +636,9 @@ triggers:
         rendered = output.getvalue()
         self.assertEqual(code, 0)
         self.assertLess(rendered.index("section triggers"), rendered.index("section feedback"))
+        self.assertLess(rendered.index("section guardrail"), rendered.index("section challenger"))
+        self.assertIn("section challenger (product): none set", rendered)
+        self.assertIn("  newest: skipped — none set", rendered)
         self.assertIn("fictional-rated-model: rated", rendered)
         trigger_lines = rendered.split("section feedback", 1)[0].splitlines()
         fired = sum(": fired —" in line for line in trigger_lines)
@@ -688,7 +693,8 @@ triggers:
         self.assertLess(rendered.index("section feedback"), rendered.index("section guardrail"))
         self.assertIn("fictional-pattern-a: rated — 2 trips, 1 rated down", rendered)
         self.assertIn("fictional-chat-a: rated — message fictional-message-a", rendered)
-        self.assertTrue(rendered.rstrip().endswith("proposals: 0 fired, 3 sections, 1 skipped"))
+        self.assertIn("section challenger (product): skipped — ", rendered)
+        self.assertTrue(rendered.rstrip().endswith("proposals: 0 fired, 4 sections, 2 skipped"))
         self.assertEqual(fake.calls, 1)
         self.assertEqual(len(host.calls), 1)
         self.assertIn("FROM guardrail_trips", host.calls[0][1] or "")

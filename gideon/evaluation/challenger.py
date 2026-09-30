@@ -21,7 +21,7 @@ _FIX: Final[str] = (
 SCHEMA_VERSION: Final[int] = 1
 _ROOT_KEYS: Final = ("version", "challenger")
 _ENTRY_KEYS: Final = ("name", "subject", "release", "challenger", "set")
-_NAME_PATTERN: Final = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+NAME_PATTERN: Final = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _SET_PATTERN: Final = re.compile(r"^([0-9]{4}-[0-9]{2}-[0-9]{2}) (\S+)$")
 
 OVERRIDE_KEY: Final[str] = "challenger"
@@ -242,7 +242,7 @@ def validate_challenger(document: Mapping[str, object]) -> list[ChallengerFindin
     entry = cast(Mapping[str, object], value)
     _unknown_keys(entry, _ENTRY_KEYS, "challenger", findings)
     name = _required_string(entry, "name", findings)
-    if name is not None and _NAME_PATTERN.fullmatch(name) is None:
+    if name is not None and NAME_PATTERN.fullmatch(name) is None:
         findings.append(_finding("challenger.name", "expected lowercase letters, digits, and hyphens"))
 
     subject_name = _required_string(entry, "subject", findings)

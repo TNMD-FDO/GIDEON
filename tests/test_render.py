@@ -949,36 +949,49 @@ class Core(unittest.TestCase):
     def test_nightly_units_are_zoned_bounded_and_carry_no_secrets(self) -> None:
         self.assertEqual(systemd.NIGHTLY_CALENDAR, "*-*-* 21:00:00")
         for site_path in (EXAMPLE, SECOND):
-            rendered_inputs = inputs(site_path)
-            rendered = render_all(rendered_inputs)
-            with self.subTest(site=site_path):
-                service = rendered.by_path["systemd/gideon-eval-nightly.service"].content
-                timer = rendered.by_path["systemd/gideon-eval-nightly.timer"].content
-                exec_lines = [line for line in service.splitlines() if line.startswith("ExecStart=")]
-                self.assertEqual(
-                    exec_lines,
-                    [
-                        "ExecStart=-/usr/bin/python3 -m gideon eval run --slice general-smoke --kind nightly",
-                        "ExecStart=/usr/bin/python3 -m gideon eval run --slice guardrails --kind nightly",
-                    ],
-                )
-                self.assertEqual(
-                    [line.split(" --slice ", 1)[1].split(" ", 1)[0] for line in exec_lines],
-                    list(systemd.NIGHTLY_SUITES),
-                )
-                self.assertIn(
-                    f"TimeoutStartSec={systemd.NIGHTLY_TIMEOUT_START_SECONDS}", service
-                )
-                self.assertNotIn("--force", service)
-                self.assertNotIn("password", service.lower())
-                self.assertNotIn(str(secrets.current_directory()), service)
-                for value in rendered_inputs.secrets.values():
-                    self.assertNotIn(value, service)
-                self.assertIn(
-                    f"OnCalendar={systemd.NIGHTLY_CALENDAR} {rendered_inputs.site.office.timezone}",
-                    timer,
-                )
-                self.assertIn("Persistent=false", timer)
+            for build_box in (False, True):
+                with self.subTest(site=site_path, build_box=build_box):
+                    rendered_inputs = inputs(site_path, build_box=build_box)
+                    rendered = render_all(rendered_inputs)
+                    service = rendered.by_path["systemd/gideon-eval-nightly.service"].content
+                    timer = rendered.by_path["systemd/gideon-eval-nightly.timer"].content
+                    exec_lines = [line for line in service.splitlines() if line.startswith("ExecStart=")]
+                    self.assertEqual(
+                        exec_lines,
+                        [
+                            "ExecStart=-/usr/bin/python3 -m gideon eval run --slice general-smoke --kind nightly",
+                            "ExecStart=/usr/bin/python3 -m gideon eval run --slice guardrails --kind nightly",
+                        ]
+                        + (
+                            [
+                                "ExecStart=-/usr/bin/python3 -m gideon "
+                                f"{systemd.NIGHTLY_CHALLENGER_COMMAND}"
+                            ]
+                            if build_box
+                            else []
+                        ),
+                    )
+                    self.assertEqual(
+                        [
+                            line.split(" --slice ", 1)[1].split(" ", 1)[0]
+                            for line in exec_lines
+                            if " --slice " in line
+                        ],
+                        list(systemd.NIGHTLY_SUITES),
+                    )
+                    self.assertIn(
+                        f"TimeoutStartSec={systemd.NIGHTLY_TIMEOUT_START_SECONDS}", service
+                    )
+                    self.assertNotIn("--force", service)
+                    self.assertNotIn("password", service.lower())
+                    self.assertNotIn(str(secrets.current_directory()), service)
+                    for value in rendered_inputs.secrets.values():
+                        self.assertNotIn(value, service)
+                    self.assertIn(
+                        f"OnCalendar={systemd.NIGHTLY_CALENDAR} {rendered_inputs.site.office.timezone}",
+                        timer,
+                    )
+                    self.assertIn("Persistent=false", timer)
 
     def test_proposals_tally_units_run_daily_on_every_host_kind(self) -> None:
         self.assertEqual(systemd.PROPOSALS_TALLY_CALENDAR, "*-*-* 07:00:00")

@@ -9,6 +9,7 @@ Type=oneshot
 WorkingDirectory=/opt/gideon
 ExecStart=-/usr/bin/python3 -m gideon eval run --slice general-smoke --kind nightly
 ExecStart=/usr/bin/python3 -m gideon eval run --slice guardrails --kind nightly
+ExecStart=-/usr/bin/python3 -m gideon eval run --challenger --stack ci --kind nightly
 TimeoutStartSec=36000
 StandardOutput=journal
 StandardError=journal

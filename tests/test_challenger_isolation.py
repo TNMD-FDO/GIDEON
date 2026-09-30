@@ -47,7 +47,7 @@ class NoChallengerRead(ChallengerHost):
 
 
 class Boundary(unittest.TestCase):
-    def test_only_command_imports_loader(self) -> None:
+    def test_only_command_and_section_import_loader(self) -> None:
         importers: set[str] = set()
         for path in _sources():
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -69,7 +69,7 @@ class Boundary(unittest.TestCase):
                     continue
                 if uses:
                     importers.add(path.relative_to(ROOT).as_posix())
-        self.assertEqual(importers, {"gideon/evaluation/command.py"})
+        self.assertEqual(importers, {"gideon/evaluation/command.py", "gideon/improvement/pairs.py"})
 
     def test_only_loader_names_the_committed_path(self) -> None:
         named = {
