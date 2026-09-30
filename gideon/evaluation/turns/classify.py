@@ -302,34 +302,24 @@ def whole_judge(guardrail: Any, user_content: str) -> Callable[[str], str | None
     return judge
 
 
-def _replacement_prefix(guardrail: Any, text: str) -> str | None:
-    """Return the text before a refusal suffix, or ``None`` when there is none."""
-
-    normalised = _normalise_whitespace(text)
-    refusals = tuple(
-        _normalise_whitespace(str(refusal)) for refusal in guardrail.REFUSALS
-    )
-    if normalised in refusals:
-        return ""
-    separator = _normalise_whitespace(str(guardrail.REFUSAL_SEPARATOR)) or " "
-    for refusal in refusals:
-        suffix = f"{separator}{refusal}"
-        if normalised.endswith(suffix):
-            return normalised[: -len(suffix)]
-    return None
-
-
 def _released_prefix(guardrail: Any, text: str) -> str | None:
-    """Return the text sent before a trailing refusal, preserving its spacing."""
+    """Return the text before a trailing separator and refusal, or ``None``.
+
+    One cut for a stored content, a stream's joined deltas, and a painted
+    answer: the suffix's whitespace is matched loosely, the prefix is the text's
+    own characters, line breaks kept. A refusal alone is decided before any
+    suffix, so a refusal's place in ``REFUSALS`` never moves a cut.
+    """
 
     separator = _normalise_whitespace(str(guardrail.REFUSAL_SEPARATOR)) or " "
     separator_pattern = re.escape(separator).replace(r"\ ", r"\s+")
-    for refusal in guardrail.REFUSALS:
-        refusal_pattern = re.escape(_normalise_whitespace(str(refusal))).replace(
-            r"\ ", r"\s+"
-        )
-        if re.fullmatch(rf"\s*{refusal_pattern}\s*", text):
-            return ""
+    refusal_patterns = tuple(
+        re.escape(_normalise_whitespace(str(refusal))).replace(r"\ ", r"\s+")
+        for refusal in guardrail.REFUSALS
+    )
+    if any(re.fullmatch(rf"\s*{pattern}\s*", text) for pattern in refusal_patterns):
+        return ""
+    for refusal_pattern in refusal_patterns:
         suffix = re.search(rf"{separator_pattern}{refusal_pattern}\s*$", text)
         if suffix is not None:
             return text[: suffix.start()]
@@ -337,10 +327,10 @@ def _released_prefix(guardrail: Any, text: str) -> str | None:
 
 
 def refusal_test(guardrail: Any) -> Callable[[str], bool]:
-    """Whether an answer as painted ends in the guardrail's refusal, whitespace aside."""
+    """Whether a painted answer ends in the refusal, suffix whitespace aside."""
 
     def is_refusal(answer: str) -> bool:
-        return _replacement_prefix(guardrail, answer) is not None
+        return _released_prefix(guardrail, answer) is not None
 
     return is_refusal
 
@@ -725,12 +715,11 @@ def classify(
     content = assistant.get("content")
     content_length = own_length(guardrail, content) if isinstance(content, str) else None
     replacement = (
-        _replacement_prefix(guardrail, content) if isinstance(content, str) else None
+        _released_prefix(guardrail, content) if isinstance(content, str) else None
     )
     if replacement is not None:
-        # A stored replacement is the released prefix before the module's
-        # separator and refusal; judge that prefix for a leak before classifying
-        # the stored shape, including when the prefix is empty.
+        # Judge the prefix as stored before classifying the replacement,
+        # including when the prefix is empty.
         prefix_message = {
             **assistant,
             "content": replacement,

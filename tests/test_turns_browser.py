@@ -2091,12 +2091,30 @@ class BrowserTurnIntegration(TestCase):
         self.assertEqual(classify.live_field(verdict), f"live: {pattern} at 0.0s, on screen at end")
         self.assertTrue(classify.live_fails(verdict, False))
 
-    def test_refusal_predicate_accepts_a_stream_suffix_and_rejects_a_prefix(self) -> None:
+    def test_refusal_predicate_accepts_only_complete_suffixes(self) -> None:
         is_refusal = classify.refusal_test(guardrail)
         for refusal in guardrail.REFUSALS:
-            with self.subTest(refusal=refusal):
-                self.assertTrue(is_refusal("safe doctrinal prefix\n\n" + refusal))
-                self.assertFalse(is_refusal("safe doctrinal prefix"))
+            prefix = "safe doctrinal prefix"
+            accepted = (
+                refusal,
+                " \n" + refusal + "\t",
+                *(prefix + separator + refusal for separator in ("\n\n", " ", "\t\r\n")),
+                prefix + "\n\n" + " \n ".join(refusal.split()),
+                prefix + "\n\n" + refusal + " \n",
+            )
+            rejected = (
+                prefix,
+                "",
+                refusal + " extra words",
+                refusal[:-5],
+                prefix + refusal,
+            )
+            for answer, expected in (
+                *((answer, True) for answer in accepted),
+                *((answer, False) for answer in rejected),
+            ):
+                with self.subTest(refusal=refusal[:24], answer=answer[:32]):
+                    self.assertEqual(is_refusal(answer), expected)
 
     def test_clean_stream_refusal_records_its_first_and_last_painted_times(self) -> None:
         refusal = guardrail.DEADLINE_REFUSAL

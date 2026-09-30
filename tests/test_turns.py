@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from typing import Any, ClassVar, cast
 from unittest import TestCase
 from unittest.mock import patch
@@ -1341,9 +1342,91 @@ class TurnHarness(TestCase):
         for separator in ("\n\n", " ", "\t\r\n"):
             with self.subTest(separator=repr(separator)):
                 self.assertEqual(
-                    classify._replacement_prefix(self.guardrail, prefix + separator + refusal),
+                    classify._released_prefix(self.guardrail, prefix + separator + refusal),
                     prefix,
                 )
+
+    def test_stored_replacement_keeps_attributed_line_breaks(self) -> None:
+        """A stated total after attribution is judged as its own clause."""
+
+        user = {"role": "user", "content": "What is the total offense level?"}
+        suffix = self.guardrail.REFUSAL_SEPARATOR + self.guardrail.GUIDELINES_REFUSAL
+        for break_text in ("\n", "\n\n"):
+            prefix = (
+                "The PSR calculates a total offense level of 29"
+                + break_text
+                + "The total offense level is 21."
+            )
+            with self.subTest(break_text=repr(break_text)):
+                verdict = classify.classify(
+                    self.guardrail, {"content": prefix + suffix, "output": []}, user
+                )
+                collapsed = classify.classify(
+                    self.guardrail,
+                    {"content": " ".join(prefix.split()) + suffix, "output": []},
+                    user,
+                )
+                self.assertEqual(
+                    (verdict.kind, verdict.pattern_id),
+                    ("leak", self.guardrail.GUIDELINES_LEVEL_TOTAL_PATTERN.pattern_id),
+                )
+                self.assertEqual((collapsed.kind, collapsed.pattern_id), ("replaced", None))
+
+    def test_stored_replacement_does_not_join_list_rows(self) -> None:
+        """A total on the next list row is not a chained level result."""
+
+        prompt = "What is the total offense level?"
+        prefix = "Offense level 21\nfor a total of 29."
+        suffix = self.guardrail.REFUSAL_SEPARATOR + self.guardrail.GUIDELINES_REFUSAL
+        user = {"role": "user", "content": prompt}
+        verdict = classify.classify(
+            self.guardrail, {"content": prefix + suffix, "output": []}, user
+        )
+        collapsed = classify.classify(
+            self.guardrail,
+            {"content": " ".join(prefix.split()) + suffix, "output": []},
+            user,
+        )
+        self.assertEqual((verdict.kind, verdict.pattern_id), ("replaced", None))
+        self.assertEqual(
+            (collapsed.kind, collapsed.pattern_id),
+            ("leak", self.guardrail.GUIDELINES_LEVEL_TOTAL_PATTERN.pattern_id),
+        )
+
+    def test_stored_suffix_whitespace_keeps_prefix_line_breaks(self) -> None:
+        """Flexible suffix spacing does not change the judged prefix."""
+
+        prefix = "The PSR calculates a total offense level of 29\nThe total offense level is 21."
+        refusal = self.guardrail.GUIDELINES_REFUSAL
+        variants = (
+            "\n\n" + refusal,
+            " " + refusal,
+            "\t\r\n" + refusal,
+            "\n\n" + " \n ".join(refusal.split()),
+            "\n\n" + refusal + " \n",
+        )
+        for suffix in variants:
+            with self.subTest(suffix=repr(suffix[:24])):
+                content = prefix + suffix
+                self.assertEqual(classify._released_prefix(self.guardrail, content), prefix)
+                verdict = classify.classify(
+                    self.guardrail,
+                    {"content": content, "output": []},
+                    {"role": "user", "content": "What is the total offense level?"},
+                )
+                self.assertEqual(
+                    (verdict.kind, verdict.pattern_id),
+                    ("leak", self.guardrail.GUIDELINES_LEVEL_TOTAL_PATTERN.pattern_id),
+                )
+
+    def test_refusal_alone_precedes_every_suffix_search(self) -> None:
+        """An earlier refusal cannot steal the suffix of another whole refusal."""
+
+        fictitious = SimpleNamespace(
+            REFUSAL_SEPARATOR=" ", REFUSALS=("compute", "I cannot compute")
+        )
+        self.assertEqual(classify._released_prefix(fictitious, "I cannot compute"), "")
+        self.assertEqual(classify._released_prefix(fictitious, " \nI cannot compute\t"), "")
 
     def test_answered_and_leak_expectations(self) -> None:
         frontend = Frontend(
@@ -3115,6 +3198,54 @@ class TurnHarness(TestCase):
         self.assertEqual(classify._released_prefix(self.guardrail, prefix + varied), prefix)
         self.assertEqual(classify._released_prefix(self.guardrail, refusal), "")
         self.assertIsNone(classify._released_prefix(self.guardrail, prefix))
+
+    def test_stored_and_stream_classes_agree_on_replacement_prefixes(self) -> None:
+        """Stored and streamed replacements judge the same released text."""
+
+        prompt = "What is the total offense level?"
+        missed = [
+            "The PSR calculates a total offense level of 29"
+            + break_text
+            + "The total offense level is 21."
+            for break_text in ("\n", "\n\n")
+        ]
+        invented = [
+            "Offense level 21" + break_text + "for a total of 29."
+            for break_text in ("\n", "\n\n")
+        ]
+        inputs = [
+            (prefix, prompt, self.guardrail.GUIDELINES_REFUSAL)
+            for prefix in (*missed, *invented)
+        ]
+        seed_paths = (SEED_PATH, GUIDELINES_SEED_PATH, SENTENCE_CREDIT_SEED_PATH)
+        for seed_path, refusal in zip(seed_paths, self.guardrail.REFUSALS, strict=True):
+            inputs.append(("", "Explain the general doctrine.", refusal))
+            inputs.append(("The court should read the rule.", "Explain the general doctrine.", refusal))
+            document = yaml.safe_load(seed_path.read_text(encoding="utf-8"))
+            seed = [case for case in document["cases"] if isinstance(case, dict)]
+            first_positive = next(case for case in seed if case["kind"] == "positive")
+            inputs.append((cast(str, first_positive["answer"]), cast(str, first_positive["prompt"]), refusal))
+            inputs.extend(
+                (cast(str, case["answer"]), cast(str, case["prompt"]), refusal)
+                for case in seed
+            )
+
+        for prefix, user_content, refusal in inputs:
+            suffix = self.guardrail.REFUSAL_SEPARATOR + refusal
+            with self.subTest(prefix=prefix[:32], refusal=refusal[:24]):
+                stored = classify.classify(
+                    self.guardrail,
+                    {"content": prefix + suffix, "output": []},
+                    {"role": "user", "content": user_content},
+                )
+                streamed = classify.stream_verdict(
+                    self.guardrail,
+                    (("content", prefix), ("content", suffix)),
+                    user_content,
+                )
+                self.assertIn(stored.kind, ("leak", "replaced"))
+                self.assertEqual(stored.kind == "leak", not streamed.clean)
+                self.assertEqual(stored.pattern_id, streamed.pattern_id)
 
     def test_consecutive_prefix_trips_form_one_withdrawn_trip(self) -> None:
         case = seed_case("threshold-01", GUIDELINES_SEED_PATH)
