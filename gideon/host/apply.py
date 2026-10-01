@@ -900,6 +900,16 @@ def _applied_units(context: _ApplyContext, suffix: str) -> set[str]:
     }
 
 
+def _never_loaded(io: Host, unit: str) -> bool:
+    """Whether systemd knows no unit of this name, so it is already disabled."""
+
+    try:
+        result = io.run(["systemctl", "show", "--property=LoadState", "--value", unit])
+    except OSError:
+        return False
+    return result.returncode == 0 and result.stdout.strip() == "not-found"
+
+
 def _timers_stage(
     io: Host, rendered_dir: PathLike, context: _ApplyContext
 ) -> StageResult:
@@ -908,8 +918,10 @@ def _timers_stage(
     A timer refuses to start unless the service it triggers is a loaded unit,
     so services are linked (``systemctl link`` is idempotent) before any timer
     is enabled; units the previous apply rendered and this one does not are
-    disabled first.  An absolute path to ``enable`` links and enables in one
-    idempotent call.
+    disabled first.  A stale unit systemd has never loaded here — an applied
+    record restored from a host of another kind names units this host never
+    linked — counts as disabled; any other disable failure refuses.  An
+    absolute path to ``enable`` links and enables in one idempotent call.
     """
 
     service_paths = _rendered_units(context, ".service")
@@ -937,7 +949,7 @@ def _timers_stage(
         failure = run_systemctl(
             ["systemctl", "disable", "--now", unit], unit, "disable", f"journalctl -u {unit}"
         )
-        if failure is not None:
+        if failure is not None and not _never_loaded(io, unit):
             return failure
     rendered_root = Path(rendered_dir)
     for relative_path in service_paths:

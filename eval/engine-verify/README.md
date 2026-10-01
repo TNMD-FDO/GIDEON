@@ -23,9 +23,10 @@ The smoke case is a short open prompt streamed with a bounded answer; its rows
 report the single-stream rate and the guardrail lags it implies, never a
 threshold.
 
-The work lands in sequence. Slice 2 adds the eight `research-qa` cases with
-frozen evidence and the harness that grades them. The `frontend` section holds
-a non-empty `positives` list and one `trip` case, each with an id and prompt. A
+The work lands in sequence. Slice 4 adds the eight `research-qa` cases with
+frozen evidence carried by `/turn`'s `evidence:` field and the harness that
+grades them. The `frontend` section holds a non-empty `positives` list and one
+`trip` case, each with an id and prompt. A
 positive must be finished, store no matched span, and avoid an outlet-only
 replacement; a calendar date the prompt did not carry, in the answer alone, is
 recorded in the kept event and never fails the gate, since

@@ -1368,6 +1368,43 @@ class NewStages(unittest.TestCase):
         code, out, _ = apply(host)
         self.assertIn("apply-manifest: ok — frontend state matches the manifest", out)
 
+    def _restored_onto_a_no_gpu_host(self, disable_stderr: str, load_state: str) -> ApplyHost:
+        # A set restored from a GPU host carries an applied record naming the
+        # nightly's units, which this host's render omits and never linked.
+        host = ApplyHost(healthy_commands(), base_files())
+        code, out, _ = apply(host)
+        self.assertEqual(code, 0, out)
+        host.files[os.fspath(nogpu.NO_GPU_PATH)] = "declared\n"
+        host.commands[PS] = done(
+            PS, stdout=running_rows(include_dcgm=False, include_engine=False, include_api=False)
+        )
+        for unit in ("gideon-eval-nightly.timer", "gideon-eval-nightly.service"):
+            disable = ("systemctl", "disable", "--now", unit)
+            host.commands[disable] = done(disable, 1, stderr=disable_stderr.format(unit=unit))
+            show = ("systemctl", "show", "--property=LoadState", "--value", unit)
+            host.commands[show] = done(show, stdout=f"{load_state}\n")
+        host.calls.clear()
+        host.writes.clear()
+        return host
+
+    def test_stale_unit_this_host_never_loaded_counts_as_disabled(self) -> None:
+        host = self._restored_onto_a_no_gpu_host(
+            "Failed to disable unit: Unit {unit} does not exist\n", "not-found"
+        )
+        code, out, _ = apply(host)
+        self.assertEqual(code, 0, out)
+        self.assertIn(
+            ("systemctl", "show", "--property=LoadState", "--value", "gideon-eval-nightly.timer"),
+            argv_calls(host),
+        )
+
+    def test_stale_unit_disable_failure_on_a_loaded_unit_still_refuses(self) -> None:
+        host = self._restored_onto_a_no_gpu_host("Failed to disable unit: Access denied\n", "loaded")
+        code, out, _ = apply(host)
+        self.assertEqual(code, 1)
+        self.assertIn("timers: refuse — systemctl disable failed for gideon-eval-nightly.timer", out)
+        self.assertNotIn(f"{RENDERED}/applied.yaml", host.writes)
+
     def test_timer_that_will_not_activate_refuses_with_journalctl(self) -> None:
         commands = healthy_commands()
         commands[SYSTEMCTL_ACTIVE] = done(SYSTEMCTL_ACTIVE, 3, stdout="inactive\n")
