@@ -199,7 +199,7 @@ def _registered_artifacts() -> tuple[Artifact, ...]:
         GrafanaPoliciesArtifact(),
         GrafanaTimeIntervalsArtifact(),
         GrafanaRulesArtifact(),
-        GrafanaOverviewArtifact,
+        GrafanaOverviewArtifact(),
         GrafanaBackupArtifact,
         GrafanaGpuArtifact,
         GrafanaEvalArtifact,

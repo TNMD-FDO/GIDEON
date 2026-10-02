@@ -10,6 +10,8 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+import yaml  # type: ignore[import-untyped]
+
 from gideon.host import alerts, audit, grafana
 from gideon.host.render.grafana import GRAFANA_ADMIN_USER
 from gideon.host.site import load_site
@@ -19,6 +21,9 @@ ROOT = Path(__file__).resolve().parent.parent
 EXAMPLE = ROOT / "config/site.example.yaml"
 RENDERED = "/etc/gideon/rendered"
 COMPOSE = (ROOT / "tests/fixtures/render/example/compose.yaml").read_text()
+PAGE_MESSAGE = yaml.safe_load(
+    (ROOT / "tests/fixtures/render/example/grafana/provisioning/alerting/contact-points.yaml").read_text()
+)["contactPoints"][0]["receivers"][0]["settings"]["message"]
 
 
 class FakeHost:
@@ -145,7 +150,7 @@ class CommandTests(unittest.TestCase):
                 "type": receiver_type,
                 "version": "1",
                 "disableResolveMessage": False,
-                "settings": {"addresses": addresses, "singleEmail": True},
+                "settings": {"addresses": addresses, "singleEmail": True, "message": PAGE_MESSAGE},
                 "secureFields": {},
             }
             for index in range(count)
@@ -166,6 +171,10 @@ class CommandTests(unittest.TestCase):
         assert fake.tested is not None
         self.assertEqual(fake.tested[0].uid, "page-email")
         self.assertEqual(fake.tested[1]["uid"], "page-email-0")
+        tested_settings = fake.tested[1]["settings"]
+        self.assertIsInstance(tested_settings, Mapping)
+        assert isinstance(tested_settings, Mapping)
+        self.assertEqual(tested_settings["message"], PAGE_MESSAGE)
         self.assertEqual(fake.tested[2], ("csa1@example.org", "csa2@example.org"))
         self.assertEqual(len(backend.rows), 1)
         detail = backend.rows[0].detail

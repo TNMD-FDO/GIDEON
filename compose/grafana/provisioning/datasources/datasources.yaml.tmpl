@@ -12,10 +12,10 @@ datasources:
     uid: gideon-rows
     access: proxy
     url: postgres:5432
-    database: gideon
     user: gideon_ro_metrics
     editable: false
     jsonData:
+      database: gideon
       sslmode: disable
     secureJsonData:
       password: "$$__file{/run/secrets/postgres_gideon_ro_metrics_password}"

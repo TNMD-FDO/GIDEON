@@ -42,15 +42,27 @@ and stays Normal, inert until the directory is recreated.
   `/etc/gideon/secrets/grafana_admin_password` (root-readable). Use it when
   the directory is what is broken. The frontend has its own break-glass
   administrator; the two are different accounts.
+- A sign-in lands on the **Overview**, Grafana's home: its first row is the
+  pages firing now and the links to the other boards and the start-here card
+  (§3).
 - Provisioned boards, rules, contact points, and the policy are **read-only in
   Grafana**: a change is a release, never a click. Silences are allowed (§5).
 
 ## 3. The boards (folder GIDEON)
 
-- **Overview** — services and probes up, `/`, `/var/lib/docker`, `/data` and
-  `/data/fast` free with the 15 % line, backup set age and push age (from the
-  rows), the last drill, GPU utilisation and memory, host load and memory,
-  container memory.
+Every board's header lists the other GIDEON boards, the Overview among them.
+Every card's (i) beside its title says what it shows, what a bad value means,
+and the runbook section to follow.
+
+- **Overview** — first, *Needs attention*: the page-class alerts firing now,
+  read from the same alert state `gideon status` prints, so an empty list
+  means a clear box; beside it, *Start here*: `gideon status`, a link to each
+  other board on this host, and the start-here card on the box and in the
+  public export. Below them: services and probes up, `/`, `/var/lib/docker`,
+  `/data` and `/data/fast` free with the 15 % line, backup set age and push
+  age (from the rows, red past the 26-hour line their pages fire at), the last
+  drill's result, GPU utilisation and memory, host load and memory, container
+  memory.
 - **Backup** — M25 (run duration, set bytes, hard-link ratio, push transferred
   vs total, verified counts) and M26 (drill duration and result) as series
   over the rows, and the last ten runs as a table — the timers' recorded runs.
@@ -74,7 +86,11 @@ disk, memory, load, filesystems, and systemd units are the host's.
 
 ## 4. What pages, and what to do
 
-Every page-class email names the rule and the fix; the rule set is a release
+Every page-class email lists each alert on one line — its status, its rule,
+its summary, and its runbook section — and ends with one line: run
+`gideon status` on the box, then follow the runbook named above. The default
+body's labels, values, and buttons are gone; a silence is made in Grafana
+(§5). The rule set is a release
 file (`compose/grafana/provisioning/alerting/rules.yaml.tmpl`). An unresolved
 condition is re-sent daily; acknowledgement follows business hours.
 `sudo python3 -m gideon status` lists the pages firing now with each rule's runbook section.

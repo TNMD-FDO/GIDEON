@@ -2,8 +2,10 @@
   "annotations": {"list": []},
   "editable": false,
   "graphTooltip": 1,
+  "links": [{"type": "dashboards", "tags": ["GIDEON"], "asDropdown": false, "title": "GIDEON boards", "includeVars": false, "keepTime": false, "targetBlank": false}],
   "panels": [
     {
+      "description": "This shows each graphics card's busy percentage, reported by the card monitor. Use should rise during work and fall at idle; a card staying busy while requests wait can mean overload. Check docs/runbooks/observability.md §4.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "fieldConfig": {"defaults": {"unit": "percent"}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
@@ -12,6 +14,7 @@
       "type": "timeseries"
     },
     {
+      "description": "This shows used and free memory on each graphics card, reported by the card monitor. Free space should remain available; very little free space can prevent the engine from serving work. Check docs/runbooks/observability.md §4.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
@@ -20,6 +23,7 @@
       "type": "timeseries"
     },
     {
+      "description": "This shows each graphics card's temperature, reported by the card monitor. A steady temperature during normal work is expected; a sustained rise can point to cooling trouble. Check docs/runbooks/observability.md §4.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "fieldConfig": {"defaults": {"unit": "celsius"}, "overrides": []},
       "gridPos": {"h": 8, "w": 8, "x": 0, "y": 8},
@@ -28,6 +32,7 @@
       "type": "timeseries"
     },
     {
+      "description": "This shows each graphics card's power use, reported by the card monitor. It normally rises with work and falls at idle; an unusual sustained value calls for a check of the engine and card. Check docs/runbooks/observability.md §4.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "fieldConfig": {"defaults": {"unit": "watt"}, "overrides": []},
       "gridPos": {"h": 8, "w": 8, "x": 8, "y": 8},
@@ -36,14 +41,17 @@
       "type": "timeseries"
     },
     {
+      "description": "This shows the graphics driver version reported by each card. It should match the tested version in this release; a mismatch raises the driver-drift page. Follow docs/runbooks/observability.md §4.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
       "gridPos": {"h": 8, "w": 8, "x": 16, "y": 8},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "none", "graphMode": "none", "textMode": "name"},
       "targets": [{"expr": "count by (DCGM_FI_DRIVER_VERSION) (DCGM_FI_DEV_GPU_UTIL)", "legendFormat": "{{DCGM_FI_DRIVER_VERSION}}", "refId": "A"}],
       "title": "Driver version",
       "type": "stat"
     },
     {
+      "description": "This shows how full the engine's memory for active requests is, from the engine's own measurements. Lower use leaves room for more requests; a level near full with waiting requests signals capacity pressure. Check docs/runbooks/observability.md §4.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "fieldConfig": {"defaults": {"min": 0, "max": 1, "unit": "percentunit"}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
@@ -52,6 +60,7 @@
       "type": "timeseries"
     },
     {
+      "description": "This shows how many requests the engine is running and how many are waiting, from the engine's own measurements. A short wait during a burst is expected; a queue that keeps growing means requests are not being served promptly. Check docs/runbooks/observability.md §4.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "fieldConfig": {"defaults": {"decimals": 0, "min": 0, "unit": "short"}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},

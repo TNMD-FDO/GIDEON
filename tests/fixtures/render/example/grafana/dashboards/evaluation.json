@@ -4,8 +4,10 @@
   },
   "editable": false,
   "graphTooltip": 1,
+  "links": [{"type": "dashboards", "tags": ["GIDEON"], "asDropdown": false, "title": "GIDEON boards", "includeVars": false, "keepTime": false, "targetBlank": false}],
   "panels": [
     {
+      "description": "This table shows the newest recorded run for each set of evaluation checks and run type, including its result and duration. A complete passing run is healthy; a failed, partial, or stale nightly run needs attention. Follow docs/runbooks/observability.md §4.",
       "datasource": {
         "type": "postgres",
         "uid": "gideon-rows"
@@ -49,6 +51,7 @@
       "type": "table"
     },
     {
+      "description": "These points show each production night's recorded evaluation result: 1 for passed, 0 for failed, and -1 for ended early. Passed is healthy; failed or early-ended runs raise pages for that set of checks. Follow docs/runbooks/observability.md §4.",
       "datasource": {
         "type": "postgres",
         "uid": "gideon-rows"
@@ -101,6 +104,7 @@
       "type": "timeseries"
     },
     {
+      "description": "This table counts missed refusals, leaked answers, errors, wrongly changed safe answers, and disagreements for each kind of nightly guardrail check. The counts come from recorded test cases. Zero missed refusals, leaks, errors, and disagreements is good; changed safe answers must stay within the shown ceiling or the run fails. Follow docs/runbooks/observability.md §4.",
       "datasource": {
         "type": "postgres",
         "uid": "gideon-rows"
@@ -131,6 +135,7 @@
       "type": "table"
     },
     {
+      "description": "This table counts harmless test questions that automated checks marked as refused, withheld, or unread, from nightly guardrail results. Low refusal counts and no unread judgments are good; rising counts may mean safe questions are being refused. Counts rising over several nights are for the developer to review; a failed nightly run follows docs/runbooks/observability.md §4.",
       "datasource": {
         "type": "postgres",
         "uid": "gideon-rows"
@@ -161,6 +166,7 @@
       "type": "table"
     },
     {
+      "description": "This compares each recorded nightly evaluation's duration with the nine-hour night. Runs below the line fit the window; longer runs risk ending early or becoming overdue. Follow docs/runbooks/observability.md §4.",
       "datasource": {
         "type": "postgres",
         "uid": "gideon-rows"
@@ -196,6 +202,7 @@
       "type": "timeseries"
     },
     {
+      "description": "This lists failed case IDs from the newest nightly run of each set of checks, from recorded results. An empty table is healthy; listed IDs show what failed in the latest run. Follow docs/runbooks/observability.md §4.",
       "datasource": {
         "type": "postgres",
         "uid": "gideon-rows"
@@ -226,6 +233,7 @@
       "type": "table"
     },
     {
+      "description": "This shows the newest daily proposal tally, including trigger states and counts, from its recorded row. A complete tally with no fired trigger needs no action; a fired trigger needs review, while an incomplete tally needs investigation. Follow docs/runbooks/observability.md §10.",
       "datasource": {
         "type": "postgres",
         "uid": "gideon-rows"

@@ -25,7 +25,12 @@ from gideon.host.render.engine import (
     ENGINE_SERVICE_NAME,
     engine_base_url,
 )
-from gideon.host.render.grafana import DASHBOARDS_MOUNT, GRAFANA_ADMIN_USER
+from gideon.host.render.grafana import (
+    DASHBOARDS_MOUNT,
+    GRAFANA_ADMIN_USER,
+    GRAFANA_SUB_PATH,
+    HOME_DASHBOARD_PATH,
+)
 from gideon.host.render.owui import (
     EVAL_IDENTITY,
     PERMISSIONS_TEMPLATE,
@@ -356,8 +361,9 @@ def grafana_environment(inputs: RenderInputs) -> Mapping[str, str]:
 
     smtp = inputs.site.alerts.smtp
     environment: dict[str, str] = {
-        "GF_SERVER_ROOT_URL": f"https://{inputs.site.hostname}/grafana/",
+        "GF_SERVER_ROOT_URL": f"https://{inputs.site.hostname}{GRAFANA_SUB_PATH}",
         "GF_SERVER_SERVE_FROM_SUB_PATH": "true",
+        "GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH": HOME_DASHBOARD_PATH,
         "GF_AUTH_LDAP_ENABLED": "true",
         "GF_AUTH_LDAP_CONFIG_FILE": "/etc/grafana/ldap.toml",
         "GF_AUTH_LDAP_ALLOW_SIGN_UP": "true",

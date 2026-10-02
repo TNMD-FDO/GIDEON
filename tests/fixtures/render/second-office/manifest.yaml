@@ -11,7 +11,7 @@ inputs:
   build_box: false
 files:
   compose.yaml:
-    sha256: "ce4c98bf5198e4f3f3046d2010c3e9fb2259494a37541095491b742870e77c75"
+    sha256: "9d1488dedf4e0867ec6113a275dad5c3155776654ccf01aa48f39bdfe619713c"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
@@ -30,7 +30,7 @@ files:
     owners:
       - "grafana"
   "grafana/provisioning/datasources/datasources.yaml":
-    sha256: "7855cc9ec1b9cc6bd185998472e31aa8c22bcf4a342b5afa773260de6643bf3b"
+    sha256: "ad19505c716c1ea8a30c2db5dbb72721767c82a83d11f2d3aec9a2c9e8a9210b"
     mode: "0644"
     owners:
       - "grafana"
@@ -40,7 +40,7 @@ files:
     owners:
       - "grafana"
   "grafana/provisioning/alerting/contact-points.yaml":
-    sha256: "7d83a844b5317313f2abd8f9247769f403da12ccd79f58e2d37af7f70a21499d"
+    sha256: "8a32f700f4f6306f281ed3598fd8e8fd25b5d3d9a27782151884cefc8938a953"
     mode: "0644"
     owners:
       - "grafana"
@@ -60,22 +60,22 @@ files:
     owners:
       - "grafana"
   "grafana/dashboards/overview.json":
-    sha256: "41efae11138354b110e48788743ed7af7cb149415f32716e2d9bcbb13882b0e8"
+    sha256: "4ebf1b9d7fd2e1359012e39dd78f0867c47d441f37c5018d26968667509d14d8"
     mode: "0644"
     owners:
       - "grafana"
   "grafana/dashboards/backup.json":
-    sha256: "2781357cf95ee5b1be07c1bda5783810372ea3014f263f69b08a858094660f7a"
+    sha256: "fd5a0e6b62364d5b505f0339cefb7457fe665062b9afa6e8a2993651d23599ae"
     mode: "0644"
     owners:
       - "grafana"
   "grafana/dashboards/gpu.json":
-    sha256: "ffef85f3b9e16bf1f1f39fd20977c05b5a7bcfb8d669eec8a666d7dbbeca792d"
+    sha256: "e3cabd41af2cb1a43e391024b455f58cc713efd6705826f274f6642a99df9b67"
     mode: "0644"
     owners:
       - "grafana"
   "grafana/dashboards/evaluation.json":
-    sha256: "aebedbfe48b5ff89d90682f8243118162e96b74a586f1eed349462bcc01e1f81"
+    sha256: "1fa248617aebbe7902f6998e310fdad893492c4ecbe58aceb94f51657a5ad071"
     mode: "0644"
     owners:
       - "grafana"
@@ -150,7 +150,7 @@ services:
   caddy: "6ab86c4b4080e9f36a8a33ac2c17068802e1161844d10a4474b8285c69c1650f"
   prometheus: "7a73ab08985ed9765b04f35b0e78d36befc83b80e562755d063bef6565a7b96b"
   node-exporter: "a581b1f8a717fdaab3b3e0ffa46114516da01f2c51c85838380c168d506632df"
-  grafana: "52fa41c180c0104195fc8ce1f53bf9316bd6b09571095f953e9c5187988e0c04"
+  grafana: "203c0b5cdde861f04b3a73829ac8fb6ad43516eb62e3df5f9b3fff1ca96f161f"
   postgres: "28166dcbe7645857c7e325986bbe54091782536983eccc65c65eee3d639d817b"
   open-webui: "17ad23ba708f21fee33fce40ecf6c7e1abb875428164b540e3e4df15f1f220cb"
   gideon-generator: "7e6fb8478dc880dc237408c62456aa742b2612de5c2bb1e2882ad65d8eaf800b"

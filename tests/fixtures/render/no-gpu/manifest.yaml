@@ -11,7 +11,7 @@ inputs:
   build_box: false
 files:
   compose.yaml:
-    sha256: "950563b6baa48e7255132d0c114feea90c41c790ab697a1de70021dfc78d28ea"
+    sha256: "0fd535681a45304619767744e2fa0d31d64ab80e5262859912235b114f7469a0"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
@@ -30,7 +30,7 @@ files:
     owners:
       - "grafana"
   "grafana/provisioning/datasources/datasources.yaml":
-    sha256: "7855cc9ec1b9cc6bd185998472e31aa8c22bcf4a342b5afa773260de6643bf3b"
+    sha256: "ad19505c716c1ea8a30c2db5dbb72721767c82a83d11f2d3aec9a2c9e8a9210b"
     mode: "0644"
     owners:
       - "grafana"
@@ -40,7 +40,7 @@ files:
     owners:
       - "grafana"
   "grafana/provisioning/alerting/contact-points.yaml":
-    sha256: "1901ccb51c48669b3dec5296c179b5e1005373be4ee3013c7839841303afae7d"
+    sha256: "420fb7cb390ca0da455904f3b99c995b54a7ec3ef734926e75b26958331ed681"
     mode: "0644"
     owners:
       - "grafana"
@@ -60,12 +60,12 @@ files:
     owners:
       - "grafana"
   "grafana/dashboards/overview.json":
-    sha256: "41efae11138354b110e48788743ed7af7cb149415f32716e2d9bcbb13882b0e8"
+    sha256: "234a0f11aced46e884d7d29d250f24308cf9788cd1b20b0e26058ea5755b0c90"
     mode: "0644"
     owners:
       - "grafana"
   "grafana/dashboards/backup.json":
-    sha256: "2781357cf95ee5b1be07c1bda5783810372ea3014f263f69b08a858094660f7a"
+    sha256: "fd5a0e6b62364d5b505f0339cefb7457fe665062b9afa6e8a2993651d23599ae"
     mode: "0644"
     owners:
       - "grafana"
@@ -147,7 +147,7 @@ services:
   caddy: "86b607a02fc284aad98149418e2c5dca70fb57282377143a35ceb8ad09ae3cc8"
   prometheus: "1590c12e98d56b195818d759cbaf4614e8b9d768816bca9efbfae27a7ae0f4bd"
   node-exporter: "8612faaf00b45f47987af313bf79e1df2336243ee6bc9f6eeb2bcaf6f7071e2e"
-  grafana: "86e24511cbb77a0b1bec1a2a8f1355c9b7af147143937b88441071b959f3c7f3"
+  grafana: "3004ff6abe5dcf082719e4f2b04269a9671321dc4be634610c4b16a0e389bb8b"
   postgres: "c646e6eec08c7266e7eb67be874e9dc4d5193cfaeb89f7125f67156bb5924f87"
   open-webui: "c21888a58ecb53cccbe5f06500250402347254f194fc9824828c42f6af51bf71"
   searxng: "790f3d23c5a48d8b2e3c02d12c6615884bb4073095bdf7faa51ccee49aa51c2c"

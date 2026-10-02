@@ -21,12 +21,17 @@ from gideon.host.render.api import API_JOB_NAME
 from gideon.host.render.engine import ENGINE_JOB_NAME
 from gideon.host.render.facts import HostFacts
 from gideon.host.render.grafana import (
+    BACKUP_TEMPLATE,
     DASHBOARDS_MOUNT,
     DATASOURCES_TEMPLATE,
     DRILL_MAX_GAP_DAYS,
     EVAL_TEMPLATE,
+    FRONT_DOOR_BOARDS,
+    GRAFANA_SUB_PATH,
     NIGHTLY_OVERDUE_SECONDS,
     OVERVIEW_TEMPLATE,
+    PUBLIC_REPOSITORY_URL,
+    START_HERE_CARD,
     GrafanaContactPointsArtifact,
     GrafanaDashboardsProviderArtifact,
     GrafanaDatasourcesArtifact,
@@ -41,7 +46,9 @@ from gideon.host.render.grafana import (
 from gideon.host.render.searxng import search_enabled
 from gideon.host.render.systemd import NIGHTLY_CALENDAR, NIGHTLY_SUITES
 from gideon.host.site import load_site
+from gideon.host.steps.command import INSTALL_HOME
 from gideon.improvement import tally
+from gideon.status import attention
 
 ROOT = Path(__file__).resolve().parent.parent
 EXAMPLE = ROOT / "config/site.example.yaml"
@@ -143,6 +150,11 @@ class Provisioning(unittest.TestCase):
         self.assertTrue(all(item["editable"] is False for item in datasources))
         self.assertEqual(datasources[0]["url"], "http://prometheus:9090")
         self.assertEqual(datasources[1]["user"], "gideon_ro_metrics")
+        # The browser's query path reads the database from jsonData alone and
+        # refuses every panel without it; only the backend falls back to the
+        # top-level key, so the alert rules never showed the gap.
+        self.assertEqual(datasources[1]["jsonData"]["database"], "gideon")
+        self.assertNotIn("database", datasources[1])
         self.assertEqual(
             datasources[1]["secureJsonData"]["password"],
             "$__file{/run/secrets/postgres_gideon_ro_metrics_password}",
@@ -174,9 +186,9 @@ def _datasource_uids(value: Any) -> set[str]:
 
 
 class Overview(unittest.TestCase):
-    def test_overview_is_verbatim_grafana_13_content_with_declared_datasources(self) -> None:
-        text = GrafanaOverviewArtifact.emit(inputs())
-        self.assertEqual(text, inputs().templates[OVERVIEW_TEMPLATE])
+    def test_rendered_overview_has_declared_datasources_and_literal_dollars(self) -> None:
+        site_inputs = inputs()
+        text = GrafanaOverviewArtifact().emit(site_inputs)
         dashboard = json.loads(text)
         self.assertEqual(dashboard["schemaVersion"], 41)
         self.assertEqual(dashboard["uid"], "gideon-overview")
@@ -184,6 +196,8 @@ class Overview(unittest.TestCase):
         self.assertEqual(
             {panel["title"] for panel in dashboard["panels"]},
             {
+                "Needs attention",
+                "Start here",
                 "Services and probes",
                 "Filesystems free",
                 "Backup set age",
@@ -201,14 +215,101 @@ class Overview(unittest.TestCase):
         self.assertTrue(all("id" not in panel for panel in dashboard["panels"]))
         declared = {
             item["uid"]
-            for item in yaml.safe_load(inputs().templates[DATASOURCES_TEMPLATE])["datasources"]
+            for item in yaml.safe_load(site_inputs.templates[DATASOURCES_TEMPLATE])["datasources"]
         }
         self.assertTrue(_datasource_uids(dashboard) <= declared)
+        self.assertIn("$__timeFilter(at)", text)
+        self.assertIn("/ limit$/", text)
+        self.assertNotIn("$$", text)
+        json.loads((ROOT / "compose" / OVERVIEW_TEMPLATE).read_text(encoding="utf-8"))
+
+    def test_alert_list_selects_page_instances_without_the_heartbeat(self) -> None:
+        panel = json.loads(GrafanaOverviewArtifact().emit(inputs()))["panels"][0]
+        self.assertEqual(panel["type"], "alertlist")
+        self.assertEqual(panel["title"], "Needs attention")
+        self.assertEqual(panel["gridPos"], {"x": 0, "y": 0, "w": 16, "h": 8})
+        self.assertNotIn("datasource", panel)
+        options = panel["options"]
+        self.assertEqual(
+            {key: value for key, value in options.items() if key != "alertInstanceLabelFilter"},
+            {
+                "viewMode": "list",
+                "groupMode": "default",
+                "groupBy": [],
+                "maxItems": 20,
+                "sortOrder": 4,
+                "dashboardAlerts": False,
+                "alertName": "",
+                "showInstances": True,
+                "showInactiveAlerts": False,
+                "stateFilter": {
+                    "firing": True,
+                    "pending": False,
+                    "noData": True,
+                    "normal": False,
+                    "error": True,
+                    "recovering": False,
+                },
+            },
+        )
+        self.assertIn("alertInstanceLabelFilter", options)
+        label_filter = options["alertInstanceLabelFilter"]
+        self.assertTrue(label_filter.startswith("{") and label_filter.endswith("}"))
+        clauses = label_filter[1:-1].split(",")
+        self.assertEqual(len(clauses), 2)
+        matchers = []
+        for clause in clauses:
+            match = re.fullmatch(r'\s*([a-z_]+)\s*(!?=)\s*"([^"]+)"\s*', clause)
+            self.assertIsNotNone(match)
+            assert match is not None
+            matchers.append(match.groups())
+        self.assertEqual(
+            set(matchers),
+            {("class", "=", attention.PAGE_CLASS), (attention.HEARTBEAT_LABEL, "!=", "true")},
+        )
+
+    def test_start_here_links_follow_applicable_registered_boards(self) -> None:
+        registered = {
+            artifact.name
+            for artifact in ARTIFACTS
+            if artifact.relative_path.startswith("grafana/dashboards/")
+            and artifact.name != GrafanaOverviewArtifact.name
+        }
+        self.assertEqual({board.name for board in FRONT_DOOR_BOARDS}, registered)
+        for site_path, no_gpu in ((EXAMPLE, False), (SECOND, False), (EXAMPLE, True)):
+            with self.subTest(site=site_path.name, no_gpu=no_gpu):
+                site_inputs = inputs(site_path, no_gpu=no_gpu)
+                panel = json.loads(GrafanaOverviewArtifact().emit(site_inputs))["panels"][1]
+                self.assertEqual(panel["type"], "text")
+                self.assertEqual(panel["title"], "Start here")
+                self.assertEqual(panel["gridPos"], {"x": 16, "y": 0, "w": 8, "h": 8})
+                self.assertNotIn("datasource", panel)
+                self.assertEqual(panel["options"]["mode"], "markdown")
+                content = panel["options"]["content"]
+                links = re.findall(r"(?m)^- \[([^]]+)\]\(([^)]+)\)$", content)
+                expected = []
+                for board in FRONT_DOOR_BOARDS:
+                    if board.applies(site_inputs):
+                        document = json.loads((ROOT / "compose" / board.template_paths[0]).read_text(encoding="utf-8"))
+                        expected.append((document["title"], GRAFANA_SUB_PATH + "d/" + document["uid"]))
+                self.assertEqual(links, expected)
+                self.assertEqual(len(links), 1 if no_gpu else 3)
+                self.assertIn(str(INSTALL_HOME / START_HERE_CARD), content)
+                export_link = re.search(r'<a href="([^"]+)" target="_blank">([^<]+)</a>', content)
+                self.assertIsNotNone(export_link)
+                assert export_link is not None
+                self.assertEqual(
+                    export_link.group(1),
+                    PUBLIC_REPOSITORY_URL + "/blob/vfixture/" + START_HERE_CARD,
+                )
+                self.assertEqual(export_link.group(2), "in the public export at this release")
+                self.assertEqual(content.count('target="_blank"'), 1)
+                self.assertTrue(all('target=' not in line for line in content.splitlines() if line.startswith("- [")))
 
     def test_filesystem_panel_has_four_mountpoint_targets_and_shared_threshold(self) -> None:
         """The Overview filesystem panel follows the page rule."""
 
-        dashboard = json.loads(GrafanaOverviewArtifact.emit(inputs()))
+        dashboard = json.loads(GrafanaOverviewArtifact().emit(inputs()))
         panel = next(panel for panel in dashboard["panels"] if panel["title"] == "Filesystems free")
         targets = panel["targets"]
         expected_mountpoints = {"/", "/var/lib/docker", "/data", "/data/fast"}
@@ -245,8 +346,56 @@ class Overview(unittest.TestCase):
         self.assertEqual(panel["fieldConfig"]["defaults"]["unit"], "percent")
         self.assertEqual(green_step["value"], data_threshold)
 
+    def test_backup_cards_show_latest_age_and_drill_result(self) -> None:
+        site_inputs = inputs()
+        panels = {
+            panel["title"]: panel
+            for panel in json.loads(GrafanaOverviewArtifact().emit(site_inputs))["panels"]
+        }
+        rules = {
+            rule["uid"]: rule
+            for group in yaml.safe_load(GrafanaRulesArtifact().emit(site_inputs))["groups"]
+            for rule in group["rules"]
+        }
+        for title, kind, rule_uid in (
+            ("Backup set age", "backup_run", "gideon-backup-set-overdue"),
+            ("Backup push age", "backup_push", "gideon-push-overdue"),
+        ):
+            with self.subTest(panel=title):
+                panel = panels[title]
+                rule = rules[rule_uid]
+                condition = next(item for item in rule["data"] if item["refId"] == rule["condition"])
+                threshold = condition["model"]["conditions"][0]["evaluator"]["params"][0]
+                self.assertEqual(panel["type"], "stat")
+                self.assertEqual(panel["targets"][0]["format"], "table")
+                sql = panel["targets"][0]["rawSql"]
+                self.assertIn("now() - max(at)", sql)
+                self.assertIn(f"kind = '{kind}'", sql)
+                if kind == "backup_run":
+                    self.assertIn("detail->>'phase' = 'applied'", sql)
+                self.assertEqual(
+                    panel["fieldConfig"]["defaults"]["thresholds"]["steps"],
+                    [{"color": "green", "value": None}, {"color": "red", "value": threshold}],
+                )
+                self.assertEqual(panel["options"]["colorMode"], "value")
+                self.assertEqual(panel["options"]["graphMode"], "none")
+                self.assertEqual(panel["options"]["textMode"], "value")
+
+        drill = panels["Last drill result"]
+        self.assertEqual(drill["targets"][0]["format"], "table")
+        self.assertIn("detail->>'result' AS result", drill["targets"][0]["rawSql"])
+        self.assertEqual(drill["options"]["reduceOptions"]["fields"], "/^result$/")
+        self.assertEqual(drill["options"]["colorMode"], "value")
+        self.assertEqual(drill["options"]["graphMode"], "none")
+        self.assertEqual(drill["options"]["textMode"], "value")
+        mappings = drill["fieldConfig"]["defaults"]["mappings"]
+        self.assertEqual(len(mappings), 1)
+        self.assertEqual(mappings[0]["type"], "value")
+        self.assertEqual(mappings[0]["options"]["pass"]["color"], "green")
+        self.assertEqual(mappings[0]["options"]["failed"]["color"], "red")
+
     def test_container_memory_compares_working_set_with_positive_limits(self) -> None:
-        dashboard = json.loads(GrafanaOverviewArtifact.emit(inputs()))
+        dashboard = json.loads(GrafanaOverviewArtifact().emit(inputs()))
         panel = next(panel for panel in dashboard["panels"] if panel["title"] == "Container memory")
         targets = {target["refId"]: target for target in panel["targets"]}
         self.assertEqual(set(targets), {"A", "B"})
@@ -266,7 +415,7 @@ class Overview(unittest.TestCase):
         )
 
     def test_trip_panels_use_the_metrics_datasource_and_source_filters(self) -> None:
-        dashboard = json.loads(GrafanaOverviewArtifact.emit(inputs()))
+        dashboard = json.loads(GrafanaOverviewArtifact().emit(inputs()))
         panels = {panel["title"]: panel for panel in dashboard["panels"]}
         for title, source in (("Guardrail trips", "user"), ("Last eval trip", "eval")):
             with self.subTest(panel=title):
@@ -278,14 +427,15 @@ class Overview(unittest.TestCase):
         # Day buckets sit at midnight, outside the board's six-hour default
         # range after 06:00; the count panel carries its own thirty-day range.
         self.assertEqual(panels["Guardrail trips"]["timeFrom"], "30d")
+        self.assertEqual(panels["Last eval trip"]["options"]["colorMode"], "none")
 
     def test_verbatim_artifact_emits_its_template_without_expansion(self) -> None:
         artifact = VerbatimArtifact(
             name="example",
             relative_path="example.txt",
-            template_path=OVERVIEW_TEMPLATE,
+            template_path=BACKUP_TEMPLATE,
         )
-        self.assertEqual(artifact.emit(inputs()), inputs().templates[OVERVIEW_TEMPLATE])
+        self.assertEqual(artifact.emit(inputs()), inputs().templates[BACKUP_TEMPLATE])
 
 
 class Dashboards(unittest.TestCase):
@@ -304,6 +454,50 @@ class Dashboards(unittest.TestCase):
                 self.assertIsInstance(dashboard.get("uid"), str)
                 self.assertNotIn("id", dashboard)
                 self.assertTrue(_datasource_uids(dashboard) <= declared)
+
+    def test_every_dashboard_links_to_the_gideon_boards(self) -> None:
+        dashboard_dir = ROOT / "compose/grafana/dashboards"
+        paths = sorted(dashboard_dir.glob("*.json"))
+        self.assertTrue(paths)
+        expected_link = {
+            "type": "dashboards",
+            "tags": ["GIDEON"],
+            "asDropdown": False,
+            "title": "GIDEON boards",
+            "includeVars": False,
+            "keepTime": False,
+            "targetBlank": False,
+        }
+        for path in paths:
+            with self.subTest(dashboard=path.name):
+                dashboard = json.loads(path.read_text(encoding="utf-8"))
+                self.assertEqual(dashboard["links"], [expected_link])
+                self.assertIn("GIDEON", dashboard["tags"])
+
+    def test_every_panel_description_names_an_existing_runbook_section(self) -> None:
+        dashboard_dir = ROOT / "compose/grafana/dashboards"
+        paths = sorted(dashboard_dir.glob("*.json"))
+        self.assertTrue(paths)
+        for path in paths:
+            dashboard = json.loads(path.read_text(encoding="utf-8"))
+            for panel in dashboard["panels"]:
+                with self.subTest(dashboard=path.name, panel=panel["title"]):
+                    description = panel.get("description")
+                    self.assertIsInstance(description, str)
+                    assert isinstance(description, str)
+                    self.assertTrue(description.strip())
+                    references = re.findall(
+                        r"(docs/runbooks/[\w-]+\.md) §(\d+)", description
+                    )
+                    self.assertTrue(references)
+                    self.assertEqual(description.count("docs/runbooks/"), len(references))
+                    for runbook_path, section in references:
+                        runbook = ROOT / runbook_path
+                        self.assertTrue(runbook.is_file(), runbook_path)
+                        headings = re.findall(
+                            r"(?m)^## (\d+)\.", runbook.read_text(encoding="utf-8")
+                        )
+                        self.assertIn(section, headings)
 
 
 class EvalBoard(unittest.TestCase):
@@ -509,6 +703,27 @@ class Alerting(unittest.TestCase):
                     receiver["settings"]["subject"],
                     f"[GIDEON {site_inputs.site.office.short_name}] {{{{ .Status | toUpper }}}}: {{{{ .CommonLabels.alertname }}}}",
                 )
+                page_message = receiver["settings"]["message"]
+                self.assertEqual(
+                    {action.strip() for action in re.findall(r"\{\{(.*?)\}\}", page_message)},
+                    {
+                        "range .Alerts",
+                        ".Status | toUpper",
+                        ".Labels.alertname",
+                        ".Annotations.summary",
+                        "with .Annotations.runbook",
+                        ".",
+                        "end",
+                    },
+                )
+                self.assertNotIn(".Values", page_message)
+                self.assertNotIn("URL", page_message)
+                message_lines = page_message.rstrip("\n").splitlines()
+                self.assertEqual(
+                    message_lines[-1],
+                    "What to do: on the box, run gideon status; the full steps are in the runbook named above.",
+                )
+                self.assertEqual(message_lines[-2], "{{ end }}")
                 recipients = ";".join(site_inputs.site.alerts.recipients)
                 page_text = (
                     "apiVersion: 1\ncontactPoints:\n"
@@ -518,6 +733,13 @@ class Alerting(unittest.TestCase):
                     "          singleEmail: true\n"
                     f'          subject: "[GIDEON {site_inputs.site.office.short_name}] '
                     '{{ .Status | toUpper }}: {{ .CommonLabels.alertname }}"\n'
+                    "          message: |\n"
+                    "            {{ range .Alerts }}{{ .Status | toUpper }}: {{ .Labels.alertname }}: "
+                    "{{ .Annotations.summary }}{{ with .Annotations.runbook }} "
+                    "(runbook: {{ . }}){{ end }}\n"
+                    "            {{ end }}\n"
+                    "            What to do: on the box, run gideon status; "
+                    "the full steps are in the runbook named above.\n"
                 )
                 self.assertEqual(text.split("  - orgId: 1\n    name: nudge", 1)[0], page_text)
 
@@ -1032,3 +1254,5 @@ class DrillIntervalTable(unittest.TestCase):
         )
         driver_panel = next(panel for panel in dashboard["panels"] if panel["title"] == "Driver version")
         self.assertIn("DCGM_FI_DRIVER_VERSION", driver_panel["targets"][0]["expr"])
+        self.assertEqual(driver_panel["targets"][0]["legendFormat"], "{{DCGM_FI_DRIVER_VERSION}}")
+        self.assertEqual(driver_panel["options"]["textMode"], "name")

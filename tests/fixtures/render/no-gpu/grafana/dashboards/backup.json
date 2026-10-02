@@ -2,8 +2,10 @@
   "annotations": {"list": []},
   "editable": false,
   "graphTooltip": 1,
+  "links": [{"type": "dashboards", "tags": ["GIDEON"], "asDropdown": false, "title": "GIDEON boards", "includeVars": false, "keepTime": false, "targetBlank": false}],
   "panels": [
     {
+      "description": "This charts how long each completed backup run took, from its recorded run. A steady duration is normal; a sharp increase can mean the nightly backup is slowing. Read docs/runbooks/backup-restore.md §3.",
       "datasource": {"type": "postgres", "uid": "gideon-rows"},
       "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
       "gridPos": {"h": 7, "w": 8, "x": 0, "y": 0},
@@ -12,6 +14,7 @@
       "type": "timeseries"
     },
     {
+      "description": "This charts the size of files in each completed backup set, excluding the database backup repository, from the set inventory. A stable size is expected; sudden growth can consume the space kept for backups. Read docs/runbooks/backup-restore.md §3.",
       "datasource": {"type": "postgres", "uid": "gideon-rows"},
       "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []},
       "gridPos": {"h": 7, "w": 8, "x": 8, "y": 0},
@@ -20,6 +23,7 @@
       "type": "timeseries"
     },
     {
+      "description": "This shows the share of sampled files reused from the previous local backup set rather than copied again, from the backup's link check. Some reuse is expected after the first set; zero reused files with a previous sample makes the run fail. Read docs/runbooks/backup-restore.md §3.",
       "datasource": {"type": "postgres", "uid": "gideon-rows"},
       "fieldConfig": {"defaults": {"unit": "percentunit"}, "overrides": []},
       "gridPos": {"h": 7, "w": 8, "x": 16, "y": 0},
@@ -28,6 +32,7 @@
       "type": "timeseries"
     },
     {
+      "description": "This compares bytes sent off the box with the total snapshot size for each recorded push. A first push may send everything; later pushes should send under 90 percent, or the push fails. Read docs/runbooks/backup-restore.md §3.",
       "datasource": {"type": "postgres", "uid": "gideon-rows"},
       "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []},
       "gridPos": {"h": 7, "w": 12, "x": 0, "y": 7},
@@ -36,6 +41,7 @@
       "type": "timeseries"
     },
     {
+      "description": "This charts paths checked on the backup target and old target snapshots removed during each recorded push. Checked paths show the copy was verified, while zero removed snapshots is normal when none has expired; a failed check prevents a successful push row. Read docs/runbooks/backup-restore.md §3.",
       "datasource": {"type": "postgres", "uid": "gideon-rows"},
       "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
       "gridPos": {"h": 7, "w": 12, "x": 12, "y": 7},
@@ -44,6 +50,7 @@
       "type": "timeseries"
     },
     {
+      "description": "This charts how long each backup restore drill took, from its recorded run. A steady duration is expected; a sharp increase can make the next scheduled drill harder to finish. Read docs/runbooks/backup-restore.md §3.",
       "datasource": {"type": "postgres", "uid": "gideon-rows"},
       "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
       "gridPos": {"h": 7, "w": 8, "x": 0, "y": 14},
@@ -52,6 +59,7 @@
       "type": "timeseries"
     },
     {
+      "description": "This table lists recorded backup drill results, newest first. Pass means the restore checks succeeded; failed means they did not and causes a page. Follow docs/runbooks/observability.md §4.",
       "datasource": {"type": "postgres", "uid": "gideon-rows"},
       "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
       "gridPos": {"h": 7, "w": 8, "x": 8, "y": 14},
@@ -60,6 +68,7 @@
       "type": "table"
     },
     {
+      "description": "This table lists the ten newest recorded backup runs, pushes, drills, and restores with their results and sizes. Completed runs and passing drills are healthy; failures or missing expected runs need investigation. Read docs/runbooks/backup-restore.md §3.",
       "datasource": {"type": "postgres", "uid": "gideon-rows"},
       "fieldConfig": {"defaults": {}, "overrides": []},
       "gridPos": {"h": 10, "w": 24, "x": 0, "y": 21},

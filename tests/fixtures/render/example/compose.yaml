@@ -60,6 +60,7 @@ services:
     environment:
       GF_SERVER_ROOT_URL: "https://gideon.example.org/grafana/"
       GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: "/etc/grafana/dashboards/overview.json"
       GF_AUTH_LDAP_ENABLED: "true"
       GF_AUTH_LDAP_CONFIG_FILE: "/etc/grafana/ldap.toml"
       GF_AUTH_LDAP_ALLOW_SIGN_UP: "true"

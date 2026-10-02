@@ -1,6 +1,7 @@
 """Pure Grafana configuration and dashboard rendering."""
 
 import json
+from pathlib import PurePosixPath
 from typing import Final
 
 from gideon.host.ldap import bind_identity
@@ -9,16 +10,21 @@ from gideon.host.render import (
     RenderInputs,
     VerbatimArtifact,
     substitute_template,
+    template_text,
 )
 from gideon.host.render.api import API_JOB_NAME, api_enabled
 from gideon.host.render.engine import ENGINE_JOB_NAME
 from gideon.host.render.searxng import SEARXNG_JOB_NAME, search_enabled
 from gideon.host.render.systemd import NIGHTLY_SUITES
+from gideon.host.steps.command import INSTALL_HOME
 
 LDAP_TEMPLATE: Final = "grafana/ldap.toml.tmpl"
 DATASOURCES_TEMPLATE: Final = "grafana/provisioning/datasources/datasources.yaml.tmpl"
 DASHBOARDS_TEMPLATE: Final = "grafana/provisioning/dashboards/provider.yaml.tmpl"
-OVERVIEW_TEMPLATE: Final = "grafana/dashboards/overview.json"
+# The Overview's relative path in the rendered tree.
+OVERVIEW_PATH: Final = "grafana/dashboards/overview.json"
+# The source template for the Overview dashboard.
+OVERVIEW_TEMPLATE: Final = OVERVIEW_PATH
 BACKUP_TEMPLATE: Final = "grafana/dashboards/backup.json"
 GPU_TEMPLATE: Final = "grafana/dashboards/gpu.json"
 EVAL_TEMPLATE: Final = "grafana/dashboards/evaluation.json"
@@ -45,6 +51,14 @@ GRAFANA_ADMIN_USER: Final = "grafana-admin"
 # Where the container sees the rendered boards; the provisioning provider
 # names the same path.
 DASHBOARDS_MOUNT: Final = "/etc/grafana/dashboards"
+# The ingress route and Grafana root URL path.
+GRAFANA_SUB_PATH: Final = "/grafana/"
+# The Overview's home dashboard path inside the container.
+HOME_DASHBOARD_PATH: Final = DASHBOARDS_MOUNT + "/" + PurePosixPath(OVERVIEW_PATH).name
+# The start-here card's relative path under the install home.
+START_HERE_CARD: Final = "docs/runbooks/start-here.md"
+# The public export's repository URL.
+PUBLIC_REPOSITORY_URL: Final = "https://github.com/TNMD-FDO/GIDEON"
 # These are the maximum gaps permitted by the actual Saturday calendars, not
 # the nominal cadence: 1w is seven days; a 2w run on days 15–21 can miss the
 # next month's first-week Saturday by 21 days; first-week 1m Saturdays can be
@@ -266,12 +280,21 @@ class GrafanaRulesArtifact(Artifact):
         )
 
 
-GrafanaOverviewArtifact = VerbatimArtifact(
-    name="grafana-overview",
-    relative_path="grafana/dashboards/overview.json",
-    template_path=OVERVIEW_TEMPLATE,
-    owners=("grafana",),
-)
+class GrafanaOverviewArtifact(Artifact):
+    """Render the Overview dashboard with links to the boards on this host."""
+
+    name = "grafana-overview"
+    relative_path = OVERVIEW_PATH
+    owners = ("grafana",)
+    template_paths = (OVERVIEW_TEMPLATE, BACKUP_TEMPLATE, GPU_TEMPLATE, EVAL_TEMPLATE)
+
+    def emit(self, inputs: RenderInputs) -> str:
+        return substitute_template(
+            inputs,
+            OVERVIEW_TEMPLATE,
+            {"start_here": json.dumps(start_here_markdown(inputs))[1:-1]},
+        )
+
 
 GrafanaBackupArtifact = VerbatimArtifact(
     name="grafana-backup",
@@ -295,3 +318,25 @@ GrafanaEvalArtifact = VerbatimArtifact(
     owners=("grafana",),
     applies=lambda inputs: not inputs.no_gpu,
 )
+
+# The dashboard artifacts linked from the Overview, in display order.
+FRONT_DOOR_BOARDS: Final = (GrafanaBackupArtifact, GrafanaGpuArtifact, GrafanaEvalArtifact)
+
+
+def start_here_markdown(inputs: RenderInputs) -> str:
+    """Build the Overview's links to available boards and the start-here card."""
+
+    links = []
+    for board in FRONT_DOOR_BOARDS:
+        if board.applies(inputs):
+            dashboard = json.loads(template_text(inputs, board.template_paths[0]))
+            links.append(f"- [{dashboard['title']}]({GRAFANA_SUB_PATH}d/{dashboard['uid']})")
+    card_url = f"{PUBLIC_REPOSITORY_URL}/blob/v{inputs.release}/{START_HERE_CARD}"
+    paragraphs = (
+        "On the box, run `gideon status` for what needs attention now.",
+        "The other boards on this host:",
+        "\n".join(links),
+        f"The start-here card: `{INSTALL_HOME / START_HERE_CARD}` on the box, "
+        f'or <a href="{card_url}" target="_blank">in the public export at this release</a>.',
+    )
+    return "\n\n".join(paragraphs)

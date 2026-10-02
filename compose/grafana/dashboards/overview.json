@@ -5,12 +5,27 @@
   "editable": false,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
-  "links": [],
+  "links": [{"type": "dashboards", "tags": ["GIDEON"], "asDropdown": false, "title": "GIDEON boards", "includeVars": false, "keepTime": false, "targetBlank": false}],
   "panels": [
     {
+      "description": "This lists page alerts from Grafana, excluding the routine heartbeat. An empty list means no page needs attention; a listed rule needs action. Follow docs/runbooks/observability.md §4.",
+      "gridPos": {"h": 8, "w": 16, "x": 0, "y": 0},
+      "options": {"viewMode": "list", "groupMode": "default", "groupBy": [], "maxItems": 20, "sortOrder": 4, "dashboardAlerts": false, "alertName": "", "showInstances": true, "showInactiveAlerts": false, "alertInstanceLabelFilter": "{class=\"page\", heartbeat!=\"true\"}", "stateFilter": {"firing": true, "pending": false, "noData": true, "normal": false, "error": true, "recovering": false}},
+      "title": "Needs attention",
+      "type": "alertlist"
+    },
+    {
+      "description": "This points to the box status command, the boards available on this host, and the start-here card. A clear status report is good; a reported problem needs action. Begin with docs/runbooks/start-here.md §1.",
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 0},
+      "options": {"mode": "markdown", "content": "$start_here"},
+      "title": "Start here",
+      "type": "text"
+    },
+    {
+      "description": "This charts service and browser-door checks from the monitoring system. A value of 1 means a check succeeds; 0 for ten minutes can cause a page. Follow docs/runbooks/observability.md §4.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
       "options": {"legend": {"displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
       "targets": [
         {"expr": "up", "legendFormat": "{{job}} / {{instance}}", "refId": "A"},
@@ -20,12 +35,13 @@
       "type": "timeseries"
     },
     {
+      "description": "This shows the percentage of space free on four host filesystems, reported by the host monitor. At least 15 percent free is healthy on /data, /, and /var/lib/docker; below that line causes a page. Follow docs/runbooks/observability.md §4.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "fieldConfig": {
         "defaults": {"unit": "percent", "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 15}]}},
         "overrides": []
       },
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
       "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
       "targets": [
         {"expr": "100 * node_filesystem_avail_bytes{mountpoint=\"/data\"} / node_filesystem_size_bytes{mountpoint=\"/data\"}", "legendFormat": "/data", "refId": "A"},
@@ -37,72 +53,80 @@
       "type": "timeseries"
     },
     {
+      "description": "This shows time since the newest completed backup set, from its recorded run. Under 26 hours is good; an older or missing set causes a page. Follow docs/runbooks/observability.md §4.",
       "datasource": {"type": "postgres", "uid": "gideon-rows"},
-      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
-      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 8},
-      "options": {"legend": {"displayMode": "hidden", "placement": "bottom"}},
-      "targets": [{"format": "time_series", "rawSql": "SELECT at AS time, EXTRACT(EPOCH FROM (now() - at)) AS \"age_seconds\" FROM audit_log WHERE kind = 'backup_run' AND detail->>'phase' = 'applied' ORDER BY at", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "s", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 93600}]}}, "overrides": []},
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 16},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "value", "graphMode": "none", "textMode": "value"},
+      "targets": [{"format": "table", "rawSql": "SELECT EXTRACT(EPOCH FROM (now() - max(at))) AS age_seconds FROM audit_log WHERE kind = 'backup_run' AND detail->>'phase' = 'applied'", "refId": "A"}],
       "title": "Backup set age",
-      "type": "timeseries"
+      "type": "stat"
     },
     {
+      "description": "This shows time since the newest off-box backup copy, from its recorded push. Under 26 hours is good; an older or missing push causes a page. Follow docs/runbooks/observability.md §4.",
       "datasource": {"type": "postgres", "uid": "gideon-rows"},
-      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
-      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 8},
-      "options": {"legend": {"displayMode": "hidden", "placement": "bottom"}},
-      "targets": [{"format": "time_series", "rawSql": "SELECT at AS time, EXTRACT(EPOCH FROM (now() - at)) AS \"age_seconds\" FROM audit_log WHERE kind = 'backup_push' ORDER BY at", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "s", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 93600}]}}, "overrides": []},
+      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 16},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "value", "graphMode": "none", "textMode": "value"},
+      "targets": [{"format": "table", "rawSql": "SELECT EXTRACT(EPOCH FROM (now() - max(at))) AS age_seconds FROM audit_log WHERE kind = 'backup_push'", "refId": "A"}],
       "title": "Backup push age",
-      "type": "timeseries"
+      "type": "stat"
     },
     {
+      "description": "This shows the newest recorded backup drill result. Pass means the restore checks succeeded; failed means they did not and causes a page. Follow docs/runbooks/observability.md §4.",
       "datasource": {"type": "postgres", "uid": "gideon-rows"},
-      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
-      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 8},
-      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "fieldConfig": {"defaults": {"unit": "short", "mappings": [{"type": "value", "options": {"pass": {"color": "green", "index": 0}, "failed": {"color": "red", "index": 1}}}]}, "overrides": []},
+      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 16},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "/^result$$/", "values": false}, "colorMode": "value", "graphMode": "none", "textMode": "value"},
       "targets": [{"format": "table", "rawSql": "SELECT at AS time, detail->>'result' AS result FROM audit_log WHERE kind = 'backup_drill' ORDER BY at DESC LIMIT 1", "refId": "A"}],
       "title": "Last drill result",
       "type": "stat"
     },
     {
+      "description": "This shows each graphics card's busy percentage, reported by the card monitor. Use rises during work and falls at idle; sustained full use while requests wait can mean overload. Check docs/runbooks/observability.md §4.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "fieldConfig": {"defaults": {"unit": "percent"}, "overrides": []},
-      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 15},
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 23},
       "options": {"legend": {"displayMode": "list", "placement": "bottom"}},
       "targets": [{"expr": "DCGM_FI_DEV_GPU_UTIL", "legendFormat": "{{gpu}}", "refId": "A"}],
       "title": "GPU utilisation",
       "type": "timeseries"
     },
     {
+      "description": "This shows memory used on each graphics card, reported by the card monitor. Stable use with room left is good; growth near full capacity can block new work. Check docs/runbooks/observability.md §4.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []},
-      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 15},
+      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 23},
       "options": {"legend": {"displayMode": "list", "placement": "bottom"}},
       "targets": [{"expr": "DCGM_FI_DEV_FB_USED", "legendFormat": "{{gpu}}", "refId": "A"}],
       "title": "GPU memory",
       "type": "timeseries"
     },
     {
+      "description": "This shows the host's average work waiting or running over one minute, reported by the host monitor. A steady value is normal; sustained growth can mean the box is overloaded. Check docs/runbooks/observability.md §4.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
-      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 15},
+      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 23},
       "options": {"legend": {"displayMode": "list", "placement": "bottom"}},
       "targets": [{"expr": "node_load1", "legendFormat": "load 1m", "refId": "A"}],
       "title": "Host load",
       "type": "timeseries"
     },
     {
+      "description": "This shows the percentage of host memory in use, calculated from the host monitor's available and total memory. A stable value with room left is good; a value near full leaves little room for work. Check docs/runbooks/observability.md §4.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "fieldConfig": {"defaults": {"unit": "percent"}, "overrides": []},
-      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 22},
+      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 30},
       "options": {"legend": {"displayMode": "list", "placement": "bottom"}},
       "targets": [{"expr": "100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)", "legendFormat": "memory used", "refId": "A"}],
       "title": "Host memory",
       "type": "timeseries"
     },
     {
+      "description": "This compares each service container's memory in use with its configured limit, from the container monitor. Use below the limit is normal; use near the limit leaves little room and may interrupt service. Check docs/runbooks/observability.md §4.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": [{"matcher": {"id": "byRegexp", "options": "/ limit$/"}, "properties": [{"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [10, 10]}}]}]},
-      "gridPos": {"h": 7, "w": 12, "x": 12, "y": 22},
+      "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": [{"matcher": {"id": "byRegexp", "options": "/ limit$$/"}, "properties": [{"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [10, 10]}}]}]},
+      "gridPos": {"h": 7, "w": 12, "x": 12, "y": 30},
       "options": {"legend": {"displayMode": "table", "placement": "bottom"}},
       "targets": [
         {"expr": "sum by (name) (container_memory_working_set_bytes{name!=\"\"})", "legendFormat": "{{name}}", "refId": "A"},
@@ -112,20 +136,22 @@
       "type": "timeseries"
     },
     {
+      "description": "This charts daily counts of user questions caught by each guardrail rule, from recorded trips. Some trips are expected; a sudden rise can mean more questions are being refused. Review docs/runbooks/guardrail.md §3.",
       "datasource": {"type": "postgres", "uid": "gideon-rows"},
       "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars"}, "unit": "short"}, "overrides": []},
-      "gridPos": {"h": 7, "w": 16, "x": 0, "y": 29},
+      "gridPos": {"h": 7, "w": 16, "x": 0, "y": 37},
       "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
-      "targets": [{"format": "time_series", "rawSql": "SELECT date_trunc('day', at) AS time, pattern_id AS metric, count(*) AS trips FROM guardrail_trips WHERE source = 'user' AND $__timeFilter(at) GROUP BY date_trunc('day', at), pattern_id ORDER BY time", "refId": "A"}],
+      "targets": [{"format": "time_series", "rawSql": "SELECT date_trunc('day', at) AS time, pattern_id AS metric, count(*) AS trips FROM guardrail_trips WHERE source = 'user' AND $$__timeFilter(at) GROUP BY date_trunc('day', at), pattern_id ORDER BY time", "refId": "A"}],
       "timeFrom": "30d",
       "title": "Guardrail trips",
       "type": "timeseries"
     },
     {
+      "description": "This shows time since the last deliberate guardrail check, from its recorded trip. A recent value after engine verification is good; a stale value may mean the trip writer stopped. Check docs/runbooks/guardrail.md §2.",
       "datasource": {"type": "postgres", "uid": "gideon-rows"},
       "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
-      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 29},
-      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 37},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "none", "graphMode": "none", "textMode": "auto"},
       "targets": [{"format": "table", "rawSql": "SELECT EXTRACT(EPOCH FROM (now() - max(at))) AS age_seconds FROM guardrail_trips WHERE source = 'eval'", "refId": "A"}],
       "title": "Last eval trip",
       "type": "stat"
