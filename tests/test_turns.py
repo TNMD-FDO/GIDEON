@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 import yaml  # type: ignore[import-untyped]
 
 from gideon import guardrail
-from gideon.api import stamp
+from gideon.api import progress, stamp
 from gideon.evaluation.turns import access, cases, classify, figures, run, session
 from gideon.host import backuplock, models, owuiturn, secrets, site
 from gideon.host.owui import Client, OwuiError, OwuiTimeout, Response
@@ -3103,6 +3103,103 @@ class TurnHarness(TestCase):
                 "messages": [{"role": "user", "content": turn_prompt}],
             },
         )
+
+    def test_stream_reader_orders_status_before_choice_deltas(self) -> None:
+        description = progress.opening_description()
+        status = progress.build_status_event(description, False)
+        empty_choices = {progress.STATUS_EVENT_KEY: status, "choices": []}
+        self.assertEqual(
+            session.parse_stream_payload(json.dumps(empty_choices)),
+            session.StreamPayload((("status", description),)),
+        )
+
+        with_choice = {
+            progress.STATUS_EVENT_KEY: status,
+            "choices": [
+                {
+                    "delta": {
+                        "reasoning": self.guardrail.REASONING_PLACEHOLDER,
+                        "content": "A plain fictitious answer.",
+                    }
+                }
+            ],
+        }
+        self.assertEqual(
+            session.parse_stream_payload(json.dumps(with_choice)),
+            session.StreamPayload(
+                (
+                    ("status", description),
+                    ("reasoning", self.guardrail.REASONING_PLACEHOLDER),
+                    ("content", "A plain fictitious answer."),
+                )
+            ),
+        )
+
+    def test_stream_reader_refuses_unreadable_events_without_their_text(self) -> None:
+        for event in (
+            None,
+            {"type": "replace", "data": {"description": "private fixture text"}},
+            {"type": "status", "data": {"description": 5}},
+        ):
+            with self.subTest(event=event):
+                parsed = session.parse_stream_payload(
+                    json.dumps({progress.STATUS_EVENT_KEY: event, "choices": []})
+                )
+                self.assertEqual(parsed.deltas, ())
+                self.assertEqual(parsed.problem, "the stream carried an unreadable event")
+                self.assertNotIn("private fixture text", repr(parsed))
+        self.assertEqual(
+            session.parse_stream_payload(json.dumps({"choices": []})).problem,
+            "the stream carried no choices",
+        )
+        self.assertEqual(
+            session.parse_stream_payload(
+                json.dumps({progress.STATUS_EVENT_KEY: progress.build_status_event(progress.opening_description(), False)})
+            ).problem,
+            "the stream carried no choices",
+        )
+
+    def test_stream_verdict_accepts_progress_forms_and_flags_other_status_text(self) -> None:
+        forms = (
+            progress.opening_description(),
+            progress.running_description(progress.PERIOD_SECONDS),
+            progress.closing_description(progress.PERIOD_SECONDS),
+        )
+        deltas = tuple(("status", form) for form in forms)
+        prompt = "Explain a fictitious record."
+        clean = classify.stream_verdict(
+            self.guardrail,
+            (*deltas, ("reasoning", self.guardrail.REASONING_PLACEHOLDER), ("content", "A plain fictitious answer.")),
+            prompt,
+        )
+        self.assertTrue(clean.clean)
+        self.assertIsNone(clean.pattern_id)
+
+        outside = "Thinking… private fixture thought"
+        released = classify.stream_verdict(
+            self.guardrail,
+            (*deltas, ("status", outside), ("content", "A plain fictitious answer.")),
+            prompt,
+        )
+        self.assertFalse(released.clean)
+        self.assertEqual(released.pattern_id, classify.STATUS_RELEASED)
+        self.assertEqual(released.offset, sum(map(len, forms)) + len(outside))
+
+    def test_progress_statuses_leave_a_seed_stream_verdict_unchanged(self) -> None:
+        case = next(case for case in seed_cases() if case["kind"] == "control")
+        answer = cast(str, case["answer"])
+        prompt = cast(str, case["prompt"])
+        baseline = classify.stream_verdict(self.guardrail, (("content", answer),), prompt)
+        with_status = classify.stream_verdict(
+            self.guardrail,
+            (
+                ("status", progress.opening_description()),
+                ("status", progress.closing_description(progress.PERIOD_SECONDS)),
+                ("content", answer),
+            ),
+            prompt,
+        )
+        self.assertEqual(with_status, baseline)
 
     def test_stream_threshold_boundary_is_withdrawn(self) -> None:
         case = seed_case("threshold-01", GUIDELINES_SEED_PATH)

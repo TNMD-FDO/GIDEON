@@ -19,7 +19,7 @@ import yaml  # type: ignore[import-untyped]
 from test_api_stamp import cases as citation_seed_cases
 
 from gideon import guardrail
-from gideon.api import stamp
+from gideon.api import progress, stamp
 from gideon.api.judged import (
     CHUNK_OBJECT,
     StreamMechanics,
@@ -190,6 +190,38 @@ def completion_body(choices: list[object], **extra: object) -> bytes:
 
 
 class ApiJudged(unittest.TestCase):
+    def assert_status_chunk(
+        self, payload: dict[str, object] | str, description: str, done: bool
+    ) -> None:
+        self.assertIsInstance(payload, dict)
+        assert isinstance(payload, dict)
+        self.assertEqual(
+            set(payload),
+            {"id", "object", "created", "model", "choices", progress.STATUS_EVENT_KEY},
+        )
+        self.assertEqual(
+            {key: payload[key] for key in ("id", "object", "created", "model")},
+            {key: BASE_ENVELOPE[key] for key in ("id", "object", "created", "model")},
+        )
+        self.assertEqual(payload["choices"], [])
+        self.assertEqual(
+            payload[progress.STATUS_EVENT_KEY],
+            progress.build_status_event(description, done),
+        )
+        self.assertTrue(progress.is_progress_description(description))
+
+    def opened_progress(
+        self, prompt: str = "Explain a fictitious rule."
+    ) -> tuple[guardrail.StreamState, StreamMechanics, list[float]]:
+        now = [100.0]
+        state = state_for_prompt(prompt)
+        mechanics = StreamMechanics(state, clock=lambda: now[0])
+        emitted, tripped = mechanics.process(chunk({"reasoning": "private fixture thought"}))
+        self.assertFalse(tripped)
+        self.assertEqual(len(emitted), 2)
+        self.assert_status_chunk(emitted[0], progress.opening_description(), False)
+        return state, mechanics, now
+
     def run_payloads(
         self,
         prompt: str,
@@ -629,33 +661,47 @@ class ApiJudged(unittest.TestCase):
                 private_text = f"private {key} fixture text"
                 emitted, tripped = mechanics.process(chunk({key: private_text}))
                 self.assertFalse(tripped)
+                if key in ("reasoning", "reasoning_content", "thinking"):
+                    self.assert_status_chunk(
+                        emitted[0], progress.opening_description(), False
+                    )
                 for payload in emitted:
                     self.assertNotIn(private_text, json.dumps(payload))
                 emitted, tripped = mechanics.process(
                     chunk({"content": "A safe fixture answer."}, finish_reason="stop")
                 )
                 self.assertFalse(tripped)
+                if key in ("reasoning", "reasoning_content", "thinking"):
+                    self.assertIsInstance(emitted[0], dict)
+                    assert isinstance(emitted[0], dict)
+                    event = emitted[0][progress.STATUS_EVENT_KEY]
+                    description = progress.read_status_event(event)
+                    self.assertIsInstance(description, str)
+                    self.assertTrue(progress.is_progress_description(description))
+                    assert isinstance(event, dict)
+                    self.assertEqual(event["data"]["done"], True)
                 for payload in emitted:
                     self.assertFalse(contains_key(payload, key))
                     self.assertNotIn(private_text, json.dumps(payload))
 
     def test_the_turns_first_reasoning_delta_leaves_as_the_placeholder(self) -> None:
-        """The first reasoning delta leaves one fixed space, then nothing.
+        """The first reasoning delta opens the line ahead of one fixed space.
 
         The frontend opens its reasoning block when a reasoning delta arrives
         on the wire, so the turn's first one leaves as the placeholder and every
-        later one is dropped.
+        later one is dropped until a progress period is due.
         """
 
         for key in ("reasoning", "reasoning_content", "thinking"):
             with self.subTest(key=key):
                 state = state_for_prompt("Explain this visibly fictitious rule.")
-                mechanics = StreamMechanics(state)
+                mechanics = StreamMechanics(state, clock=lambda: 0.0)
 
                 emitted, tripped = mechanics.process(chunk({key: "first withheld thought"}))
                 self.assertFalse(tripped)
-                self.assertEqual(len(emitted), 1)
-                payload = emitted[0]
+                self.assertEqual(len(emitted), 2)
+                self.assert_status_chunk(emitted[0], progress.opening_description(), False)
+                payload = emitted[1]
                 assert isinstance(payload, dict)
                 choices = payload["choices"]
                 assert isinstance(choices, list)
@@ -666,13 +712,162 @@ class ApiJudged(unittest.TestCase):
                 self.assertEqual(first["delta"], {key: guardrail.REASONING_PLACEHOLDER})
                 self.assertTrue(state["placeholder_sent"])
 
-                # Every later reasoning delta is dropped whole.
+                # Before the first period, later reasoning deltas are dropped whole.
                 emitted, tripped = mechanics.process(chunk({key: "a later withheld thought"}))
                 self.assertFalse(tripped)
                 self.assertEqual(emitted, [])
                 emitted, tripped = mechanics.process(chunk({"reasoning": "another one"}))
                 self.assertFalse(tripped)
                 self.assertEqual(emitted, [])
+
+    def test_progress_ticks_once_at_each_due_delta_and_closes_before_answer(self) -> None:
+        _state, mechanics, now = self.opened_progress()
+        period = progress.PERIOD_SECONDS
+        now[0] += period - 0.1
+        self.assertEqual(mechanics.process(chunk({"reasoning": "private"})), ([], False))
+
+        now[0] += 0.1
+        emitted, tripped = mechanics.process(chunk({"reasoning": "private"}))
+        self.assertFalse(tripped)
+        self.assertEqual(len(emitted), 1)
+        self.assert_status_chunk(emitted[0], progress.running_description(period), False)
+        self.assertEqual(mechanics.process(chunk({"reasoning": "private"})), ([], False))
+
+        # A long silent interval produces one update at the next delta.
+        now[0] += period * 3 + 2.4
+        elapsed = period * 4 + 2
+        emitted, tripped = mechanics.process(chunk({"reasoning": "private"}))
+        self.assertFalse(tripped)
+        self.assertEqual(len(emitted), 1)
+        self.assert_status_chunk(emitted[0], progress.running_description(elapsed), False)
+
+        now[0] += 0.8
+        answer = "A neutral fictitious record. " * 40
+        emitted, tripped = mechanics.process(chunk({"content": answer}))
+        self.assertFalse(tripped)
+        self.assertGreater(len(emitted), 1)
+        self.assert_status_chunk(
+            emitted[0], progress.closing_description(elapsed + 1), True
+        )
+        self.assertTrue(content_from_payload(emitted[1]))
+        self.assertEqual(mechanics.process(chunk({"reasoning": "late"})), ([], False))
+        for payload in (chunk({}, finish_reason="stop"), usage_chunk(), DONE_EVENT):
+            later, tripped = mechanics.process(payload)
+            self.assertFalse(tripped)
+            for item in later:
+                if isinstance(item, dict):
+                    self.assertNotIn(progress.STATUS_EVENT_KEY, item)
+
+    def test_progress_closes_ahead_of_every_stream_ending(self) -> None:
+        error = {"error": {"message": "fixture engine error"}}
+        for ending in ("finish chunk", "engine error", "end marker", "finish", "fail closed", "malformed"):
+            with self.subTest(ending=ending):
+                _state, mechanics, now = self.opened_progress()
+                now[0] += 7.8
+                if ending == "finish chunk":
+                    emitted, tripped = mechanics.process(
+                        chunk({"reasoning": "private"}, finish_reason="stop")
+                    )
+                elif ending == "engine error":
+                    emitted, tripped = mechanics.process(error)
+                elif ending == "end marker":
+                    emitted, tripped = mechanics.process(DONE_EVENT)
+                elif ending == "finish":
+                    emitted, tripped = mechanics.finish()
+                elif ending == "fail closed":
+                    emitted, tripped = mechanics.fail_closed()
+                else:
+                    emitted, tripped = mechanics.process("not-json")
+
+                self.assert_status_chunk(
+                    emitted[0], progress.closing_description(7), True
+                )
+                self.assertEqual(tripped, ending in ("fail closed", "malformed"))
+                if ending == "finish chunk":
+                    self.assertEqual(len(emitted), 2)
+                    assert isinstance(emitted[1], dict)
+                    choices = emitted[1]["choices"]
+                    assert isinstance(choices, list)
+                    finish = choices[0]
+                    assert isinstance(finish, dict)
+                    self.assertEqual(finish["finish_reason"], "stop")
+                elif ending == "engine error":
+                    self.assertEqual(emitted[1], error)
+                elif ending == "end marker":
+                    self.assertEqual(emitted[1], DONE_EVENT)
+                elif ending == "finish":
+                    self.assertEqual(len(emitted), 1)
+                else:
+                    self.assertEqual(len(emitted), 4)
+                    self.assertEqual(emitted[-1], DONE_EVENT)
+                    self.assertTrue(content_from_payload(emitted[1]))
+
+    def test_progress_closes_before_a_tripping_first_answer_delta(self) -> None:
+        _state, mechanics, now = self.opened_progress("When is the filing deadline?")
+        now[0] += 6.2
+        emitted, tripped = mechanics.process(
+            chunk({"content": "The deadline is June 5, 2027."}, finish_reason="stop")
+        )
+        self.assertTrue(tripped)
+        self.assertEqual(len(emitted), 4)
+        self.assert_status_chunk(emitted[0], progress.closing_description(6), True)
+        self.assertTrue(content_from_payload(emitted[1]))
+        self.assertEqual(emitted[-1], DONE_EVENT)
+
+    def test_progress_failure_cannot_prevent_a_refusal(self) -> None:
+        calls = [0]
+
+        def clock() -> float:
+            calls[0] += 1
+            if calls[0] > 1:
+                raise RuntimeError("fixture clock failure")
+            return 100.0
+
+        mechanics = StreamMechanics(state_for_prompt("Explain a fictitious rule."), clock=clock)
+        opened, tripped = mechanics.process(chunk({"reasoning": "private"}))
+        self.assertFalse(tripped)
+        self.assertEqual(len(opened), 2)
+        emitted, tripped = mechanics.fail_closed()
+        self.assertTrue(tripped)
+        self.assertEqual(len(emitted), 3)
+        self.assertTrue(content_from_payload(emitted[0]))
+        self.assertEqual(emitted[-1], DONE_EVENT)
+
+    def test_engine_event_is_not_relayed_on_any_engine_payload_shape(self) -> None:
+        engine_event = {"type": "replace", "data": {"content": "unjudged fixture"}}
+        state = state_for_prompt("Explain a fictitious rule.")
+        mechanics = StreamMechanics(state)
+        choice = chunk({"role": "assistant"}, envelope=BASE_ENVELOPE | {"event": engine_event})
+        emitted, tripped = mechanics.process(choice)
+        self.assertFalse(tripped)
+        self.assertEqual(len(emitted), 1)
+        assert isinstance(emitted[0], dict)
+        self.assertNotIn(progress.STATUS_EVENT_KEY, emitted[0])
+        self.assertEqual(emitted[0]["choices"], choice["choices"])
+
+        usage = usage_chunk()
+        emitted, tripped = mechanics.process(usage)
+        self.assertFalse(tripped)
+        self.assertEqual(emitted, [usage])
+        self.assertEqual(json.dumps(emitted[0]), json.dumps(usage))
+
+        usage_with_event = dict(usage)
+        usage_with_event[progress.STATUS_EVENT_KEY] = engine_event
+        emitted, tripped = mechanics.process(usage_with_event)
+        self.assertFalse(tripped)
+        self.assertEqual(len(emitted), 1)
+        expected_usage = {
+            key: value
+            for key, value in usage_with_event.items()
+            if key != progress.STATUS_EVENT_KEY
+        }
+        self.assertEqual(json.dumps(emitted[0]), json.dumps(expected_usage))
+
+        error = {"error": {"message": "fixture engine error"}, "event": engine_event}
+        emitted, tripped = mechanics.process(error)
+        self.assertFalse(tripped)
+        self.assertEqual(emitted[-1], {"error": error["error"]})
+        self.assertTrue(all("event" not in item for item in emitted if isinstance(item, dict)))
 
     def test_a_stream_with_no_reasoning_sends_no_placeholder(self) -> None:
         """A content-only stream is byte for byte what it was."""
@@ -683,6 +878,38 @@ class ApiJudged(unittest.TestCase):
         for payload in emitted:
             self.assertFalse(contains_key(payload, "reasoning"))
         self.assertFalse(state["placeholder_sent"])
+
+    def test_progress_never_opens_on_a_content_only_stream(self) -> None:
+        mechanics = StreamMechanics(state_for_prompt("Explain a fictitious rule."))
+        for payload in (
+            chunk({"content": "A safe fictitious answer."}),
+            chunk({}, finish_reason="stop"),
+            usage_chunk(),
+            DONE_EVENT,
+        ):
+            emitted, tripped = mechanics.process(payload)
+            self.assertFalse(tripped)
+            for item in emitted:
+                if isinstance(item, dict):
+                    self.assertNotIn(progress.STATUS_EVENT_KEY, item)
+
+    def test_reasoning_beside_the_first_answer_text_opens_no_line(self) -> None:
+        """The answer has begun, so the line stays shut while the placeholder leaves."""
+
+        state = state_for_prompt("Explain a fictitious rule.")
+        mechanics = StreamMechanics(state, clock=lambda: 0.0)
+        emitted, tripped = mechanics.process(
+            chunk({"reasoning": "private", "content": "A safe fictitious answer."})
+        )
+        self.assertFalse(tripped)
+        self.assertTrue(state["placeholder_sent"])
+        for payload in (chunk({"reasoning": "late"}), DONE_EVENT):
+            later, tripped = mechanics.process(payload)
+            self.assertFalse(tripped)
+            emitted.extend(later)
+        for item in emitted:
+            if isinstance(item, dict):
+                self.assertNotIn(progress.STATUS_EVENT_KEY, item)
 
     def test_a_trip_before_any_reasoning_sends_no_placeholder(self) -> None:
         """A tripping chunk returns the refusal alone, with no block opened."""
@@ -721,6 +948,14 @@ class ApiJudged(unittest.TestCase):
             "".join(content_from_payload(item) for item in emitted), answer
         )
         self.assertNotIn(stamp.CITATION_STAMP, json.dumps(emitted))
+        self.assertEqual(
+            sum(
+                progress.STATUS_EVENT_KEY in item
+                for item in emitted
+                if isinstance(item, dict)
+            ),
+            2,
+        )
 
     def test_clean_stream_preserves_envelopes_and_usage(self) -> None:
         answer = "This fixture describes a neutral record without a calculation. " * 18
@@ -1258,6 +1493,7 @@ class ApiJudged(unittest.TestCase):
                 assert output is not None
                 parsed = json.loads(output)
                 self.assertNotIn(key, parsed["choices"][0]["message"])
+                self.assertNotIn(progress.STATUS_EVENT_KEY, parsed)
 
     def test_whole_null_content_with_tool_calls_is_not_judged(self) -> None:
         message = {

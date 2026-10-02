@@ -20,7 +20,7 @@ import httpx
 from starlette.types import Message, Scope
 
 from gideon import guardrail
-from gideon.api import judged, stamp
+from gideon.api import judged, progress, stamp
 from gideon.api.app import create_app
 from gideon.api.relay import UPSTREAM_ERROR
 from gideon.api.settings import Settings
@@ -954,6 +954,94 @@ class ApiCompletions(unittest.TestCase):
         self.assertIn("POST /v1/chat/completions 200", captured.output[0])
         for secret in ("fixture prompt secret", "fixture header secret", API_KEY, ENGINE_KEY):
             self.assertNotIn(secret, captured.output[0])
+
+    def test_reasoning_statuses_are_separate_bodies_and_close_before_transport_error(
+        self,
+    ) -> None:
+        failure = httpx.ReadError("fixture mid-stream failure")
+        stream = GatedStream(
+            (
+                _chunk_event({"role": "assistant"}),
+                _chunk_event({"reasoning": "private fixture thought"}),
+            ),
+            failure,
+        )
+
+        def engine(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=stream,
+                request=request,
+            )
+
+        async def run() -> list[Message]:
+            app = create_app(self.settings(), transport=httpx.MockTransport(engine))
+            async with ASGISession(
+                app,
+                "POST",
+                "/v1/chat/completions",
+                b'{"stream":true,"messages":[]}',
+                {"Authorization": f"Bearer {API_KEY}"},
+                "2.4",
+            ) as session:
+                messages = [await session.next_message()]
+                stream.release(0)
+                messages.append(await session.next_message())
+                stream.release(1)
+                for _ in range(7):
+                    messages.append(await session.next_message())
+                return messages
+
+        with self.assertLogs("gideon.api.relay", level="WARNING") as captured:
+            messages = asyncio.run(run())
+
+        self.assertEqual(messages[0]["status"], 200)
+        self.assertEqual(len(messages), 9)
+        self.assertEqual(_parse_event(self.message_body(messages[1])), _parse_event(stream.chunks[0]))
+        opening = _parse_event(self.message_body(messages[2]))
+        placeholder = _parse_event(self.message_body(messages[3]))
+        closing = _parse_event(self.message_body(messages[4]))
+        for event, done in ((opening, False), (closing, True)):
+            self.assertIsInstance(event, dict)
+            assert isinstance(event, dict)
+            self.assertEqual(
+                set(event),
+                {"id", "object", "created", "model", "choices", progress.STATUS_EVENT_KEY},
+            )
+            self.assertEqual(event["choices"], [])
+            self.assertEqual(
+                {key: event[key] for key in _STREAM_ENVELOPE}, _STREAM_ENVELOPE
+            )
+            description = progress.read_status_event(event[progress.STATUS_EVENT_KEY])
+            self.assertIsInstance(description, str)
+            self.assertTrue(progress.is_progress_description(description))
+            assert isinstance(description, str)
+            self.assertEqual(
+                event[progress.STATUS_EVENT_KEY],
+                progress.build_status_event(description, done),
+            )
+        assert isinstance(opening, dict)
+        assert isinstance(closing, dict)
+        self.assertEqual(
+            progress.read_status_event(opening[progress.STATUS_EVENT_KEY]),
+            progress.opening_description(),
+        )
+        assert isinstance(placeholder, dict)
+        self.assertEqual(
+            _first_choice(placeholder)["delta"],
+            {"reasoning": guardrail.REASONING_PLACEHOLDER},
+        )
+        self.assertEqual(self.message_body(messages[5]), b"\n\n")
+        self.assertEqual(_parse_event(self.message_body(messages[6])), UPSTREAM_ERROR)
+        self.assertEqual(_parse_event(self.message_body(messages[7])), DONE_EVENT)
+        self.assertEqual(self.message_body(messages[8]), b"")
+        self.assertTrue(all(message["more_body"] for message in messages[1:8]))
+        self.assertFalse(messages[8]["more_body"])
+        self.assertTrue(stream.closed)
+        self.assertEqual(len(captured.output), 1)
+        self.assertIn(type(failure).__name__, captured.output[0])
+        self.assertNotIn(str(failure), captured.output[0])
 
     def test_shaped_stream_keeps_chunk_count_and_stamps_its_last_text(self) -> None:
         answer = (

@@ -24,6 +24,7 @@ from urllib.parse import quote
 import yaml  # type: ignore[import-untyped]
 
 from gideon import guardrail
+from gideon.api import progress
 from gideon.evaluation.turns import classify, door, doorclient, session
 from gideon.evaluation.turns import run as run_module
 from gideon.evaluation.turns.cases import Case
@@ -348,6 +349,7 @@ class FakeHost:
         answer: str = "A plain answer.",
         fail_probe: bool = False,
         stream_deltas: Sequence[tuple[str, str]] | None = None,
+        stream_payloads: Sequence[Mapping[str, object]] | None = None,
         stream_end: bool = True,
         stream_error: bool = False,
         ignores_stream: bool = False,
@@ -370,6 +372,7 @@ class FakeHost:
         self.answers: dict[str, str] = {}
         self.fail_probe = fail_probe
         self.stream_deltas = tuple(stream_deltas) if stream_deltas is not None else None
+        self.stream_payloads = tuple(stream_payloads) if stream_payloads is not None else None
         self.stream_end = stream_end
         self.stream_error = stream_error
         self.ignores_stream = ignores_stream
@@ -427,6 +430,8 @@ class FakeHost:
                 events: list[str] = []
                 if self.stream_error:
                     events.append(json.dumps({"error": {"message": "relay secret"}}))
+                elif self.stream_payloads is not None:
+                    events.extend(json.dumps(payload) for payload in self.stream_payloads)
                 else:
                     deltas = self.stream_deltas
                     if deltas is None:
@@ -895,6 +900,48 @@ class ServiceDoor(unittest.TestCase):
         self.assertEqual(row["stream"]["first_offset"], 0.01)
         self.assertEqual(row["stream"]["verdict"], {"clean": True, "pattern_id": None, "offset": None})
         self.assertEqual(row["answer"], "A plain answer.")
+
+    def test_streamed_door_reads_progress_without_storing_it_as_answer(self) -> None:
+        answer = "A plain fictitious answer."
+        descriptions = (
+            progress.opening_description(),
+            progress.running_description(progress.PERIOD_SECONDS),
+            progress.closing_description(progress.PERIOD_SECONDS),
+        )
+        payloads: list[Mapping[str, object]] = [
+            {
+                progress.STATUS_EVENT_KEY: progress.build_status_event(description, index == 2),
+                "choices": [],
+            }
+            for index, description in enumerate(descriptions)
+        ]
+        payloads.append({"choices": [{"delta": {"content": answer}}]})
+        with tempfile.TemporaryDirectory() as directory:
+            cases_path = Path(directory) / "cases.yaml"
+            output = Path(directory) / "out"
+            _case_file(cases_path, [{"id": "plain", "prompt": "plain", "expect": "answered"}])
+            host = FakeHost(stream_payloads=payloads)
+            code, stdout, stderr = _run_service(
+                host,
+                cases_path,
+                arguments=("--service", "--stream"),
+                output=output,
+            )
+
+        self.assertEqual(code, 0, stderr)
+        self.assertIn("stream clean", stdout)
+        record_text = host.files[str(output / "plain.json")]
+        row = json.loads(record_text)
+        self.assertEqual(row["answer"], answer)
+        self.assertEqual(
+            row["stream"]["deltas"],
+            [["status", description] for description in descriptions] + [["content", answer]],
+        )
+        self.assertEqual(row["stream"]["verdict"], {"clean": True, "pattern_id": None, "offset": None})
+        self.assertNotIn(f'"{progress.STATUS_EVENT_KEY}":', record_text)
+        for value in door.identity_headers().values():
+            self.assertNotIn(value, record_text)
+            self.assertNotIn(value, stdout)
 
     def test_boundary_stream_rows_keep_withdrawn_trips_content_free(self) -> None:
         prompt, answer = _seed_case("threshold-01", GUIDELINES_SEED_PATH)

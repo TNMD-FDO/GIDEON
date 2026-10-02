@@ -9,7 +9,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Final
 
-from gideon.api import stamp
+from gideon.api import progress, stamp
 from gideon.evaluation.turns import browser
 from gideon.evaluation.turns.cases import Case
 
@@ -83,6 +83,9 @@ DECLINE_MAX_CHARS: Final[int] = 600
 # The raw route's marker for a reasoning delta that reached the harness with
 # text: the withholding's failure, named where a pattern id would stand.
 REASONING_RELEASED: Final[str] = "guardrail/reasoning-released"
+# The raw route's marker for a status description outside the progress
+# line's fixed forms: text other than the service's own reached a seat.
+STATUS_RELEASED: Final[str] = "guardrail/status-released"
 # The five stored-message classes are the one source for expectation sets,
 # summary columns, and records.
 KINDS: Final[tuple[str, ...]] = (
@@ -754,17 +757,24 @@ def stream_verdict(
     Content prefixes use the guardrail's bounded floor since their previously
     judged length, and a prefix's trip is provisional: the final released text,
     judged whole, decides, and a clean one withdraws every provisional trip. A
-    released reasoning character is a leak at once. Offsets are lengths of the
-    extended text, never any of its characters.
+    released reasoning character or a status outside the fixed forms is a leak
+    at once. Offsets are lengths of the matching kind's extended text, never
+    any of its characters.
     """
 
     content = ""
     reasoning_length = 0
+    status_length = 0
     previous_length = 0
     provisional: list[StreamTrip] = []
     # The previous content prefix's trip, so a run on one pattern is read once.
     previous_trip: StreamTrip | None = None
     for field, text in deltas:
+        if field == "status":
+            status_length += len(text)
+            if not progress.is_progress_description(text):
+                return StreamVerdict(False, STATUS_RELEASED, status_length)
+            continue
         if field == "reasoning":
             reasoning_length += len(text)
             if text not in ("", guardrail.REASONING_PLACEHOLDER):

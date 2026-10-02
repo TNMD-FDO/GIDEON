@@ -1,13 +1,14 @@
 """Judge streamed Chat Completions payloads without owning transport I/O."""
 
 import json
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from typing import Final
 
 from gideon import guardrail
 
-from . import stamp
+from . import progress, stamp
 from .sse import DONE_EVENT
 
 # A downstream choice is rebuilt from these keys, never scrubbed of the ones it
@@ -15,6 +16,9 @@ from .sse import DONE_EVENT
 # `reasoning_content`, `logprobs`, token ids — is absent because it was never
 # copied, not because a list of names caught it.
 RELAYED_CHOICE_KEYS: Final[tuple[str, ...]] = ("index", "finish_reason")
+# Status chunks use only these engine envelope fields. Rebuilding from names
+# keeps an engine extra from riding the frontend's status event.
+STATUS_ENVELOPE_KEYS: Final[tuple[str, ...]] = ("id", "object", "created", "model")
 RELAYED_DELTA_KEYS: Final[tuple[str, ...]] = ("role", "content", "tool_calls")
 RELAYED_MESSAGE_KEYS: Final[tuple[str, ...]] = ("role", "content", "tool_calls")
 # The text a delta may carry, and the names the pinned engine has used for its
@@ -208,14 +212,21 @@ def _record_error_trip(state: guardrail.StreamState) -> None:
 
 
 class StreamMechanics:
-    """Judge one stream and stamp its answer when the window's tail settles.
+    """Judge one stream, send its progress line, and stamp its settled answer.
 
     The citation label is decided only after the finished answer settles at a
     finish chunk or an unfinished end.  A trip returns through the refusal
-    path before that decision and never reaches the stamp.
+    path before that decision and never reaches the stamp.  The first reasoning
+    delta opens the progress line, later ones tick it, and the first answer or
+    any end closes it with text built by ``progress``.
     """
 
-    def __init__(self, state: guardrail.StreamState) -> None:
+    def __init__(
+        self,
+        state: guardrail.StreamState,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self.state = state
         # The exception class of a failure the mechanics caught themselves, for
         # the relay to log: a class name, never a payload's text.
@@ -223,6 +234,12 @@ class StreamMechanics:
         self._last_envelope: dict[str, object] | None = None
         self._error_seen = False
         self._ended = False
+        # The line belongs to the stream mechanics, not the judge's answer
+        # state: only the mechanics sees reasoning deltas and stream endings.
+        self._clock = clock
+        self._progress_start: float | None = None
+        self._progress_next_due = progress.PERIOD_SECONDS
+        self._progress_closed = False
 
     def process(
         self, payload: Mapping[str, object] | str
@@ -254,6 +271,9 @@ class StreamMechanics:
             return [], True
         try:
             payloads = self._settle_tail(self._last_envelope)
+            closing = self._close_progress()
+            if closing is not None:
+                payloads.insert(0, closing)
             self._ended = True
             if self._tripped():
                 return payloads, True
@@ -292,7 +312,10 @@ class StreamMechanics:
         envelope = self._envelope(event)
         if not choices:
             self._last_envelope = envelope
-            return [dict(event)], False
+            # Relayed in the engine's own key order, less a top-level event.
+            return [
+                {key: value for key, value in event.items() if key != progress.STATUS_EVENT_KEY}
+            ], False
         if len(choices) != 1 or not isinstance(choices[0], Mapping):
             raise TypeError("stream choices are not one mapping")
         choice = choices[0]
@@ -329,9 +352,25 @@ class StreamMechanics:
         if is_finished:
             released += checker.finish()
             self.state["finished"] = True
+        progress_chunk: dict[str, object] | None = None
+        if (
+            self._tripped()
+            or ("content" in texts and texts["content"] != "")
+            or is_finished
+        ):
+            progress_chunk = self._close_progress()
+        elif reasoning_keys:
+            progress_chunk = (
+                self._open_progress()
+                if self._progress_start is None
+                else self._tick_progress()
+            )
+        leading: list[dict[str, object] | str] = (
+            [progress_chunk] if progress_chunk is not None else []
+        )
         if self._tripped():
             self._ended = True
-            return self._trip_payloads(envelope), True
+            return leading + self._trip_payloads(envelope), True
         if is_finished and not was_finished:
             released += stamp.tail_for(self._finished_answer())
 
@@ -349,12 +388,14 @@ class StreamMechanics:
         # watches a silent wait while the model reasons. The placeholder is a
         # release constant and carries no model text; it is relayed under the
         # engine's own key, so a pin bump that renames the field carries the
-        # placeholder with it.
+        # placeholder with it. The changing progress line rides a status chunk
+        # of its own, since the block's summary is fixed text and its body only
+        # appends.
         if reasoning_keys and not self.state.get("placeholder_sent"):
             output_delta[reasoning_keys[0]] = guardrail.REASONING_PLACEHOLDER
             self.state["placeholder_sent"] = True
         if not output_delta and not is_finished:
-            return [], False
+            return leading, False
 
         output_choice: dict[str, object] = {
             key: choice[key] for key in RELAYED_CHOICE_KEYS if key in choice
@@ -362,20 +403,26 @@ class StreamMechanics:
         output_choice["delta"] = output_delta
         output = dict(envelope)
         output["choices"] = [output_choice]
-        return [output], False
+        return [*leading, output], False
 
     def _process_error(
         self, event: Mapping[str, object]
     ) -> tuple[list[dict[str, object] | str], bool]:
         payloads = self._settle_tail(self._last_envelope)
+        closing = self._close_progress()
+        if closing is not None:
+            payloads.insert(0, closing)
         if self._tripped():
             return payloads, True
         self._error_seen = True
-        payloads.append(dict(event))
+        payloads.append(self._envelope(event))
         return payloads, False
 
     def _process_end_marker(self) -> tuple[list[dict[str, object] | str], bool]:
         payloads = self._settle_tail(self._last_envelope)
+        closing = self._close_progress()
+        if closing is not None:
+            payloads.insert(0, closing)
         self._ended = True
         if self._tripped():
             return payloads, True
@@ -410,7 +457,59 @@ class StreamMechanics:
 
     @staticmethod
     def _envelope(event: Mapping[str, object]) -> dict[str, object]:
-        return {key: value for key, value in event.items() if key != "choices"}
+        # The frontend replays a top-level event as its own; only progress
+        # builds one, so an engine event cannot be copied into a reply.
+        return {
+            key: value
+            for key, value in event.items()
+            if key not in ("choices", progress.STATUS_EVENT_KEY)
+        }
+
+    def _status_chunk(self, description: str, *, done: bool) -> dict[str, object]:
+        envelope = self._last_envelope
+        output: dict[str, object] = (
+            {"object": CHUNK_OBJECT}
+            if envelope is None
+            else {key: envelope[key] for key in STATUS_ENVELOPE_KEYS if key in envelope}
+        )
+        output["choices"] = []
+        output[progress.STATUS_EVENT_KEY] = progress.build_status_event(
+            description, done
+        )
+        return output
+
+    def _elapsed_seconds(self) -> int:
+        start = self._progress_start
+        if start is None:
+            return 0
+        return max(0, int(self._clock() - start))
+
+    def _open_progress(self) -> dict[str, object] | None:
+        if self._progress_closed or self._progress_start is not None:
+            return None
+        self._progress_start = self._clock()
+        return self._status_chunk(progress.opening_description(), done=False)
+
+    def _tick_progress(self) -> dict[str, object] | None:
+        if self._progress_closed or self._progress_start is None:
+            return None
+        elapsed = self._elapsed_seconds()
+        if elapsed < self._progress_next_due:
+            return None
+        self._progress_next_due = (
+            elapsed // progress.PERIOD_SECONDS + 1
+        ) * progress.PERIOD_SECONDS
+        return self._status_chunk(progress.running_description(elapsed), done=False)
+
+    def _close_progress(self) -> dict[str, object] | None:
+        if self._progress_closed:
+            return None
+        self._progress_closed = True
+        if self._progress_start is None:
+            return None
+        return self._status_chunk(
+            progress.closing_description(self._elapsed_seconds()), done=True
+        )
 
     @staticmethod
     def _base(envelope: Mapping[str, object] | None) -> dict[str, object]:
@@ -454,10 +553,14 @@ class StreamMechanics:
     ) -> tuple[list[dict[str, object] | str], bool]:
         if failure is not None and self.failure is None:
             self.failure = failure
+        closing: dict[str, object] | None = None
+        with suppress(Exception):
+            closing = self._close_progress()
         if not self._tripped():
             _record_error_trip(self.state)
         self._ended = True
-        return self._trip_payloads(self._last_envelope), True
+        payloads = self._trip_payloads(self._last_envelope)
+        return ([closing] if closing is not None else []) + payloads, True
 
     def _tripped(self) -> bool:
         return self.state.get("trip") is not None

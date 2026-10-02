@@ -10,6 +10,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Final
 
+from gideon.api import progress
 from gideon.host.owui import Client, OwuiError, OwuiTimeout
 from gideon.host.owuiturn import COMPLETIONS_PATH, LOGS_FIX
 from gideon.host.report import Problem, Timeout
@@ -31,7 +32,7 @@ class StreamCapture:
 
 @dataclass(frozen=True, slots=True)
 class StreamPayload:
-    """The delta fields in one engine payload, or its safe parse problem."""
+    """Ordered status, reasoning, and content deltas, or a safe parse problem."""
 
     deltas: tuple[tuple[str, str], ...] = ()
     problem: str | None = None
@@ -144,7 +145,7 @@ def raw_stream(
 
 
 def parse_stream_payload(payload: object) -> StreamPayload:
-    """Extract ordered reasoning and content deltas from one engine payload."""
+    """Extract status, reasoning, then content deltas from one stream payload."""
 
     if not isinstance(payload, (str, bytes, bytearray)):
         return StreamPayload(problem="the stream carried invalid JSON")
@@ -154,10 +155,20 @@ def parse_stream_payload(payload: object) -> StreamPayload:
         return StreamPayload(problem="the stream carried invalid JSON")
     if not isinstance(decoded, Mapping):
         return StreamPayload(problem="the stream carried a non-object payload")
+    deltas: list[tuple[str, str]] = []
+    if progress.STATUS_EVENT_KEY in decoded:
+        description = progress.read_status_event(decoded[progress.STATUS_EVENT_KEY])
+        if description is None:
+            return StreamPayload(problem="the stream carried an unreadable event")
+        deltas.append(("status", description))
     if "error" in decoded:
         return StreamPayload(problem="the stream carried an error")
     choices = decoded.get("choices")
-    if not isinstance(choices, list) or not choices:
+    if not isinstance(choices, list):
+        return StreamPayload(problem="the stream carried no choices")
+    if not choices:
+        if deltas:
+            return StreamPayload(tuple(deltas))
         return StreamPayload(problem="the stream carried no choices")
     choice = choices[0]
     if not isinstance(choice, Mapping):
@@ -165,7 +176,6 @@ def parse_stream_payload(payload: object) -> StreamPayload:
     delta = choice.get("delta")
     if not isinstance(delta, Mapping):
         return StreamPayload(problem="the stream carried no delta")
-    deltas: list[tuple[str, str]] = []
     reasoning = delta.get("reasoning")
     if isinstance(reasoning, str) and reasoning:
         deltas.append(("reasoning", reasoning))
