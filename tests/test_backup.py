@@ -12,7 +12,15 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from unittest import mock
 
-from gideon.host import backup, backuplock, backupset, pgbackrest, secrets, stack
+from gideon.host import (
+    backup,
+    backuplock,
+    backupset,
+    pgbackrest,
+    secrets,
+    stack,
+    stages,
+)
 from gideon.host.steps.site_dirs import AGE_IDENTITY_PATH, AGE_RECIPIENT_PATH
 from gideon.host.sysio import Command, PathLike
 
@@ -725,6 +733,89 @@ class BackupRun(unittest.TestCase):
         self.assertEqual(
             backup_calls,
             [tuple(pgbackrest.backup_argv(RENDERED, "full", expire_auto=False))],
+        )
+
+    def test_postgres_commits_after_boundary_before_archive_check(self) -> None:
+        info = pgbackrest.InfoResult(
+            infos=(
+                pgbackrest.BackupInfo(
+                    "old-full", "full", (NOW - timedelta(days=3)).timestamp()
+                ),
+            )
+        )
+        psql = tuple(stages.psql_argv(RENDERED, "gideon", on_error_stop=True))
+        self.assertEqual(psql[-4:], ("-v", "ON_ERROR_STOP=1", "-f", "-"))
+        check = tuple(pgbackrest.exec_argv(RENDERED, "check"))
+        for kind, full_requested, backup_type, expire_auto in (
+            (backupset.Kind.NIGHTLY, False, "incr", True),
+            (backupset.Kind.LABELLED, True, "full", False),
+        ):
+            with self.subTest(kind=kind):
+                host = _host()
+                stage, backup_stage = backup._postgres_stage(
+                    host,
+                    RENDERED,
+                    info=info,
+                    full_requested=full_requested,
+                    kind=kind,
+                    now=NOW,
+                    now_was_supplied=True,
+                )
+                self.assertTrue(stage.ok, stage.detail)
+                self.assertIsNotNone(backup_stage)
+                backup_argv = tuple(
+                    pgbackrest.backup_argv(
+                        RENDERED,
+                        backup_type,
+                        expire_auto=expire_auto,
+                    )
+                )
+                calls = [(argv, input_text) for argv, input_text, _timeout in host.calls]
+                start = calls.index((backup_argv, None))
+                self.assertEqual(
+                    calls[start : start + 3],
+                    [
+                        (backup_argv, None),
+                        (psql, "SELECT pg_current_xact_id();\n"),
+                        (check, None),
+                    ],
+                )
+
+    def test_postgres_refuses_failed_boundary_commit_before_check(self) -> None:
+        host = _host()
+        psql = tuple(stages.psql_argv(RENDERED, "gideon", on_error_stop=True))
+        host.commands[psql] = [result(psql, returncode=3, stderr="SQL error")]
+        stage, backup_stage = backup._postgres_stage(
+            host,
+            RENDERED,
+            info=pgbackrest.InfoResult(infos=()),
+            full_requested=False,
+            kind=backupset.Kind.NIGHTLY,
+            now=NOW,
+            now_was_supplied=True,
+        )
+        self.assertFalse(stage.ok)
+        self.assertEqual(stage.name, "postgres")
+        self.assertEqual(stage.fix, backup._STAGE_FIX)
+        self.assertIn("SQL error", stage.detail)
+        self.assertIsNone(backup_stage)
+        self.assertNotIn(tuple(pgbackrest.exec_argv(RENDERED, "check")), [call[0] for call in host.calls])
+
+    def test_psql_default_argv_is_unchanged(self) -> None:
+        self.assertEqual(
+            stages.psql_argv(RENDERED, "gideon"),
+            stack.exec_argv(
+                RENDERED,
+                "postgres",
+                "psql",
+                "-U",
+                "postgres",
+                "-d",
+                "gideon",
+                "-tA",
+                "-f",
+                "-",
+            ),
         )
 
     def test_backup_type_uses_seven_day_full_boundary(self) -> None:

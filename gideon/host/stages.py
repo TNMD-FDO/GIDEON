@@ -50,12 +50,16 @@ def site_problem(result: site.SiteLoadResult) -> str:
     return "; ".join(error.problem for error in result.errors)
 
 
-def psql_argv(project_dir: PathLike, database: str) -> list[str]:
+def psql_argv(
+    project_dir: PathLike, database: str, *, on_error_stop: bool = False
+) -> list[str]:
     """One unaligned, tuples-only psql over the project's Postgres, SQL on stdin."""
 
-    return stack.exec_argv(
-        project_dir, "postgres", "psql", "-U", "postgres", "-d", database, "-tA", "-f", "-"
-    )
+    args = ["psql", "-U", "postgres", "-d", database, "-tA"]
+    if on_error_stop:
+        args.extend(("-v", "ON_ERROR_STOP=1"))
+    args.extend(("-f", "-"))
+    return stack.exec_argv(project_dir, "postgres", *args)
 
 
 def table_parts(name: str) -> tuple[str, str] | None:

@@ -37,6 +37,9 @@ _VERSION_LINE: Final = re.compile(
     r"(?m)^(?P<prefix>\s*__version__\s*=\s*['\"])(?P<value>[^'\"]+)(?P<suffix>['\"]\s*)$"
 )
 _SEMVER: Final = re.compile(r"^(?P<major>0|[1-9][0-9]*)\.(?P<minor>0|[1-9][0-9]*)\.(?P<patch>0|[1-9][0-9]*)$")
+_MANIFEST_DETAIL: Final = re.compile(r"manifest written and set renamed to (?P<label>\S+)")
+_POSTGRES_DETAIL: Final = re.compile(r"pgBackRest (?P<type>full|diff|incr) backup \S+; archive through \S+")
+_FETCH_DETAIL: Final = re.compile(r"(?:^|; )selected set (?P<label>[^;]+)(?:;|$)")
 
 
 def _problem(problem: str, fix: str = REHEARSAL_FIX) -> Problem:
@@ -231,17 +234,49 @@ def rehearse(ctx: HarnessContext) -> StageResult:
     )
 
 
+def _made_set(text: str) -> tuple[str, str] | None:
+    """The set label and pgBackRest type a ``backup run`` transcript names, or None."""
+
+    rows = vm.row_details(text)
+    manifest = rows.get("manifest", ("", ""))
+    postgres = rows.get("postgres", ("", ""))
+    label = _MANIFEST_DETAIL.fullmatch(manifest[1]) if manifest[0] == "ok" else None
+    kind = _POSTGRES_DETAIL.fullmatch(postgres[1]) if postgres[0] == "ok" else None
+    if label is None or kind is None:
+        return None
+    return label["label"], kind["type"]
+
+
+def _fetched_set(text: str) -> str | None:
+    """The set a ``restore --from target`` transcript fetched, or None."""
+
+    rows = vm.row_details(text)
+    select = rows.get("select", ("", ""))
+    fetch = rows.get("fetch", ("", ""))
+    if select[0] != "ok" or "source=target" not in select[1].split("; "):
+        return None
+    fetched = _FETCH_DETAIL.search(fetch[1]) if fetch[0] == "ok" else None
+    return None if fetched is None else fetched["label"]
+
+
 def restore(ctx: HarnessContext) -> StageResult:
-    """Push, restore the newest target snapshot, and apply it in the VM."""
+    """Restore, by its name, the set a plain ``backup run`` takes after the last rollback.
+
+    That is the nightly's form: an unlabelled set pushed straight after its
+    run, as the nightly unit does, so no ``archive_timeout`` closes the open
+    WAL segment between the two.
+    """
 
     commands = (
-        ("restore-1-push.txt", ("python3", "-m", "gideon", "backup", "push")),
-        ("restore-2-restore.txt", ("python3", "-m", "gideon", "restore", "--from", "target")),
-        ("restore-3-apply.txt", ("python3", "-m", "gideon", "apply")),
+        ("restore-1-run.txt", ("python3", "-m", "gideon", "backup", "run")),
+        ("restore-2-push.txt", ("python3", "-m", "gideon", "backup", "push")),
+        ("restore-3-restore.txt", ("python3", "-m", "gideon", "restore", "--from", "target")),
+        ("restore-4-apply.txt", ("python3", "-m", "gideon", "apply")),
     )
     paths = [ctx.spec.out / f"{ctx.stage_index:02d}-{name}" for name, _ in commands]
-    for transcript_name, command in commands:
-        result, _text = vm.run_product(
+    made: tuple[str, str] | None = None
+    for (transcript_name, command), path in zip(commands, paths, strict=True):
+        result, text = vm.run_product(
             ctx,
             "restore",
             transcript_name,
@@ -250,10 +285,33 @@ def restore(ctx: HarnessContext) -> StageResult:
         )
         if not result.ok:
             return StageResult("restore", False, result.detail, result.fix)
+        if made is None:
+            made = _made_set(text)
+            if made is None:
+                return StageResult(
+                    "restore",
+                    False,
+                    f"{transcript_name} lacks the manifest and postgres rows naming its set; "
+                    f"transcript {path}",
+                    RESTORE_FIX,
+                )
+        elif command[3] == "restore":
+            fetched = _fetched_set(text)
+            if fetched != made[0]:
+                return StageResult(
+                    "restore",
+                    False,
+                    f"{transcript_name} restored set {fetched or '(none named)'}, not the run's set "
+                    f"{made[0]}; transcript {path}",
+                    RESTORE_FIX,
+                )
+    assert made is not None
+    label, backup_type = made
     return StageResult(
         "restore",
         True,
-        f"restored the newest target snapshot; transcripts {', '.join(str(path) for path in paths)}",
+        f"restored set {label}, pgBackRest {backup_type} backup, from the newest target snapshot; "
+        f"transcripts {', '.join(str(path) for path in paths)}",
         "",
     )
 

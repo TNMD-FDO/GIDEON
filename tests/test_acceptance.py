@@ -2356,26 +2356,78 @@ class PhaseFourRehearsal(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("rehearse-1-upgrade.txt", result.detail)
 
-    def test_restore_runs_push_restore_and_apply_in_order(self) -> None:
+    def _restore_context(
+        self,
+        *,
+        run_text: str | None = None,
+        fetched_set: str = "example-nightly-set",
+    ) -> tuple[FakeHost, HarnessContext, list[str]]:
         host = FakeHost()
         ctx = harness_context(host, stage="restore")
+        if run_text is None:
+            run_text = (
+                "postgres: ok — pgBackRest incr backup example-pgbackrest-label; "
+                "archive through 2026-09-17T02:00:00+00:00\n"
+                "manifest: ok — manifest written and set renamed to example-nightly-set\n"
+            )
         commands = (
-            ("restore-1-push.txt", ("python3", "-m", "gideon", "backup", "push")),
-            ("restore-2-restore.txt", ("python3", "-m", "gideon", "restore", "--from", "target")),
-            ("restore-3-apply.txt", ("python3", "-m", "gideon", "apply")),
+            ("restore-1-run.txt", ("python3", "-m", "gideon", "backup", "run")),
+            ("restore-2-push.txt", ("python3", "-m", "gideon", "backup", "push")),
+            ("restore-3-restore.txt", ("python3", "-m", "gideon", "restore", "--from", "target")),
+            ("restore-4-apply.txt", ("python3", "-m", "gideon", "apply")),
+        )
+        outputs = (
+            run_text,
+            "push: ok — copied example-nightly-set\n",
+            "select: ok — source=target; snapshot=example-snapshot; set=chosen after fetch\n"
+            f"fetch: ok — fetched example-snapshot; selected set {fetched_set}; re-owned paths\n",
+            "apply: ok — applied\n",
         )
         expected_scripts: list[str] = []
-        for transcript, command in commands:
+        for (transcript, command), output in zip(commands, outputs, strict=True):
             script = f"cd /opt/gideon && sudo {shlex.join(command)} 2>&1 | tee ~/acceptance/{transcript}"
             ssh = tuple(vm.ssh_argv(ctx, script))
-            host.commands[ssh] = completed(ssh, stdout="ok\n")
+            host.commands[ssh] = completed(ssh, stdout=output)
             expected_scripts.append(script)
+        return host, ctx, expected_scripts
+
+    def test_restore_runs_push_restore_and_apply_in_order(self) -> None:
+        host, ctx, expected_scripts = self._restore_context()
 
         result = rehearsal.restore(ctx)
 
         self.assertTrue(result.ok, result.detail)
         scripts = [shlex.split(call[0][-1])[0] for call in host.calls]
         self.assertEqual(scripts, expected_scripts)
+        self.assertIn("restored set example-nightly-set, pgBackRest incr backup", result.detail)
+        self.assertIn("from the newest target snapshot", result.detail)
+        for transcript in ("restore-1-run.txt", "restore-2-push.txt", "restore-3-restore.txt", "restore-4-apply.txt"):
+            self.assertIn(transcript, result.detail)
+
+    def test_restore_refuses_run_without_manifest_or_postgres_rows(self) -> None:
+        host, ctx, expected_scripts = self._restore_context(run_text="backup: ok — done\n")
+
+        result = rehearsal.restore(ctx)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.name, "restore")
+        self.assertEqual(result.fix, rehearsal.RESTORE_FIX)
+        self.assertIn("restore-1-run.txt", result.detail)
+        self.assertIn("transcript", result.detail)
+        self.assertEqual([shlex.split(call[0][-1])[0] for call in host.calls], expected_scripts[:1])
+
+    def test_restore_refuses_fetch_of_another_set(self) -> None:
+        host, ctx, expected_scripts = self._restore_context(fetched_set="example-other-set")
+
+        result = rehearsal.restore(ctx)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.name, "restore")
+        self.assertEqual(result.fix, rehearsal.RESTORE_FIX)
+        self.assertIn("example-nightly-set", result.detail)
+        self.assertIn("example-other-set", result.detail)
+        self.assertIn("restore-3-restore.txt", result.detail)
+        self.assertEqual([shlex.split(call[0][-1])[0] for call in host.calls], expected_scripts[:3])
 
     def _verify_context(
         self,

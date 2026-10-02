@@ -604,6 +604,28 @@ def _postgres_stage(
         )
 
     archive_start = now if now_was_supplied else datetime.now(UTC)
+    # Recovery to a time target needs an archived commit stamped past it, or
+    # Postgres ends fatally; check switches and archives this segment next.
+    try:
+        boundary = io.run(
+            psql_argv(rendered_dir, "gideon", on_error_stop=True),
+            input="SELECT pg_current_xact_id();\n",
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return (
+            StageResult(
+                "postgres",
+                False,
+                f"Postgres boundary commit failed: {exc}",
+                _STAGE_FIX,
+            ),
+            None,
+        )
+    if boundary.returncode != 0:
+        return (
+            _run_failure("postgres", "Postgres boundary commit failed", boundary, _STAGE_FIX),
+            None,
+        )
     checked = pgbackrest.check(io, rendered_dir)
     if not checked.ok:
         return (

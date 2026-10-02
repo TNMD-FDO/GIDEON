@@ -89,8 +89,8 @@ nothing older is recoverable, and there is no monthly tier.
 - **`backup run`** — `intent`, `files` (`linked n of m sampled`: the hard-link
   verdict against the previous set — zero links with a previous set is a
   failure, because a full copy would hide a retention overrun), `secrets`,
-  `postgres` (`full` or `incr`, then the archive boundary — the instant the
-  set's WAL coverage is proven), `counts`, `manifest`, `prune`, `applied`.
+  `postgres` (`full` or `incr`, then the archive boundary and one commit past
+  it before the WAL segment is archived), `counts`, `manifest`, `prune`, `applied`.
   A set is complete only once `manifest.json` exists; an interrupted run leaves
   a `.partial` directory that the next run prunes after a day.
 - **`backup push`** — `record` (`push.json`, the snapshot's coverage record),
