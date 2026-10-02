@@ -16,8 +16,9 @@ from typing import Any, NoReturn, cast
 from unittest.mock import patch
 
 import gideon
-from gideon.host import backupset, grafana, owui, secrets, stack
+from gideon.host import backupset, grafana, nogpu, owui, secrets, stack
 from gideon.host.checks.capacity import DATA_DF_ARGV
+from gideon.host.render.ci import CI_ROOT
 from gideon.host.render.grafana import GRAFANA_ADMIN_USER
 from gideon.host.report import Problem
 from gideon.host.sysio import Command, PathLike
@@ -37,6 +38,7 @@ CERTIFICATE = "-----BEGIN CERTIFICATE-----\nFICTITIOUS\n-----END CERTIFICATE----
 SITE_TEXT = (ROOT / "config/site.example.yaml").read_text(encoding="utf-8")
 TRIGGERS_TEXT = (ROOT / "config/triggers.yaml").read_text(encoding="utf-8")
 COMPOSE_TEXT = "services:\n  grafana: {}\n  postgres: {}\n"
+SIBLING_COMPOSE_TEXT = "services:\n  sibling-a: {}\n  sibling-b: {}\n  sibling-c: {}\n"
 SET_LABEL = "20990103T090000Z"
 
 
@@ -65,6 +67,25 @@ def _manifest(finished: datetime) -> str:
         "version": 1,
     }
     return json.dumps(document)
+
+
+def _newest_run(**overrides: object) -> str:
+    row: dict[str, object] = {
+        "run_id": "11111111-2222-4333-8444-555555555555",
+        "slice": "fixture-slice",
+        "kind": "smoke",
+        "stack": "ci",
+        "verdict": "pass",
+        "partial": False,
+        "finished_at": (NOW - timedelta(hours=3)).isoformat(),
+    }
+    row.update(overrides)
+    return json.dumps(row)
+
+
+def _developer_lines(stdout: str) -> tuple[str, ...]:
+    block = stdout.split("developer\n", 1)[1].split("\nstatus:", 1)[0]
+    return tuple(block.splitlines())
 
 
 def _alert(
@@ -102,8 +123,12 @@ class ReadOnlyHost:
         directories: Sequence[str] = (),
         compose_rc: int = 0,
         compose_stdout: str | None = None,
+        sibling_compose_rc: int = 0,
+        sibling_compose_stdout: str | None = None,
         psql_rc: int = 0,
         psql_stdout: str = "",
+        eval_run_rc: int = 0,
+        eval_run_stdout: str = "null",
         guardrail_rc: int = 0,
         guardrail_stdout: str = "",
         df_rc: int = 0,
@@ -125,8 +150,21 @@ class ReadOnlyHost:
                 {"Service": "postgres", "State": "exited"},
             ]
         )
+        self.sibling_compose_rc = sibling_compose_rc
+        self.sibling_compose_stdout = (
+            sibling_compose_stdout
+            if sibling_compose_stdout is not None
+            else json.dumps(
+                [
+                    {"Service": name, "State": "running"}
+                    for name in ("sibling-a", "sibling-b", "sibling-c")
+                ]
+            )
+        )
         self.psql_rc = psql_rc
         self.psql_stdout = psql_stdout
+        self.eval_run_rc = eval_run_rc
+        self.eval_run_stdout = eval_run_stdout
         self.guardrail_rc = guardrail_rc
         self.guardrail_stdout = guardrail_stdout
         self.df_rc = df_rc
@@ -160,13 +198,24 @@ class ReadOnlyHost:
         self.calls.append((command_argv, input))
         if command_argv[:2] == ("docker", "compose"):
             if "psql" in command_argv:
+                if input is not None and "FROM eval_runs" in input:
+                    return self._completed(
+                        command_argv, self.eval_run_rc, self.eval_run_stdout
+                    )
                 if input is not None and "FROM guardrail_trips" in input:
                     return self._completed(
                         command_argv, self.guardrail_rc, self.guardrail_stdout
                     )
                 return self._completed(command_argv, self.psql_rc, self.psql_stdout)
             if "ps" in command_argv:
-                return self._completed(command_argv, self.compose_rc, self.compose_stdout)
+                project = command_argv[command_argv.index("--project-directory") + 1]
+                if project == os.fspath(RENDERED):
+                    return self._completed(command_argv, self.compose_rc, self.compose_stdout)
+                if project == os.fspath(CI_ROOT):
+                    return self._completed(
+                        command_argv, self.sibling_compose_rc, self.sibling_compose_stdout
+                    )
+                raise AssertionError(f"unexpected Compose project: {project}")
             raise AssertionError(f"unexpected Compose command: {command_argv}")
         if command_argv == DATA_DF_ARGV:
             return self._completed(command_argv, self.df_rc, self.df_stdout)
@@ -270,6 +319,7 @@ def _host(
     *,
     psql_stdout: str | None = None,
     set_names: Sequence[str] = (SET_LABEL,),
+    build_box: bool = False,
     **overrides: Any,
 ) -> ReadOnlyHost:
     files = {
@@ -278,6 +328,9 @@ def _host(
         os.fspath(RENDERED / "compose.yaml"): COMPOSE_TEXT,
         os.fspath(secrets.secret_path("grafana_admin_password")): "fictitious-grafana-secret\n",
     }
+    if build_box:
+        files[os.fspath(nogpu.BUILD_BOX_PATH)] = "fictitious build-box marker\n"
+        files[os.fspath(Path(CI_ROOT) / "compose.yaml")] = SIBLING_COMPOSE_TEXT
     directories = [os.fspath(STAGING / "sets")]
     if set_names:
         directories.append(os.fspath(STAGING / "sets" / SET_LABEL))
@@ -326,8 +379,6 @@ class FakeSection:
     def render(self, context: Context) -> SectionReport | Problem:
         del context
         self.calls += 1
-        if self.scope == "product":
-            raise AssertionError("status rendered a product section")
         return self.result
 
 
@@ -433,6 +484,314 @@ class Status(unittest.TestCase):
         self.assertTrue(stdout.rstrip().endswith("status: nothing needs attention"))
         self.assertEqual(fake.reads, 1)
         self.assertEqual(sum("psql" in argv for argv, _ in host.calls), 1)
+
+    def test_developer_block_order_and_build_box_marker_gate(self) -> None:
+        for mode in ("build box", "no marker", "marker pair"):
+            with self.subTest(mode=mode):
+                host = self.make_host(build_box=True, eval_run_stdout=_newest_run())
+                if mode == "no marker":
+                    del host.files[os.fspath(nogpu.BUILD_BOX_PATH)]
+                elif mode == "marker pair":
+                    host.files[os.fspath(nogpu.NO_GPU_PATH)] = "fictitious no-GPU marker\n"
+                product = FakeSection(
+                    "product-section",
+                    "product",
+                    SectionReport("pending", (Row("build-action", "fired", "review it"),)),
+                )
+
+                code, stdout, stderr, _ = self.run_status(
+                    host, FakeGrafana(), sections=(product,)
+                )
+
+                self.assertEqual((code, stderr), (0, ""))
+                sibling_reads = [
+                    argv for argv, _ in host.calls
+                    if "ps" in argv and argv[argv.index("--project-directory") + 1] == CI_ROOT
+                ]
+                newest_reads = [
+                    sql for _argv, sql in host.calls if sql is not None and "FROM eval_runs" in sql
+                ]
+                if mode == "build box":
+                    headers = ("needs attention", "waiting on you", "at a glance", "developer")
+                    positions = [stdout.index(f"{header}\n") for header in headers]
+                    self.assertEqual(positions, sorted(positions))
+                    self.assertLess(positions[-1], stdout.index("status: nothing needs attention"))
+                    self.assertIn("sibling stack: up, 3 of 3 services", stdout)
+                    self.assertIn("eval run: fixture-slice smoke on ci: pass, 3h ago", stdout)
+                    self.assertIn("product-section: build-action — review it", stdout)
+                    self.assertEqual(product.calls, 1)
+                    self.assertEqual((len(sibling_reads), len(newest_reads)), (1, 1))
+                else:
+                    self.assertNotIn("\ndeveloper\n", stdout)
+                    self.assertNotIn("build-action", stdout)
+                    self.assertEqual(product.calls, 0)
+                    self.assertEqual((sibling_reads, newest_reads), ([], []))
+
+    def test_sibling_service_states_and_fixes(self) -> None:
+        partial = json.dumps(
+            [
+                {"Service": "sibling-a", "State": "running"},
+                {"Service": "sibling-b", "State": "exited"},
+            ]
+        )
+        cases = (
+            ("not converged", None, 0, "sibling stack: down, not converged", "cistack up"),
+            ("all up", "default", 0, "sibling stack: up, 3 of 3 services", None),
+            ("all down", "[]", 0, "sibling stack: down, 0 of 3 services", "cistack up"),
+            (
+                "partly up", partial, 0,
+                "sibling stack: 1 of 3 services up; not running: sibling-b, sibling-c",
+                "cistack status",
+            ),
+            (
+                "Compose failed", "default", 2,
+                "sibling stack: could not read — Compose service status is unavailable.",
+                "cistack status",
+            ),
+            (
+                "invalid compose", "default", 0,
+                "sibling stack: could not read — rendered Compose file has no services map.",
+                "cistack status",
+            ),
+        )
+        for name, answer, rc, detail, fix in cases:
+            with self.subTest(name=name):
+                host = self.make_host(
+                    build_box=True,
+                    sibling_compose_rc=rc,
+                    sibling_compose_stdout=None if answer == "default" else answer,
+                )
+                if name == "not converged":
+                    del host.files[os.fspath(Path(CI_ROOT) / "compose.yaml")]
+                elif name == "invalid compose":
+                    host.files[os.fspath(Path(CI_ROOT) / "compose.yaml")] = "services: []\n"
+
+                code, stdout, stderr, _ = self.run_status(host, FakeGrafana())
+
+                self.assertEqual((code, stderr), (0, ""))
+                line = next(line for line in _developer_lines(stdout) if line.startswith("sibling stack:"))
+                self.assertTrue(line.startswith(detail))
+                if fix is None:
+                    self.assertNotIn("Fix:", line)
+                else:
+                    self.assertIn(f"Fix: Run sudo python3 -m tools.{fix}, then retry.", line)
+                    self.assertNotIn("gideon apply", line)
+                sibling_reads = [
+                    argv for argv, _ in host.calls
+                    if "ps" in argv and argv[argv.index("--project-directory") + 1] == CI_ROOT
+                ]
+                self.assertEqual(len(sibling_reads), 0 if name in ("not converged", "invalid compose") else 1)
+
+    def test_sibling_exists_failure_and_production_compose_are_independent(self) -> None:
+        host = self.make_host(build_box=True)
+        original_exists = host.exists
+
+        def fail_sibling_exists(path: PathLike) -> bool:
+            if os.fspath(path) == os.fspath(Path(CI_ROOT) / "compose.yaml"):
+                raise OSError("fictitious unreadable sibling")
+            return original_exists(path)
+
+        with patch.object(host, "exists", side_effect=fail_sibling_exists):
+            code, stdout, stderr, _ = self.run_status(host, FakeGrafana())
+        self.assertEqual((code, stderr), (0, ""))
+        self.assertIn(
+            "sibling stack: could not read — sibling Compose file is unavailable. "
+            "Fix: Run sudo python3 -m tools.cistack status, then retry.",
+            stdout,
+        )
+        self.assertIn("services: 1 of 2 up; not running: postgres", stdout)
+
+        production_down = self.make_host(build_box=True, compose_rc=2)
+        code, stdout, stderr, _ = self.run_status(production_down, FakeGrafana())
+        self.assertEqual((code, stderr), (0, ""))
+        self.assertIn("services: could not read", stdout)
+        self.assertIn("sibling stack: up, 3 of 3 services", stdout)
+
+    def test_eval_run_line_age_partial_and_null_slice(self) -> None:
+        cases = (
+            (
+                "complete",
+                _newest_run(),
+                "eval run: fixture-slice smoke on ci: pass, 3h ago",
+            ),
+            (
+                "partial",
+                _newest_run(
+                    partial=True,
+                    verdict="fail",
+                    finished_at=(NOW - timedelta(minutes=15)).isoformat(),
+                ),
+                "eval run: fixture-slice smoke on ci: fail (partial), 15m ago",
+            ),
+            (
+                "no slice",
+                _newest_run(slice=None),
+                "eval run: no slice smoke on ci: pass, 3h ago",
+            ),
+        )
+        for name, document, expected in cases:
+            with self.subTest(name=name):
+                host = self.make_host(build_box=True, eval_run_stdout=document)
+                code, stdout, stderr, _ = self.run_status(host, FakeGrafana())
+                self.assertEqual((code, stderr), (0, ""))
+                self.assertIn(expected, _developer_lines(stdout))
+                self.assertTrue(
+                    any("FROM eval_runs" in (sql or "") for _argv, sql in host.calls)
+                )
+
+    def test_eval_run_none_yet_and_failed_read_have_their_fixes(self) -> None:
+        empty = self.make_host(build_box=True)
+        code, stdout, stderr, _ = self.run_status(empty, FakeGrafana())
+        self.assertEqual((code, stderr), (0, ""))
+        self.assertIn(
+            "eval run: none yet Fix: Run sudo python3 -m tools.cistack smoke, then retry.",
+            _developer_lines(stdout),
+        )
+
+        failed = self.make_host(build_box=True, eval_run_rc=3)
+        code, stdout, stderr, _ = self.run_status(failed, FakeGrafana())
+        self.assertEqual((code, stderr), (0, ""))
+        self.assertIn(
+            f"eval run: could not read — eval reader failed: exit 3 "
+            f"Fix: {stack.logs_fix(RENDERED, 'postgres')}",
+            _developer_lines(stdout),
+        )
+
+    def test_product_sections_print_fired_rows_and_failures_once(self) -> None:
+        first = FakeSection(
+            "triggers",
+            "product",
+            SectionReport(
+                "trigger details",
+                (
+                    Row("fired-one", "fired", "first decision"),
+                    Row("quiet", "not fired", "quiet detail"),
+                    Row("unmeasured", "not yet measurable", "unmeasured detail"),
+                    Row("rated", "rated", "rated detail"),
+                ),
+            ),
+        )
+        second = FakeSection(
+            "challenger",
+            "product",
+            SectionReport("challenger details", (Row("fired-two", "fired", "second decision"),)),
+        )
+        broken = FakeSection(
+            "broken-product", "product", Problem("fictional reader failed", "Run the fictional reader.")
+        )
+        office = FakeSection(
+            "office-section",
+            "office",
+            SectionReport("office details", (Row("office-action", "fired", "office decision"),)),
+        )
+        host = self.make_host(build_box=True)
+
+        code, stdout, stderr, _ = self.run_status(
+            host, FakeGrafana(), sections=(first, office, broken, second)
+        )
+
+        self.assertEqual((code, stderr), (0, ""))
+        waiting = stdout.split("waiting on you\n", 1)[1].split("\nat a glance", 1)[0]
+        developer = _developer_lines(stdout)
+        self.assertEqual(waiting, "office-action: office decision")
+        self.assertIn("triggers: fired-one — first decision", developer)
+        self.assertIn("challenger: fired-two — second decision", developer)
+        self.assertIn(
+            "broken-product: could not read — fictional reader failed "
+            "Fix: Run the fictional reader.",
+            developer,
+        )
+        self.assertLess(
+            developer.index("triggers: fired-one — first decision"),
+            developer.index("challenger: fired-two — second decision"),
+        )
+        for hidden in ("quiet", "unmeasured", "rated", "office-action", "none fired"):
+            with self.subTest(hidden=hidden):
+                self.assertNotIn(hidden, "\n".join(developer))
+        self.assertEqual((first.calls, office.calls, broken.calls, second.calls), (1, 1, 1, 1))
+
+    def test_product_sections_report_none_fired(self) -> None:
+        product = FakeSection(
+            "triggers",
+            "product",
+            SectionReport(
+                "quiet",
+                (
+                    Row("not-fired", "not fired", "quiet detail"),
+                    Row("rated", "rated", "rated detail"),
+                ),
+            ),
+        )
+        host = self.make_host(build_box=True)
+        code, stdout, stderr, _ = self.run_status(host, FakeGrafana(), sections=(product,))
+
+        self.assertEqual((code, stderr), (0, ""))
+        self.assertEqual(
+            _developer_lines(stdout),
+            (
+                "sibling stack: up, 3 of 3 services",
+                "eval run: none yet Fix: Run sudo python3 -m tools.cistack smoke, then retry.",
+                "proposals: none fired",
+            ),
+        )
+        self.assertEqual(product.calls, 1)
+
+    def test_unloadable_registry_prints_the_same_line_in_both_blocks(self) -> None:
+        host = self.make_host(build_box=True)
+        host.files[os.fspath(TRIGGERS_PATH)] = "version: [not valid\n"
+        product = FakeSection(
+            "product-section",
+            "product",
+            SectionReport("would fire", (Row("hidden", "fired", "hidden"),)),
+        )
+
+        code, stdout, stderr, _ = self.run_status(host, FakeGrafana(), sections=(product,))
+
+        self.assertEqual((code, stderr), (0, ""))
+        waiting = stdout.split("waiting on you\n", 1)[1].split("\nat a glance", 1)[0]
+        self.assertTrue(waiting.startswith("could not check — trigger registry could not be loaded Fix:"))
+        self.assertEqual(_developer_lines(stdout)[-1], waiting)
+        self.assertEqual(stdout.count(waiting), 2)
+        self.assertEqual(product.calls, 0)
+        self.assertIn("sibling stack:", stdout)
+        self.assertIn("eval run:", stdout)
+
+    def test_developer_failures_never_change_attention_exit_or_write(self) -> None:
+        cases = (
+            (0, FakeGrafana(), "status: nothing needs attention"),
+            (
+                1,
+                FakeGrafana((_alert("FictitiousPage", NOW.isoformat()),)),
+                "status: 1 need attention",
+            ),
+            (
+                2,
+                FakeGrafana(error=grafana.GrafanaError("fictional Grafana failure")),
+                "status: could not check",
+            ),
+        )
+        for expected_code, grafana_reader, closing in cases:
+            with self.subTest(expected_code=expected_code):
+                host = self.make_host(
+                    build_box=True,
+                    sibling_compose_rc=2,
+                    eval_run_rc=3,
+                )
+                product = FakeSection(
+                    "broken-product", "product", Problem("fictional read failed", "Fix the fiction.")
+                )
+
+                code, stdout, stderr, _ = self.run_status(
+                    host, grafana_reader, sections=(product,)
+                )
+
+                self.assertEqual((code, stderr), (expected_code, ""))
+                self.assertTrue(stdout.rstrip().endswith(closing))
+                developer = _developer_lines(stdout)
+                self.assertEqual(sum("could not read" in line for line in developer), 3)
+                self.assertTrue(all("Fix:" in line for line in developer))
+                self.assertEqual(product.calls, 1)
+                self.assertFalse(host.write_attempted)
 
     def test_silenced_page_is_printed_but_does_not_make_status_red(self) -> None:
         host = self.make_host()
@@ -772,7 +1131,9 @@ class Status(unittest.TestCase):
     def test_status_package_imports_only_stdlib_yaml_and_gideon(self) -> None:
         package = ROOT / "gideon" / "status"
         allowed = set(sys.stdlib_module_names) | {"yaml", "gideon"}
-        for path in sorted(package.glob("*.py")):
+        paths = sorted(package.glob("*.py"))
+        self.assertIn(package / "developer.py", paths)
+        for path in paths:
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):

@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import subprocess
 import unittest
 from collections.abc import Mapping
@@ -475,6 +476,109 @@ class ReadRows(unittest.TestCase):
         assert problem is not None
         self.assertIn("not a UUID", problem.problem)
         self.assertEqual(host.calls, [])
+
+
+class ReadNewestRun(unittest.TestCase):
+    def test_reader_uses_metrics_role_and_selects_only_status_fields(self) -> None:
+        host = FakeHost(stdout="null")
+
+        loaded, problem = record.read_newest_run(host, RENDERED)
+
+        self.assertIsNone(loaded)
+        self.assertIsNone(problem)
+        self.assertEqual(len(host.calls), 1)
+        argv, sql = host.calls[0]
+        self.assertEqual(argv, READER_PSQL)
+        assert sql is not None
+        self.assertIn("FROM eval_runs", sql)
+        self.assertIn("ORDER BY started_at DESC", sql)
+        self.assertIn("finished_at AT TIME ZONE 'UTC'", sql)
+        self.assertIn("'null'::json", sql)
+        for field in ("judge", "metrics", "decision", "overrides"):
+            with self.subTest(field=field):
+                self.assertIsNone(re.search(rf"\b{field}\b", sql))
+
+    def test_row_decodes_to_newest_run_with_aware_utc_time(self) -> None:
+        run_id = "11111111-2222-4333-8444-555555555555"
+        row = {
+            "run_id": run_id,
+            "slice": None,
+            "kind": "smoke",
+            "stack": "ci",
+            "verdict": "fail",
+            "partial": True,
+            "finished_at": "2026-09-19T07:00:01-05:00",
+        }
+
+        loaded, problem = record.read_newest_run(FakeHost(stdout=json.dumps(row)), RENDERED)
+
+        self.assertIsNone(problem)
+        self.assertEqual(
+            loaded,
+            record.NewestRun(
+                run_id=run_id,
+                slice=None,
+                kind="smoke",
+                stack="ci",
+                verdict="fail",
+                partial=True,
+                finished_at=datetime(2026, 9, 19, 12, 0, 1, tzinfo=UTC),
+            ),
+        )
+        assert loaded is not None
+        self.assertEqual(loaded.finished_at.tzinfo, UTC)
+
+    def test_reader_failures_carry_the_postgres_logs_fix(self) -> None:
+        for failure in (OSError("psql unavailable"), subprocess.SubprocessError("psql unavailable")):
+            with self.subTest(failure=type(failure).__name__):
+                host = FakeHost()
+                with patch.object(host, "run", side_effect=failure):
+                    loaded, problem = record.read_newest_run(host, RENDERED)
+                self.assertIsNone(loaded)
+                self.assertIsNotNone(problem)
+                assert problem is not None
+                self.assertIn("command could not run", problem.problem)
+                self.assertEqual(problem.fix, stack.logs_fix(RENDERED, record.POSTGRES_SERVICE))
+                self.assertEqual(host.calls, [])
+
+        loaded, problem = record.read_newest_run(FakeHost(rc=2), RENDERED)
+        self.assertIsNone(loaded)
+        self.assertIsNotNone(problem)
+        assert problem is not None
+        self.assertIn("exit 2", problem.problem)
+        self.assertEqual(problem.fix, stack.logs_fix(RENDERED, record.POSTGRES_SERVICE))
+
+    def test_malformed_documents_name_the_field_and_carry_the_logs_fix(self) -> None:
+        row = {
+            "run_id": "11111111-2222-4333-8444-555555555555",
+            "slice": "fixture-slice",
+            "kind": "manual",
+            "stack": "production",
+            "verdict": "pass",
+            "partial": False,
+            "finished_at": "2026-09-19T12:00:01Z",
+        }
+        cases: tuple[tuple[str, str, str], ...] = (
+            ("not json", "{", "invalid JSON"),
+            ("not a mapping", "[]", "invalid document"),
+            ("run id", json.dumps({**row, "run_id": None}), "run id"),
+            ("missing slice", json.dumps({key: value for key, value in row.items() if key != "slice"}), "slice"),
+            ("slice", json.dumps({**row, "slice": 3}), "slice"),
+            ("kind", json.dumps({**row, "kind": False}), "kind"),
+            ("stack", json.dumps({**row, "stack": None}), "stack"),
+            ("verdict", json.dumps({**row, "verdict": 3}), "verdict"),
+            ("partial", json.dumps({**row, "partial": "false"}), "partial"),
+            ("timestamp", json.dumps({**row, "finished_at": "not a date"}), "finished at"),
+            ("naive timestamp", json.dumps({**row, "finished_at": "2026-09-19T12:00:01"}), "finished at"),
+        )
+        for name, stdout, expected in cases:
+            with self.subTest(name=name):
+                loaded, problem = record.read_newest_run(FakeHost(stdout=stdout), RENDERED)
+                self.assertIsNone(loaded)
+                self.assertIsNotNone(problem)
+                assert problem is not None
+                self.assertIn(expected, problem.problem)
+                self.assertEqual(problem.fix, stack.logs_fix(RENDERED, record.POSTGRES_SERVICE))
 
 
 if __name__ == "__main__":

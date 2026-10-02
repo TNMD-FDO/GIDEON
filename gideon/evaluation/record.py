@@ -4,7 +4,7 @@ import json
 import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Final
 from uuid import UUID
 
@@ -124,6 +124,19 @@ class ComparandRun:
     kind: str
     partial: bool
     results: tuple[tuple[str, int, Mapping[str, object]], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class NewestRun:
+    """The identity and outcome of the most recently started evaluation run."""
+
+    run_id: str
+    slice: str | None
+    kind: str
+    stack: str
+    verdict: str
+    partial: bool
+    finished_at: datetime
 
 
 def _contains_forbidden_text(value: object) -> bool:
@@ -538,6 +551,26 @@ SELECT json_build_object(
     return "\n".join(lines) + "\n"
 
 
+def _newest_run_sql() -> str:
+    return """SELECT COALESCE((
+    SELECT json_build_object(
+        'run_id', run_id::text,
+        'slice', slice,
+        'kind', kind,
+        'stack', stack,
+        'verdict', verdict,
+        'partial', partial,
+        'finished_at', to_char(
+            finished_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+        )
+    )
+    FROM eval_runs
+    ORDER BY started_at DESC
+    LIMIT 1
+), 'null'::json);
+"""
+
+
 def _decoded_comparand(stdout: str, run_id: str, fix: str) -> ComparandRun:
     run, rows = _reader_payload(stdout, run_id, fix)
     return ComparandRun(
@@ -559,11 +592,38 @@ def _decoded_comparand(stdout: str, run_id: str, fix: str) -> ComparandRun:
     )
 
 
-def _read_document(
-    io: Host, rendered_dir: PathLike, run_id: str, sql: str, fix: str
-) -> str | Problem:
-    """Run one reader statement as the metrics role and return its stdout."""
+def _decoded_newest(stdout: str, fix: str) -> NewestRun | None:
+    try:
+        document = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise _ReadRefusal(Problem("eval reader returned invalid JSON", fix)) from exc
+    if document is None:
+        return None
+    if not isinstance(document, Mapping):
+        raise _ReadRefusal(Problem("eval reader returned an invalid document", fix))
+    if "slice" not in document:
+        raise _invalid("slice", fix)
 
+    timestamp = _text_field(document.get("finished_at"), "finished at", fix)
+    try:
+        finished_at = datetime.fromisoformat(timestamp)
+    except ValueError as exc:
+        raise _invalid("finished at", fix) from exc
+    if finished_at.tzinfo is None or finished_at.utcoffset() is None:
+        raise _invalid("finished at", fix)
+
+    return NewestRun(
+        run_id=_text_field(document.get("run_id"), "run id", fix),
+        slice=_optional_text_field(document.get("slice"), "slice", fix),
+        kind=_text_field(document.get("kind"), "kind", fix),
+        stack=_text_field(document.get("stack"), "stack", fix),
+        verdict=_text_field(document.get("verdict"), "verdict", fix),
+        partial=_bool_field(document.get("partial"), "partial state", fix),
+        finished_at=finished_at.astimezone(UTC),
+    )
+
+
+def _malformed_id(run_id: str) -> Problem | None:
     try:
         UUID(run_id)
     except (AttributeError, TypeError, ValueError):
@@ -571,6 +631,14 @@ def _read_document(
             f"run id is not a UUID: {run_id!r}",
             "Supply the id of a recorded evaluation run, then retry.",
         )
+    return None
+
+
+def _read_document(
+    io: Host, rendered_dir: PathLike, sql: str, fix: str
+) -> str | Problem:
+    """Run one reader statement as the metrics role and return its stdout."""
+
     try:
         result = io.run(_reader_argv(rendered_dir), input=sql)
     except (OSError, subprocess.SubprocessError):
@@ -585,7 +653,10 @@ def read_run(
 ) -> tuple[RecordedRun | None, Problem | None]:
     """Read one recorded run and its content-free verdicts, or return a refusal."""
 
-    stdout = _read_document(io, rendered_dir, run_id, _read_sql(run_id), _reader_fix(run_id))
+    malformed = _malformed_id(run_id)
+    if malformed is not None:
+        return None, malformed
+    stdout = _read_document(io, rendered_dir, _read_sql(run_id), _reader_fix(run_id))
     if isinstance(stdout, Problem):
         return None, stdout
     try:
@@ -605,12 +676,30 @@ def read_run_metrics(
     database's logs, since the id itself was well formed.
     """
 
+    malformed = _malformed_id(run_id)
+    if malformed is not None:
+        return None, malformed
     fix = stack.logs_fix(rendered_dir, POSTGRES_SERVICE)
-    stdout = _read_document(io, rendered_dir, run_id, _metrics_read_sql(run_id), fix)
+    stdout = _read_document(io, rendered_dir, _metrics_read_sql(run_id), fix)
     if isinstance(stdout, Problem):
         return None, stdout
     try:
         return _decoded_comparand(stdout, run_id, fix), None
+    except _ReadRefusal as refused:
+        return None, refused.problem
+
+
+def read_newest_run(
+    io: Host, rendered_dir: PathLike
+) -> tuple[NewestRun | None, Problem | None]:
+    """Read the most recently started evaluation run, if one exists."""
+
+    fix = stack.logs_fix(rendered_dir, POSTGRES_SERVICE)
+    stdout = _read_document(io, rendered_dir, _newest_run_sql(), fix)
+    if isinstance(stdout, Problem):
+        return None, stdout
+    try:
+        return _decoded_newest(stdout, fix), None
     except _ReadRefusal as refused:
         return None, refused.problem
 

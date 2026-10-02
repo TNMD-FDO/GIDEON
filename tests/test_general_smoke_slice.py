@@ -409,7 +409,9 @@ class GeneralSmokeCommand(unittest.TestCase):
         self.assertIn("instruction rendered, eval password read, door probed", stdout)
         self.assertIn("22 results over 11 active cases at 2 repeats", stdout)
         self.assertIn("record: ok — skipped", stdout)
-        self.assertIn("reference: absent", stdout)
+        # The comparand is the committed eval/reference/general-smoke/, first recorded at
+        # v0.3.0; every fixture case passes, so the comparison reads current.
+        self.assertIn("reference: current", stdout)
         comparison.assert_called_once()
         self.assertFalse(any(argv[0] == "docker" for argv, _input in host.calls))
         self.assertNotIn(SENTINEL, stdout + stderr)
@@ -422,7 +424,9 @@ class GeneralSmokeCommand(unittest.TestCase):
         self.assertEqual(code, 0, stdout + stderr)
         self.assertIn("22 results over 11 active cases at 2 repeats", stdout)
         self.assertIn("record: ok — run", stdout)
-        self.assertIn("reference: absent", stdout)
+        # The comparand is the committed eval/reference/general-smoke/, first recorded at
+        # v0.3.0; every fixture case passes, so the comparison reads current.
+        self.assertIn("reference: current", stdout)
         comparison.assert_called_once()
         sql = "\n".join(
             cast(str, input_text)

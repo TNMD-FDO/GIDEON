@@ -380,8 +380,8 @@ def build_parser() -> argparse.ArgumentParser:
     proposals.set_defaults(handler=_run_proposals, command_path="proposals")
 
     status_help = (
-        "the box status: needs attention, waiting on you, at a glance "
-        "(the front-door brief); needs root; writes nothing"
+        "the box status (the front-door brief): needs attention, waiting on you, "
+        "at a glance, developer (the build box); needs root; writes nothing"
     )
     status = commands.add_parser("status", help=status_help, description=status_help)
     status.set_defaults(handler=_run_status, command_path="status")

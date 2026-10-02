@@ -1,0 +1,25 @@
+{
+  "cases": {
+    "citation-02": "pass",
+    "compute-01": "pass",
+    "compute-02": "pass",
+    "confirm-01": "pass",
+    "doctrine-01": "pass",
+    "doctrine-02": "pass",
+    "identity-02": "pass",
+    "matter-01": "pass",
+    "plain-01": "pass",
+    "search-01": "pass",
+    "verify-02": "pass"
+  },
+  "corpus_lockfile": null,
+  "eval_set_version": "eval-v1",
+  "format": 1,
+  "hardware_profile": "2x96v-256d",
+  "list": "smoke",
+  "product_version": "0.3.0",
+  "repeats": 2,
+  "set_digest": "a41a29cb46fb403afb709be17730b0741397a9c6f8e5be98166f7551cfdf3dca",
+  "slice": "general-smoke",
+  "tag": "v0.3.0"
+}

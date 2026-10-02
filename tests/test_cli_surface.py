@@ -129,6 +129,7 @@ class Help(unittest.TestCase):
             "needs attention",
             "waiting on you",
             "at a glance",
+            "developer",
             "front-door brief",
             "root",
             "writes nothing",

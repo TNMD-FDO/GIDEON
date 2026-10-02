@@ -8,12 +8,13 @@ from pathlib import Path
 from typing import Final
 
 from gideon.host import backupset, grafana, nogpu, owui, secrets, site, tls
+from gideon.host.render.ci import CI_ROOT
 from gideon.host.render.grafana import GRAFANA_ADMIN_USER
 from gideon.host.report import Problem, one_line, refusal
 from gideon.host.sysio import Host, PathLike, RealHost
 from gideon.improvement import owuifeedback, proposals, triggers
 from gideon.improvement import sections as improvement_sections
-from gideon.status import attention, glance
+from gideon.status import attention, developer, glance
 
 _SITE_PATH: Final[Path] = Path("/etc/gideon/site.yaml")
 _RENDERED_DIR: Final[Path] = Path("/etc/gideon/rendered")
@@ -24,10 +25,11 @@ _APPLY_FIX: Final[str] = "Run sudo python3 -m gideon apply, then retry."
 _REGISTRY_FIX: Final[str] = (
     "Restore config/triggers.yaml from the release checkout, then retry."
 )
-_HEADERS: Final[tuple[str, str, str]] = (
+_HEADERS: Final[tuple[str, str, str, str]] = (
     "needs attention",
     "waiting on you",
     "at a glance",
+    "developer",
 )
 _CLEAR_LINE: Final[str] = "status: nothing needs attention"
 _ATTENTION_LINE: Final[str] = "status: {count} need attention"
@@ -39,17 +41,17 @@ def _print_line(value: object) -> None:
     print(one_line(value))
 
 
-def _waiting_lines(
+def _status_context(
     host: Host,
     *,
     checkout_root: Path,
     rendered_dir: Path,
     triggers_path: PathLike | None,
-    registered: Sequence[improvement_sections.Section] | None,
     site_path: PathLike,
     owui_client_factory: Callable[..., owui.Client] | None,
     now: Callable[[], float],
-) -> tuple[str, ...]:
+    build_box: bool,
+) -> improvement_sections.Context | str:
     registry_path = (
         checkout_root / "config/triggers.yaml"
         if triggers_path is None
@@ -58,14 +60,14 @@ def _waiting_lines(
     loaded = triggers.load_trigger_registry(registry_path, host=host)
     if loaded.errors or loaded.registry is None:
         fix = loaded.errors[0].fix if loaded.errors else _REGISTRY_FIX
-        return (f"could not check — {_REGISTRY_PROBLEM} Fix: {fix}",)
+        return f"could not check — {_REGISTRY_PROBLEM} Fix: {fix}"
 
-    context = improvement_sections.Context(
+    return improvement_sections.Context(
         host=host,
         checkout_root=checkout_root,
         rendered_dir=rendered_dir,
         registry=loaded.registry,
-        build_box=nogpu.is_build_box(host),
+        build_box=build_box,
         query=lambda sql: improvement_sections.read_rows(host, rendered_dir, sql),
         feedback=improvement_sections.once(
             owuifeedback.source(
@@ -76,9 +78,14 @@ def _waiting_lines(
         ),
         now=now,
     )
-    selected = proposals.SECTIONS if registered is None else tuple(registered)
+
+
+def _waiting_lines(
+    context: improvement_sections.Context,
+    registered: Sequence[improvement_sections.Section],
+) -> tuple[str, ...]:
     lines: list[str] = []
-    for section in selected:
+    for section in registered:
         if section.scope != "office":
             continue
         result = section.render(context)
@@ -117,6 +124,7 @@ def run_status(
     host: Host | None = None,
     site_path: PathLike = _SITE_PATH,
     rendered_dir: PathLike = _RENDERED_DIR,
+    ci_root: PathLike = CI_ROOT,
     staging: PathLike = _STAGING,
     checkout_root: PathLike | None = None,
     triggers_path: PathLike | None = None,
@@ -161,17 +169,21 @@ def run_status(
         _print_line("none")
         firing = 0
 
-    _print_line(_HEADERS[1])
-    for line in _waiting_lines(
+    build_box = nogpu.is_build_box(io)
+    registered = proposals.SECTIONS if sections is None else tuple(sections)
+    context = _status_context(
         io,
         checkout_root=checkout,
         rendered_dir=rendered,
         triggers_path=triggers_path,
-        registered=sections,
         site_path=site_path,
         owui_client_factory=owui_client_factory,
         now=lambda: current.timestamp(),
-    ):
+        build_box=build_box,
+    )
+    _print_line(_HEADERS[1])
+    waiting = (context,) if isinstance(context, str) else _waiting_lines(context, registered)
+    for line in waiting:
         _print_line(line)
 
     _print_line(_HEADERS[2])
@@ -185,6 +197,14 @@ def run_status(
     )
     for fact in facts:
         _print_line(glance.fact_line(fact))
+
+    if build_box:
+        _print_line(_HEADERS[3])
+        _print_line(glance.fact_line(developer.sibling_fact(io, ci_root)))
+        _print_line(glance.fact_line(developer.eval_run_fact(io, rendered, current)))
+        lines = (context,) if isinstance(context, str) else developer.proposal_lines(context, registered)
+        for line in lines:
+            _print_line(line)
 
     if attention_failed:
         _print_line(_UNKNOWN_LINE)

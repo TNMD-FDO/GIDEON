@@ -56,7 +56,9 @@ def age_text(now: datetime, then: datetime) -> str:
     return f"{days}d {remaining // 3600}h"
 
 
-def _failure(name: str, problem: str, fix: str) -> Fact:
+def failure(name: str, problem: str, fix: str) -> Fact:
+    """Render a reader's failure as one could-not-read fact with its fix."""
+
     return Fact(name, f"could not read — {one_line(problem)}", fix)
 
 
@@ -71,10 +73,10 @@ def services_fact(host: Host, rendered_dir: PathLike) -> Fact:
 
     declared = stack.declared_services(host, rendered_dir)
     if isinstance(declared, Problem):
-        return _failure("services", declared.problem, declared.fix)
+        return failure("services", declared.problem, declared.fix)
     running = stack.running_services(host, rendered_dir)
     if running is None:
-        return _failure("services", "Compose service status is unavailable.", _APPLY_FIX)
+        return failure("services", "Compose service status is unavailable.", _APPLY_FIX)
     active = set(running)
     missing = tuple(service for service in declared if service not in active)
     detail = f"{len(declared) - len(missing)} of {len(declared)} up"
@@ -89,7 +91,7 @@ def backup_set_fact(host: Host, staging: PathLike, now: datetime) -> Fact:
     try:
         refs = backupset.list_sets(host, staging)
     except (OSError, subprocess.SubprocessError) as exc:
-        return _failure("backup set", str(exc), _BACKUP_RUN_FIX)
+        return failure("backup set", str(exc), _BACKUP_RUN_FIX)
     selected = backupset.select_set(refs)
     if isinstance(selected, Problem):
         return Fact("backup set", "none yet", _BACKUP_RUN_FIX)
@@ -138,7 +140,7 @@ def record_facts(
 
     def failed(problem: str) -> tuple[Fact, Fact]:
         fix = stack.logs_fix(rendered_dir, record.POSTGRES_SERVICE)
-        return _failure("off-box push", problem, fix), _failure("drill", problem, fix)
+        return failure("off-box push", problem, fix), failure("drill", problem, fix)
 
     result = sections.read_rows(host, rendered_dir, _RECORDS_SQL)
     if isinstance(result, Problem):
@@ -172,13 +174,13 @@ def tls_fact(host: Host, hostname: str, now: datetime) -> Fact:
             cafile=tls.CA_PATH,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        return _failure(
+        return failure(
             "TLS certificate",
             str(exc),
             stack.logs_fix("/etc/gideon/rendered", "caddy"),
         )
     if isinstance(expiry, Problem):
-        return _failure("TLS certificate", expiry.problem, expiry.fix)
+        return failure("TLS certificate", expiry.problem, expiry.fix)
     return Fact(
         "TLS certificate",
         f"{(expiry - now).days} days left, expires {expiry.date().isoformat()}",
@@ -192,15 +194,15 @@ def data_fact(host: Host) -> Fact:
     try:
         result = host.run(DATA_DF_ARGV)
     except (OSError, subprocess.SubprocessError) as exc:
-        return _failure("/data", str(exc), _DATA_FIX)
+        return failure("/data", str(exc), _DATA_FIX)
     if result.returncode != 0:
-        return _failure("/data", "df could not measure the data volume.", _DATA_FIX)
+        return failure("/data", "df could not measure the data volume.", _DATA_FIX)
     measurement = parse_size_and_available(result.stdout)
     if measurement is None:
-        return _failure("/data", "df returned invalid size and free-space values.", _DATA_FIX)
+        return failure("/data", "df returned invalid size and free-space values.", _DATA_FIX)
     size, available = measurement
     if size == 0:
-        return _failure("/data", "df returned a zero-sized data volume.", _DATA_FIX)
+        return failure("/data", "df returned a zero-sized data volume.", _DATA_FIX)
     percent = available * 100 / size
     return Fact(
         "/data", f"{format_gb(available)} free of {format_gb(size)} ({percent:.1f}%)", ""

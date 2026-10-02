@@ -8,9 +8,9 @@
   "format": 1,
   "hardware_profile": "2x96v-256d",
   "list": "sentence-credit",
-  "product_version": "0.2.69",
+  "product_version": "0.3.0",
   "repeats": 1,
-  "set_digest": "cc921273c34c917ecceb2d694ef6ce539b3826a71efb1603efed8b1bb66ee410",
+  "set_digest": "a41a29cb46fb403afb709be17730b0741397a9c6f8e5be98166f7551cfdf3dca",
   "slice": "smoke",
-  "tag": "v0.2.69"
+  "tag": "v0.3.0"
 }

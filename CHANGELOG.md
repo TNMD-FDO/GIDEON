@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.1](docs/release-notes/v0.3.1.md) — 2026-10-01 — the box status's developer block
 - [v0.3.0](docs/release-notes/v0.3.0.md) — 2026-09-30 — the eval harness; slice 2 closes
 - [v0.2.98](docs/release-notes/v0.2.98.md) — 2026-09-30 — the build box's nightly runs the challenger's pair and `gideon proposals` reads it
 - [v0.2.97](docs/release-notes/v0.2.97.md) — 2026-09-30 — a replacement's prefix judged as stored
