@@ -337,6 +337,10 @@ class Runner(unittest.TestCase):
         self.assertEqual(
             [line for line in stdout.splitlines() if line.startswith("reference")], []
         )
+        self.assertEqual(
+            [line for line in stdout.splitlines() if line.startswith("verdict ")],
+            ["verdict pass"],
+        )
         self.assertIn(
             "gate: ok — all judge gradings returned on-schema verdicts\n", stdout
         )
@@ -346,6 +350,10 @@ class Runner(unittest.TestCase):
         code, stdout, _stderr = _invoke_command(host)
         self.assertEqual(code, 1)
         self.assertIn("gate: refuse", stdout)
+        self.assertEqual(
+            [line for line in stdout.splitlines() if line.startswith("verdict ")],
+            ["verdict FAIL"],
+        )
         self.assertTrue(host.write_sql)
         sql = host.write_sql[0]
         judge_line = next(line for line in sql.splitlines() if line.startswith("\\set result_0_judge "))

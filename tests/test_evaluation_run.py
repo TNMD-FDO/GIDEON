@@ -232,21 +232,37 @@ def _changed_result(loaded: Any, changes: Mapping[str, str]) -> SliceResult:
 
 
 def _assert_comparison_lines(
-    test: unittest.TestCase, stdout: str, outcome: str | None = None
+    test: unittest.TestCase,
+    stdout: str,
+    outcome: str | None = None,
+    word: str | None = None,
 ) -> None:
-    """The release's whitelist reads exactly one of each line.
+    """The release's whitelist reads exactly one of each line, in order.
 
-    *outcome* is pinned only where the case is about the comparison; a case
-    about the rows runs against the real checkout, whose committed reference
-    moves with the set, and asserts the counts alone.
+    The ``verdict`` line follows the ``run`` row and precedes the
+    ``reference:`` line. *outcome* and *word* are pinned only where the case
+    is about them; a case about the rows runs against the real checkout,
+    whose committed reference moves with the set, and asserts the counts alone.
     """
 
-    reference_lines = [line for line in stdout.splitlines() if line.startswith("reference: ")]
-    verdict_lines = [line for line in stdout.splitlines() if line.startswith("verdict ")]
+    lines = stdout.splitlines()
+    reference_lines = [line for line in lines if line.startswith("reference: ")]
+    verdict_lines = [line for line in lines if line.startswith("verdict ")]
     test.assertEqual(len(reference_lines), 1, reference_lines)
     if outcome is not None:
         test.assertEqual(reference_lines, [f"reference: {outcome}"])
     test.assertEqual(len(verdict_lines), 1)
+    if word is not None:
+        test.assertEqual(verdict_lines, [f"verdict {word}"])
+    run_index = next(i for i, line in enumerate(lines) if line.startswith("run: ok"))
+    test.assertLess(run_index, lines.index(verdict_lines[0]))
+    test.assertLess(lines.index(verdict_lines[0]), lines.index(reference_lines[0]))
+
+
+def _assert_no_verdict_line(test: unittest.TestCase, stdout: str) -> None:
+    """A run that stops at or before its ``run`` row prints no ``verdict`` line."""
+
+    test.assertFalse([line for line in stdout.splitlines() if line.startswith("verdict ")])
 
 
 def _expected_object(obj: ExactObject) -> dict[str, object]:
@@ -374,6 +390,7 @@ class Command(unittest.TestCase):
             stdout,
         )
         self.assertNotIn("run: ok", stdout)
+        _assert_no_verdict_line(self, stdout)
         self.assertEqual(host.lock_records, [])
 
     def test_force_outside_quiet_window_runs_engine_slice(self) -> None:
@@ -446,7 +463,7 @@ class Command(unittest.TestCase):
         self.assertEqual(rows, tuple(sorted(rows)))
         self.assertIn(f"record: ok — run {RUN_ID} recorded", stdout)
         self.assertIn("gate: ok", stdout)
-        _assert_comparison_lines(self, stdout)
+        _assert_comparison_lines(self, stdout, word="pass")
         writes = [input for argv, input in host.calls if argv[0] == "docker" and input != "SELECT 1;\n"]
         self.assertEqual(len(writes), 1)
         self.assertIn("INSERT INTO eval_runs", writes[0] or "")
@@ -544,7 +561,7 @@ class Command(unittest.TestCase):
         self.assertEqual(stderr, "")
         self.assertIn("gate: refuse", stdout)
         self.assertIn("record: ok — skipped", stdout)
-        _assert_comparison_lines(self, stdout)
+        _assert_comparison_lines(self, stdout, word="FAIL")
 
     def test_failing_release_run_is_recorded_before_gate(self) -> None:
         host = EvalHost()
@@ -573,7 +590,7 @@ class Command(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("record: ok — run", stdout)
         self.assertIn("gate: refuse", stdout)
-        _assert_comparison_lines(self, stdout)
+        _assert_comparison_lines(self, stdout, word="FAIL")
         write_sql = next(input for argv, input in host.calls if argv[0] == "docker" and input != "SELECT 1;\n")
         self.assertIn("\\set run_verdict 'fail'", write_sql or "")
         self.assertIn("\\set result_0_verdict 'fail'", write_sql or "")
@@ -598,7 +615,7 @@ class Command(unittest.TestCase):
             )
         self.assertEqual(code, 1)
         self.assertEqual(stderr, "")
-        _assert_comparison_lines(self, stdout, "regressed")
+        _assert_comparison_lines(self, stdout, "regressed", "pass")
         self.assertIn(target, stdout)
         self.assertLess(stdout.index("record: ok — run"), stdout.index("gate: refuse"))
         self.assertIn("\\set run_verdict 'fail'", write_sql or "")
@@ -625,7 +642,7 @@ class Command(unittest.TestCase):
             )
         self.assertEqual(code, 1)
         self.assertEqual(stderr, "")
-        _assert_comparison_lines(self, stdout, "other-version")
+        _assert_comparison_lines(self, stdout, "other-version", "pass")
         self.assertLess(stdout.index("record: ok — run"), stdout.index("gate: refuse"))
         self.assertIn(f"eval reference --run {RUN_ID}", stdout)
         # A refused comparison judges nothing, so the row carries the slice
@@ -649,7 +666,7 @@ class Command(unittest.TestCase):
             )
         self.assertEqual(code, 1)
         self.assertIn("canonical serialization", stderr)
-        _assert_comparison_lines(self, stdout, "malformed")
+        _assert_comparison_lines(self, stdout, "malformed", "pass")
         self.assertIn(reference.SLICE_REPAIR_FIX, stdout)
         self.assertNotIn("eval reference --run", stdout)
 
@@ -670,7 +687,7 @@ class Command(unittest.TestCase):
                 )
         self.assertEqual(code, 1)
         self.assertEqual(stderr, "")
-        _assert_comparison_lines(self, stdout, "regressed")
+        _assert_comparison_lines(self, stdout, "regressed", "FAIL")
         self.assertLess(
             stdout.index("Review the miss and false hit lines"),
             stdout.index(reference.REGRESSION_FIX),
@@ -689,7 +706,7 @@ class Command(unittest.TestCase):
             )
         self.assertEqual(code, 0)
         self.assertEqual(stderr, "")
-        _assert_comparison_lines(self, stdout, "absent")
+        _assert_comparison_lines(self, stdout, "absent", "pass")
         self.assertIn("gate: ok", stdout)
         self.assertIn("no reference for extraction", stdout)
 
@@ -716,7 +733,7 @@ class Command(unittest.TestCase):
             )
         self.assertEqual(code, 0)
         self.assertEqual(stderr, "")
-        _assert_comparison_lines(self, stdout, "stale")
+        _assert_comparison_lines(self, stdout, "stale", "pass")
         self.assertIn(f"re-record with gideon eval reference --run {RUN_ID}", stdout)
 
     def test_set_run_still_compares_against_release_checkout_reference(self) -> None:
@@ -739,7 +756,7 @@ class Command(unittest.TestCase):
                 )
         self.assertEqual(code, 1)
         self.assertEqual(stderr, "")
-        _assert_comparison_lines(self, stdout, "regressed")
+        _assert_comparison_lines(self, stdout, "regressed", "pass")
         self.assertIn(target, stdout)
         self.assertIn("record: ok — skipped", stdout)
 
@@ -838,6 +855,7 @@ class Command(unittest.TestCase):
                 self.assertIn("gideon eval run:", stderr)
                 self.assertIn(expected, stderr)
                 self.assertIn("Fix:", stderr)
+                _assert_no_verdict_line(self, stdout)
                 if "nightly" in argv:
                     self.assertIn("Remove --kind nightly", stderr)
                 self.assertEqual(host.calls, [])
@@ -850,6 +868,7 @@ class Command(unittest.TestCase):
                 refusal_text = stderr if stderr else stdout
                 self.assertIn("Fix:", refusal_text)
                 self.assertNotIn("reference:", stdout)
+                _assert_no_verdict_line(self, stdout)
 
         next_opening = datetime(2026, 9, 21, 19, 0, tzinfo=UTC)
         outside = command.window.WindowJudgement(
@@ -873,6 +892,7 @@ class Command(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("Fix:", stderr if stderr else stdout)
         self.assertNotIn("reference:", stdout)
+        _assert_no_verdict_line(self, stdout)
 
     def test_missing_runner_prints_no_reference_line(self) -> None:
         with patch.object(command, "SLICE_RUNNERS", {}):
@@ -885,6 +905,7 @@ class Command(unittest.TestCase):
         self.assertIn("run: refuse — no runner serves slice 'extraction'", stdout)
         self.assertIn("Fix:", stdout)
         self.assertNotIn("reference:", stdout)
+        _assert_no_verdict_line(self, stdout)
 
     def test_ranked_flag_refuses_for_extraction(self) -> None:
         host = EvalHost()
@@ -896,6 +917,7 @@ class Command(unittest.TestCase):
         self.assertEqual(stderr, "")
         self.assertIn("ranked: refuse", stdout)
         self.assertIn("Remove --ranked", stdout)
+        _assert_no_verdict_line(self, stdout)
         self.assertFalse(any(argv[0] == "docker" for argv, _input in host.calls))
 
     def test_signoff_slice_row_names_unsigned_count_and_zero(self) -> None:
@@ -967,6 +989,7 @@ class Command(unittest.TestCase):
         self.assertIn("must select through the loader", stdout)
         self.assertNotIn("record:", stdout)
         self.assertNotIn("gate:", stdout)
+        _assert_no_verdict_line(self, stdout)
 
 
 def _invoke_engine_command(
@@ -1049,6 +1072,25 @@ def _nightly_start() -> datetime:
 
 
 class EngineStackAndLock(unittest.TestCase):
+    def test_turn_driving_slices_print_their_own_verdict(self) -> None:
+        for slice_name in ("smoke", "general-smoke", "guardrails"):
+            for verdict, word in ((True, "pass"), (False, "FAIL")):
+                with self.subTest(slice_name=slice_name, verdict=verdict):
+                    def run_result(_context: RunContext, verdict: bool = verdict) -> SliceResult:
+                        return SliceResult(
+                            verdict, "visibly fictitious report without final newline", ()
+                        )
+
+                    code, stdout, stderr, _observed = _invoke_engine_command(
+                        EvalHost(),
+                        slice_name=slice_name,
+                        on_run=run_result,
+                    )
+                    self.assertEqual(stderr, "")
+                    self.assertEqual(code, 0 if verdict else 1)
+                    self.assertIn("visibly fictitious report without final newline\nverdict ", stdout)
+                    _assert_comparison_lines(self, stdout, word=word)
+
     def test_ci_threads_turn_paths_records_identity_and_waives_the_window(self) -> None:
         host = EvalHost()
         production_dir = Path("/tmp/fictitious-production-rendered")
@@ -1288,6 +1330,7 @@ class NightlyCommand(unittest.TestCase):
         self.assertIn(f"aborted at the window end {end.isoformat()}", stdout)
         self.assertIn("1 run row, 0 result rows", stdout)
         self.assertIn("gate: refuse", stdout)
+        _assert_comparison_lines(self, stdout, word="FAIL")
         write_sql = next(
             cast(str, statement)
             for argv, statement in host.calls
@@ -1751,6 +1794,7 @@ class ChallengerPair(unittest.TestCase):
                 )
                 self.assertEqual((code, stdout), (1, ""))
                 self.assertIn("Fix:", stderr)
+                _assert_no_verdict_line(self, stdout)
                 self.assertFalse(host.calls)
                 self.assertFalse(host.exists_calls)
                 command_text = stderr.split("Run gideon ", 1)[1].split(", then retry", 1)[0]
@@ -1762,6 +1806,7 @@ class ChallengerPair(unittest.TestCase):
             code, stdout, stderr = _invoke(args, **_run_kwargs(host))
             self.assertEqual((code, stdout), (1, ""))
             self.assertIn("--stack ci", stderr)
+            _assert_no_verdict_line(self, stdout)
             self.assertFalse(host.exists_calls)
         host = ChallengerHost(build_box=False)
         code, stdout, stderr = _invoke(
@@ -1769,6 +1814,7 @@ class ChallengerPair(unittest.TestCase):
         )
         self.assertEqual((code, stderr), (1, ""))
         self.assertIn("build box", stdout)
+        _assert_no_verdict_line(self, stdout)
         self.assertEqual(host.exists_calls, [str(nogpu.BUILD_BOX_PATH)])
 
     def test_loader_none_and_build_box_stages_stop_before_engine(self) -> None:
@@ -1783,6 +1829,7 @@ class ChallengerPair(unittest.TestCase):
                 self.assertIn(expected, stdout)
                 self.assertFalse(host.calls)
                 self.assertFalse(host.lock_records)
+                _assert_no_verdict_line(self, stdout)
                 self.assertEqual(host.reads, [str(ROOT / challenger.CHALLENGER_PATH)])
                 if expected_code:
                     self.assertIn("Fix:", stderr)
@@ -1793,6 +1840,7 @@ class ChallengerPair(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("challenger: refuse", stdout)
         self.assertFalse(host.reads)
+        _assert_no_verdict_line(self, stdout)
 
     def test_two_passes_record_pair_and_grade_each_prompt(self) -> None:
         host = ChallengerHost()
@@ -1831,9 +1879,15 @@ class ChallengerPair(unittest.TestCase):
         release_record = next(i for i, line in enumerate(lines) if line.startswith("record: ok"))
         candidate_side = next(i for i, line in enumerate(lines) if line.startswith("side: ok") and "challenger run" in line)
         candidate_record = next(i for i, line in enumerate(lines) if line.startswith("record: ok") and ids[1] in line)
+        verdict_indices = [i for i, line in enumerate(lines) if line.startswith("verdict ")]
+        self.assertEqual([lines[i] for i in verdict_indices], ["verdict pass", "verdict pass"])
         self.assertLess(release_side, release_record)
+        self.assertLess(release_side, verdict_indices[0])
+        self.assertLess(verdict_indices[0], release_record)
         self.assertLess(release_record, candidate_side)
         self.assertLess(candidate_side, candidate_record)
+        self.assertLess(candidate_side, verdict_indices[1])
+        self.assertLess(verdict_indices[1], candidate_record)
         self.assertIn(ids[0], lines[release_side])
         self.assertIn(ids[1], lines[candidate_side])
         self.assertEqual(sum("side: ok" in line for line in lines), 2)

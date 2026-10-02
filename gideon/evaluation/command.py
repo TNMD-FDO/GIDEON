@@ -218,6 +218,18 @@ def _gate(slice_result: SliceResult, slice_spec: SliceSpec, *, partial: bool) ->
     return False
 
 
+def _verdict_word(slice_result: SliceResult, *, partial: bool) -> str:
+    """Return the word of the run's one ``verdict`` line, which a release's reference check reads.
+
+    The word is the slice's own gate, never the comparison's, so it reads
+    ``pass`` beside a regressed or other-version reference. A partial run reads
+    ``FAIL`` even when its completed repeats passed: ``verdict pass`` never
+    appears on a run that did not finish.
+    """
+
+    return "pass" if slice_result.verdict and not partial else "FAIL"
+
+
 def _compare_reference(
     loaded: LoadedSet,
     slice_name: str,
@@ -1441,6 +1453,9 @@ def _run_body(
         run_detail += f", {len(selection.unsigned)} unsigned excluded"
     print_stage(StageResult("run", True, run_detail, ""))
     print(slice_result.report, end="")
+    if slice_result.report and not slice_result.report.endswith("\n"):
+        print()
+    print(f"verdict {_verdict_word(slice_result, partial=run_result.partial)}")
 
     comparison: reference.Comparison | None = None
     reference_version = ""

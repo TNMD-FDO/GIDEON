@@ -727,12 +727,28 @@ class Scorer(TestCase):
 
     def test_report_names_ids_types_and_offsets_but_not_question_text(self) -> None:
         case = _case("fictional-report-case", [_label("statute", 4, 12, key="/us/usc/t18/s3663a")])
-        result = score(
+        failing = score(
             [[case]],
             {"fictional-report-case": (_object("statute", 4, 11, key="/us/usc/t18/s3663b"),)},
             ("statute",),
         )
-        report = build_report(result)
-        self.assertIn("miss fictional-report-case statute 4:12", report)
-        self.assertIn("false hit fictional-report-case statute 4:11", report)
-        self.assertNotIn(case["question"], report)
+        passing = score(
+            [[case]],
+            {"fictional-report-case": (_object("statute", 4, 12, key="/us/usc/t18/s3663a"),)},
+            ("statute",),
+        )
+        for result, word in ((passing, "pass"), (failing, "FAIL")):
+            with self.subTest(word=word):
+                report = build_report(result)
+                self.assertFalse([line for line in report.splitlines() if line.startswith("verdict ")])
+                self.assertIn("type hits false_hits misses precision recall verdict", report)
+                self.assertTrue(
+                    any(
+                        line.startswith("statute ") and line.endswith(f" {word}")
+                        for line in report.splitlines()
+                    )
+                )
+                self.assertNotIn(case["question"], report)
+        failing_report = build_report(failing)
+        self.assertIn("miss fictional-report-case statute 4:12", failing_report)
+        self.assertIn("false hit fictional-report-case statute 4:11", failing_report)

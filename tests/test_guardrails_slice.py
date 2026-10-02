@@ -18,7 +18,15 @@ from typing import Any, cast
 from unittest.mock import patch
 
 import yaml  # type: ignore[import-untyped]
-from test_evaluation_run import NOW, ROOT, EvalHost, _invoke, _run_kwargs
+from test_evaluation_run import (
+    NOW,
+    ROOT,
+    EvalHost,
+    _assert_comparison_lines,
+    _assert_no_verdict_line,
+    _invoke,
+    _run_kwargs,
+)
 from test_judge import engine_output, false_refusal_content
 from test_turns import PASSWORD, Frontend
 from test_turns_door import RENDERED_COMPOSE, _served_name
@@ -1715,6 +1723,7 @@ class GuardrailsCommand(unittest.TestCase):
                 self.assertEqual(stdout.count("preconditions: refuse"), 1)
                 self.assertIn(problem.problem, stdout)
                 self.assertIn(problem.fix, stdout)
+                _assert_no_verdict_line(self, stdout)
                 self.assertFalse(any(argv[0] == "docker" for argv, _input in host.calls))
 
     def test_set_run_orders_probe_before_runner_and_skips_recording(self) -> None:
@@ -1870,6 +1879,7 @@ class GuardrailsCommand(unittest.TestCase):
         )
         self.assertIn(f"decision: ok — {expected_decision}", stdout)
         self.assertIn("repeat 5 of 5: pass", stdout)
+        _assert_comparison_lines(self, stdout, word="pass")
         self.assertEqual(
             len(frontend.deleted_chats),
             5 * sum(_drives_frontend(case_id) for case_id in loaded.active_ids),
@@ -1959,6 +1969,7 @@ class GuardrailsCommand(unittest.TestCase):
                 self.assertIn(expected, stdout)
                 self.assertNotIn("run: ok", stdout)
                 self.assertNotIn("record:", stdout)
+                _assert_no_verdict_line(self, stdout)
                 self.assertEqual(host.door_host.requests, [])
                 self.assertEqual(frontend.calls, [])
                 if against == "not-a-uuid":
@@ -2006,6 +2017,7 @@ class GuardrailsCommand(unittest.TestCase):
                 self.assertIn("repeat 1 of 5: pass", stdout)
                 self.assertIn("repeat 2 of 5: pass", stdout)
                 self.assertNotIn("repeat 3 of 5: pass", stdout)
+                _assert_comparison_lines(self, stdout, word="FAIL")
                 self.assertIn(
                     f"run: ok — {2 * case_count} results over {case_count} active cases, "
                     "2 of 5 repeats completed",
@@ -2074,6 +2086,7 @@ class GuardrailsCommand(unittest.TestCase):
         self.assertEqual(code, 1, stdout + stderr)
         self.assertTrue(crossed)
         self.assertIn("gate: refuse — partial: aborted at the window's end, nothing kept", stdout)
+        _assert_comparison_lines(self, stdout, word="FAIL")
         self.assertIn("Start the run at the window's opening, then retry.", stdout)
         self.assertIn(
             f"run: ok — 0 results over 0 active cases, 0 of 1 repeats completed; "
@@ -2131,6 +2144,7 @@ class GuardrailsCommand(unittest.TestCase):
         self.assertIn("decision: ok — false-refusal", stdout)
         self.assertIn(": wins; candidate-only", stdout)
         self.assertIn("gate: refuse —", stdout)
+        _assert_comparison_lines(self, stdout, word="FAIL")
 
     def test_forced_outside_weekend_is_recorded_and_inside_run_is_not_forced(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

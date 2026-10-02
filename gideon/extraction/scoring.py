@@ -233,5 +233,4 @@ def build_report(result: SetScore) -> str:
             f"{heading} {finding.case_id} {finding.type} {finding.start}:{finding.end}"
             for finding in findings
         )
-    lines.append(f"verdict {'pass' if result.verdict else 'FAIL'}")
     return "\n".join(lines) + "\n"

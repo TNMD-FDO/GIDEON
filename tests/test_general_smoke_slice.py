@@ -10,7 +10,14 @@ from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
-from test_evaluation_run import NOW, ROOT, EvalHost, _invoke, _run_kwargs
+from test_evaluation_run import (
+    NOW,
+    ROOT,
+    EvalHost,
+    _assert_comparison_lines,
+    _invoke,
+    _run_kwargs,
+)
 from test_turns import PASSWORD, Frontend, _tagged_case_id
 
 from gideon import guardrail
@@ -368,10 +375,12 @@ class GeneralSmokeCommand(unittest.TestCase):
     """The public command resolves turn access and records the smoke results."""
 
     def _run_command(
-        self, *, supplied_set: bool
+        self, *, supplied_set: bool, failing: bool = False
     ) -> tuple[int, str, str, EvalHost, SmokeFrontend, MagicMock]:
         loaded = _loaded()
         frontend = SmokeFrontend(loaded)
+        if failing:
+            frontend.modes["doctrine-01"] = "stream-leak"
         host = EvalHost()
         argv = ["eval", "run", "--slice", "general-smoke"]
         if supplied_set:
@@ -411,6 +420,7 @@ class GeneralSmokeCommand(unittest.TestCase):
         # The comparand is the committed eval/reference/general-smoke/, first recorded at
         # v0.3.0; every fixture case passes, so the comparison reads current.
         self.assertIn("reference: current", stdout)
+        _assert_comparison_lines(self, stdout, word="pass")
         comparison.assert_called_once()
         self.assertFalse(any(argv[0] == "docker" for argv, _input in host.calls))
         self.assertNotIn(SENTINEL, stdout + stderr)
@@ -425,6 +435,7 @@ class GeneralSmokeCommand(unittest.TestCase):
         # The comparand is the committed eval/reference/general-smoke/, first recorded at
         # v0.3.0; every fixture case passes, so the comparison reads current.
         self.assertIn("reference: current", stdout)
+        _assert_comparison_lines(self, stdout, word="pass")
         comparison.assert_called_once()
         sql = "\n".join(
             cast(str, input_text)
@@ -437,6 +448,15 @@ class GeneralSmokeCommand(unittest.TestCase):
         self.assertEqual(len(frontend.stream_calls), 22)
         self.assertNotIn(SENTINEL, stdout + stderr + sql)
         self.assertNotIn(SENTINEL, "".join(frontend.stream_payloads))
+
+    def test_cli_failing_turn_prints_fail(self) -> None:
+        code, stdout, stderr, _host, _frontend, comparison = self._run_command(
+            supplied_set=True, failing=True
+        )
+        self.assertEqual((code, stderr), (1, ""), stdout)
+        self.assertIn("doctrine-01: fail", stdout)
+        _assert_comparison_lines(self, stdout, word="FAIL")
+        comparison.assert_called_once()
 
 
 if __name__ == "__main__":

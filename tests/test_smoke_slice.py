@@ -8,12 +8,13 @@ import shutil
 import tempfile
 import unittest
 from collections.abc import Callable, Mapping
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
-from test_evaluation_run import EvalHost, _invoke, _run_kwargs
+from test_evaluation_run import EvalHost, _assert_comparison_lines, _invoke, _run_kwargs
 from test_guardrails_slice import JudgingDoorHost, _fixture_turns
 
 import gideon
@@ -241,6 +242,7 @@ class SmokeRunner(unittest.TestCase):
         self.assertIn("extraction bounds fail (reported, not gated)", result.report)
         self.assertIn("guardrails report (its verdict is reported, not smoke's)", result.report)
         self.assertIn("extraction report (its verdict is reported, not smoke's)", result.report)
+        self.assertFalse([line for line in result.report.splitlines() if line.startswith("verdict ")])
         self.assertEqual(host.judge_requests, [])
 
     def test_case_from_an_unrouted_suite_fails_by_id(self) -> None:
@@ -403,6 +405,93 @@ class SmokeSet(unittest.TestCase):
 
 
 class SmokeCommand(unittest.TestCase):
+    def _run_fixture(self, *, fail_guardrail: bool, fail_extraction: bool) -> tuple[int, str, str]:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            set_root, loaded = _temporary_smoke_set(root)
+            if not fail_extraction:
+                # One case per list misses the bounds' floors, so passing bounds
+                # take the extraction slice's whole lists back.
+                for list_name, case_ids in loaded.slice_lists["extraction"].items():
+                    path = set_root / _SMOKE_LIST / f"{list_name}.ids"
+                    if path.is_file():
+                        path.write_text(
+                            "".join(f"{case_id}\n" for case_id in case_ids), encoding="utf-8"
+                        )
+                loaded = _load(set_root)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            host = CommandDoorHost()
+            _host, turns_context = _context(loaded, host=host)
+            assert turns_context.turns is not None
+            positive = next(
+                case_id for case_id in _SAMPLE
+                if cast(list[str], loaded.cases_by_id[case_id]["labels"])[1] == "positive"
+            )
+
+            def unblocked(row: CaseResult) -> CaseResult:
+                metrics = dict(row.metrics)
+                metrics["class"] = "answered"
+                metrics.pop("checks", None)
+                return replace(row, metrics=metrics)
+
+            guardrails_runner = (
+                _mutating_guardrails(positive, unblocked)
+                if fail_guardrail else guardrails_slice.run_guardrails
+            )
+            with (
+                patch.object(
+                    command.engine,
+                    "resolve_engine_target",
+                    return_value=command.engine.EngineTarget(
+                        "fictitious-profile", "fictitious-model", 1
+                    ),
+                ),
+                patch.object(
+                    command.access,
+                    "read_eval_password",
+                    return_value=turns_context.turns.password,
+                ),
+                patch.object(
+                    command.access,
+                    "make_client_factory",
+                    return_value=turns_context.turns.client_factory,
+                ),
+                patch.object(
+                    command.door,
+                    "probe",
+                    return_value=command.door.ProbeResult(True, "door ready", None),
+                ),
+                patch.dict(smoke_slice._RUNNERS, {"guardrails": guardrails_runner}),
+                (
+                    patch.object(extraction_slice, "extract", return_value=())
+                    if fail_extraction
+                    else nullcontext()
+                ),
+                patch.object(command.stacks.secrets, "select_directory"),
+            ):
+                return _invoke(
+                    [
+                        "eval", "run", "--slice", "smoke", "--stack", "ci",
+                        "--kind", "smoke", "--set", str(set_root),
+                    ],
+                    **_run_kwargs(cast(EvalHost, host), checkout=checkout),
+                )
+
+    def test_zero_tolerance_failure_prints_fail_with_passing_extraction_bounds(self) -> None:
+        code, stdout, stderr = self._run_fixture(fail_guardrail=True, fail_extraction=False)
+        self.assertEqual((code, stderr), (1, ""), stdout)
+        self.assertIn("smoke: fail", stdout)
+        self.assertIn("extraction bounds pass (reported, not gated)", stdout)
+        _assert_comparison_lines(self, stdout, word="FAIL")
+
+    def test_failing_extraction_bounds_print_pass_with_passing_zero_tolerance(self) -> None:
+        code, stdout, stderr = self._run_fixture(fail_guardrail=False, fail_extraction=True)
+        self.assertEqual((code, stderr), (0, ""), stdout)
+        self.assertIn("smoke: pass", stdout)
+        self.assertIn("extraction bounds fail (reported, not gated)", stdout)
+        _assert_comparison_lines(self, stdout, word="pass")
+
     def test_reference_regression_blocks_through_eval_run(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -499,7 +588,9 @@ class SmokeCommand(unittest.TestCase):
         self.assertEqual(code, 1, stdout)
         self.assertEqual(stderr, "")
         self.assertIn("smoke: pass", stdout)
+        self.assertIn("reference: regressed", stdout)
         self.assertIn(f"regressed {target}", stdout)
+        _assert_comparison_lines(self, stdout, word="pass")
         self.assertIn("gate: refuse", stdout)
         self.assertIn(target, stdout)
         self.assertEqual(host.locks, {})

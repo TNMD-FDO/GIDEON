@@ -54,8 +54,10 @@ needed for comparison. No key may carry case text.
 ## Commands
 
 `gideon eval run --slice <name>` evaluates the slice, folds its repeated
-verdicts, and compares them with the committed reference. It prints one
-`reference: <outcome>` line after the scorer when the comparison is reached.
+verdicts, and compares them with the committed reference. After the slice's
+report it prints one `verdict pass|FAIL` line, the slice's own gate and never
+the comparison's, then one `reference: <outcome>` line when the comparison is
+reached.
 A slice whose registry entry (`gideon/evaluation/slices.py`) sets
 `compares_reference` false keeps no reference: its run prints no `reference:`
 line, its gate row is the slice's own, and the writer refuses its runs.

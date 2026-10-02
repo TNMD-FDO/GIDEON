@@ -183,7 +183,11 @@ def _run_registered(
             progress.append,
             turns=turns,
         )
-        results[slice_name] = spec.runner(loaded, slice_name, context)
+        result = spec.runner(loaded, slice_name, context)
+        assert not [line for line in result.report.splitlines() if line.startswith("verdict ")], (
+            f"{slice_name} report printed a verdict line in variation {variation}"
+        )
+        results[slice_name] = result
     return loaded, results
 
 
