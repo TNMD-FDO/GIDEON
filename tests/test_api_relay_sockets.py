@@ -21,6 +21,7 @@ ENGINE_KEY = "fixture-engine-key"
 SOURCE_HEADER = "X-Fixture-Source"
 CHAT_HEADER = "X-Fixture-Chat"
 EVAL_IDENTITY = "eval@example.invalid"
+INSTRUCTION = "Fictitious General instruction."
 _WAIT_SECONDS = 3.0
 _POLL_SECONDS = 0.05
 _STREAM_CONTENT_TYPE = "text/event-stream; charset=utf-8"
@@ -251,6 +252,7 @@ class StubHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length", "0"))
         body = json.loads(self.rfile.read(length))
+        self.state["received_body"] = body
         if self.path != "/v1/chat/completions" or not isinstance(body, dict):
             self._send(404, b"not found\n", "text/plain; charset=utf-8")
             return
@@ -307,6 +309,7 @@ class ApiRelaySockets(unittest.TestCase):
             SOURCE_HEADER,
             CHAT_HEADER,
             EVAL_IDENTITY,
+            INSTRUCTION,
         )
         self.service_server = StartedServer(
             uvicorn.Config(
@@ -383,6 +386,13 @@ class ApiRelaySockets(unittest.TestCase):
         connection, response = self._stream_request()
         try:
             first = _read_event(response)
+            self.assertEqual(
+                cast(dict[str, object], self.stub_state["received_body"])["messages"],
+                [
+                    {"role": "system", "content": INSTRUCTION},
+                    {"content": "fixture prompt"},
+                ],
+            )
             self.assertEqual(first, _parse_event(_STREAM_EVENTS[0]))
             self.assertEqual(response.status, 200)
             self.assertEqual(response.getheader("Content-Type"), _STREAM_CONTENT_TYPE)

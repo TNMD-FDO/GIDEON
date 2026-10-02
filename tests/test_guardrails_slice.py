@@ -341,7 +341,7 @@ def _fixture_turns(
     fixture_host = cast(Any, selected_host)
     fixture_host._fixture_seed_root = seed_root
     fixture_host._fixture_seed_directory = seed_directory
-    access = TurnAccess("fixture instruction", PASSWORD, selected_frontend.factory, SENTINEL)
+    access = TurnAccess(PASSWORD, selected_frontend.factory, SENTINEL)
     context = RunContext(
         cast(Host, selected_host),
         RENDERED_COMPOSE.parent,
@@ -1665,7 +1665,6 @@ class GuardrailsCommand(unittest.TestCase):
             patch.object(
                 command.window, "decision_judgement", return_value=selected_judgement
             ),
-            patch.object(command.access, "load_general_instruction", return_value="fixture instruction"),
             patch.object(command.access, "read_eval_password", return_value=PASSWORD),
             patch.object(command.access, "make_client_factory", return_value=frontend.factory),
             patch.object(command.run, "new_sentinel", return_value=SENTINEL),
@@ -1680,7 +1679,6 @@ class GuardrailsCommand(unittest.TestCase):
     def _invoke_with_preconditions(
         self,
         *,
-        instruction: str | Problem,
         password: str | Problem,
         probe: object,
     ) -> tuple[int, str, EvalHost]:
@@ -1692,7 +1690,6 @@ class GuardrailsCommand(unittest.TestCase):
                 return_value=command.engine.EngineTarget("fixture-profile", "fixture-model", 1000),
             ),
             patch.object(command.window, "window_judgement", return_value=command.window.WindowJudgement(True, "fixture quiet window", NOW, WINDOW_END)),
-            patch.object(command.access, "load_general_instruction", return_value=instruction),
             patch.object(command.access, "read_eval_password", return_value=password),
             patch.object(command.door, "probe", return_value=probe),
             patch.object(command, "_run_repeats", side_effect=AssertionError("runner must not start")),
@@ -1702,17 +1699,15 @@ class GuardrailsCommand(unittest.TestCase):
             )
         return code, stdout, host
 
-    def test_instruction_password_and_door_refusals_keep_their_problem_and_fix(self) -> None:
+    def test_password_and_door_refusals_keep_their_problem_and_fix(self) -> None:
         problem = Problem("fixture precondition failed", "Repair the fixture, then retry.")
         scenarios = (
-            (problem, "unused", None),
-            ("rendered instruction", problem, None),
-            ("rendered instruction", "fixture password", command.door.ProbeResult(False, problem.problem, problem)),
+            (problem, None),
+            ("fixture password", command.door.ProbeResult(False, problem.problem, problem)),
         )
-        for instruction, password, probe in scenarios:
-            with self.subTest(failed=type(instruction if isinstance(instruction, Problem) else password).__name__):
+        for password, probe in scenarios:
+            with self.subTest(failed="password" if isinstance(password, Problem) else "door"):
                 code, stdout, host = self._invoke_with_preconditions(
-                    instruction=instruction,
                     password=password,
                     probe=probe,
                 )
@@ -1747,10 +1742,6 @@ class GuardrailsCommand(unittest.TestCase):
                 contexts.append(context)
                 return command._RunRepeats(result, 1, 1, None)
 
-            def load_instruction(*_args: object, **_kwargs: object) -> str:
-                events.append("instruction")
-                return "fixture instruction"
-
             def read_password(*_args: object) -> str:
                 events.append("password")
                 return "fixture password"
@@ -1766,7 +1757,6 @@ class GuardrailsCommand(unittest.TestCase):
                     return_value=command.engine.EngineTarget("fixture-profile", "fixture-model", 1000),
                 ),
                 patch.object(command.window, "window_judgement", return_value=command.window.WindowJudgement(True, "fixture quiet window", NOW, WINDOW_END)),
-                patch.object(command.access, "load_general_instruction", side_effect=load_instruction),
                 patch.object(command.access, "read_eval_password", side_effect=read_password),
                 patch.object(command.access, "make_client_factory", return_value=cast(object, lambda **_kwargs: object())),
                 patch.object(command.run, "new_sentinel", return_value=SENTINEL),
@@ -1778,12 +1768,11 @@ class GuardrailsCommand(unittest.TestCase):
                     **_run_kwargs(host),
                 )
         self.assertEqual(code, 0, stdout + stderr)
-        self.assertEqual(events, ["instruction", "password", "probe", "runner"])
+        self.assertEqual(events, ["password", "probe", "runner"])
         assert contexts[0].turns is not None
-        self.assertEqual(contexts[0].turns.instruction, "fixture instruction")
         self.assertEqual(contexts[0].turns.password, "fixture password")
         self.assertEqual(contexts[0].turns.sentinel, SENTINEL)
-        self.assertIn("instruction rendered, eval password read, door probed", stdout)
+        self.assertIn("eval password read, door probed", stdout)
         preconditions = next(
             line for line in stdout.splitlines() if line.startswith("preconditions:")
         )
@@ -1813,7 +1802,6 @@ class GuardrailsCommand(unittest.TestCase):
                 return_value=command.engine.EngineTarget("fixture-profile", "fixture-model", 1000),
             ),
             patch.object(command.window, "window_judgement", return_value=command.window.WindowJudgement(True, "fixture quiet window", NOW, WINDOW_END)),
-            patch.object(command.access, "load_general_instruction", return_value="fixture instruction"),
             patch.object(command.access, "read_eval_password", return_value="fixture password"),
             patch.object(command.access, "make_client_factory", return_value=cast(object, lambda **_kwargs: object())),
             patch.object(command.run, "new_sentinel", return_value=SENTINEL),

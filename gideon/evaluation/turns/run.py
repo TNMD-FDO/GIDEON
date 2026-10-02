@@ -401,13 +401,11 @@ class ServiceTurnDriver:
         rendered_dir: PathLike,
         *,
         model: str,
-        instruction: str | None,
         stream: bool = False,
     ) -> None:
         self._io = io
         self._rendered_dir = rendered_dir
         self._model = model
-        self._instruction = instruction
         self._stream = stream
 
     @property
@@ -459,7 +457,6 @@ class ServiceTurnDriver:
             self._rendered_dir,
             served_name=self._model,
             prompt=prompt,
-            instruction=self._instruction,
             stream=self._stream,
             max_time=TURN_TIMEOUT_SECONDS,
         )
@@ -2187,7 +2184,6 @@ def run(
                     io,
                     rendered_dir,
                     model=spec.model,
-                    instruction=instruction_text,
                     stream=spec.stream,
                 )
                 for _ in range(spec.concurrent)

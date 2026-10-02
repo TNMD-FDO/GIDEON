@@ -13,16 +13,19 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
+from test_render_ci import inputs
+
 from gideon.host import nogpu, owui
 from gideon.host import stack as host_stack
 from gideon.host.render import ARTIFACTS, RenderInputs
-from gideon.host.render.api import API_SERVICE_NAME
+from gideon.host.render.api import API_INSTRUCTION_PATH, API_SERVICE_NAME
 from gideon.host.render.ci import (
     CI_PORT,
     CI_ROOT,
     CI_SECRETS_DIR,
     CI_SKIPPED_SECRETS,
     CI_WIPE_PATHS,
+    ci_instruction,
 )
 from gideon.host.report import StageResult
 from gideon.host.secrets import EnsureResult
@@ -250,6 +253,45 @@ class Preconditions(unittest.TestCase):
         self.assertIn("notes.txt", result.detail)
         self.assertEqual(host.writes, [])
 
+    def test_foreign_file_in_the_api_directory_refuses_before_writing(self) -> None:
+        host = FakeHost()
+        host.directories.add(f"{CI_ROOT}/{API_SERVICE_NAME}")
+        host.files[f"{CI_ROOT}/{API_INSTRUCTION_PATH}"] = "fixture instruction\n"
+        host.files[f"{CI_ROOT}/{API_SERVICE_NAME}/notes.txt"] = "hand-written\n"
+
+        result = cistack_run._render_stage(ci_stack(), host, inputs())
+
+        self.assertFalse(result.ok)
+        self.assertIn(f"{API_SERVICE_NAME}/notes.txt", result.detail)
+        self.assertNotIn(API_INSTRUCTION_PATH, result.detail)
+        self.assertEqual(host.writes, [])
+
+    def test_render_writes_four_files_and_accepts_the_api_directory(self) -> None:
+        host = FakeHost()
+        render_inputs = inputs()
+
+        result = cistack_run._render_stage(ci_stack(), host, render_inputs)
+
+        self.assertTrue(result.ok)
+        self.assertIn(f"{CI_ROOT}/{API_SERVICE_NAME}", host.directories)
+        self.assertIn("API instruction", result.detail)
+        self.assertEqual(
+            host.writes,
+            [
+                (f"{CI_ROOT}/compose.yaml", 0o644),
+                (f"{CI_ROOT}/open-webui/env", 0o600),
+                (f"{CI_ROOT}/open-webui/manifest.yaml", 0o644),
+                (f"{CI_ROOT}/{API_INSTRUCTION_PATH}", 0o644),
+            ],
+        )
+        self.assertEqual(
+            host.files[f"{CI_ROOT}/{API_INSTRUCTION_PATH}"],
+            ci_instruction(render_inputs),
+        )
+        host.writes.clear()
+        self.assertTrue(cistack_run._render_stage(ci_stack(), host, render_inputs).ok)
+        self.assertEqual(len(host.writes), 4)
+
 
 class SmokeCommand(unittest.TestCase):
     def test_busy_engine_skips_without_running_commands_or_touching_the_sibling(self) -> None:
@@ -473,6 +515,9 @@ class DownAndSecrets(unittest.TestCase):
         eval_key = f"{CI_SECRETS_DIR}/gideon_eval_api_key"
         for path in (generated, admin_key, eval_key):
             host.files[path] = "value\n"
+        instruction_path = f"{CI_ROOT}/{API_INSTRUCTION_PATH}"
+        host.files[instruction_path] = "fixture instruction\n"
+        host.directories.add(f"{CI_ROOT}/{API_SERVICE_NAME}")
 
         self.assertEqual(cistack_run.down(ci_stack(), host), 0)
         self.assertIn(generated, host.files)
@@ -482,6 +527,8 @@ class DownAndSecrets(unittest.TestCase):
         self.assertIn(generated, host.files)
         self.assertNotIn(admin_key, host.files)
         self.assertNotIn(eval_key, host.files)
+        self.assertNotIn(instruction_path, host.files)
+        self.assertNotIn(f"{CI_ROOT}/{API_SERVICE_NAME}", host.directories)
         wipe_commands = [command for command in host.commands if command[0] == "rm"]
         self.assertEqual(wipe_commands, [("rm", "-rf", path) for path in CI_WIPE_PATHS])
 

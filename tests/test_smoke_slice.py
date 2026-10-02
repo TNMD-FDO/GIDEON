@@ -472,11 +472,6 @@ class SmokeCommand(unittest.TestCase):
                 ),
                 patch.object(
                     command.access,
-                    "load_general_instruction",
-                    return_value=turns_context.turns.instruction,
-                ),
-                patch.object(
-                    command.access,
                     "read_eval_password",
                     return_value=turns_context.turns.password,
                 ),

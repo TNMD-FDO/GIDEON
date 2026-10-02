@@ -1,5 +1,6 @@
 """Contracts for the standing CI sibling render."""
 
+import hashlib
 import unittest
 from collections.abc import Mapping
 from dataclasses import replace
@@ -16,8 +17,14 @@ from gideon.host.models import (
     select_profile,
 )
 from gideon.host.render import ARTIFACTS, RenderInputs
-from gideon.host.render.api import API_SERVICE_NAME
+from gideon.host.render.api import (
+    API_INSTRUCTION_MOUNT,
+    API_INSTRUCTION_PATH,
+    API_MOUNT_TARGET,
+    API_SERVICE_NAME,
+)
 from gideon.host.render.ci import (
+    CI_INSTRUCTION_DIGEST_LABEL,
     CI_PORT,
     CI_POSTGRES_MEMORY_GB,
     CI_PROJECT,
@@ -30,6 +37,7 @@ from gideon.host.render.ci import (
     RELAY_SOURCE,
     ci_compose_document,
     ci_env_file,
+    ci_instruction,
     ci_manifest,
     production_network_name,
 )
@@ -169,6 +177,18 @@ class Compose(unittest.TestCase):
         render_inputs = inputs()
         document = ci_compose_document(render_inputs)
         services = mapping(document["services"])
+        api = mapping(services[API_SERVICE_NAME])
+        self.assertEqual(
+            api["volumes"],
+            [
+                f"{render_inputs.checkout}/gideon:{API_MOUNT_TARGET}:ro",
+                f"{CI_ROOT}/{API_INSTRUCTION_PATH}:{API_INSTRUCTION_MOUNT}:ro",
+            ],
+        )
+        self.assertEqual(
+            mapping(api["environment"])["GIDEON_INSTRUCTION_FILE"],
+            API_INSTRUCTION_MOUNT,
+        )
         allowed_read_only = {
             f"{render_inputs.checkout}/gideon",
             f"{render_inputs.checkout}/{RELAY_SOURCE}",
@@ -313,8 +333,46 @@ class Compose(unittest.TestCase):
                 "postgres",
                 "openwebui",
                 "open-webui",
+                API_SERVICE_NAME,
                 "compose.yaml",
                 "secrets/gideon_admin_api_key",
                 "secrets/gideon_eval_api_key",
             },
+        )
+
+    def test_office_name_moves_only_the_api_instruction_digest_label(self) -> None:
+        original = inputs()
+        moved_office = replace(original.site.office, name="Fictitious Moved Office")
+        moved = replace(original, site=replace(original.site, office=moved_office))
+        before = ci_compose_document(original)
+        after = ci_compose_document(moved)
+        self.assertNotEqual(ci_instruction(original), ci_instruction(moved))
+        self.assertEqual(before.keys(), after.keys())
+        self.assertEqual(before["networks"], after["networks"])
+        self.assertEqual(before["secrets"], after["secrets"])
+        before_services = mapping(before["services"])
+        after_services = mapping(after["services"])
+        self.assertEqual(before_services.keys(), after_services.keys())
+        for name in before_services:
+            if name != API_SERVICE_NAME:
+                self.assertEqual(before_services[name], after_services[name])
+        before_api = mapping(before_services[API_SERVICE_NAME])
+        after_api = mapping(after_services[API_SERVICE_NAME])
+        self.assertEqual(
+            {key: value for key, value in before_api.items() if key != "labels"},
+            {key: value for key, value in after_api.items() if key != "labels"},
+        )
+        before_labels = mapping(before_api["labels"])
+        after_labels = mapping(after_api["labels"])
+        self.assertEqual(
+            before_labels["org.gideon.api-sources-digest"],
+            after_labels["org.gideon.api-sources-digest"],
+        )
+        self.assertEqual(
+            after_labels[CI_INSTRUCTION_DIGEST_LABEL],
+            hashlib.sha256(ci_instruction(moved).encode("utf-8")).hexdigest(),
+        )
+        self.assertNotEqual(
+            before_labels[CI_INSTRUCTION_DIGEST_LABEL],
+            after_labels[CI_INSTRUCTION_DIGEST_LABEL],
         )

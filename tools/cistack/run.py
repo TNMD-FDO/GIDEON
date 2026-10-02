@@ -9,7 +9,7 @@ from argparse import Namespace
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Final
 
 from gideon.evaluation import command as evaluation_command
@@ -28,7 +28,11 @@ from gideon.host import (
 from gideon.host.images import load_image_lock
 from gideon.host.lock import load_host_lock
 from gideon.host.models import load_models_lock
-from gideon.host.render.api import API_HEALTH_PATH, API_SERVICE_NAME
+from gideon.host.render.api import (
+    API_HEALTH_PATH,
+    API_INSTRUCTION_PATH,
+    API_SERVICE_NAME,
+)
 from gideon.host.render.ci import (
     CI_PROJECT,
     CI_ROOT,
@@ -38,6 +42,7 @@ from gideon.host.render.ci import (
     RELAY_SERVICE_NAME,
     ci_compose_document,
     ci_env_file,
+    ci_instruction,
     ci_manifest,
     production_network_name,
 )
@@ -77,11 +82,13 @@ _HEALTH_SCRIPT: Final = (
     "timeout=4).status != 200)"
 )
 _RENDERED_NAMES: Final[frozenset[str]] = frozenset(
-    {"compose.yaml", "open-webui"}
+    {"compose.yaml", "open-webui", API_SERVICE_NAME}
 )
-_OPEN_WEBUI_NAMES: Final[frozenset[str]] = frozenset(
-    {"env", "manifest.yaml"}
-)
+# Each rendered directory and the names the render stage writes inside it.
+_RENDERED_DIRECTORY_NAMES: Final[Mapping[str, frozenset[str]]] = {
+    "open-webui": frozenset({"env", "manifest.yaml"}),
+    API_SERVICE_NAME: frozenset({PurePosixPath(API_INSTRUCTION_PATH).name}),
+}
 _LOCK_ACCESS_FIX: Final = "Repair access to the engine lock, then retry."
 
 
@@ -287,7 +294,7 @@ def _secrets_stage(
     return StageResult("secrets", True, detail, ""), inputs
 
 
-def _open_webui_files(io: Host, path: Path) -> tuple[str, ...]:
+def _directory_files(io: Host, path: Path) -> tuple[str, ...]:
     if not io.exists(path):
         return ()
     return tuple(io.listdir(path))
@@ -299,9 +306,10 @@ def _foreign_files(io: Host, project_dir: Path) -> tuple[str, ...]:
         if name in _RENDERED_NAMES or name in {"postgres", "openwebui", "secrets"}:
             continue
         foreign.append(str(project_dir / name))
-    for name in _open_webui_files(io, project_dir / "open-webui"):
-        if name not in _OPEN_WEBUI_NAMES:
-            foreign.append(str(project_dir / "open-webui" / name))
+    for directory, names in _RENDERED_DIRECTORY_NAMES.items():
+        for name in _directory_files(io, project_dir / directory):
+            if name not in names:
+                foreign.append(str(project_dir / directory / name))
     return tuple(sorted(foreign))
 
 
@@ -325,17 +333,21 @@ def _render_stage(
         compose_text = dump(ci_compose_document(inputs))
         env_text = ci_env_file(inputs)
         manifest_text = ci_manifest(inputs)
+        instruction_text = ci_instruction(inputs)
         open_webui = ci_stack.project_dir / "open-webui"
+        api_directory = ci_stack.project_dir / API_SERVICE_NAME
         io.mkdir(open_webui, mode=0o755, parents=True, exist_ok=True)
+        io.mkdir(api_directory, mode=0o755, parents=True, exist_ok=True)
         io.write_text(ci_stack.project_dir / "compose.yaml", compose_text, mode=0o644)
         io.write_text(open_webui / "env", env_text, mode=0o600)
         io.write_text(open_webui / "manifest.yaml", manifest_text, mode=0o644)
+        io.write_text(ci_stack.project_dir / API_INSTRUCTION_PATH, instruction_text, mode=0o644)
     except (OSError, TypeError, ValueError) as exc:
         return StageResult("render", False, f"CI render files could not be written: {exc}", _RENDER_FIX)
     return StageResult(
         "render",
         True,
-        "wrote the CI Compose document, Open WebUI env file, and manifest",
+        "wrote the CI Compose document, Open WebUI env file and manifest, and API instruction",
         "",
     )
 

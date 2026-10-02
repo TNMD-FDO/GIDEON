@@ -1,4 +1,4 @@
-"""Resolve the instruction, eval identity, and frontend client for turn runs."""
+"""Resolve turn access and the unfiltered driver's rendered instruction."""
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -18,9 +18,8 @@ _RENDER_INPUTS_FIX: Final[str] = "Correct the checkout's render inputs, then ret
 
 @dataclass(frozen=True, slots=True)
 class TurnAccess:
-    """The values shared by a suite's service and managed frontend turns."""
+    """The password, client factory, and sentinel for a suite's turns."""
 
-    instruction: str
     password: str = field(repr=False)
     client_factory: Callable[..., owui.Client]
     sentinel: str

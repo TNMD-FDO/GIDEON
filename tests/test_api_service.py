@@ -17,6 +17,7 @@ ENGINE_URL = "http://fixture-engine/v1"
 SOURCE_HEADER = "X-Fixture-Source"
 CHAT_HEADER = "X-Fixture-Chat"
 EVAL_IDENTITY = "eval@example.invalid"
+INSTRUCTION = "Fictitious General instruction."
 
 
 def response_body(response: httpx.Response) -> dict[str, Any]:
@@ -35,6 +36,7 @@ class ApiService(unittest.TestCase):
             SOURCE_HEADER,
             CHAT_HEADER,
             EVAL_IDENTITY,
+            INSTRUCTION,
         )
 
     def request(
@@ -209,6 +211,7 @@ class ApiService(unittest.TestCase):
             root = Path(directory)
             (root / "engine-key").write_text(ENGINE_KEY, encoding="utf-8")
             (root / "api-key").write_text(API_KEY, encoding="utf-8")
+            (root / "instruction.txt").write_text(f" \n{INSTRUCTION}\n ", encoding="utf-8")
             settings = load_settings(
                 {
                     "GIDEON_ENGINE_URL": ENGINE_URL,
@@ -218,12 +221,38 @@ class ApiService(unittest.TestCase):
                     "GIDEON_SOURCE_HEADER": SOURCE_HEADER,
                     "GIDEON_CHAT_HEADER": CHAT_HEADER,
                     "GIDEON_EVAL_IDENTITY": EVAL_IDENTITY,
+                    "GIDEON_INSTRUCTION_FILE": str(root / "instruction.txt"),
                 }
             )
 
         self.assertEqual(settings.source_header, SOURCE_HEADER)
         self.assertEqual(settings.chat_header, CHAT_HEADER)
         self.assertEqual(settings.eval_identity, EVAL_IDENTITY)
+        self.assertEqual(settings.instruction, INSTRUCTION)
+
+    def test_instruction_file_refuses_missing_variable_missing_file_and_empty_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "engine-key").write_text(ENGINE_KEY, encoding="utf-8")
+            (root / "api-key").write_text(API_KEY, encoding="utf-8")
+            empty = root / "empty-instruction"
+            empty.write_text(" \n\t", encoding="utf-8")
+            environment = {
+                "GIDEON_ENGINE_URL": ENGINE_URL,
+                "GIDEON_ENGINE_API_KEY_FILE": str(root / "engine-key"),
+                "GIDEON_API_KEY_FILE": str(root / "api-key"),
+                "GIDEON_API_PORT": "8000",
+                "GIDEON_SOURCE_HEADER": SOURCE_HEADER,
+                "GIDEON_CHAT_HEADER": CHAT_HEADER,
+                "GIDEON_EVAL_IDENTITY": EVAL_IDENTITY,
+            }
+            with self.assertRaisesRegex(ValueError, "GIDEON_INSTRUCTION_FILE"):
+                load_settings(environment)
+            for path in (root / "missing-instruction", empty):
+                with self.subTest(path=path), self.assertRaisesRegex(
+                    ValueError, f"Instruction file {path} is missing or empty"
+                ):
+                    load_settings({**environment, "GIDEON_INSTRUCTION_FILE": str(path)})
 
     def test_missing_or_empty_source_settings_refuse(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

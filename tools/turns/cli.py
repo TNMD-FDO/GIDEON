@@ -77,8 +77,11 @@ _SERVICE_TRUST_FIX: Final[str] = (
 _SERVICE_UNFILTERED_FIX: Final[str] = (
     "Drop --unfiltered when using --service, then retry."
 )
+_SERVICE_NO_INSTRUCTION_FIX: Final[str] = (
+    "Drop --no-instruction when using --service, then retry."
+)
 _NO_INSTRUCTION_FIX: Final[str] = (
-    "Pass --service or --unfiltered with --no-instruction, then retry."
+    "Pass --unfiltered with --no-instruction, then retry."
 )
 _DIRECT_SEARCH_FIX: Final[str] = (
     "Select cases without search, then retry."
@@ -207,6 +210,7 @@ def _service_refusal(options: argparse.Namespace) -> StageResult | None:
             (options.probe_inlet, "--probe-inlet", _SERVICE_PROBE_FIX),
             (options.trust_ca, "--trust-ca", _SERVICE_TRUST_FIX),
             (options.unfiltered, "--unfiltered", _SERVICE_UNFILTERED_FIX),
+            (options.no_instruction, "--no-instruction", _SERVICE_NO_INSTRUCTION_FIX),
         )
         for present, flag, fix in conflicts:
             if present:
@@ -218,7 +222,7 @@ def _service_refusal(options: argparse.Namespace) -> StageResult | None:
         return StageResult(
             "preconditions",
             False,
-            "--no-instruction requires --service or --unfiltered",
+            "--no-instruction requires --unfiltered",
             _NO_INSTRUCTION_FIX,
         )
     return None
@@ -414,7 +418,7 @@ def main(
             base_model = served_model
 
     instruction: str | None = None
-    if direct_mode and not options.no_instruction:
+    if options.unfiltered and not options.no_instruction:
         resolved_instruction = access.load_general_instruction(
             io,
             site_path=site_path,
@@ -659,7 +663,9 @@ def main(
             print("engine lock: not taken (dry run)")
             if direct_mode:
                 assert served_model is not None
-                instruction_state = "on" if instruction is not None else "off"
+                instruction_state = (
+                    "service" if options.service else "on" if instruction is not None else "off"
+                )
                 print(f"model: {served_model} (instruction: {instruction_state})")
             else:
                 print(f"model: {GENERAL_PRESET_ID}")

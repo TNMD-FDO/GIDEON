@@ -162,7 +162,11 @@ def _registered_artifacts() -> tuple[Artifact, ...]:
         GrafanaRulesArtifact,
         GrafanaTimeIntervalsArtifact,
     )
-    from gideon.host.render.owui import ApplyManifestArtifact, OwuiEnvArtifact
+    from gideon.host.render.owui import (
+        ApiInstructionArtifact,
+        ApplyManifestArtifact,
+        OwuiEnvArtifact,
+    )
     from gideon.host.render.pgbackrest import PgBackRestConfArtifact
     from gideon.host.render.prometheus import (
         BlackboxConfigArtifact,
@@ -207,6 +211,7 @@ def _registered_artifacts() -> tuple[Artifact, ...]:
         CaddyfileArtifact(),
         OwuiEnvArtifact(),
         ApplyManifestArtifact(),
+        ApiInstructionArtifact(),
         SearxngSettingsArtifact(),
         SearxngEnvArtifact(),
         SearxngLoggingArtifact(),

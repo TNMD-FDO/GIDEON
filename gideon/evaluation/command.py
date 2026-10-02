@@ -895,18 +895,6 @@ def _engine_preconditions(
 
     turns: access.TurnAccess | None = None
     if slice_spec.drives_turns:
-        instruction = access.load_general_instruction(
-            io,
-            site_path=site_path,
-            root=checkout,
-            stack=paths.name,
-            command="gideon eval run",
-        )
-        if isinstance(instruction, Problem):
-            print_stage(
-                StageResult("preconditions", False, instruction.problem, instruction.fix)
-            )
-            return None
         password = access.read_eval_password(io)
         if isinstance(password, Problem):
             print_stage(StageResult("preconditions", False, password.problem, password.fix))
@@ -923,7 +911,6 @@ def _engine_preconditions(
             )
             return None
         turns = access.TurnAccess(
-            instruction=instruction,
             password=password,
             client_factory=access.make_client_factory(
                 config.hostname,
@@ -978,7 +965,7 @@ def _engine_preconditions(
             f"profile {target.profile_name}, served model {target.served_model_name}, "
             f"prompt {prompt_id}, {writer}"
             + (
-                ", instruction rendered, eval password read, door probed"
+                ", eval password read, door probed"
                 if slice_spec.drives_turns
                 else ""
             ),

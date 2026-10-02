@@ -126,7 +126,8 @@ def create_app(
         Route(
             _COMPLETIONS_PATH,
             CompletionRelay(
-                settings.source_header, settings.chat_header, settings.eval_identity
+                settings.source_header, settings.chat_header, settings.eval_identity,
+                settings.instruction,
             ),
             methods=["POST"],
         ),

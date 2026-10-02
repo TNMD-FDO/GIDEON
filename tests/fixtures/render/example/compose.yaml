@@ -380,6 +380,7 @@ services:
       GIDEON_ENGINE_URL: "http://gideon-generator:8000/v1"
       GIDEON_ENGINE_API_KEY_FILE: "/run/secrets/engine_api_key"
       GIDEON_API_KEY_FILE: "/run/secrets/gideon_api_key"
+      GIDEON_INSTRUCTION_FILE: "/etc/gideon/instruction.txt"
       GIDEON_API_PORT: "8000"
       GIDEON_SOURCE_HEADER: "X-OpenWebUI-User-Email"
       GIDEON_EVAL_IDENTITY: "gideon-eval@gideon.invalid"
@@ -392,6 +393,7 @@ services:
     working_dir: "/opt/gideon-src"
     volumes:
       - "/opt/gideon/gideon:/opt/gideon-src/gideon:ro"
+      - "/etc/gideon/rendered/gideon-api/instruction.txt:/etc/gideon/instruction.txt:ro"
     group_add:
       - "4242"
     secrets:

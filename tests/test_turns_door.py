@@ -34,7 +34,7 @@ from gideon.host.render.api import (
     API_USER_NAME_HEADER,
     API_USER_ROLE_HEADER,
 )
-from gideon.host.render.ci import CI_ROOT, CI_SECRET_NAMES
+from gideon.host.render.ci import CI_ROOT
 from gideon.host.render.owui import EVAL_IDENTITY
 from gideon.host.report import Problem, Timeout
 from gideon.host.sysio import Command, Host, PathLike
@@ -546,7 +546,7 @@ def _run_service(
     host: FakeHost,
     cases_path: Path,
     *,
-    arguments: Sequence[str] = ("--service", "--no-instruction"),
+    arguments: Sequence[str] = ("--service",),
     output: Path | None = None,
 ) -> tuple[int, str, str]:
     stdout = io.StringIO()
@@ -641,7 +641,17 @@ class ServiceDoor(unittest.TestCase):
 
         run_record = json.loads(host.files[str(output / "run.json")])
         self.assertTrue(run_record["arguments"]["service"])
-        self.assertFalse(run_record["arguments"]["instruction"])
+        self.assertTrue(run_record["arguments"]["instruction"])
+
+    def test_service_dry_run_says_the_service_instructs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cases_path = Path(directory) / "cases.yaml"
+            _case_file(cases_path, [{"id": "plain", "prompt": "plain", "expect": "answered"}])
+            code, stdout, stderr = _run_service(
+                FakeHost(), cases_path, arguments=("--service", "--dry-run")
+            )
+        self.assertEqual(code, 0, stderr)
+        self.assertIn("(instruction: service)", stdout)
 
     def test_service_turn_structured_facts_exist_with_and_without_output(self) -> None:
         prompt, answer = _seed_case("direct-01")
@@ -653,7 +663,6 @@ class ServiceDoor(unittest.TestCase):
                     cast(Host, FakeHost()),
                     RENDERED_COMPOSE.parent,
                     model="served",
-                    instruction=None,
                     stream=True,
                 )
                 self.reply = reply
@@ -785,27 +794,19 @@ class ServiceDoor(unittest.TestCase):
             host = FakeHost()
             host.files[f"{CI_ROOT}/compose.yaml"] = "ci-rendered"
             output = Path(directory) / "out"
-            loaded: dict[str, object] = {}
-
-            def load_inputs(*args: object, **kwargs: object) -> tuple[object, str, str, str]:
-                del args
-                loaded.update(kwargs)
-                return object(), "", "", ""
-
-            with (
-                patch.object(cli.access.render_command, "load_render_inputs", side_effect=load_inputs),
-                patch.object(cli.access, "general_texts", return_value=type("Texts", (), {"system_prompt": "instruction"})()),
-            ):
+            with patch.object(
+                cli.access.render_command, "load_render_inputs", side_effect=AssertionError("service read render inputs")
+            ) as load_inputs:
                 code, stdout, stderr = _run_service(
                     host,
                     cases_path,
                     arguments=("--stack", "ci", "--service"),
                     output=output,
                 )
+            load_inputs.assert_not_called()
             record = cast(dict[str, object], json.loads(host.files[str(output / "run.json")]))
 
         self.assertEqual(code, 0, stderr)
-        self.assertEqual(loaded["secret_names"], CI_SECRET_NAMES)
         self.assertEqual(host.exec_argv[0][2], "--project-directory")
         self.assertEqual(host.exec_argv[0][3], CI_ROOT)
         self.assertIn("summary: ok — stack: ci;", stdout)
@@ -860,9 +861,9 @@ class ServiceDoor(unittest.TestCase):
                 cases_path = Path(directory) / "cases.yaml"
                 _case_file(cases_path, [{"id": "one", "prompt": "plain", "expect": "answered"}])
                 host = FakeHost()
-                arguments = ["--service", "--no-instruction", "--repeat", "5", "--concurrent", "3"]
+                arguments = ["--service", "--repeat", "5", "--concurrent", "3"]
                 if streamed:
-                    arguments.insert(2, "--stream")
+                    arguments.insert(1, "--stream")
                 code, stdout, stderr = _run_service(
                     host, cases_path, arguments=tuple(arguments)
                 )
@@ -881,7 +882,7 @@ class ServiceDoor(unittest.TestCase):
             code, stdout, stderr = _run_service(
                 host,
                 cases_path,
-                arguments=("--service", "--no-instruction", "--stream"),
+                arguments=("--service", "--stream"),
                 output=output,
             )
 
@@ -925,7 +926,7 @@ class ServiceDoor(unittest.TestCase):
                 code, stdout, stderr = _run_service(
                     host,
                     cases_path,
-                    arguments=("--service", "--no-instruction", "--stream"),
+                    arguments=("--service", "--stream"),
                     output=output,
                 )
                 self.assertEqual(code, 0, stderr)
@@ -962,7 +963,6 @@ class ServiceDoor(unittest.TestCase):
                         cast(Host, row_host),
                         RENDERED_COMPOSE.parent,
                         model=_served_name(),
-                        instruction=None,
                         stream=True,
                     ),
                     guardrail=guardrail,
@@ -998,7 +998,7 @@ class ServiceDoor(unittest.TestCase):
             code, stdout, stderr = _run_service(
                 host,
                 cases_path,
-                arguments=("--service", "--no-instruction", "--stream"),
+                arguments=("--service", "--stream"),
                 output=output,
             )
 
@@ -1022,7 +1022,7 @@ class ServiceDoor(unittest.TestCase):
             code, stdout, stderr = _run_service(
                 host,
                 cases_path,
-                arguments=("--service", "--no-instruction", "--stream"),
+                arguments=("--service", "--stream"),
             )
         self.assertEqual(code, 1)
         self.assertEqual(stderr, "")
@@ -1073,14 +1073,14 @@ class ServiceDoor(unittest.TestCase):
             code, stdout, stderr = _run_service(
                 host,
                 cases_path,
-                arguments=("--service", "--no-instruction", "--stream"),
+                arguments=("--service", "--stream"),
             )
         self.assertEqual(code, 0, stderr)
         self.assertIn(f"replacement: ok — {expected.kind}", stdout)
 
     @staticmethod
     def _service_arguments(streamed: bool) -> tuple[str, ...]:
-        arguments = ("--service", "--no-instruction")
+        arguments = ("--service",)
         return (*arguments, "--stream") if streamed else arguments
 
     def test_refusal_without_released_prefix_is_the_stored_replacement_class(self) -> None:
@@ -1153,7 +1153,7 @@ class ServiceDoor(unittest.TestCase):
             code, stdout, stderr = _run_service(
                 host,
                 cases_path,
-                arguments=("--service", "--no-instruction", "--stream"),
+                arguments=("--service", "--stream"),
             )
         self.assertEqual(code, 1)
         self.assertIn(
@@ -1174,7 +1174,7 @@ class ServiceDoor(unittest.TestCase):
             code, stdout, stderr = _run_service(
                 host,
                 cases_path,
-                arguments=("--service", "--no-instruction", "--stream"),
+                arguments=("--service", "--stream"),
                 output=output,
             )
         self.assertEqual(code, 1)
@@ -1191,7 +1191,7 @@ class ServiceDoor(unittest.TestCase):
             code, stdout, stderr = _run_service(
                 host,
                 cases_path,
-                arguments=("--service", "--no-instruction", "--stream"),
+                arguments=("--service", "--stream"),
             )
         self.assertEqual(code, 1)
         self.assertIn("door stream ended without its end marker", stdout)
@@ -1207,7 +1207,7 @@ class ServiceDoor(unittest.TestCase):
             code, stdout, stderr = _run_service(
                 host,
                 cases_path,
-                arguments=("--service", "--no-instruction", "--stream"),
+                arguments=("--service", "--stream"),
                 output=output,
             )
         self.assertEqual(code, 1)
@@ -1219,7 +1219,7 @@ class ServiceDoor(unittest.TestCase):
 
 
 class DoorBody(unittest.TestCase):
-    """General's instruction is the adapter's own, sent as the system message."""
+    """The unfiltered helper can instruct; the service door sends the prompt."""
 
     def test_instruction_rides_as_the_system_message_and_one_flag_drops_it(self) -> None:
         instructed = door.completion_body(
@@ -1247,13 +1247,12 @@ class DoorBody(unittest.TestCase):
         self.assertEqual(bare["messages"], [{"role": "user", "content": "tagged prompt"}])
         self.assertIs(bare["stream"], True)
 
-    def test_the_driver_sends_the_instruction_it_was_built_with(self) -> None:
+    def test_the_service_driver_sends_only_the_tagged_user_message(self) -> None:
         host = FakeHost()
         driver = run_module.ServiceTurnDriver(
             cast(Any, host),
             "/etc/gideon/rendered",
             model=_served_name(),
-            instruction="You are General.",
         )
         driver.turn(
             Case(id="one", prompt="plain", expect="answered"),
@@ -1265,8 +1264,9 @@ class DoorBody(unittest.TestCase):
         )
         body = cast(dict[str, object], host.requests[-1]["body"])
         messages = cast(list[dict[str, str]], body["messages"])
-        self.assertEqual(messages[0], {"role": "system", "content": "You are General."})
-        self.assertEqual(messages[1]["content"], "tagged prompt [turn harness abcd1234 one]")
+        self.assertEqual(messages, [
+            {"role": "user", "content": "tagged prompt [turn harness abcd1234 one]"}
+        ])
 
     def test_client_timeout_failure_discards_stream_prefix_and_is_typed(self) -> None:
         records = (
@@ -1321,7 +1321,6 @@ class DoorBody(unittest.TestCase):
             host,
             RENDERED_COMPOSE.parent,
             model="fixture-model",
-            instruction=None,
         )
         reply = door.DoorReply(
             status=200,
@@ -1355,7 +1354,8 @@ class DoorBody(unittest.TestCase):
             (("--service", "--probe-inlet"), "--probe-inlet"),
             (("--service", "--trust-ca"), "--trust-ca"),
             (("--service", "--unfiltered"), "--unfiltered"),
-            (("--no-instruction",), "--service or --unfiltered"),
+            (("--service", "--no-instruction"), "--no-instruction"),
+            (("--no-instruction",), "--unfiltered"),
         )
         for arguments, expected in early_refusals:
             with self.subTest(arguments=arguments):

@@ -41,6 +41,7 @@ ENGINE_KEY = "fixture-engine-key"
 ENGINE_URL = "http://fixture-engine/v1"
 SOURCE_HEADER = "X-Fixture-Source"
 EVAL_IDENTITY = "eval@example.invalid"
+INSTRUCTION = "Fictitious General instruction."
 _ASGI_WAIT_SECONDS = 1.0
 # The application task has already finished wherever this bound is used, so a
 # message that has not arrived by now never will.
@@ -520,6 +521,7 @@ class ApiCompletions(unittest.TestCase):
             self.source_header,
             self.chat_header,
             EVAL_IDENTITY,
+            INSTRUCTION,
         )
 
     def request(
@@ -1508,10 +1510,126 @@ class ApiCompletions(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(calls), 1)
         request = calls[0]
-        self.assertEqual(request.content, callers_body)
+        self.assertEqual(
+            json.loads(request.content),
+            {"messages": [
+                {"role": "system", "content": INSTRUCTION},
+                {"content": "fixture prompt"},
+            ]},
+        )
         self.assertEqual(request.headers["authorization"], f"Bearer {ENGINE_KEY}")
         self.assertEqual(request.headers["content-type"], "application/json; charset=utf-8")
         self.assertNotIn("x-caller-header", request.headers)
+
+    def test_completion_merges_personal_system_text_and_keeps_other_fields(self) -> None:
+        messages = [
+            {"role": "system", "content": "Personal direction.", "name": "personal"},
+            {"role": "user", "content": "Fixture prompt."},
+        ]
+        caller = {
+            "model": "fixture-model",
+            "messages": messages,
+            "temperature": 0.4,
+        }
+        received: list[bytes] = []
+
+        def engine(request: httpx.Request) -> httpx.Response:
+            received.append(request.content)
+            return httpx.Response(200, content=b'{"choices":[]}', request=request)
+
+        response = self.request(
+            httpx.MockTransport(engine),
+            body=json.dumps(caller).encode(),
+            headers={"Authorization": f"Bearer {API_KEY}"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(received), 1)
+        expected = {
+            **caller,
+            "messages": [
+                {"role": "system", "content": INSTRUCTION + "\nPersonal direction.", "name": "personal"},
+                messages[1],
+            ],
+        }
+        self.assertEqual(json.loads(received[0]), expected)
+
+    def test_unshaped_bodies_reach_engine_unchanged(self) -> None:
+        for body in (b'{ "model": "fixture" }', b'{"messages":false}', b'not JSON'):
+            with self.subTest(body=body):
+                received: list[bytes] = []
+
+                def engine(request: httpx.Request, observed: list[bytes] = received) -> httpx.Response:
+                    observed.append(request.content)
+                    return httpx.Response(200, content=b'{"choices":[]}', request=request)
+
+                response = self.request(
+                    httpx.MockTransport(engine),
+                    body=body,
+                    headers={"Authorization": f"Bearer {API_KEY}"},
+                )
+
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(received, [body])
+
+    def test_judged_state_reads_the_body_sent_to_engine(self) -> None:
+        for personal in (False, True):
+            with self.subTest(personal=personal):
+                messages: list[object] = [{
+                    "role": "user",
+                    "content": "I calculated the § 2255 deadline as June 5, 2027. Is that correct?",
+                }]
+                if personal:
+                    messages.insert(0, {"role": "system", "content": "Personal direction."})
+                body = json.dumps({"messages": messages}).encode()
+                seen: list[bytes] = []
+                original = judged.stream_state_from_body
+
+                def record_state(
+                    instructed: bytes,
+                    source: str,
+                    chat_id: str | None = None,
+                    observed: list[bytes] = seen,
+                    read_state: Callable[[bytes, str, str | None], guardrail.StreamState] = original,
+                ) -> guardrail.StreamState:
+                    observed.append(instructed)
+                    return read_state(instructed, source, chat_id)
+
+                def engine(request: httpx.Request, observed: list[bytes] = seen) -> httpx.Response:
+                    observed.append(request.content)
+                    return httpx.Response(
+                        200,
+                        content=whole_completion([{
+                            "index": 0,
+                            "finish_reason": "stop",
+                            "message": {
+                                "role": "assistant",
+                                "content": "I won't verify your deadline of June 5, 2027.",
+                            },
+                        }]),
+                        request=request,
+                    )
+
+                with patch.object(judged, "stream_state_from_body", record_state):
+                    response = self.request(
+                        httpx.MockTransport(engine),
+                        body=body,
+                        headers={"Authorization": f"Bearer {API_KEY}"},
+                    )
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(
+                    json.loads(response.body)["choices"][0]["message"]["content"],
+                    "I won't verify your deadline of June 5, 2027.",
+                )
+                self.assertEqual(len(seen), 2)
+                self.assertEqual(seen[0], seen[1])
+                instructed_messages = json.loads(seen[0])["messages"]
+                self.assertEqual(instructed_messages[0]["role"], "system")
+                self.assertEqual(instructed_messages[-1], messages[-1])
+                self.assertEqual(
+                    guardrail.message_context(instructed_messages, len(instructed_messages))[0],
+                    guardrail.message_context(messages, len(messages))[0],
+                )
 
     def test_tripped_whole_completion_has_its_judged_content_length(self) -> None:
         completion = {

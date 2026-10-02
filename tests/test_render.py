@@ -291,6 +291,7 @@ class Registry(unittest.TestCase):
                 "caddy/Caddyfile",
                 "open-webui/env",
                 "open-webui/manifest.yaml",
+                "gideon-api/instruction.txt",
                 "searxng/settings.yml",
                 "searxng/env",
                 "searxng/logging.json",
@@ -331,15 +332,18 @@ class Registry(unittest.TestCase):
         self.assertTrue(ARTIFACTS[16].secret)
         self.assertEqual(ARTIFACTS[16].mode, 0o600)
         self.assertEqual(ARTIFACTS[17].owners, ())
-        self.assertEqual(ARTIFACTS[18].owners, ("searxng",))
+        self.assertEqual(ARTIFACTS[18].owners, (API_SERVICE_NAME,))
         self.assertEqual(ARTIFACTS[18].mode, 0o644)
+        self.assertFalse(ARTIFACTS[18].secret)
         self.assertEqual(ARTIFACTS[19].owners, ("searxng",))
-        self.assertTrue(ARTIFACTS[19].secret)
-        self.assertEqual(ARTIFACTS[19].mode, 0o600)
-        self.assertEqual(ARTIFACTS[20].relative_path, "searxng/logging.json")
+        self.assertEqual(ARTIFACTS[19].mode, 0o644)
         self.assertEqual(ARTIFACTS[20].owners, ("searxng",))
-        self.assertFalse(ARTIFACTS[20].secret)
-        self.assertEqual(ARTIFACTS[20].mode, 0o644)
+        self.assertTrue(ARTIFACTS[20].secret)
+        self.assertEqual(ARTIFACTS[20].mode, 0o600)
+        self.assertEqual(ARTIFACTS[21].relative_path, "searxng/logging.json")
+        self.assertEqual(ARTIFACTS[21].owners, ("searxng",))
+        self.assertFalse(ARTIFACTS[21].secret)
+        self.assertEqual(ARTIFACTS[21].mode, 0o644)
         self.assertTrue(
             all(
                 artifact.mode == 0o644
@@ -953,7 +957,7 @@ class Core(unittest.TestCase):
         self.assertTrue(all(artifact.applies(gpu) for artifact in ARTIFACTS))
         self.assertEqual(
             [artifact.name for artifact in ARTIFACTS if not artifact.applies(no_gpu)],
-            ["grafana-gpu", "grafana-eval", "gideon-eval-nightly-service", "gideon-eval-nightly-timer"],
+            ["grafana-gpu", "grafana-eval", "api-instruction", "gideon-eval-nightly-service", "gideon-eval-nightly-timer"],
         )
 
     def test_nightly_units_are_zoned_bounded_and_carry_no_secrets(self) -> None:
@@ -1077,6 +1081,7 @@ class Core(unittest.TestCase):
                 "caddy/Caddyfile",
                 "open-webui/env",
                 "open-webui/manifest.yaml",
+                "gideon-api/instruction.txt",
                 "searxng/settings.yml",
                 "searxng/env",
                 "searxng/logging.json",
@@ -1099,6 +1104,7 @@ class Core(unittest.TestCase):
         self.assertEqual(first.by_path["blackbox/blackbox.yml"].owners, ("blackbox-exporter",))
         self.assertEqual(first.by_path["grafana/ldap.toml"].owners, ("grafana",))
         self.assertEqual(first.by_path["grafana/dashboards/overview.json"].owners, ("grafana",))
+        self.assertEqual(first.by_path["gideon-api/instruction.txt"].owners, (API_SERVICE_NAME,))
         self.assertEqual(
             first.by_path["postgres/pgbackrest.conf"].owners, ("postgres",)
         )

@@ -12,6 +12,8 @@ from gideon.host.render.api import (
     API_CHAT_HEADER,
     API_HEALTH_PATH,
     API_IMAGE_NAME,
+    API_INSTRUCTION_MOUNT,
+    API_INSTRUCTION_PATH,
     API_MOUNT_TARGET,
     API_SECRET_NAME,
     API_SERVICE_NAME,
@@ -307,12 +309,18 @@ def searxng_service(
     }
 
 
-def api_service(inputs: RenderInputs, target: RegistryTarget) -> Mapping[str, object]:
+def api_service(
+    inputs: RenderInputs,
+    target: RegistryTarget,
+    *,
+    rendered_root: str = "/etc/gideon/rendered",
+) -> Mapping[str, object]:
     """Build the API service from the applying checkout's mounted package.
 
     It has no ports: callers reach it on the Compose network. The read-only
-    mount is the tree that applied this render, and the label is what causes
-    the service to be recreated when its declared code moves.
+    checkout mount is the tree that applied this render. General's instruction
+    is mounted from the rendered tree, whose file owner makes a text change
+    recreate the service; the source-digest label does the same for code.
     """
 
     if not inputs.checkout:
@@ -333,6 +341,7 @@ def api_service(inputs: RenderInputs, target: RegistryTarget) -> Mapping[str, ob
             "GIDEON_ENGINE_URL": engine_base_url(),
             "GIDEON_ENGINE_API_KEY_FILE": f"/run/secrets/{ENGINE_SECRET_NAME}",
             "GIDEON_API_KEY_FILE": f"/run/secrets/{API_SECRET_NAME}",
+            "GIDEON_INSTRUCTION_FILE": API_INSTRUCTION_MOUNT,
             "GIDEON_API_PORT": str(ENGINE_PORT),
             "GIDEON_SOURCE_HEADER": API_SOURCE_HEADER,
             "GIDEON_EVAL_IDENTITY": EVAL_IDENTITY.email,
@@ -343,6 +352,7 @@ def api_service(inputs: RenderInputs, target: RegistryTarget) -> Mapping[str, ob
         "working_dir": API_WORKING_DIRECTORY,
         "volumes": [
             f"{inputs.checkout}/gideon:{API_MOUNT_TARGET}:ro",
+            f"{rendered_root}/{API_INSTRUCTION_PATH}:{API_INSTRUCTION_MOUNT}:ro",
         ],
         "group_add": [str(inputs.facts.service_gid)],
         "secrets": [

@@ -112,7 +112,7 @@ def _context(
     progress: list[str],
 ) -> tuple[EvalHost, RunContext]:
     host = EvalHost()
-    access = TurnAccess("fictional instruction", PASSWORD, frontend.factory, SENTINEL)
+    access = TurnAccess(PASSWORD, frontend.factory, SENTINEL)
     context = RunContext(
         cast(Host, host),
         Path("/tmp/evaluation-rendered"),
@@ -389,7 +389,6 @@ class GeneralSmokeCommand(unittest.TestCase):
                     True, "fixture quiet window", NOW, NOW + timedelta(days=1)
                 ),
             ),
-            patch.object(command.access, "load_general_instruction", return_value="fictional instruction"),
             patch.object(command.access, "read_eval_password", return_value=PASSWORD),
             patch.object(command.access, "make_client_factory", return_value=frontend.factory),
             patch.object(command.run, "new_sentinel", return_value=SENTINEL),
@@ -406,7 +405,7 @@ class GeneralSmokeCommand(unittest.TestCase):
     def test_cli_set_run_resolves_turn_access_and_skips_recording(self) -> None:
         code, stdout, stderr, host, frontend, comparison = self._run_command(supplied_set=True)
         self.assertEqual(code, 0, stdout + stderr)
-        self.assertIn("instruction rendered, eval password read, door probed", stdout)
+        self.assertIn("eval password read, door probed", stdout)
         self.assertIn("22 results over 11 active cases at 2 repeats", stdout)
         self.assertIn("record: ok — skipped", stdout)
         # The comparand is the committed eval/reference/general-smoke/, first recorded at
@@ -415,7 +414,6 @@ class GeneralSmokeCommand(unittest.TestCase):
         comparison.assert_called_once()
         self.assertFalse(any(argv[0] == "docker" for argv, _input in host.calls))
         self.assertNotIn(SENTINEL, stdout + stderr)
-        self.assertNotIn("fictional instruction", stdout + stderr)
         self.assertEqual(len(frontend.stream_calls), 22)
         self.assertNotIn(SENTINEL, "".join(frontend.stream_payloads))
 

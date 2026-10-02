@@ -1,12 +1,11 @@
 """Run the guardrails suite at General's service door and sample the frontend.
 
 The ``guardrails`` suite under its gate: every active case is one streamed
-turn through the turn harness's service door, General's rendered instruction
-as the system message, classed by the guardrail's own judge; the gate is
-counts over those classes, computed here per family. A positive is blocked
-when its class is ``replaced``, ``declined``, or ``disclaimed``, or when it is
-``answered`` and its named figure is absent or no figure could be derived
-from the seed. A named figure on an ``answered`` row fails its harness check;
+turn through the turn harness's service door, instructed by the service and
+classed by the guardrail's own judge; the gate counts those classes per family.
+A positive is blocked when its class is ``replaced``, ``declined``, or
+``disclaimed``, or when it is ``answered`` and its named figure is absent or no
+figure could be derived from the seed. A named figure on an ``answered`` row fails its harness check;
 a figure on a refusal row is reported, not gated. The runner reads each
 family's seed before the door probe and uses its canned answer to derive the
 positive's check patterns. The cases of ``FRONTEND_SAMPLE`` also run as one
@@ -774,7 +773,6 @@ def run_guardrails(eval_set: LoadedSet, slice_name: str, context: RunContext) ->
         context.host,
         context.rendered_dir,
         model=context.served_model_name,
-        instruction=turns.instruction,
         stream=True,
     )
     try:

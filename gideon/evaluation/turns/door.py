@@ -19,6 +19,7 @@ the enclosing ``DoorEvent`` keeps those deltas with their seconds-from-request
 start offset, and the ``end`` line keeps the ``[DONE]`` flag.  A successful
 reply is converted to the stored assistant-message shape consumed by
 :mod:`gideon.evaluation.turns.classify`.
+The door sends a client's prompt alone; the API service makes the request General.
 """
 
 from __future__ import annotations
@@ -369,7 +370,6 @@ def complete(
     *,
     served_name: str,
     prompt: str,
-    instruction: str | None,
     stream: bool,
     max_time: float,
 ) -> DoorReply:
@@ -382,7 +382,7 @@ def complete(
         body=completion_body(
             served_name=served_name,
             prompt=prompt,
-            instruction=instruction,
+            instruction=None,
             stream=stream,
         ),
         max_time=max_time,

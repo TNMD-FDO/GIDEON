@@ -1,5 +1,6 @@
 """Pure Compose and Open WebUI artifacts for the standing CI sibling stack."""
 
+import hashlib
 from collections.abc import Mapping
 from typing import Final
 
@@ -25,6 +26,7 @@ from gideon.host.render.engine import (
 )
 from gideon.host.render.owui import (
     ApplyManifestArtifact,
+    general_instruction_text,
     owui_env_file_text,
     owui_environment,
     owui_secret_environment,
@@ -41,6 +43,10 @@ RELAY_SERVICE_NAME: Final[str] = "engine-relay"
 RELAY_SOURCE: Final[str] = "tools/cistack/relay.py"
 RELAY_CONTAINER_PATH: Final[str] = "/relay/relay.py"
 RELAY_MEMORY_LIMIT: Final[int] = 128 * 1024 * 1024
+# The sibling has no recreate rule, only Compose's config diff at ``up -d``, so
+# its API block carries the instruction's digest: a changed text moves the block
+# and the service never keeps a startup text its mounted file no longer holds.
+CI_INSTRUCTION_DIGEST_LABEL: Final[str] = "org.gideon.instruction-digest"
 # The sibling's Postgres ceiling in the memory table's unit, decimal gigabytes,
 # sized as the table's rows are: the smallest whole gigabyte at least four times
 # the service's working-set peak, floor 1. The peak is the maximum by Compose
@@ -69,6 +75,7 @@ CI_WIPE_PATHS: Final[tuple[str, ...]] = (
     f"{CI_ROOT}/postgres",
     f"{CI_ROOT}/openwebui",
     f"{CI_ROOT}/open-webui",
+    f"{CI_ROOT}/{API_SERVICE_NAME}",
     f"{CI_ROOT}/compose.yaml",
     f"{CI_SECRETS_DIR}/gideon_admin_api_key",
     f"{CI_SECRETS_DIR}/gideon_eval_api_key",
@@ -103,7 +110,15 @@ def ci_compose_document(inputs: RenderInputs) -> Mapping[str, object]:
 
     postgres_pin = image_pin(inputs, "postgres")
     open_webui_pin = image_pin(inputs, "open-webui")
-    api = dict(api_service(inputs, target))
+    api = dict(api_service(inputs, target, rendered_root=CI_ROOT))
+    api_labels = api["labels"]
+    assert isinstance(api_labels, Mapping)
+    api["labels"] = {
+        **api_labels,
+        CI_INSTRUCTION_DIGEST_LABEL: hashlib.sha256(
+            ci_instruction(inputs).encode("utf-8")
+        ).hexdigest(),
+    }
     api_environment = api["environment"]
     assert isinstance(api_environment, Mapping)
     api["environment"] = {
@@ -211,6 +226,12 @@ def ci_env_file(inputs: RenderInputs) -> str:
     """Render the sibling's Open WebUI env file without directory settings."""
 
     return owui_env_file_text(owui_secret_environment(inputs, directory=False))
+
+
+def ci_instruction(inputs: RenderInputs) -> str:
+    """Render the instruction mounted by the sibling API service."""
+
+    return general_instruction_text(inputs)
 
 
 def ci_manifest(inputs: RenderInputs) -> str:

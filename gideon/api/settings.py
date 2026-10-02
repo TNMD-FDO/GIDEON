@@ -1,4 +1,4 @@
-"""Startup settings for the GIDEON API service."""
+"""The eight startup settings for the GIDEON API service."""
 
 import os
 from collections.abc import Mapping
@@ -17,6 +17,7 @@ class Settings:
     source_header: str  # the forwarded header the trip's source is decided on
     chat_header: str  # the forwarded header holding the trip's chat id
     eval_identity: str  # the value under that header that reads as the eval identity
+    instruction: str  # rendered file text, with surrounding whitespace stripped
 
 
 def _required_environment(environ: Mapping[str, str], name: str) -> str:
@@ -26,20 +27,19 @@ def _required_environment(environ: Mapping[str, str], name: str) -> str:
     return value
 
 
-def _read_secret(environ: Mapping[str, str], variable: str) -> str:
-    path_text = _required_environment(environ, variable)
-    path = Path(path_text)
+def _read_file(environ: Mapping[str, str], variable: str, kind: str) -> str:
+    path = Path(_required_environment(environ, variable))
     try:
         value = path.read_text(encoding="utf-8").strip()
     except (OSError, UnicodeDecodeError) as exc:
-        raise ValueError(f"Secret file {path} is missing or empty.") from exc
+        raise ValueError(f"{kind} file {path} is missing or empty.") from exc
     if not value:
-        raise ValueError(f"Secret file {path} is missing or empty.")
+        raise ValueError(f"{kind} file {path} is missing or empty.")
     return value
 
 
 def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
-    """Read and validate the service environment and mounted secret files."""
+    """Read the service environment, mounted secrets, and rendered instruction."""
 
     values = os.environ if environ is None else environ
     port_text = _required_environment(values, "GIDEON_API_PORT")
@@ -51,10 +51,11 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         raise ValueError("Environment variable GIDEON_API_PORT must be a valid TCP port.")
     return Settings(
         engine_url=_required_environment(values, "GIDEON_ENGINE_URL").rstrip("/"),
-        engine_api_key=_read_secret(values, "GIDEON_ENGINE_API_KEY_FILE"),
-        api_key=_read_secret(values, "GIDEON_API_KEY_FILE"),
+        engine_api_key=_read_file(values, "GIDEON_ENGINE_API_KEY_FILE", "Secret"),
+        api_key=_read_file(values, "GIDEON_API_KEY_FILE", "Secret"),
         port=port,
         source_header=_required_environment(values, "GIDEON_SOURCE_HEADER"),
         chat_header=_required_environment(values, "GIDEON_CHAT_HEADER"),
         eval_identity=_required_environment(values, "GIDEON_EVAL_IDENTITY"),
+        instruction=_read_file(values, "GIDEON_INSTRUCTION_FILE", "Instruction"),
     )

@@ -11,6 +11,8 @@ it is the one rendered artifact that reads forwarded header names.
 ``API_SOURCES`` is the code the container imports from the mounted checkout,
 including the shared guardrail judge: its digest is the block's label, so a
 change there recreates the service and nothing else.
+General's instruction reaches the container as a rendered file at a fixed
+mount, the one non-secret file beside its secret mounts.
 """
 
 from typing import Final
@@ -29,6 +31,8 @@ API_SOURCE_HEADER: Final[str] = API_USER_EMAIL_HEADER
 API_CHAT_HEADER: Final[str] = "X-OpenWebUI-Chat-Id"
 API_MOUNT_TARGET: Final[str] = "/opt/gideon-src/gideon"
 API_WORKING_DIRECTORY: Final[str] = "/opt/gideon-src"
+API_INSTRUCTION_PATH: Final[str] = "gideon-api/instruction.txt"
+API_INSTRUCTION_MOUNT: Final[str] = "/etc/gideon/instruction.txt"
 API_SOURCES: Final[tuple[str, ...]] = ("gideon/api", "gideon/guardrail")
 
 

@@ -19,7 +19,7 @@ from gideon.host.models import (
     select_profile,
 )
 from gideon.host.render import ARTIFACTS, RenderInputs, render_all
-from gideon.host.render.api import API_SERVICE_NAME, api_base_url
+from gideon.host.render.api import API_INSTRUCTION_PATH, API_SERVICE_NAME, api_base_url
 from gideon.host.render.compose import STORE_SERVICES, service_names
 from gideon.host.render.drill import (
     DRILL_PORT,
@@ -45,6 +45,7 @@ from gideon.host.render.owui import (
     GENERAL_CAPABILITIES,
     GENERAL_FUNCTION_CALLING,
     GENERAL_PRESET_ID,
+    GENERAL_TEMPLATE,
     MODEL_GRANT_CREATED_AT,
     MODEL_GRANT_ID,
     MODEL_GRANT_RESOURCE_TYPE,
@@ -57,9 +58,11 @@ from gideon.host.render.owui import (
     WEB_LOADER_USER_AGENT,
     WEB_SEARCH_CONFIRMATION_TEXT,
     WEB_SEARCH_RESULT_COUNT,
+    ApiInstructionArtifact,
     ApplyManifestArtifact,
     OwuiEnvArtifact,
     branch_gate_function,
+    general_instruction_text,
     general_preset_record,
     general_texts,
     owui_environment,
@@ -568,10 +571,7 @@ class Manifest(unittest.TestCase):
         self.assertEqual(general["base_model_id"], ENGINE_SERVICE_NAME)
         self.assertEqual(
             general["params"],
-            {
-                "system": general_texts(inputs(SECOND)).system_prompt,
-                "function_calling": GENERAL_FUNCTION_CALLING,
-            },
+            {"function_calling": GENERAL_FUNCTION_CALLING},
         )
         self.assertEqual(
             general["meta"],
@@ -629,13 +629,32 @@ class Manifest(unittest.TestCase):
         first_name = inputs(EXAMPLE).site.office.name
         second_name = inputs(SECOND).site.office.name
         self.assertNotEqual(first, second)
-        self.assertIn(first_name, first["params"]["system"])
         self.assertIn(first_name, first["meta"]["description"])
         # The second office's web.search is off; its record still differs only by the name.
         renamed = deepcopy(first)
-        renamed["params"]["system"] = first["params"]["system"].replace(first_name, second_name)
         renamed["meta"]["description"] = first["meta"]["description"].replace(first_name, second_name)
         self.assertEqual(renamed, second)
+
+    def test_general_instruction_is_a_service_owned_gpu_artifact(self) -> None:
+        artifact = ApiInstructionArtifact()
+        for site_path in (EXAMPLE, SECOND):
+            with self.subTest(site=site_path):
+                rendered_inputs = inputs(site_path)
+                text = general_instruction_text(rendered_inputs)
+                self.assertEqual(text, general_texts(rendered_inputs).system_prompt + "\n")
+                self.assertEqual(text, artifact.emit(rendered_inputs))
+                self.assertEqual(
+                    render_all(rendered_inputs).by_path[API_INSTRUCTION_PATH].content,
+                    text,
+                )
+                self.assertEqual(text[-1], "\n")
+                self.assertNotEqual(text[-2], "\n")
+        self.assertEqual(artifact.relative_path, API_INSTRUCTION_PATH)
+        self.assertEqual(artifact.owners, (API_SERVICE_NAME,))
+        self.assertEqual(artifact.template_paths, (GENERAL_TEMPLATE,))
+        self.assertTrue(artifact.applies(inputs()))
+        self.assertFalse(artifact.applies(inputs(no_gpu=True)))
+        self.assertNotIn(API_INSTRUCTION_PATH, render_all(inputs(no_gpu=True)).by_path)
 
     def test_general_template_has_exact_keys_and_only_its_release_placeholder(self) -> None:
         source = inputs().templates["open-webui/general.yaml"]

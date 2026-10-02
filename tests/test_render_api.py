@@ -14,6 +14,8 @@ from gideon.host.render import RenderInputs, render_all
 from gideon.host.render.api import (
     API_CHAT_HEADER,
     API_HEALTH_PATH,
+    API_INSTRUCTION_MOUNT,
+    API_INSTRUCTION_PATH,
     API_JOB_NAME,
     API_MOUNT_TARGET,
     API_SECRET_NAME,
@@ -65,12 +67,16 @@ class ApiRender(unittest.TestCase):
         self.assertEqual(api["environment"]["GIDEON_SOURCE_HEADER"], API_SOURCE_HEADER)
         self.assertEqual(api["environment"]["GIDEON_CHAT_HEADER"], API_CHAT_HEADER)
         self.assertEqual(api["environment"]["GIDEON_EVAL_IDENTITY"], EVAL_IDENTITY.email)
+        self.assertEqual(api["environment"]["GIDEON_INSTRUCTION_FILE"], API_INSTRUCTION_MOUNT)
         self.assertEqual(API_SOURCE_HEADER, API_USER_EMAIL_HEADER)
         self.assertNotIn("ports", api)
         self.assertNotIn("depends_on", api)
         self.assertEqual(
             api["volumes"],
-            [f"{gpu.checkout}/gideon:{API_MOUNT_TARGET}:ro"],
+            [
+                f"{gpu.checkout}/gideon:{API_MOUNT_TARGET}:ro",
+                f"/etc/gideon/rendered/{API_INSTRUCTION_PATH}:{API_INSTRUCTION_MOUNT}:ro",
+            ],
         )
         self.assertEqual(
             api["labels"],
@@ -98,6 +104,7 @@ class ApiRender(unittest.TestCase):
             no_gpu_rendered.by_path["compose.yaml"].content
         )
         self.assertNotIn(API_SERVICE_NAME, no_gpu_document["services"])
+        self.assertNotIn(API_INSTRUCTION_PATH, no_gpu_rendered.by_path)
         self.assertNotIn(API_SECRET_NAME, no_gpu_document["secrets"])
         self.assertEqual(
             gpu_document["secrets"]["postgres_gideon_audit_password"],
@@ -129,6 +136,43 @@ class ApiRender(unittest.TestCase):
             ValueError, "Re-run render from a release checkout, whose loader gathers it\\."
         ):
             api_service(replace(base, api_sources_digest=""), registry)
+
+    def test_instruction_mount_accepts_a_rendered_root(self) -> None:
+        base = inputs()
+        registry = parse_registry(base.site.registry)
+        assert registry is not None
+        block = api_service(base, registry, rendered_root="/tmp/fixture-rendered")
+        self.assertEqual(
+            block["volumes"],
+            [
+                f"{base.checkout}/gideon:{API_MOUNT_TARGET}:ro",
+                f"/tmp/fixture-rendered/{API_INSTRUCTION_PATH}:{API_INSTRUCTION_MOUNT}:ro",
+            ],
+        )
+
+    def test_moving_office_name_recreates_only_api_for_changed_instruction(self) -> None:
+        original = inputs()
+        moved_office = replace(original.site.office, name="Fictitious Moved Office")
+        moved = replace(original, site=replace(original.site, office=moved_office))
+        original_rendered = render_all(original)
+        moved_rendered = render_all(moved)
+        self.assertNotEqual(
+            original_rendered.by_path[API_INSTRUCTION_PATH].content,
+            moved_rendered.by_path[API_INSTRUCTION_PATH].content,
+        )
+        original_compose = yaml.safe_load(original_rendered.by_path["compose.yaml"].content)
+        moved_compose = yaml.safe_load(moved_rendered.by_path["compose.yaml"].content)
+        self.assertEqual(original_compose, moved_compose)
+        judgment = recreate_judgment(
+            moved_rendered,
+            applied_record(original),
+            service_names(moved),
+            compose_digests(moved),
+        )
+        self.assertEqual(judgment.services, (API_SERVICE_NAME,))
+        self.assertEqual(judgment.files, (API_SERVICE_NAME,))
+        self.assertEqual(judgment.block, ())
+        self.assertEqual(judgment.top_level, ())
 
     def test_moving_the_digest_recreates_only_the_api_service_block(self) -> None:
         original = inputs()

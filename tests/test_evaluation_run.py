@@ -402,7 +402,6 @@ class Command(unittest.TestCase):
                 ),
             ),
             patch.object(command.window, "window_judgement", return_value=judgement),
-            patch.object(command.access, "load_general_instruction", return_value="fixture instruction"),
             patch.object(command.access, "read_eval_password", return_value="fixture password"),
             patch.object(command.access, "make_client_factory", return_value=cast(object, lambda **_kwargs: object())),
             patch.object(command.run, "new_sentinel", return_value="fixture-sentinel"),
@@ -984,15 +983,10 @@ def _invoke_engine_command(
 ) -> tuple[int, str, str, dict[str, list[Any]]]:
     observed: dict[str, list[Any]] = {
         "contexts": [],
-        "instruction": [],
         "client": [],
         "door": [],
         "engine_paths": [],
     }
-
-    def load_instruction(*args: Any, **kwargs: Any) -> str:
-        observed["instruction"].append((args, kwargs))
-        return "A visibly fictitious instruction."
 
     def make_client(*args: Any, **kwargs: Any) -> object:
         observed["client"].append((args, kwargs))
@@ -1034,7 +1028,6 @@ def _invoke_engine_command(
             "resolve_engine_target",
             side_effect=resolve_engine,
         ),
-        patch.object(command.access, "load_general_instruction", side_effect=load_instruction),
         patch.object(command.access, "read_eval_password", return_value="fictitious-password"),
         patch.object(command.access, "make_client_factory", side_effect=make_client),
         patch.object(command.door, "probe", side_effect=probe_door),
@@ -1079,7 +1072,6 @@ class EngineStackAndLock(unittest.TestCase):
         )
         self.assertIn("engine lock taken", stdout)
         self.assertEqual(observed["engine_paths"], [production_dir])
-        self.assertEqual(observed["instruction"][0][1]["stack"], "ci")
         self.assertEqual(observed["client"][0][1]["stack"], "ci")
         self.assertEqual(observed["door"][0][0][1], Path(stacks.CI_ROOT))
         self.assertEqual(observed["door"][0][1]["max_time"], command.run.TURN_TIMEOUT_SECONDS)

@@ -980,13 +980,12 @@ class TurnHarness(TestCase):
 
     def test_turn_access_withholds_password_from_repr(self) -> None:
         record = access.TurnAccess(
-            "rendered instruction",
             PASSWORD,
             lambda **_kwargs: cast(Client, object()),
             "run-sentinel",
         )
         self.assertNotIn(PASSWORD, repr(record))
-        self.assertIn("rendered instruction", repr(record))
+        self.assertIn("run-sentinel", repr(record))
 
     def test_frontend_turn_structured_facts_exist_with_and_without_output(self) -> None:
         source = seed_case("direct-01")

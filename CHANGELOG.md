@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.5](docs/release-notes/v0.3.5.md) — 2026-10-02 — the service owns General's instruction
 - [v0.3.4](docs/release-notes/v0.3.4.md) — 2026-10-02 — the Grafana front door
 - [v0.3.3](docs/release-notes/v0.3.3.md) — 2026-10-02 — every set's boundary carries a commit
 - [v0.3.2](docs/release-notes/v0.3.2.md) — 2026-10-01 — the start-here card

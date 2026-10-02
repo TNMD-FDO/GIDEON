@@ -20,7 +20,13 @@ from gideon.host.images import NO_PROXY_LOCAL
 from gideon.host.ldap import bind_identity, filter_value
 from gideon.host.models import ModelPin
 from gideon.host.render import Artifact, RenderInputs, template_text
-from gideon.host.render.api import API_SECRET_NAME, API_SERVICE_NAME, api_base_url
+from gideon.host.render.api import (
+    API_INSTRUCTION_PATH,
+    API_SECRET_NAME,
+    API_SERVICE_NAME,
+    api_base_url,
+    api_enabled,
+)
 from gideon.host.render.proxy import PROXY_AUTH_NAME, proxy_environment_values
 from gideon.host.render.searxng import (
     SEARXNG_SERVICE_NAME,
@@ -246,7 +252,7 @@ MODEL_GRANT_CREATED_AT: Final[int] = 0
 
 @dataclass(frozen=True, slots=True)
 class GeneralTexts:
-    """The three release texts used by General's preset record."""
+    """The three release texts for General's preset and service instruction."""
 
     name: str
     description: str
@@ -328,6 +334,12 @@ def general_texts(inputs: RenderInputs) -> GeneralTexts:
                 "may carry only the $office_name placeholder; write a literal dollar sign as $$",
             ) from exc
     return GeneralTexts(**values)
+
+
+def general_instruction_text(inputs: RenderInputs) -> str:
+    """Render General's system prompt with one trailing newline."""
+
+    return general_texts(inputs).system_prompt + "\n"
 
 
 def _permission_environment(tree: Mapping[str, Mapping[str, bool]]) -> dict[str, str]:
@@ -611,16 +623,14 @@ def general_preset_record(inputs: RenderInputs) -> Mapping[str, object]:
     generator = _generator_model(inputs)
     texts = general_texts(inputs)
     # The frontend reads a preset's params from its own record and stores its
-    # grants as principal, principal id, and permission triples.
+    # grants as principal, principal id, and permission triples. General's
+    # instruction belongs to the service, so the frontend splices none.
     return {
         "id": GENERAL_PRESET_ID,
         "user_id": SYNC_ROW_USER_ID,
         "base_model_id": generator.serve.served_name,
         "name": texts.name,
-        "params": {
-            "system": texts.system_prompt,
-            "function_calling": GENERAL_FUNCTION_CALLING,
-        },
+        "params": {"function_calling": GENERAL_FUNCTION_CALLING},
         "meta": {
             "description": texts.description,
             "capabilities": dict(GENERAL_CAPABILITIES),
@@ -838,3 +848,23 @@ class ApplyManifestArtifact(Artifact):
             ),
         }
         return dump(document)
+
+
+class ApiInstructionArtifact(Artifact):
+    """Render General's text, owned by the API so its change recreates that service."""
+
+    name = "api-instruction"
+    relative_path = API_INSTRUCTION_PATH
+    mode = 0o644
+    owners = (API_SERVICE_NAME,)
+    template_paths = (GENERAL_TEMPLATE,)
+
+    def applies(self, inputs: RenderInputs) -> bool:
+        """Emit the instruction only where the API service runs."""
+
+        return api_enabled(inputs.no_gpu)
+
+    def emit(self, inputs: RenderInputs) -> str:
+        """Emit General's rendered instruction for the mounted service file."""
+
+        return general_instruction_text(inputs)
