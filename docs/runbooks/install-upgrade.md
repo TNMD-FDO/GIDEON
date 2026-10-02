@@ -348,6 +348,12 @@ never something rollback does.
 
 - `install` again on a live box: a no-op apply, an incremental set, a drill,
   the URL. Safe at any time.
+- After editing `/etc/gideon/site.yaml`, run `sudo python3 -m gideon apply` to
+  converge the running stack to the site file. If the edit changed `alerts.*`,
+  follow apply with `sudo python3 -m gideon alerts test` (`observability.md` §4).
+  A renewed certificate is placed in the certificate and key files, then picked
+  up with `sudo python3 -m gideon tls reload`; it is not a site-file edit
+  (`office-services-setup.md` §4).
 - `upgrade <tag>` again after a reboot: the checkout is already at the tag, the
   set is reused, and the run resumes at the new tree's provision.
 - `upgrade <tag>` again after an attempt that stopped before the checkout: a

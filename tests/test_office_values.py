@@ -174,6 +174,24 @@ def _skill_directories(root: Path) -> frozenset[Path]:
     return frozenset(root / ".claude" / "skills" / entry.name for entry in lock.entries)
 
 
+# A built presentation, an iteration folder's HTML and pptx under the memo tree the
+# export omits, is a render of the slide source beside it, which is scanned; its bulk is
+# base64 on a few lines that the hostname scan reads at microseconds a character. The
+# outputs are untracked, but a local build leaves them in the tree, so the walk skips
+# them by shape.
+_PRESENTATIONS = ("docs", "6-memo", "presentations")
+_BUILT_DECK_SUFFIXES = frozenset({".html", ".pptx"})
+
+
+def _is_built_deck(relative: Path) -> bool:
+    parts = relative.parts
+    return (
+        len(parts) == 5
+        and parts[:3] == _PRESENTATIONS
+        and relative.suffix.lower() in _BUILT_DECK_SUFFIXES
+    )
+
+
 def _walk(root: Path) -> Iterator[Path]:
     skill_directories = _skill_directories(root)
     for path in sorted(root.rglob("*")):
@@ -181,6 +199,8 @@ def _walk(root: Path) -> Iterator[Path]:
             continue
         relative_parts = path.relative_to(root).parts
         if any(part in _SKIP_NAMES for part in relative_parts):
+            continue
+        if _is_built_deck(path.relative_to(root)):
             continue
         if any(skill in path.parents for skill in skill_directories):
             continue

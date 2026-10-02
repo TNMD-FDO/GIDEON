@@ -17,3 +17,7 @@ __pycache__/
 # the dev venv: a worktree's link to the primary, or its own directory
 .venv
 *.egg-info/
+# A presentation's built outputs (docs/6-memo/presentations/README.md): the HTML embeds
+# a font and every image and the pptx is as large, so a build is run and never committed
+docs/6-memo/presentations/*/*.html
+docs/6-memo/presentations/*/*.pptx

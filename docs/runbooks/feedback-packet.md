@@ -150,7 +150,7 @@ the attorney rejects never enters the set.
 
 A packet is the one file on the box that holds users' text outside the
 frontend's database. Delete each month's directory once its candidates are
-written:
+written and the guardrail review has read its reports (`guardrail.md` §3):
 
 ```
 sudo rm -r /root/candidates/<YYYY-MM>

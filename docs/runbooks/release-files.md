@@ -56,3 +56,39 @@ This file lists improvement triggers, each with a condition and one of three sta
 This file names the challenger: at most one configuration experiment, run beside the release's configuration on the build box's CI sibling so both are recorded paired. The entry names the experiment, the subject it changes, the release's value, the challenger's value, and the date and pull request or tag that set it; a null `challenger` means none is set and nothing runs. The file changes only through a pull request. A challenger found better is promoted by a pull request that changes the product's own configuration and this file together, so the challenger never reaches production by itself.
 
 `gideon eval run --challenger --stack ci` reads the file on the build box alone, where the nightly timer runs it after the two nightly suites, a failed pair never failing the timer's unit; `gideon proposals` reads it there too, showing the newest pair's figures and the paired statistic over up to five nights of one release. An office's box receives it and never reads it. A refusal naming the file is fixed by restoring it from the installed release tag; the person changing the file in a release corrects the named key so the `release` value is the one the release runs and the two values name the same kind of setting, then runs the command again.
+
+## 9. The Monday review of pull requests
+
+The maintaining office reviews the open pin-watch and Dependabot pull requests on GitHub each Monday. Read the PR's title for its pin, find its row below, and merge only when the hosted `checks` job is green.
+
+| The pull request | What you do on GitHub |
+| --- | --- |
+| Dependabot: `ruff`, `mypy`, `pytest`, a GitHub Action | Merge when green. An Action needing a newer runner waits for `host.gh_runner`. A `requirements-dev.txt` bump makes open cycles rebase onto `main` before their gate can pass. |
+| Dependabot: `playwright`, `PyYAML` | Leave open for a cycle; each needs a companion change before its checks pass. |
+| `images.prometheus`, `grafana`, `node-exporter`, `dcgm-exporter`, `postgres-exporter`, `cadvisor`, `blackbox-exporter` | Merge when green. The observability services move at the next release's upgrade. |
+| `images.caddy`, `images.searxng`, `images.vllm-openai`, `images.open-webui`, `models.*` | Leave open for a release cycle. These recreate a service a user's turn uses. A hand merge changes the recreate set of every open cycle; open a bump cycle to move one sooner. A frontend bump goes to the developer; a model bump follows `model-upgrade.md` §2. |
+| `images.postgres`, `images.gideon`, and their build arguments | Leave open for a cycle. Checks stay red until the image is rebuilt on the box (`built-images.md` §2). Postgres is user-facing. |
+| `host.registry_image`, `host.acceptance_vm_image` | Merge when green. The registry moves at the next provision; the VM image at the next acceptance run. |
+| `host.gh_runner` | Merge when green, then provision the box within thirty days to update its runner. |
+| `host.driver.branch`, `host.minimums.*` proposals | Leave open until the box runs the new version. Merging first makes preflight refuse. Close a version you decide to skip. |
+| `skills.matt-pocock` proposal | A maintainer completes the skill refresh on the proposal branch, then merges when green. Nothing on the box moves. |
+
+**Closing declines.** Closing a PR unmerged tells the watch that bump was declined; it proposes nothing else for that pin until upstream moves again. Say why in a closing comment.
+
+**How to merge.** Use **Rebase and merge** to keep `main` linear. The watch's commit subject is the PR title and may be long; keep it. GitHub deletes the branch after the merge when automatic head-branch deletion is enabled, and the watch recreates it when that pin moves again. The decline remains in the closed PR. Afterwards, bring the primary checkout up to date:
+
+```bash
+cd ~/src/GIDEON && git pull --ff-only
+```
+
+If the merge changed `requirements-dev.txt`, rebuild that checkout's development environment. A release that finds `main` moved during its final fast-forward rebases again.
+
+**When a PR shows a conflict.** Watch branches regenerate the same render fixtures, so one merged bump or a release touching a lock can make the others conflict. Do not resolve a watch branch's conflict by hand: the watch can replace that commit. Let Monday's scheduled watch run rebase open branches onto `main`. If a green PR is urgent, use *Actions* → *pin watch* → *Run workflow*, choose `main`, leave the dry-run option unticked, and run it. From a shell:
+
+```bash
+gh workflow run pin-watch.yml -f dry_run=false
+```
+
+Merge the next PR when its checks are green again.
+
+**A watch run costs hosted minutes.** It rebases every open watch branch, and each rebase reruns that PR's `checks` job. With many PRs open, extra dispatches can exhaust the organisation's Actions minutes and stop CI. Merge one conflicting PR a week after Monday's scheduled rebase; dispatch between merges only for an urgent green PR. A PR GitHub shows without a conflict can be merged at once, because CI on `main` checks it again.

@@ -8,7 +8,7 @@ assistant, on one box the office controls. Built by TNMD-FDO (the Office of
 the Federal Public Defender, Middle District of Tennessee) and designed from
 day one for distribution: clone a tag, edit `site.yaml`, run one script.
 
-**Status:** 0.x — slice 0 (platform) complete at `v0.1.0`, the clean-VM acceptance at minor tags its standing proof; slice 1 (General) complete at `v0.2.0`, with no user on the box until go-live; slice 2 (eval harness) complete at `v0.3.0`; slice 3 (corpus machinery and tranche 1) next; this tree is `v0.3.1`.
+**Status:** 0.x — slice 0 (platform) complete at `v0.1.0`, the clean-VM acceptance at minor tags its standing proof; slice 1 (General) complete at `v0.2.0`, with no user on the box until go-live; slice 2 (eval harness) complete at `v0.3.0`; slice 3 (corpus machinery and tranche 1) next; this tree is `v0.3.2`.
 What each release changed is in [`CHANGELOG.md`](CHANGELOG.md), one line per release; from `v0.2.0` each line links its release note. Later-slice commands still print "not implemented".
 
 ## Install
@@ -93,6 +93,7 @@ python3 -m tools.gate
 
 | What | Where |
 |---|---|
+| Where to start (operator card: a CSA's situations, each with its command and runbook section holding the steps) | [`docs/runbooks/start-here.md`](docs/runbooks/start-here.md) |
 | Changelog index (what each release changed; `upgrade` prints a major release's `## Breaking` section from its release note) | [`CHANGELOG.md`](CHANGELOG.md) |
 | Reporting a vulnerability | [`SECURITY.md`](SECURITY.md) |
 | Site file example + editor schema | [`config/site.example.yaml`](config/site.example.yaml) · [`config/site.schema.json`](config/site.schema.json) |
@@ -113,7 +114,7 @@ python3 -m tools.gate
 | Guardrail review (monthly, content-free trips beside down ratings in the same chats; a person reads the chat and rules on each report) | [`docs/runbooks/guardrail.md`](docs/runbooks/guardrail.md) |
 | Install, upgrade, and rollback (the receiving-office sequence, upgrading, rolling back, re-runs, moving a populated image store, and every refusal's fix) | [`docs/runbooks/install-upgrade.md`](docs/runbooks/install-upgrade.md) · [`docs/runbooks/backup-restore.md`](docs/runbooks/backup-restore.md) §6 (the pre-upgrade set) |
 | Model upgrade (a pin-watch model revision from its pull request to a tag: the window, the comparand, the swap, `engine verify`, the decision run, and the return to the outgoing model) | [`docs/runbooks/model-upgrade.md`](docs/runbooks/model-upgrade.md) |
-| Release files (what the locks and configuration pin, who changes them, and the fixes for related refusals) | [`docs/runbooks/release-files.md`](docs/runbooks/release-files.md) |
+| Release files (what the locks and configuration pin, who changes them, the fixes for related refusals, and the Monday review of pull requests) | [`docs/runbooks/release-files.md`](docs/runbooks/release-files.md) |
 | The clean-VM acceptance (a throwaway KVM VM from the pinned image, the receiving-office sequence driven end to end at minor tags; `sudo python3 -m tools.acceptance <ref>` on the build box) | [`tools/acceptance/`](tools/acceptance/) · [`docs/runbooks/install-upgrade.md`](docs/runbooks/install-upgrade.md) §6 |
 | The turn harness (a case set at GIDEON as the eval identity, one row per case with its class; the seed the first set; `sudo python3 -m tools.turns <cases> [--case <id>] [--stream] --out <dir>` on the box through the frontend's chat path, a long run in the quiet window or on a weekend; it takes the engine lock after the window check and refuses to start beside a live evaluation, `--beside` the one deliberate overlap, a browser case beside a load; `--service` posting the same cases to General's service instead, signed in nowhere; a replaced answer's cause read with `--unfiltered --case <id> --out <dir>`, asked of the engine directly, past the service's judge; its browser mode `sudo .venv/bin/python -m tools.turns --browser <cases> --out <dir> [--probe-inlet]` from a users-group seat, the screen judged frame by frame) | [`tools/turns/`](tools/turns/) · [`eval/seed/guardrails/`](eval/seed/guardrails/) · [`eval/seed/general/`](eval/seed/general/) (General's smoke set) |
 | The CI sibling stack (`gideon-ci`, the standing second project beside production — its own Postgres, frontend, and service, production's engine through a relay, its frontend on loopback port 18100, outside the backup set; `sudo python3 -m tools.cistack up`, `smoke`, `status`, `down [--wipe]` on the box; the turn harness's `--stack ci` and `eval run --stack ci` drive it) | [`tools/cistack/`](tools/cistack/) |
