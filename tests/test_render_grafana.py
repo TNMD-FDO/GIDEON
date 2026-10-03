@@ -5,6 +5,7 @@ import re
 import tomllib
 import unittest
 from dataclasses import replace
+from itertools import combinations, pairwise
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,7 @@ from gideon.host.render.grafana import (
     PUBLIC_REPOSITORY_URL,
     START_HERE_CARD,
     START_HERE_TITLE,
+    GrafanaBackupArtifact,
     GrafanaContactPointsArtifact,
     GrafanaDashboardsProviderArtifact,
     GrafanaDatasourcesArtifact,
@@ -56,16 +58,134 @@ from gideon.host.render.grafana import (
 from gideon.host.render.prometheus import PrometheusConfigArtifact
 from gideon.host.render.searxng import search_enabled
 from gideon.host.render.systemd import NIGHTLY_CALENDAR, NIGHTLY_SUITES
-from gideon.host.site import load_site
+from gideon.host.site import FIELD_REGISTRY, load_site
 from gideon.host.steps.command import INSTALL_HOME
 from gideon.improvement import tally
 from gideon.status import attention
+from tools.boards.page import GRID_CELL_HEIGHT, GRID_CELL_MARGIN, VIEWPORT_WIDTH
 
 ROOT = Path(__file__).resolve().parent.parent
 EXAMPLE = ROOT / "config/site.example.yaml"
 SECOND = ROOT / "tests/fixtures/site/second-office.yaml"
 FULL_DN = ROOT / "tests/fixtures/site/dn-groups.yaml"
 ESCAPED_DN = ROOT / "tests/fixtures/site/dn-groups-escaping.yaml"
+
+# The pinned Grafana's table panel and dashboard grid, read from its source;
+# a Grafana pin bump re-reads these against the new tag.
+PANEL_INNER_WIDTH_LOSS = 18  # a 1 px border and 8 px padding on each side
+PANEL_VERTICAL_CHROME = 58  # the same border and padding, and a 40 px title bar
+TABLE_HEADER_HEIGHT = 34  # a header row on one line
+TABLE_ROW_HEIGHT = {"sm": 36, "md": 42, "lg": 48}  # a data row per cell height
+TABLE_MIN_COLUMN_WIDTH = 150  # a column's minimum width when none is set
+HEADER_TEXT_INSET = 13  # a header cell's 6 px padding each side and its right border
+KIOSK_SIDE_PADDING = 32  # the kiosk page's 16 px padding on each side
+GRID_COLUMNS = 24  # the dashboard grid's columns
+HEADER_CHAR_WIDTH_BOUND = 9  # an upper bound per header character, not a glyph metric
+
+
+def table_whole_rows(panel: dict[str, Any]) -> int:
+    """Count whole data rows inside a table card at the pinned Grafana layout."""
+
+    cell_height = panel.get("options", {}).get("cellHeight", "sm")
+    card_height = (GRID_CELL_HEIGHT + GRID_CELL_MARGIN) * panel["gridPos"]["h"] - GRID_CELL_MARGIN
+    return (card_height - PANEL_VERTICAL_CHROME - TABLE_HEADER_HEIGHT) // TABLE_ROW_HEIGHT[cell_height]
+
+
+def table_inner_width(panel: dict[str, Any]) -> int:
+    """Resolve the table's available pixels in the board check's kiosk viewport."""
+
+    grid_width = VIEWPORT_WIDTH - KIOSK_SIDE_PADDING
+    column_width = (grid_width - GRID_CELL_MARGIN * (GRID_COLUMNS - 1)) / GRID_COLUMNS
+    width = panel["gridPos"]["w"]
+    return round(column_width * width + GRID_CELL_MARGIN * (width - 1)) - PANEL_INNER_WIDTH_LOSS
+
+
+def column_overrides(panel: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Map each by-name override's column to its property values."""
+
+    return {
+        override["matcher"]["options"]: {item["id"]: item["value"] for item in override["properties"]}
+        for override in panel["fieldConfig"]["overrides"]
+        if override["matcher"]["id"] == "byName"
+    }
+
+
+def table_column_widths(panel: dict[str, Any], columns: list[str]) -> dict[str, float]:
+    """Apply Grafana's explicit widths and shared width floor to query columns."""
+
+    defaults = panel["fieldConfig"]["defaults"].get("custom", {})
+    properties = column_overrides(panel)
+    explicit = {
+        name: properties.get(name, {}).get("custom.width", defaults.get("width"))
+        for name in columns
+    }
+    fixed = sum(value for value in explicit.values() if value)
+    auto_count = sum(not value for value in explicit.values())
+    shared = (table_inner_width(panel) - fixed) / auto_count if auto_count else 0
+    return {
+        name: float(value) if value else max(
+            properties.get(name, {}).get("custom.minWidth", defaults.get("minWidth", TABLE_MIN_COLUMN_WIDTH)),
+            shared,
+        )
+        for name, value in explicit.items()
+    }
+
+
+def _sql_top_level_tokens(sql: str) -> list[tuple[str, int, int]]:
+    """Find words and commas outside strings, identifiers, and parentheses."""
+
+    tokens = []
+    depth = 0
+    quote = ""
+    index = 0
+    while index < len(sql):
+        char = sql[index]
+        if quote:
+            if char == quote:
+                if index + 1 < len(sql) and sql[index + 1] == quote:
+                    index += 2
+                    continue
+                quote = ""
+        elif char in {"'", '"'}:
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif depth == 0 and char == ",":
+            tokens.append((char, index, index + 1))
+        elif depth == 0 and (char.isalpha() or char == "_"):
+            end = index + 1
+            while end < len(sql) and (sql[end].isalnum() or sql[end] == "_"):
+                end += 1
+            tokens.append((sql[index:end].upper(), index, end))
+            index = end
+            continue
+        index += 1
+    return tokens
+
+
+def outer_select_columns(sql: str) -> list[str]:
+    """Read outermost SELECT names, using an alias or the final identifier."""
+
+    tokens = _sql_top_level_tokens(sql)
+    select = next((end for word, _, end in tokens if word == "SELECT"), None)
+    assert select is not None
+    source = next((start for word, start, _ in tokens if word == "FROM" and start > select), None)
+    assert source is not None
+    clause = sql[select:source]
+    clause = re.sub(r"(?is)^\s*DISTINCT\s+ON\s*\([^)]*\)\s*", "", clause, count=1)
+    commas = [start for word, start, _ in _sql_top_level_tokens(clause) if word == ","]
+    boundaries = [-1, *commas, len(clause)]
+    names = []
+    for left, right in pairwise(boundaries):
+        item = clause[left + 1:right].strip()
+        alias = re.search(r"(?i)\bAS\s+([a-z_][a-z_0-9]*)\s*$", item)
+        identifier = re.search(r"([a-z_][a-z_0-9]*)\s*$", item, re.IGNORECASE)
+        match = alias or identifier
+        assert match is not None, item
+        names.append(match.group(1))
+    return names
 
 
 def dcgm_counter_rows() -> dict[str, tuple[str, str]]:
@@ -842,6 +962,94 @@ class Dashboards(unittest.TestCase):
                         self.assertIn(section, headings)
 
 
+class TableLayout(unittest.TestCase):
+    def test_helpers_match_v038_board_readings(self) -> None:
+        panel: dict[str, Any] = {
+            "gridPos": {"h": 7, "w": 24},
+            "fieldConfig": {"defaults": {}, "overrides": []},
+        }
+        self.assertEqual(table_whole_rows(panel), 4)
+        self.assertEqual(table_inner_width(panel), 1550)
+        panel["gridPos"]["h"] = 10
+        self.assertEqual(table_whole_rows(panel), 7)
+        self.assertEqual(sum(table_column_widths(panel, [f"field_{i}" for i in range(12)]).values()), 1800)
+        panel["gridPos"]["w"] = 12
+        self.assertEqual(table_inner_width(panel), 762)
+        self.assertEqual(sum(table_column_widths(panel, [f"field_{i}" for i in range(10)]).values()), 1500)
+
+    def test_column_reader_uses_outer_select_and_skips_distinct_on(self) -> None:
+        sql = (
+            "WITH fictitious AS (SELECT hidden FROM invented_rows) "
+            "SELECT DISTINCT ON (group_key, item_key) t.at, "
+            "COALESCE(t.size, 0) AS bytes FROM fictitious t"
+        )
+        self.assertEqual(outer_select_columns(sql), ["at", "bytes"])
+
+
+class BackupBoard(unittest.TestCase):
+    def test_board_is_verbatim_and_applies_on_every_host(self) -> None:
+        self.assertIn(GrafanaBackupArtifact, ARTIFACTS)
+        self.assertIsInstance(GrafanaBackupArtifact, VerbatimArtifact)
+        self.assertEqual(GrafanaBackupArtifact.owners, ("grafana",))
+        self.assertEqual(GrafanaBackupArtifact.emit(inputs()), inputs().templates[BACKUP_TEMPLATE])
+        self.assertTrue(GrafanaBackupArtifact.applies(inputs()))
+        self.assertTrue(GrafanaBackupArtifact.applies(inputs(no_gpu=True)))
+
+    def test_range_follows_the_default_drill_cadence(self) -> None:
+        board = json.loads(inputs().templates[BACKUP_TEMPLATE])
+        interval = next(spec.default for spec in FIELD_REGISTRY if spec.path == "backup.drill_interval")
+        assert isinstance(interval, str)
+        self.assertEqual(
+            board["time"],
+            {"from": f"now-{DRILL_MAX_GAP_DAYS[interval]}d", "to": "now"},
+        )
+
+    def test_drill_and_runs_tables_hold_their_limited_rows(self) -> None:
+        board = json.loads(inputs().templates[BACKUP_TEMPLATE])
+        panels = {panel["title"]: panel for panel in board["panels"]}
+        drill = panels["Restore drill result"]
+        duration = panels["Restore drill duration"]
+        runs = panels["Last ten backup and restore runs"]
+        for panel, count in ((drill, 5), (runs, 10)):
+            with self.subTest(panel=panel["title"]):
+                self.assertRegex(panel["targets"][0]["rawSql"], rf"(?i)\bORDER BY at DESC LIMIT {count}$")
+                self.assertGreaterEqual(table_whole_rows(panel), count)
+                self.assertEqual(panel["options"]["cellHeight"], "sm")
+                self.assertTrue(panel["options"]["showHeader"])
+        self.assertEqual(drill["gridPos"]["y"], duration["gridPos"]["y"])
+        self.assertEqual(drill["gridPos"]["h"], duration["gridPos"]["h"])
+        self.assertEqual(runs["gridPos"]["y"], drill["gridPos"]["y"] + drill["gridPos"]["h"])
+
+    def test_runs_table_uses_the_chart_ratio_and_recorded_result(self) -> None:
+        board = json.loads(inputs().templates[BACKUP_TEMPLATE])
+        panels = {panel["title"]: panel for panel in board["panels"]}
+        chart = panels["Hard-link ratio"]
+        runs = panels["Last ten backup and restore runs"]
+        chart_sql = chart["targets"][0]["rawSql"]
+        runs_sql = runs["targets"][0]["rawSql"]
+        expression = r"CASE WHEN jsonb_typeof\(detail->'hard_links'\).*?END AS hard_link_ratio"
+        chart_ratio = re.search(expression, chart_sql)
+        runs_ratio = re.search(expression, runs_sql)
+        self.assertIsNotNone(chart_ratio)
+        self.assertIsNotNone(runs_ratio)
+        assert chart_ratio is not None and runs_ratio is not None
+        self.assertEqual(runs_ratio.group(), chart_ratio.group())
+        self.assertIn("COALESCE(detail->>'result', 'completed') AS result", runs_sql)
+        self.assertEqual(
+            outer_select_columns(runs_sql),
+            ["at", "kind", "duration_s", "result", "set_bytes", "hard_link_ratio", "transferred_bytes", "total_bytes", "verified", "pruned"],
+        )
+        self.assertNotRegex(runs_sql, r"detail->'hard_links'\s+AS")
+        kinds = re.search(r"kind IN \(([^)]*)\)", runs_sql)
+        self.assertIsNotNone(kinds)
+        assert kinds is not None
+        self.assertEqual(set(re.findall(r"'([^']+)'", kinds.group(1))), {"backup_run", "backup_push", "backup_drill", "restore"})
+        self.assertIn("(kind <> 'backup_run' OR detail->>'phase' = 'applied')", runs_sql)
+        overrides = column_overrides(runs)
+        self.assertEqual(overrides["hard_link_ratio"]["unit"], chart["fieldConfig"]["defaults"]["unit"])
+        self.assertEqual(overrides["transferred_bytes"]["custom.width"], 170)
+
+
 class EvalBoard(unittest.TestCase):
     def test_board_is_verbatim_and_only_applies_on_gpu_hosts(self) -> None:
         self.assertEqual(GrafanaEvalArtifact.emit(inputs()), inputs().templates[EVAL_TEMPLATE])
@@ -1032,6 +1240,60 @@ class EvalBoard(unittest.TestCase):
         assert hours is not None
         start_hour = int(NIGHTLY_CALENDAR.split(" ")[1].split(":")[0])
         self.assertEqual(int(hours.group(1)), (QUIET_WINDOW_END_HOUR - start_hour) % 24)
+
+    def test_grid_places_charts_and_gate_counts_in_screen_order_without_overlap(self) -> None:
+        board = json.loads(GrafanaEvalArtifact.emit(inputs()))
+        panels = board["panels"]
+        by_title = {panel["title"]: panel["gridPos"] for panel in panels}
+        nightly = by_title["Nightly verdicts"]
+        duration = by_title["Run duration against the night"]
+        gate = by_title["Guardrails: gate counts per family"]
+        refusal = by_title["False refusal: harness and judge"]
+        self.assertEqual((nightly["y"], nightly["h"]), (duration["y"], duration["h"]))
+        self.assertEqual(duration["x"], nightly["x"] + nightly["w"])
+        self.assertEqual(nightly["w"] + duration["w"], GRID_COLUMNS)
+        self.assertEqual((gate["x"], gate["w"]), (0, GRID_COLUMNS))
+        self.assertEqual(gate["y"], nightly["y"] + nightly["h"])
+        self.assertEqual(refusal["y"], gate["y"] + gate["h"])
+        self.assertEqual(
+            [panel["title"] for panel in panels],
+            [panel["title"] for panel in sorted(panels, key=lambda panel: (panel["gridPos"]["y"], panel["gridPos"]["x"]))],
+        )
+        row_widths: dict[int, int] = {}
+        for panel in panels:
+            pos = panel["gridPos"]
+            self.assertGreaterEqual(pos["x"], 0)
+            self.assertLessEqual(pos["x"] + pos["w"], GRID_COLUMNS)
+            row_widths[pos["y"]] = row_widths.get(pos["y"], 0) + pos["w"]
+        self.assertTrue(all(width <= GRID_COLUMNS for width in row_widths.values()))
+        for left, right in combinations(panels, 2):
+            a = left["gridPos"]
+            b = right["gridPos"]
+            overlap = (
+                a["x"] < b["x"] + b["w"]
+                and b["x"] < a["x"] + a["w"]
+                and a["y"] < b["y"] + b["h"]
+                and b["y"] < a["y"] + a["h"]
+            )
+            self.assertFalse(overlap, (left["title"], right["title"]))
+
+    def test_all_backup_and_eval_table_headers_fit_without_sideways_scroll(self) -> None:
+        for artifact in (GrafanaBackupArtifact, GrafanaEvalArtifact):
+            board = json.loads(artifact.emit(inputs()))
+            for panel in board["panels"]:
+                if panel["type"] != "table":
+                    continue
+                with self.subTest(board=board["uid"], panel=panel["title"]):
+                    columns = outer_select_columns(panel["targets"][0]["rawSql"])
+                    widths = table_column_widths(panel, columns)
+                    self.assertEqual(len(widths), len(columns))
+                    self.assertLessEqual(sum(widths.values()), table_inner_width(panel))
+                    for name in columns:
+                        with self.subTest(column=name):
+                            self.assertLessEqual(
+                                len(name) * HEADER_CHAR_WIDTH_BOUND,
+                                widths[name] - HEADER_TEXT_INSET,
+                            )
 
 
 class Alerting(unittest.TestCase):

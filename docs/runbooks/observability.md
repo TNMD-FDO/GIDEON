@@ -61,7 +61,8 @@ and the runbook section to follow.
   card on the box and in the public export. Below them, one card for each
   measure a page rule grades, each coloured card turning red at the line its
   page fires at: *Services and probes*, one tile per metrics scrape, door
-  probe, and database check a down-rule watches, reading up or down; three
+  probe, and database check a down-rule watches, reading up or down (each
+  tile is named under "The tiles on *Services and probes*" below); three
   bars for `/data`, `/`, and `/var/lib/docker` free, red under the 15 % line;
   the certificate's days left, red under the 14-day line; backup set age and
   push age (from the rows, red past the 26-hour line), the newest passing
@@ -71,9 +72,12 @@ and the runbook section to follow.
   container memory against each limit; no rule pages on them. `/data/fast` is
   not paged and not shown. A tile turns red at once, while its rule waits out
   its pending period, so a red tile is a page on its way.
-- **Backup** — M25 (run duration, set bytes, hard-link ratio, push transferred
-  vs total, verified counts) and M26 (drill duration and result) as series
-  over the rows, and the last ten runs as a table — the timers' recorded runs.
+- **Backup** — the last 35 days of M25 (run duration, set bytes, hard-link
+  ratio, push transferred vs total, verified counts) and M26 (drill duration
+  and result) as series over the rows. The drill table shows the five newest
+  results. The last ten runs table shows each row's result and the share of
+  sampled files reused: a run, push, or restore reads `completed` when it has
+  no recorded result, and a drill shows its own result word.
 - **GPU** — per-GPU utilisation, memory in GiB, temperature, power, and the
   driver version from DCGM. The temperature card's dashed line is each card's
   own maximum operating temperature, read through the exporter; a card that
@@ -100,6 +104,47 @@ and the runbook section to follow.
 The node exporter runs on the private network with the host's root mounted, so
 its network-device series describe the container's interfaces, not the host's;
 disk, memory, load, filesystems, and systemd units are the host's.
+
+### The tiles on *Services and probes*
+
+Each tile is one check, and its name is the short name Prometheus knows the
+check by. There are three kinds:
+
+- **A plain name** (`node`, `caddy`) is a metrics read: Prometheus asked that
+  service for its figures and got an answer, so the service is running.
+- **A name ending in *probe*** (`ingress probe`) is a door check: the blackbox
+  exporter, a small service whose only job is to make test requests, sent a
+  real request and got a healthy answer.
+- **A name ending in *database*** (`postgres database`) is the database check:
+  the Postgres exporter signed in to the database.
+
+The checks the blackbox exporter makes show two tiles each: `ingress` and
+`frontend`, and where they exist `search` and `api`. For those, the plain tile
+says only that the blackbox exporter ran the test, and the *probe* tile says
+the service passed it. Read the *probe* tile for the service's health. If the
+plain tile is down, the tester is what failed, the *probe* tile has no
+reading, and the page is *core service down*; the table's last column names
+the *probe* tile's page.
+
+| Tile | What it checks | Its page (§4) |
+|---|---|---|
+| `prometheus` | Prometheus, the store that keeps every figure the boards and the page rules read. | core service down |
+| `grafana` | Grafana's own figures. A stopped Grafana shows no board and sends no page; the missing Saturday email (channel heartbeat) is its alarm. | core service down |
+| `node` | The node exporter, which reports the host itself: disks, memory, load, and systemd units. While it is down the free-space bars and the backup-unit rule have nothing to read. | core service down |
+| `cadvisor` | cAdvisor, which reports each container's memory and processor use: the *Host detail* row's container memory. | core service down |
+| `dcgm` | NVIDIA's DCGM exporter, which reports the graphics cards: everything on the GPU board's first two rows. A GPU host only. | core service down |
+| `engine` | The engine, the model server that writes every answer. A GPU host only. | engine down |
+| `caddy` | Caddy, the web server every browser reaches first; this tile says it is running, not that the way in works. | core service down |
+| `ingress`, `ingress probe` | The way in. The test asks Caddy for the site over HTTPS under the box's own hostname, as a browser does, and passes only when the site answers with a certificate the office CA signed. The same test reads the certificate's days left. Caddy can be running while this fails, on an expired certificate for one. | core service down |
+| `frontend`, `frontend probe` | The chat frontend, the page users type into. The test asks the frontend directly, on the box's private network, whether it is healthy. | core service down |
+| `search`, `search probe` | SearXNG, the web search General uses. The test asks it directly whether it is healthy. Present only while `web.search` is on; with it down General still answers, without search. | search probe failing |
+| `api`, `api probe` | `gideon-api`, GIDEON's own service between the chat frontend and the engine: every General turn passes through it. The test asks it directly whether it is healthy. A GPU host only. | API probe failing |
+| `postgres` | The Postgres exporter, which reports the database's figures. | core service down |
+| `postgres database` | The database itself: the exporter signed in to it. | core service down |
+
+Only the `ingress` test goes through the web front door; the `frontend`,
+`search`, and `api` tests reach their service directly. So `ingress probe` down
+with the other three up means the services work and the way to them does not.
 
 ## 4. What pages, and what to do
 

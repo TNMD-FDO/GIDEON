@@ -15,6 +15,14 @@
       "fieldConfig": {
         "defaults": {},
         "overrides": [
+          {"matcher": {"id": "byName", "options": "stack"}, "properties": [{"id": "custom.width", "value": 95}]},
+          {"matcher": {"id": "byName", "options": "slice"}, "properties": [{"id": "custom.width", "value": 120}]},
+          {"matcher": {"id": "byName", "options": "kind"}, "properties": [{"id": "custom.width", "value": 85}]},
+          {"matcher": {"id": "byName", "options": "verdict"}, "properties": [{"id": "custom.width", "value": 80}]},
+          {"matcher": {"id": "byName", "options": "partial"}, "properties": [{"id": "custom.width", "value": 80}]},
+          {"matcher": {"id": "byName", "options": "forced"}, "properties": [{"id": "custom.width", "value": 75}]},
+          {"matcher": {"id": "byName", "options": "started_at"}, "properties": [{"id": "custom.width", "value": 165}]},
+          {"matcher": {"id": "byName", "options": "finished_at"}, "properties": [{"id": "custom.width", "value": 165}]},
           {
             "matcher": {
               "id": "byName",
@@ -24,9 +32,15 @@
               {
                 "id": "unit",
                 "value": "s"
+              },
+              {
+                "id": "custom.width",
+                "value": 160
               }
             ]
-          }
+          },
+          {"matcher": {"id": "byName", "options": "product_version"}, "properties": [{"id": "custom.width", "value": 150}]},
+          {"matcher": {"id": "byName", "options": "eval_set_version"}, "properties": [{"id": "custom.width", "value": 160}]}
         ]
       },
       "gridPos": {
@@ -104,13 +118,18 @@
       "type": "timeseries"
     },
     {
-      "description": "This table counts missed refusals, leaked answers, errors, wrongly changed safe answers, and disagreements for each kind of nightly guardrail check. The counts come from recorded test cases. Zero missed refusals, leaks, errors, and disagreements is good; changed safe answers must stay within the shown ceiling or the run fails. Follow docs/runbooks/observability.md §4.",
+      "description": "This compares each recorded nightly evaluation's duration with the nine-hour night. Runs below the line fit the window; longer runs risk ending early or becoming overdue. Follow docs/runbooks/observability.md §4.",
       "datasource": {
         "type": "postgres",
         "uid": "gideon-rows"
       },
       "fieldConfig": {
-        "defaults": {},
+        "defaults": {
+          "custom": {
+            "showPoints": "always"
+          },
+          "unit": "h"
+        },
         "overrides": []
       },
       "gridPos": {
@@ -118,6 +137,47 @@
         "w": 12,
         "x": 12,
         "y": 9
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "gideon-rows"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT started_at AS time, slice AS metric,\n       EXTRACT(EPOCH FROM (finished_at - started_at)) / 3600.0 AS duration_hours,\n       9 AS night_hours\nFROM eval_runs\nWHERE stack = 'production' AND kind = 'nightly'\n  AND $__timeFilter(started_at)\nORDER BY started_at",
+          "refId": "A"
+        }
+      ],
+      "title": "Run duration against the night",
+      "type": "timeseries"
+    },
+    {
+      "description": "This table counts missed refusals, leaked answers, errors, wrongly changed safe answers, and disagreements for each kind of nightly guardrail check. The counts come from recorded test cases. Zero missed refusals, leaks, errors, and disagreements is good; changed safe answers must stay within the shown ceiling or the run fails. Follow docs/runbooks/observability.md §4.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "gideon-rows"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "started_at"}, "properties": [{"id": "custom.width", "value": 165}]},
+          {"matcher": {"id": "byName", "options": "family"}, "properties": [{"id": "custom.width", "value": 145}]},
+          {"matcher": {"id": "byName", "options": "run_verdict"}, "properties": [{"id": "custom.width", "value": 115}]},
+          {"matcher": {"id": "byName", "options": "positives_not_blocked"}, "properties": [{"id": "custom.width", "value": 205}]},
+          {"matcher": {"id": "byName", "options": "leaks"}, "properties": [{"id": "custom.width", "value": 70}]},
+          {"matcher": {"id": "byName", "options": "errors"}, "properties": [{"id": "custom.width", "value": 75}]},
+          {"matcher": {"id": "byName", "options": "replaced_controls"}, "properties": [{"id": "custom.width", "value": 170}]},
+          {"matcher": {"id": "byName", "options": "frontend_disagreements"}, "properties": [{"id": "custom.width", "value": 215}]},
+          {"matcher": {"id": "byName", "options": "ceiling"}, "properties": [{"id": "custom.width", "value": 80}]}
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 17
       },
       "targets": [
         {
@@ -148,7 +208,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 17
+        "y": 25
       },
       "targets": [
         {
@@ -164,42 +224,6 @@
       ],
       "title": "False refusal: harness and judge",
       "type": "table"
-    },
-    {
-      "description": "This compares each recorded nightly evaluation's duration with the nine-hour night. Runs below the line fit the window; longer runs risk ending early or becoming overdue. Follow docs/runbooks/observability.md §4.",
-      "datasource": {
-        "type": "postgres",
-        "uid": "gideon-rows"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "showPoints": "always"
-          },
-          "unit": "h"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 25
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "postgres",
-            "uid": "gideon-rows"
-          },
-          "format": "time_series",
-          "rawQuery": true,
-          "rawSql": "SELECT started_at AS time, slice AS metric,\n       EXTRACT(EPOCH FROM (finished_at - started_at)) / 3600.0 AS duration_hours,\n       9 AS night_hours\nFROM eval_runs\nWHERE stack = 'production' AND kind = 'nightly'\n  AND $__timeFilter(started_at)\nORDER BY started_at",
-          "refId": "A"
-        }
-      ],
-      "title": "Run duration against the night",
-      "type": "timeseries"
     },
     {
       "description": "This lists failed case IDs from the newest nightly run of each set of checks, from recorded results. An empty table is healthy; listed IDs show what failed in the latest run. Follow docs/runbooks/observability.md §4.",
