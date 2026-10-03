@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final, Literal
 from urllib.parse import urlsplit
 
-from gideon.evaluation.turns.browser import Page, PageDrain, PageError
+from gideon.evaluation.turns.browser import PageDrain, PageError
 from gideon.host import tls
 from gideon.host.report import Problem
 from gideon.host.sysio import Host
@@ -464,6 +464,18 @@ class PlaywrightPage:
         except Exception as exc:
             raise _page_error(exc) from exc
 
+    def hover(self, selector: str) -> None:
+        try:
+            self._page.locator(selector).first.hover()
+        except Exception as exc:
+            raise _page_error(exc) from exc
+
+    def resize(self, width: int, height: int) -> None:
+        try:
+            self._page.set_viewport_size({"width": width, "height": height})
+        except Exception as exc:
+            raise _page_error(exc) from exc
+
     def press(self, key: str) -> None:
         try:
             self._page.keyboard.press(key)
@@ -580,7 +592,8 @@ def launch(
     browser_home: Path,
     request_log: RequestLog,
     page_timeout: float,
-) -> tuple[Page, Callable[[], None]]:
+    locale: str | None = None,
+) -> tuple[PlaywrightPage, Callable[[], None]]:
     """Launch the pinned headless shell with the one-host request boundary."""
 
     os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(browsers_dir)
@@ -603,7 +616,10 @@ def launch(
             ],
             env=environment,
         )
-        context = browser.new_context(service_workers="block")
+        if locale is None:
+            context = browser.new_context(service_workers="block")
+        else:
+            context = browser.new_context(service_workers="block", locale=locale)
         context.set_default_timeout(page_timeout * 1000)
 
         def route_request(route: playwright.sync_api.Route) -> None:

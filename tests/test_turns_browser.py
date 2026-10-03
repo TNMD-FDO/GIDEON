@@ -330,6 +330,7 @@ class BrowserSurface(TestCase):
         turn_roots = (
             (ROOT / "gideon/evaluation/turns", ALLOWED_EXTERNAL | {"gideon"}),
             (ROOT / "tools/turns", ALLOWED_EXTERNAL | {"gideon", "tools"}),
+            (ROOT / "tools/boards", ALLOWED_EXTERNAL | {"gideon", "tools"}),
         )
         for turn_root, allowed_external in turn_roots:
             for path in sorted(turn_root.glob("*.py")):

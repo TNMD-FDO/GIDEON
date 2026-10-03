@@ -74,6 +74,7 @@ _CURATED_ALLOWLIST: tuple[str, ...] = (
     "googlesource.com",
     "grafana.com",
     "grafana.org",
+    "gravatar.com",
     "gstatic.com",
     "harvey.ai",
     "healthchecks.io",
@@ -102,6 +103,7 @@ _CURATED_ALLOWLIST: tuple[str, ...] = (
     "stanford.edu",
     "thomsonreuters.com",
     "vals.ai",
+    "w3c.github.io",
     "whatwg.org",
     "yaml.org",
 )
