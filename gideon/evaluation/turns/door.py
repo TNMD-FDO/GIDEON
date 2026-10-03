@@ -19,7 +19,8 @@ the enclosing ``DoorEvent`` keeps those deltas with their seconds-from-request
 start offset, and the ``end`` line keeps the ``[DONE]`` flag.  A successful
 reply is converted to the stored assistant-message shape consumed by
 :mod:`gideon.evaluation.turns.classify`.
-The door sends a client's prompt alone; the API service makes the request General.
+The door addresses General's id with a client's prompt alone; the API service
+addresses the engine's served name.
 """
 
 from __future__ import annotations
@@ -147,7 +148,7 @@ def identity_headers() -> dict[str, str]:
 
 
 def completion_body(
-    *, served_name: str, prompt: str, instruction: str | None, stream: bool
+    *, model: str, prompt: str, instruction: str | None, stream: bool
 ) -> dict[str, object]:
     """Build a direct completion body with General's instruction when present."""
 
@@ -155,7 +156,7 @@ def completion_body(
     if instruction is not None:
         messages.append({"role": "system", "content": instruction})
     messages.append({"role": "user", "content": prompt})
-    return {"model": served_name, "stream": stream, "messages": messages}
+    return {"model": model, "stream": stream, "messages": messages}
 
 
 def _empty_reply(problem: Problem) -> DoorReply:
@@ -368,7 +369,7 @@ def complete(
     io: Host,
     rendered_dir: PathLike,
     *,
-    served_name: str,
+    model: str,
     prompt: str,
     stream: bool,
     max_time: float,
@@ -380,7 +381,7 @@ def complete(
         rendered_dir,
         url=f"{api_base_url()}{_COMPLETIONS_PATH}",
         body=completion_body(
-            served_name=served_name,
+            model=model,
             prompt=prompt,
             instruction=None,
             stream=stream,
@@ -463,10 +464,10 @@ def probe(
     io: Host,
     rendered_dir: PathLike,
     *,
-    served_name: str,
+    model: str,
     max_time: float,
 ) -> ProbeResult:
-    """Probe the models route through the door and require the served model."""
+    """Probe the models route through the door and require the requested model."""
 
     reply = _run(
         io,
@@ -483,9 +484,9 @@ def probe(
         body = None
     data = body.get("data") if isinstance(body, Mapping) else None
     listed = isinstance(data, list) and any(
-        isinstance(model, Mapping) and model.get("id") == served_name for model in data
+        isinstance(entry, Mapping) and entry.get("id") == model for entry in data
     )
     if reply.status != 200 or not listed:
-        problem = _problem(rendered_dir, "door models response does not list the served model")
+        problem = _problem(rendered_dir, "door models response does not list the requested model")
         return ProbeResult(False, problem.problem, problem)
-    return ProbeResult(True, f"door lists served model {served_name}", None)
+    return ProbeResult(True, f"door lists model {model}", None)

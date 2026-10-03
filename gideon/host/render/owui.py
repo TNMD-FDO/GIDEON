@@ -18,8 +18,7 @@ import yaml  # type: ignore[import-untyped]
 
 from gideon.host.images import NO_PROXY_LOCAL
 from gideon.host.ldap import bind_identity, filter_value
-from gideon.host.models import ModelPin
-from gideon.host.render import Artifact, RenderInputs, template_text
+from gideon.host.render import Artifact, RenderInputs
 from gideon.host.render.api import (
     API_INSTRUCTION_PATH,
     API_SECRET_NAME,
@@ -41,27 +40,9 @@ PERMISSIONS_TEMPLATE: Final = "open-webui/permissions.yaml"
 # one template beside the permission set; the office supplies its name and
 # nothing else.
 GENERAL_TEMPLATE: Final = "open-webui/general.yaml"
-# The branch gate's source (docs/frontend-contract.md §2 row 8): an
-# inlet-only global Function the frontend runs and the tests import by path,
-# rendered verbatim as a manifest Function on every host, refusing a user-role
-# request on a model row that is not a preset.
-BRANCH_GATE_TEMPLATE: Final = "open-webui/functions/branch_gate.py"
-# Effectively permanent: chat rows, URLs, and the default-model value name it.
-# Prefixed like other GIDEON-owned ids, so every GIDEON-owned id starts the
-# same way.
+# Effectively permanent: chat rows, URLs, the service's listing, and the
+# default-model value name the frontend's row on this id.
 GENERAL_PRESET_ID: Final = "gideon-general"
-# Effectively permanent: the frontend contract names it; the hyphen-safe
-# prefix follows the Function id rule. The frontend sorts Filters by priority
-# and id; without Valves this one gets priority 0. Since cutover, it is the
-# only global inlet the frontend runs.
-BRANCH_GATE_ID: Final = "gideon-branch-gate"
-BRANCH_GATE_NAME: Final = "GIDEON branch gate"
-# Release text shown on the frontend's Functions page beside the record.
-BRANCH_GATE_DESCRIPTION: Final = (
-    "The branch gate refuses a user's request to any model that is not one of "
-    "GIDEON's branches, such as the hidden base model, and sends the user to General. Global on "
-    "every model; pushed by gideon apply, which reverts any edit made here."
-)
 # General carries no Filter since the cutover: the citation stamp is the
 # service's.  The key is kept and rendered empty rather than dropped, so the
 # push overwrites a live attachment whether the sync route merges `meta` or
@@ -169,41 +150,29 @@ _WORKSPACE_ACCESS_FLAGS: Final[frozenset[str]] = frozenset(
     {"models", "knowledge", "prompts", "tools", "skills"}
 )
 
-# The base model's own record disables built-in tools because the frontend
-# attaches them to every UI turn unless the model's record says no, and the
-# engine has no tool-call parser. A bare base model has no rig for any other
-# capability either: all are off, including `terminal`, which also attaches
-# tools. Display-only capabilities (citations, status_updates, usage) are
-# deliberately absent, so the frontend keeps its own defaults. Every key is
-# the pinned frontend's name.
-BASE_MODEL_CAPABILITIES: Final[Mapping[str, bool]] = {
-    "builtin_tools": False,
-    "file_upload": False,
-    "file_context": False,
-    "vision": False,
-    "memory": False,
-    "code_interpreter": False,
-    "image_generation": False,
-    "web_search": False,
-    "terminal": False,
-}
-
 # General's capabilities: web search and file context on, the other seven off.
 # The pinned middleware runs its files handler only under the record's
 # `file_context`; the search handler's loaded pages are
 # files, and that handler is the only step that applies the citation template
 # to them, so this flag makes the loaded pages available whole in context.
 # `file_upload: false` keeps attachments out and `builtin_tools: false` keeps
-# file tools out; the base record is unchanged.
-# A preset inherits its connection from the base but no capability, so it needs
-# its own set. With no `defaultFeatureIds`, an enabled capability is offered
+# file tools out, since the engine has no tool-call parser. With no
+# `defaultFeatureIds`, an enabled capability is offered
 # but off for every new chat, and `memory: false` on the record forces memory
 # off for every user regardless of the frontend's defaults or personal
-# settings. `terminal` stays off beside `builtin_tools`.
+# settings. `terminal` stays off beside `builtin_tools` because it also
+# attaches tools. Display-only capabilities are absent, leaving the frontend's
+# own defaults in place.
 GENERAL_CAPABILITIES: Final[Mapping[str, bool]] = {
-    **BASE_MODEL_CAPABILITIES,
-    "web_search": True,
+    "builtin_tools": False,
+    "file_upload": False,
     "file_context": True,
+    "vision": False,
+    "memory": False,
+    "code_interpreter": False,
+    "image_generation": False,
+    "web_search": True,
+    "terminal": False,
 }
 
 # No suggestion cards on General's new-chat screen (exempt: policy toggles).
@@ -223,17 +192,7 @@ GENERAL_SUGGESTION_PROMPTS: Final[tuple[Mapping[str, str], ...]] = ()
 # other gated paths sit behind capabilities that are off.
 GENERAL_FUNCTION_CALLING: Final[str] = "legacy"
 
-# The pinned frontend enforces read access on every hop of a preset's base
-# chain at generation time — a base model with no row is admin-only, one with
-# a row needs a grant the caller passes — so a base the users cannot read
-# makes every preset over it answer "Model not found" for a `user`-role
-# account. The base model's record therefore carries the public-read grant.
-# The client-side `meta.hidden` rule keeps it out of the selector and default
-# selection, but the API still lists it to a signed-in user, who cannot mint a
-# key.
-BASE_MODEL_HIDDEN: Final[bool] = True
-
-# Both model and Function sync forms carry these row fields. The server
+# Model sync forms carry these row fields. The server
 # replaces the owner with the syncing admin's id and the update time with its
 # clock, while it stores the creation time verbatim. Shared placeholders keep
 # both deterministic.
@@ -352,16 +311,6 @@ def _permission_environment(tree: Mapping[str, Mapping[str, bool]]) -> dict[str,
     return environment
 
 
-def _generator_model(inputs: RenderInputs) -> ModelPin:
-    generator = inputs.profile.model("generator")
-    if generator is None:
-        raise ValueError(
-            f"Cannot render Compose: profile {inputs.profile.name} has no generator model. "
-            "Add the generator model to models.lock, then re-run render."
-        )
-    return generator
-
-
 def owui_environment(
     inputs: RenderInputs,
     *,
@@ -443,12 +392,10 @@ def owui_environment(
         "ENABLE_OPENAI_API": "false",
     }
     if connected:
-        generator = _generator_model(inputs)
         # One Chat Completions connection, discovered from the service's model
         # list. Leaving out OPENAI_API_CONFIGS keeps the request shape Chat
-        # Completions and uses live model discovery. The generator remains the
-        # task model, with follow-ups and autocomplete off. The key rides the
-        # env file.
+        # Completions and uses live model discovery. General is the task model,
+        # with follow-ups and autocomplete off. The key rides the env file.
         environment.update(
             {
                 "ENABLE_OPENAI_API": "true",
@@ -457,7 +404,7 @@ def owui_environment(
                 # form is unused, and the service reads the email header as its
                 # source identity.
                 "ENABLE_FORWARD_USER_INFO_HEADERS": "true",
-                "TASK_MODEL_EXTERNAL": generator.serve.served_name,
+                "TASK_MODEL_EXTERNAL": GENERAL_PRESET_ID,
                 "ENABLE_TITLE_GENERATION": "true",
                 "ENABLE_TAGS_GENERATION": "true",
                 "ENABLE_SEARCH_QUERY_GENERATION": "true",
@@ -478,8 +425,7 @@ def owui_environment(
                 # serves it as `default_models` to a signed-in caller, and a new
                 # chat takes it after a `?model=` parameter, a folder's pins,
                 # and the user's own default, and before its fallback to the
-                # first visible model; every path but the parameter skips a
-                # hidden model.  Rendered where General's record is (a connected
+                # first visible model. Rendered where General's record is (a connected
                 # GPU host).  A panel edit lives in the process's memory until
                 # the frontend next starts, which apply causes only when a
                 # frontend-owned file changed.
@@ -528,9 +474,8 @@ def owui_environment(
             # The pinned frontend's evaluation arena (anonymous chatbots,
             # votes, a leaderboard) is on by default and offered to admins
             # alone; an arena turn draws a model at random from the
-            # process-wide cache with no access or hidden check, so on this
-            # box it could answer from the bare base model with no system
-            # prompt.  A feature outside the evaluation harness and General's
+            # process-wide cache, where General is the only candidate here.
+            # A feature outside the evaluation harness and General's
             # feature list, off for every role on every host (exempt: policy
             # toggles).  The Admin → Evaluations page stays.
             "ENABLE_EVALUATION_ARENA_MODELS": "false",
@@ -576,28 +521,6 @@ def owui_environment(
     return environment
 
 
-def base_model_record(inputs: RenderInputs) -> Mapping[str, object]:
-    """Build the GPU host's desired record for the discovered base model.
-
-    Readable by every verified user (the base hop of General's access check)
-    and hidden from the selector — see ``BASE_MODEL_HIDDEN``.
-    """
-
-    served_name = _generator_model(inputs).serve.served_name
-    return {
-        "id": served_name,
-        "user_id": SYNC_ROW_USER_ID,
-        "base_model_id": None,
-        "name": served_name,
-        "params": {},
-        "meta": {"hidden": BASE_MODEL_HIDDEN, "capabilities": dict(BASE_MODEL_CAPABILITIES)},
-        "access_grants": [dict(public_read_grant(served_name))],
-        "is_active": True,
-        "updated_at": SYNC_ROW_UPDATED_AT,
-        "created_at": SYNC_ROW_CREATED_AT,
-    }
-
-
 def public_read_grant(model_id: str) -> Mapping[str, object]:
     """Build the frontend's public-to-verified-users grant for one model.
 
@@ -618,17 +541,16 @@ def public_read_grant(model_id: str) -> Mapping[str, object]:
 
 
 def general_preset_record(inputs: RenderInputs) -> Mapping[str, object]:
-    """Build General's desired preset row over the selected generator."""
+    """Build General's row on the model discovered from its own service."""
 
-    generator = _generator_model(inputs)
     texts = general_texts(inputs)
-    # The frontend reads a preset's params from its own record and stores its
-    # grants as principal, principal id, and permission triples. General's
-    # instruction belongs to the service, so the frontend splices none.
+    # The frontend reads this baseless row by its public-read grant and applies
+    # its params to the discovered service model. General's instruction belongs
+    # to the service, so the frontend splices none.
     return {
         "id": GENERAL_PRESET_ID,
         "user_id": SYNC_ROW_USER_ID,
-        "base_model_id": generator.serve.served_name,
+        "base_model_id": None,
         "name": texts.name,
         "params": {"function_calling": GENERAL_FUNCTION_CALLING},
         "meta": {
@@ -738,66 +660,12 @@ def _manifest_group(name: str, membership: str, permissions: Mapping[str, Mappin
     }
 
 
-def _function_row(
-    inputs: RenderInputs,
-    template: str,
-    identifier: str,
-    name: str,
-    description: str,
-    is_global: bool,
-) -> Mapping[str, object]:
-    """Build one Filter's row in the pinned Functions sync form.
-
-    The sync execs the content and stores `type`, `is_active`, and `is_global`
-    from the payload — both flags default to false when omitted — while it
-    overwrites the owner and the update time and stores the creation time
-    verbatim. A falsy `valves` is stored as none and read back as an empty
-    mapping, which is the row's state for a Filter that defines no Valves. The
-    content is compiled first so a broken edit refuses at render, before sync.
-    """
-
-    content = template_text(inputs, template)
-    try:
-        compile(content, template, "exec")
-    except SyntaxError as exc:
-        line = exc.lineno if exc.lineno is not None else "unknown"
-        raise ValueError(
-            f"Render template {template} has a syntax error on line {line}: {exc.msg}."
-        ) from exc
-    return {
-        "id": identifier,
-        "user_id": SYNC_ROW_USER_ID,
-        "name": name,
-        "type": "filter",
-        "content": content,
-        "meta": {"description": description},
-        "valves": {},
-        "is_active": True,
-        "is_global": is_global,
-        "updated_at": SYNC_ROW_UPDATED_AT,
-        "created_at": SYNC_ROW_CREATED_AT,
-    }
-
-
-def branch_gate_function(inputs: RenderInputs) -> Mapping[str, object]:
-    """Build the global branch gate row."""
-
-    return _function_row(
-        inputs,
-        BRANCH_GATE_TEMPLATE,
-        BRANCH_GATE_ID,
-        BRANCH_GATE_NAME,
-        BRANCH_GATE_DESCRIPTION,
-        True,
-    )
-
-
 class ApplyManifestArtifact(Artifact):
     """Render the desired Open WebUI groups, identities, and sync sets.
 
-    The model set holds the base model's own record and General's preset only
-    on a GPU host. Both follow the service's presence, which the no-GPU marker
-    controls. The branch gate rides every host.
+    The model set holds General's baseless record on a GPU host. The empty
+    functions key remains so the desired-state sync removes old or hand-added
+    Functions on every host.
     """
 
     name = "open-webui-manifest"
@@ -805,7 +673,6 @@ class ApplyManifestArtifact(Artifact):
     template_paths = (
         PERMISSIONS_TEMPLATE,
         GENERAL_TEMPLATE,
-        BRANCH_GATE_TEMPLATE,
     )
 
     def emit(self, inputs: RenderInputs) -> str:
@@ -840,11 +707,11 @@ class ApplyManifestArtifact(Artifact):
         document: Mapping[str, Any] = {
             "groups": groups,
             "identities": identities,
-            "functions": [branch_gate_function(inputs)],
+            "functions": [],
             "models": (
                 []
                 if inputs.no_gpu
-                else [base_model_record(inputs), general_preset_record(inputs)]
+                else [general_preset_record(inputs)]
             ),
         }
         return dump(document)

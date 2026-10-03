@@ -37,9 +37,9 @@ _RETRY_FIX: Final[str] = "Check Open WebUI availability, then retry."
 _VALID_ROLES: Final[frozenset[str]] = frozenset({"admin", "user", "pending"})
 _FUNCTIONS_PATH: Final[str] = "/api/v1/functions/"
 # The bare /api/v1/models/ path is served by the single-page app; the JSON
-# listing is /list, paginated like knowledge — and it holds preset rows only.
-# A base model's row is listed by /base, unpaged and admin-only; the removal
-# report and read-back therefore need both endpoints.
+# listing is /list, paginated like knowledge. General's baseless record is
+# listed by /base, unpaged and admin-only; the removal report and read-back
+# therefore need both endpoints.
 _MODELS_PATH: Final[str] = "/api/v1/models/list"
 _BASE_MODELS_PATH: Final[str] = "/api/v1/models/base"
 # The live listing every signed-in caller sees.  The frontend's chat route reads
@@ -867,7 +867,7 @@ def _ids(rows: Sequence[Mapping[str, object]], path: str) -> tuple[str, ...]:
 
 
 def _listed_models(client: Client) -> tuple[Mapping[str, object], ...]:
-    """Every model row the server holds: the paged preset listing, then the base rows."""
+    """Every model row the server holds, including General's baseless row."""
 
     return (
         *_listed_rows(client, _MODELS_PATH, paged=True),
@@ -901,8 +901,8 @@ def _refresh_live_models(client: Client, desired_by_id: Mapping[str, Mapping[str
     """Read the live model listing so the frontend's cache holds the pushed records.
 
     Every manifest model the listing shows is held to its attachment key; a
-    model the listing omits — the base model until the engine answers, and a
-    preset over an undiscovered base — is verify's concern, not this read's.
+    model the listing omits — General until its service's model listing
+    answers — is verify's concern, not this read's.
     """
 
     body = _as_mapping(

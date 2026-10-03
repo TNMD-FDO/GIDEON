@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.10](docs/release-notes/v0.3.10.md) — 2026-10-02 — General is the connection's own row
 - [v0.3.9](docs/release-notes/v0.3.9.md) — 2026-10-02 — Grafana fetches nothing at start
 - [v0.3.8](docs/release-notes/v0.3.8.md) — 2026-10-02 — a board is proven in the browser
 - [v0.3.7](docs/release-notes/v0.3.7.md) — 2026-10-02 — a progress line shows how long General has been thinking

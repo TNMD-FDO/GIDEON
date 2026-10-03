@@ -1,20 +1,14 @@
 """Classify stored or painted assistant messages and apply case expectations."""
 
-import importlib.util
 import re
-import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
-from types import ModuleType
 from typing import Any, Final
 
 from gideon.api import progress, stamp
 from gideon.evaluation.turns import browser
 from gideon.evaluation.turns.cases import Case
 
-# The branch gate's Function keeps the branch refusal.
-BRANCH_GATE_FUNCTION: Final[str] = "compose/open-webui/functions/branch_gate.py"
 # The fixes name the record's home: the runner says where it is, or how to keep one.
 _FIX: Final[str] = (
     "Read {record}; a leak is a guardrail gap in "
@@ -209,13 +203,6 @@ class LiveVerdict:
     ended_at: float | None = None
     pattern_id: str | None = None
     withdrawn: tuple[LiveTrip, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class GateTexts:
-    """The branch gate's inlet refusal text."""
-
-    branch_refusal: str
 
 
 def _normalise_whitespace(text: str) -> str:
@@ -609,43 +596,6 @@ def offline_field(judgement: OfflineJudgement) -> str:
         if figures
     )
     return f"{verdict}; unsupplied: {counts or 'none'}"
-
-
-class GateTextUnavailable(Exception):
-    """A gate Function that could not be read; it carries the path, never the cause's text."""
-
-    def __init__(self, path: Path) -> None:
-        super().__init__(str(path))
-        self.path = path
-
-
-def load_gate_texts(checkout: str | Path) -> GateTexts:
-    """Read the branch gate's release text by path without importing a package module."""
-
-    root = Path(checkout)
-    return GateTexts(
-        _gate_text(root / BRANCH_GATE_FUNCTION, "branch_gate_gate_texts", "BRANCH_REFUSAL"),
-    )
-
-
-def _gate_text(path: Path, name: str, attribute: str) -> str:
-    try:
-        text = getattr(_load_function(path, name), attribute)
-    except Exception as exc:  # any failure is the Function's, named by its path
-        raise GateTextUnavailable(path) from exc
-    if not isinstance(text, str):
-        raise GateTextUnavailable(path)
-    return text
-
-
-def _load_function(path: Path, name: str) -> ModuleType:
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"could not load Function from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 def _trip_pattern(trip: object) -> str | None:

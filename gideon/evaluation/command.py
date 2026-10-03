@@ -35,6 +35,7 @@ from gideon.evaluation.results import CaseResult, JSONValue, RunContext, SliceRe
 from gideon.evaluation.slices import SLICE_RUNNERS, SliceSpec
 from gideon.evaluation.turns import access, door, run
 from gideon.host import backuplock, courts, engine, nogpu, site, stack
+from gideon.host.render.owui import GENERAL_PRESET_ID
 from gideon.host.report import Problem, StageResult, print_stage, refusal
 from gideon.host.sysio import Host, LockingHost, PathLike, RealHost
 
@@ -914,7 +915,7 @@ def _engine_preconditions(
         probe = door.probe(
             io,
             paths.turns_dir,
-            served_name=target.served_model_name,
+            model=GENERAL_PRESET_ID,
             max_time=run.TURN_TIMEOUT_SECONDS,
         )
         if probe.problem is not None:

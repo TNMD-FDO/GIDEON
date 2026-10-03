@@ -41,6 +41,7 @@ from gideon.evaluation.slices import SLICE_RUNNERS
 from gideon.extraction import KEYED_TYPES, SECTION_TYPES, ExactObject, extract
 from gideon.extraction.scoring import MIN_RECALL
 from gideon.host import backuplock, nogpu
+from gideon.host.render.owui import GENERAL_PRESET_ID
 from gideon.host.sysio import Host, PathLike
 from tools.exportboundary import absent_from_export
 
@@ -1116,10 +1117,12 @@ class EngineStackAndLock(unittest.TestCase):
         self.assertEqual(observed["engine_paths"], [production_dir])
         self.assertEqual(observed["client"][0][1]["stack"], "ci")
         self.assertEqual(observed["door"][0][0][1], Path(stacks.CI_ROOT))
+        self.assertEqual(observed["door"][0][1]["model"], GENERAL_PRESET_ID)
         self.assertEqual(observed["door"][0][1]["max_time"], command.run.TURN_TIMEOUT_SECONDS)
         self.assertEqual(observed["client"][0][1]["timeout"], command.run.TURN_TIMEOUT_SECONDS)
         self.assertEqual(observed["contexts"][0].rendered_dir, Path(stacks.CI_ROOT))
         self.assertEqual(observed["contexts"][0].engine_dir, production_dir)
+        self.assertEqual(observed["contexts"][0].served_model_name, "fictitious-model")
         self.assertEqual(host.locks, {})
         self.assertEqual(len(host.lock_records), 1)
         lock_record = backuplock.parse(host.lock_records[0][1])

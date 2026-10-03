@@ -29,9 +29,9 @@ from gideon.host.render.command import (
     gather_api_sources_digest,
     recreate_judgment,
 )
-from gideon.host.render.compose import api_service, service_names
-from gideon.host.render.engine import ENGINE_SECRET_NAME
-from gideon.host.render.owui import EVAL_IDENTITY
+from gideon.host.render.compose import api_service, engine_service, service_names
+from gideon.host.render.engine import ENGINE_SECRET_NAME, ENGINE_SERVICE_NAME
+from gideon.host.render.owui import EVAL_IDENTITY, GENERAL_PRESET_ID
 from gideon.host.sysio import PathLike
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -68,6 +68,12 @@ class ApiRender(unittest.TestCase):
         self.assertEqual(api["environment"]["GIDEON_CHAT_HEADER"], API_CHAT_HEADER)
         self.assertEqual(api["environment"]["GIDEON_EVAL_IDENTITY"], EVAL_IDENTITY.email)
         self.assertEqual(api["environment"]["GIDEON_INSTRUCTION_FILE"], API_INSTRUCTION_MOUNT)
+        generator = gpu.profile.model("generator")
+        assert generator is not None
+        self.assertEqual(api["environment"]["GIDEON_MODEL_ID"], GENERAL_PRESET_ID)
+        self.assertEqual(
+            api["environment"]["GIDEON_ENGINE_MODEL"], generator.serve.served_name
+        )
         self.assertEqual(API_SOURCE_HEADER, API_USER_EMAIL_HEADER)
         self.assertNotIn("ports", api)
         self.assertNotIn("depends_on", api)
@@ -208,6 +214,83 @@ class ApiRender(unittest.TestCase):
         self.assertEqual(judgment.block, (API_SERVICE_NAME,))
         self.assertEqual(judgment.files, ())
         self.assertEqual(judgment.top_level, ())
+
+    def test_moving_served_name_moves_api_and_generator_blocks(self) -> None:
+        original = inputs()
+        generator = original.profile.model("generator")
+        assert generator is not None
+        moved_name = generator.serve.served_name + "-fixture"
+        moved_generator = replace(
+            generator, serve=replace(generator.serve, served_name=moved_name)
+        )
+        moved_profile = replace(
+            original.profile,
+            models=tuple(
+                moved_generator if model.role == "generator" else model
+                for model in original.profile.models
+            ),
+        )
+        moved = replace(original, profile=moved_profile)
+        target = parse_registry(original.site.registry)
+        assert target is not None
+
+        before_api = api_service(original, target)
+        after_api = api_service(moved, target)
+        before_environment = before_api["environment"]
+        after_environment = after_api["environment"]
+        assert isinstance(before_environment, dict) and isinstance(after_environment, dict)
+        self.assertEqual(before_environment["GIDEON_ENGINE_MODEL"], generator.serve.served_name)
+        self.assertEqual(after_environment["GIDEON_ENGINE_MODEL"], moved_name)
+        self.assertEqual(
+            {key: value for key, value in before_environment.items() if key != "GIDEON_ENGINE_MODEL"},
+            {key: value for key, value in after_environment.items() if key != "GIDEON_ENGINE_MODEL"},
+        )
+        self.assertEqual(
+            {key: value for key, value in before_api.items() if key != "environment"},
+            {key: value for key, value in after_api.items() if key != "environment"},
+        )
+
+        before_engine = engine_service(original, target)
+        after_engine = engine_service(moved, target)
+        before_command = before_engine["command"]
+        after_command = after_engine["command"]
+        assert isinstance(before_command, list) and isinstance(after_command, list)
+        name_position = before_command.index("--served-model-name") + 1
+        self.assertEqual(after_command[name_position], moved_name)
+        self.assertEqual(
+            before_command[:name_position] + before_command[name_position + 1:],
+            after_command[:name_position] + after_command[name_position + 1:],
+        )
+        self.assertEqual(
+            {key: value for key, value in before_engine.items() if key != "command"},
+            {key: value for key, value in after_engine.items() if key != "command"},
+        )
+        before_digests = compose_digests(original).services
+        after_digests = compose_digests(moved).services
+        for service in (API_SERVICE_NAME, ENGINE_SERVICE_NAME):
+            with self.subTest(service=service):
+                self.assertNotEqual(before_digests[service], after_digests[service])
+        for service in set(before_digests) - {API_SERVICE_NAME, ENGINE_SERVICE_NAME}:
+            with self.subTest(unchanged_service=service):
+                self.assertEqual(before_digests[service], after_digests[service])
+        before_rendered = render_all(original)
+        after_rendered = render_all(moved)
+        before_compose = yaml.safe_load(before_rendered.by_path["compose.yaml"].content)
+        after_compose = yaml.safe_load(after_rendered.by_path["compose.yaml"].content)
+        self.assertEqual(before_compose["services"]["open-webui"], after_compose["services"]["open-webui"])
+        frontend_environment = after_compose["services"]["open-webui"]["environment"]
+        self.assertNotIn(generator.serve.served_name, str(frontend_environment))
+        self.assertNotIn(moved_name, str(frontend_environment))
+        self.assertEqual(
+            before_rendered.by_path["open-webui/manifest.yaml"].content,
+            after_rendered.by_path["open-webui/manifest.yaml"].content,
+        )
+        judgment = recreate_judgment(
+            after_rendered, applied_record(original), service_names(moved),
+            compose_digests(moved),
+        )
+        self.assertEqual(set(judgment.block), {API_SERVICE_NAME, ENGINE_SERVICE_NAME})
+        self.assertEqual(set(judgment.services), {API_SERVICE_NAME, ENGINE_SERVICE_NAME})
 
 
 class SourceDigest(unittest.TestCase):

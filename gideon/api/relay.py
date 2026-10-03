@@ -14,6 +14,12 @@ from gideon import guardrail
 
 from . import judged
 from .instruction import instruct_completion_body
+from .model import (
+    MODEL_NOT_FOUND_ERROR,
+    MODEL_NOT_FOUND_STATUS,
+    address_completion_body,
+    admits_model,
+)
 from .sse import DONE_EVENT, EventReassembler
 
 _RELAY_LOG = logging.getLogger("gideon.api.relay")
@@ -73,18 +79,21 @@ async def _run_with_disconnect(work: Callable[[], Awaitable[None]], receive: Rec
 class CompletionRelay:
     """Relay one judged completion response as a stream or after reading it in full.
 
-    The caller's body is rewritten with General's instruction first before it
-    is sent, and the judged state is read from the rewritten body, so the judge
-    sees exactly the request the engine receives.
+    Admission precedes instruction and judging. The judged state reads the
+    instructed body before its model is addressed to the engine, keeping the
+    trip's branch on General's id while both see the same messages.
     """
 
     def __init__(
-        self, source_header: str, chat_header: str, eval_identity: str, instruction: str
+        self, source_header: str, chat_header: str, eval_identity: str,
+        instruction: str, model_id: str, engine_model: str,
     ) -> None:
         self._source_header = source_header
         self._chat_header = chat_header
         self._eval_identity = eval_identity
         self._instruction = instruction
+        self._model_id = model_id
+        self._engine_model = engine_model
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         request = Request(scope, receive)
@@ -96,13 +105,19 @@ class CompletionRelay:
         content_type = request.headers.get("content-type")
 
         async def work() -> None:
+            if not admits_model(body, self._model_id):
+                await JSONResponse(
+                    MODEL_NOT_FOUND_ERROR, status_code=MODEL_NOT_FOUND_STATUS
+                )(scope, receive, send)
+                return
             instructed = instruct_completion_body(body, self._instruction)
             source = judged.source_for_header(
                 request.headers.getlist(self._source_header), self._eval_identity
             )
             chat_id = judged.chat_id_for_header(request.headers.getlist(self._chat_header))
             state = judged.stream_state_from_body(instructed, source, chat_id)
-            upstream = await request.app.state.engine.completion(instructed, content_type)
+            addressed = address_completion_body(instructed, self._engine_model)
+            upstream = await request.app.state.engine.completion(addressed, content_type)
             if upstream is None:
                 await JSONResponse(UPSTREAM_ERROR, status_code=502)(scope, receive, send)
                 return

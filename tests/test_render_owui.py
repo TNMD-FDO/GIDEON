@@ -33,12 +33,6 @@ from gideon.host.render.owui import (
     ALLOWED_ENDPOINTS,
     AUDIT_EXCLUDED_PATHS,
     AUDIT_LOG_FILE,
-    BASE_MODEL_CAPABILITIES,
-    BASE_MODEL_HIDDEN,
-    BRANCH_GATE_DESCRIPTION,
-    BRANCH_GATE_ID,
-    BRANCH_GATE_NAME,
-    BRANCH_GATE_TEMPLATE,
     BREAK_GLASS,
     EVAL_IDENTITY,
     FEEDBACK_LIST_ROUTE,
@@ -61,7 +55,6 @@ from gideon.host.render.owui import (
     ApiInstructionArtifact,
     ApplyManifestArtifact,
     OwuiEnvArtifact,
-    branch_gate_function,
     general_instruction_text,
     general_preset_record,
     general_texts,
@@ -69,7 +62,6 @@ from gideon.host.render.owui import (
     owui_secret_environment,
     owui_secret_names,
     permission_tree,
-    public_read_grant,
 )
 from gideon.host.render.searxng import searxng_query_url
 from gideon.host.render.systemd import (
@@ -189,9 +181,7 @@ class Environment(unittest.TestCase):
         self.assertEqual(env["ENABLE_OPENAI_API"], "true")
         self.assertEqual(env["OPENAI_API_BASE_URLS"], api_base_url())
         self.assertEqual(env["ENABLE_FORWARD_USER_INFO_HEADERS"], "true")
-        generator = inputs().profile.model("generator")
-        assert generator is not None
-        self.assertEqual(env["TASK_MODEL_EXTERNAL"], generator.serve.served_name)
+        self.assertEqual(env["TASK_MODEL_EXTERNAL"], GENERAL_PRESET_ID)
         self.assertEqual(
             {
                 name: env[name]
@@ -503,7 +493,7 @@ class SecretEnv(unittest.TestCase):
 
 
 class Manifest(unittest.TestCase):
-    def test_groups_identities_and_both_model_records(self) -> None:
+    def test_groups_identities_and_general_record(self) -> None:
         document = yaml.safe_load(ApplyManifestArtifact().emit(inputs(SECOND)))
         groups = {group["name"]: group for group in document["groups"]}
         self.assertEqual(list(groups), ["GIDEON-Users", "GIDEON-Admins", "EXD-Trial", "EXD-Habeas", SERVICE_GROUP])
@@ -526,53 +516,14 @@ class Manifest(unittest.TestCase):
                 {"username": EVAL_IDENTITY.username, "email": EVAL_IDENTITY.email, "role": "user", "groups": [SERVICE_GROUP]},
             ],
         )
-        self.assertEqual(
-            document["functions"],
-            [branch_gate_function(inputs(SECOND))],
-        )
-        function = document["functions"][0]
-        self.assertEqual(
-            function,
-            {
-                "id": BRANCH_GATE_ID,
-                "user_id": SYNC_ROW_USER_ID,
-                "name": BRANCH_GATE_NAME,
-                "type": "filter",
-                "content": inputs(SECOND).templates[BRANCH_GATE_TEMPLATE],
-                "meta": {"description": BRANCH_GATE_DESCRIPTION},
-                "valves": {},
-                "is_active": True,
-                "is_global": True,
-                "updated_at": SYNC_ROW_UPDATED_AT,
-                "created_at": SYNC_ROW_CREATED_AT,
-            },
-        )
-        model = document["models"]
-        self.assertEqual(len(model), 2)
-        self.assertEqual(
-            model[0],
-            {
-                "id": ENGINE_SERVICE_NAME,
-                "user_id": SYNC_ROW_USER_ID,
-                "base_model_id": None,
-                "name": ENGINE_SERVICE_NAME,
-                "params": {},
-                "meta": {"hidden": True, "capabilities": dict(BASE_MODEL_CAPABILITIES)},
-                "access_grants": [dict(public_read_grant(ENGINE_SERVICE_NAME))],
-                "is_active": True,
-                "updated_at": SYNC_ROW_UPDATED_AT,
-                "created_at": SYNC_ROW_CREATED_AT,
-            },
-        )
-        general = model[1]
+        self.assertEqual(document["functions"], [])
+        self.assertEqual(len(document["models"]), 1)
+        general = document["models"][0]
         self.assertEqual(general, general_preset_record(inputs(SECOND)))
         self.assertEqual(general["id"], GENERAL_PRESET_ID)
         self.assertEqual(general["name"], "General")
-        self.assertEqual(general["base_model_id"], ENGINE_SERVICE_NAME)
-        self.assertEqual(
-            general["params"],
-            {"function_calling": GENERAL_FUNCTION_CALLING},
-        )
+        self.assertIsNone(general["base_model_id"])
+        self.assertEqual(general["params"], {"function_calling": GENERAL_FUNCTION_CALLING})
         self.assertEqual(
             general["meta"],
             {
@@ -582,48 +533,36 @@ class Manifest(unittest.TestCase):
                 "filterIds": [],
             },
         )
-        self.assertNotIn("filterIds", model[0]["meta"])
         self.assertEqual(
             general["access_grants"],
-            [
-                {
-                    "id": MODEL_GRANT_ID,
-                    "resource_type": MODEL_GRANT_RESOURCE_TYPE,
-                    "resource_id": GENERAL_PRESET_ID,
-                    "principal_type": "user",
-                    "principal_id": "*",
-                    "permission": "read",
-                    "created_at": MODEL_GRANT_CREATED_AT,
-                }
-            ],
+            [{
+                "id": MODEL_GRANT_ID,
+                "resource_type": MODEL_GRANT_RESOURCE_TYPE,
+                "resource_id": GENERAL_PRESET_ID,
+                "principal_type": "user",
+                "principal_id": "*",
+                "permission": "read",
+                "created_at": MODEL_GRANT_CREATED_AT,
+            }],
         )
         self.assertEqual(general["user_id"], SYNC_ROW_USER_ID)
         self.assertEqual(general["updated_at"], SYNC_ROW_UPDATED_AT)
         self.assertEqual(general["created_at"], SYNC_ROW_CREATED_AT)
-        self.assertEqual(set(BASE_MODEL_CAPABILITIES), {
-            "builtin_tools",
-            "file_upload",
-            "file_context",
-            "vision",
-            "memory",
-            "code_interpreter",
-            "image_generation",
-            "web_search",
-            "terminal",
+        self.assertEqual(GENERAL_CAPABILITIES, {
+            "builtin_tools": False,
+            "file_upload": False,
+            "file_context": True,
+            "vision": False,
+            "memory": False,
+            "code_interpreter": False,
+            "image_generation": False,
+            "web_search": True,
+            "terminal": False,
         })
-        self.assertTrue(all(value is False for value in BASE_MODEL_CAPABILITIES.values()))
-        self.assertIs(BASE_MODEL_HIDDEN, True)
-        self.assertEqual(set(GENERAL_CAPABILITIES), set(BASE_MODEL_CAPABILITIES))
-        self.assertEqual(
-            [name for name in BASE_MODEL_CAPABILITIES if BASE_MODEL_CAPABILITIES[name] != GENERAL_CAPABILITIES[name]],
-            ["file_context", "web_search"],
-        )
-        self.assertFalse(GENERAL_CAPABILITIES["file_upload"])
-        self.assertFalse(GENERAL_CAPABILITIES["builtin_tools"])
 
     def test_general_records_differ_between_offices_only_by_the_office_name(self) -> None:
-        first = yaml.safe_load(ApplyManifestArtifact().emit(inputs(EXAMPLE)))["models"][1]
-        second = yaml.safe_load(ApplyManifestArtifact().emit(inputs(SECOND)))["models"][1]
+        first = yaml.safe_load(ApplyManifestArtifact().emit(inputs(EXAMPLE)))["models"][0]
+        second = yaml.safe_load(ApplyManifestArtifact().emit(inputs(SECOND)))["models"][0]
         self.assertEqual(first["meta"]["filterIds"], [])
         self.assertEqual(second["meta"]["filterIds"], [])
         first_name = inputs(EXAMPLE).site.office.name
@@ -699,53 +638,18 @@ class Manifest(unittest.TestCase):
             general_texts(rendered_inputs)
         self.assertIn("open-webui/general.yaml", str(ctx.exception))
 
-    def test_no_gpu_manifest_has_no_model_records(self) -> None:
-        document = yaml.safe_load(ApplyManifestArtifact().emit(inputs(no_gpu=True)))
-        self.assertEqual(document["models"], [])
-        self.assertEqual(
-            document["functions"],
-            [branch_gate_function(inputs(no_gpu=True))],
-        )
-
-    def test_branch_gate_is_held_for_all_fixture_sites(self) -> None:
+    def test_functions_are_empty_on_every_host_and_no_gpu_has_no_models(self) -> None:
         for site_path, no_gpu in ((EXAMPLE, False), (SECOND, False), (EXAMPLE, True)):
             with self.subTest(site_path=site_path, no_gpu=no_gpu):
-                rendered_inputs = inputs(site_path, no_gpu=no_gpu)
-                document = yaml.safe_load(ApplyManifestArtifact().emit(rendered_inputs))
-                self.assertEqual(
-                    document["functions"],
-                    [branch_gate_function(rendered_inputs)],
+                document = yaml.safe_load(
+                    ApplyManifestArtifact().emit(inputs(site_path, no_gpu=no_gpu))
                 )
-
-    def test_branch_gate_refuses_syntax_errors_with_template_and_line(self) -> None:
-        rendered_inputs = inputs(
-            templates={
-                **inputs().templates,
-                BRANCH_GATE_TEMPLATE: "class Filter(\n",
-            }
+                self.assertEqual(document["functions"], [])
+                self.assertEqual(len(document["models"]), 0 if no_gpu else 1)
+        self.assertEqual(
+            ApplyManifestArtifact().template_paths,
+            ("open-webui/permissions.yaml", GENERAL_TEMPLATE),
         )
-        with self.assertRaises(ValueError) as ctx:
-            branch_gate_function(rendered_inputs)
-        self.assertIn(BRANCH_GATE_TEMPLATE, str(ctx.exception))
-        self.assertIn("line 1", str(ctx.exception))
-
-    def test_branch_gate_refuses_a_missing_template(self) -> None:
-        rendered_inputs = inputs(
-            templates={name: value for name, value in inputs().templates.items() if name != BRANCH_GATE_TEMPLATE}
-        )
-        with self.assertRaises(ValueError) as ctx:
-            branch_gate_function(rendered_inputs)
-        self.assertIn(BRANCH_GATE_TEMPLATE, str(ctx.exception))
-
-    def test_missing_generator_refuses_from_manifest(self) -> None:
-        rendered_inputs = inputs()
-        missing_generator = replace(
-            rendered_inputs,
-            profile=replace(rendered_inputs.profile, models=()),
-        )
-        with self.assertRaises(ValueError) as ctx:
-            ApplyManifestArtifact().emit(missing_generator)
-        self.assertIn("models.lock", str(ctx.exception))
 
     def test_dn_form_groups_are_named_by_their_cn(self) -> None:
         document = yaml.safe_load(ApplyManifestArtifact().emit(inputs(DN_GROUPS)))

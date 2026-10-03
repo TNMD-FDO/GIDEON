@@ -7,11 +7,9 @@ no ``test_`` prefix so the hosted pytest run never collects it.  It brings up
 a throwaway Compose project (Postgres, Open WebUI, and a standard-library model
 stub on loopback) in production order — Postgres, ``stores.converge``, then the
 frontend — adds a Function by hand, pushes the rendered example manifest with
-``owui.bootstrap``, and proves the hand Function is gone, the rendered branch-gate Function, both model
-records with General's empty attachment list, groups, and keys match, and a
-further push changes nothing. The rendered Function is hand-edited, toggled,
-and removed through the frontend routes, General's attachment list is
-hand-added, and the next desired-state push restores all of it.
+``owui.bootstrap``, and proves the Function is removed and General's single
+baseless row, groups, and keys match. A hand edit of General, an added model,
+and a changed group are restored by the next push; another push changes nothing.
 
 It also proves the signed-in environment facts: the rendered ``default_models``
 value and the disabled evaluation arena are visible through session-only config
@@ -42,10 +40,8 @@ import gideon.host.secrets as secret_files
 from gideon.host import owui, stores
 from gideon.host.images import load_image_lock, parse_registry, reference
 from gideon.host.models import HardwareProfile, load_models_lock, select_profile
-from gideon.host.render.engine import ENGINE_SERVICE_NAME
 from gideon.host.render.owui import (
     ALLOWED_ENDPOINTS,
-    BASE_MODEL_CAPABILITIES,
     BREAK_GLASS,
     EVAL_IDENTITY,
     GENERAL_CAPABILITIES,
@@ -77,7 +73,13 @@ HAND_ADDED_FUNCTION = {
 
 
 def stub_model_id() -> str:
-    """Return the selected profile's generator served name for the stub."""
+    """Return the service model id the connection stub lists."""
+
+    return GENERAL_PRESET_ID
+
+
+def engine_served_name() -> str:
+    """Return the selected generator's served name for a stray-row edit."""
 
     site_result = load_site(EXAMPLE_SITE)
     models_result = load_models_lock(ROOT / "models.lock")
@@ -226,82 +228,42 @@ class ApplyManifestContract(unittest.TestCase):
         return client_factory(token=token)
 
     def _assert_manifest_model_state(self, admin: owui.Client, admin_id: str) -> None:
-        """Hold the split admin listings to the rendered base and General records."""
+        """Hold General's baseless row and the empty preset listing to the manifest."""
+
+        rendered_models = self.manifest()["models"]
+        assert isinstance(rendered_models, list)
+        self.assertEqual(len(rendered_models), 1)
+        rendered_general = rendered_models[0]
+        assert isinstance(rendered_general, dict)
+        self.assertEqual(rendered_general["id"], GENERAL_PRESET_ID)
+        self.assertIsNone(rendered_general["base_model_id"])
 
         base = admin.request("GET", "/api/v1/models/base")
         self.assertEqual(base.status, 200, base.body)
         assert isinstance(base.body, list)
         self.assertEqual(len(base.body), 1)
-        record = base.body[0]
-        assert isinstance(record, dict)
-        self.assertEqual(record["id"], ENGINE_SERVICE_NAME)
-        self.assertEqual(record["name"], ENGINE_SERVICE_NAME)
-        self.assertIsNone(record["base_model_id"])
-        self.assertTrue(record["is_active"])
-        self.assertEqual(record["params"], {})
-        meta = record["meta"]
-        assert isinstance(meta, dict)
-        self.assertEqual(meta["capabilities"], dict(BASE_MODEL_CAPABILITIES))
-        # Readable by every verified user but hidden from the selector: the base
-        # hop of General's access check.
-        self.assertIs(meta["hidden"], True)
-        self.assertTrue(
-            all(value is None for key, value in meta.items() if key not in {"capabilities", "hidden"})
-        )
-        # These ModelMeta defaults are materialized as null by the pinned row shape.
-        self.assertIsNone(meta.get("profile_image_url"))
-        self.assertIsNone(meta.get("description"))
-        self.assertIsNone(meta.get("knowledge"))
-        base_grants = record["access_grants"]
-        assert isinstance(base_grants, list)
-        self.assertEqual(len(base_grants), 1)
-        base_grant = base_grants[0]
-        assert isinstance(base_grant, dict)
-        self.assertEqual(
-            (base_grant["principal_type"], base_grant["principal_id"], base_grant["permission"]),
-            ("user", "*", "read"),
-        )
-        self.assertEqual((base_grant["resource_type"], base_grant["resource_id"]), ("model", ENGINE_SERVICE_NAME))
-        self.assertEqual(record["user_id"], admin_id)
-
-        presets = admin.request("GET", "/api/v1/models/list?page=1")
-        self.assertEqual(presets.status, 200, presets.body)
-        assert isinstance(presets.body, dict)
-        # The admin preset listing returns General's full params and grants;
-        # the base route is separate.
-        items = presets.body["items"]
-        assert isinstance(items, list)
-        self.assertEqual(len(items), 1)
-        general = items[0]
+        general = base.body[0]
         assert isinstance(general, dict)
-        rendered_models = self.manifest()["models"]
-        assert isinstance(rendered_models, list)
-        rendered_general = rendered_models[1]
-        assert isinstance(rendered_general, dict)
         self.assertEqual(general["id"], GENERAL_PRESET_ID)
         self.assertEqual(general["name"], rendered_general["name"])
-        self.assertEqual(general["base_model_id"], ENGINE_SERVICE_NAME)
+        self.assertIsNone(general["base_model_id"])
         self.assertTrue(general["is_active"])
         self.assertEqual(general["params"], rendered_general["params"])
-        general_meta = general["meta"]
-        assert isinstance(general_meta, dict)
+        meta = general["meta"]
         rendered_meta = rendered_general["meta"]
-        assert isinstance(rendered_meta, dict)
-        self.assertEqual(general_meta["description"], rendered_meta["description"])
-        self.assertEqual(general_meta["capabilities"], dict(GENERAL_CAPABILITIES))
-        self.assertEqual(general_meta["suggestion_prompts"], [])
-        self.assertEqual(general_meta["suggestion_prompts"], rendered_meta["suggestion_prompts"])
+        assert isinstance(meta, dict) and isinstance(rendered_meta, dict)
+        self.assertEqual(meta["description"], rendered_meta["description"])
+        self.assertEqual(meta["capabilities"], dict(GENERAL_CAPABILITIES))
+        self.assertEqual(meta["suggestion_prompts"], rendered_meta["suggestion_prompts"])
+        self.assertEqual(meta["filterIds"], rendered_meta["filterIds"])
+        self.assertEqual(meta["filterIds"], [])
         self.assertTrue(
             all(
                 value is None
-                for key, value in general_meta.items()
+                for key, value in meta.items()
                 if key not in {"description", "capabilities", "suggestion_prompts", "filterIds"}
             )
         )
-        # The rendered attachment list is empty since the cutover, and the push
-        # overwrites a live one with it — the key is kept so that it does.
-        self.assertEqual(rendered_meta["filterIds"], [])
-        self.assertEqual(general_meta["filterIds"], rendered_meta["filterIds"])
         grants = general["access_grants"]
         assert isinstance(grants, list)
         self.assertEqual(len(grants), 1)
@@ -311,10 +273,13 @@ class ApplyManifestContract(unittest.TestCase):
             (grant["principal_type"], grant["principal_id"], grant["permission"]),
             ("user", "*", "read"),
         )
-        self.assertEqual(grant["resource_type"], "model")
-        self.assertEqual(grant["resource_id"], GENERAL_PRESET_ID)
+        self.assertEqual((grant["resource_type"], grant["resource_id"]), ("model", GENERAL_PRESET_ID))
         self.assertEqual(general["user_id"], admin_id)
-        self.assertTrue(general.get("write_access"))
+
+        presets = admin.request("GET", "/api/v1/models/list?page=1")
+        self.assertEqual(presets.status, 200, presets.body)
+        assert isinstance(presets.body, dict)
+        self.assertEqual(presets.body["items"], [])
 
         for group in admin.groups():
             chat = group.permissions.get("chat")
@@ -324,7 +289,7 @@ class ApplyManifestContract(unittest.TestCase):
             self.assertTrue(chat["rate_response"])
 
     def _assert_live_model_listing(self, client: owui.Client, *, arena: bool = False) -> None:
-        """Hold the chat-facing listing to the stub model and General."""
+        """Hold the chat-facing listing to General and an optional arena entry."""
 
         listing = client.request("GET", "/api/models")
         self.assertEqual(listing.status, 200, listing.body)
@@ -338,7 +303,7 @@ class ApplyManifestContract(unittest.TestCase):
             for row in rows
             if isinstance(row, dict) and isinstance(row.get("id"), str)
         }
-        expected = {stub_model_id(), GENERAL_PRESET_ID}
+        expected = {GENERAL_PRESET_ID}
         if arena:
             self.assertEqual(len(rows), len(expected) + 1)
             self.assertEqual(len(ids - expected), 1)
@@ -347,39 +312,12 @@ class ApplyManifestContract(unittest.TestCase):
             self.assertEqual(len(rows), len(expected))
 
     def _assert_manifest_function_state(self, admin: owui.Client) -> None:
-        """Hold the Function listing, source row, and empty valves to the manifest."""
+        """Hold the desired and live Function sets empty after each push."""
 
-        document = self.manifest()
-        functions = document["functions"]
-        assert isinstance(functions, list)
-        expected_ids = [function["id"] for function in functions]
-
+        self.assertEqual(self.manifest()["functions"], [])
         listing = admin.request("GET", "/api/v1/functions/")
         self.assertEqual(listing.status, 200, listing.body)
-        assert isinstance(listing.body, list)
-        # A set: the pinned list route's order follows neither the ids nor the
-        # push, and the inlets' running order is the frontend's own per-request
-        # sort by (priority, id).
-        self.assertEqual(sorted(row["id"] for row in listing.body), sorted(expected_ids))
-
-        for expected in functions:
-            assert isinstance(expected, dict)
-            identifier = expected["id"]
-            assert isinstance(identifier, str)
-            observed = admin.function_by_id(identifier)
-            self.assertIsNotNone(observed)
-            assert observed is not None
-            self.assertEqual(observed["content"], expected["content"])
-            self.assertEqual(observed["type"], expected["type"])
-            self.assertEqual(observed["name"], expected["name"])
-            self.assertEqual(observed["is_active"], expected["is_active"])
-            self.assertEqual(observed["is_global"], expected["is_global"])
-            expected_meta = expected["meta"]
-            observed_meta = observed["meta"]
-            assert isinstance(expected_meta, dict)
-            assert isinstance(observed_meta, dict)
-            self.assertEqual(observed_meta["description"], expected_meta["description"])
-            self.assertEqual(admin.function_valves(identifier), {})
+        self.assertEqual(listing.body, [])
 
     def test_hand_added_function_and_model_are_removed_and_restorations_are_idempotent(self) -> None:
         session = self.admin_session()
@@ -417,43 +355,27 @@ class ApplyManifestContract(unittest.TestCase):
         eval_client = client_factory(api_key=(self.stack.secrets / "gideon_eval_api_key").read_text().strip())
         self._assert_live_model_listing(eval_client)
         self.assertIn(eval_client.request("GET", "/api/v1/users/all").status, (401, 403))
-        # The base listing remains admin-only.
+        # The admin model-record route remains admin-only.
         self.assertIn(eval_client.request("GET", "/api/v1/models/base").status, (401, 403))
         # The admin key is bound to the allowlist too.
         self.assertEqual(admin.request("GET", "/api/v1/auths/").status, 403)
 
         # The admin model editor uses full-column update and create routes; use
-        # its session, not the API key, for the hand edits. The base record's
-        # edit flips a capability, drops `hidden`, and empties the grant list.
-        edited_capabilities = dict(BASE_MODEL_CAPABILITIES)
+        # its session, not the API key, for the hand edits.
+        edited_capabilities = dict(GENERAL_CAPABILITIES)
         edited_capabilities["builtin_tools"] = True
-        edited = session.request(
-            "POST",
-            "/api/v1/models/model/update",
-            {
-                "id": ENGINE_SERVICE_NAME,
-                "base_model_id": None,
-                "name": ENGINE_SERVICE_NAME,
-                "meta": {"capabilities": edited_capabilities},
-                "params": {},
-                "access_grants": [],
-                "is_active": True,
-            },
-        )
-        self.assertEqual(edited.status, 200, edited.body)
-        # The update route replaces the full preset row, including params,
-        # description, grants, and the attachment list; this hand edit adds a
-        # stray Function id.
+        # The update replaces General's params, description, capabilities,
+        # grants, and attachment list; the next push must restore each field.
         edited_general = session.request(
             "POST",
             "/api/v1/models/model/update",
             {
                 "id": GENERAL_PRESET_ID,
-                "base_model_id": ENGINE_SERVICE_NAME,
+                "base_model_id": None,
                 "name": "General",
                 "meta": {
                     "description": "hand-edited",
-                    "capabilities": dict(GENERAL_CAPABILITIES),
+                    "capabilities": edited_capabilities,
                     "suggestion_prompts": [
                         {"title": ["Fictitious", "hand-edit"], "content": "hand-edited"}
                     ],
@@ -478,38 +400,15 @@ class ApplyManifestContract(unittest.TestCase):
         )
         self.assertEqual(edited_group.status, 200, edited_group.body)
 
-        document = self.manifest()
-        functions = document["functions"]
-        assert isinstance(functions, list)
-        for function in functions:
-            assert isinstance(function, dict)
-            identifier = function["id"]
-            assert isinstance(identifier, str)
-            function_edit = session.request(
-                "POST",
-                f"/api/v1/functions/id/{identifier}/update",
-                {
-                    **function,
-                    "content": "class Filter:\n    pass\n",
-                },
-            )
-            self.assertEqual(function_edit.status, 200, function_edit.body)
-            toggled = session.request(
-                "POST", f"/api/v1/functions/id/{identifier}/toggle"
-            )
-            self.assertEqual(toggled.status, 200, toggled.body)
-            globally_toggled = session.request(
-                "POST", f"/api/v1/functions/id/{identifier}/toggle/global"
-            )
-            self.assertEqual(globally_toggled.status, 200, globally_toggled.body)
-
+        old_served_name = engine_served_name()
+        self.assertNotEqual(old_served_name, stub_model_id())
         stray = session.request(
             "POST",
             "/api/v1/models/create",
             {
-                "id": "stray_model",
-                "base_model_id": ENGINE_SERVICE_NAME,
-                "name": "Stray",
+                "id": old_served_name,
+                "base_model_id": None,
+                "name": "Stray engine row",
                 "meta": {},
                 "params": {},
             },
@@ -519,28 +418,16 @@ class ApplyManifestContract(unittest.TestCase):
         second = owui.bootstrap(ContractHost(), client_factory, self.manifest(), rendered_dir=self.stack.directory)
         self.assertTrue(second.ok, second.problem)
         self.assertEqual(second.updated_groups, ("GIDEON-Users",))
-        self.assertEqual(second.removed_models, ("stray_model",))
+        self.assertEqual(second.removed_models, (old_served_name,))
         self.assertEqual(second.removed_functions, ())
         self._assert_manifest_function_state(admin)
         self._assert_manifest_model_state(admin, users[BREAK_GLASS.email].id)
 
-        # The pinned delete route answers the DELETE method alone (a POST is 405).
-        for function in functions:
-            assert isinstance(function, dict)
-            identifier = function["id"]
-            assert isinstance(identifier, str)
-            removed = session.request(
-                "DELETE", f"/api/v1/functions/id/{identifier}/delete"
-            )
-            self.assertEqual(removed.status, 200, removed.body)
         third = owui.bootstrap(ContractHost(), client_factory, self.manifest(), rendered_dir=self.stack.directory)
         self.assertTrue(third.ok, third.problem)
-        self.assertEqual(third.removed_functions, ())
+        self.assertEqual(third, owui.BootstrapReport())
         self._assert_manifest_function_state(admin)
-
-        fourth = owui.bootstrap(ContractHost(), client_factory, self.manifest(), rendered_dir=self.stack.directory)
-        self.assertTrue(fourth.ok, fourth.problem)
-        self.assertEqual(fourth, owui.BootstrapReport())
+        self._assert_manifest_model_state(admin, users[BREAK_GLASS.email].id)
 
     def test_rendered_environment_facts_return_after_frontend_restart(self) -> None:
         """Panel edits are process-local; restart restores the rendered environment facts."""
@@ -603,8 +490,8 @@ class ApplyManifestContract(unittest.TestCase):
         assert isinstance(arena_config.body, dict)
         self.assertTrue(arena_config.body["ENABLE_EVALUATION_ARENA_MODELS"])
 
-        # The live listing now proves the arena entry appears beside the stub
-        # model and General; the config read-back is what the restart reverts.
+        # The live listing now proves the arena entry appears beside General;
+        # the config read-back is what the restart reverts.
         self._assert_live_model_listing(admin, arena=True)
 
         restarted = self.stack.compose("restart", "open-webui")

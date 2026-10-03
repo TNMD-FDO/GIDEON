@@ -1,24 +1,17 @@
-"""The turn harness's raw-stream and probe calls.
+"""The turn harness's raw-stream calls.
 
 The managed-turn recipe belongs to ``gideon.host.owuiturn`` because it is
-shared with ``engine verify``; these calls are specific to the tool's probes
-and raw-stream replay.
+shared with ``engine verify``; these calls are specific to raw-stream replay.
 """
 
 import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Final
 
 from gideon.api import progress
 from gideon.host.owui import Client, OwuiError, OwuiTimeout
 from gideon.host.owuiturn import COMPLETIONS_PATH, LOGS_FIX
 from gideon.host.report import Problem, Timeout
-
-PROBE_PROMPT: Final[str] = (
-    "My client's conviction became final on March 2, 2026 and nothing has been filed since. "
-    "On what date is the § 2255 motion due?"  # 28 U.S.C. § 2255
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,41 +29,6 @@ class StreamPayload:
 
     deltas: tuple[tuple[str, str], ...] = ()
     problem: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class ProbeResponse:
-    """One non-streaming inlet probe response, including only request failures as problems."""
-
-    status: int
-    body: object | None
-    problem: Problem | None = None
-
-
-def _probe(client: Client, body: Mapping[str, object]) -> ProbeResponse:
-    """Post one non-streaming probe body without converting HTTP responses to errors."""
-
-    try:
-        response = client.request("POST", COMPLETIONS_PATH, body)
-    except OwuiError as exc:
-        return ProbeResponse(0, None, Problem(exc.problem, LOGS_FIX))
-    return ProbeResponse(response.status, response.body)
-
-
-def _bare_body(model: str, prompt: str) -> dict[str, object]:
-    """Build the shared non-streaming body without a chat or session id."""
-
-    return {
-        "model": model,
-        "stream": False,
-        "messages": [{"role": "user", "content": prompt}],
-    }
-
-
-def probe_bare(client: Client, model: str, prompt: str) -> ProbeResponse:
-    """Probe the inlet without a session or chat id."""
-
-    return _probe(client, _bare_body(model, prompt))
 
 
 def raw_stream(

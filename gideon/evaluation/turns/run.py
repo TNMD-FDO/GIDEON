@@ -80,9 +80,7 @@ class RunSpec:
     dry_run: bool
     sentinel: str
     model: str = GENERAL_PRESET_ID
-    base_model: str | None = None
     browser: bool = False
-    probe_inlet: bool = False
     trust_ca: bool = False
     concurrent: int = 1
     unfiltered: bool = False
@@ -367,7 +365,7 @@ class UnfilteredTurnDriver:
         del case, now, ids_before, row_name
         started = monotonic()
         body = door.completion_body(
-            served_name=self._model,
+            model=self._model,
             prompt=prompt,
             instruction=self._instruction,
             stream=False,
@@ -433,7 +431,7 @@ class ServiceTurnDriver:
         result = door.probe(
             self._io,
             self._rendered_dir,
-            served_name=self._model,
+            model=self._model,
             max_time=TURN_TIMEOUT_SECONDS,
         )
         if result.problem is not None:
@@ -455,7 +453,7 @@ class ServiceTurnDriver:
         reply = door.complete(
             self._io,
             self._rendered_dir,
-            served_name=self._model,
+            model=self._model,
             prompt=prompt,
             stream=self._stream,
             max_time=TURN_TIMEOUT_SECONDS,
@@ -952,31 +950,9 @@ def _emit_stage(
     _write_requests_log(host, browser_setup, output)
 
 
-def _probe_data(
-    response: session.ProbeResponse, verdict: str | None
-) -> dict[str, object]:
-    return {
-        "status": response.status,
-        "body": response.body,
-        "verdict": verdict,
-        "problem": _problem_data(response.problem),
-    }
-
-
-def _probe_result(
-    name: str, response: session.ProbeResponse, ok: bool, detail: str, fix: str
-) -> StageResult:
-    """The probe row: a request that failed carries its own problem and fix, never an HTTP 0."""
-
-    if response.problem is not None:
-        return StageResult(name, False, f"probe error: {response.problem.problem}", response.problem.fix)
-    return StageResult(name, ok, detail, fix)
-
-
 def _browser_run_data(
     setup: BrowserSetup,
     observation: browser.Observation | None,
-    probe_records: Mapping[str, Mapping[str, object]],
 ) -> dict[str, object]:
     counts = setup.request_log.counts()
     observation_data: dict[str, object] | None = None
@@ -1003,143 +979,7 @@ def _browser_run_data(
         },
         "observation": observation_data,
     }
-    if probe_records:
-        data["probes"] = {
-            name: {
-                key: value[key]
-                for key in ("ok", "status", "residual")
-                if key in value
-            }
-            for name, value in probe_records.items()
-        }
     return data
-
-
-@dataclass(frozen=True, slots=True)
-class ProbeOutcome:
-    """What the inlet probe's one row produced: its record and accounting.
-
-    ``turns`` is the engine calls attempted: none when the gate refuses as it
-    should, one when it failed open and the request reached the engine.
-    """
-
-    records: dict[str, dict[str, object]]
-    misses: int
-    deleted: int
-    not_deleted: tuple[str, ...]
-    turns: int
-
-
-def _probe_row(
-    host: Host,
-    spec: RunSpec,
-    result: StageResult,
-    response: session.ProbeResponse,
-    pattern: str | None,
-    records: dict[str, dict[str, object]],
-    *,
-    residual: str | None,
-) -> StageResult:
-    """Record one probe row and write its ``--out`` file; a failed write fails the row."""
-
-    records[result.name] = {"ok": result.ok, **_probe_data(response, pattern), "residual": residual}
-    if spec.out is not None:
-        write_problem = _write_json(
-            host, spec.out / f"{result.name}.json", _probe_data(response, pattern)
-        )
-        if write_problem is not None:
-            records[result.name]["ok"] = False
-            return StageResult(result.name, False, write_problem.problem, write_problem.fix)
-    return result
-
-
-def _run_probe(
-    client: Client,
-    spec: RunSpec,
-    gate_texts: classify.GateTexts,
-    host: Host,
-    emit: Callable[[StageResult], None],
-) -> ProbeOutcome:
-    """Probe the users-seat branch gate through one bare base-model completion.
-
-    The request carries no session or chat id and must receive the gate's
-    refusal as HTTP 400 before the engine. A chat that appears is deleted and
-    reported as a guard violation; failures remain one named row and never
-    become a traceback.
-    """
-
-    prompt = session.prompt_text("inlet-probe", spec.sentinel, session.PROBE_PROMPT)
-    records: dict[str, dict[str, object]] = {}
-    misses = 0
-    deleted = 0
-    not_deleted: list[str] = []
-    emitted: set[str] = set()
-    turns = 0
-
-    def report(result: StageResult) -> None:
-        nonlocal misses
-        emit(result)
-        emitted.add(result.name)
-        misses += int(not result.ok)
-
-    try:
-        before = owuiturn.chat_ids(client)
-        if spec.base_model is None:
-            raise RuntimeError("the probe base model is unavailable")
-        base = session.probe_bare(client, spec.base_model, prompt)
-        if base.problem is None and base.status == 200:
-            # The gate failed open: the completion reached the engine, so the
-            # record counts the call the guard's estimate did not expect.
-            turns = 1
-        strays = 0
-        for stray in sorted(owuiturn.chat_ids(client) - before):
-            if owuiturn.delete_chat(client, stray) is None:
-                deleted += 1
-                strays += 1
-            else:
-                not_deleted.append(stray)
-        base_ok = (
-            base.problem is None
-            and base.status == 400
-            and isinstance(base.body, Mapping)
-            and base.body.get("detail") == gate_texts.branch_refusal
-        )
-        detail = (
-            "refused with the branch refusal (HTTP 400)"
-            if base_ok
-            else f"HTTP {base.status}, not the branch refusal"
-        )
-        if strays:
-            detail += "; stray chat deleted"
-        result = _probe_result(
-            "inlet-base-model",
-            base,
-            base_ok,
-            detail,
-            "" if base_ok else _turn_fix(spec),
-        )
-        report(
-            _probe_row(
-                host,
-                spec,
-                result,
-                base,
-                None,
-                records,
-                residual=None,
-            )
-        )
-    except owui.OwuiError as exc:
-        name = "inlet-base-model"
-        if name not in emitted:
-            records[name] = {"ok": False, "status": 0, "body": None, "verdict": None, "residual": None, "problem": {"problem": exc.problem, "fix": exc.fix}}
-            report(StageResult(name, False, f"probe error: {exc.problem}", exc.fix))
-    except Exception as exc:  # noqa: BLE001 - the probe boundary owns the traceback.
-        name = "inlet-base-model"
-        if name not in emitted:
-            records[name] = {"ok": False, "status": 0, "body": None, "verdict": None, "residual": None, "problem": None}
-            report(_internal_error(name, exc, _turn_fix(spec)))
-    return ProbeOutcome(records, misses, deleted, tuple(not_deleted), turns)
 
 
 def _summary_counts(
@@ -1147,7 +987,6 @@ def _summary_counts(
     counts: Mapping[str, Mapping[str, int]],
     misses: int,
     stream_counts: Mapping[str, int] | None = None,
-    extra_turns: int = 0,
     offline_counts: Mapping[str, int] | None = None,
     replayed: bool = True,
 ) -> dict[str, object]:
@@ -1162,15 +1001,13 @@ def _summary_counts(
             "clean": offline_counts.get("clean", 0),
             "errors": offline_counts.get("error", 0),
         }
-    # A turn is a row: every case row, plus every replay; the probe's refusal
-    # reaches no engine and is not a turn;
-    # the guard's engine-call count lives in cli.py. A streamed door row is not
-    # a replay — it is the case's one call — so ``replayed`` is false there.
+    # A turn is a row: every case row, plus every replay; the guard's
+    # engine-call count lives in cli.py. A streamed door row is not a replay — it is the case's one call — so ``replayed`` is false there.
     replays = (
         sum(stream_counts.values()) if replayed and stream_counts is not None else 0
     )
     summary: dict[str, object] = {
-        "turns": sum(totals.values()) + replays + extra_turns,
+        "turns": sum(totals.values()) + replays,
         "misses": misses,
     }
     for kind in CASE_KINDS:
@@ -1189,7 +1026,6 @@ def _summary_detail(
     counts: Mapping[str, Mapping[str, int]],
     misses: int,
     stream_counts: Mapping[str, int] | None = None,
-    extra_turns: int = 0,
     offline_counts: Mapping[str, int] | None = None,
     replayed: bool = True,
 ) -> str:
@@ -1208,7 +1044,7 @@ def _summary_detail(
     replays = (
         sum(stream_counts.values()) if replayed and stream_counts is not None else 0
     )
-    parts = [f"{sum(totals.values()) + replays + extra_turns} turns"]
+    parts = [f"{sum(totals.values()) + replays} turns"]
     labels = {"positive": "positives", "control": "controls", "case": "cases"}
     for kind in CASE_KINDS:
         if kind in totals:
@@ -1876,7 +1712,6 @@ def _arguments(spec: RunSpec) -> dict[str, object]:
         "force": spec.force,
         "dry_run": spec.dry_run,
         "browser": spec.browser,
-        "probe_inlet": spec.probe_inlet,
         "trust_ca": spec.trust_ca,
         "unfiltered": spec.unfiltered,
         "case_ids": list(spec.case_ids),
@@ -1900,7 +1735,6 @@ def _run_cases(
     origin: str,
     window: str,
     guardrail: Any,
-    gate_texts: classify.GateTexts | None,
     now: Callable[[], datetime],
     monotonic: Callable[[], float],
     host: Host,
@@ -2009,30 +1843,15 @@ def _run_cases(
             executor.shutdown(wait=True)
 
     reported_stream = bookkeeping.stream_counts if spec.stream else None
-    probe_turns = 0
-    probe_records: dict[str, dict[str, object]] = {}
-    if spec.probe_inlet:
-        assert gate_texts is not None
-        assert client is not None
-        probe = _run_probe(client, spec, gate_texts, host, emit)
-        probe_turns = probe.turns
-        probe_records = probe.records
-        bookkeeping.misses += probe.misses
-        bookkeeping.deleted += probe.deleted
-        bookkeeping.not_deleted.extend(probe.not_deleted)
-        bookkeeping.all_ok = bookkeeping.all_ok and probe.misses == 0
-
     reported_offline = bookkeeping.offline_counts if spec.unfiltered else None
     summary_args = (bookkeeping.totals, bookkeeping.counts, bookkeeping.misses, reported_stream)
     summary_counts = _summary_counts(
         *summary_args,
-        extra_turns=probe_turns,
         offline_counts=reported_offline,
         replayed=not spec.service,
     )
     summary_detail = _summary_detail(
         *summary_args,
-        extra_turns=probe_turns,
         offline_counts=reported_offline,
         replayed=not spec.service,
     )
@@ -2118,7 +1937,7 @@ def _run_cases(
         }
         if spec.browser and browser_setup is not None:
             run_data["browser"] = _browser_run_data(
-                browser_setup, first_driver.observation, probe_records
+                browser_setup, first_driver.observation
             )
         record_problem = _write_json(
             host,
@@ -2147,7 +1966,6 @@ def run(
     window: str = "",
     password: str,
     guardrail: Any,
-    gate_texts: classify.GateTexts | None = None,
     client_factory: Callable[..., Client],
     now: Callable[[], datetime],
     monotonic: Callable[[], float] = time.monotonic,
@@ -2161,13 +1979,8 @@ def run(
 
     The browser is closed and the output handed back whatever happened; a
     browser that does not close cleanly is a failed ``browser`` row and a
-    non-zero exit, never a traceback. ``gate_texts`` is the branch gate's
-    refusal the probe row compares; a probe spec without it is
-    the caller's error, refused before any sign-in.
+    non-zero exit, never a traceback.
     """
-
-    if spec.probe_inlet and gate_texts is None:
-        raise ValueError("a probe_inlet run needs the inlet gates' texts")
 
     io = host or RealHost()
     output = spec.out
@@ -2243,7 +2056,6 @@ def run(
             origin=origin,
             window=window,
             guardrail=guardrail,
-            gate_texts=gate_texts,
             now=now,
             monotonic=monotonic,
             host=io,

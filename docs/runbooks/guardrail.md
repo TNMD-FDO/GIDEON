@@ -44,7 +44,8 @@ last deliberate trip, which every `engine verify` refreshes, so a stale age
 means the writer has stopped
 ([`docs/runbooks/observability.md §3`](observability.md#3-the-boards-folder-gideon)).
 Behind both is the `guardrail_trips` table, one row per trip with six facts:
-the moment, the branch, the family, the pattern id, the source (`user` or
+the moment, the branch (the chat, `gideon-general` since `v0.3.10`; earlier
+rows hold the engine's model name), the family, the pattern id, the source (`user` or
 `eval`), and the id of the chat it tripped in. The row never holds a user, a
 message, or any text; the chat id is empty for a trip made outside a chat.
 The audit role writes the rows and the metrics role reads them.

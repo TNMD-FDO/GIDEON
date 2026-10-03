@@ -162,13 +162,14 @@ def render_inputs() -> RenderInputs:
     )
 
 
-def _manifest_base_model_id(manifest: Mapping[str, object]) -> str:
+def _manifest_model_id(manifest: Mapping[str, object]) -> str:
     models = manifest.get("models")
-    assert isinstance(models, list) and models
-    base = models[0]
-    assert isinstance(base, Mapping)
-    identifier = base.get("id")
-    assert isinstance(identifier, str) and identifier
+    assert isinstance(models, list) and len(models) == 1
+    general = models[0]
+    assert isinstance(general, Mapping)
+    assert general.get("base_model_id") is None
+    identifier = general.get("id")
+    assert isinstance(identifier, str) and identifier == GENERAL_PRESET_ID
     return identifier
 
 
@@ -284,7 +285,7 @@ class SentinelStack:
             "ALLOWED_ENDPOINTS": ",".join(ALLOWED_ENDPOINTS),
             "STUB_MODE": "ok",
             "STUB_SENTINEL": "",
-            "STUB_MODEL_ID": _manifest_base_model_id(self.manifest),
+            "STUB_MODEL_ID": _manifest_model_id(self.manifest),
             "OPEN_WEBUI_COMMAND": shlex.join(OWUI_COMMAND),
         }
         for name in FRONTEND_ENV_KEYS:
@@ -443,9 +444,8 @@ class SearchSentinelContract(unittest.TestCase):
                 raise AssertionError("store convergence applied an unexpected migration set")
 
             # The stub and SearXNG start before the frontend: the frontend
-            # discovers its base model from the stub's listing, and bootstrap's
-            # live-listing step then holds General to its attachment list over
-            # a real base model (the plan's Overview).
+            # discovers General from the stub's listing, and bootstrap's
+            # live-listing step holds its attachment list on that row.
             search = cls.stack.compose("up", "-d", "searxng", "stub")
             cls.stack.require_success(search, "docker compose up searxng stub")
             cls.stack.wait_healthy("searxng")
@@ -529,16 +529,18 @@ class SearchSentinelContract(unittest.TestCase):
         )
         client = client_factory(token=token)
         # The chat route serves a per-worker model cache that only the listing
-        # refreshes, so the turn is preceded by one listing, which must show
-        # General over the stub's base model.
+        # refreshes, so the turn is preceded by one listing of General.
         listing = client.request("GET", "/api/models")
         if listing.status != 200 or not isinstance(listing.body, Mapping):
             raise AssertionError(f"model listing answered HTTP {listing.status}")
         listed = listing.body.get("data")
-        if not isinstance(listed, list) or not any(
-            isinstance(row, Mapping) and row.get("id") == GENERAL_PRESET_ID for row in listed
+        if (
+            not isinstance(listed, list)
+            or len(listed) != 1
+            or not isinstance(listed[0], Mapping)
+            or listed[0].get("id") != GENERAL_PRESET_ID
         ):
-            raise AssertionError("model listing does not show General over the stub")
+            raise AssertionError("model listing does not show General alone")
         before = owuiturn.chat_ids(client)
         user_id = str(uuid.uuid4())
         assistant_id = str(uuid.uuid4())

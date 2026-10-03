@@ -16,7 +16,7 @@ from gideon.evaluation import challenger, slices
 from gideon.host import nogpu
 from gideon.host.sysio import PathLike
 
-_SOURCE_FOLDERS = ("gideon", "tools", "compose/open-webui/functions")
+_SOURCE_FOLDERS = ("gideon", "tools")
 
 
 def _sources() -> tuple[Path, ...]:

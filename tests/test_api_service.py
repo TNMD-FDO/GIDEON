@@ -18,6 +18,8 @@ SOURCE_HEADER = "X-Fixture-Source"
 CHAT_HEADER = "X-Fixture-Chat"
 EVAL_IDENTITY = "eval@example.invalid"
 INSTRUCTION = "Fictitious General instruction."
+MODEL_ID = "fixture-general"
+ENGINE_MODEL = "fixture-model"
 
 
 def response_body(response: httpx.Response) -> dict[str, Any]:
@@ -37,6 +39,8 @@ class ApiService(unittest.TestCase):
             CHAT_HEADER,
             EVAL_IDENTITY,
             INSTRUCTION,
+            MODEL_ID,
+            ENGINE_MODEL,
         )
 
     def request(
@@ -120,10 +124,11 @@ class ApiService(unittest.TestCase):
         self.assertEqual(response.status_code, 401)
         self.assertEqual(calls, [])
 
-    def test_models_passes_the_engine_list_and_error_status_through(self) -> None:
+    def test_models_lists_general_and_passes_engine_error_through(self) -> None:
         replies = iter(
             (
-                (200, {"object": "list", "data": [{"id": "fixture-model"}]}),
+                (200, {"object": "list", "data": [{"id": ENGINE_MODEL, "created": 42,
+                     "owned_by": "engine-secret", "extra": "secret"}]}),
                 (429, {"error": {"message": "fixture refusal"}}),
             )
         )
@@ -149,10 +154,31 @@ class ApiService(unittest.TestCase):
         )
 
         self.assertEqual(first.status_code, 200)
-        self.assertEqual(response_body(first)["data"][0]["id"], "fixture-model")
+        self.assertEqual(response_body(first), {"object": "list", "data": [{
+            "id": MODEL_ID, "object": "model", "created": 42, "owned_by": "gideon",
+        }]})
+        self.assertNotIn(ENGINE_MODEL, first.text)
+        self.assertNotIn("engine-secret", first.text)
         self.assertEqual(second.status_code, 429)
         self.assertEqual(response_body(second)["error"]["message"], "fixture refusal")
         self.assertEqual([request.url.path for request in calls], ["/v1/models", "/v1/models"])
+
+    def test_engine_listing_without_served_name_is_fixed_502_and_content_free_log(self) -> None:
+        for body in ({"data": [{"id": "engine-secret"}]}, {"data": "unreadable"}):
+            with self.subTest(body=body):
+                def engine(request: httpx.Request, listing: dict[str, Any] = body) -> httpx.Response:
+                    return httpx.Response(200, json=listing, request=request)
+
+                with self.assertLogs("gideon.api.app", level="WARNING") as captured:
+                    response = self.request(
+                        httpx.MockTransport(engine), "GET", "/v1/models",
+                        headers={"Authorization": f"Bearer {API_KEY}"},
+                    )
+                self.assertEqual(response.status_code, 502)
+                self.assertEqual(response_body(response)["error"]["code"], "upstream_unavailable")
+                self.assertEqual(len(captured.records), 1)
+                self.assertNotIn("engine-secret", captured.output[0])
+                self.assertNotIn(ENGINE_MODEL, captured.output[0])
 
     def test_unreachable_engine_is_a_fixed_502_error(self) -> None:
         def engine(request: httpx.Request) -> httpx.Response:
@@ -197,6 +223,8 @@ class ApiService(unittest.TestCase):
                 "GIDEON_SOURCE_HEADER": SOURCE_HEADER,
                 "GIDEON_CHAT_HEADER": CHAT_HEADER,
                 "GIDEON_EVAL_IDENTITY": EVAL_IDENTITY,
+                "GIDEON_MODEL_ID": MODEL_ID,
+                "GIDEON_ENGINE_MODEL": ENGINE_MODEL,
             }
             (root / "engine-key").write_text(ENGINE_KEY, encoding="utf-8")
             for path in (missing, empty):
@@ -222,6 +250,8 @@ class ApiService(unittest.TestCase):
                     "GIDEON_CHAT_HEADER": CHAT_HEADER,
                     "GIDEON_EVAL_IDENTITY": EVAL_IDENTITY,
                     "GIDEON_INSTRUCTION_FILE": str(root / "instruction.txt"),
+                    "GIDEON_MODEL_ID": MODEL_ID,
+                    "GIDEON_ENGINE_MODEL": ENGINE_MODEL,
                 }
             )
 
@@ -229,6 +259,8 @@ class ApiService(unittest.TestCase):
         self.assertEqual(settings.chat_header, CHAT_HEADER)
         self.assertEqual(settings.eval_identity, EVAL_IDENTITY)
         self.assertEqual(settings.instruction, INSTRUCTION)
+        self.assertEqual(settings.model_id, MODEL_ID)
+        self.assertEqual(settings.engine_model, ENGINE_MODEL)
 
     def test_instruction_file_refuses_missing_variable_missing_file_and_empty_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -245,6 +277,8 @@ class ApiService(unittest.TestCase):
                 "GIDEON_SOURCE_HEADER": SOURCE_HEADER,
                 "GIDEON_CHAT_HEADER": CHAT_HEADER,
                 "GIDEON_EVAL_IDENTITY": EVAL_IDENTITY,
+                "GIDEON_MODEL_ID": MODEL_ID,
+                "GIDEON_ENGINE_MODEL": ENGINE_MODEL,
             }
             with self.assertRaisesRegex(ValueError, "GIDEON_INSTRUCTION_FILE"):
                 load_settings(environment)
@@ -259,6 +293,7 @@ class ApiService(unittest.TestCase):
             root = Path(directory)
             (root / "engine-key").write_text(ENGINE_KEY, encoding="utf-8")
             (root / "api-key").write_text(API_KEY, encoding="utf-8")
+            (root / "instruction.txt").write_text(INSTRUCTION, encoding="utf-8")
             common = {
                 "GIDEON_ENGINE_URL": ENGINE_URL,
                 "GIDEON_ENGINE_API_KEY_FILE": str(root / "engine-key"),
@@ -267,11 +302,16 @@ class ApiService(unittest.TestCase):
                 "GIDEON_SOURCE_HEADER": SOURCE_HEADER,
                 "GIDEON_CHAT_HEADER": CHAT_HEADER,
                 "GIDEON_EVAL_IDENTITY": EVAL_IDENTITY,
+                "GIDEON_MODEL_ID": MODEL_ID,
+                "GIDEON_ENGINE_MODEL": ENGINE_MODEL,
+                "GIDEON_INSTRUCTION_FILE": str(root / "instruction.txt"),
             }
             for variable in (
                 "GIDEON_SOURCE_HEADER",
                 "GIDEON_CHAT_HEADER",
                 "GIDEON_EVAL_IDENTITY",
+                "GIDEON_MODEL_ID",
+                "GIDEON_ENGINE_MODEL",
             ):
                 for value in (None, " \t"):
                     with self.subTest(variable=variable, value=value):
@@ -285,7 +325,7 @@ class ApiService(unittest.TestCase):
 
     def test_request_log_has_no_query_header_or_body_values(self) -> None:
         def engine(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(200, json={"data": []}, request=request)
+            return httpx.Response(200, json={"data": [{"id": ENGINE_MODEL}]}, request=request)
 
         with self.assertLogs("gideon.api.request", level="INFO") as captured:
             response = self.request(

@@ -42,6 +42,8 @@ ENGINE_URL = "http://fixture-engine/v1"
 SOURCE_HEADER = "X-Fixture-Source"
 EVAL_IDENTITY = "eval@example.invalid"
 INSTRUCTION = "Fictitious General instruction."
+MODEL_ID = "fixture-general"
+ENGINE_MODEL = "fixture-model"
 _ASGI_WAIT_SECONDS = 1.0
 # The application task has already finished wherever this bound is used, so a
 # message that has not arrived by now never will.
@@ -121,7 +123,7 @@ _TRIP_PROMPT = "Explain a fictitious legal rule."
 _TRIP_REQUEST_BODY = json.dumps(
     {
         "stream": True,
-        "model": "fixture-model",
+        "model": MODEL_ID,
         "messages": [{"role": "user", "content": _TRIP_PROMPT}],
     },
     separators=(",", ":"),
@@ -522,6 +524,8 @@ class ApiCompletions(unittest.TestCase):
             self.chat_header,
             EVAL_IDENTITY,
             INSTRUCTION,
+            MODEL_ID,
+            ENGINE_MODEL,
         )
 
     def request(
@@ -530,7 +534,7 @@ class ApiCompletions(unittest.TestCase):
         method: str = "POST",
         path: str = "/v1/chat/completions",
         *,
-        body: bytes = b'{"messages":[]}',
+        body: bytes = b'{"model":"fixture-general","messages":[]}',
         headers: Mapping[str, str] | Sequence[tuple[str, str]] | None = None,
         spec_version: str = "2.4",
     ) -> ASGIResponse:
@@ -575,7 +579,7 @@ class ApiCompletions(unittest.TestCase):
             app,
             "POST",
             "/v1/chat/completions",
-            b'{"stream":true,"prompt":"fixture prompt secret"}',
+            b'{"model":"fixture-general","stream":true,"prompt":"fixture prompt secret"}',
             {
                 "Authorization": f"Bearer {API_KEY}",
                 "Content-Type": "application/json",
@@ -614,7 +618,7 @@ class ApiCompletions(unittest.TestCase):
         )
         if not isinstance(expected, guardrail.Trip):
             raise AssertionError("fixture answer stopped tripping")
-        return ("fixture-model", expected.family, expected.pattern_id, source, chat_id)
+        return (MODEL_ID, expected.family, expected.pattern_id, source, chat_id)
 
     @staticmethod
     def response_body(messages: Sequence[Message]) -> bytes:
@@ -981,7 +985,7 @@ class ApiCompletions(unittest.TestCase):
                 app,
                 "POST",
                 "/v1/chat/completions",
-                b'{"stream":true,"messages":[]}',
+                b'{"model":"fixture-general","stream":true,"messages":[]}',
                 {"Authorization": f"Bearer {API_KEY}"},
                 "2.4",
             ) as session:
@@ -1096,7 +1100,7 @@ class ApiCompletions(unittest.TestCase):
 
         response = self.request(
             httpx.MockTransport(engine),
-            body=b'{"stream":true}',
+            body=b'{"model":"fixture-general","stream":true}',
             headers={"Authorization": f"Bearer {API_KEY}"},
         )
 
@@ -1119,7 +1123,7 @@ class ApiCompletions(unittest.TestCase):
 
         response = self.request(
             httpx.MockTransport(engine),
-            body=b'{"stream":true}',
+            body=b'{"model":"fixture-general","stream":true}',
             headers={"Authorization": f"Bearer {API_KEY}"},
         )
 
@@ -1143,7 +1147,7 @@ class ApiCompletions(unittest.TestCase):
             app,
             "POST",
             "/v1/chat/completions",
-            b'{"stream":true,"prompt":"fixture prompt secret"}',
+            b'{"model":"fixture-general","stream":true,"prompt":"fixture prompt secret"}',
             {
                 "Authorization": f"Bearer {API_KEY}",
                 "Content-Type": "application/json",
@@ -1188,7 +1192,7 @@ class ApiCompletions(unittest.TestCase):
             app,
             "POST",
             "/v1/chat/completions",
-            b'{"stream":false,"prompt":"fixture prompt secret"}',
+            b'{"model":"fixture-general","stream":false,"prompt":"fixture prompt secret"}',
             {
                 "Authorization": f"Bearer {API_KEY}",
                 "Content-Type": "application/json",
@@ -1236,7 +1240,7 @@ class ApiCompletions(unittest.TestCase):
             app,
             "POST",
             "/v1/chat/completions",
-            b'{"stream":true,"prompt":"fixture prompt secret"}',
+            b'{"model":"fixture-general","stream":true,"prompt":"fixture prompt secret"}',
             {
                 "Authorization": f"Bearer {API_KEY}",
                 "Content-Type": "application/json",
@@ -1342,7 +1346,7 @@ class ApiCompletions(unittest.TestCase):
                 app,
                 "POST",
                 "/v1/chat/completions",
-                b'{"stream":true,"prompt":"fixture prompt secret"}',
+                b'{"model":"fixture-general","stream":true,"prompt":"fixture prompt secret"}',
                 {"Authorization": f"Bearer {API_KEY}"},
                 "2.4",
             ) as session:
@@ -1382,7 +1386,7 @@ class ApiCompletions(unittest.TestCase):
             app,
             "POST",
             "/v1/chat/completions",
-            b'{"stream":true,"prompt":"fixture prompt secret"}',
+            b'{"model":"fixture-general","stream":true,"prompt":"fixture prompt secret"}',
             {"Authorization": f"Bearer {API_KEY}"},
             "2.4",
         ) as session:
@@ -1505,6 +1509,7 @@ class ApiCompletions(unittest.TestCase):
         request_body = json.dumps(
             {
                 "stream": False,
+                "model": MODEL_ID,
                 "messages": [{"role": "user", "content": "fixture prompt"}],
             },
             separators=(",", ":"),
@@ -1567,7 +1572,7 @@ class ApiCompletions(unittest.TestCase):
         with capture_logs() as captured:
             response = self.request(
                 httpx.MockTransport(engine),
-                body=b'{"stream":false,"messages":[{"role":"user","content":"fixture prompt"}]}',
+                body=b'{"model":"fixture-general","stream":false,"messages":[{"role":"user","content":"fixture prompt"}]}',
                 headers={"Authorization": f"Bearer {API_KEY}"},
             )
 
@@ -1578,7 +1583,7 @@ class ApiCompletions(unittest.TestCase):
             self.assertNotIn(stamp.CITATION_STAMP, rendered)
 
     def test_completion_forwards_body_content_type_and_only_engine_identity(self) -> None:
-        callers_body = b'{"messages":[{"content":"fixture prompt"}]}'
+        callers_body = b'{"model":"fixture-general","messages":[{"content":"fixture prompt"}]}'
         calls: list[httpx.Request] = []
 
         def engine(request: httpx.Request) -> httpx.Response:
@@ -1600,7 +1605,7 @@ class ApiCompletions(unittest.TestCase):
         request = calls[0]
         self.assertEqual(
             json.loads(request.content),
-            {"messages": [
+            {"model": ENGINE_MODEL, "messages": [
                 {"role": "system", "content": INSTRUCTION},
                 {"content": "fixture prompt"},
             ]},
@@ -1615,7 +1620,7 @@ class ApiCompletions(unittest.TestCase):
             {"role": "user", "content": "Fixture prompt."},
         ]
         caller = {
-            "model": "fixture-model",
+            "model": MODEL_ID,
             "messages": messages,
             "temperature": 0.4,
         }
@@ -1635,6 +1640,7 @@ class ApiCompletions(unittest.TestCase):
         self.assertEqual(len(received), 1)
         expected = {
             **caller,
+            "model": ENGINE_MODEL,
             "messages": [
                 {"role": "system", "content": INSTRUCTION + "\nPersonal direction.", "name": "personal"},
                 messages[1],
@@ -1642,25 +1648,56 @@ class ApiCompletions(unittest.TestCase):
         }
         self.assertEqual(json.loads(received[0]), expected)
 
-    def test_unshaped_bodies_reach_engine_unchanged(self) -> None:
-        for body in (b'{ "model": "fixture" }', b'{"messages":false}', b'not JSON'):
+    def test_unadmitted_bodies_are_refused_before_engine_and_judge(self) -> None:
+        for body in (
+            b'{"model":"fixture-other"}',
+            json.dumps({"model": ENGINE_MODEL}).encode(),
+            b'{"messages":false}', b'{"model":null}', b'{"model":7}',
+            b'[]', b'not JSON',
+        ):
             with self.subTest(body=body):
                 received: list[bytes] = []
+                rows: list[tuple[str, str, str, str, str | None]] = []
 
                 def engine(request: httpx.Request, observed: list[bytes] = received) -> httpx.Response:
                     observed.append(request.content)
                     return httpx.Response(200, content=b'{"choices":[]}', request=request)
 
-                response = self.request(
-                    httpx.MockTransport(engine),
-                    body=body,
-                    headers={"Authorization": f"Bearer {API_KEY}"},
-                )
+                with trip_driver(self.recording_connect(rows, threading.Event())), capture_logs() as captured:
+                    response = self.request(
+                        httpx.MockTransport(engine), body=body,
+                        headers={"Authorization": f"Bearer {API_KEY}"},
+                    )
+                self.assertEqual(response.status_code, 404)
+                self.assertEqual(json.loads(response.body)["error"]["code"], "model_not_found")
+                self.assertNotIn(body, response.body)
+                self.assertEqual(received, [])
+                self.assertEqual(rows, [])
+                service_records = [
+                    record for record in captured.records
+                    if record.name.startswith("gideon.api.")
+                ]
+                self.assertEqual(len(service_records), 1)
+                self.assertEqual(service_records[0].name, "gideon.api.request")
+                self.assertNotIn(body.decode("utf-8", errors="replace"),
+                                 service_records[0].getMessage())
 
-                self.assertEqual(response.status_code, 200)
-                self.assertEqual(received, [body])
+    def test_admitted_body_without_messages_reaches_engine_addressed(self) -> None:
+        received: list[bytes] = []
 
-    def test_judged_state_reads_the_body_sent_to_engine(self) -> None:
+        def engine(request: httpx.Request) -> httpx.Response:
+            received.append(request.content)
+            return httpx.Response(400, content=b'{"error":"fixture"}', request=request)
+
+        response = self.request(
+            httpx.MockTransport(engine),
+            body=b'{"model":"fixture-general","messages":false}',
+            headers={"Authorization": f"Bearer {API_KEY}"},
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(json.loads(received[0]), {"model": ENGINE_MODEL, "messages": False})
+
+    def test_judged_state_reads_the_instructed_body_before_engine_addressing(self) -> None:
         for personal in (False, True):
             with self.subTest(personal=personal):
                 messages: list[object] = [{
@@ -1669,7 +1706,7 @@ class ApiCompletions(unittest.TestCase):
                 }]
                 if personal:
                     messages.insert(0, {"role": "system", "content": "Personal direction."})
-                body = json.dumps({"messages": messages}).encode()
+                body = json.dumps({"model": MODEL_ID, "messages": messages}).encode()
                 seen: list[bytes] = []
                 original = judged.stream_state_from_body
 
@@ -1710,7 +1747,11 @@ class ApiCompletions(unittest.TestCase):
                     "I won't verify your deadline of June 5, 2027.",
                 )
                 self.assertEqual(len(seen), 2)
-                self.assertEqual(seen[0], seen[1])
+                instructed = json.loads(seen[0])
+                addressed = json.loads(seen[1])
+                self.assertEqual(instructed["model"], MODEL_ID)
+                self.assertEqual(addressed["model"], ENGINE_MODEL)
+                self.assertEqual(instructed["messages"], addressed["messages"])
                 instructed_messages = json.loads(seen[0])["messages"]
                 self.assertEqual(instructed_messages[0]["role"], "system")
                 self.assertEqual(instructed_messages[-1], messages[-1])
@@ -1749,7 +1790,7 @@ class ApiCompletions(unittest.TestCase):
 
         response = self.request(
             httpx.MockTransport(engine),
-            body=b'{"messages":[{"role":"user","content":"Explain a fictitious legal rule."}]}',
+            body=b'{"model":"fixture-general","messages":[{"role":"user","content":"Explain a fictitious legal rule."}]}',
             headers={"Authorization": f"Bearer {API_KEY}"},
         )
 
@@ -1781,7 +1822,7 @@ class ApiCompletions(unittest.TestCase):
         with self.assertLogs("gideon.api.relay", level="WARNING") as captured:
             response = self.request(
                 httpx.MockTransport(engine),
-                body=b'{"stream":false,"messages":[{"role":"user","content":"short fictitious chat"}]}',
+                body=b'{"model":"fixture-general","stream":false,"messages":[{"role":"user","content":"short fictitious chat"}]}',
                 headers={"Authorization": f"Bearer {API_KEY}"},
             )
 
@@ -1894,7 +1935,7 @@ class ApiCompletions(unittest.TestCase):
             timeout = cast(dict[str, float], request.extensions["timeout"])
             timeouts[request.url.path] = timeout
             if request.url.path == "/v1/models":
-                return httpx.Response(200, json={"data": []}, request=request)
+                return httpx.Response(200, json={"data": [{"id": ENGINE_MODEL}]}, request=request)
             return httpx.Response(200, content=b'{"choices":[]}', request=request)
 
         transport = httpx.MockTransport(engine)

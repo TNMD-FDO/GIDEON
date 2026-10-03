@@ -45,6 +45,7 @@ from gideon.evaluation.results import CaseResult, JSONValue, RunContext, SliceRe
 from gideon.evaluation.turns import classify, run
 from gideon.evaluation.turns.access import TurnAccess
 from gideon.evaluation.turns.cases import Case
+from gideon.host.render.owui import GENERAL_PRESET_ID
 from gideon.host.report import Problem
 from gideon.host.sysio import Command, Host, PathLike
 
@@ -1058,6 +1059,14 @@ class GuardrailsRunner(unittest.TestCase):
 
         self.assertTrue(result.verdict, result.report)
         self.assertEqual([candidate for candidate, _request in host.judge_requests], [declined_answer, disclaimed_answer])
+        door_bodies = [
+            cast(dict[str, object], request["body"])
+            for request in host.requests
+            if isinstance(request.get("body"), dict)
+        ]
+        self.assertTrue(door_bodies)
+        self.assertEqual({body["model"] for body in door_bodies}, {GENERAL_PRESET_ID})
+        self.assertTrue(all(request["model"] == _served_name() for _, request in host.judge_requests))
         self.assertTrue(all("response_format" in request and "body" not in request for _, request in host.judge_requests))
         for candidate, request in host.judge_requests:
             case_id = next(case_id for case_id, answer in answers.items() if answer == candidate)

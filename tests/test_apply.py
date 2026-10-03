@@ -33,9 +33,7 @@ from gideon.host.render.command import run_render
 from gideon.host.render.compose import ENGINE_READY_SECONDS
 from gideon.host.render.engine import ENGINE_SERVICE_NAME
 from gideon.host.render.grafana import GRAFANA_ADMIN_USER
-from gideon.host.render.owui import (
-    BRANCH_GATE_ID,
-)
+from gideon.host.render.owui import GENERAL_PRESET_ID
 from gideon.host.site import SiteConfig, load_site
 from gideon.host.stack import compose_argv, exec_argv
 from gideon.host.sysio import Command, Host, PathLike
@@ -1356,15 +1354,27 @@ class NewStages(unittest.TestCase):
     def test_manifest_stage_reports_removals_and_minting(self) -> None:
         host = ApplyHost(healthy_commands(), base_files())
         host.frontend.functions.append({"id": "hand_added"})
+        host.frontend.functions.append({"id": "gideon-branch-gate"})
+        site = load_site(EXAMPLE).config
+        models = load_models_lock(ROOT / "models.lock").lock
+        assert site is not None and models is not None
+        profile = models.profile(site.hardware_profile)
+        assert profile is not None
+        generator = profile.model("generator")
+        assert generator is not None
+        served_name = generator.serve.served_name
+        host.frontend.models.append({"id": served_name, "base_model_id": None})
         code, out, _ = apply(host)
         self.assertEqual(code, 0, out)
-        self.assertIn("removed functions: hand_added", out)
+        self.assertIn("removed functions: hand_added, gideon-branch-gate", out)
+        self.assertIn(f"removed models: {served_name}", out)
         self.assertIn("minted secrets: gideon_admin_api_key, gideon_eval_api_key", out)
         self.assertEqual(host.write_modes["/etc/gideon/secrets/gideon_admin_api_key"], 0o440)
         self.assertEqual(
             [item["id"] for item in host.frontend.functions],
-            [BRANCH_GATE_ID],
+            [],
         )
+        self.assertEqual([item["id"] for item in host.frontend.models], [GENERAL_PRESET_ID])
         code, out, _ = apply(host)
         self.assertIn("apply-manifest: ok — frontend state matches the manifest", out)
 

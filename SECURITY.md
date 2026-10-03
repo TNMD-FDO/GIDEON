@@ -24,11 +24,10 @@ too.
 
 ## What is in scope
 
-The `gideon` package and its CLI; the rendered stack (the Compose templates,
-the Caddyfile, the units, and the Filters under
-`compose/open-webui/functions/`); the built images under `images/`; the
-migrations; the three scripts; the workflows; and GIDEON's exposure to an
-upstream defect — a pin file (`host.lock`, `images.lock`, `models.lock`)
+The `gideon` package and its CLI, General's service among it; the rendered
+stack (the Compose templates, the Caddyfile, and the units); the built images
+under `images/`; the migrations; the three scripts; the workflows; and
+GIDEON's exposure to an upstream defect — a pin file (`host.lock`, `images.lock`, `models.lock`)
 naming a version that is vulnerable, or the rendered configuration exposing a
 component's defect — which is reported here as GIDEON's exposure even when the
 defect itself belongs upstream.

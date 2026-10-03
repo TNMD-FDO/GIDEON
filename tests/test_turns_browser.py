@@ -20,8 +20,8 @@ import yaml  # type: ignore[import-untyped]
 
 from gideon import guardrail
 from gideon.evaluation.turns import browser, chromium, classify, run
-from gideon.host import backuplock, models, site, tls
-from gideon.host.owui import Client, OwuiError, Response
+from gideon.host import backuplock, tls
+from gideon.host.owui import Client, Response
 from gideon.host.report import Problem
 from gideon.host.sysio import Command, PathLike
 from tools.turns import cli
@@ -39,17 +39,12 @@ class FakeHost:
         self,
         *,
         site_text: str = SITE_TEXT,
-        models_text: str | None = None,
         lock_holder: str | None = None,
         lock_error: OSError | None = None,
     ) -> None:
         self.euid = 0
         self.files: dict[str, str] = {
             str(SITE_PATH): site_text,
-            str(ROOT / "models.lock"):
-                (ROOT / "models.lock").read_text(encoding="utf-8")
-                if models_text is None
-                else models_text,
         }
         self.directories: dict[str, list[str]] = {}
         self.read_paths: list[str] = []
@@ -152,22 +147,6 @@ class FakeHost:
 
     def geteuid(self) -> int:
         return self.euid
-
-
-def _base_model_id(host: FakeHost) -> str:
-    """Derive the fake site's generator name through the committed lock loader."""
-
-    site_result = site.load_site(SITE_PATH, host=host)
-    assert site_result.config is not None and not site_result.errors
-    models_result = models.load_models_lock(ROOT / "models.lock", host=host)
-    assert models_result.lock is not None and not models_result.errors
-    selected = models.select_profile(
-        models_result.lock, site_result.config.hardware_profile
-    )
-    assert not isinstance(selected, Problem)
-    generator = selected.model("generator")
-    assert generator is not None
-    return generator.serve.served_name
 
 
 def completed(command: Sequence[str], returncode: int = 0, stdout: str = "") -> subprocess.CompletedProcess[str]:
@@ -596,14 +575,6 @@ class FakeFrontend:
         self.token = "browser-session-token"
         self.chats: dict[str, dict[str, object]] = {}
         self.calls: list[tuple[str, str, object | None, str | None]] = []
-        gate_texts = classify.load_gate_texts(ROOT)
-        self.branch_refusal = gate_texts.branch_refusal
-        self.base_model_id: str | None = None
-        self.base_model_status = 400
-        self.base_model_detail = self.branch_refusal
-        self.base_model_content = "A clean base-model answer."
-        self.base_model_stray = False
-        self.completions_transport_error = False
 
     def factory(self, *, token: str | None = None) -> Client:
         return FakeClient(self, token)
@@ -641,26 +612,6 @@ class FakeFrontend:
         self.calls.append((method, path, body, token))
         if token != self.token:
             return Response(403, {"detail": "not owner"})
-        if method == "POST" and path == "/api/chat/completions":
-            if self.completions_transport_error:
-                raise OwuiError("connection refused by the ingress", "Check the ingress, then retry.")
-            request = body if isinstance(body, Mapping) else {}
-            if request.get("model") == self.base_model_id:
-                if self.base_model_stray:
-                    self.create_chat("probe", "probe-stray")
-                if self.base_model_status != 200:
-                    return Response(self.base_model_status, {"detail": self.base_model_detail})
-                return Response(
-                    200,
-                    {
-                        "choices": [
-                            {"message": {"content": self.base_model_content, "reasoning": ""}}
-                        ]
-                    },
-                )
-            # The probe's one completion is the bare base-model request; any
-            # other falls through to the handler's not-found answer rather than
-            # being given a plausible reply this fake does not model.
         if method == "GET" and path == "/api/v1/chats/list":
             return Response(200, [{"id": chat_id} for chat_id in self.chats])
         if method == "GET" and path.startswith("/api/v1/chats/"):
@@ -772,7 +723,6 @@ class BrowserTurnIntegration(TestCase):
     ) -> tuple[int, str, str, FakeFrontend, FakeHost]:
         frontend = frontend or page.frontend
         host = host if host is not None else self._host()
-        frontend.base_model_id = _base_model_id(host)
         with TemporaryDirectory() as directory:
             cases_path = Path(directory) / "cases.yaml"
             cases_path.write_text(
@@ -812,6 +762,7 @@ class BrowserTurnIntegration(TestCase):
         code, stdout, _stderr, frontend, host = self._run(page=page, args=[])
 
         self.assertEqual(code, 0)
+        self.assertNotIn(str(ROOT / "models.lock"), host.read_paths)
         record = backuplock.parse(host.lock_records[0])
         self.assertIsNotNone(record)
         assert record is not None
@@ -883,7 +834,7 @@ class BrowserTurnIntegration(TestCase):
             with redirect_stdout(streamed), patch("tools.turns.cli.chromium.playwright_problem", return_value=None):
                 code = cli.main([str(cases_path), "--browser", "--out", str(Path(directory) / "out"), "--stream"], host=host, checkout=ROOT)
             self.assertEqual(code, 1)
-            self.assertIn("--probe-inlet", streamed.getvalue())
+            self.assertIn("drop --stream", streamed.getvalue())
 
             dry = StringIO()
             factory_calls: list[str] = []
@@ -1038,108 +989,19 @@ class BrowserTurnIntegration(TestCase):
             self.assertIn("Drop --browser", output.getvalue())
             self.assertEqual(host.read_paths, [])
 
-    def test_inlet_probe_row_is_clean(self) -> None:
-        frontend = FakeFrontend()
-        page = FakePage(frontend, drains=self._drains())
-        code, stdout, _stderr, frontend, host = self._run(
-            page=page, args=["--probe-inlet"]
-        )
-        self.assertEqual(code, 0)
-        self.assertIn(
-            "inlet-base-model: ok — refused with the branch refusal (HTTP 400)", stdout
-        )
-        self.assertIn("summary: ok — 1 turns", stdout)
-        probe_calls = [call for call in frontend.calls if call[1] == "/api/chat/completions"]
-        self.assertEqual(len(probe_calls), 1)
-        base_body = probe_calls[0][2]
-        assert isinstance(base_body, Mapping)
-        self.assertEqual(base_body["model"], frontend.base_model_id)
-        self.assertNotIn("chat_id", base_body)
-        self.assertIsNotNone(frontend.base_model_id)
-        self.assertEqual(frontend.chats, {})
-        base_record = json.loads(
-            next(value for key, value in host.files.items() if key.endswith("inlet-base-model.json"))
-        )
-        self.assertEqual(base_record["status"], 400)
-        self.assertEqual(base_record["body"]["detail"], frontend.branch_refusal)
-        self.assertIn(str(ROOT / "models.lock"), host.read_paths)
-
-    def test_probe_gate_text_loader_failure_is_content_free(self) -> None:
-        frontend = FakeFrontend()
-        page = FakePage(frontend, drains=self._drains())
-        with patch(
-            "gideon.evaluation.turns.classify._load_function",
-            side_effect=RuntimeError("private gate text"),
-        ):
-            code, stdout, _stderr, _frontend, _host = self._run(
-                page=page, args=["--probe-inlet"]
+    def test_trust_ca_requires_browser(self) -> None:
+        host = self._host()
+        with TemporaryDirectory() as directory:
+            cases_path = Path(directory) / "cases.yaml"
+            cases_path.write_text(
+                "cases:\n  - {id: answered, prompt: p, expect: answered}\n",
+                encoding="utf-8",
             )
-        function_path = ROOT / classify.BRANCH_GATE_FUNCTION
-        self.assertEqual(code, 1)
-        self.assertIn(
-            f"preconditions: refuse — inlet gate text could not be loaded from {function_path}",
-            stdout,
-        )
-        self.assertIn(f"Correct {function_path}, then retry.", stdout)
-        self.assertNotIn("private gate text", stdout)
-
-    def test_inlet_probe_failures_never_print_response_text(self) -> None:
-        for status, detail in ((200, "private base answer"), (400, "private branch detail")):
-            with self.subTest(status=status):
-                frontend = FakeFrontend()
-                frontend.base_model_status = status
-                frontend.base_model_detail = detail
-                page = FakePage(frontend, drains=self._drains())
-                code, stdout, _stderr, _frontend, _host = self._run(
-                    page=page, args=["--probe-inlet"]
-                )
-                self.assertEqual(code, 1)
-                self.assertIn(
-                    f"inlet-base-model: refuse — HTTP {status}, not the branch refusal",
-                    stdout,
-                )
-                self.assertNotIn(detail, stdout)
-                self.assertIn("2 turns" if status == 200 else "1 turns", stdout)
-
-    def test_inlet_probe_deletes_and_reports_a_stray_chat(self) -> None:
-        frontend = FakeFrontend()
-        frontend.base_model_stray = True
-        page = FakePage(frontend, drains=self._drains())
-        code, stdout, _stderr, frontend, _host = self._run(
-            page=page, args=["--probe-inlet"]
-        )
-        self.assertEqual(code, 0)
-        self.assertIn(
-            "inlet-base-model: ok — refused with the branch refusal (HTTP 400); stray chat deleted",
-            stdout,
-        )
-        self.assertIn(("DELETE", "/api/v1/chats/probe-stray", None, frontend.token), frontend.calls)
-
-    def test_probe_transport_failure_keeps_its_problem_and_fix(self) -> None:
-        frontend = FakeFrontend()
-        frontend.completions_transport_error = True
-        page = FakePage(frontend, drains=self._drains())
-        code, stdout, _stderr, _frontend, host = self._run(page=page, args=["--probe-inlet"])
-        self.assertEqual(code, 1)
-        # A request that fails carries its problem and the frontend's logs fix,
-        # owuiturn.py's rule for every call it makes — never an HTTP 0.
-        self.assertIn("inlet-base-model: refuse — probe error: connection refused by the ingress Fix: docker compose", stdout)
-        self.assertNotIn("HTTP 0", stdout)
-        record = json.loads(next(value for key, value in host.files.items() if key.endswith("inlet-base-model.json")))
-        self.assertIn("logs open-webui", record["problem"]["fix"])
-
-    def test_probe_internal_error_names_the_one_row(self) -> None:
-        frontend = FakeFrontend()
-        page = FakePage(frontend, drains=self._drains())
-        with patch(
-            "gideon.evaluation.turns.run.session.probe_bare",
-            side_effect=RuntimeError("probe broke"),
-        ):
-            code, stdout, _stderr, _frontend, _host = self._run(
-                page=page, args=["--probe-inlet"]
-            )
-        self.assertEqual(code, 1)
-        self.assertIn("inlet-base-model: refuse — internal error: RuntimeError: probe broke", stdout)
+            output = StringIO()
+            with redirect_stdout(output):
+                code = cli.main([str(cases_path), "--trust-ca"], host=host, checkout=ROOT)
+            self.assertEqual(code, 1)
+            self.assertIn("--trust-ca requires --browser", output.getvalue())
 
     def test_no_painted_frame_fails_even_with_a_clean_end_state(self) -> None:
         page = FakePage(
@@ -1155,127 +1017,6 @@ class BrowserTurnIntegration(TestCase):
         self.assertEqual([state["painted"] for state in record["browser"]["states"]], [False])
         self.assertTrue(record["browser"]["no_frames"])
 
-    def test_probe_and_trust_flags_require_browser(self) -> None:
-        host = self._host()
-        with TemporaryDirectory() as directory:
-            cases_path = Path(directory) / "cases.yaml"
-            cases_path.write_text(
-                "cases:\n  - {id: answered, prompt: p, expect: answered}\n",
-                encoding="utf-8",
-            )
-            for flag in ("--probe-inlet", "--trust-ca"):
-                output = StringIO()
-                with redirect_stdout(output):
-                    code = cli.main(
-                        [str(cases_path), flag], host=host, checkout=ROOT
-                    )
-                self.assertEqual(code, 1)
-                self.assertIn("requires --browser", output.getvalue())
-
-    def test_probe_model_lock_preconditions_use_loader_and_profile_selection(self) -> None:
-        cases_text = "cases:\n  - {id: answered, prompt: p, expect: answered}\n"
-        variants = (
-            (
-                "malformed lock",
-                FakeHost(models_text="fictitious: malformed lock\n"),
-                "models.lock",
-                "Edit models.lock",
-            ),
-            (
-                "profile missing",
-                FakeHost(site_text=SITE_TEXT + "\nhardware_profile: fictitious-profile\n"),
-                "not in models.lock",
-                "Set hardware_profile",
-            ),
-        )
-        for label, host, expected, expected_fix in variants:
-            with self.subTest(label=label), TemporaryDirectory() as directory:
-                cases_path = Path(directory) / "cases.yaml"
-                cases_path.write_text(cases_text, encoding="utf-8")
-                output = StringIO()
-                with redirect_stdout(output):
-                    code = cli.main(
-                        [
-                            str(cases_path),
-                            "--browser",
-                            "--probe-inlet",
-                            "--dry-run",
-                            "--out",
-                            str(Path(directory) / "out"),
-                        ],
-                        host=host,
-                        checkout=ROOT,
-                        site_path=SITE_PATH,
-                    )
-                self.assertEqual(code, 1)
-                self.assertIn("preconditions: refuse", output.getvalue())
-                self.assertIn(expected, output.getvalue())
-                self.assertIn(expected_fix, output.getvalue())
-                self.assertIn(str(ROOT / "models.lock"), host.read_paths)
-
-    def test_probe_gate_load_failure_is_a_precondition_row_with_its_fix(self) -> None:
-        frontend = FakeFrontend()
-        page = FakePage(frontend)
-        gate_path = ROOT / classify.BRANCH_GATE_FUNCTION
-        load_function = classify._load_function
-
-        def broken_gate(path: Path, name: str) -> object:
-            if path == gate_path:
-                raise ImportError("broken gate")
-            return load_function(path, name)
-
-        with patch(
-            "gideon.evaluation.turns.classify._load_function", side_effect=broken_gate
-        ):
-            code, stdout, _stderr, _frontend, _host = self._run(
-                page=page, args=["--probe-inlet"]
-            )
-        self.assertEqual(code, 1)
-        self.assertIn(
-            f"preconditions: refuse — inlet gate text could not be loaded from {gate_path}",
-            stdout,
-        )
-        self.assertIn(f"Correct {gate_path}, then retry.", stdout)
-        self.assertNotIn("broken gate", stdout)
-        self.assertNotIn("signin:", stdout)
-
-    def test_run_without_probe_never_loads_the_gate_texts(self) -> None:
-        frontend = FakeFrontend()
-        page = FakePage(frontend, drains=self._drains())
-        with patch(
-            "tools.turns.cli.classify.load_gate_texts",
-            side_effect=AssertionError("gate opened without probe"),
-        ) as load_gate_texts:
-            code, stdout, _stderr, _frontend, _host = self._run(page=page, args=[])
-        self.assertEqual(code, 0)
-        self.assertIn("summary: ok", stdout)
-        load_gate_texts.assert_not_called()
-
-    def test_run_entry_refuses_a_probe_without_a_gate_before_signin(self) -> None:
-        spec = run.RunSpec(
-            cases=ROOT / "tests/test_turns_browser.py",
-            repeat=1,
-            stream=False,
-            out=None,
-            force=False,
-            dry_run=False,
-            sentinel="fictitious-sentinel",
-            probe_inlet=True,
-        )
-
-        def client_factory(**_kwargs: object) -> Client:
-            raise AssertionError("signin reached without a gate")
-
-        with self.assertRaisesRegex(ValueError, "inlet gates' texts"):
-            run.run(
-                spec,
-                cases=(),
-                password="fictitious-password",
-                guardrail=object(),
-                gate_texts=None,
-                client_factory=client_factory,
-                now=lambda: datetime(2026, 9, 5, 12, 0, tzinfo=UTC),
-            )
 
     def test_trust_ca_row_runs_before_launch_and_failure_blocks_factory(self) -> None:
         host = self._host()
@@ -1393,43 +1134,8 @@ class BrowserTurnIntegration(TestCase):
         self.assertEqual(browser_record["requests"], {"on_host": 2, "off_host": 1, "off_hostnames": ["outside.example"]})
         self.assertEqual(browser_record["observation"]["selector_label"], "General")
 
-    def test_dry_run_probe_prints_engine_calls_and_never_launches(self) -> None:
-        host = self._host()
-        expected_base_model = _base_model_id(host)
-        with TemporaryDirectory() as directory:
-            cases_path = Path(directory) / "cases.yaml"
-            cases_path.write_text(
-                "cases:\n"
-                "  - {id: answered, prompt: p, expect: answered}\n"
-                "  - {id: answered-two, prompt: q, expect: answered}\n",
-                encoding="utf-8",
-            )
-            calls: list[str] = []
 
-            def factory(
-                hostname: str, _log: chromium.RequestLog
-            ) -> tuple[browser.Page, Callable[[], None], str]:
-                calls.append(hostname)
-                return FakePage(FakeFrontend()), lambda: None, "unused"
-
-            output = StringIO()
-            with redirect_stdout(output):
-                code = cli.main(
-                    [str(cases_path), "--browser", "--probe-inlet", "--dry-run", "--out", str(Path(directory) / "out")],
-                    host=host,
-                    page_factory=factory,
-                    checkout=ROOT,
-                )
-            self.assertEqual(code, 0)
-            self.assertIn("probe: inlet gate", output.getvalue())
-            self.assertIn(
-                "engine calls: 6 (3 per browser turn)",
-                output.getvalue(),
-            )
-            self.assertIn(f"probe: inlet gate ({expected_base_model})", output.getvalue())
-            self.assertEqual(calls, [])
-
-    def test_browser_turn_factor_and_probe_call_drive_the_window_guard(self) -> None:
+    def test_browser_turn_factor_drives_the_window_guard(self) -> None:
         host = self._host()
         office = datetime(2026, 9, 7, 12, 0, tzinfo=UTC)
         with TemporaryDirectory() as directory:
@@ -1487,7 +1193,6 @@ class BrowserTurnIntegration(TestCase):
                 write_cases(cases_path, count)
                 frontend = FakeFrontend()
                 run_host = self._host()
-                frontend.base_model_id = _base_model_id(run_host)
                 page = FakePage(frontend, drains=self._drains() * (count * 3))
                 factory_calls: list[str] = []
 
@@ -1520,16 +1225,6 @@ class BrowserTurnIntegration(TestCase):
             self.assertIn("2 turns; 6 engine calls (3 per browser turn)", admitted_output)
             self.assertEqual(len(factory_calls), 1)
             self.assertTrue(frontend.calls)
-
-            code, probed_output, _frontend, _factory_calls = run_browser_cases(
-                2, "probed", ("--probe-inlet",)
-            )
-            self.assertEqual(code, 0)
-            self.assertIn(
-                "2 turns; 6 engine calls (3 per browser turn)",
-                probed_output,
-            )
-            self.assertIn("summary: ok — 2 turns", probed_output)
 
             code, forced_output, _frontend, _factory_calls = run_browser_cases(
                 5, "forced", ("--force",)

@@ -35,6 +35,7 @@ from gideon.host.render.grafana import (
 )
 from gideon.host.render.owui import (
     EVAL_IDENTITY,
+    GENERAL_PRESET_ID,
     PERMISSIONS_TEMPLATE,
     owui_environment,
 )
@@ -188,6 +189,18 @@ def engine_wrapper(secret_path: str, server: str) -> list[str]:
     return ["sh", "-c", line, ENGINE_SERVICE_NAME]
 
 
+def _generator(inputs: RenderInputs) -> ModelPin:
+    """Return the profile's generator pin, which the engine and the service both name."""
+
+    model = inputs.profile.model("generator")
+    if model is None:
+        raise ValueError(
+            f"Cannot render Compose: profile {inputs.profile.name} has no generator model. "
+            "Add the generator model to models.lock, then re-run render."
+        )
+    return model
+
+
 def engine_command(pin: ModelPin) -> list[str]:
     """Build the vLLM command from the selected model's locked baseline.
 
@@ -224,12 +237,7 @@ def engine_service(
     document builder passes its own so the key is parsed once.
     """
 
-    model = inputs.profile.model("generator")
-    if model is None:
-        raise ValueError(
-            f"Cannot render Compose: profile {inputs.profile.name} has no generator model. "
-            "Add the generator model to models.lock, then re-run render."
-        )
+    model = _generator(inputs)
     if model.gpu < 0 or model.gpu >= len(inputs.facts.gpu_uuids):
         raise ValueError(
             f"Cannot render Compose: profile {inputs.profile.name} assigns generator GPU "
@@ -318,9 +326,9 @@ def api_service(
     """Build the API service from the applying checkout's mounted package.
 
     It has no ports: callers reach it on the Compose network. The read-only
-    checkout mount is the tree that applied this render. General's instruction
-    is mounted from the rendered tree, whose file owner makes a text change
-    recreate the service; the source-digest label does the same for code.
+    checkout mount is the tree that applied this render. A change to the
+    mounted instruction or source-digest label recreates the service;
+    General's model id and the engine's served name move its block.
     """
 
     if not inputs.checkout:
@@ -346,6 +354,8 @@ def api_service(
             "GIDEON_SOURCE_HEADER": API_SOURCE_HEADER,
             "GIDEON_EVAL_IDENTITY": EVAL_IDENTITY.email,
             "GIDEON_CHAT_HEADER": API_CHAT_HEADER,
+            "GIDEON_MODEL_ID": GENERAL_PRESET_ID,
+            "GIDEON_ENGINE_MODEL": _generator(inputs).serve.served_name,
             "TZ": inputs.site.office.timezone,
         },
         "command": ["python", "-m", "gideon.api"],

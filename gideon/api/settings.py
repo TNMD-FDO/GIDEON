@@ -1,4 +1,4 @@
-"""The eight startup settings for the GIDEON API service."""
+"""The ten startup settings for the GIDEON API service."""
 
 import os
 from collections.abc import Mapping
@@ -18,6 +18,8 @@ class Settings:
     chat_header: str  # the forwarded header holding the trip's chat id
     eval_identity: str  # the value under that header that reads as the eval identity
     instruction: str  # rendered file text, with surrounding whitespace stripped
+    model_id: str  # the service's listed and accepted model id
+    engine_model: str  # the engine's served name for upstream requests
 
 
 def _required_environment(environ: Mapping[str, str], name: str) -> str:
@@ -58,4 +60,6 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         chat_header=_required_environment(values, "GIDEON_CHAT_HEADER"),
         eval_identity=_required_environment(values, "GIDEON_EVAL_IDENTITY"),
         instruction=_read_file(values, "GIDEON_INSTRUCTION_FILE", "Instruction"),
+        model_id=_required_environment(values, "GIDEON_MODEL_ID"),
+        engine_model=_required_environment(values, "GIDEON_ENGINE_MODEL"),
     )

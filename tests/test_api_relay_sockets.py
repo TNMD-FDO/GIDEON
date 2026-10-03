@@ -22,6 +22,8 @@ SOURCE_HEADER = "X-Fixture-Source"
 CHAT_HEADER = "X-Fixture-Chat"
 EVAL_IDENTITY = "eval@example.invalid"
 INSTRUCTION = "Fictitious General instruction."
+MODEL_ID = "fixture-general"
+ENGINE_MODEL = "fixture-model"
 _WAIT_SECONDS = 3.0
 _POLL_SECONDS = 0.05
 _STREAM_CONTENT_TYPE = "text/event-stream; charset=utf-8"
@@ -310,6 +312,8 @@ class ApiRelaySockets(unittest.TestCase):
             CHAT_HEADER,
             EVAL_IDENTITY,
             INSTRUCTION,
+            MODEL_ID,
+            ENGINE_MODEL,
         )
         self.service_server = StartedServer(
             uvicorn.Config(
@@ -368,7 +372,7 @@ class ApiRelaySockets(unittest.TestCase):
     def _stream_request(self) -> tuple[http.client.HTTPConnection, http.client.HTTPResponse]:
         connection = self._connection()
         body = json.dumps(
-            {"stream": True, "messages": [{"content": "fixture prompt"}]},
+            {"model": MODEL_ID, "stream": True, "messages": [{"content": "fixture prompt"}]},
             separators=(",", ":"),
         ).encode("utf-8")
         connection.request(
@@ -392,6 +396,10 @@ class ApiRelaySockets(unittest.TestCase):
                     {"role": "system", "content": INSTRUCTION},
                     {"content": "fixture prompt"},
                 ],
+            )
+            self.assertEqual(
+                cast(dict[str, object], self.stub_state["received_body"])["model"],
+                ENGINE_MODEL,
             )
             self.assertEqual(first, _parse_event(_STREAM_EVENTS[0]))
             self.assertEqual(response.status, 200)
@@ -442,7 +450,8 @@ class ApiRelaySockets(unittest.TestCase):
     def test_trip_closes_engine_before_client_reads_refusal(self) -> None:
         connection = self._connection()
         body = json.dumps(
-            {"stream": True, "trip": True, "messages": [{"content": "fixture prompt"}]},
+            {"model": MODEL_ID, "stream": True, "trip": True,
+             "messages": [{"content": "fixture prompt"}]},
             separators=(",", ":"),
         ).encode("utf-8")
         connection.request(

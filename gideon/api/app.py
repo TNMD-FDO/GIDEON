@@ -13,6 +13,7 @@ from starlette.routing import BaseRoute, Match, Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .auth import BearerAuthMiddleware
+from .model import model_listing
 from .relay import UPSTREAM_ERROR, CompletionRelay
 from .settings import Settings
 from .upstream import EngineClient
@@ -21,6 +22,7 @@ _HEALTH_PATH = "/health"
 _MODELS_PATH = "/v1/models"
 _COMPLETIONS_PATH = "/v1/chat/completions"
 _REQUEST_LOG = logging.getLogger("gideon.api.request")
+_APP_LOG = logging.getLogger("gideon.api.app")
 
 _UNMATCHED = "-"
 
@@ -91,11 +93,19 @@ async def health(_: Request) -> JSONResponse:
 
 
 async def models(request: Request) -> Response:
-    """Pass the engine's model-list status and body through the service."""
+    """List General when the engine confirms its served model is available."""
 
     result = await request.app.state.engine.list_models()
     if result is None:
         return JSONResponse(UPSTREAM_ERROR, status_code=502)
+    if result.status_code == 200:
+        listing = model_listing(
+            result.content, request.app.state.engine_model, request.app.state.model_id
+        )
+        if listing is None:
+            _APP_LOG.warning("upstream model listing unavailable")
+            return JSONResponse(UPSTREAM_ERROR, status_code=502)
+        return Response(content=listing, status_code=200, media_type="application/json")
     headers = {}
     if result.content_type is not None:
         headers["content-type"] = result.content_type
@@ -113,6 +123,8 @@ def create_app(
     async def lifespan(application: Starlette) -> AsyncIterator[None]:
         engine = EngineClient(settings, transport=transport)
         application.state.engine = engine
+        application.state.model_id = settings.model_id
+        application.state.engine_model = settings.engine_model
         try:
             yield
         finally:
@@ -128,6 +140,7 @@ def create_app(
             CompletionRelay(
                 settings.source_header, settings.chat_header, settings.eval_identity,
                 settings.instruction,
+                settings.model_id, settings.engine_model,
             ),
             methods=["POST"],
         ),

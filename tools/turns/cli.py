@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 from gideon import guardrail
 from gideon.evaluation import window
-from gideon.evaluation.turns import access, browser, cases, chromium, classify
+from gideon.evaluation.turns import access, browser, cases, chromium
 from gideon.evaluation.turns.run import (
     BROWSER_ENGINE_CALLS_PER_TURN,
     SMOKE_TURNS,
@@ -40,9 +40,7 @@ _MODELS_FIX: Final[str] = (
 )
 _OUT_FIX: Final[str] = "Name a new or empty directory for the run's transcripts."
 _BROWSER_OUT_FIX: Final[str] = "Pass --out <dir> when using --browser, then retry."
-_BROWSER_STREAM_FIX: Final[str] = (
-    "Use --probe-inlet for the users-seat probe; browser mode captures the live screen."
-)
+_BROWSER_STREAM_FIX: Final[str] = "Browser mode captures the live screen; drop --stream, then retry."
 _BROWSER_CONCURRENT_FIX: Final[str] = (
     "Run the API mode with --concurrent, and one --browser case with --beside for the "
     "screen under load, then retry."
@@ -55,9 +53,6 @@ _UNFILTERED_BROWSER_FIX: Final[str] = (
     "Drop --browser when using --unfiltered, then retry."
 )
 _UNFILTERED_STREAM_FIX: Final[str] = "Drop --stream when using --unfiltered, then retry."
-_UNFILTERED_PROBE_FIX: Final[str] = (
-    "Drop --probe-inlet when using --unfiltered, then retry."
-)
 _UNFILTERED_CONCURRENT_FIX: Final[str] = (
     "Drop --concurrent or set it to 1 when using --unfiltered, then retry."
 )
@@ -67,9 +62,6 @@ _UNFILTERED_SEARCH_FIX: Final[str] = (
 )
 _SERVICE_BROWSER_FIX: Final[str] = (
     "Drop --browser when using --service, then retry."
-)
-_SERVICE_PROBE_FIX: Final[str] = (
-    "Drop --probe-inlet when using --service, then retry."
 )
 _SERVICE_TRUST_FIX: Final[str] = (
     "Drop --trust-ca when using --service, then retry."
@@ -137,7 +129,6 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--stream", action="store_true")
     parser.add_argument("--browser", action="store_true")
-    parser.add_argument("--probe-inlet", action="store_true")
     parser.add_argument("--trust-ca", action="store_true")
     parser.add_argument("--out", type=Path, metavar="DIR")
     parser.add_argument("--case", action="append", default=[], metavar="ID")
@@ -186,7 +177,6 @@ def _unfiltered_refusal(
     conflicts = (
         (options.browser, "--browser", _UNFILTERED_BROWSER_FIX),
         (options.stream, "--stream", _UNFILTERED_STREAM_FIX),
-        (options.probe_inlet, "--probe-inlet", _UNFILTERED_PROBE_FIX),
         (options.concurrent > 1, "--concurrent above 1", _UNFILTERED_CONCURRENT_FIX),
     )
     for present, flag, fix in conflicts:
@@ -207,7 +197,6 @@ def _service_refusal(options: argparse.Namespace) -> StageResult | None:
     if options.service:
         conflicts = (
             (options.browser, "--browser", _SERVICE_BROWSER_FIX),
-            (options.probe_inlet, "--probe-inlet", _SERVICE_PROBE_FIX),
             (options.trust_ca, "--trust-ca", _SERVICE_TRUST_FIX),
             (options.unfiltered, "--unfiltered", _SERVICE_UNFILTERED_FIX),
             (options.no_instruction, "--no-instruction", _SERVICE_NO_INSTRUCTION_FIX),
@@ -289,9 +278,8 @@ def main(
     io = host or RealHost()
     root = checkout or Path(__file__).resolve().parents[2]
     output = options.out.resolve() if options.out is not None else None
-    # The modes that call a GIDEON service directly, so they read the served
-    # name and General's instruction instead of the frontend's preset and
-    # need no eval password. Both modes now call a GIDEON service directly.
+    # Direct modes need no frontend eval password. Unfiltered reads the engine's
+    # served name and General's instruction; service mode addresses General.
     direct_mode = options.service or options.unfiltered
     rendered_dir = Path(CI_ROOT) if options.stack == "ci" else Path(_RENDERED_DIR)
     rendered_fix = _CI_RENDERED_FIX if options.stack == "ci" else _RENDERED_FIX
@@ -313,16 +301,6 @@ def main(
                 False,
                 "--concurrent is not available with --browser",
                 _BROWSER_CONCURRENT_FIX,
-            )
-        )
-        return 1
-    if options.probe_inlet and not options.browser:
-        print_stage(
-            StageResult(
-                "preconditions",
-                False,
-                "--probe-inlet requires --browser",
-                _BROWSER_ONLY_FIX,
             )
         )
         return 1
@@ -379,9 +357,10 @@ def main(
         )
         return 1
 
-    base_model: str | None = None
-    served_model: str | None = None
-    if options.probe_inlet or direct_mode:
+    # The model a run addresses: General's id, or the engine's served name when
+    # --unfiltered asks the engine directly.
+    run_model = GENERAL_PRESET_ID
+    if options.unfiltered:
         models_result = models.load_models_lock(root / "models.lock", host=io)
         if models_result.errors or models_result.lock is None:
             fix = models_result.errors[0].fix if models_result.errors else _MODELS_FIX
@@ -413,9 +392,7 @@ def main(
                 )
             )
             return 1
-        served_model = generator.serve.served_name
-        if options.probe_inlet:
-            base_model = served_model
+        run_model = generator.serve.served_name
 
     instruction: str | None = None
     if options.unfiltered and not options.no_instruction:
@@ -474,21 +451,6 @@ def main(
             )
             return 1
         password_value = resolved_password
-
-    gate_texts: classify.GateTexts | None = None
-    if options.probe_inlet:
-        try:
-            gate_texts = classify.load_gate_texts(root)
-        except classify.GateTextUnavailable as exc:
-            print_stage(
-                StageResult(
-                    "preconditions",
-                    False,
-                    f"inlet gate text could not be loaded from {exc.path}",
-                    f"Correct {exc.path}, then retry.",
-                )
-            )
-            return 1
 
     loaded_cases = cases.load_cases(options.cases)
     if not isinstance(loaded_cases, cases.CaseSet):
@@ -552,8 +514,6 @@ def main(
     case_values = loaded_cases.cases
     selected_now = now or _utc_now
     stream_turns = 1 if options.service else (2 if options.stream else 1)
-    # The inlet probe is counted in neither total: the branch gate refuses it
-    # before the engine, and it is not one of the run's turns.
     turns = len(case_values) * options.repeat * options.concurrent * stream_turns
     if options.browser:
         engine_calls = turns * BROWSER_ENGINE_CALLS_PER_TURN
@@ -648,12 +608,11 @@ def main(
         if options.dry_run:
             print("Turn harness dry run:")
             streamed = ", streamed" if options.stream else ""
-            probed = " + 1 probe" if options.probe_inlet else ""
             print(f"cases: {loaded_cases.origin}")
             sessions = f"{options.concurrent} sessions × " if options.concurrent > 1 else ""
             print(
                 f"turns: {turns} ({sessions}{options.repeat} × {len(case_values)}"
-                f"{streamed}{probed})"
+                f"{streamed})"
             )
             if options.concurrent > 1:
                 print(f"sessions: {options.concurrent} in flight")
@@ -662,16 +621,13 @@ def main(
             print(f"window: {window_detail}")
             print("engine lock: not taken (dry run)")
             if direct_mode:
-                assert served_model is not None
                 instruction_state = (
                     "service" if options.service else "on" if instruction is not None else "off"
                 )
-                print(f"model: {served_model} (instruction: {instruction_state})")
+                print(f"model: {run_model} (instruction: {instruction_state})")
             else:
                 print(f"model: {GENERAL_PRESET_ID}")
             print(f"output directory: {output if output is not None else 'none'}")
-            if options.probe_inlet:
-                print(f"probe: inlet gate ({base_model})")
             if options.browser:
                 print("mode: browser")
                 print(f"harness home: {chromium.HARNESS_HOME}")
@@ -729,10 +685,8 @@ def main(
             sentinel=new_sentinel(),
             concurrent=options.concurrent,
             browser=options.browser,
-            probe_inlet=options.probe_inlet,
             trust_ca=options.trust_ca,
-            base_model=base_model,
-            model=served_model if direct_mode and served_model is not None else GENERAL_PRESET_ID,
+            model=run_model,
             unfiltered=options.unfiltered,
             case_ids=tuple(case.id for case in case_values) if options.case else (),
             service=options.service,
@@ -752,7 +706,6 @@ def main(
             cases=case_values,
             password=password_value,
             guardrail=guardrail,
-            gate_texts=gate_texts,
             client_factory=chosen_factory,
             now=selected_now,
             monotonic=monotonic,

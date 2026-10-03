@@ -786,10 +786,10 @@ class TurnHarness(TestCase):
         self.assertEqual(
             stdout.getvalue(),
             "usage: python3 -m tools.turns [-h] [--repeat N] [--concurrent N] [--stream]\n"
-            "                              [--browser] [--probe-inlet] [--trust-ca]\n"
-            "                              [--out DIR] [--case ID] [--unfiltered]\n"
-            "                              [--service] [--no-instruction] [--force]\n"
-            "                              [--beside] [--dry-run] [--stack {production,ci}]\n"
+            "                              [--browser] [--trust-ca] [--out DIR] [--case ID]\n"
+            "                              [--unfiltered] [--service] [--no-instruction]\n"
+            "                              [--force] [--beside] [--dry-run]\n"
+            "                              [--stack {production,ci}]\n"
             "                              cases\n\n"
             "positional arguments:\n"
             "  cases\n\n"
@@ -799,7 +799,6 @@ class TurnHarness(TestCase):
             "  --concurrent N\n"
             "  --stream\n"
             "  --browser\n"
-            "  --probe-inlet\n"
             "  --trust-ca\n"
             "  --out DIR\n"
             "  --case ID\n"
@@ -1850,7 +1849,6 @@ class TurnHarness(TestCase):
         refusals = (
             (["--browser", "--out", "/tmp/unfiltered-browser"], "--browser"),
             (["--stream", "--out", "/tmp/unfiltered-stream"], "--stream"),
-            (["--probe-inlet", "--out", "/tmp/unfiltered-probe"], "--probe-inlet"),
             (["--concurrent", "2", "--out", "/tmp/unfiltered-concurrent"], "--concurrent"),
             (["--unfiltered"], "--out is required"),
         )

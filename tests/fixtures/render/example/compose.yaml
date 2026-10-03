@@ -185,7 +185,7 @@ services:
       ENABLE_OPENAI_API: "true"
       OPENAI_API_BASE_URLS: "http://gideon-api:8000/v1"
       ENABLE_FORWARD_USER_INFO_HEADERS: "true"
-      TASK_MODEL_EXTERNAL: "gideon-generator"
+      TASK_MODEL_EXTERNAL: "gideon-general"
       ENABLE_TITLE_GENERATION: "true"
       ENABLE_TAGS_GENERATION: "true"
       ENABLE_SEARCH_QUERY_GENERATION: "true"
@@ -387,6 +387,8 @@ services:
       GIDEON_SOURCE_HEADER: "X-OpenWebUI-User-Email"
       GIDEON_EVAL_IDENTITY: "gideon-eval@gideon.invalid"
       GIDEON_CHAT_HEADER: "X-OpenWebUI-Chat-Id"
+      GIDEON_MODEL_ID: "gideon-general"
+      GIDEON_ENGINE_MODEL: "gideon-generator"
       TZ: "America/Chicago"
     command:
       - "python"

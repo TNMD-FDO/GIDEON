@@ -27,7 +27,6 @@ from gideon.host.owui import (
     wait_ready,
 )
 from gideon.host.render.owui import (
-    BRANCH_GATE_ID,
     BREAK_GLASS,
     EVAL_IDENTITY,
     GENERAL_PRESET_ID,
@@ -43,6 +42,22 @@ ADMIN_PASSWORD = "admin-pw"
 EVAL_PASSWORD = "eval-pw"
 ADMIN_KEY = "sk-admin-secret"
 EVAL_KEY = "sk-eval-secret"
+FUNCTION_ID = "fixture-function"
+
+
+def fixture_function() -> dict[str, object]:
+    """A fictitious Function row for the sync read-back checks."""
+
+    return {
+        "id": FUNCTION_ID,
+        "name": "Fixture Function",
+        "type": "filter",
+        "content": "class Filter: pass",
+        "meta": {"description": "Fixture description"},
+        "valves": {},
+        "is_active": True,
+        "is_global": True,
+    }
 
 
 class FakeHost:
@@ -583,7 +598,7 @@ class Bootstrap(unittest.TestCase):
         host = FakeHost(secrets())
         self.run_bootstrap(frontend, host)
         frontend.functions.append({"id": "hand_added", "type": "filter"})
-        frontend.models.append({"id": "stray_model", "base_model_id": "gideon-generator"})
+        frontend.models.append({"id": "stray_model", "base_model_id": "fixture-parent"})
         frontend.models.append({"id": "stray_base"})
         stray = frontend.fresh_id("g")
         frontend.groups[stray] = {"id": stray, "name": "stray", "description": "", "permissions": {}}
@@ -595,7 +610,7 @@ class Bootstrap(unittest.TestCase):
         self.assertEqual(report.removed_groups, ("stray",))
         self.assertEqual(
             [item["id"] for item in frontend.functions],
-            [BRANCH_GATE_ID],
+            [],
         )
         expected_models = manifest()["models"]
         assert isinstance(expected_models, list)
@@ -605,7 +620,7 @@ class Bootstrap(unittest.TestCase):
         self,
         mutate: Callable[[dict[str, Any]], None],
         field: str,
-        model_id: str = "gideon-generator",
+        model_id: str = GENERAL_PRESET_ID,
     ) -> None:
         frontend = Frontend()
         host = FakeHost(secrets())
@@ -618,11 +633,6 @@ class Bootstrap(unittest.TestCase):
         self.assertIn(model_id, report.problem or "")
         self.assertIn(field, report.problem or "")
         self.assertIn("logs open-webui", report.fix)
-
-    def _assert_swallowed_general_correction_refuses(
-        self, mutate: Callable[[dict[str, Any]], None], field: str
-    ) -> None:
-        self._assert_swallowed_model_correction_refuses(mutate, field, GENERAL_PRESET_ID)
 
     def test_swallowed_model_sync_with_missing_row_refuses(self) -> None:
         frontend = Frontend()
@@ -671,27 +681,13 @@ class Bootstrap(unittest.TestCase):
 
         self._assert_swallowed_model_correction_refuses(mutate, "meta.description")
 
-    def test_swallowed_model_sync_with_removed_base_grant_refuses(self) -> None:
-        def mutate(model: dict[str, Any]) -> None:
-            model["access_grants"] = []
-
-        self._assert_swallowed_model_correction_refuses(mutate, "access_grants")
-
-    def test_swallowed_model_sync_with_unhidden_base_refuses(self) -> None:
-        def mutate(model: dict[str, Any]) -> None:
-            meta = model["meta"]
-            assert isinstance(meta, dict)
-            meta["hidden"] = False
-
-        self._assert_swallowed_model_correction_refuses(mutate, "meta.hidden")
-
     def test_swallowed_general_sync_with_changed_prompt_refuses(self) -> None:
         def mutate(model: dict[str, Any]) -> None:
             params = model["params"]
             assert isinstance(params, dict)
             params["system"] = "hand-edited"
 
-        self._assert_swallowed_general_correction_refuses(mutate, "params")
+        self._assert_swallowed_model_correction_refuses(mutate, "params")
 
     def test_swallowed_general_sync_with_dropped_mode_refuses(self) -> None:
         def mutate(model: dict[str, Any]) -> None:
@@ -699,7 +695,7 @@ class Bootstrap(unittest.TestCase):
             assert isinstance(params, dict)
             del params["function_calling"]
 
-        self._assert_swallowed_general_correction_refuses(mutate, "params")
+        self._assert_swallowed_model_correction_refuses(mutate, "params")
 
     def test_swallowed_general_sync_with_changed_description_refuses(self) -> None:
         def mutate(model: dict[str, Any]) -> None:
@@ -707,7 +703,7 @@ class Bootstrap(unittest.TestCase):
             assert isinstance(meta, dict)
             meta["description"] = "hand-edited"
 
-        self._assert_swallowed_general_correction_refuses(mutate, "meta.description")
+        self._assert_swallowed_model_correction_refuses(mutate, "meta.description")
 
     def test_swallowed_general_sync_with_changed_suggestion_prompts_refuses(self) -> None:
         frontend = Frontend()
@@ -734,7 +730,7 @@ class Bootstrap(unittest.TestCase):
             assert isinstance(meta, dict)
             meta["filterIds"] = ["hand-added-filter"]
 
-        self._assert_swallowed_general_correction_refuses(mutate, "meta.filterIds")
+        self._assert_swallowed_model_correction_refuses(mutate, "meta.filterIds")
 
     def test_live_model_listing_is_read_after_the_models_sync(self) -> None:
         frontend = Frontend()
@@ -760,7 +756,7 @@ class Bootstrap(unittest.TestCase):
         def mutate(model: dict[str, Any]) -> None:
             model["access_grants"] = []
 
-        self._assert_swallowed_general_correction_refuses(mutate, "access_grants")
+        self._assert_swallowed_model_correction_refuses(mutate, "access_grants")
 
     def test_swallowed_general_sync_with_flipped_capability_refuses(self) -> None:
         def mutate(model: dict[str, Any]) -> None:
@@ -770,7 +766,7 @@ class Bootstrap(unittest.TestCase):
             assert isinstance(capabilities, dict)
             capabilities["web_search"] = False
 
-        self._assert_swallowed_general_correction_refuses(mutate, "meta.capabilities")
+        self._assert_swallowed_model_correction_refuses(mutate, "meta.capabilities")
 
     def test_swallowed_model_sync_accepts_null_defaulted_meta_fields(self) -> None:
         frontend = Frontend()
@@ -778,7 +774,7 @@ class Bootstrap(unittest.TestCase):
         self.run_bootstrap(frontend, host)
         meta = frontend.models[0]["meta"]
         assert isinstance(meta, dict)
-        meta.update(profile_image_url=None, description=None, knowledge=None)
+        meta.update(profile_image_url=None, knowledge=None)
         frontend.swallow_sync = True
         report = self.run_bootstrap(frontend, host)
         self.assertTrue(report.ok, report.problem)
@@ -800,16 +796,20 @@ class Bootstrap(unittest.TestCase):
         self,
         mutate: Callable[[dict[str, Any]], None],
         field: str,
-        function_id: str = BRANCH_GATE_ID,
+        function_id: str = FUNCTION_ID,
     ) -> None:
         frontend = Frontend()
         host = FakeHost(secrets())
-        self.run_bootstrap(frontend, host)
+        desired = dict(manifest())
+        desired["functions"] = [fixture_function()]
+        first = bootstrap(host, factory_for(frontend), desired, rendered_dir=RENDERED)
+        self.assertTrue(first.ok, first.problem)
+        desired["functions"] = [fixture_function()]
         function = next(item for item in frontend.functions if item["id"] == function_id)
         original_content = function["content"]
         mutate(function)
         frontend.swallow_sync = True
-        report = self.run_bootstrap(frontend, host)
+        report = bootstrap(host, factory_for(frontend), desired, rendered_dir=RENDERED)
         self.assertFalse(report.ok)
         problem = report.problem or ""
         self.assertIn("functions sync", problem)
@@ -921,7 +921,7 @@ class Manifest(unittest.TestCase):
         assert isinstance(functions, list)
         self.assertEqual(
             [function["id"] for function in functions],
-            [BRANCH_GATE_ID],
+            [],
         )
         groups = document["groups"]
         assert isinstance(groups, list)
