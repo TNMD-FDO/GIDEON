@@ -82,6 +82,10 @@ services:
       GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
       GF_PLUGINS_PREINSTALL_DISABLED: "true"
       GF_PLUGINS_PUBLIC_KEY_RETRIEVAL_DISABLED: "true"
+      GF_SECURITY_DISABLE_GRAVATAR: "true"
+      GF_SNAPSHOTS_EXTERNAL_ENABLED: "false"
+      GF_PLUGINS_PLUGIN_ADMIN_ENABLED: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
       TZ: "America/Chicago"
     group_add:
       - "4242"

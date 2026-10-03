@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.13](docs/release-notes/v0.3.13.md) — 2026-10-03 — Grafana's Gravatar, external snapshots, plugin install, and news feed off
 - [v0.3.12](docs/release-notes/v0.3.12.md) — 2026-10-03 — the progress line alone while General thinks, no Thinking block beneath it
 - [v0.3.11](docs/release-notes/v0.3.11.md) — 2026-10-03 — the Overview shows the passing drill's age and links the silences page
 - [v0.3.10](docs/release-notes/v0.3.10.md) — 2026-10-02 — General is the connection's own row

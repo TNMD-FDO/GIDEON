@@ -413,6 +413,14 @@ def grafana_environment(inputs: RenderInputs) -> Mapping[str, str]:
         # The image otherwise downloads the plugin-signature key from the same
         # host every ten days.
         "GF_PLUGINS_PUBLIC_KEY_RETRIEVAL_DISABLED": "true",
+        # Rendering an avatar otherwise fetches an address hash from Gravatar.
+        "GF_SECURITY_DISABLE_GRAVATAR": "true",
+        # Publishing a board otherwise sends it to a public snapshot host.
+        "GF_SNAPSHOTS_EXTERNAL_ENABLED": "false",
+        # In-app install otherwise downloads unpinned code; the listing proxy stays.
+        "GF_PLUGINS_PLUGIN_ADMIN_ENABLED": "false",
+        # The product's chrome otherwise fetches a news feed in the browser.
+        "GF_NEWS_NEWS_FEED_ENABLED": "false",
         "TZ": inputs.site.office.timezone,
     }
     if smtp.user:

@@ -215,6 +215,16 @@ signature-key refresh; Grafana runs only what the pinned image holds, and
 `config/egress.yaml` lists no host for it. Grafana reaches Prometheus and
 Postgres on the Compose network, and the office's mail relay and directory.
 
+A signed-in person's actions cannot fetch profile images from Gravatar (every
+account shows the default image), publish a snapshot to Grafana Labs' public
+snapshot host (snapshots kept on the box still work), install plugins from the
+catalog, or load the news feed. Visiting the Plugins page still asks the box to
+fetch the catalog listing from grafana.com; no setting turns off that proxy.
+`config/egress.yaml` lists no host for Grafana. An office firewall that enforces
+the allowlist refuses the request, and each visit then logs one `level=error`
+"Proxy request failed" line; this is not a fault. Where the firewall does not
+enforce the allowlist, the listing loads. Either way, the page installs nothing.
+
 ## 10. The weekly nudge
 
 The weekly email, subject `[GIDEON <office>] Proposals waiting`, says

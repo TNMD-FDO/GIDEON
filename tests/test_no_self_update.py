@@ -31,13 +31,19 @@ SELF_UPDATE_SWITCHES: Mapping[str, Mapping[str, str]] = {
     # and the two user-triggered outbound resolvers are off in its settings.
     "searxng": {},
     # Grafana's update checks and reporting are off; plugins are neither
-    # installed nor refreshed by the image.
+    # installed nor refreshed by the image. Signed-in actions cannot trigger
+    # Gravatar, external snapshot, or catalog install requests, and the browser's
+    # news feed is off; the catalog listing's proxy stays, as the runbook records.
     "grafana": {
         "GF_ANALYTICS_REPORTING_ENABLED": "false",
         "GF_ANALYTICS_CHECK_FOR_UPDATES": "false",
         "GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES": "false",
         "GF_PLUGINS_PREINSTALL_DISABLED": "true",
         "GF_PLUGINS_PUBLIC_KEY_RETRIEVAL_DISABLED": "true",
+        "GF_SECURITY_DISABLE_GRAVATAR": "true",
+        "GF_SNAPSHOTS_EXTERNAL_ENABLED": "false",
+        "GF_PLUGINS_PLUGIN_ADMIN_ENABLED": "false",
+        "GF_NEWS_NEWS_FEED_ENABLED": "false",
     },
     # Prometheus has no update check or telemetry.
     "prometheus": {},

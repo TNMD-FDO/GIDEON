@@ -4,8 +4,8 @@
     "compute-01": "pass",
     "compute-02": "pass",
     "confirm-01": "pass",
-    "doctrine-01": "pass",
-    "doctrine-02": "pass",
+    "doctrine-03": "pass",
+    "doctrine-04": "pass",
     "identity-02": "pass",
     "matter-01": "pass",
     "plain-01": "pass",
@@ -17,9 +17,9 @@
   "format": 1,
   "hardware_profile": "2x96v-256d",
   "list": "smoke",
-  "product_version": "0.3.0",
+  "product_version": "0.3.12",
   "repeats": 2,
-  "set_digest": "a41a29cb46fb403afb709be17730b0741397a9c6f8e5be98166f7551cfdf3dca",
+  "set_digest": "481c76988b8629e65e45be44ae108a1ffca1e0a827d2e97d464417c5df501760",
   "slice": "general-smoke",
-  "tag": "v0.3.0"
+  "tag": "v0.3.12"
 }
