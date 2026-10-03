@@ -184,7 +184,8 @@ class LiveVerdict:
     Built from the compact entries the turn judged as they arrived; the
     instants are seconds from the first painted state of the message (the
     frames carry the page's own millisecond clock, whose zero is the page's
-    navigation, not the send).
+    navigation, not the send). The line's first paint is seconds from the
+    turn's start, and its class is one fixed word rather than its text.
     """
 
     no_states: bool
@@ -198,6 +199,8 @@ class LiveVerdict:
     gone_at: float | None = None
     on_screen_at_end: bool = False
     reasoning_painted_at: float | None = None
+    line_painted_at: float | None = None
+    line_class: str | None = None
     refused_index: int | None = None
     refused_at: float | None = None
     ended_at: float | None = None
@@ -344,7 +347,11 @@ def continuity_test() -> Callable[[str, str], bool]:
 
 
 def live_verdict(
-    entries: Sequence[browser.LiveEntry], final_trip: str | None
+    entries: Sequence[browser.LiveEntry],
+    final_trip: str | None,
+    *,
+    line_painted_at: float | None = None,
+    line_class: str | None = None,
 ) -> LiveVerdict:
     """The final painted text's judgement, the first flash, and the withdrawn trips.
 
@@ -356,7 +363,9 @@ def live_verdict(
     """
 
     if not entries:
-        return LiveVerdict(no_states=True)
+        return LiveVerdict(
+            no_states=True, line_painted_at=line_painted_at, line_class=line_class
+        )
     # The end state read directly is judged like any other, but a turn no
     # frame ever painted was not a turn a person saw.
     no_frames = not any(entry.painted for entry in entries)
@@ -402,6 +411,8 @@ def live_verdict(
             replaced_at=seconds(replaced_index) if replaced_index is not None else None,
             on_screen_at_end=True,
             reasoning_painted_at=reasoning_painted_at,
+            line_painted_at=line_painted_at,
+            line_class=line_class,
             refused_index=refused_index,
             refused_at=refused_at,
             ended_at=ended_at,
@@ -428,6 +439,8 @@ def live_verdict(
             no_frames=no_frames,
             trips=trips,
             reasoning_painted_at=reasoning_painted_at,
+            line_painted_at=line_painted_at,
+            line_class=line_class,
             refused_index=refused_index,
             refused_at=refused_at,
             ended_at=ended_at,
@@ -447,6 +460,8 @@ def live_verdict(
         replaced_at=seconds(replaced_index) if replaced_index is not None else None,
         gone_at=seconds(gone_index) if gone_index is not None else None,
         reasoning_painted_at=reasoning_painted_at,
+        line_painted_at=line_painted_at,
+        line_class=line_class,
         refused_index=refused_index,
         refused_at=refused_at,
         ended_at=ended_at,
@@ -488,11 +503,21 @@ def live_field(verdict: LiveVerdict) -> str:
     return f"live: {pattern} at {first_at:.1f}s, gone at {verdict.gone_at or 0.0:.1f}s"
 
 
-def live_fails(verdict: LiveVerdict, flash_fails: bool) -> bool:
+def line_field(verdict: LiveVerdict) -> str:
+    """Render the browser row's status-line class without its text."""
+
+    return f"line {verdict.line_class or 'absent'}"
+
+
+def live_fails(
+    verdict: LiveVerdict, flash_fails: bool, *, search: bool = False
+) -> bool:
     """Whether the live result fails the row.
 
     No state, no painted frame, reasoning, and a confirmed final trip always
-    fail. A flash fails under the shared policy; withdrawn trips do not.
+    fail. A line outside the forms fails unless the case searched, since the
+    frontend's search statuses have other forms. A flash fails under the
+    shared policy; withdrawn trips do not.
     """
 
     return (
@@ -500,6 +525,7 @@ def live_fails(verdict: LiveVerdict, flash_fails: bool) -> bool:
         or verdict.no_frames
         or verdict.on_screen_at_end
         or verdict.reasoning_painted_at is not None
+        or (verdict.line_class == browser.LINE_OUTSIDE and not search)
         or (verdict.first_trip_index is not None and flash_fails)
     )
 
@@ -707,13 +733,12 @@ def stream_verdict(
     Content prefixes use the guardrail's bounded floor since their previously
     judged length, and a prefix's trip is provisional: the final released text,
     judged whole, decides, and a clean one withdraws every provisional trip. A
-    released reasoning character or a status outside the fixed forms is a leak
-    at once. Offsets are lengths of the matching kind's extended text, never
-    any of its characters.
+    reasoning delta, even an empty one, or a status outside the fixed forms is
+    a leak at once. Offsets are lengths of the matching kind's extended text,
+    never any of its characters.
     """
 
     content = ""
-    reasoning_length = 0
     status_length = 0
     previous_length = 0
     provisional: list[StreamTrip] = []
@@ -726,10 +751,7 @@ def stream_verdict(
                 return StreamVerdict(False, STATUS_RELEASED, status_length)
             continue
         if field == "reasoning":
-            reasoning_length += len(text)
-            if text not in ("", guardrail.REASONING_PLACEHOLDER):
-                return StreamVerdict(False, REASONING_RELEASED, reasoning_length)
-            continue
+            return StreamVerdict(False, REASONING_RELEASED, len(text))
         if field != "content":
             continue
         content += text

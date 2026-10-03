@@ -9,6 +9,7 @@ from typing import Final
 from gideon import guardrail
 
 from . import progress, stamp
+from .progress import REASONING_KEYS
 from .sse import DONE_EVENT
 
 # A downstream choice is rebuilt from these keys, never scrubbed of the ones it
@@ -21,11 +22,10 @@ RELAYED_CHOICE_KEYS: Final[tuple[str, ...]] = ("index", "finish_reason")
 STATUS_ENVELOPE_KEYS: Final[tuple[str, ...]] = ("id", "object", "created", "model")
 RELAYED_DELTA_KEYS: Final[tuple[str, ...]] = ("role", "content", "tool_calls")
 RELAYED_MESSAGE_KEYS: Final[tuple[str, ...]] = ("role", "content", "tool_calls")
-# The text a delta may carry, and the names the pinned engine has used for its
-# reasoning. These are read to decide and to validate, never to scrub: what is
-# relayed is what the lists above name.
-TEXT_KEYS: Final[tuple[str, ...]] = ("reasoning", "reasoning_content", "thinking", "content")
-REASONING_KEYS: Final[tuple[str, ...]] = ("reasoning", "reasoning_content", "thinking")
+# A reasoning delta under any of the three names is withheld whole: nothing
+# leaves under its key. These names decide and validate; the progress line is
+# the seat's one sign that the model is reasoning. Relayed keys are named above.
+TEXT_KEYS: Final[tuple[str, ...]] = (*REASONING_KEYS, "content")
 # With no valid chunk seen, no envelope is minted: `object` and `choices` are
 # all the pinned frontend and the door read of a chunk.
 CHUNK_OBJECT: Final[str] = "chat.completion.chunk"
@@ -217,8 +217,10 @@ class StreamMechanics:
     The citation label is decided only after the finished answer settles at a
     finish chunk or an unfinished end.  A trip returns through the refusal
     path before that decision and never reaches the stamp.  The first reasoning
-    delta opens the progress line, later ones tick it, and the first answer or
-    any end closes it with text built by ``progress``.
+    delta under any reasoning name is withheld whole and opens the progress
+    line, the seat's one sign of reasoning. Later deltas tick it, and the first
+    answer or any end closes it with text built by ``progress``. Nothing leaves
+    under a reasoning key.
     """
 
     def __init__(
@@ -381,19 +383,6 @@ class StreamMechanics:
             del output_delta["content"]
         if released:
             output_delta["content"] = released
-        # The turn's first reasoning delta leaves as one fixed space, every
-        # later one empty: the pinned frontend's streaming accumulator opens
-        # its "Thinking…" block from a `reasoning`, `reasoning_content`, or
-        # `thinking` delta, so without this it never opens one and a seat
-        # watches a silent wait while the model reasons. The placeholder is a
-        # release constant and carries no model text; it is relayed under the
-        # engine's own key, so a pin bump that renames the field carries the
-        # placeholder with it. The changing progress line rides a status chunk
-        # of its own, since the block's summary is fixed text and its body only
-        # appends.
-        if reasoning_keys and not self.state.get("placeholder_sent"):
-            output_delta[reasoning_keys[0]] = guardrail.REASONING_PLACEHOLDER
-            self.state["placeholder_sent"] = True
         if not output_delta and not is_finished:
             return leading, False
 

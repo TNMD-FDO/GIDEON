@@ -5,9 +5,10 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Final, Protocol
 from urllib.parse import unquote, urlsplit
 
+from gideon.api import progress
 from gideon.evaluation.turns.session import LOGS_FIX
 from gideon.host.report import Problem
 
@@ -71,7 +72,7 @@ class LiveEntry:
 
 @dataclass(frozen=True, slots=True)
 class BrowserTurn:
-    """The page evidence and outcome of one browser turn."""
+    """The page evidence and outcome of one turn, with the line's class but no line text."""
 
     chat_id: str | None
     entries: tuple[LiveEntry, ...]
@@ -80,6 +81,8 @@ class BrowserTurn:
     screenshot: Path
     regions: Mapping[str, str]
     elapsed: float
+    line_painted_at: float | None = None
+    line_class: str | None = None
     problem: Problem | None = None
     final_trip: str | None = None
 
@@ -179,6 +182,13 @@ COLLAPSIBLE_BUTTON_SELECTOR = (
     f"{LAST_MESSAGE_SELECTOR} >> #response-content-container >> button[aria-expanded]"
 )
 CURSOR_SELECTOR = f"{LAST_MESSAGE_SELECTOR} >> span.animate-pulse"
+# The pinned status-history toggle under the turn's message holds the newest
+# description in this line-clamp element. Its text is classified, never kept.
+STATUS_LINE_SELECTOR: Final[str] = (
+    f'{LAST_MESSAGE_SELECTOR} >> button[aria-label="Toggle status history"] '
+    ">> .status-description .line-clamp-1"
+)
+LINE_OUTSIDE: Final[str] = "outside"
 
 _CERTIFICATE_FIX = "Run with --trust-ca once, then retry."
 
@@ -503,19 +513,22 @@ def turn(
     while the driver is inside a page call, so a Python sleep would freeze the
     page for its whole length.
 
-    The turn is done when the composer's Stop button has been seen and is gone
-    (the frontend renders it while the current message is not done), or —
-    for a turn over before the first poll saw the button — when the page
-    bound has passed since the URL flipped with a message on screen and no
-    pulsing cursor in it. The regions read directly at the last drain become
-    one more judged state when no frame showed them, so the end state is
-    always judged.
+    Each poll reads the painted status line's class beside the reasoning block;
+    the line's text is never kept. The turn is done when the composer's Stop
+    button has been seen and is gone (the frontend renders it while the current
+    message is not done), or — for a turn over before the first poll saw the
+    button — when the page bound has passed since the URL flipped with a
+    message on screen and no pulsing cursor in it. The regions read directly
+    at the last drain become one more judged state when no frame showed them,
+    so the end state is always judged.
     """
 
     started = monotonic()
     screenshot = out / f"{row_name}.png"
     watch = _Watch(judge, is_replacement, continues, whole_judge)
     block_opened_at: float | None = None
+    line_painted_at: float | None = None
+    line_class: str | None = None
     regions: Mapping[str, str] = {"block": "", "answer": ""}
     chat_id: str | None = None
     stop_seen = False
@@ -557,6 +570,14 @@ def turn(
                     if page.attribute(COLLAPSIBLE_BUTTON_SELECTOR, "aria-expanded") != "true":
                         page.click(COLLAPSIBLE_BUTTON_SELECTOR)
                     block_opened_at = monotonic()
+                if page.count(STATUS_LINE_SELECTOR) > 0:
+                    # An empty read is a line not yet painted, never a form.
+                    line = page.text(STATUS_LINE_SELECTOR)
+                    if line:
+                        if line_painted_at is None:
+                            line_painted_at = monotonic() - started
+                        if line_class != LINE_OUTSIDE:
+                            line_class = progress.classify_description(line) or LINE_OUTSIDE
                 drain_once()
                 if page.count(STOP_BUTTON_SELECTOR) > 0:
                     stop_seen = True
@@ -599,6 +620,8 @@ def turn(
         screenshot=screenshot,
         regions=regions,
         elapsed=monotonic() - started,
+        line_painted_at=line_painted_at,
+        line_class=line_class,
         problem=problem,
         final_trip=watch.final_trip,
     )

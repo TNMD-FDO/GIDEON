@@ -50,7 +50,7 @@ class GeneralSmokeSetContract(unittest.TestCase):
         seed_document = yaml.safe_load(seed_path.read_text(encoding="utf-8"))
         seed_cases = cast(list[dict[str, object]], seed_document["cases"])
 
-        self.assertEqual(len(suite_path.read_bytes().splitlines()), 14)
+        self.assertEqual(len(suite_path.read_bytes().splitlines()), 16)
         self.assertEqual(len(records), len(seed_cases))
         for source, record in zip(seed_cases, records, strict=True):
             with self.subTest(case=source["id"]):
@@ -131,7 +131,7 @@ class GeneralSmokeSetContract(unittest.TestCase):
             if "supersedes" in source
         }
         active = [case_id for case_id in ids if case_id not in superseded]
-        self.assertEqual((len(ids), len(active), len(superseded)), (14, 11, 3))
+        self.assertEqual((len(ids), len(active), len(superseded)), (16, 11, 5))
         self.assertEqual(
             sum(bool(cast(dict[str, object], record["expected"])["search"]) for record in records),
             1,

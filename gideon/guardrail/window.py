@@ -36,8 +36,8 @@ class StreamState(dict[str, object]):
     whole request with ``%s`` into a DEBUG log line, and no character of the
     stream or of the user's dates may reach a log.  The content entry holds
     its accumulated string, released length, decided length, and release
-    constraints; the state also holds the placeholder and finished flags, the
-    trip, and the inlet stash.
+    constraints; the state also holds the finished flag, the trip, and the
+    inlet stash.
     """
 
     def __init__(
@@ -52,7 +52,6 @@ class StreamState(dict[str, object]):
         super().__init__(
             {
                 "content": _new_text_state(),
-                "placeholder_sent": False,
                 "trip": None,
                 "finished": False,
                 "supplied": {
@@ -75,8 +74,7 @@ class StreamState(dict[str, object]):
         else:
             content = "invalid"
         return (
-            f"StreamState(content={content}, placeholder_sent={self.get('placeholder_sent')}, "
-            f"tripped={self.get('trip') is not None}, "
+            f"StreamState(content={content}, tripped={self.get('trip') is not None}, "
             f"finished={self.get('finished')})"
         )
 
@@ -88,7 +86,6 @@ def _stream_state(value: object) -> dict[str, object] | None:
 
     keys = (
         "content",
-        "placeholder_sent",
         "trip",
         "finished",
         "supplied",

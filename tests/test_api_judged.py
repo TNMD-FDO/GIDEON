@@ -218,8 +218,10 @@ class ApiJudged(unittest.TestCase):
         mechanics = StreamMechanics(state, clock=lambda: now[0])
         emitted, tripped = mechanics.process(chunk({"reasoning": "private fixture thought"}))
         self.assertFalse(tripped)
-        self.assertEqual(len(emitted), 2)
+        self.assertEqual(len(emitted), 1)
         self.assert_status_chunk(emitted[0], progress.opening_description(), False)
+        for key in progress.REASONING_KEYS:
+            self.assertFalse(contains_key(emitted, key))
         return state, mechanics, now
 
     def run_payloads(
@@ -648,11 +650,7 @@ class ApiJudged(unittest.TestCase):
                     self.assertIsNotNone(failure)
 
     def test_reasoning_text_and_unlisted_delta_fields_never_reach_downstream(self) -> None:
-        """No reasoning text is ever relayed, and no unlisted field at all.
-
-        A reasoning delta carries the placeholder out under its own key (the
-        case below), so the invariant here is the text, not the key.
-        """
+        """No reasoning key or unlisted field leaves on either stream step."""
 
         for key in ("reasoning", "reasoning_content", "thinking", "fixture_hidden"):
             with self.subTest(key=key):
@@ -667,6 +665,8 @@ class ApiJudged(unittest.TestCase):
                     )
                 for payload in emitted:
                     self.assertNotIn(private_text, json.dumps(payload))
+                    for reasoning_key in progress.REASONING_KEYS:
+                        self.assertFalse(contains_key(payload, reasoning_key))
                 emitted, tripped = mechanics.process(
                     chunk({"content": "A safe fixture answer."}, finish_reason="stop")
                 )
@@ -683,34 +683,23 @@ class ApiJudged(unittest.TestCase):
                 for payload in emitted:
                     self.assertFalse(contains_key(payload, key))
                     self.assertNotIn(private_text, json.dumps(payload))
+                    for reasoning_key in progress.REASONING_KEYS:
+                        self.assertFalse(contains_key(payload, reasoning_key))
 
-    def test_the_turns_first_reasoning_delta_leaves_as_the_placeholder(self) -> None:
-        """The first reasoning delta opens the line ahead of one fixed space.
+    def test_the_turns_first_reasoning_delta_leaves_only_the_progress_line(self) -> None:
+        """A reasoning-only delta sends the status chunk or nothing."""
 
-        The frontend opens its reasoning block when a reasoning delta arrives
-        on the wire, so the turn's first one leaves as the placeholder and every
-        later one is dropped until a progress period is due.
-        """
-
-        for key in ("reasoning", "reasoning_content", "thinking"):
+        for key in progress.REASONING_KEYS:
             with self.subTest(key=key):
                 state = state_for_prompt("Explain this visibly fictitious rule.")
                 mechanics = StreamMechanics(state, clock=lambda: 0.0)
 
                 emitted, tripped = mechanics.process(chunk({key: "first withheld thought"}))
                 self.assertFalse(tripped)
-                self.assertEqual(len(emitted), 2)
+                self.assertEqual(len(emitted), 1)
                 self.assert_status_chunk(emitted[0], progress.opening_description(), False)
-                payload = emitted[1]
-                assert isinstance(payload, dict)
-                choices = payload["choices"]
-                assert isinstance(choices, list)
-                first = choices[0]
-                assert isinstance(first, dict)
-                # Relayed under the engine's own key, so a pin bump that renames
-                # the field carries the placeholder with it.
-                self.assertEqual(first["delta"], {key: guardrail.REASONING_PLACEHOLDER})
-                self.assertTrue(state["placeholder_sent"])
+                for reasoning_key in progress.REASONING_KEYS:
+                    self.assertFalse(contains_key(emitted, reasoning_key))
 
                 # Before the first period, later reasoning deltas are dropped whole.
                 emitted, tripped = mechanics.process(chunk({key: "a later withheld thought"}))
@@ -826,7 +815,7 @@ class ApiJudged(unittest.TestCase):
         mechanics = StreamMechanics(state_for_prompt("Explain a fictitious rule."), clock=clock)
         opened, tripped = mechanics.process(chunk({"reasoning": "private"}))
         self.assertFalse(tripped)
-        self.assertEqual(len(opened), 2)
+        self.assertEqual(len(opened), 1)
         emitted, tripped = mechanics.fail_closed()
         self.assertTrue(tripped)
         self.assertEqual(len(emitted), 3)
@@ -869,15 +858,15 @@ class ApiJudged(unittest.TestCase):
         self.assertEqual(emitted[-1], {"error": error["error"]})
         self.assertTrue(all("event" not in item for item in emitted if isinstance(item, dict)))
 
-    def test_a_stream_with_no_reasoning_sends_no_placeholder(self) -> None:
+    def test_a_stream_with_no_reasoning_sends_no_reasoning_key(self) -> None:
         """A content-only stream is byte for byte what it was."""
 
         state = state_for_prompt("Explain this visibly fictitious rule.")
         mechanics = StreamMechanics(state)
         emitted, _ = mechanics.process(chunk({"content": "A safe fixture answer."}))
         for payload in emitted:
-            self.assertFalse(contains_key(payload, "reasoning"))
-        self.assertFalse(state["placeholder_sent"])
+            for key in progress.REASONING_KEYS:
+                self.assertFalse(contains_key(payload, key))
 
     def test_progress_never_opens_on_a_content_only_stream(self) -> None:
         mechanics = StreamMechanics(state_for_prompt("Explain a fictitious rule."))
@@ -894,7 +883,7 @@ class ApiJudged(unittest.TestCase):
                     self.assertNotIn(progress.STATUS_EVENT_KEY, item)
 
     def test_reasoning_beside_the_first_answer_text_opens_no_line(self) -> None:
-        """The answer has begun, so the line stays shut while the placeholder leaves."""
+        """The answer has begun, so the line stays shut and reasoning stays withheld."""
 
         state = state_for_prompt("Explain a fictitious rule.")
         mechanics = StreamMechanics(state, clock=lambda: 0.0)
@@ -902,7 +891,9 @@ class ApiJudged(unittest.TestCase):
             chunk({"reasoning": "private", "content": "A safe fictitious answer."})
         )
         self.assertFalse(tripped)
-        self.assertTrue(state["placeholder_sent"])
+        for item in emitted:
+            for key in progress.REASONING_KEYS:
+                self.assertFalse(contains_key(item, key))
         for payload in (chunk({"reasoning": "late"}), DONE_EVENT):
             later, tripped = mechanics.process(payload)
             self.assertFalse(tripped)
@@ -910,8 +901,10 @@ class ApiJudged(unittest.TestCase):
         for item in emitted:
             if isinstance(item, dict):
                 self.assertNotIn(progress.STATUS_EVENT_KEY, item)
+            for key in progress.REASONING_KEYS:
+                self.assertFalse(contains_key(item, key))
 
-    def test_a_trip_before_any_reasoning_sends_no_placeholder(self) -> None:
+    def test_a_trip_before_any_reasoning_sends_no_reasoning_key(self) -> None:
         """A tripping chunk returns the refusal alone, with no block opened."""
 
         state = state_for_prompt("When is the filing deadline?")
@@ -920,9 +913,9 @@ class ApiJudged(unittest.TestCase):
             chunk({"content": "The deadline is March 2, 2027."}, finish_reason="stop")
         )
         self.assertTrue(tripped)
-        self.assertFalse(state["placeholder_sent"])
         for payload in emitted:
-            self.assertFalse(contains_key(payload, "reasoning"))
+            for key in progress.REASONING_KEYS:
+                self.assertFalse(contains_key(payload, key))
 
     def test_a_shape_in_the_reasoning_alone_is_never_stamped(self) -> None:
         """Only ``content`` deltas enter the window, so reasoning is never scanned."""

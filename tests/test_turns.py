@@ -392,10 +392,7 @@ class Frontend:
                 "id": assistant_id,
                 "content": "This doctrinal answer contains no deadline.",
                 "done": True,
-                "output": [
-                    {"type": "reasoning", "content": [{"type": "output_text"}]},
-                    {"type": "message", "content": [{"type": "output_text"}]},
-                ],
+                "output": [{"type": "message", "content": [{"type": "output_text"}]}],
             }
         elif mode == "leak":
             assistant = {
@@ -710,12 +707,7 @@ class Frontend:
                     payload("content", "never released"),
                 ]
             )
-        return iter(
-            [
-                payload("reasoning", self.guardrail.REASONING_PLACEHOLDER),
-                payload("content", "a clean doctrinal answer"),
-            ]
-        )
+        return iter([payload("content", "a clean doctrinal answer")])
 
 
 def _run_file(
@@ -1262,7 +1254,7 @@ class TurnHarness(TestCase):
                             "content": [
                                 {
                                     "type": "output_text",
-                                    "text": self.guardrail.REASONING_PLACEHOLDER,
+                                    "text": " ",
                                 }
                             ],
                         },
@@ -1314,7 +1306,7 @@ class TurnHarness(TestCase):
                         "content": [
                             {
                                 "type": "output_text",
-                                "text": self.guardrail.REASONING_PLACEHOLDER,
+                                "text": " ",
                             }
                         ],
                     },
@@ -1438,14 +1430,14 @@ class TurnHarness(TestCase):
             "  - {id: leak, prompt: leak prompt, expect: recorded}\n",
         )
         self.assertEqual(code, 1)
-        self.assertIn("answered: ok — answered; block present; expect answered", stdout)
+        self.assertIn("answered: ok — answered; block absent; expect answered", stdout)
         self.assertIn("leak: refuse — leak (", stdout)
         self.assertIn("expect recorded", stdout)
         self.assertIn("gideon/guardrail/", stdout)
         self.assertEqual(frontend.chats, {})
 
     def test_an_errored_turn_is_cleaned_up_and_an_unidentified_one_is_left(self) -> None:
-        # The errored placeholder still carries the minted ids, so the finder
+        # The errored chat still carries the minted ids, so the finder
         # identifies that chat and the cleanup deletes it; a turn the finder
         # refused has no chat of its own to delete, and the chats standing are
         # nobody's to touch.
@@ -2245,8 +2237,6 @@ class TurnHarness(TestCase):
         self.assertIsInstance(loaded, cases.CaseSet)
         assert isinstance(loaded, cases.CaseSet)
         expected = {
-            "doctrine-01": ("answered", "present", "any", False, True, False),
-            "doctrine-02": ("answered", "present", "any", False, True, False),
             "plain-01": ("answered", "any", "absent", False, False, True),
             "compute-01": ("refused", "any", "any", False, False, False),
             "compute-02": ("refused", "any", "any", False, False, False),
@@ -2256,6 +2246,8 @@ class TurnHarness(TestCase):
             "identity-02": ("answered", "any", "any", False, True, True),
             "citation-02": ("recorded", "any", "any", False, True, True),
             "verify-02": ("recorded", "any", "any", False, True, True),
+            "doctrine-03": ("answered", "absent", "any", False, True, False),
+            "doctrine-04": ("answered", "absent", "any", False, True, False),
         }
         self.assertEqual([case.id for case in loaded.cases], list(expected))
         self.assertEqual(loaded.searched, 1)
@@ -2272,7 +2264,7 @@ class TurnHarness(TestCase):
                 self.assertEqual(bool(case.must_not), has_must_not)
 
         by_id = {case.id: case for case in loaded.cases}
-        for predecessor in ("identity-01", "citation-01", "verify-01"):
+        for predecessor in ("identity-01", "citation-01", "verify-01", "doctrine-01", "doctrine-02"):
             with self.subTest(predecessor=predecessor):
                 self.assertNotIn(predecessor, by_id)
 
@@ -2720,10 +2712,12 @@ class TurnHarness(TestCase):
                 self.assertIn("withheld failed", judgement.detail)
                 self.assertFalse(judgement.ok)
 
+        # A chat stored by an earlier service can still hold a whitespace item;
+        # the stored-shape check treats it as withheld while keeping its block.
         placeholder = {
             **substantive,
             "output": [
-                {"type": "reasoning", "content": [{"type": "output_text", "text": self.guardrail.REASONING_PLACEHOLDER}]},
+                {"type": "reasoning", "content": [{"type": "output_text", "text": " "}]},
                 {"type": "message", "content": [{"type": "output_text", "text": content}]},
             ],
         }
@@ -3082,7 +3076,7 @@ class TurnHarness(TestCase):
             args=["--stream"],
         )
         self.assertEqual(code, 0)
-        self.assertIn("clean: ok — answered; block present; expect answered; withheld ok; stream clean", stdout)
+        self.assertIn("clean: ok — answered; block absent; expect answered; withheld ok; stream clean", stdout)
         self.assertIn("summary: ok — 2 turns; cases 1:", stdout)
         self.assertIn("stream: 1 clean, 0 leak, 0 error", stdout)
         self.assertEqual(len(frontend.stream_calls), 1)
@@ -3111,12 +3105,13 @@ class TurnHarness(TestCase):
             session.StreamPayload((("status", description),)),
         )
 
+        reasoning_values = ("", "private fixture one", "private fixture two")
         with_choice = {
             progress.STATUS_EVENT_KEY: status,
             "choices": [
                 {
                     "delta": {
-                        "reasoning": self.guardrail.REASONING_PLACEHOLDER,
+                        **dict(zip(progress.REASONING_KEYS, reasoning_values, strict=True)),
                         "content": "A plain fictitious answer.",
                     }
                 }
@@ -3127,11 +3122,39 @@ class TurnHarness(TestCase):
             session.StreamPayload(
                 (
                     ("status", description),
-                    ("reasoning", self.guardrail.REASONING_PLACEHOLDER),
+                    *(("reasoning", value) for value in reasoning_values),
                     ("content", "A plain fictitious answer."),
                 )
             ),
         )
+
+    def test_stream_reader_refuses_unreadable_reasoning_without_its_text(self) -> None:
+        for key in progress.REASONING_KEYS:
+            with self.subTest(key=key):
+                parsed = session.parse_stream_payload(
+                    json.dumps({"choices": [{"delta": {key: {"private": "fixture secret"}}}]})
+                )
+                self.assertEqual(parsed.deltas, ())
+                self.assertEqual(
+                    parsed.problem, "the stream carried an unreadable reasoning value"
+                )
+                self.assertNotIn("fixture secret", repr(parsed))
+
+    def test_stream_verdict_releases_reasoning_under_every_wire_name(self) -> None:
+        for key in progress.REASONING_KEYS:
+            for text in ("", " ", "private fixture text"):
+                with self.subTest(key=key, length=len(text)):
+                    parsed = session.parse_stream_payload(
+                        json.dumps({"choices": [{"delta": {key: text}}]})
+                    )
+                    self.assertEqual(parsed, session.StreamPayload((("reasoning", text),)))
+                    verdict = classify.stream_verdict(
+                        self.guardrail, parsed.deltas, "A visibly fictitious prompt."
+                    )
+                    self.assertEqual(
+                        verdict,
+                        classify.StreamVerdict(False, classify.REASONING_RELEASED, len(text)),
+                    )
 
     def test_stream_reader_refuses_unreadable_events_without_their_text(self) -> None:
         for event in (
@@ -3167,7 +3190,7 @@ class TurnHarness(TestCase):
         prompt = "Explain a fictitious record."
         clean = classify.stream_verdict(
             self.guardrail,
-            (*deltas, ("reasoning", self.guardrail.REASONING_PLACEHOLDER), ("content", "A plain fictitious answer.")),
+            (*deltas, ("content", "A plain fictitious answer.")),
             prompt,
         )
         self.assertTrue(clean.clean)
@@ -3469,17 +3492,19 @@ class TurnHarness(TestCase):
         self.assertNotIn(answer[:split], repr(stream["verdict"]))
 
     def test_stream_leak_reports_first_prefix_and_fails_by_default(self) -> None:
-        deltas = (("reasoning", self.guardrail.REASONING_PLACEHOLDER),)
+        deltas = (("reasoning", ""),)
         earlier = classify.stream_verdict(self.guardrail, deltas, "hidden\n\n[turn harness 0123abcd case]")
         complete = classify.stream_verdict(
             self.guardrail,
             (*deltas, ("reasoning", "the deadline is March 2, 2027")),
             "hidden\n\n[turn harness 0123abcd case]",
         )
-        self.assertTrue(earlier.clean)
+        self.assertFalse(earlier.clean)
+        self.assertEqual(earlier.pattern_id, classify.REASONING_RELEASED)
+        self.assertEqual(earlier.offset, 0)
         self.assertFalse(complete.clean)
         self.assertEqual(complete.pattern_id, classify.REASONING_RELEASED)
-        self.assertEqual(complete.offset, len(" " + "the deadline is March 2, 2027"))
+        self.assertEqual(complete.offset, 0)
 
         frontend = Frontend(self.guardrail, {"leak-stream": "stream-leak"})
         text = "cases:\n  - id: leak-stream\n    prompt: hidden\n    expect: answered\n"
@@ -3625,7 +3650,7 @@ class TurnHarness(TestCase):
             )
         self.assertEqual(code, 1)
         self.assertEqual(stderr, "")
-        self.assertIn("write: refuse — answered; block present; expect answered", stdout)
+        self.assertIn("write: refuse — answered; block absent; expect answered", stdout)
         self.assertIn("record not written", stdout)
         self.assertIn("second: refuse", stdout)
         self.assertIn("record: refuse — record not written", stdout)

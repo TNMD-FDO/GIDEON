@@ -1,6 +1,6 @@
-"""The guardrail's grammar: the match, gap, and lag bounds, the reasoning
-placeholder and refusal separator, each family's vocabulary, and every bounded
-pattern source and construction builder the families compile.
+"""The guardrail's grammar: the match, gap, and lag bounds, the refusal
+separator, each family's vocabulary, and every bounded pattern source and
+construction builder the families compile.
 
 Standard library only; ``families``, ``judge``, and ``window`` import from it.
 """
@@ -16,11 +16,6 @@ RESTATEMENT_LOOKAHEAD_CHARS = 40
 EXCLUSION_REACH_CHARS = 40
 # The stream lag is the family match bound plus its restatement look-ahead.
 LAG_CHARS = MAX_MATCH_CHARS + RESTATEMENT_LOOKAHEAD_CHARS
-# The one reasoning value the hook ever releases, in the turn's first
-# reasoning delta: a truthy delta opens the frontend's reasoning item (its
-# "Thinking…" timer, closed with a duration by the first answer text), and a
-# space leaves the item's body empty on screen and in the stored message.
-REASONING_PLACEHOLDER = " "
 # The in-stream refusal follows any answer text already released.
 REFUSAL_SEPARATOR = "\n\n"
 

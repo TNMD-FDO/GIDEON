@@ -19,7 +19,8 @@ from urllib.parse import unquote
 import yaml  # type: ignore[import-untyped]
 
 from gideon import guardrail
-from gideon.evaluation.turns import browser, chromium, classify, run
+from gideon.api import progress
+from gideon.evaluation.turns import browser, cases, chromium, classify, run
 from gideon.host import backuplock, tls
 from gideon.host.owui import Client, Response
 from gideon.host.report import Problem
@@ -416,11 +417,16 @@ class FakePage:
         email_form: bool = False,
         certificate: bool = False,
         drains: Sequence[browser.PageDrain] = (),
+        lines: Sequence[str] = (),
+        stop_polls: int = 1,
     ) -> None:
         self.frontend = frontend
         self.phase = "email" if email_form else "auth"
         self.certificate = certificate
         self.drains = list(drains)
+        self.lines = list(lines)
+        self.line_reads = 0
+        self.stop_polls = stop_polls
         self.fills: list[tuple[str, str]] = []
         self.clicks: list[str] = []
         self.presses: list[str] = []
@@ -432,7 +438,7 @@ class FakePage:
         self.watched = False
         self.expanded = False
         self.token = "browser-session-token"
-        self._stop_seen = False
+        self._stop_reads = 0
         self._chat_id = "browser-chat"
         self._last_regions: dict[str, str] = {"block": "", "answer": ""}
 
@@ -442,7 +448,7 @@ class FakePage:
             raise browser.PageError("certificate verify failed", certificate=True)
         if path == "/":
             self.phase = "chat"
-            self._stop_seen = False
+            self._stop_reads = 0
             self.expanded = False
 
     def fill(self, selector: str, text: str) -> None:
@@ -465,6 +471,9 @@ class FakePage:
         self.presses.append(key)
 
     def text(self, selector: str) -> str | None:
+        if selector == browser.STATUS_LINE_SELECTOR and self.lines:
+            self.line_reads += 1
+            return self.lines.pop(0)
         if selector == browser.MODEL_SELECTOR:
             return "General"
         if selector.startswith(browser.INTEGRATION_TOGGLE_SELECTOR):
@@ -494,9 +503,11 @@ class FakePage:
             return int(self.phase in {"chat", "running", "done"})
         if selector == browser.COLLAPSIBLE_BUTTON_SELECTOR:
             return int(self.phase in {"running", "done"})
+        if selector == browser.STATUS_LINE_SELECTOR:
+            return int(self.phase in {"running", "done"} and bool(self.lines))
         if selector == browser.STOP_BUTTON_SELECTOR:
-            if self.phase == "running" and not self._stop_seen:
-                self._stop_seen = True
+            if self.phase == "running" and self._stop_reads < self.stop_polls:
+                self._stop_reads += 1
                 return 1
             return 0
         if selector == browser.MESSAGE_SELECTOR:
@@ -774,6 +785,7 @@ class BrowserTurnIntegration(TestCase):
             stdout,
         )
         self.assertIn("answered: ok", stdout)
+        self.assertIn("line absent", stdout)
         self.assertNotIn(page.token, stdout)
         self.assertNotIn("browser-password", stdout)
         self.assertTrue(page.watched)
@@ -796,11 +808,135 @@ class BrowserTurnIntegration(TestCase):
         self.assertEqual(record["browser"]["states"][0]["tripped"], None)
         self.assertFalse(record["browser"]["states"][0]["block_text"])
         self.assertIsNone(record["browser"]["reasoning_painted_at"])
+        self.assertIsNone(record["browser"]["line_painted_at"])
+        self.assertIsNone(record["browser"]["line_class"])
         self.assertIsNone(record["browser"]["refused_index"])
         self.assertIsNone(record["browser"]["refused_at"])
         self.assertEqual(record["browser"]["ended_at"], 0.0)
         self.assertFalse(record["verdict"]["reasoning_stored"])
         self.assertEqual(set(record["browser"]["texts"]), {"0"})
+
+    def test_progress_line_records_first_paint_and_closing_without_text(self) -> None:
+        frontend = FakeFrontend()
+        closing = progress.closing_description(progress.PERIOD_SECONDS)
+        page = FakePage(
+            frontend,
+            drains=self._drains() * 4,
+            lines=(
+                "",
+                progress.opening_description(),
+                progress.running_description(progress.PERIOD_SECONDS),
+                closing,
+            ),
+            stop_polls=3,
+        )
+        code, stdout, stderr, _frontend, host = self._run(page=page, args=[])
+        record = json.loads(
+            next(value for key, value in host.files.items() if key.endswith("answered.json"))
+        )
+        browser_data = record["browser"]
+        self.assertEqual(code, 0)
+        self.assertEqual(page.line_reads, 4)
+        self.assertIn("live: clean; line closing", stdout)
+        self.assertIsInstance(browser_data["line_painted_at"], float)
+        self.assertGreaterEqual(browser_data["line_painted_at"], 0.0)
+        self.assertEqual(browser_data["line_class"], progress.CLOSING)
+        for output in (stdout, stderr, json.dumps(record)):
+            self.assertNotIn(closing, output)
+
+    def test_outside_line_sticks_and_fails_an_unsearched_row(self) -> None:
+        private_line = "private fixture thought in status"
+        page = FakePage(
+            FakeFrontend(),
+            drains=self._drains() * 2,
+            lines=(private_line, progress.closing_description(progress.PERIOD_SECONDS)),
+        )
+        code, stdout, stderr, _frontend, host = self._run(page=page, args=[])
+        record = json.loads(
+            next(value for key, value in host.files.items() if key.endswith("answered.json"))
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(page.line_reads, 2)
+        self.assertIn("line outside", stdout)
+        self.assertEqual(record["browser"]["line_class"], browser.LINE_OUTSIDE)
+        for output in (stdout, stderr, json.dumps(record)):
+            self.assertNotIn(private_line, output)
+
+    def test_searched_case_reports_outside_line_without_failing(self) -> None:
+        private_line = "private search status fixture"
+        frontend = FakeFrontend()
+        page = FakePage(
+            frontend,
+            drains=self._drains() * 2,
+            lines=(private_line, progress.closing_description(progress.PERIOD_SECONDS)),
+        )
+        with TemporaryDirectory() as directory:
+            out = Path(directory)
+            setup = run.BrowserSetup(
+                page=page,
+                close=lambda: None,
+                detail="browser detail",
+                hostname="frontend.example",
+                account="gideon-test-user",
+                request_log=chromium.RequestLog(lambda: 0.0),
+                page_timeout=1.0,
+                poll=0.0,
+            )
+            driver = run.BrowserTurnDriver(
+                setup, frontend.factory, "browser-password", guardrail=guardrail, out=out
+            )
+            driver.signin()
+            row = run.frontend_turn(
+                run.RunSpec(out / "cases.yaml", 1, False, out, True, False, "fixture", browser=True),
+                client=driver.client,
+                driver=driver,
+                guardrail=guardrail,
+                case=cases.Case("answered", "doctrinal prompt", "answered", search=True),
+                session_number=1,
+                row_name="answered",
+                now=lambda: datetime(2026, 9, 5, 12, 0, tzinfo=UTC),
+                monotonic=lambda: 0.0,
+            )
+        self.assertTrue(row.result.ok)
+        self.assertIn("line outside", row.result.detail)
+        self.assertIsNotNone(row.record)
+        assert row.record is not None
+        browser_data = row.record["browser"]
+        assert isinstance(browser_data, dict)
+        self.assertEqual(browser_data["line_class"], browser.LINE_OUTSIDE)
+        self.assertNotIn(private_line, repr(row))
+        self.assertNotIn(private_line, json.dumps(row.record))
+
+    def test_stop_button_prevents_quiet_done_with_hidden_cursor(self) -> None:
+        page = FakePage(
+            FakeFrontend(),
+            drains=self._drains() * 3,
+            lines=(
+                progress.opening_description(),
+                progress.running_description(progress.PERIOD_SECONDS),
+                progress.closing_description(progress.PERIOD_SECONDS),
+            ),
+            stop_polls=2,
+        )
+        with TemporaryDirectory() as directory:
+            turn = browser.turn(
+                page,
+                "A visibly fictitious prompt.",
+                judge=lambda _block, _answer: None,
+                is_replacement=lambda _answer: False,
+                continues=classify.continuity_test(),
+                whole_judge=lambda _answer: None,
+                monotonic=lambda: 0.0,
+                poll=0.0,
+                page_timeout=0.0,
+                deadline=1.0,
+                out=Path(directory),
+                row_name="answered",
+            )
+        self.assertIsNone(turn.problem)
+        self.assertEqual(page.line_reads, 3)
+        self.assertEqual(turn.line_class, progress.CLOSING)
+        self.assertEqual(page.count(browser.CURSOR_SELECTOR), 0)
 
     def test_certificate_failure_is_a_browser_row_without_signin(self) -> None:
         frontend = FakeFrontend()

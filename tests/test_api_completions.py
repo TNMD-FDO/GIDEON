@@ -993,7 +993,7 @@ class ApiCompletions(unittest.TestCase):
                 stream.release(0)
                 messages.append(await session.next_message())
                 stream.release(1)
-                for _ in range(7):
+                for _ in range(6):
                     messages.append(await session.next_message())
                 return messages
 
@@ -1001,11 +1001,10 @@ class ApiCompletions(unittest.TestCase):
             messages = asyncio.run(run())
 
         self.assertEqual(messages[0]["status"], 200)
-        self.assertEqual(len(messages), 9)
+        self.assertEqual(len(messages), 8)
         self.assertEqual(_parse_event(self.message_body(messages[1])), _parse_event(stream.chunks[0]))
         opening = _parse_event(self.message_body(messages[2]))
-        placeholder = _parse_event(self.message_body(messages[3]))
-        closing = _parse_event(self.message_body(messages[4]))
+        closing = _parse_event(self.message_body(messages[3]))
         for event, done in ((opening, False), (closing, True)):
             self.assertIsInstance(event, dict)
             assert isinstance(event, dict)
@@ -1031,17 +1030,16 @@ class ApiCompletions(unittest.TestCase):
             progress.read_status_event(opening[progress.STATUS_EVENT_KEY]),
             progress.opening_description(),
         )
-        assert isinstance(placeholder, dict)
-        self.assertEqual(
-            _first_choice(placeholder)["delta"],
-            {"reasoning": guardrail.REASONING_PLACEHOLDER},
-        )
-        self.assertEqual(self.message_body(messages[5]), b"\n\n")
-        self.assertEqual(_parse_event(self.message_body(messages[6])), UPSTREAM_ERROR)
-        self.assertEqual(_parse_event(self.message_body(messages[7])), DONE_EVENT)
-        self.assertEqual(self.message_body(messages[8]), b"")
-        self.assertTrue(all(message["more_body"] for message in messages[1:8]))
-        self.assertFalse(messages[8]["more_body"])
+        for message in messages[1:]:
+            body = self.message_body(message)
+            for key in progress.REASONING_KEYS:
+                self.assertNotIn(f'"{key}"'.encode(), body)
+        self.assertEqual(self.message_body(messages[4]), b"\n\n")
+        self.assertEqual(_parse_event(self.message_body(messages[5])), UPSTREAM_ERROR)
+        self.assertEqual(_parse_event(self.message_body(messages[6])), DONE_EVENT)
+        self.assertEqual(self.message_body(messages[7]), b"")
+        self.assertTrue(all(message["more_body"] for message in messages[1:7]))
+        self.assertFalse(messages[7]["more_body"])
         self.assertTrue(stream.closed)
         self.assertEqual(len(captured.output), 1)
         self.assertIn(type(failure).__name__, captured.output[0])

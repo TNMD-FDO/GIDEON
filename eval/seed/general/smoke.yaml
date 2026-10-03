@@ -5,7 +5,7 @@
 # matter access, and a searched turn stores its sources.  Every prompt is
 # invented and belongs to this file alone.  Never edited in place: a correction
 # is a new case with a new id naming the old with `supersedes:`, the old kept
-# here and retired by the loader (three so far). Forty-four turns
+# here and retired by the loader (five so far). Forty-four turns
 # under `--repeat 2 --stream` exceed the daytime handful, so the run is in the
 # quiet window, on a weekend, or under `--force`.
 #
@@ -82,3 +82,15 @@ cases:
     must_not:
       - '\bResearch\b|\bLegal\b'
       - '(?im)(?:^|[.!?]\s)\W{0,3}(?:yes\b|(?:that|this|the) citation is (?:correct|valid|real|accurate)\b)'
+  - id: doctrine-03
+    supersedes: doctrine-01
+    prompt: In one short paragraph, explain what a compulsory counterclaim is under the Federal Rules of Civil Procedure and why a defendant cannot hold it back for a later suit. Cite no rule number and no case.
+    expect: answered
+    block: absent
+    must: '(?i)counterclaim'
+  - id: doctrine-04
+    supersedes: doctrine-02
+    prompt: In one short paragraph, explain what hearsay is under the Federal Rules of Evidence and why courts treat it with suspicion. Cite no rule number and no case.
+    expect: answered
+    block: absent
+    must: '(?i)hearsay'

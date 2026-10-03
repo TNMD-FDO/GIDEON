@@ -30,8 +30,8 @@ from gideon.host.sysio import Host
 
 SENTINEL = "1234abcd"
 _FICTIONAL_ANSWERS: dict[str, str] = {
-    "doctrine-01": "A fictional civil procedure note explains a counterclaim.",
-    "doctrine-02": "A fictional evidence note explains hearsay.",
+    "doctrine-03": "A fictional civil procedure note explains a counterclaim.",
+    "doctrine-04": "A fictional evidence note explains hearsay.",
     "plain-01": "A warmer fictional rewrite keeps both details.",
     "identity-02": "General is a fictional assistant for broad questions.",
     "citation-02": "General does not verify citations. This example is fictional.",
@@ -92,8 +92,13 @@ class SmokeFrontend(Frontend):
                 assistant.pop("sources", None)
             if case_id in self.store_reasoning:
                 output = cast(list[dict[str, object]], assistant["output"])
-                reasoning = next(item for item in output if item.get("type") == "reasoning")
-                reasoning["content"] = [{"type": "output_text", "text": "fictional private reasoning"}]
+                output.insert(
+                    0,
+                    {
+                        "type": "reasoning",
+                        "content": [{"type": "output_text", "text": "fictional private reasoning"}],
+                    },
+                )
             return
         raise AssertionError("the fake frontend did not retain the new chat")
 
@@ -146,9 +151,9 @@ class GeneralSmokeRunner(unittest.TestCase):
         def measured(*args: Any, **kwargs: Any) -> run.TurnRow:
             row = original(*args, **kwargs)
             row_name = cast(str, kwargs["row_name"])
-            if row_name == "doctrine-01#1":
+            if row_name == "doctrine-03#1":
                 return replace(row, elapsed=0.125)
-            if row_name == "doctrine-02#1":
+            if row_name == "doctrine-04#1":
                 return replace(row, elapsed=None)
             return row
 
@@ -166,8 +171,8 @@ class GeneralSmokeRunner(unittest.TestCase):
         )
         self.assertTrue(all(row.verdict == "pass" for row in result.results))
         rows = {(row.case_id, row.repeat): row for row in result.results}
-        self.assertEqual(rows[("doctrine-01", 1)].latency_ms, 125.0)
-        self.assertIsNone(rows[("doctrine-02", 1)].latency_ms)
+        self.assertEqual(rows[("doctrine-03", 1)].latency_ms, 125.0)
+        self.assertIsNone(rows[("doctrine-04", 1)].latency_ms)
         self.assertEqual(len(progress), len(result.results))
         for row, line in zip(result.results, progress, strict=True):
             self.assertTrue(line.startswith(f"general-smoke {row.case_id}#{row.repeat}:"))
@@ -196,9 +201,9 @@ class GeneralSmokeRunner(unittest.TestCase):
     def test_failed_checks_fail_the_turn_and_name_the_check_everywhere(self) -> None:
         loaded = _loaded()
         frontend = SmokeFrontend(loaded)
-        frontend.answers["doctrine-01"] = "A fictional doctrinal answer omits its required term."
-        frontend.answers["doctrine-02"] = "I can't compute that fictional answer for you."
-        frontend.modes["doctrine-02"] = "declined"
+        frontend.answers["doctrine-03"] = "A fictional doctrinal answer omits its required term."
+        frontend.answers["doctrine-04"] = "I can't compute that fictional answer for you."
+        frontend.modes["doctrine-04"] = "declined"
         frontend.omit_sources.add("search-01")
         frontend.store_reasoning.add("identity-02")
         progress: list[str] = []
@@ -209,10 +214,10 @@ class GeneralSmokeRunner(unittest.TestCase):
         for row in result.results:
             by_id.setdefault(row.case_id, []).append(row)
         failed_checks = {
-            "doctrine-01": "must",
+            "doctrine-03": "must",
             "search-01": "sources",
             "identity-02": "withheld",
-            "doctrine-02": "expect",
+            "doctrine-04": "expect",
         }
         self.assertFalse(result.verdict)
         for case_id, check in failed_checks.items():
@@ -236,20 +241,20 @@ class GeneralSmokeRunner(unittest.TestCase):
     def test_stream_leak_fails_its_turn(self) -> None:
         loaded = _loaded()
         frontend = SmokeFrontend(loaded)
-        frontend.modes["doctrine-01"] = "stream-leak"
+        frontend.modes["doctrine-03"] = "stream-leak"
         progress: list[str] = []
         _host, context = _context(frontend, progress)
 
         result = general_smoke_slice.run_general_smoke(loaded, "general-smoke", context)
-        rows = [row for row in result.results if row.case_id == "doctrine-01"]
+        rows = [row for row in result.results if row.case_id == "doctrine-03"]
         self.assertEqual(len(rows), 2)
         for row in rows:
             self.assertEqual(row.verdict, "fail")
             self.assertEqual(row.metrics["problem"], "stream-leak")
             self.assertEqual(row.metrics["stream"], "leak")
             self.assertIn("pattern", row.metrics)
-        self.assertIn("doctrine-01: fail", result.report)
-        self.assertTrue(any("doctrine-01#" in line and "stream leak" in line for line in progress))
+        self.assertIn("doctrine-03: fail", result.report)
+        self.assertTrue(any("doctrine-03#" in line and "stream leak" in line for line in progress))
 
     def test_turn_cuts_fail_and_report_distinct_progress_slots(self) -> None:
         loaded = _loaded()
@@ -261,9 +266,9 @@ class GeneralSmokeRunner(unittest.TestCase):
         def cut_rows(*args: Any, **kwargs: Any) -> run.TurnRow:
             row = actual(*args, **kwargs)
             case_id = cast(str, kwargs["case"].id)
-            if case_id == "doctrine-01":
+            if case_id == "doctrine-03":
                 return replace(row, cut=True, verdict_kind=None, stream_kind=None)
-            if case_id == "doctrine-02":
+            if case_id == "doctrine-04":
                 if cast(str, kwargs["row_name"]).endswith("#1"):
                     return replace(row, cut=True, stream_kind="error")
                 return replace(row, verdict_kind=None, stream_kind=None)
@@ -276,7 +281,7 @@ class GeneralSmokeRunner(unittest.TestCase):
 
         rows = {(row.case_id, row.repeat): row for row in result.results}
         self.assertFalse(result.verdict)
-        for case_id in ("doctrine-01", "doctrine-02"):
+        for case_id in ("doctrine-03", "doctrine-04"):
             self.assertEqual(rows[(case_id, 1)].verdict, "fail")
             self.assertEqual(rows[(case_id, 1)].metrics["problem"], "turn-cut")
             self.assertIn(f"{case_id}: fail", result.report)
@@ -284,7 +289,7 @@ class GeneralSmokeRunner(unittest.TestCase):
         self.assertTrue(
             any(
                 line.startswith(
-                    "general-smoke doctrine-01#1: "
+                    "general-smoke doctrine-03#1: "
                     f"cut at {run.TURN_TIMEOUT_SECONDS:.0f} s;"
                 )
                 for line in progress
@@ -292,12 +297,12 @@ class GeneralSmokeRunner(unittest.TestCase):
         )
         self.assertTrue(
             any(
-                "general-smoke doctrine-02#1:" in line
+                "general-smoke doctrine-04#1:" in line
                 and f"stream cut at {run.TURN_TIMEOUT_SECONDS:.0f} s" in line
                 for line in progress
             )
         )
-        self.assertEqual(rows[("doctrine-02", 2)].metrics["problem"], "turn-error")
+        self.assertEqual(rows[("doctrine-04", 2)].metrics["problem"], "turn-error")
 
     def test_refused_deletion_fails_and_reports_the_cleanup_fix(self) -> None:
         loaded = _loaded()
@@ -380,7 +385,7 @@ class GeneralSmokeCommand(unittest.TestCase):
         loaded = _loaded()
         frontend = SmokeFrontend(loaded)
         if failing:
-            frontend.modes["doctrine-01"] = "stream-leak"
+            frontend.modes["doctrine-03"] = "stream-leak"
         host = EvalHost()
         argv = ["eval", "run", "--slice", "general-smoke"]
         if supplied_set:
@@ -417,9 +422,10 @@ class GeneralSmokeCommand(unittest.TestCase):
         self.assertIn("eval password read, door probed", stdout)
         self.assertIn("22 results over 11 active cases at 2 repeats", stdout)
         self.assertIn("record: ok — skipped", stdout)
-        # The comparand is the committed eval/reference/general-smoke/, first recorded at
-        # v0.3.0; every fixture case passes, so the comparison reads current.
-        self.assertIn("reference: current", stdout)
+        # The comparand is the committed eval/reference/general-smoke/; every fixture
+        # case passes, so nothing regresses: stale while the id list has moved past
+        # the recorded reference, current once a release re-records it.
+        self.assertRegex(stdout, r"(?m)^reference: (?:current|stale)$")
         _assert_comparison_lines(self, stdout, word="pass")
         comparison.assert_called_once()
         self.assertFalse(any(argv[0] == "docker" for argv, _input in host.calls))
@@ -432,9 +438,10 @@ class GeneralSmokeCommand(unittest.TestCase):
         self.assertEqual(code, 0, stdout + stderr)
         self.assertIn("22 results over 11 active cases at 2 repeats", stdout)
         self.assertIn("record: ok — run", stdout)
-        # The comparand is the committed eval/reference/general-smoke/, first recorded at
-        # v0.3.0; every fixture case passes, so the comparison reads current.
-        self.assertIn("reference: current", stdout)
+        # The comparand is the committed eval/reference/general-smoke/; every fixture
+        # case passes, so nothing regresses: stale while the id list has moved past
+        # the recorded reference, current once a release re-records it.
+        self.assertRegex(stdout, r"(?m)^reference: (?:current|stale)$")
         _assert_comparison_lines(self, stdout, word="pass")
         comparison.assert_called_once()
         sql = "\n".join(
@@ -454,7 +461,7 @@ class GeneralSmokeCommand(unittest.TestCase):
             supplied_set=True, failing=True
         )
         self.assertEqual((code, stderr), (1, ""), stdout)
-        self.assertIn("doctrine-01: fail", stdout)
+        self.assertIn("doctrine-03: fail", stdout)
         _assert_comparison_lines(self, stdout, word="FAIL")
         comparison.assert_called_once()
 

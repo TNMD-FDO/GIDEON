@@ -13,7 +13,8 @@ from typing import Final
 
 # exempt: starting value, a painting cadence: each period of reasoning is one
 # more stream message and one more stored status entry, so the entry count and
-# the chat row's size a seat's turn shows are what correct it.
+# the chat row's size a seat's turn shows are what correct it.  A 51-second
+# reasoning turn stored 12 entries, 1.4% of its chat row, so the period stands.
 PERIOD_SECONDS: Final[int] = 5
 
 # Fixed product text a seat sees and the frontend stores, no site value: the
@@ -22,6 +23,16 @@ PERIOD_SECONDS: Final[int] = 5
 OPENING_FORM: Final[str] = "Thinking…"
 RUNNING_FORM: Final[str] = "Thinking… {elapsed}"
 CLOSING_FORM: Final[str] = "Thought for {elapsed}"
+
+# The names a reasoning delta travels under: the service opens the line on any
+# of them and relays none, and the turn harness reads each as a leak.
+REASONING_KEYS: Final[tuple[str, ...]] = ("reasoning", "reasoning_content", "thinking")
+
+# The classes of the three forms, so every reader of a painted or stored line
+# spells them from one place.
+OPENING: Final[str] = "opening"
+RUNNING: Final[str] = "running"
+CLOSING: Final[str] = "closing"
 
 # The chunk's top-level key the pinned frontend hands to its event emitter.
 STATUS_EVENT_KEY: Final[str] = "event"
@@ -36,12 +47,10 @@ def _form_pattern(form: str) -> str:
     return re.escape(form).replace(re.escape(_ELAPSED_PLACEHOLDER), _ELAPSED_PATTERN)
 
 
-_DESCRIPTION_PATTERN = re.compile(
-    "(?:"
-    + "|".join(
-        _form_pattern(form) for form in (OPENING_FORM, RUNNING_FORM, CLOSING_FORM)
-    )
-    + ")"
+_DESCRIPTION_PATTERNS = (
+    (OPENING, re.compile(_form_pattern(OPENING_FORM))),
+    (RUNNING, re.compile(_form_pattern(RUNNING_FORM))),
+    (CLOSING, re.compile(_form_pattern(CLOSING_FORM))),
 )
 
 
@@ -77,7 +86,18 @@ def closing_description(seconds: object) -> str:
 def is_progress_description(value: object) -> bool:
     """Whether text is exactly one bounded progress form."""
 
-    return isinstance(value, str) and _DESCRIPTION_PATTERN.fullmatch(value) is not None
+    return classify_description(value) is not None
+
+
+def classify_description(value: object) -> str | None:
+    """Name a complete progress form, or decline text outside the forms."""
+
+    if not isinstance(value, str):
+        return None
+    for word, pattern in _DESCRIPTION_PATTERNS:
+        if pattern.fullmatch(value) is not None:
+            return word
+    return None
 
 
 def build_status_event(description: str, done: bool) -> dict[str, object]:

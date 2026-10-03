@@ -708,12 +708,14 @@ def _browser_turn_fix(spec: RunSpec, turn: browser.BrowserTurn) -> str:
 def _browser_data(
     turn: browser.BrowserTurn, verdict: classify.LiveVerdict
 ) -> dict[str, object]:
-    """The record's browser block: every state compact, the notable states' texts."""
+    """The browser block: compact states, notable texts, and the line's class."""
 
     return {
         "chat_id": turn.chat_id,
         "screenshot": str(turn.screenshot),
         "block_opened_at": turn.block_opened_at,
+        "line_painted_at": verdict.line_painted_at,
+        "line_class": verdict.line_class,
         "elapsed": turn.elapsed,
         "regions": dict(turn.regions),
         "no_states": verdict.no_states,
@@ -1454,9 +1456,14 @@ def frontend_turn(
         unidentified = outcome.unidentified
         if isinstance(outcome.extras, browser.BrowserTurn):
             browser_turn = outcome.extras
-            live_verdict = classify.live_verdict(browser_turn.entries, browser_turn.final_trip)
+            live_verdict = classify.live_verdict(
+                browser_turn.entries,
+                browser_turn.final_trip,
+                line_painted_at=browser_turn.line_painted_at,
+                line_class=browser_turn.line_class,
+            )
         live_detail = (
-            f"; {classify.live_field(live_verdict)}"
+            f"; {classify.live_field(live_verdict)}; {classify.line_field(live_verdict)}"
             if live_verdict is not None
             else ""
         )
@@ -1501,7 +1508,9 @@ def frontend_turn(
             if (
                 live_verdict is not None
                 and browser_turn is not None
-                and classify.live_fails(live_verdict, STREAM_LEAK_FAILS)
+                and classify.live_fails(
+                    live_verdict, STREAM_LEAK_FAILS, search=case.search
+                )
             ):
                 row_ok = False
                 row_fix = _browser_turn_fix(spec, browser_turn)

@@ -9,6 +9,7 @@ from pathlib import Path
 import yaml  # type: ignore[import-untyped]
 
 from gideon.api import progress
+from gideon.api.judged import REASONING_KEYS
 
 ROOT = Path(__file__).resolve().parent.parent
 PROGRESS_PATH = ROOT / "gideon/api/progress.py"
@@ -85,6 +86,34 @@ class Descriptions(unittest.TestCase):
         ):
             with self.subTest(description=description):
                 self.assertFalse(progress.is_progress_description(description))
+
+    def test_classifier_names_each_form_and_rejects_other_values(self) -> None:
+        self.assertEqual(
+            (progress.OPENING, progress.RUNNING, progress.CLOSING),
+            ("opening", "running", "closing"),
+        )
+        self.assertEqual(
+            progress.classify_description(progress.opening_description()), progress.OPENING
+        )
+        for seconds in (0, 5, 59, 60, 65, 3599, 3600):
+            with self.subTest(seconds=seconds):
+                self.assertEqual(
+                    progress.classify_description(progress.running_description(seconds)),
+                    progress.RUNNING,
+                )
+                self.assertEqual(
+                    progress.classify_description(progress.closing_description(seconds)),
+                    progress.CLOSING,
+                )
+        for value in ("Thinking… 5s extra", "Thinking… the model is reasoning", "A model answer", 5):
+            with self.subTest(value=value):
+                self.assertIsNone(progress.classify_description(value))
+
+    def test_reasoning_names_are_shared_with_the_mechanics(self) -> None:
+        self.assertIs(REASONING_KEYS, progress.REASONING_KEYS)
+        self.assertEqual(
+            progress.REASONING_KEYS, ("reasoning", "reasoning_content", "thinking")
+        )
 
 
 class Event(unittest.TestCase):

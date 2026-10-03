@@ -25,7 +25,7 @@ class StreamCapture:
 
 @dataclass(frozen=True, slots=True)
 class StreamPayload:
-    """Ordered status, reasoning, and content deltas, or a safe parse problem."""
+    """Ordered status, each reasoning value, and content, or a safe parse problem."""
 
     deltas: tuple[tuple[str, str], ...] = ()
     problem: str | None = None
@@ -134,9 +134,12 @@ def parse_stream_payload(payload: object) -> StreamPayload:
     delta = choice.get("delta")
     if not isinstance(delta, Mapping):
         return StreamPayload(problem="the stream carried no delta")
-    reasoning = delta.get("reasoning")
-    if isinstance(reasoning, str) and reasoning:
-        deltas.append(("reasoning", reasoning))
+    for key in progress.REASONING_KEYS:
+        if key in delta:
+            reasoning = delta[key]
+            if not isinstance(reasoning, str):
+                return StreamPayload(problem="the stream carried an unreadable reasoning value")
+            deltas.append(("reasoning", reasoning))
     content = delta.get("content")
     if isinstance(content, str) and content:
         deltas.append(("content", content))
