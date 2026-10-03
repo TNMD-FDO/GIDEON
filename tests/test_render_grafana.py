@@ -81,6 +81,7 @@ HEADER_TEXT_INSET = 13  # a header cell's 6 px padding each side and its right b
 KIOSK_SIDE_PADDING = 32  # the kiosk page's 16 px padding on each side
 GRID_COLUMNS = 24  # the dashboard grid's columns
 HEADER_CHAR_WIDTH_BOUND = 9  # an upper bound per header character, not a glyph metric
+GPU_AGGREGATED_FIELD = re.compile(r"max by \(gpu\) \((DCGM_FI_[A-Z0-9_]+)\)")
 
 
 def table_whole_rows(panel: dict[str, Any]) -> int:
@@ -198,6 +199,15 @@ def dcgm_counter_rows() -> dict[str, tuple[str, str]]:
             field, kind, help_text = (part.strip() for part in line.split(",", 2))
             rows[field] = (kind, help_text)
     return rows
+
+
+def gpu_aggregated_field(expr: str) -> str:
+    """Read a DCGM field grouped to draw one series per gpu."""
+
+    match = GPU_AGGREGATED_FIELD.fullmatch(expr)
+    if match is None:
+        raise AssertionError(f"{expr!r} must draw one series per gpu")
+    return match.group(1)
 
 
 def inputs(site_path: Path = EXAMPLE, **overrides: object) -> RenderInputs:
@@ -899,6 +909,47 @@ class Overview(unittest.TestCase):
 
 
 class Dashboards(unittest.TestCase):
+    def test_every_range_card_draws_one_series_per_gpu(self) -> None:
+        for path in sorted((ROOT / "compose/grafana/dashboards").rglob("*.json")):
+            dashboard = json.loads(path.read_text(encoding="utf-8"))
+            for panel in _leaf_panels(dashboard):
+                if panel["type"] == "stat":
+                    continue
+                for target in panel.get("targets", []):
+                    expr = target.get("expr", "")
+                    if "DCGM_FI_" not in expr:
+                        continue
+                    with self.subTest(
+                        dashboard=path.name, panel=panel["title"], refId=target["refId"]
+                    ):
+                        gpu_aggregated_field(expr)
+                        labels = re.findall(r"\{\{\s*(\w+)\s*\}\}", target["legendFormat"])
+                        self.assertTrue(all(label == "gpu" for label in labels))
+
+        dashboard = json.loads(GrafanaGpuArtifact.emit(inputs()))
+        panels = {panel["title"]: panel for panel in _leaf_panels(dashboard)}
+        expected = {
+            "GPU utilisation": [("DCGM_FI_DEV_GPU_UTIL", "GPU {{gpu}}")],
+            "GPU memory": [
+                ("DCGM_FI_DEV_FB_USED", "GPU {{gpu}}"),
+                ("DCGM_FI_DEV_FB_FREE", "GPU {{gpu}} free"),
+            ],
+            "GPU temperature": [
+                ("DCGM_FI_DEV_GPU_TEMP", "GPU {{gpu}}"),
+                ("DCGM_FI_DEV_GPU_MAX_OP_TEMP", "GPU {{gpu}} limit"),
+            ],
+            "GPU power": [("DCGM_FI_DEV_POWER_USAGE", "GPU {{gpu}}")],
+        }
+        for title, pairs in expected.items():
+            with self.subTest(panel=title):
+                self.assertEqual(
+                    [
+                        (gpu_aggregated_field(target["expr"]), target["legendFormat"])
+                        for target in panels[title]["targets"]
+                    ],
+                    pairs,
+                )
+
     def test_every_dashboard_has_a_fixed_uid_and_declared_datasources(self) -> None:
         site_inputs = inputs()
         declared = {
@@ -1860,13 +1911,13 @@ class Alerting(unittest.TestCase):
             panel for panel in dashboard["panels"] if panel["title"] == "GPU memory"
         )
         self.assertEqual(
-            {target["expr"] for target in memory["targets"]},
+            {gpu_aggregated_field(target["expr"]) for target in memory["targets"]},
             {"DCGM_FI_DEV_FB_USED", "DCGM_FI_DEV_FB_FREE"},
         )
         self.assertEqual(memory["fieldConfig"]["defaults"]["unit"], "mbytes")
         rows = dcgm_counter_rows()
         for target in memory["targets"]:
-            self.assertIn("MiB", rows[target["expr"]][1])
+            self.assertIn("MiB", rows[gpu_aggregated_field(target["expr"])][1])
 
     def test_gpu_board_temperature_limit_is_dashed(self) -> None:
         dashboard = json.loads(
@@ -1877,7 +1928,7 @@ class Alerting(unittest.TestCase):
         )
         targets = temperature["targets"]
         self.assertEqual(
-            [target["expr"] for target in targets],
+            [gpu_aggregated_field(target["expr"]) for target in targets],
             ["DCGM_FI_DEV_GPU_TEMP", "DCGM_FI_DEV_GPU_MAX_OP_TEMP"],
         )
         self.assertTrue(targets[1]["legendFormat"].endswith(" limit"))
@@ -1893,7 +1944,7 @@ class Alerting(unittest.TestCase):
             overrides[0]["properties"],
             [{"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [10, 10]}}],
         )
-        self.assertEqual(dcgm_counter_rows()[targets[1]["expr"]][0], "gauge")
+        self.assertEqual(dcgm_counter_rows()[gpu_aggregated_field(targets[1]["expr"])][0], "gauge")
 
     def test_dcgm_fields_read_by_boards_and_rules_are_collected(self) -> None:
         dashboard_paths = (ROOT / "compose/grafana/dashboards").rglob("*.json")

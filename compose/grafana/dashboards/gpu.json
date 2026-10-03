@@ -9,7 +9,7 @@
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "fieldConfig": {"defaults": {"unit": "percent"}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
-      "targets": [{"expr": "DCGM_FI_DEV_GPU_UTIL", "legendFormat": "GPU {{gpu}}", "refId": "A"}],
+      "targets": [{"expr": "max by (gpu) (DCGM_FI_DEV_GPU_UTIL)", "legendFormat": "GPU {{gpu}}", "refId": "A"}],
       "title": "GPU utilisation",
       "type": "timeseries"
     },
@@ -18,7 +18,7 @@
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "fieldConfig": {"defaults": {"unit": "mbytes"}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
-      "targets": [{"expr": "DCGM_FI_DEV_FB_USED", "legendFormat": "GPU {{gpu}}", "refId": "A"}, {"expr": "DCGM_FI_DEV_FB_FREE", "legendFormat": "GPU {{gpu}} free", "refId": "B"}],
+      "targets": [{"expr": "max by (gpu) (DCGM_FI_DEV_FB_USED)", "legendFormat": "GPU {{gpu}}", "refId": "A"}, {"expr": "max by (gpu) (DCGM_FI_DEV_FB_FREE)", "legendFormat": "GPU {{gpu}} free", "refId": "B"}],
       "title": "GPU memory",
       "type": "timeseries"
     },
@@ -27,7 +27,7 @@
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "fieldConfig": {"defaults": {"unit": "celsius"}, "overrides": [{"matcher": {"id": "byRegexp", "options": "/ limit$/"}, "properties": [{"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [10, 10]}}]}]},
       "gridPos": {"h": 8, "w": 8, "x": 0, "y": 8},
-      "targets": [{"expr": "DCGM_FI_DEV_GPU_TEMP", "legendFormat": "GPU {{gpu}}", "refId": "A"}, {"expr": "DCGM_FI_DEV_GPU_MAX_OP_TEMP", "legendFormat": "GPU {{gpu}} limit", "refId": "B"}],
+      "targets": [{"expr": "max by (gpu) (DCGM_FI_DEV_GPU_TEMP)", "legendFormat": "GPU {{gpu}}", "refId": "A"}, {"expr": "max by (gpu) (DCGM_FI_DEV_GPU_MAX_OP_TEMP)", "legendFormat": "GPU {{gpu}} limit", "refId": "B"}],
       "title": "GPU temperature",
       "type": "timeseries"
     },
@@ -36,7 +36,7 @@
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "fieldConfig": {"defaults": {"unit": "watt"}, "overrides": []},
       "gridPos": {"h": 8, "w": 8, "x": 8, "y": 8},
-      "targets": [{"expr": "DCGM_FI_DEV_POWER_USAGE", "legendFormat": "GPU {{gpu}}", "refId": "A"}],
+      "targets": [{"expr": "max by (gpu) (DCGM_FI_DEV_POWER_USAGE)", "legendFormat": "GPU {{gpu}}", "refId": "A"}],
       "title": "GPU power",
       "type": "timeseries"
     },

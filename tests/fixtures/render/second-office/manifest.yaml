@@ -75,7 +75,7 @@ files:
     owners:
       - "grafana"
   "grafana/dashboards/gpu.json":
-    sha256: "3c9beb828057d1b865e85c84e42880b21d4ec127cc1c66d444305aaa3663f749"
+    sha256: "e7c85e50facfbb24118ac4d36be555b3de8f732ae3967aed7186569fe019a90c"
     mode: "0644"
     owners:
       - "grafana"
