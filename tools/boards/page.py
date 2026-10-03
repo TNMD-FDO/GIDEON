@@ -8,7 +8,7 @@ re-read them when the Grafana pin moves.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Final, Literal, Protocol
 from urllib.parse import quote, urlsplit
@@ -17,7 +17,7 @@ from gideon.evaluation.turns.browser import PageError
 from gideon.host import secrets
 from gideon.host.render.grafana import GRAFANA_SUB_PATH
 from gideon.host.report import Problem, one_line
-from tools.boards.inventory import Board, ExpectedPanel
+from tools.boards.inventory import Board, CollapsedRow, ExpectedPanel
 
 # Research note section 1, Sign-in: the local form.
 LOGIN_PATH: Final = f"{GRAFANA_SUB_PATH}login"
@@ -41,6 +41,11 @@ NO_DATA_TEXT: Final = "No data"
 TABLE_EMPTY_TEXT: Final = "No rows"
 STAT_EMPTY_TEXT: Final = "No data"
 ALERT_EMPTY_TEXT: Final = "No alerts matching filters"
+
+# Research note section 10, Collapsed rows, as its Settled section corrects it:
+# the toggle button's test id and its closed-state label.
+ROW_BUTTON_PREFIX: Final = "data-testid dashboard-row-toggle-for-"
+ROW_EXPAND_LABEL_PREFIX: Final = "Expand row"
 
 # Research note sections 5 and 9, Lazy loading and Playwright: grid and viewport.
 GRID_CELL_HEIGHT: Final = 30
@@ -145,10 +150,10 @@ def sign_in(
         return Problem("Grafana sign-in page could not be read", _PAGE_FIX)
 
 
-def _panel_section(title: str) -> str:
-    # Escape a CSS quoted attribute value, including a title containing a quote.
-    value = PANEL_SECTION_PREFIX + title
-    escaped = "".join(
+def _css_attribute_value(value: str) -> str:
+    """Escape a CSS quoted attribute value, including a title containing a quote."""
+
+    return "".join(
         f"\\{ord(char):x} "
         if ord(char) < 32
         else "\\" + char
@@ -156,7 +161,14 @@ def _panel_section(title: str) -> str:
         else char
         for char in value
     )
-    return f'section[data-testid="{escaped}"]'
+
+
+def _panel_section(title: str) -> str:
+    return f'section[data-testid="{_css_attribute_value(PANEL_SECTION_PREFIX + title)}"]'
+
+
+def _row_button(title: str) -> str:
+    return f'button[data-testid="{_css_attribute_value(ROW_BUTTON_PREFIX + title)}"]'
 
 
 def _inside(section: str, selector: str) -> str:
@@ -168,9 +180,9 @@ def _content(page: BoardPage, section: str) -> str | None:
 
 
 def _blank_stat(page: BoardPage, section: str, panel: ExpectedPanel) -> bool:
-    # A stat over null values renders its value element with no text, while a
-    # panel the frontend has not yet rendered leaves its content element empty.
-    return panel.type == "stat" and (
+    # A stat or bar gauge over null values has a blank value element; a panel
+    # that has not rendered has empty content.
+    return panel.type in {"stat", "bargauge"} and (
         page.count(_inside(section, f"{PANEL_CONTENT_SELECTOR} *")) > 0
     )
 
@@ -194,6 +206,33 @@ def open_board(page: BoardPage, board: Board) -> None:
     grid_height = board.lowest_grid_row * row_height
     page.resize(VIEWPORT_WIDTH, max(VIEWPORT_FLOOR, grid_height + VIEWPORT_ALLOWANCE))
     page.goto(f"{GRAFANA_SUB_PATH}d/{quote(board.uid, safe='')}?{BOARD_QUERY}")
+
+
+def _wait_for_selector(page: BoardPage, selector: str, timeout: float) -> bool:
+    return page.wait_until(lambda: page.count(selector) > 0, timeout)
+
+
+def _expand_rows(page: BoardPage, board: Board, *, timeout: float) -> tuple[CollapsedRow, ...]:
+    """Open collapsed rows and return those whose panels did not mount."""
+
+    unopened: list[CollapsedRow] = []
+    for row in board.collapsed_rows:
+        button = _row_button(row.title)
+        expand_button = (
+            f'{button}[aria-label^="{_css_attribute_value(ROW_EXPAND_LABEL_PREFIX)}"]'
+        )
+        first_panel = _panel_section(row.panel_titles[0])
+        try:
+            if not _wait_for_selector(page, button, timeout):
+                unopened.append(row)
+                continue
+            if page.count(expand_button) > 0:
+                page.click(expand_button)
+            if not _wait_for_selector(page, first_panel, timeout):
+                unopened.append(row)
+        except PageError:
+            unopened.append(row)
+    return tuple(unopened)
 
 
 def _ready(page: BoardPage, board: Board) -> bool:
@@ -255,7 +294,7 @@ def classify(page: BoardPage, panel: ExpectedPanel, *, timeout: float) -> PanelR
         return PanelReading(panel.title, "loading")
     text = (content or "").strip()
     if not text:
-        # Only a stat reaches here blank; what it should show is the screenshot's.
+        # The screenshot shows what a blank stat or bar gauge should display.
         return PanelReading(panel.title, "drawn", "blank value")
     data_error = page.text(_inside(section, DATA_ERROR_SELECTOR))
     if data_error is not None:
@@ -266,6 +305,7 @@ def classify(page: BoardPage, panel: ExpectedPanel, *, timeout: float) -> PanelR
     empty_text = {
         "table": TABLE_EMPTY_TEXT,
         "stat": STAT_EMPTY_TEXT,
+        "bargauge": STAT_EMPTY_TEXT,
         "alertlist": ALERT_EMPTY_TEXT,
     }.get(panel.type)
     if empty_text is not None and text == empty_text:
@@ -280,8 +320,20 @@ def check_board(
 
     try:
         open_board(page, board)
-        settle(page, board)
+        unopened = {
+            title: row.title
+            for row in _expand_rows(page, board, timeout=timeout)
+            for title in row.panel_titles
+        }
+        # A row that did not open has no panels to wait for.
+        reachable = tuple(panel for panel in board.panels if panel.title not in unopened)
+        settle(page, replace(board, panels=reachable))
         page.screenshot(screenshot)
-        return tuple(classify(page, panel, timeout=timeout) for panel in board.panels)
+        return tuple(
+            PanelReading(panel.title, "missing", f"row {unopened[panel.title]} did not open")
+            if panel.title in unopened
+            else classify(page, panel, timeout=timeout)
+            for panel in board.panels
+        )
     except PageError:
         return Problem("Grafana board could not be read", _PAGE_FIX)

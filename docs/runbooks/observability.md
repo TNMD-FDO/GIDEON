@@ -58,12 +58,19 @@ and the runbook section to follow.
   read from the same alert state `gideon status` prints, so an empty list
   means a clear box; beside it, *Start here*: `gideon status`, Grafana's
   silences page, a link to each other board on this host, and the start-here
-  card on the box and in the public export. Below them: services and probes
-  up; `/`, `/var/lib/docker`, `/data` and `/data/fast` free with the 15 % line;
-  backup set age and push age (from the rows, red past the 26-hour line their
-  pages fire at), the newest passing drill's age (red past the drill-overdue
-  line set by the drill calendar), the last drill's result, GPU utilisation
-  and memory, host load and memory, container memory.
+  card on the box and in the public export. Below them, one card for each
+  measure a page rule grades, each coloured card turning red at the line its
+  page fires at: *Services and probes*, one tile per metrics scrape, door
+  probe, and database check a down-rule watches, reading up or down; three
+  bars for `/data`, `/`, and `/var/lib/docker` free, red under the 15 % line;
+  the certificate's days left, red under the 14-day line; backup set age and
+  push age (from the rows, red past the 26-hour line), the newest passing
+  drill's age (red past the drill-overdue line set by the drill calendar), and
+  the last drill's result; then *Guardrail trips*, the users' daily trips. At
+  the foot, the collapsed *Host detail* row holds host load, host memory, and
+  container memory against each limit; no rule pages on them. `/data/fast` is
+  not paged and not shown. A tile turns red at once, while its rule waits out
+  its pending period, so a red tile is a page on its way.
 - **Backup** — M25 (run duration, set bytes, hard-link ratio, push transferred
   vs total, verified counts) and M26 (drill duration and result) as series
   over the rows, and the last ten runs as a table — the timers' recorded runs.
@@ -77,7 +84,9 @@ and the runbook section to follow.
   replaced-control ceiling; the harness's and judge's false-refusal counts and
   unread controls; run duration against the nine-hour night; and the failed
   case IDs of the newest nightly runs. The Proposals waiting table shows the
-  newest daily tally, its completeness, and its recorded trigger rows. M17 and
+  newest daily tally, its completeness, and its recorded trigger rows. Below
+  it, *Last eval trip*: the age of the eval identity's last deliberate
+  guardrail trip, which every `engine verify` refreshes. M17 and
   M18 have no panel yet; their measurements arrive with the user and synthesis
   work.
 

@@ -38,10 +38,11 @@ guideline works.
 
 ## 2. Where a trip shows
 
-The Overview board (folder GIDEON) carries two trip panels: the users' daily
-trip count by pattern id over thirty days, and the age of the eval identity's
-last deliberate trip, which every `engine verify` refreshes, so a stale age
-means the writer has stopped
+Two panels in folder GIDEON show trips: the Overview's *Guardrail trips*, the
+users' daily trip count by pattern id over thirty days, and on a GPU host the
+Eval board's *Last eval trip*, the age of the eval identity's last deliberate
+trip, which every `engine verify` refreshes, so a stale age means the writer
+has stopped
 ([`docs/runbooks/observability.md §3`](observability.md#3-the-boards-folder-gideon)).
 Behind both is the `guardrail_trips` table, one row per trip with six facts:
 the moment, the branch (the chat, `gideon-general` since `v0.3.10`; earlier

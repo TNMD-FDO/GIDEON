@@ -262,6 +262,16 @@
       ],
       "title": "Proposals waiting",
       "type": "table"
+    },
+    {
+      "description": "This shows time since the last deliberate guardrail check, from its recorded trip. A recent value after engine verification is good; a stale value may mean the trip writer stopped. Check docs/runbooks/guardrail.md §2.",
+      "datasource": {"type": "postgres", "uid": "gideon-rows"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 8, "x": 0, "y": 51},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "none", "graphMode": "none", "textMode": "auto"},
+      "targets": [{"format": "table", "rawSql": "SELECT EXTRACT(EPOCH FROM (now() - max(at))) AS age_seconds FROM guardrail_trips WHERE source = 'eval'", "refId": "A"}],
+      "title": "Last eval trip",
+      "type": "stat"
     }
   ],
   "refresh": "30s",

@@ -32,12 +32,21 @@ class ExpectedPanel:
 
 
 @dataclass(frozen=True, slots=True)
+class CollapsedRow:
+    """A collapsed row and the panels the browser must open it to read."""
+
+    title: str
+    panel_titles: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class Board:
-    """One dashboard's identity, expected panels, and lowest grid row."""
+    """One dashboard's identity, expected panels, collapsed rows, and grid extent."""
 
     uid: str
     title: str
     panels: tuple[ExpectedPanel, ...]
+    collapsed_rows: tuple[CollapsedRow, ...]
     lowest_grid_row: int
 
 
@@ -59,6 +68,8 @@ def parse_board(document: str) -> Board:
 
     expected: list[ExpectedPanel] = []
     titles: set[str] = set()
+    collapsed_rows: list[CollapsedRow] = []
+    row_title_counts: dict[str, int] = {}
     lowest_grid_row = 0
 
     def visit(raw_panels: object) -> None:
@@ -86,11 +97,27 @@ def parse_board(document: str) -> Board:
                     raise ValueError(f"dashboard repeats panel title: {panel_title}")
                 titles.add(panel_title)
                 expected.append(ExpectedPanel(panel_title, panel_type))
+            else:
+                row_title = panel.get("title")
+                if isinstance(row_title, str) and row_title.strip():
+                    row_title_counts[row_title] = row_title_counts.get(row_title, 0) + 1
             if "panels" in panel:
+                first_nested = len(expected)
                 visit(panel["panels"])
+                if panel_type == "row" and panel.get("collapsed") is True and panel["panels"]:
+                    row_title = panel.get("title")
+                    if not isinstance(row_title, str) or not row_title.strip():
+                        raise ValueError("dashboard collapsed row has no title")
+                    if len(expected) > first_nested:
+                        collapsed_rows.append(
+                            CollapsedRow(row_title, tuple(item.title for item in expected[first_nested:]))
+                        )
 
     visit(dashboard.get("panels"))
-    return Board(uid, title, tuple(expected), lowest_grid_row)
+    for row in collapsed_rows:
+        if row_title_counts[row.title] > 1:
+            raise ValueError(f"dashboard repeats row title: {row.title}")
+    return Board(uid, title, tuple(expected), tuple(collapsed_rows), lowest_grid_row)
 
 
 @dataclass(frozen=True, slots=True)

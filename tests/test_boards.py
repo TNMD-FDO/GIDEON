@@ -44,7 +44,12 @@ DASHBOARD_PATHS = tuple(
 )
 
 
-def board_document(uid: str, panels: list[tuple[str, str]]) -> str:
+def board_document(
+    uid: str,
+    panels: list[tuple[str, str]],
+    *,
+    rows: Sequence[tuple[str, Sequence[tuple[str, str]]]] = (),
+) -> str:
     return json.dumps(
         {
             "uid": uid,
@@ -56,6 +61,33 @@ def board_document(uid: str, panels: list[tuple[str, str]]) -> str:
                     "gridPos": {"x": 0, "y": index * 8, "w": 12, "h": 8},
                 }
                 for index, (title, kind) in enumerate(panels)
+            ]
+            + [
+                {
+                    "title": row_title,
+                    "type": "row",
+                    "collapsed": True,
+                    "gridPos": {
+                        "x": 0,
+                        "y": (len(panels) + index) * 9,
+                        "w": 24,
+                        "h": 1,
+                    },
+                    "panels": [
+                        {
+                            "title": title,
+                            "type": kind,
+                            "gridPos": {
+                                "x": 0,
+                                "y": (len(panels) + index) * 9 + 1,
+                                "w": 12,
+                                "h": 8,
+                            },
+                        }
+                        for title, kind in nested
+                    ],
+                }
+                for index, (row_title, nested) in enumerate(rows)
             ],
         }
     )
@@ -172,6 +204,9 @@ class FakePage:
         boards: Mapping[str, list[tuple[str, str, str]]] | None = None,
         fail_navigation: set[str] | None = None,
         sections: Mapping[str, str] | None = None,
+        rows: Mapping[str, list[tuple[str, str, str]]] | None = None,
+        open_rows: set[str] | None = None,
+        unopenable_rows: set[str] | None = None,
     ) -> None:
         self.host = host
         self.password = password
@@ -180,6 +215,9 @@ class FakePage:
         self.boards = boards or {}
         self.fail_navigation = fail_navigation or set()
         self.sections = sections or {}
+        self.rows = rows or {}
+        self.open_rows = open_rows or set()
+        self.unopenable_rows = unopenable_rows or set()
         self.default_panels = panels
         self.current_url = ""
         self.tooltip = ""
@@ -194,6 +232,7 @@ class FakePage:
         self.closed = False
         self.values: dict[str, str] = {}
         self.present: set[str] = set()
+        self.row_buttons: dict[str, str] = {}
 
         self._install_panels(panels)
 
@@ -201,6 +240,9 @@ class FakePage:
         self.values.clear()
         self.present.clear()
         self.hovered = False
+        self._add_panels(panels)
+
+    def _add_panels(self, panels: list[tuple[str, str, str]]) -> None:
         for title, kind, content in panels:
             section = self.sections.get(
                 title, f'section[data-testid="{page.PANEL_SECTION_PREFIX}{title}"]'
@@ -228,6 +270,16 @@ class FakePage:
             if uid in self.fail_navigation:
                 raise PageError(f"navigation failed with {self.password}")
             self._install_panels(self.boards.get(uid, self.default_panels))
+            self.row_buttons = {
+                f'button[data-testid="{page.ROW_BUTTON_PREFIX}{title}"]': (
+                    "Collapse row"
+                    if title in self.open_rows
+                    else page.ROW_EXPAND_LABEL_PREFIX
+                )
+                for title in self.rows
+            }
+            for title in self.open_rows:
+                self._add_panels(self.rows[title])
         self.current_url = path
 
     def fill(self, selector: str, text: str) -> None:
@@ -238,6 +290,18 @@ class FakePage:
 
     def click(self, selector: str) -> None:
         self.click_selectors.append(selector)
+        row_selector = selector.removesuffix(
+            f'[aria-label^="{page.ROW_EXPAND_LABEL_PREFIX}"]'
+        )
+        if row_selector in self.row_buttons and row_selector != selector:
+            self.events.append("row click")
+            self.row_buttons[row_selector] = "Collapse row"
+            title = row_selector.removeprefix(
+                f'button[data-testid="{page.ROW_BUTTON_PREFIX}'
+            ).removesuffix('"]')
+            if title not in self.unopenable_rows:
+                self._add_panels(self.rows[title])
+            return
         if self.login_mode == "failed":
             self.login_error = True
             return
@@ -255,6 +319,12 @@ class FakePage:
             return int(self.login_error)
         if selector == page.TOOLTIP_SELECTOR:
             return int(self.hovered)
+        if selector in self.row_buttons:
+            return 1
+        for label in (page.ROW_EXPAND_LABEL_PREFIX, "Collapse row"):
+            row_selector = selector.removesuffix(f'[aria-label^="{label}"]')
+            if row_selector != selector and row_selector in self.row_buttons:
+                return int(self.row_buttons[row_selector].startswith(label))
         return int(selector in self.present or selector in self.values)
 
     def text(self, selector: str) -> str | None:
@@ -453,6 +523,16 @@ class BoardRows(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("Empty stat: empty; No data", stdout)
 
+    def test_bar_gauge_whole_no_data_is_empty(self) -> None:
+        """A bar gauge without a series has Grafana's no-data text."""
+
+        code, stdout, _, _, _ = self.run_board(
+            [("Empty bar", "bargauge")],
+            [("Empty bar", "drawn", page.STAT_EMPTY_TEXT)],
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("panel: ok — example-board: Empty bar: empty; No data", stdout)
+
     def test_alert_list_empty_text_is_empty(self) -> None:
         code, stdout, _, _, _ = self.run_board(
             [("Empty alerts", "alertlist")],
@@ -529,10 +609,122 @@ class BoardRows(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("Blank: drawn; blank value", stdout)
 
+    def test_rendered_blank_bar_gauge_is_drawn_for_the_screenshot(self) -> None:
+        """A mounted bar gauge with a blank value is visible."""
+
+        code, stdout = self.run_rendered_blank("bargauge")
+        self.assertEqual(code, 0)
+        self.assertIn("panel: ok — example-board: Blank: drawn; blank value", stdout)
+
     def test_rendered_blank_timeseries_is_still_loading(self) -> None:
         code, stdout = self.run_rendered_blank("timeseries")
         self.assertEqual(code, 1)
         self.assertIn("Blank: loading", stdout)
+
+    def test_collapsed_row_opens_once_before_screenshot(self) -> None:
+        """The screenshot and panel rows account for an opened row."""
+
+        host = FakeHost(
+            board_document(
+                "example-board",
+                [("Visible", "stat")],
+                rows=[
+                    (
+                        "Host detail",
+                        [("Host load", "timeseries"), ("Host memory", "stat")],
+                    )
+                ],
+            )
+        )
+        browser_page = FakePage(
+            host,
+            [("Visible", "drawn", "up")],
+            rows={
+                "Host detail": [
+                    ("Host load", "drawn", "12 points"),
+                    ("Host memory", "drawn", "42 percent"),
+                ]
+            },
+        )
+        code, stdout, stderr = self.invoke(host, browser_page)
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr, "")
+        self.assertIn("panel: ok — example-board: Host load: drawn", stdout)
+        self.assertIn("panel: ok — example-board: Host memory: drawn", stdout)
+        self.assertEqual(browser_page.events.count("row click"), 1)
+        self.assertLess(
+            browser_page.events.index("row click"),
+            browser_page.events.index("screenshot"),
+        )
+        button = f'button[data-testid="{page.ROW_BUTTON_PREFIX}Host detail"]'
+        self.assertEqual(
+            browser_page.click_selectors.count(
+                f'{button}[aria-label^="{page.ROW_EXPAND_LABEL_PREFIX}"]'
+            ),
+            1,
+        )
+        self.assertEqual(browser_page.count(f'{button}[aria-label^="Collapse row"]'), 1)
+
+    def test_already_open_row_is_not_clicked(self) -> None:
+        """An open row stays open for its panel reading."""
+
+        host = FakeHost(
+            board_document(
+                "example-board",
+                [],
+                rows=[("Host detail", [("Host load", "timeseries")])],
+            )
+        )
+        browser_page = FakePage(
+            host,
+            [],
+            rows={"Host detail": [("Host load", "drawn", "12 points")]},
+            open_rows={"Host detail"},
+        )
+        code, stdout, stderr = self.invoke(host, browser_page)
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr, "")
+        self.assertIn("panel: ok — example-board: Host load: drawn", stdout)
+        self.assertEqual(browser_page.events.count("row click"), 0)
+        self.assertEqual(browser_page.click_selectors, [page.LOGIN_SELECTOR])
+
+    def test_row_that_never_opens_reports_its_panels_missing(self) -> None:
+        """A failed row opening names the row on each missing panel."""
+
+        host = FakeHost(
+            board_document(
+                "example-board",
+                [("Visible", "stat")],
+                rows=[
+                    (
+                        "Host detail",
+                        [("Host load", "timeseries"), ("Host memory", "stat")],
+                    )
+                ],
+            )
+        )
+        browser_page = FakePage(
+            host,
+            [("Visible", "drawn", "up")],
+            rows={
+                "Host detail": [
+                    ("Host load", "drawn", "12 points"),
+                    ("Host memory", "drawn", "42 percent"),
+                ]
+            },
+            unopenable_rows={"Host detail"},
+        )
+        code, stdout, stderr = self.invoke(host, browser_page)
+        self.assertEqual(code, 1)
+        self.assertEqual(stderr, "")
+        self.assertIn("panel: ok — example-board: Visible: drawn", stdout)
+        for title in ("Host load", "Host memory"):
+            self.assertIn(
+                f"panel: refuse — example-board: {title}: missing; row Host detail did not open",
+                stdout,
+            )
+        self.assertIn("board: refuse", stdout)
+        self.assertIn("summary: refuse", stdout)
 
     def test_screenshot_precedes_tooltip_hover(self) -> None:
         _, _, _, _, browser_page = self.run_board(
@@ -994,6 +1186,39 @@ class BoardRows(unittest.TestCase):
         self.assertIn("dashboard repeats panel title: Repeated", stdout)
         self.assertIn("board: refuse", stdout)
         self.assertIn("Fix: ", stdout)
+
+    def test_named_dashboard_collapsed_row_without_title_is_board_refusal(self) -> None:
+        """A collapsed row needs a title for its browser handle."""
+
+        dashboard = json.loads(
+            board_document(
+                "outside-board", [], rows=[("", [("Host load", "timeseries")])]
+            )
+        )
+        code, stdout = self.run_named_dashboard(dashboard)
+        self.assertEqual(code, 1)
+        self.assertIn("dashboard collapsed row has no title", stdout)
+        self.assertIn("board: refuse", stdout)
+        self.assertIn("Fix: Correct the dashboard in Grafana, then retry.", stdout)
+
+    def test_named_dashboard_repeated_row_title_is_board_refusal(self) -> None:
+        """Collapsed row handles must be unique on the board."""
+
+        dashboard = json.loads(
+            board_document(
+                "outside-board",
+                [],
+                rows=[
+                    ("Host detail", [("Host load", "timeseries")]),
+                    ("Host detail", [("Host memory", "stat")]),
+                ],
+            )
+        )
+        code, stdout = self.run_named_dashboard(dashboard)
+        self.assertEqual(code, 1)
+        self.assertIn("dashboard repeats row title: Host detail", stdout)
+        self.assertIn("board: refuse", stdout)
+        self.assertIn("Fix: Correct the dashboard in Grafana, then retry.", stdout)
 
     def test_named_dashboard_non_object_document_is_board_refusal(self) -> None:
         code, stdout = self.run_named_dashboard("{not JSON")

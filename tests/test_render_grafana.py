@@ -22,11 +22,15 @@ from gideon.host.render.compose import service_blocks
 from gideon.host.render.engine import ENGINE_JOB_NAME
 from gideon.host.render.facts import HostFacts
 from gideon.host.render.grafana import (
+    BACKUP_PUSH_AGE_TITLE,
+    BACKUP_SET_AGE_TITLE,
     BACKUP_TEMPLATE,
+    CERTIFICATE_DAYS_LEFT_TITLE,
     DASHBOARDS_MOUNT,
     DATASOURCES_TEMPLATE,
     DRILL_MAX_GAP_DAYS,
     EVAL_TEMPLATE,
+    FILESYSTEMS_FREE_TITLE,
     FRONT_DOOR_BOARDS,
     GRAFANA_SILENCES_ROUTE,
     GRAFANA_SUB_PATH,
@@ -49,6 +53,7 @@ from gideon.host.render.grafana import (
     GrafanaRulesArtifact,
     GrafanaTimeIntervalsArtifact,
 )
+from gideon.host.render.prometheus import PrometheusConfigArtifact
 from gideon.host.render.searxng import search_enabled
 from gideon.host.render.systemd import NIGHTLY_CALENDAR, NIGHTLY_SUITES
 from gideon.host.site import load_site
@@ -215,70 +220,117 @@ def _datasource_uids(value: Any) -> set[str]:
     return found
 
 
+def _leaf_panels(dashboard: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every panel but a row, the panels nested under a row included."""
+
+    leaves = []
+    for panel in dashboard["panels"]:
+        if panel["type"] == "row":
+            leaves.extend(panel.get("panels", []))
+        else:
+            leaves.append(panel)
+    return leaves
+
+
 class Overview(unittest.TestCase):
     def test_rendered_overview_has_declared_datasources_and_literal_dollars(self) -> None:
-        site_inputs = inputs()
-        text = GrafanaOverviewArtifact().emit(site_inputs)
-        dashboard = json.loads(text)
-        self.assertEqual(dashboard["schemaVersion"], 41)
-        self.assertEqual(dashboard["uid"], "gideon-overview")
-        self.assertNotIn("id", dashboard)
-        self.assertEqual(
-            {panel["title"] for panel in dashboard["panels"]},
-            {
-                "Needs attention",
-                "Start here",
-                "Services and probes",
-                "Filesystems free",
-                "Backup set age",
-                "Backup push age",
-                PASSING_DRILL_AGE_TITLE,
-                "Last drill result",
-                "GPU utilisation",
-                "GPU memory",
-                "Host load",
-                "Host memory",
-                "Container memory",
-                "Guardrail trips",
-                "Last eval trip",
-            },
-        )
-        self.assertTrue(all("id" not in panel for panel in dashboard["panels"]))
-        declared = {
-            item["uid"]
-            for item in yaml.safe_load(site_inputs.templates[DATASOURCES_TEMPLATE])["datasources"]
-        }
-        self.assertTrue(_datasource_uids(dashboard) <= declared)
-        template_text = (ROOT / "compose" / OVERVIEW_TEMPLATE).read_text(encoding="utf-8")
-        for board_text in (text, template_text):
-            self.assertIn("$__timeFilter(at)", board_text)
-            self.assertIn("/^result$/", board_text)
-            self.assertIn("/ limit$/", board_text)
-            self.assertNotIn("$$", board_text)
-        template = json.loads(template_text)
-        expected = {panel["title"]: panel for panel in template["panels"]}
-        rendered = {panel["title"]: panel for panel in dashboard["panels"]}
-        self.assertEqual(expected[START_HERE_TITLE]["options"]["content"], "$start_here")
-        expected[START_HERE_TITLE]["options"]["content"] = rendered[START_HERE_TITLE]["options"]["content"]
-        red_step = expected[PASSING_DRILL_AGE_TITLE]["fieldConfig"]["defaults"]["thresholds"]["steps"][-1]
-        self.assertEqual(red_step["value"], "$drill_threshold")
-        threshold = rendered[PASSING_DRILL_AGE_TITLE]["fieldConfig"]["defaults"]["thresholds"]["steps"][-1]["value"]
-        red_step["value"] = threshold
-        description = expected[PASSING_DRILL_AGE_TITLE]["description"]
-        self.assertIn("$drill_days", description)
-        expected[PASSING_DRILL_AGE_TITLE]["description"] = description.replace("$drill_days", str(threshold // 86400))
-        self.assertEqual(dashboard, template)
+        for no_gpu in (False, True):
+            with self.subTest(no_gpu=no_gpu):
+                site_inputs = inputs(no_gpu=no_gpu)
+                text = GrafanaOverviewArtifact().emit(site_inputs)
+                dashboard = json.loads(text)
+                self.assertEqual(dashboard["schemaVersion"], 41)
+                self.assertEqual(dashboard["uid"], "gideon-overview")
+                self.assertNotIn("id", dashboard)
+                self.assertEqual(
+                    {panel["title"] for panel in dashboard["panels"]},
+                    {
+                        "Needs attention",
+                        START_HERE_TITLE,
+                        "Services and probes",
+                        FILESYSTEMS_FREE_TITLE,
+                        CERTIFICATE_DAYS_LEFT_TITLE,
+                        BACKUP_SET_AGE_TITLE,
+                        BACKUP_PUSH_AGE_TITLE,
+                        PASSING_DRILL_AGE_TITLE,
+                        "Last drill result",
+                        "Guardrail trips",
+                        "Host detail",
+                    },
+                )
+                self.assertEqual(len(dashboard["panels"]), 11)
+                row = next(panel for panel in dashboard["panels"] if panel["type"] == "row")
+                self.assertEqual(
+                    [panel["title"] for panel in row["panels"]],
+                    ["Host load", "Host memory", "Container memory"],
+                )
+                self.assertTrue(
+                    all("id" not in panel for panel in (*dashboard["panels"], *row["panels"]))
+                )
+                declared = {
+                    item["uid"]
+                    for item in yaml.safe_load(site_inputs.templates[DATASOURCES_TEMPLATE])[
+                        "datasources"
+                    ]
+                }
+                self.assertTrue(_datasource_uids(dashboard) <= declared)
+                template_text = (ROOT / "compose" / OVERVIEW_TEMPLATE).read_text(encoding="utf-8")
+                for board_text in (text, template_text):
+                    self.assertIn("$__timeFilter(at)", board_text)
+                    self.assertIn("/^result$/", board_text)
+                    self.assertIn("/ limit$/", board_text)
+                    self.assertNotIn("$$", board_text)
+                template = json.loads(template_text)
+                expected = {panel["title"]: panel for panel in template["panels"]}
+                rendered = {panel["title"]: panel for panel in dashboard["panels"]}
+                self.assertEqual(expected[START_HERE_TITLE]["options"]["content"], "$start_here")
+                expected[START_HERE_TITLE]["options"]["content"] = rendered[START_HERE_TITLE][
+                    "options"
+                ]["content"]
+                for title, step_name, description_name, divisor in (
+                    (PASSING_DRILL_AGE_TITLE, "drill_threshold", "drill_days", 86400),
+                    (BACKUP_SET_AGE_TITLE, "backup_threshold", "backup_hours", 3600),
+                    (BACKUP_PUSH_AGE_TITLE, "backup_threshold", "backup_hours", 3600),
+                    (FILESYSTEMS_FREE_TITLE, "filesystem_percent", "filesystem_percent", 1),
+                    (CERTIFICATE_DAYS_LEFT_TITLE, "certificate_days", "certificate_days", 1),
+                ):
+                    with self.subTest(no_gpu=no_gpu, panel=title):
+                        step = expected[title]["fieldConfig"]["defaults"]["thresholds"]["steps"][-1]
+                        value = rendered[title]["fieldConfig"]["defaults"]["thresholds"]["steps"][
+                            -1
+                        ]["value"]
+                        self.assertEqual(step["value"], f"${step_name}")
+                        step["value"] = value
+                        description = expected[title]["description"]
+                        self.assertIn(f"${description_name}", description)
+                        expected[title]["description"] = description.replace(
+                            f"${description_name}", str(value // divisor)
+                        )
+                self.assertEqual(dashboard, template)
 
     def test_overview_refuses_renamed_panel_or_missing_sentinel(self) -> None:
         site_inputs = inputs()
-        for change, placeholder in (("title", "drill_threshold"), ("sentinel", "drill_days")):
-            with self.subTest(change=change):
+        for title, change, placeholder in (
+            (PASSING_DRILL_AGE_TITLE, "title", "drill_threshold"),
+            (PASSING_DRILL_AGE_TITLE, "description", "drill_days"),
+            (BACKUP_SET_AGE_TITLE, "step", "backup_threshold"),
+            (BACKUP_PUSH_AGE_TITLE, "description", "backup_hours"),
+            (FILESYSTEMS_FREE_TITLE, "step", "filesystem_percent"),
+            (CERTIFICATE_DAYS_LEFT_TITLE, "description", "certificate_days"),
+        ):
+            with self.subTest(panel=title, change=change):
                 template = json.loads(site_inputs.templates[OVERVIEW_TEMPLATE])
-                drill = next(panel for panel in template["panels"] if panel["title"] == PASSING_DRILL_AGE_TITLE)
+                panel = next(panel for panel in template["panels"] if panel["title"] == title)
                 if change == "title":
-                    drill["title"] = "Fictitious renamed drill"
+                    panel["title"] = "Fictitious renamed card"
+                elif change == "step":
+                    panel["fieldConfig"]["defaults"]["thresholds"]["steps"][-1][
+                        "value"
+                    ] = "fictitious"
                 else:
-                    drill["description"] = drill["description"].replace("$drill_days", "fictitious")
+                    panel["description"] = panel["description"].replace(
+                        f"${placeholder}", "fictitious"
+                    )
                 altered = replace(
                     site_inputs,
                     templates={**site_inputs.templates, OVERVIEW_TEMPLATE: json.dumps(template)},
@@ -382,14 +434,15 @@ class Overview(unittest.TestCase):
                 self.assertEqual(content.count('target="_blank"'), 1)
                 self.assertTrue(all('target=' not in line for line in content.splitlines() if line.startswith("- [")))
 
-    def test_filesystem_panel_has_four_mountpoint_targets_and_shared_threshold(self) -> None:
+    def test_filesystem_panel_has_three_paged_mountpoints_and_shared_threshold(self) -> None:
         """The Overview filesystem panel follows the page rule."""
 
         dashboard = json.loads(GrafanaOverviewArtifact().emit(inputs()))
-        panel = next(panel for panel in dashboard["panels"] if panel["title"] == "Filesystems free")
+        panel = next(panel for panel in dashboard["panels"] if panel["title"] == FILESYSTEMS_FREE_TITLE)
         targets = panel["targets"]
-        expected_mountpoints = {"/", "/var/lib/docker", "/data", "/data/fast"}
-        self.assertEqual(len(targets), 4)
+        expected_mountpoints = {"/", "/var/lib/docker", "/data"}
+        self.assertEqual(panel["type"], "bargauge")
+        self.assertEqual(len(targets), 3)
         self.assertEqual({target["legendFormat"] for target in targets}, expected_mountpoints)
         expression_pattern = re.compile(
             r'100 \* node_filesystem_avail_bytes\{mountpoint="([^"]+)"\}'
@@ -401,14 +454,20 @@ class Overview(unittest.TestCase):
                 self.assertIsNotNone(expression)
                 assert expression is not None
                 self.assertEqual(expression.groups(), (target["legendFormat"], target["legendFormat"]))
+                self.assertTrue(target["instant"])
+                self.assertFalse(target["range"])
 
         rules = yaml.safe_load(GrafanaRulesArtifact().emit(inputs()))
-        data_rule = next(
-            rule
-            for group in rules["groups"]
-            for rule in group["rules"]
-            if rule["uid"] == "gideon-data-volume-low"
-        )
+        by_uid = {rule["uid"]: rule for group in rules["groups"] for rule in group["rules"]}
+        paged_mountpoints: set[str] = set()
+        for uid in ("gideon-data-volume-low", "gideon-host-filesystem-low"):
+            expression = by_uid[uid]["data"][0]["model"]["expr"]
+            matchers = re.findall(r'mountpoint(?:=|=~)"([^"]+)"', expression)
+            self.assertEqual(len(matchers), 2)
+            self.assertEqual(matchers[0], matchers[1])
+            paged_mountpoints.update(matchers[0].split("|"))
+        self.assertEqual(expected_mountpoints, paged_mountpoints)
+        data_rule = by_uid["gideon-data-volume-low"]
         data_threshold = next(
             item
             for item in data_rule["data"]
@@ -420,6 +479,9 @@ class Overview(unittest.TestCase):
             if step["color"] == "green"
         )
         self.assertEqual(panel["fieldConfig"]["defaults"]["unit"], "percent")
+        self.assertEqual(panel["fieldConfig"]["defaults"]["min"], 0)
+        self.assertEqual(panel["fieldConfig"]["defaults"]["max"], 100)
+        self.assertEqual(panel["options"]["orientation"], "horizontal")
         self.assertEqual(green_step["value"], data_threshold)
 
     def test_backup_cards_show_latest_age_and_drill_result(self) -> None:
@@ -490,9 +552,170 @@ class Overview(unittest.TestCase):
                 self.assertEqual(mappings[0]["options"]["pass"]["color"], "green")
                 self.assertEqual(mappings[0]["options"]["failed"]["color"], "red")
 
+    def test_coloured_cards_take_each_line_from_their_page_rule(self) -> None:
+        """Each graded Overview measure changes colour at its rendered page line."""
+
+        self.assertNotEqual(
+            inputs(EXAMPLE).site.backup.drill_interval,
+            inputs(SECOND).site.backup.drill_interval,
+        )
+        for site_path in (EXAMPLE, SECOND):
+            for no_gpu in (False, True):
+                site_inputs = inputs(site_path, no_gpu=no_gpu)
+                panels = {
+                    panel["title"]: panel
+                    for panel in json.loads(GrafanaOverviewArtifact().emit(site_inputs))["panels"]
+                }
+                rules = {
+                    rule["uid"]: rule
+                    for group in yaml.safe_load(GrafanaRulesArtifact().emit(site_inputs))["groups"]
+                    for rule in group["rules"]
+                }
+                for title, rule_uid, colour, evaluator_type, divisor in (
+                    (BACKUP_SET_AGE_TITLE, "gideon-backup-set-overdue", "red", "gt", 1),
+                    (BACKUP_PUSH_AGE_TITLE, "gideon-push-overdue", "red", "gt", 1),
+                    (PASSING_DRILL_AGE_TITLE, "gideon-drill-overdue", "red", "gt", 1),
+                    (FILESYSTEMS_FREE_TITLE, "gideon-data-volume-low", "green", "lt", 1),
+                    (FILESYSTEMS_FREE_TITLE, "gideon-host-filesystem-low", "green", "lt", 1),
+                    (CERTIFICATE_DAYS_LEFT_TITLE, "gideon-tls-expiring", "green", "lt", 86400),
+                ):
+                    with self.subTest(
+                        site=site_path.name, no_gpu=no_gpu, panel=title, rule=rule_uid
+                    ):
+                        panel = panels[title]
+                        rule = rules[rule_uid]
+                        condition = next(
+                            item for item in rule["data"] if item["refId"] == rule["condition"]
+                        )
+                        evaluator = condition["model"]["conditions"][0]["evaluator"]
+                        self.assertEqual(evaluator["type"], evaluator_type)
+                        line = evaluator["params"][0]
+                        steps = panel["fieldConfig"]["defaults"]["thresholds"]["steps"]
+                        self.assertEqual(steps[-1], {"color": colour, "value": line // divisor})
+                        self.assertEqual(
+                            steps[0],
+                            {"color": "green" if colour == "red" else "red", "value": None},
+                        )
+                        if title in (BACKUP_SET_AGE_TITLE, BACKUP_PUSH_AGE_TITLE):
+                            self.assertIn(f"Under {line // 3600} hours", panel["description"])
+                        elif title == PASSING_DRILL_AGE_TITLE:
+                            self.assertIn(f"Under {line // 86400} days", panel["description"])
+                        elif title == FILESYSTEMS_FREE_TITLE:
+                            self.assertIn(f"{line} percent free", panel["description"])
+                        else:
+                            self.assertIn(f"{line // divisor} days or more", panel["description"])
+                            expression = rule["data"][0]["model"]["expr"]
+                            self.assertEqual(
+                                panel["targets"][0]["expr"],
+                                f"floor(({expression}) / {divisor})",
+                            )
+                            self.assertEqual(panel["fieldConfig"]["defaults"]["decimals"], 0)
+
+    def test_service_tiles_cover_every_rendered_down_rule_job(self) -> None:
+        """A rendered scrape or probe job appears in the tiles and has a page rule."""
+
+        for site_path, no_gpu in ((EXAMPLE, False), (SECOND, False), (EXAMPLE, True)):
+            with self.subTest(site=site_path.name, no_gpu=no_gpu):
+                site_inputs = inputs(site_path, no_gpu=no_gpu)
+                panels = json.loads(GrafanaOverviewArtifact().emit(site_inputs))["panels"]
+                panel = next(item for item in panels if item["title"] == "Services and probes")
+                self.assertEqual(panel["type"], "stat")
+                self.assertEqual(panel["options"]["colorMode"], "background")
+                self.assertEqual(panel["options"]["graphMode"], "none")
+                self.assertEqual(panel["options"]["textMode"], "value_and_name")
+                # Grafana's automatic size shrinks a name to unreadable across many tiles.
+                self.assertGreaterEqual(panel["options"]["text"]["titleSize"], 14)
+                self.assertEqual(
+                    [(target["expr"], target["legendFormat"]) for target in panel["targets"]],
+                    [("up", "{{job}}"), ("probe_success", "{{job}} probe"), ("pg_up", "{{job}} database")],
+                )
+                self.assertTrue(all(target["instant"] and not target["range"] for target in panel["targets"]))
+                mappings = panel["fieldConfig"]["defaults"]["mappings"]
+                self.assertEqual(len(mappings), 1)
+                self.assertEqual(mappings[0]["type"], "value")
+                self.assertEqual(
+                    {key: (value["text"], value["color"]) for key, value in mappings[0]["options"].items()},
+                    {"1": ("up", "green"), "0": ("down", "red")},
+                )
+
+                jobs = yaml.safe_load(PrometheusConfigArtifact().emit(site_inputs))[
+                    "scrape_configs"
+                ]
+                scrape_jobs = {job["job_name"] for job in jobs}
+                probe_jobs = {
+                    job["job_name"] for job in jobs if job.get("metrics_path") == "/probe"
+                }
+                rules = {
+                    rule["uid"]: rule
+                    for group in yaml.safe_load(GrafanaRulesArtifact().emit(site_inputs))["groups"]
+                    for rule in group["rules"]
+                }
+                target_down = rules["gideon-target-down"]["data"][0]["model"]["expr"]
+                excluded = set(re.findall(r'job!="([^"]+)"', target_down))
+                self.assertRegex(target_down, r'^min by \(job, instance\) \(up\{job!="[^"]+"\}\) == bool 0$')
+                self.assertEqual(rules["gideon-target-down"]["labels"]["class"], "page")
+                self.assertEqual(excluded & scrape_jobs, {ENGINE_JOB_NAME} if not no_gpu else set())
+                for job in excluded & scrape_jobs:
+                    with self.subTest(job=job):
+                        self.assertEqual(
+                            rules["gideon-engine-down"]["data"][0]["model"]["expr"],
+                            f'up{{job="{job}"}} == bool 0',
+                        )
+                        self.assertEqual(rules["gideon-engine-down"]["labels"]["class"], "page")
+                probe_rule_jobs = []
+                for rule in rules.values():
+                    expression = rule["data"][0]["model"].get("expr", "")
+                    match = re.fullmatch(r'probe_success\{job="([^"]+)"\} == bool 0', expression)
+                    if match:
+                        probe_rule_jobs.append(match.group(1))
+                        self.assertEqual(rule["labels"]["class"], "page")
+                self.assertEqual(len(probe_rule_jobs), len(set(probe_rule_jobs)))
+                self.assertEqual(set(probe_rule_jobs), probe_jobs)
+                self.assertEqual(rules["gideon-postgres-down"]["data"][0]["model"]["expr"], "pg_up == bool 0")
+
+    def test_collapsed_row_holds_host_detail_and_grid_positions(self) -> None:
+        """A collapsed row saves its children at their absolute open positions."""
+
+        for site_path, no_gpu in ((EXAMPLE, False), (SECOND, False), (EXAMPLE, True)):
+            with self.subTest(site=site_path.name, no_gpu=no_gpu):
+                site_inputs = inputs(site_path, no_gpu=no_gpu)
+                overview = json.loads(GrafanaOverviewArtifact().emit(site_inputs))
+                row = next(item for item in overview["panels"] if item["type"] == "row")
+                self.assertEqual(row["title"], "Host detail")
+                self.assertNotIn("$", row["title"])
+                self.assertTrue(row["collapsed"])
+                self.assertEqual(row["gridPos"], {"h": 1, "w": 24, "x": 0, "y": 30})
+                self.assertEqual(
+                    [panel["title"] for panel in row["panels"]],
+                    ["Host load", "Host memory", "Container memory"],
+                )
+                self.assertEqual(
+                    [panel["gridPos"] for panel in row["panels"]],
+                    [
+                        {"h": 8, "w": 6, "x": 0, "y": 31},
+                        {"h": 8, "w": 6, "x": 6, "y": 31},
+                        {"h": 8, "w": 12, "x": 12, "y": 31},
+                    ],
+                )
+                for panel in row["panels"]:
+                    self.assertIn("docs/runbooks/observability.md §4", panel["description"])
+                    self.assertTrue(panel["description"].strip())
+                for artifact in ARTIFACTS:
+                    if not artifact.relative_path.startswith("grafana/dashboards/") or not artifact.applies(site_inputs):
+                        continue
+                    board = json.loads(artifact.emit(site_inputs))
+                    for item in board["panels"]:
+                        if item["type"] == "row" and item.get("collapsed") and item.get("panels"):
+                            with self.subTest(board=board["uid"], row=item["title"]):
+                                self.assertEqual(
+                                    item["panels"][0]["gridPos"]["y"],
+                                    item["gridPos"]["y"] + 1,
+                                )
+
     def test_container_memory_compares_working_set_with_positive_limits(self) -> None:
         dashboard = json.loads(GrafanaOverviewArtifact().emit(inputs()))
-        panel = next(panel for panel in dashboard["panels"] if panel["title"] == "Container memory")
+        row = next(panel for panel in dashboard["panels"] if panel["title"] == "Host detail")
+        panel = next(panel for panel in row["panels"] if panel["title"] == "Container memory")
         targets = {target["refId"]: target for target in panel["targets"]}
         self.assertEqual(set(targets), {"A", "B"})
         self.assertEqual(
@@ -510,20 +733,29 @@ class Overview(unittest.TestCase):
             [{"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [10, 10]}}],
         )
 
-    def test_trip_panels_use_the_metrics_datasource_and_source_filters(self) -> None:
-        dashboard = json.loads(GrafanaOverviewArtifact().emit(inputs()))
-        panels = {panel["title"]: panel for panel in dashboard["panels"]}
-        for title, source in (("Guardrail trips", "user"), ("Last eval trip", "eval")):
-            with self.subTest(panel=title):
-                panel = panels[title]
+    def test_trip_panels_use_their_own_boards_and_source_filters(self) -> None:
+        overview = json.loads(GrafanaOverviewArtifact().emit(inputs()))
+        evaluation = json.loads(GrafanaEvalArtifact.emit(inputs()))
+        self.assertNotIn("Last eval trip", {panel["title"] for panel in overview["panels"]})
+        for board, title, source in (
+            (overview, "Guardrail trips", "user"),
+            (evaluation, "Last eval trip", "eval"),
+        ):
+            with self.subTest(board=board["uid"], panel=title):
+                panel = next(panel for panel in board["panels"] if panel["title"] == title)
                 target = panel["targets"][0]
                 self.assertEqual(panel["datasource"]["uid"], "gideon-rows")
                 self.assertIn("guardrail_trips", target["rawSql"])
                 self.assertIn(f"source = '{source}'", target["rawSql"])
         # Day buckets sit at midnight, outside the board's six-hour default
         # range after 06:00; the count panel carries its own thirty-day range.
-        self.assertEqual(panels["Guardrail trips"]["timeFrom"], "30d")
-        self.assertEqual(panels["Last eval trip"]["options"]["colorMode"], "none")
+        self.assertEqual(
+            next(panel for panel in overview["panels"] if panel["title"] == "Guardrail trips")[
+                "timeFrom"
+            ],
+            "30d",
+        )
+        self.assertEqual(evaluation["panels"][-1]["options"]["colorMode"], "none")
 
     def test_verbatim_artifact_emits_its_template_without_expansion(self) -> None:
         artifact = VerbatimArtifact(
@@ -549,7 +781,9 @@ class Dashboards(unittest.TestCase):
                 dashboard = json.loads(path.read_text(encoding="utf-8"))
                 self.assertIsInstance(dashboard.get("uid"), str)
                 self.assertNotIn("id", dashboard)
-                self.assertTrue(_datasource_uids(dashboard) <= declared)
+                for panel in _leaf_panels(dashboard):
+                    with self.subTest(dashboard=path.name, panel=panel["title"]):
+                        self.assertTrue(_datasource_uids(panel) <= declared)
 
     def test_every_dashboard_links_to_the_gideon_boards(self) -> None:
         dashboard_dir = ROOT / "compose/grafana/dashboards"
@@ -576,7 +810,7 @@ class Dashboards(unittest.TestCase):
         self.assertTrue(paths)
         for path in paths:
             dashboard = json.loads(path.read_text(encoding="utf-8"))
-            for panel in dashboard["panels"]:
+            for panel in _leaf_panels(dashboard):
                 with self.subTest(dashboard=path.name, panel=panel["title"]):
                     description = panel.get("description")
                     self.assertIsInstance(description, str)
@@ -618,7 +852,7 @@ class EvalBoard(unittest.TestCase):
             ).by_path,
         )
 
-    def test_seven_panels_show_only_recorded_fields(self) -> None:
+    def test_eight_panels_show_only_recorded_fields(self) -> None:
         board = json.loads(GrafanaEvalArtifact.emit(inputs()))
         gpu_board = json.loads(GrafanaGpuArtifact.emit(inputs()))
         self.assertEqual(board["uid"], "gideon-eval")
@@ -638,6 +872,7 @@ class EvalBoard(unittest.TestCase):
                 "Run duration against the night",
                 "Failed cases of newest nightly runs",
                 "Proposals waiting",
+                "Last eval trip",
             },
         )
         self.assertEqual(len(panels), len(board["panels"]))
@@ -687,13 +922,23 @@ class EvalBoard(unittest.TestCase):
         for column in ("n.slice", "n.run_id", "e.case_id", "e.repeat", "family", "role", "class", "problem"):
             self.assertIn(column, failed)
 
+        trip = panels["Last eval trip"]
+        self.assertEqual(trip["type"], "stat")
+        self.assertEqual(trip["gridPos"], {"h": 5, "w": 8, "x": 0, "y": 51})
+        self.assertEqual(trip["options"]["colorMode"], "none")
+        self.assertEqual(
+            trip["targets"][0]["rawSql"],
+            "SELECT EXTRACT(EPOCH FROM (now() - max(at))) AS age_seconds "
+            "FROM guardrail_trips WHERE source = 'eval'",
+        )
+
     def test_proposals_panel_reads_the_newest_tally_and_keeps_empty_lists_visible(self) -> None:
         board = json.loads(GrafanaEvalArtifact.emit(inputs()))
-        panel = board["panels"][-1]
+        panel = board["panels"][-2]
         self.assertEqual(panel["title"], "Proposals waiting")
         self.assertEqual(panel["type"], "table")
         self.assertEqual(panel["datasource"], {"type": "postgres", "uid": "gideon-rows"})
-        sixth = board["panels"][-2]["gridPos"]
+        sixth = board["panels"][-3]["gridPos"]
         self.assertEqual(panel["gridPos"]["y"], sixth["y"] + sixth["h"])
         self.assertEqual(panel["gridPos"]["w"], 24)
         self.assertEqual(panel["gridPos"]["x"], 0)

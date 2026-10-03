@@ -2,7 +2,7 @@
 
 import json
 from pathlib import PurePosixPath
-from typing import Final
+from typing import Any, Final
 
 from gideon.host.ldap import bind_identity
 from gideon.host.render import (
@@ -61,8 +61,20 @@ GRAFANA_SILENCES_ROUTE: Final = "alerting/silences"
 # The Overview panels whose content the render fills, and the sentinel strings
 # the template carries in their place, so the file on disk stays valid JSON.
 START_HERE_TITLE: Final = "Start here"
+BACKUP_SET_AGE_TITLE: Final = "Backup set age"
+BACKUP_PUSH_AGE_TITLE: Final = "Backup push age"
+FILESYSTEMS_FREE_TITLE: Final = "Filesystems free"
+CERTIFICATE_DAYS_LEFT_TITLE: Final = "Certificate days left"
 PASSING_DRILL_AGE_TITLE: Final = "Passing drill age"
-OVERVIEW_SENTINELS: Final = ("start_here", "drill_threshold", "drill_days")
+OVERVIEW_SENTINELS: Final = (
+    "start_here",
+    "drill_threshold",
+    "drill_days",
+    "backup_threshold",
+    "backup_hours",
+    "filesystem_percent",
+    "certificate_days",
+)
 # The Overview's home dashboard path inside the container.
 HOME_DASHBOARD_PATH: Final = DASHBOARDS_MOUNT + "/" + PurePosixPath(OVERVIEW_PATH).name
 # The start-here card's relative path under the install home.
@@ -96,6 +108,17 @@ ENGINE_PENDING_PERIOD: Final = "5m"
 # Consecutive starts can be 33 hours apart; 36 hours leaves room for that
 # wait and pages a missed night at about 09:00. This is a starting value.
 NIGHTLY_OVERDUE_SECONDS: Final = 36 * 3600
+# The page lines below are each one figure, read by its rule and by the
+# Overview card that mirrors it, so a card turns red where its page fires.
+# "Backup set overdue" and "Push overdue": a nightly set or push with two
+# hours of grace past the day.
+BACKUP_OVERDUE_SECONDS: Final = 26 * 3600
+# exempt: fixed by rule. "Data volume low" and "Host filesystem low": the data
+# volume's interim free-space line, applied to the host filesystems too.
+FILESYSTEM_LOW_PERCENT: Final = 15
+# "TLS certificate expiring": two weeks' lead time, since a renewal comes from
+# the office CA.
+CERTIFICATE_EXPIRING_SECONDS: Final = 14 * 86400
 
 
 def drill_overdue_seconds(interval: str) -> int:
@@ -280,6 +303,10 @@ class GrafanaRulesArtifact(Artifact):
             RULES_TEMPLATE,
             {
                 "drill_threshold": drill_overdue_seconds(inputs.site.backup.drill_interval),
+                "backup_threshold": BACKUP_OVERDUE_SECONDS,
+                "filesystem_percent": FILESYSTEM_LOW_PERCENT,
+                "certificate_threshold": CERTIFICATE_EXPIRING_SECONDS,
+                "certificate_days": CERTIFICATE_EXPIRING_SECONDS // 86400,
                 "search_rules": search_rule,
                 "api_rules": api_rule,
                 "gpu_rules": engine_rule + driver_rule,
@@ -291,7 +318,7 @@ class GrafanaRulesArtifact(Artifact):
 
 
 class GrafanaOverviewArtifact(Artifact):
-    """Render the Overview dashboard with links to the boards on this host."""
+    """Render the Overview's board links and page-rule threshold cards."""
 
     name = "grafana-overview"
     relative_path = OVERVIEW_PATH
@@ -303,16 +330,33 @@ class GrafanaOverviewArtifact(Artifact):
         panels = {panel.get("title"): panel for panel in document["panels"]}
         start = panels.get(START_HERE_TITLE, {}).get("options", {})
         drill = panels.get(PASSING_DRILL_AGE_TITLE, {})
-        thresholds = drill.get("fieldConfig", {}).get("defaults", {}).get("thresholds", {})
         threshold = drill_overdue_seconds(inputs.site.backup.drill_interval)
+        filesystems = panels.get(FILESYSTEMS_FREE_TITLE, {})
+        certificate = panels.get(CERTIFICATE_DAYS_LEFT_TITLE, {})
         _fill(start, "content", "start_here", start_here_markdown(inputs))
-        _fill((thresholds.get("steps") or [{}])[-1], "value", "drill_threshold", threshold)
+        _fill(_last_step(drill), "value", "drill_threshold", threshold)
         _fill(drill, "description", "drill_days", threshold // 86400)
+        for title in (BACKUP_SET_AGE_TITLE, BACKUP_PUSH_AGE_TITLE):
+            card = panels.get(title, {})
+            _fill(_last_step(card), "value", "backup_threshold", BACKUP_OVERDUE_SECONDS)
+            _fill(card, "description", "backup_hours", BACKUP_OVERDUE_SECONDS // 3600)
+        _fill(_last_step(filesystems), "value", "filesystem_percent", FILESYSTEM_LOW_PERCENT)
+        _fill(filesystems, "description", "filesystem_percent", FILESYSTEM_LOW_PERCENT)
+        certificate_days = CERTIFICATE_EXPIRING_SECONDS // 86400
+        _fill(_last_step(certificate), "value", "certificate_days", certificate_days)
+        _fill(certificate, "description", "certificate_days", certificate_days)
         rendered = json.dumps(document, indent=2, ensure_ascii=False) + "\n"
         for name in OVERVIEW_SENTINELS:
             if f"${name}" in rendered:
                 raise unfilled_placeholder(OVERVIEW_TEMPLATE, name)
         return rendered
+
+
+def _last_step(panel: dict[str, Any]) -> dict[str, object]:
+    """Return a card's last threshold step, the one its line sits in."""
+
+    steps = panel.get("fieldConfig", {}).get("defaults", {}).get("thresholds", {}).get("steps")
+    return (steps or [{}])[-1]
 
 
 def _fill(holder: dict[str, object], key: str, name: str, value: object) -> None:
