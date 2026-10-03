@@ -176,6 +176,7 @@ def _registered_artifacts() -> tuple[Artifact, ...]:
     from gideon.host.render.pgbackrest import PgBackRestConfArtifact
     from gideon.host.render.prometheus import (
         BlackboxConfigArtifact,
+        DcgmCountersArtifact,
         PrometheusConfigArtifact,
     )
     from gideon.host.render.searxng import (
@@ -234,6 +235,7 @@ def _registered_artifacts() -> tuple[Artifact, ...]:
         NightlyTimerArtifact(),
         ProposalsTallyServiceArtifact(),
         ProposalsTallyTimerArtifact(),
+        DcgmCountersArtifact,
     )
 
 

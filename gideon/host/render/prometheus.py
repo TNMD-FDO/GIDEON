@@ -2,7 +2,12 @@
 
 from typing import Final
 
-from gideon.host.render import Artifact, RenderInputs, substitute_template
+from gideon.host.render import (
+    Artifact,
+    RenderInputs,
+    VerbatimArtifact,
+    substitute_template,
+)
 from gideon.host.render.api import API_JOB_NAME, api_enabled, api_health_url
 from gideon.host.render.engine import ENGINE_JOB_NAME, engine_metrics_target
 from gideon.host.render.searxng import (
@@ -13,6 +18,11 @@ from gideon.host.render.searxng import (
 
 PROMETHEUS_TEMPLATE: Final = "prometheus/prometheus.yml.tmpl"
 BLACKBOX_TEMPLATE: Final = "blackbox/blackbox.yml.tmpl"
+# The DCGM exporter's counters file: the fields it collects, passed by its -f
+# flag and mounted beside the image's own default file, never over it.
+DCGM_COUNTERS_TEMPLATE: Final = "dcgm-exporter/counters.csv"
+DCGM_COUNTERS_PATH: Final = "dcgm-exporter/counters.csv"
+DCGM_COUNTERS_MOUNT: Final = "/etc/dcgm-exporter/gideon-counters.csv"
 # The template's $gpu_jobs line: the DCGM job and the engine's own /metrics
 # (keyless by vLLM's design, on the Compose network alone), both governed by
 # the no-GPU marker like the services they scrape; a no-GPU host renders the
@@ -95,3 +105,12 @@ class BlackboxConfigArtifact(Artifact):
         return substitute_template(
             inputs, BLACKBOX_TEMPLATE, {"hostname": inputs.site.hostname}
         )
+
+
+DcgmCountersArtifact = VerbatimArtifact(
+    name="dcgm-counters",
+    relative_path=DCGM_COUNTERS_PATH,
+    template_path=DCGM_COUNTERS_TEMPLATE,
+    owners=("dcgm-exporter",),
+    applies=lambda inputs: not inputs.no_gpu,
+)

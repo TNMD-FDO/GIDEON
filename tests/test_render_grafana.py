@@ -68,6 +68,18 @@ FULL_DN = ROOT / "tests/fixtures/site/dn-groups.yaml"
 ESCAPED_DN = ROOT / "tests/fixtures/site/dn-groups-escaping.yaml"
 
 
+def dcgm_counter_rows() -> dict[str, tuple[str, str]]:
+    """Read the release's active DCGM fields, types, and help text."""
+
+    text = (ROOT / "compose/dcgm-exporter/counters.csv").read_text(encoding="utf-8")
+    rows = {}
+    for line in text.splitlines():
+        if line.strip() and not line.lstrip().startswith("#"):
+            field, kind, help_text = (part.strip() for part in line.split(",", 2))
+            rows[field] = (kind, help_text)
+    return rows
+
+
 def inputs(site_path: Path = EXAMPLE, **overrides: object) -> RenderInputs:
     site = load_site(site_path).config
     lock = load_host_lock(ROOT / "host.lock").lock
@@ -1522,30 +1534,119 @@ class Alerting(unittest.TestCase):
         )
         panels = {panel["title"]: panel for panel in dashboard["panels"]}
         self.assertIn("KV-cache usage", panels)
-        self.assertIn("Queue depth", panels)
+        self.assertIn("Requests waiting and running", panels)
+        self.assertIn("Answer speed", panels)
+        self.assertNotIn("Queue depth", panels)
         self.assertEqual(
             panels["KV-cache usage"]["fieldConfig"]["defaults"]["unit"],
             "percentunit",
         )
         self.assertEqual(panels["KV-cache usage"]["fieldConfig"]["defaults"]["min"], 0)
         self.assertEqual(panels["KV-cache usage"]["fieldConfig"]["defaults"]["max"], 1)
+        engine_titles = (
+            "KV-cache usage",
+            "Requests waiting and running",
+            "Answer speed",
+        )
+        speed_expr = (
+            "sum by (model_name) "
+            "(increase(vllm:inter_token_latency_seconds_count[$__range])) / "
+            "(sum by (model_name) "
+            "(increase(vllm:inter_token_latency_seconds_sum[$__range])) > 0)"
+        )
         self.assertEqual(
-            {target["expr"] for target in panels["KV-cache usage"]["targets"]}
-            | {target["expr"] for target in panels["Queue depth"]["targets"]},
+            {
+                target["expr"]
+                for title in engine_titles
+                for target in panels[title]["targets"]
+            },
             {
                 "vllm:kv_cache_usage_perc",
                 "vllm:num_requests_waiting",
                 "vllm:num_requests_running",
+                speed_expr,
             },
         )
-        for title in ("KV-cache usage", "Queue depth"):
+        self.assertEqual(
+            [panels[title]["gridPos"] for title in engine_titles],
+            [{"h": 8, "w": 8, "x": x, "y": 16} for x in (0, 8, 16)],
+        )
+        speed = panels["Answer speed"]
+        self.assertEqual(speed["type"], "stat")
+        self.assertEqual(speed["fieldConfig"]["defaults"]["unit"], "suffix: tokens/s")
+        self.assertEqual(speed["fieldConfig"]["defaults"]["decimals"], 1)
+        self.assertEqual(speed["options"]["colorMode"], "none")
+        self.assertEqual(speed["options"]["graphMode"], "none")
+        self.assertEqual(speed["options"]["reduceOptions"]["calcs"], ["lastNotNull"])
+        self.assertEqual(speed["targets"][0]["legendFormat"], "{{model_name}}")
+        self.assertTrue(speed["targets"][0]["instant"])
+        for title in engine_titles:
             with self.subTest(panel=title):
                 panel = panels[title]
                 self.assertNotIn("id", panel)
-                self.assertEqual(panel["type"], "timeseries")
                 self.assertEqual(panel["datasource"]["uid"], "prometheus")
                 for target in panel["targets"]:
                     self.assertEqual(target["datasource"]["uid"], "prometheus")
+        for title in engine_titles[:2]:
+            self.assertEqual(panels[title]["type"], "timeseries")
+
+    def test_gpu_board_memory_uses_mebibyte_unit(self) -> None:
+        dashboard = json.loads(
+            (ROOT / "compose/grafana/dashboards/gpu.json").read_text(encoding="utf-8")
+        )
+        memory = next(
+            panel for panel in dashboard["panels"] if panel["title"] == "GPU memory"
+        )
+        self.assertEqual(
+            {target["expr"] for target in memory["targets"]},
+            {"DCGM_FI_DEV_FB_USED", "DCGM_FI_DEV_FB_FREE"},
+        )
+        self.assertEqual(memory["fieldConfig"]["defaults"]["unit"], "mbytes")
+        rows = dcgm_counter_rows()
+        for target in memory["targets"]:
+            self.assertIn("MiB", rows[target["expr"]][1])
+
+    def test_gpu_board_temperature_limit_is_dashed(self) -> None:
+        dashboard = json.loads(
+            (ROOT / "compose/grafana/dashboards/gpu.json").read_text(encoding="utf-8")
+        )
+        temperature = next(
+            panel for panel in dashboard["panels"] if panel["title"] == "GPU temperature"
+        )
+        targets = temperature["targets"]
+        self.assertEqual(
+            [target["expr"] for target in targets],
+            ["DCGM_FI_DEV_GPU_TEMP", "DCGM_FI_DEV_GPU_MAX_OP_TEMP"],
+        )
+        self.assertTrue(targets[1]["legendFormat"].endswith(" limit"))
+        overrides = temperature["fieldConfig"]["overrides"]
+        self.assertEqual(len(overrides), 1)
+        matcher = overrides[0]["matcher"]
+        self.assertEqual(matcher["id"], "byRegexp")
+        pattern = matcher["options"]
+        self.assertTrue(pattern.startswith("/") and pattern.endswith("/"))
+        self.assertIsNone(re.search(pattern[1:-1], targets[0]["legendFormat"]))
+        self.assertIsNotNone(re.search(pattern[1:-1], targets[1]["legendFormat"]))
+        self.assertEqual(
+            overrides[0]["properties"],
+            [{"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [10, 10]}}],
+        )
+        self.assertEqual(dcgm_counter_rows()[targets[1]["expr"]][0], "gauge")
+
+    def test_dcgm_fields_read_by_boards_and_rules_are_collected(self) -> None:
+        dashboard_paths = (ROOT / "compose/grafana/dashboards").rglob("*.json")
+        alert_paths = (ROOT / "compose/grafana/provisioning/alerting").rglob("*.tmpl")
+        referenced = {
+            name
+            for path in (*dashboard_paths, *alert_paths)
+            for name in re.findall(
+                r"DCGM_FI_[A-Z0-9_]+", path.read_text(encoding="utf-8")
+            )
+        }
+        rows = dcgm_counter_rows()
+        self.assertTrue(referenced)
+        self.assertEqual(referenced - rows.keys(), set())
+        self.assertEqual(rows["DCGM_FI_DRIVER_VERSION"][0], "label")
 
     def test_gpu_board_is_not_applicable_in_no_gpu_mode(self) -> None:
         self.assertTrue(GrafanaGpuArtifact.applies(inputs()))

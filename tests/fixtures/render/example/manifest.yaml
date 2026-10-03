@@ -11,7 +11,7 @@ inputs:
   build_box: true
 files:
   compose.yaml:
-    sha256: "12279d9bf272c042a5f01195be34e474e89b6c0df3bfdc3b02f7c5371ffb6e96"
+    sha256: "6c80d552eb868ba139976c15b8e6052bc9184aa3a424dbc40460c7392ccf3965"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
@@ -75,7 +75,7 @@ files:
     owners:
       - "grafana"
   "grafana/dashboards/gpu.json":
-    sha256: "e3cabd41af2cb1a43e391024b455f58cc713efd6705826f274f6642a99df9b67"
+    sha256: "3c9beb828057d1b865e85c84e42880b21d4ec127cc1c66d444305aaa3663f749"
     mode: "0644"
     owners:
       - "grafana"
@@ -171,6 +171,11 @@ files:
     sha256: "146f6d4265909219848cf81833e9a839fa54e1fb111014bb838a7883aaf76bc4"
     mode: "0644"
     owners: []
+  "dcgm-exporter/counters.csv":
+    sha256: "6a1829a36a3f1a9846400c59f42be5568d030212086aa6e126e5af6366c4d1ff"
+    mode: "0644"
+    owners:
+      - "dcgm-exporter"
 services:
   caddy: "86b607a02fc284aad98149418e2c5dca70fb57282377143a35ceb8ad09ae3cc8"
   prometheus: "1590c12e98d56b195818d759cbaf4614e8b9d768816bca9efbfae27a7ae0f4bd"
@@ -181,7 +186,7 @@ services:
   gideon-generator: "4769d4dcc7e4e3de52094a84573d13c76bc57eaaafc7c39cbec954fe93b5efa9"
   gideon-api: "2ba4d9ee58cc72be69686f3013e7691af7186d2f942cc8f46f1972947bf746ea"
   searxng: "790f3d23c5a48d8b2e3c02d12c6615884bb4073095bdf7faa51ccee49aa51c2c"
-  dcgm-exporter: "ccec4f31a87a5bc79b6a0f4ed8954b3e995d2f704b8189de0a69025e368634fd"
+  dcgm-exporter: "69b8cf5fe0c7805a28c1690e0ac3f49736a04f2fe8b7822a939073cd435d8a5f"
   postgres-exporter: "71024e25f248a0a94b2ea92c4f48813f8b4f95e3d17d41522f300fa9f1407291"
   cadvisor: "6e4def0c2cc0e80a5357574ad6a8e81286c1f29140a78422632c6e860d14d83e"
   blackbox-exporter: "959ff7e850d35c00a0a178fca5cf671d37dffa6ea5db86790b9166f5182999d3"

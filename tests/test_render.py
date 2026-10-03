@@ -90,6 +90,9 @@ from gideon.host.render.pgbackrest import (
 )
 from gideon.host.render.prometheus import (
     BLACKBOX_TEMPLATE,
+    DCGM_COUNTERS_MOUNT,
+    DCGM_COUNTERS_PATH,
+    DCGM_COUNTERS_TEMPLATE,
     BlackboxConfigArtifact,
     PrometheusConfigArtifact,
 )
@@ -309,6 +312,7 @@ class Registry(unittest.TestCase):
                 "systemd/gideon-eval-nightly.timer",
                 "systemd/gideon-proposals-tally.service",
                 "systemd/gideon-proposals-tally.timer",
+                DCGM_COUNTERS_PATH,
             ],
         )
         self.assertEqual(ARTIFACTS[0].owners, ())
@@ -347,6 +351,8 @@ class Registry(unittest.TestCase):
         self.assertEqual(ARTIFACTS[22].owners, ("searxng",))
         self.assertFalse(ARTIFACTS[22].secret)
         self.assertEqual(ARTIFACTS[22].mode, 0o644)
+        self.assertEqual(ARTIFACTS[-1].owners, ("dcgm-exporter",))
+        self.assertEqual(ARTIFACTS[-1].mode, 0o644)
         self.assertTrue(
             all(
                 artifact.mode == 0o644
@@ -379,6 +385,8 @@ class Compose(unittest.TestCase):
     def test_no_gpu_omits_dcgm_but_gpu_hosts_keep_it(self) -> None:
         self.assertIn("dcgm-exporter", service_names(inputs()))
         self.assertNotIn("dcgm-exporter", service_names(inputs(no_gpu=True)))
+        self.assertIn(DCGM_COUNTERS_PATH, render_all(inputs()).by_path)
+        self.assertNotIn(DCGM_COUNTERS_PATH, render_all(inputs(no_gpu=True)).by_path)
         self.assertIn(ENGINE_SERVICE_NAME, service_names(inputs()))
         self.assertNotIn(ENGINE_SERVICE_NAME, service_names(inputs(no_gpu=True)))
         self.assertIn("gideon-api", service_names(inputs()))
@@ -694,6 +702,11 @@ class Engine(unittest.TestCase):
         self.assertEqual(services["dcgm-exporter"]["devices"], ["nvidia.com/gpu=all"])
         self.assertEqual(services["dcgm-exporter"]["cap_add"], ["SYS_ADMIN"])
         self.assertEqual(services["dcgm-exporter"]["environment"]["TZ"], site().office.timezone)
+        self.assertEqual(services["dcgm-exporter"]["command"], ["-f", DCGM_COUNTERS_MOUNT])
+        self.assertEqual(
+            services["dcgm-exporter"]["volumes"],
+            [f"/etc/gideon/rendered/{DCGM_COUNTERS_PATH}:{DCGM_COUNTERS_MOUNT}:ro"],
+        )
         postgres_exporter = services["postgres-exporter"]
         self.assertEqual(
             postgres_exporter["environment"],
@@ -887,6 +900,22 @@ class Caddyfile(unittest.TestCase):
 
 
 class PrometheusConfig(unittest.TestCase):
+    def test_dcgm_counters_template_has_unique_typed_rows(self) -> None:
+        text = (ROOT / "compose" / DCGM_COUNTERS_TEMPLATE).read_text(encoding="utf-8")
+        fields: set[str] = set()
+        for line in text.splitlines():
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            parts = [part.strip() for part in line.split(",")]
+            self.assertEqual(len(parts), 3, line)
+            field, kind, help_text = parts
+            self.assertTrue(field)
+            self.assertTrue(help_text)
+            self.assertIn(kind, {"gauge", "counter", "label"})
+            self.assertNotIn(field, fields)
+            fields.add(field)
+        self.assertTrue(fields)
+
     def test_initial_scrape_jobs_are_static_and_run_every_fifteen_seconds(self) -> None:
         text = PrometheusConfigArtifact().emit(inputs())
         self.assertIn("scrape_interval: 15s", text)
@@ -961,7 +990,7 @@ class Core(unittest.TestCase):
         self.assertTrue(all(artifact.applies(gpu) for artifact in ARTIFACTS))
         self.assertEqual(
             [artifact.name for artifact in ARTIFACTS if not artifact.applies(no_gpu)],
-            ["grafana-gpu", "grafana-eval", "api-instruction", "gideon-eval-nightly-service", "gideon-eval-nightly-timer"],
+            ["grafana-gpu", "grafana-eval", "api-instruction", "gideon-eval-nightly-service", "gideon-eval-nightly-timer", "dcgm-counters"],
         )
 
     def test_nightly_units_are_zoned_bounded_and_carry_no_secrets(self) -> None:
@@ -1102,6 +1131,7 @@ class Core(unittest.TestCase):
                 "systemd/gideon-eval-nightly.timer",
                 "systemd/gideon-proposals-tally.service",
                 "systemd/gideon-proposals-tally.timer",
+                DCGM_COUNTERS_PATH,
             },
         )
         self.assertEqual(first.by_path["caddy/Caddyfile"].owners, ("caddy",))
@@ -1366,18 +1396,23 @@ class RenderCommand(unittest.TestCase):
         code, out, err = render(host)
         self.assertEqual((code, err), (0, ""))
         self.assertIn("grafana/dashboards/gpu.json: stale", out)
+        self.assertIn(f"{DCGM_COUNTERS_PATH}: stale", out)
         self.assertIn("compose.yaml: changed", out)
         self.assertIn("prometheus/prometheus.yml: changed", out)
         self.assertNotIn(f"{RENDERED}/grafana/dashboards/gpu.json", host.files)
+        self.assertNotIn(f"{RENDERED}/{DCGM_COUNTERS_PATH}", host.files)
         self.assertNotIn(Facts.SMI, host.calls)
         no_gpu_manifest = yaml.safe_load(host.files[f"{RENDERED}/manifest.yaml"])
         self.assertNotIn("grafana/dashboards/gpu.json", no_gpu_manifest["files"])
+        self.assertNotIn(DCGM_COUNTERS_PATH, no_gpu_manifest["files"])
 
         del host.files["/etc/gideon/no-gpu"]
         code, out, err = render(host)
         self.assertEqual((code, err), (0, ""))
         self.assertIn("grafana/dashboards/gpu.json: new", out)
+        self.assertIn(f"{DCGM_COUNTERS_PATH}: new", out)
         self.assertIn(f"{RENDERED}/grafana/dashboards/gpu.json", host.files)
+        self.assertIn(f"{RENDERED}/{DCGM_COUNTERS_PATH}", host.files)
 
     def test_a_registered_artifact_left_behind_is_stale_never_foreign(self) -> None:
         """The GPU board on disk with no manifest naming it (a mode change

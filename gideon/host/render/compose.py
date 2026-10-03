@@ -45,6 +45,7 @@ from gideon.host.render.pgbackrest import (
     REPOSITORY_PATH,
     STANZA,
 )
+from gideon.host.render.prometheus import DCGM_COUNTERS_MOUNT, DCGM_COUNTERS_PATH
 from gideon.host.render.searxng import (
     SEARXNG_ENV_FILE,
     SEARXNG_LOGGING_PATH,
@@ -665,6 +666,8 @@ def _compose_document(inputs: RenderInputs) -> Mapping[str, object]:
             "image": reference(target, image_pin(inputs, "dcgm-exporter")),
             "restart": "unless-stopped",
             "environment": {"TZ": inputs.site.office.timezone},
+            "command": ["-f", DCGM_COUNTERS_MOUNT],
+            "volumes": [f"/etc/gideon/rendered/{DCGM_COUNTERS_PATH}:{DCGM_COUNTERS_MOUNT}:ro"],
             "devices": ["nvidia.com/gpu=all"],
             "cap_add": ["SYS_ADMIN"],
             "networks": ["gideon"],

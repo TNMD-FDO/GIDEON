@@ -420,6 +420,11 @@ services:
     restart: "unless-stopped"
     environment:
       TZ: "America/Denver"
+    command:
+      - "-f"
+      - "/etc/dcgm-exporter/gideon-counters.csv"
+    volumes:
+      - "/etc/gideon/rendered/dcgm-exporter/counters.csv:/etc/dcgm-exporter/gideon-counters.csv:ro"
     devices:
       - "nvidia.com/gpu=all"
     cap_add:

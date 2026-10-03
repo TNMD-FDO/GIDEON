@@ -16,18 +16,18 @@
     {
       "description": "This shows used and free memory on each graphics card, reported by the card monitor. Free space should remain available; very little free space can prevent the engine from serving work. Check docs/runbooks/observability.md §4.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []},
+      "fieldConfig": {"defaults": {"unit": "mbytes"}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
       "targets": [{"expr": "DCGM_FI_DEV_FB_USED", "legendFormat": "GPU {{gpu}}", "refId": "A"}, {"expr": "DCGM_FI_DEV_FB_FREE", "legendFormat": "GPU {{gpu}} free", "refId": "B"}],
       "title": "GPU memory",
       "type": "timeseries"
     },
     {
-      "description": "This shows each graphics card's temperature, reported by the card monitor. A steady temperature during normal work is expected; a sustained rise can point to cooling trouble. Check docs/runbooks/observability.md §4.",
+      "description": "This shows each graphics card's temperature and its dashed maximum operating temperature line, both reported by the card. A temperature at or above that line means the card is slowing itself; check the room's cooling and airflow. Check docs/runbooks/observability.md §3.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "fieldConfig": {"defaults": {"unit": "celsius"}, "overrides": []},
+      "fieldConfig": {"defaults": {"unit": "celsius"}, "overrides": [{"matcher": {"id": "byRegexp", "options": "/ limit$/"}, "properties": [{"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [10, 10]}}]}]},
       "gridPos": {"h": 8, "w": 8, "x": 0, "y": 8},
-      "targets": [{"expr": "DCGM_FI_DEV_GPU_TEMP", "legendFormat": "GPU {{gpu}}", "refId": "A"}],
+      "targets": [{"expr": "DCGM_FI_DEV_GPU_TEMP", "legendFormat": "GPU {{gpu}}", "refId": "A"}, {"expr": "DCGM_FI_DEV_GPU_MAX_OP_TEMP", "legendFormat": "GPU {{gpu}} limit", "refId": "B"}],
       "title": "GPU temperature",
       "type": "timeseries"
     },
@@ -54,7 +54,7 @@
       "description": "This shows how full the engine's memory for active requests is, from the engine's own measurements. Lower use leaves room for more requests; a level near full with waiting requests signals capacity pressure. Check docs/runbooks/observability.md §4.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "fieldConfig": {"defaults": {"min": 0, "max": 1, "unit": "percentunit"}, "overrides": []},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 16},
       "targets": [{"datasource": {"type": "prometheus", "uid": "prometheus"}, "expr": "vllm:kv_cache_usage_perc", "legendFormat": "{{model_name}}", "refId": "A"}],
       "title": "KV-cache usage",
       "type": "timeseries"
@@ -63,10 +63,20 @@
       "description": "This shows how many requests the engine is running and how many are waiting, from the engine's own measurements. A short wait during a burst is expected; a queue that keeps growing means requests are not being served promptly. Check docs/runbooks/observability.md §4.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "fieldConfig": {"defaults": {"decimals": 0, "min": 0, "unit": "short"}, "overrides": []},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 16},
       "targets": [{"datasource": {"type": "prometheus", "uid": "prometheus"}, "expr": "vllm:num_requests_waiting", "legendFormat": "{{model_name}} waiting", "refId": "A"}, {"datasource": {"type": "prometheus", "uid": "prometheus"}, "expr": "vllm:num_requests_running", "legendFormat": "{{model_name}} running", "refId": "B"}],
-      "title": "Queue depth",
+      "title": "Requests waiting and running",
       "type": "timeseries"
+    },
+    {
+      "description": "This shows how fast the engine writes an answer, in tokens per second while a request is being answered across the board's time range, from the engine's own measurements. A figure well below the usual one means answers arrive slowly for everyone. The card is empty when no request ran in the range. Check docs/runbooks/observability.md §3.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"decimals": 1, "unit": "suffix: tokens/s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 16},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "none", "graphMode": "none", "textMode": "value"},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "prometheus"}, "expr": "sum by (model_name) (increase(vllm:inter_token_latency_seconds_count[$__range])) / (sum by (model_name) (increase(vllm:inter_token_latency_seconds_sum[$__range])) > 0)", "instant": true, "legendFormat": "{{model_name}}", "refId": "A"}],
+      "title": "Answer speed",
+      "type": "stat"
     }
   ],
   "refresh": "30s",

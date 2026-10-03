@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.15](docs/release-notes/v0.3.15.md) — 2026-10-03 — the GPU board's speed, memory, and limit
 - [v0.3.14](docs/release-notes/v0.3.14.md) — 2026-10-03 — the Overview is the page rules' board
 - [v0.3.13](docs/release-notes/v0.3.13.md) — 2026-10-03 — Grafana's Gravatar, external snapshots, plugin install, and news feed off
 - [v0.3.12](docs/release-notes/v0.3.12.md) — 2026-10-03 — the progress line alone while General thinks, no Thinking block beneath it
