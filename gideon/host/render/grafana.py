@@ -11,6 +11,7 @@ from gideon.host.render import (
     VerbatimArtifact,
     substitute_template,
     template_text,
+    unfilled_placeholder,
 )
 from gideon.host.render.api import API_JOB_NAME, api_enabled
 from gideon.host.render.engine import ENGINE_JOB_NAME
@@ -54,6 +55,14 @@ GRAFANA_ADMIN_USER: Final = "grafana-admin"
 DASHBOARDS_MOUNT: Final = "/etc/grafana/dashboards"
 # The ingress route and Grafana root URL path.
 GRAFANA_SUB_PATH: Final = "/grafana/"
+# The pinned Grafana frontend's silences route under the sub path, read from
+# the image's bundle; re-read at a Grafana pin bump.
+GRAFANA_SILENCES_ROUTE: Final = "alerting/silences"
+# The Overview panels whose content the render fills, and the sentinel strings
+# the template carries in their place, so the file on disk stays valid JSON.
+START_HERE_TITLE: Final = "Start here"
+PASSING_DRILL_AGE_TITLE: Final = "Passing drill age"
+OVERVIEW_SENTINELS: Final = ("start_here", "drill_threshold", "drill_days")
 # The Overview's home dashboard path inside the container.
 HOME_DASHBOARD_PATH: Final = DASHBOARDS_MOUNT + "/" + PurePosixPath(OVERVIEW_PATH).name
 # The start-here card's relative path under the install home.
@@ -290,11 +299,30 @@ class GrafanaOverviewArtifact(Artifact):
     template_paths = (OVERVIEW_TEMPLATE, BACKUP_TEMPLATE, GPU_TEMPLATE, EVAL_TEMPLATE)
 
     def emit(self, inputs: RenderInputs) -> str:
-        return substitute_template(
-            inputs,
-            OVERVIEW_TEMPLATE,
-            {"start_here": json.dumps(start_here_markdown(inputs))[1:-1]},
-        )
+        document = json.loads(template_text(inputs, OVERVIEW_TEMPLATE))
+        panels = {panel.get("title"): panel for panel in document["panels"]}
+        start = panels.get(START_HERE_TITLE, {}).get("options", {})
+        drill = panels.get(PASSING_DRILL_AGE_TITLE, {})
+        thresholds = drill.get("fieldConfig", {}).get("defaults", {}).get("thresholds", {})
+        threshold = drill_overdue_seconds(inputs.site.backup.drill_interval)
+        _fill(start, "content", "start_here", start_here_markdown(inputs))
+        _fill((thresholds.get("steps") or [{}])[-1], "value", "drill_threshold", threshold)
+        _fill(drill, "description", "drill_days", threshold // 86400)
+        rendered = json.dumps(document, indent=2, ensure_ascii=False) + "\n"
+        for name in OVERVIEW_SENTINELS:
+            if f"${name}" in rendered:
+                raise unfilled_placeholder(OVERVIEW_TEMPLATE, name)
+        return rendered
+
+
+def _fill(holder: dict[str, object], key: str, name: str, value: object) -> None:
+    """Fill one Overview sentinel in place: a whole string takes the typed value, a phrase its text."""
+
+    text = holder.get(key)
+    sentinel = f"${name}"
+    if not isinstance(text, str) or sentinel not in text:
+        raise unfilled_placeholder(OVERVIEW_TEMPLATE, name)
+    holder[key] = value if text == sentinel else text.replace(sentinel, str(value))
 
 
 GrafanaPluginsArtifact = VerbatimArtifact(
@@ -342,7 +370,10 @@ def start_here_markdown(inputs: RenderInputs) -> str:
             links.append(f"- [{dashboard['title']}]({GRAFANA_SUB_PATH}d/{dashboard['uid']})")
     card_url = f"{PUBLIC_REPOSITORY_URL}/blob/v{inputs.release}/{START_HERE_CARD}"
     paragraphs = (
-        "On the box, run `gideon status` for what needs attention now.",
+        # One paragraph: the panel's fixed height holds every line only so.
+        "On the box, run `gideon status` for what needs attention now. "
+        "Before planned work, [silence the rule that would page]"
+        f"({GRAFANA_SUB_PATH}{GRAFANA_SILENCES_ROUTE}).",
         "The other boards on this host:",
         "\n".join(links),
         f"The start-here card: `{INSTALL_HOME / START_HERE_CARD}` on the box, "

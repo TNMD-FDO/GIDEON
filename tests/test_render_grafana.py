@@ -28,12 +28,15 @@ from gideon.host.render.grafana import (
     DRILL_MAX_GAP_DAYS,
     EVAL_TEMPLATE,
     FRONT_DOOR_BOARDS,
+    GRAFANA_SILENCES_ROUTE,
     GRAFANA_SUB_PATH,
     NIGHTLY_OVERDUE_SECONDS,
     OVERVIEW_TEMPLATE,
+    PASSING_DRILL_AGE_TITLE,
     PLUGINS_TEMPLATE,
     PUBLIC_REPOSITORY_URL,
     START_HERE_CARD,
+    START_HERE_TITLE,
     GrafanaContactPointsArtifact,
     GrafanaDashboardsProviderArtifact,
     GrafanaDatasourcesArtifact,
@@ -229,6 +232,7 @@ class Overview(unittest.TestCase):
                 "Filesystems free",
                 "Backup set age",
                 "Backup push age",
+                PASSING_DRILL_AGE_TITLE,
                 "Last drill result",
                 "GPU utilisation",
                 "GPU memory",
@@ -245,10 +249,44 @@ class Overview(unittest.TestCase):
             for item in yaml.safe_load(site_inputs.templates[DATASOURCES_TEMPLATE])["datasources"]
         }
         self.assertTrue(_datasource_uids(dashboard) <= declared)
-        self.assertIn("$__timeFilter(at)", text)
-        self.assertIn("/ limit$/", text)
-        self.assertNotIn("$$", text)
-        json.loads((ROOT / "compose" / OVERVIEW_TEMPLATE).read_text(encoding="utf-8"))
+        template_text = (ROOT / "compose" / OVERVIEW_TEMPLATE).read_text(encoding="utf-8")
+        for board_text in (text, template_text):
+            self.assertIn("$__timeFilter(at)", board_text)
+            self.assertIn("/^result$/", board_text)
+            self.assertIn("/ limit$/", board_text)
+            self.assertNotIn("$$", board_text)
+        template = json.loads(template_text)
+        expected = {panel["title"]: panel for panel in template["panels"]}
+        rendered = {panel["title"]: panel for panel in dashboard["panels"]}
+        self.assertEqual(expected[START_HERE_TITLE]["options"]["content"], "$start_here")
+        expected[START_HERE_TITLE]["options"]["content"] = rendered[START_HERE_TITLE]["options"]["content"]
+        red_step = expected[PASSING_DRILL_AGE_TITLE]["fieldConfig"]["defaults"]["thresholds"]["steps"][-1]
+        self.assertEqual(red_step["value"], "$drill_threshold")
+        threshold = rendered[PASSING_DRILL_AGE_TITLE]["fieldConfig"]["defaults"]["thresholds"]["steps"][-1]["value"]
+        red_step["value"] = threshold
+        description = expected[PASSING_DRILL_AGE_TITLE]["description"]
+        self.assertIn("$drill_days", description)
+        expected[PASSING_DRILL_AGE_TITLE]["description"] = description.replace("$drill_days", str(threshold // 86400))
+        self.assertEqual(dashboard, template)
+
+    def test_overview_refuses_renamed_panel_or_missing_sentinel(self) -> None:
+        site_inputs = inputs()
+        for change, placeholder in (("title", "drill_threshold"), ("sentinel", "drill_days")):
+            with self.subTest(change=change):
+                template = json.loads(site_inputs.templates[OVERVIEW_TEMPLATE])
+                drill = next(panel for panel in template["panels"] if panel["title"] == PASSING_DRILL_AGE_TITLE)
+                if change == "title":
+                    drill["title"] = "Fictitious renamed drill"
+                else:
+                    drill["description"] = drill["description"].replace("$drill_days", "fictitious")
+                altered = replace(
+                    site_inputs,
+                    templates={**site_inputs.templates, OVERVIEW_TEMPLATE: json.dumps(template)},
+                )
+                with self.assertRaisesRegex(
+                    ValueError, rf"{re.escape(OVERVIEW_TEMPLATE)}.*{placeholder}"
+                ):
+                    GrafanaOverviewArtifact().emit(altered)
 
     def test_alert_list_selects_page_instances_without_the_heartbeat(self) -> None:
         panel = json.loads(GrafanaOverviewArtifact().emit(inputs()))["panels"][0]
@@ -321,6 +359,17 @@ class Overview(unittest.TestCase):
                         expected.append((document["title"], GRAFANA_SUB_PATH + "d/" + document["uid"]))
                 self.assertEqual(links, expected)
                 self.assertEqual(len(links), 1 if no_gpu else 3)
+                self.assertFalse(GRAFANA_SILENCES_ROUTE.startswith("/"))
+                self.assertTrue(GRAFANA_SUB_PATH.endswith("/"))
+                self.assertFalse(GRAFANA_SUB_PATH.endswith("//"))
+                silences_path = GRAFANA_SUB_PATH + GRAFANA_SILENCES_ROUTE
+                silences_lines = [
+                    line for line in content.splitlines() if f"]({silences_path})" in line
+                ]
+                self.assertEqual(len(silences_lines), 1)
+                self.assertIn("[silence the rule that would page]", silences_lines[0])
+                self.assertFalse(silences_lines[0].startswith("- "))
+                self.assertNotIn("target=", silences_lines[0])
                 self.assertIn(str(INSTALL_HOME / START_HERE_CARD), content)
                 export_link = re.search(r'<a href="([^"]+)" target="_blank">([^<]+)</a>', content)
                 self.assertIsNotNone(export_link)
@@ -374,52 +423,72 @@ class Overview(unittest.TestCase):
         self.assertEqual(green_step["value"], data_threshold)
 
     def test_backup_cards_show_latest_age_and_drill_result(self) -> None:
-        site_inputs = inputs()
-        panels = {
-            panel["title"]: panel
-            for panel in json.loads(GrafanaOverviewArtifact().emit(site_inputs))["panels"]
-        }
-        rules = {
-            rule["uid"]: rule
-            for group in yaml.safe_load(GrafanaRulesArtifact().emit(site_inputs))["groups"]
-            for rule in group["rules"]
-        }
-        for title, kind, rule_uid in (
-            ("Backup set age", "backup_run", "gideon-backup-set-overdue"),
-            ("Backup push age", "backup_push", "gideon-push-overdue"),
-        ):
-            with self.subTest(panel=title):
-                panel = panels[title]
-                rule = rules[rule_uid]
-                condition = next(item for item in rule["data"] if item["refId"] == rule["condition"])
-                threshold = condition["model"]["conditions"][0]["evaluator"]["params"][0]
-                self.assertEqual(panel["type"], "stat")
-                self.assertEqual(panel["targets"][0]["format"], "table")
-                sql = panel["targets"][0]["rawSql"]
-                self.assertIn("now() - max(at)", sql)
-                self.assertIn(f"kind = '{kind}'", sql)
-                if kind == "backup_run":
-                    self.assertIn("detail->>'phase' = 'applied'", sql)
-                self.assertEqual(
-                    panel["fieldConfig"]["defaults"]["thresholds"]["steps"],
-                    [{"color": "green", "value": None}, {"color": "red", "value": threshold}],
-                )
-                self.assertEqual(panel["options"]["colorMode"], "value")
-                self.assertEqual(panel["options"]["graphMode"], "none")
-                self.assertEqual(panel["options"]["textMode"], "value")
+        for site_path in (EXAMPLE, SECOND):
+            with self.subTest(site=site_path.name):
+                site_inputs = inputs(site_path)
+                panels = {
+                    panel["title"]: panel
+                    for panel in json.loads(GrafanaOverviewArtifact().emit(site_inputs))["panels"]
+                }
+                rules = {
+                    rule["uid"]: rule
+                    for group in yaml.safe_load(GrafanaRulesArtifact().emit(site_inputs))["groups"]
+                    for rule in group["rules"]
+                }
+                for title, kind, rule_uid in (
+                    ("Backup set age", "backup_run", "gideon-backup-set-overdue"),
+                    ("Backup push age", "backup_push", "gideon-push-overdue"),
+                    (PASSING_DRILL_AGE_TITLE, "backup_drill", "gideon-drill-overdue"),
+                ):
+                    with self.subTest(panel=title):
+                        panel = panels[title]
+                        rule = rules[rule_uid]
+                        condition = next(item for item in rule["data"] if item["refId"] == rule["condition"])
+                        threshold = condition["model"]["conditions"][0]["evaluator"]["params"][0]
+                        self.assertEqual(panel["type"], "stat")
+                        self.assertEqual(panel["targets"][0]["format"], "table")
+                        sql = panel["targets"][0]["rawSql"]
+                        self.assertIn("now() - max(at)", sql)
+                        self.assertIn(f"kind = '{kind}'", sql)
+                        if kind == "backup_run":
+                            self.assertIn("detail->>'phase' = 'applied'", sql)
+                        if kind == "backup_drill":
+                            rule_sql = rule["data"][0]["model"]["rawSql"]
+                            drill_filter = "WHERE kind = 'backup_drill' AND detail->>'result' = 'pass'"
+                            self.assertIn(drill_filter, sql)
+                            self.assertIn(drill_filter, rule_sql)
+                            self.assertEqual(panel["fieldConfig"]["defaults"]["unit"], "s")
+                            self.assertIn(f"Under {threshold // 86400} days", panel["description"])
+                            self.assertIn("docs/runbooks/observability.md §4.", panel["description"])
+                        self.assertEqual(
+                            panel["fieldConfig"]["defaults"]["thresholds"]["steps"],
+                            [{"color": "green", "value": None}, {"color": "red", "value": threshold}],
+                        )
+                        self.assertEqual(panel["options"]["colorMode"], "value")
+                        self.assertEqual(panel["options"]["graphMode"], "none")
+                        self.assertEqual(panel["options"]["textMode"], "value")
 
-        drill = panels["Last drill result"]
-        self.assertEqual(drill["targets"][0]["format"], "table")
-        self.assertIn("detail->>'result' AS result", drill["targets"][0]["rawSql"])
-        self.assertEqual(drill["options"]["reduceOptions"]["fields"], "/^result$/")
-        self.assertEqual(drill["options"]["colorMode"], "value")
-        self.assertEqual(drill["options"]["graphMode"], "none")
-        self.assertEqual(drill["options"]["textMode"], "value")
-        mappings = drill["fieldConfig"]["defaults"]["mappings"]
-        self.assertEqual(len(mappings), 1)
-        self.assertEqual(mappings[0]["type"], "value")
-        self.assertEqual(mappings[0]["options"]["pass"]["color"], "green")
-        self.assertEqual(mappings[0]["options"]["failed"]["color"], "red")
+                for title, column in (
+                    ("Backup set age", 0),
+                    ("Backup push age", 6),
+                    (PASSING_DRILL_AGE_TITLE, 12),
+                    ("Last drill result", 18),
+                ):
+                    with self.subTest(panel=title):
+                        self.assertEqual(panels[title]["gridPos"], {"h": 7, "w": 6, "x": column, "y": 16})
+
+                drill = panels["Last drill result"]
+                self.assertEqual(drill["targets"][0]["format"], "table")
+                self.assertIn("detail->>'result' AS result", drill["targets"][0]["rawSql"])
+                self.assertEqual(drill["options"]["reduceOptions"]["fields"], "/^result$/")
+                self.assertEqual(drill["options"]["colorMode"], "value")
+                self.assertEqual(drill["options"]["graphMode"], "none")
+                self.assertEqual(drill["options"]["textMode"], "value")
+                mappings = drill["fieldConfig"]["defaults"]["mappings"]
+                self.assertEqual(len(mappings), 1)
+                self.assertEqual(mappings[0]["type"], "value")
+                self.assertEqual(mappings[0]["options"]["pass"]["color"], "green")
+                self.assertEqual(mappings[0]["options"]["failed"]["color"], "red")
 
     def test_container_memory_compares_working_set_with_positive_limits(self) -> None:
         dashboard = json.loads(GrafanaOverviewArtifact().emit(inputs()))

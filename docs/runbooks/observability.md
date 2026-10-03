@@ -56,13 +56,14 @@ and the runbook section to follow.
 
 - **Overview** — first, *Needs attention*: the page-class alerts firing now,
   read from the same alert state `gideon status` prints, so an empty list
-  means a clear box; beside it, *Start here*: `gideon status`, a link to each
-  other board on this host, and the start-here card on the box and in the
-  public export. Below them: services and probes up, `/`, `/var/lib/docker`,
-  `/data` and `/data/fast` free with the 15 % line, backup set age and push
-  age (from the rows, red past the 26-hour line their pages fire at), the last
-  drill's result, GPU utilisation and memory, host load and memory, container
-  memory.
+  means a clear box; beside it, *Start here*: `gideon status`, Grafana's
+  silences page, a link to each other board on this host, and the start-here
+  card on the box and in the public export. Below them: services and probes
+  up; `/`, `/var/lib/docker`, `/data` and `/data/fast` free with the 15 % line;
+  backup set age and push age (from the rows, red past the 26-hour line their
+  pages fire at), the newest passing drill's age (red past the drill-overdue
+  line set by the drill calendar), the last drill's result, GPU utilisation
+  and memory, host load and memory, container memory.
 - **Backup** — M25 (run duration, set bytes, hard-link ratio, push transferred
   vs total, verified counts) and M26 (drill duration and result) as series
   over the rows, and the last ten runs as a table — the timers' recorded runs.
@@ -125,8 +126,9 @@ and the Saturday email). Run it after any change to `alerts.*` in the site file
 ## 5. Silencing during planned work
 
 Before a planned outage (a restore, a NAS maintenance window, a driver move),
-create a **silence** in Grafana (Alerting → Silences) matching the rule's
-`alertname`, with an end time. Silences are Grafana state, not release
+create a **silence** on Grafana's silences page (Alerting → Silences), linked
+from the Overview's *Start here* panel; match the rule's `alertname` and set
+an end time. Silences are Grafana state, not release
 content, and expire on their own. Do not silence the heartbeat. An engine
 restart expected to take longer than five minutes — a model or image bump's
 cold recreate on a box whose compile cache is gone, a first install — gets a

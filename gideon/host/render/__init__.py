@@ -93,14 +93,19 @@ def template_text(inputs: RenderInputs, path: str) -> str:
         raise ValueError(f"Render template {path} is missing.") from exc
 
 
+def unfilled_placeholder(path: str, placeholder: str) -> ValueError:
+    """Return the one refusal for a template placeholder left unfilled."""
+
+    return ValueError(f"Render template {path} has an unfilled placeholder: {placeholder}.")
+
+
 def substitute_template(inputs: RenderInputs, path: str, values: Mapping[str, object]) -> str:
     """Fill a ``string.Template`` from the declared templates; an unfilled placeholder is a ``ValueError``."""
 
     try:
         return Template(template_text(inputs, path)).substitute(values)
     except KeyError as exc:
-        placeholder = exc.args[0] if exc.args else "unknown"
-        raise ValueError(f"Render template {path} has an unfilled placeholder: {placeholder}.") from exc
+        raise unfilled_placeholder(path, exc.args[0] if exc.args else "unknown") from exc
 
 
 @dataclass(frozen=True, slots=True)
