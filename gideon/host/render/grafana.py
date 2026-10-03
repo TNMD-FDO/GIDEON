@@ -32,6 +32,7 @@ CONTACT_POINTS_TEMPLATE: Final = "grafana/provisioning/alerting/contact-points.y
 POLICIES_TEMPLATE: Final = "grafana/provisioning/alerting/policies.yaml.tmpl"
 TIME_INTERVALS_TEMPLATE: Final = "grafana/provisioning/alerting/time-intervals.yaml.tmpl"
 RULES_TEMPLATE: Final = "grafana/provisioning/alerting/rules.yaml.tmpl"
+PLUGINS_TEMPLATE: Final = "grafana/provisioning/plugins/plugins.yaml"
 DRIFT_RULE_TEMPLATE: Final = "grafana/provisioning/alerting/driver-drift-rule.yaml.tmpl"
 ENGINE_RULE_TEMPLATE: Final = "grafana/provisioning/alerting/engine-down-rule.yaml.tmpl"
 # The host-unit rule pages on the registry and runner units, which only the
@@ -294,6 +295,14 @@ class GrafanaOverviewArtifact(Artifact):
             OVERVIEW_TEMPLATE,
             {"start_here": json.dumps(start_here_markdown(inputs))[1:-1]},
         )
+
+
+GrafanaPluginsArtifact = VerbatimArtifact(
+    name="grafana-plugins",
+    relative_path=PLUGINS_TEMPLATE,
+    template_path=PLUGINS_TEMPLATE,
+    owners=("grafana",),
+)
 
 
 GrafanaBackupArtifact = VerbatimArtifact(

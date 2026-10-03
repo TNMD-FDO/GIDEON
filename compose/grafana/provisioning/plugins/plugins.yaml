@@ -1,0 +1,5 @@
+# Grafana reads its plugins provisioning directory at every start and logs an
+# error when it is missing; this file keeps the directory in the rendered tree.
+# GIDEON provisions no plugin.
+apiVersion: 1
+apps: []

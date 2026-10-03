@@ -18,6 +18,7 @@ from gideon.host.lock import load_host_lock, load_host_lock_text
 from gideon.host.models import HardwareProfile, load_models_lock, select_profile
 from gideon.host.render import ARTIFACTS, RenderInputs, VerbatimArtifact, render_all
 from gideon.host.render.api import API_JOB_NAME
+from gideon.host.render.compose import service_blocks
 from gideon.host.render.engine import ENGINE_JOB_NAME
 from gideon.host.render.facts import HostFacts
 from gideon.host.render.grafana import (
@@ -30,6 +31,7 @@ from gideon.host.render.grafana import (
     GRAFANA_SUB_PATH,
     NIGHTLY_OVERDUE_SECONDS,
     OVERVIEW_TEMPLATE,
+    PLUGINS_TEMPLATE,
     PUBLIC_REPOSITORY_URL,
     START_HERE_CARD,
     GrafanaContactPointsArtifact,
@@ -39,6 +41,7 @@ from gideon.host.render.grafana import (
     GrafanaGpuArtifact,
     GrafanaLdapArtifact,
     GrafanaOverviewArtifact,
+    GrafanaPluginsArtifact,
     GrafanaPoliciesArtifact,
     GrafanaRulesArtifact,
     GrafanaTimeIntervalsArtifact,
@@ -143,6 +146,30 @@ class Ldap(unittest.TestCase):
 
 
 class Provisioning(unittest.TestCase):
+    def test_plugins_file_is_empty_and_inside_the_mounted_provisioning_tree(self) -> None:
+        artifact = GrafanaPluginsArtifact
+        template = (ROOT / "compose" / PLUGINS_TEMPLATE).read_text(encoding="utf-8")
+        self.assertIn(artifact, ARTIFACTS)
+        self.assertIsInstance(artifact, VerbatimArtifact)
+        self.assertEqual(artifact.owners, ("grafana",))
+        self.assertEqual(artifact.mode, 0o644)
+        for no_gpu in (False, True):
+            with self.subTest(no_gpu=no_gpu):
+                site_inputs = inputs(no_gpu=no_gpu)
+                self.assertTrue(artifact.applies(site_inputs))
+                self.assertEqual(artifact.emit(site_inputs), template)
+                self.assertEqual(
+                    yaml.safe_load(artifact.emit(site_inputs)), {"apiVersion": 1, "apps": []}
+                )
+                grafana = service_blocks(site_inputs)["grafana"]
+                assert isinstance(grafana, dict)
+                mounts = [volume.split(":") for volume in grafana["volumes"]]
+                source = next(
+                    mount[0] for mount in mounts if mount[1] == "/etc/grafana/provisioning"
+                )
+                rendered_path = Path("/etc/gideon/rendered") / artifact.relative_path
+                self.assertTrue(rendered_path.is_relative_to(source))
+
     def test_datasources_have_fixed_uids_and_file_password(self) -> None:
         document = yaml.safe_load(GrafanaDatasourcesArtifact().emit(inputs()))
         datasources = document["datasources"]

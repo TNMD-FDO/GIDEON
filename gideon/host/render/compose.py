@@ -397,6 +397,12 @@ def grafana_environment(inputs: RenderInputs) -> Mapping[str, str]:
         "GF_ANALYTICS_REPORTING_ENABLED": "false",
         "GF_ANALYTICS_CHECK_FOR_UPDATES": "false",
         "GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES": "false",
+        # The background installer fetches plugins from an unlisted host at
+        # start and refreshes them on later starts.
+        "GF_PLUGINS_PREINSTALL_DISABLED": "true",
+        # The image otherwise downloads the plugin-signature key from the same
+        # host every ten days.
+        "GF_PLUGINS_PUBLIC_KEY_RETRIEVAL_DISABLED": "true",
         "TZ": inputs.site.office.timezone,
     }
     if smtp.user:

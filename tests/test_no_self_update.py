@@ -30,11 +30,14 @@ SELF_UPDATE_SWITCHES: Mapping[str, Mapping[str, str]] = {
     # No update check or telemetry at the pinned commit; no checker module,
     # and the two user-triggered outbound resolvers are off in its settings.
     "searxng": {},
-    # Grafana's update checks and reporting are disabled in its environment.
+    # Grafana's update checks and reporting are off; plugins are neither
+    # installed nor refreshed by the image.
     "grafana": {
         "GF_ANALYTICS_REPORTING_ENABLED": "false",
         "GF_ANALYTICS_CHECK_FOR_UPDATES": "false",
         "GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES": "false",
+        "GF_PLUGINS_PREINSTALL_DISABLED": "true",
+        "GF_PLUGINS_PUBLIC_KEY_RETRIEVAL_DISABLED": "true",
     },
     # Prometheus has no update check or telemetry.
     "prometheus": {},

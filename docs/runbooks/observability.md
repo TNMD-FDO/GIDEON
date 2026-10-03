@@ -207,6 +207,12 @@ it); the office firewall must allow it for `registry mirror` and the CI runner
 (`config/egress.yaml`, `office-services-setup.md`). cAdvisor comes from
 GHCR, already allowed.
 
+Grafana fetches nothing from the internet by itself, at a start or on a timer.
+The release turns off its update checks, usage report, plugin install, and
+signature-key refresh; Grafana runs only what the pinned image holds, and
+`config/egress.yaml` lists no host for it. Grafana reaches Prometheus and
+Postgres on the Compose network, and the office's mail relay and directory.
+
 ## 10. The weekly nudge
 
 The weekly email, subject `[GIDEON <office>] Proposals waiting`, says

@@ -283,6 +283,7 @@ class Registry(unittest.TestCase):
                 "grafana/provisioning/alerting/policies.yaml",
                 "grafana/provisioning/alerting/time-intervals.yaml",
                 "grafana/provisioning/alerting/rules.yaml",
+                "grafana/provisioning/plugins/plugins.yaml",
                 "grafana/dashboards/overview.json",
                 "grafana/dashboards/backup.json",
                 "grafana/dashboards/gpu.json",
@@ -326,24 +327,25 @@ class Registry(unittest.TestCase):
         self.assertEqual(ARTIFACTS[11].owners, ("grafana",))
         self.assertEqual(ARTIFACTS[12].owners, ("grafana",))
         self.assertEqual(ARTIFACTS[13].owners, ("grafana",))
-        self.assertEqual(ARTIFACTS[14].owners, ("postgres",))
-        self.assertEqual(ARTIFACTS[15].owners, ("caddy",))
-        self.assertEqual(ARTIFACTS[16].owners, ("open-webui",))
-        self.assertTrue(ARTIFACTS[16].secret)
-        self.assertEqual(ARTIFACTS[16].mode, 0o600)
-        self.assertEqual(ARTIFACTS[17].owners, ())
-        self.assertEqual(ARTIFACTS[18].owners, (API_SERVICE_NAME,))
-        self.assertEqual(ARTIFACTS[18].mode, 0o644)
-        self.assertFalse(ARTIFACTS[18].secret)
-        self.assertEqual(ARTIFACTS[19].owners, ("searxng",))
+        self.assertEqual(ARTIFACTS[14].owners, ("grafana",))
+        self.assertEqual(ARTIFACTS[15].owners, ("postgres",))
+        self.assertEqual(ARTIFACTS[16].owners, ("caddy",))
+        self.assertEqual(ARTIFACTS[17].owners, ("open-webui",))
+        self.assertTrue(ARTIFACTS[17].secret)
+        self.assertEqual(ARTIFACTS[17].mode, 0o600)
+        self.assertEqual(ARTIFACTS[18].owners, ())
+        self.assertEqual(ARTIFACTS[19].owners, (API_SERVICE_NAME,))
         self.assertEqual(ARTIFACTS[19].mode, 0o644)
+        self.assertFalse(ARTIFACTS[19].secret)
         self.assertEqual(ARTIFACTS[20].owners, ("searxng",))
-        self.assertTrue(ARTIFACTS[20].secret)
-        self.assertEqual(ARTIFACTS[20].mode, 0o600)
-        self.assertEqual(ARTIFACTS[21].relative_path, "searxng/logging.json")
+        self.assertEqual(ARTIFACTS[20].mode, 0o644)
         self.assertEqual(ARTIFACTS[21].owners, ("searxng",))
-        self.assertFalse(ARTIFACTS[21].secret)
-        self.assertEqual(ARTIFACTS[21].mode, 0o644)
+        self.assertTrue(ARTIFACTS[21].secret)
+        self.assertEqual(ARTIFACTS[21].mode, 0o600)
+        self.assertEqual(ARTIFACTS[22].relative_path, "searxng/logging.json")
+        self.assertEqual(ARTIFACTS[22].owners, ("searxng",))
+        self.assertFalse(ARTIFACTS[22].secret)
+        self.assertEqual(ARTIFACTS[22].mode, 0o644)
         self.assertTrue(
             all(
                 artifact.mode == 0o644
@@ -1073,6 +1075,7 @@ class Core(unittest.TestCase):
                 "grafana/provisioning/alerting/policies.yaml",
                 "grafana/provisioning/alerting/time-intervals.yaml",
                 "grafana/provisioning/alerting/rules.yaml",
+                "grafana/provisioning/plugins/plugins.yaml",
                 "grafana/dashboards/overview.json",
                 "grafana/dashboards/backup.json",
                 "grafana/dashboards/gpu.json",

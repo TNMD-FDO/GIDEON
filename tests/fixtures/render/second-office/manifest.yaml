@@ -11,7 +11,7 @@ inputs:
   build_box: false
 files:
   compose.yaml:
-    sha256: "4eacf0224acad05230d75400eb48f0bf889ebdc12f79a26d8cb4d6a0178150aa"
+    sha256: "e881558d11ca63f522dc264cf78ddb0399778b7ddfa77364843b1479bff3fdaf"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
@@ -56,6 +56,11 @@ files:
       - "grafana"
   "grafana/provisioning/alerting/rules.yaml":
     sha256: "e8c20cd7fda91841bb2c8d6a5a1aed67b6d5149217dd6b609d9b0832a4ac973f"
+    mode: "0644"
+    owners:
+      - "grafana"
+  "grafana/provisioning/plugins/plugins.yaml":
+    sha256: "70a515a57ba3448737279e98a341322d5982752fa1ef68b1db858a48e8fd3057"
     mode: "0644"
     owners:
       - "grafana"
@@ -155,7 +160,7 @@ services:
   caddy: "6ab86c4b4080e9f36a8a33ac2c17068802e1161844d10a4474b8285c69c1650f"
   prometheus: "7a73ab08985ed9765b04f35b0e78d36befc83b80e562755d063bef6565a7b96b"
   node-exporter: "a581b1f8a717fdaab3b3e0ffa46114516da01f2c51c85838380c168d506632df"
-  grafana: "203c0b5cdde861f04b3a73829ac8fb6ad43516eb62e3df5f9b3fff1ca96f161f"
+  grafana: "a854406365c66cee83237e97198bbd378d1878a5c20bdeae4a910ec5a01f8d76"
   postgres: "28166dcbe7645857c7e325986bbe54091782536983eccc65c65eee3d639d817b"
   open-webui: "17ad23ba708f21fee33fce40ecf6c7e1abb875428164b540e3e4df15f1f220cb"
   gideon-generator: "7e6fb8478dc880dc237408c62456aa742b2612de5c2bb1e2882ad65d8eaf800b"

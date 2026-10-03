@@ -80,6 +80,8 @@ services:
       GF_ANALYTICS_REPORTING_ENABLED: "false"
       GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
       GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+      GF_PLUGINS_PUBLIC_KEY_RETRIEVAL_DISABLED: "true"
       TZ: "America/Chicago"
     group_add:
       - "4242"
