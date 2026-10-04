@@ -3,7 +3,7 @@
 `v0.0.18`. The product produces its own backup set, and one push copies it
 off-box. An upgrade rollback restores the pre-upgrade set. Each run is kept as
 an `audit_log` row (`backup_run`, `backup_push`, `backup_drill`, `restore`),
-which an operator can query, never as a log line. The Synology side is §3 of
+which an operator can query, never as a log line. The backup target's side is §3 of
 [`office-services-setup.md`](office-services-setup.md).
 
 ## 1. What runs, and where it lives

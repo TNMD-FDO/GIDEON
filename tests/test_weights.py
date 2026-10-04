@@ -20,6 +20,7 @@ from gideon.host.models import (
     load_models_lock,
     load_models_lock_text,
 )
+from gideon.host.render.grafana import PUBLIC_REPOSITORY_URL
 from gideon.host.report import Problem
 from gideon.host.site import SiteConfig
 from gideon.host.steps import Wgetrc, temporary_wgetrc, wget_argv_for_site
@@ -554,6 +555,13 @@ FICTITIOUS_SITE = cast(
 )
 
 
+def _wrong_digest_wget(command: list[str], host: FakeHost) -> subprocess.CompletedProcess[str]:
+    partial = command[command.index("-qO") + 1]
+    host.sizes[partial] = FICTITIOUS_PIN.files[0].size
+    host.digests[partial] = "f" * 64
+    return subprocess.CompletedProcess(command, 0, "", "HTTP/1.1 200 OK\n")
+
+
 class ModelConvergence(unittest.TestCase):
     """Classification and convergence use only the loaded fictitious lock."""
 
@@ -719,18 +727,20 @@ class ModelConvergence(unittest.TestCase):
         self.assertIn("lock requires", outcome.problem)
         self.assertIn("source archive is republished", outcome.fix)
 
-        def wrong_digest(command: list[str], host: FakeHost) -> subprocess.CompletedProcess[str]:
-            partial = command[command.index("-qO") + 1]
-            host.sizes[partial] = file.size
-            host.digests[partial] = "f" * 64
-            return subprocess.CompletedProcess(command, 0, "", "HTTP/1.1 200 OK\n")
-
-        host = FakeHost(wget=wrong_digest)
+        host = FakeHost(wget=_wrong_digest_wget)
         outcome = converge_model(host, FICTITIOUS_SITE, FICTITIOUS_PIN, _no_proxy_wgetrc(), root=MODELS_ROOT)
         self.assertEqual(outcome.kind, "failed")
         self.assertFalse(host.exists(_partial_for(file)))
         self.assertIn("digest", outcome.problem)
         self.assertIn("source archive is republished", outcome.fix)
+
+    def test_lock_rejected_fetch_fix_names_public_repository_issues(self) -> None:
+        host = FakeHost(wget=_wrong_digest_wget)
+        outcome = converge_model(host, FICTITIOUS_SITE, FICTITIOUS_PIN, _no_proxy_wgetrc(), root=MODELS_ROOT)
+        self.assertEqual(outcome.kind, "failed")
+        self.assertIn("digest", outcome.problem)
+        self.assertIn(f"{PUBLIC_REPOSITORY_URL}/issues", outcome.fix)
+        self.assertNotIn("report it to TNMD", outcome.fix)
 
     def test_network_refusals_refetch_relink_and_resume(self) -> None:
         file = FICTITIOUS_PIN.files[0]

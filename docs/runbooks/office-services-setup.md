@@ -1,257 +1,318 @@
-# Office-services setup for GIDEON (CSA runbook material)
+# Office-services setup for GIDEON
 
-What a CSA sets up **outside the box** before `./preflight.sh` can pass: the
-before-you-begin checklist made explicit. Written from TNMD's first live setup
-(2026-09-01); promote into the formal install runbook when that document lands.
-TNMD example values throughout — a receiving office substitutes its own and
-records them in `/etc/gideon/site.yaml`.
+A CSA prepares the office services in these five sections outside the box
+before `./preflight.sh` can pass. Record each site value in
+`/etc/gideon/site.yaml` and place each supplied secret as a file under
+`/etc/gideon/secrets/`. Do this after the first host provision run and before
+preflight, as described in
+[`docs/runbooks/install-upgrade.md`](install-upgrade.md) §1.
 
-The `~/gideon-onbox-wizard.sh` pattern (an interactive script that walks these
-steps and places the results) is worth regenerating per office; this checklist
-makes the before-you-begin work explicit for the person preparing a box.
+Each section starts with the requirement and the preflight row that checks it,
+then gives the setup steps. A paragraph headed **TNMD example** shows how the
+office that first ran GIDEON met the requirement with its own equipment;
+substitute your own. No script performs these steps: the CSA does them, and
+preflight checks the result.
 
-## 1. Active Directory (ADUC)
+## 1. Active Directory
 
-**Service account** — `svc-gideon-ldap`, in your service-accounts OU (default
-Users container is fine):
+GIDEON needs LDAPS to the domain in `auth.ldap.host`, a bind account that can
+read users, groups, and `memberOf`, the users and admins groups, and a
+`userPrincipalName` on every account that will sign in. The domain
+controllers must already serve LDAPS on port 636 (`auth.ldap.port`) with a
+certificate §4 describes. Preflight's `ldap` row binds, resolves the
+configured groups, and checks every users-group member through `memberOf` for
+a UPN.
 
-- **User logon name (UPN) matters**: the box binds as
-  `svc-gideon-ldap@<ad-domain>` (e.g. `svc-gideon-ldap@example.org`).
-- Password: generated long/random in the office password manager **first**,
-  then set here. Flags: ☑ Password never expires, ☑ User cannot change
-  password, ☐ must-change-at-next-logon.
-- **No extra group memberships** — default Domain Users read access is all the
-  bind and group searches need. The account only ever does LDAP reads.
+Create a read-only bind account such as `svc-gideon-ldap` in the office's
+service-accounts OU or the default `Users` container. Set its User logon name
+to a UPN such as `svc-gideon-ldap@example.org`. In `auth.ldap.bind_user`,
+give the account name alone and GIDEON binds as
+`<auth.ldap.bind_user>@<auth.ldap.host>`; where the UPN's suffix differs from
+the domain, give the full UPN or the account's DN instead.
+Generate a long random password in the office password manager first. Set
+**Password never expires** and **User cannot change password**; leave
+**must-change-at-next-logon** off. Add no group memberships beyond the
+`memberOf` grant below. Default Domain Users read access is enough for the
+ordinary bind and group searches, provided the account can also read
+`memberOf` as described below. Leave `auth.ldap.search_base` at its default,
+the whole domain, unless every signing-in account sits under a narrower base;
+a group given by its CN alone is looked up as
+`CN=<name>,CN=Users,<auth.ldap.search_base>`, so a narrowed base needs the
+groups' full DNs.
 
-**Groups** — two Global Security groups, names exactly matching the site
-file's `auth.ldap` keys (defaults shown):
+Place the password at `/etc/gideon/secrets/ldap_bind_password`. `ldapsearch -y`
+reads that file verbatim, so it must have no trailing newline. The directory
+is root-owned and mode 0700; run this Bash command from the box, entering the
+password at the hidden prompt. The value is passed on stdin, never as a
+command argument:
 
-| Group | Meaning |
-|---|---|
-| `GIDEON-Users` | membership = may log in to GIDEON |
-| `GIDEON-Admins` | membership = GIDEON admin (`gideon users reconcile` enforces); since `v0.0.22` also the only directory group that may open Grafana at `/grafana/` (§7) |
+```bash
+(
+  set -e
+  set -o pipefail
+  umask 077
+  IFS= read -rs -p 'LDAP bind password: ' bind_password
+  printf '\n'
+  printf '%s' "$bind_password" | sudo tee /etc/gideon/secrets/ldap_bind_password >/dev/null
+  unset bind_password
+)
+```
 
-Add office staff (their normal AD accounts) to `GIDEON-Users`; put admins in
-**both** groups — the users group is the login gate, so an admin outside it is
-an admin who can't log in.
+After the write succeeds, run `sudo python3 -m gideon host provision` again.
+Its `secrets-dirs` step converges the supplied file to `root:gideon` mode 0440.
 
-**Every account that will sign in needs a `userPrincipalName`** — ADUC's *User
-logon name* on the Account tab (`user@<ad-domain>`), which every account
-created through ADUC already has; only script-created accounts may lack one,
-and preflight's LDAP check refuses a users-group member without one. This is
-required because the frontend and reconcile need a stable directory identity.
-Users sign in with their `sAMAccountName`; the frontend keys the
-account by its UPN and shows it as the account's address, and
-`gideon users reconcile` joins directory accounts to frontend users by the same
-attribute. The E-mail (`mail`) attribute is not read by GIDEON.
+Create two Global Security groups. `auth.ldap.users_group` defaults to
+`GIDEON-Users`: direct membership permits sign-in. `auth.ldap.admins_group`
+defaults to `GIDEON-Admins`: direct membership grants GIDEON admin access via
+`gideon users reconcile` and is the only directory group allowed into Grafana
+(§5). Add staff's normal AD accounts to the users group; put admins in
+**both** groups, because users-group membership is still the sign-in gate.
 
-## 2. DNS (AD DNS on the DCs)
+If either group, or a group in `auth.ldap.mirror_groups`, lives outside AD's
+default `Users` container, put its full distinguished name in the
+corresponding site key rather than only its CN. Look it up in PowerShell with
+`Get-ADGroup GIDEON-Users | Select-Object DistinguishedName`, changing the
+group name for each lookup. Preflight refuses a group it cannot resolve.
 
-Two A records in the AD forward zone (DNS Manager on a DC):
+Every signing-in account needs ADUC's **User logon name** on the Account tab,
+for example `user@example.org`; accounts created by scripts may lack it.
+People sign in with `sAMAccountName`, while the frontend, reconcile, and audit
+records identify them by UPN. The E-mail (`mail`) attribute is not required or
+read by GIDEON. Preflight refuses a users-group member with no UPN, and also
+refuses a member the bind account cannot see through `memberOf`: check for a
+delegation that misses an OU or a member outside `auth.ldap.search_base`.
 
-- `gideon` → the box's LAN IP, which is the certificate subject and Caddy's
-  hostname.
-- `nas` → the backup target's LAN IP.
+The bind account must be able to read the `memberOf` back-link on user
+objects; the frontend login filter and `gideon users reconcile` use it.
+Domains that removed *Authenticated Users* from *Pre-Windows 2000 Compatible
+Access* can hide the attribute. Grant the bind account read access by adding
+it to *Pre-Windows 2000 Compatible Access* or by delegating *Read memberOf* on
+the OU that holds the signing-in accounts. Preflight's `ldap` row refuses
+until it can see all users-group members this way.
 
-Per record: "create associated PTR" if a reverse zone exists (harmless
-either way); **leave "allow any authenticated user to update…" unchecked**
-(static server records must not be dynamically claimable); default TTL.
+## 2. DNS
 
-**If the office resolvers are Pi-hole (TNMD: Pi-hole on the Synologys) or any
-caching layer in front of AD DNS:**
+The box's resolvers must answer the directory's zone: the site `hostname`
+must resolve to the box, `auth.ldap.host` to the domain controllers, and
+`backup.target.host` to the target if it is a name. Preflight's `hostname`
+row runs `getent hosts` for the site hostname; verify that its answer is the
+box's address. The `ldap` and `backup-ssh` rows exercise the other names.
 
-- Records go in **AD DNS regardless** — it is authoritative for the AD zone;
-  the cache forwards to it. Never split AD-zone names into Pi-hole "Local DNS
-  records".
-- **Negative caching gotcha**: any lookup of the name *before* the record
-  existed plants an NXDOMAIN in the caches for the zone's negative TTL (an
-  hour on AD defaults). Symptom: `dig <name> @<dc>` answers while
-  `getent hosts <name>` on the box refuses. Fix: flush DNS caches on **every**
-  Pi-hole (Settings → Flush DNS cache, or `pihole restartdns`), then
-  `sudo resolvectl flush-caches` on the box.
-- Determinism check while you're in Pi-hole: upstreams should be the DCs (who
-  forward externally), or at minimum the AD zone conditionally forwarded to
-  them — public upstreams answering NXDOMAIN for the private zone cause
-  maddening intermittent failures.
+Create the box and backup-target records in the zone's authoritative DNS, for
+example `gideon.example.org` and `nas.example.org`; the directory's domain
+name must resolve to its controllers. Add an associated PTR where a reverse
+zone exists. Keep static server records from being dynamically updated, and
+use the zone's default TTL.
 
-## 3. Backup target (Synology DSM 7 — TNMD: DS2422)
+If caching resolvers sit in front of the authoritative servers, put the
+records in the authoritative zone regardless. A lookup made before a record
+existed can cache NXDOMAIN for the zone's negative TTL (an hour on AD
+defaults). The symptom is `dig @dc1.example.org gideon.example.org` answering
+while `getent hosts gideon.example.org` on the box fails. Flush **every**
+caching resolver, then run `sudo resolvectl flush-caches` on the box. Set the
+caches' upstreams to the domain controllers, or forward the directory zone to
+them; a public upstream may answer NXDOMAIN for that zone.
 
-**Which unit/volume**: any single volume works — a DSM volume is one
-filesystem, so `--link-dest` can hard-link snapshots under one path. Choose by headroom,
-and prefer a volume that isolates backup growth from other duties the unit
-carries (TNMD's Synologys also run office DNS). If the units replicate
-primary→backup, target the **primary** — GIDEON's snapshots then gain a
-second copy for free. **Whatever you choose, `backup.target.path` in
-`site.yaml` must match** (`/volumeN/<share-name>` — TNMD:
-`/volume3/gideon-backup`).
+**TNMD example — Pi-hole in front of AD DNS.** Put the zone's records in AD
+DNS, never in Pi-hole's "Local DNS records". On each Pi-hole, use Settings →
+Flush DNS cache or run `pihole restartdns`, then flush the box's cache as
+above. Pi-hole's upstreams are the domain controllers or forward their zone
+to them.
 
-**Shared folder** (Control Panel → Shared Folder → Create):
+## 3. Backup target
 
-- Name `gideon-backup` (it becomes the path's last segment); location = the
-  chosen volume.
-- **Recycle Bin: OFF** — pruning uses `rsync --delete`; the Synology Recycle Bin would
-  invisibly hoard every pruned snapshot.
-- Encryption: off unless policy demands (an unmounted encrypted share after a
-  NAS reboot silently fails the nightly push).
-- On btrfs: **enable data checksums** (creation-time only option) — integrity
-  is this share's entire purpose. Compression optional (payload is largely
-  pre-compressed).
-- Permissions: `gideon-backup` user Read/Write; everyone else No access.
+Preflight's `backup-ssh` row and `backup push` need an SSH account named by
+`backup.target.user` (default `gideon-backup`) on `backup.target.host`, at
+port 22; GIDEON has no backup-target port setting. Authorize the box's backup
+public key for that account. Set `backup.target.path` to one directory on one
+filesystem that supports hard links; create it, writable by the account. The
+target needs `sh`, `rsync`, and a `sha256sum` that accepts `-c -` on stdin; preflight
+probes authentication, path writability, and those tools. Push sends no owner
+or group (`--no-owner --no-group`); each set's manifest carries ownership and
+modes for restore. The account's login shell must run `sh -c` commands.
 
-**Account** (Control Panel → User & Group → Create): `gideon-backup`, strong
-password (used exactly once, for key placement).
+Supported targets include Synology DSM 7, QNAP, TrueNAS SCALE, and plain
+Linux over SSH. On plain Linux the account is an ordinary user with no
+special privilege; a NAS whose SSH service admits only administrators needs
+the account in that group (the example below). A Windows file server is not
+supported. Choose a target with headroom for the retained snapshots; an
+optional quota can protect other data on its volume. If the target is a
+replicated pair, push to the primary. Pruning must really delete data: a
+trash or recycle folder on the share would hoard every pruned snapshot. The
+path must be available unattended after a reboot; an encrypted volume
+awaiting manual unlock would fail the nightly push. Enable data
+checksums where the filesystem offers them and monitor the target's disk
+health, because the target must keep a sound backup copy.
 
-- **Member of `administrators` — required**: Synology's sshd only allows SSH
-  for administrators. Compensate by stripping everything
-  else: No access to all other shares, **Deny all** on the Applications tab.
-  (If a later `backup push` hits a permission wall, the "rsync" application
-  privilege is the first knob — do not pre-grant.)
-- No quota required; a quota is a reasonable hard cap protecting the volume's
-  other tenants.
+Under `backup.target.path`, each push has a directory named by its UTC time,
+hard-linked to the previous push. The same name with `.partial` appended
+marks a push in flight; old pushes are pruned after `backup.remote_days`.
+Each completed directory holds `push.json`, the sets, and the pgBackRest
+repository as of that push.
 
-**Three service toggles**: User & Group → Advanced → ☑ Enable user home service
-(no home ⇒ no `~/.ssh`; DSM creates the home on first login). Terminal & SNMP
-→ ☑ Enable SSH service, **port 22** (the product has no port setting — 22 is
-assumed by preflight and `backup push`), Advanced Settings left at default.
-File Services → rsync → ☑ **Enable rsync service** — DSM's `rsync` binary is a
-wrapper that answers `Permission denied, please try again.` to `rsync
---server` (the push, over SSH) while the service is off, even though SSH key
-authentication succeeded; the first push showed that enabling SSH alone does
-not enable this separate rsync service. The rsync
-port 873 itself is not used and may stay firewalled. Then grant the account the
-**rsync application privilege** (User & Group → `gideon-backup` → Applications).
+After `host provision` prints the backup public key, run this on the box,
+substituting the account and host from `/etc/gideon/site.yaml`:
 
-**What the target must have** (preflight's `backup-ssh` check proves all of
-it): `rsync`, `sha256sum` that accepts `-c -` on stdin, and `sh`. The push
-sends no ownership (`--no-owner --no-group`, a plain account cannot store it);
-every set's manifest carries the owners and modes and a restore reapplies them.
+```bash
+sudo ssh-copy-id \
+  -i /etc/gideon/secrets/backup_ssh_key.pub \
+  -o UserKnownHostsFile=/etc/gideon/backup_known_hosts \
+  "<backup.target.user>@<backup.target.host>"
+```
 
-**Layout on the share**: one directory per push, named by its UTC time
-(`20260902T210803Z`), hard-linked to the previous one; `<name>.partial` while
-in flight; pruned after `backup.remote_days`. Each holds `push.json` (its
-coverage record), the sets, and the pgBackRest repository as of that push.
+The command asks for the target account's password once. Confirm the target
+host key at first contact, comparing the fingerprint shown with the one the
+target's own console reports (`ssh-keygen -lf` on its host key): this places
+it in `/etc/gideon/backup_known_hosts`, the trust file `backup push` uses. If the
+target does not permit password login, place the printed public-key line in
+that account's `~/.ssh/authorized_keys` by the target's own means and confirm
+its host key in the same trust file. If key authentication still fails on an
+OpenSSH target, check the target account's permissions:
+`chmod 755 ~; chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys`. Once the
+key is placed, GIDEON never uses the account's password, so password login
+may be disabled for it.
 
-**Key placement**: done from the box, not by hand —
-`ssh-copy-id -i /etc/gideon/secrets/backup_ssh_key.pub` (the wizard runs it),
-which also triggers home creation. First contact enrolls the NAS host key
-into `/etc/gideon/backup_known_hosts` — the shared trust file `backup push`
-uses. If key auth fails afterwards: the classic DSM cause is permissions —
-`chmod 755 ~; chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys` on the NAS.
+**TNMD example — Synology DSM 7 on a DS2422.** Choose one DSM volume; its
+shared folder path starts with `/volumeN/`, where N is the volume number,
+such as `/volume3/gideon-backup`. Prefer a volume with headroom isolated from
+other duties; TNMD's units also provide office DNS. In Control Panel → Shared
+Folder, create `gideon-backup` on that volume, turn **Recycle Bin** off, and
+keep encryption off unless policy requires it and unattended mounting is
+arranged. On btrfs, enable data checksums when creating the folder;
+compression is optional because much of the payload is already compressed.
+Give the `gideon-backup` user Read/Write on this folder and everyone else No
+access. Create the user with a strong password for initial key placement and
+put it in `administrators`, because DSM's SSH service admits administrators;
+deny access to all other shares and applications. A quota is optional.
+Enable the user home service so `~/.ssh` exists after first login, enable SSH
+on port 22, and enable the separate rsync service. DSM may otherwise answer
+`Permission denied, please try again.` to `rsync --server` even after SSH key
+authentication succeeds. Grant the account the rsync application privilege
+if that permission wall appears; rsync's port 873 is not used and may remain
+firewalled.
 
-## 4. Certificates (AD CS)
+## 4. Certificates
 
-**CA root → `/etc/gideon/ca.pem`** (required for preflight's LDAPS check).
-Export from any domain-joined machine — the root is already in its trust
-store. PowerShell, one command at a time:
+Preflight's `ldap` row needs the CA root that signs the domain controllers'
+LDAPS certificates at `/etc/gideon/ca.pem`. GIDEON connects to the
+directory by the domain name in `auth.ldap.host`, so each domain
+controller's LDAPS certificate must carry that name among its SANs, beside
+the controller's own name; a controller without such a certificate is
+issued and given one by the office CA's own means before preflight. Install
+also needs a TLS certificate for the site `hostname`, with the private key
+generated on the box and never sent to the CA. Its homes are `/etc/gideon/tls/cert.pem` (0644) and
+`/etc/gideon/secrets/tls_key`, whose owner and mode the next
+`sudo python3 -m gideon host provision` converges to `root:gideon` 0440, as
+for every supplied secret.
 
-    $ca = Get-ChildItem Cert:\LocalMachine\Root | ? Subject -like "*<your-CA-CN>*" | Sort NotAfter -Descending | Select -First 1
-    $ca | Export-Certificate -FilePath $env:TEMP\ca.cer
-    certutil -encode $env:TEMP\ca.cer $env:USERPROFILE\Desktop\root-ca.pem
+`/etc/gideon/ca.pem` is one PEM file. Where the CA issues from an
+intermediate, the file holds the root followed by each intermediate, since
+GIDEON verifies every chain against this file alone. `cert.pem` holds the
+site certificate first; append the intermediates after it so browsers
+receive the whole chain.
 
-Copy the PEM text to the box. Sanity check before installing: the DC's live
-LDAPS cert must verify against it
-(`openssl verify -CAfile root-ca.pem <(openssl s_client -connect <ad-domain>:636 </dev/null | openssl x509)`).
+Export the trusted CA root as PEM from the office's CA or a machine that
+trusts it, and copy the PEM text to the box. Before installing it, verify a
+domain controller's live LDAPS certificate against that file:
 
-**TLS certificate for `gideon.<zone>`** (needed by install, not preflight).
-The private key is generated **on the box** and never travels:
+```bash
+openssl verify -CAfile root-ca.pem \
+  <(openssl s_client -connect <auth.ldap.host>:636 </dev/null | openssl x509)
+```
 
-    openssl req -new -newkey rsa:3072 -nodes -keyout ~/gideon-tls.key \
-      -out ~/gideon-tls.csr -subj "/CN=gideon.<zone>" \
-      -addext "subjectAltName=DNS:gideon.<zone>"
+Then install the PEM with
+`sudo install -m 0644 root-ca.pem /etc/gideon/ca.pem`.
 
-Submit the CSR on a Windows machine (Web Server template — publish it and
-grant Enroll if the CA has never issued one):
+Generate the site key and CSR on the box, using the site `hostname` as both
+subject and SAN; the key stays there:
 
-    certreq -submit -attrib "CertificateTemplate:WebServer" gideon-tls.csr gideon-tls.cer
-    certutil -encode gideon-tls.cer gideon-tls.pem
+```bash
+openssl req -new -newkey rsa:3072 -nodes -keyout ~/gideon-tls.key \
+  -out ~/gideon-tls.csr -subj "/CN=<hostname>" \
+  -addext "subjectAltName=DNS:<hostname>"
+```
 
-Verify on the box before installing: subject/SAN, chain
-(`openssl verify -CAfile /etc/gideon/ca.pem`), and key match (pubkey sha256 of
-cert vs key). Homes: cert → `/etc/gideon/tls/cert.pem` (0644), key →
-`/etc/gideon/secrets/tls_key` (0400) — then `shred -u` the loose key copy.
-Web Server template default validity is 2 years; the product alerts when
-fewer than 14 days remain, and renewal is the same CSR flow and `gideon tls reload`.
+Submit the CSR to the office CA and bring back the issued certificate as
+`~/gideon-tls.pem`, never the key. Ask for a lifetime of months, a year or
+more being usual: GIDEON alerts when fewer than 14 days remain, so a shorter
+certificate pages from the start. Before installing, check **all three** on the box — the subject and
+SAN name `hostname`, the chain verifies against `/etc/gideon/ca.pem`, and
+the two public-key digests are equal:
 
-## 5. Hard-won practicalities
+```bash
+openssl x509 -in ~/gideon-tls.pem -noout -subject -ext subjectAltName
+openssl verify -CAfile /etc/gideon/ca.pem ~/gideon-tls.pem
+openssl x509 -in ~/gideon-tls.pem -noout -pubkey | sha256sum
+openssl pkey -in ~/gideon-tls.key -pubout | sha256sum
+```
 
-- **Terminal paste hygiene**: PowerShell mangles pasted multi-line commands —
-  run them one line at a time. Values prompted by wizards/scripts are plain
-  text: never include the backticks/quotes that chat or docs use as
-  formatting.
-- **tmux → workstation clipboard**: OSC 52 (`set -s set-clipboard on` +
-  `set -as terminal-features ",*:clipboard"`) if the client terminal honors
-  it; the universal fallback is **Shift+drag** (terminal-native selection),
-  then Ctrl+Shift+C / auto-copy depending on the terminal.
-- **A silent, long-running wizard step may be a *stopped* process**, not a
-  slow one (a stray Ctrl-Z suspends it): `ps` showing `T` state confirms;
-  `fg` or `kill -CONT <pid>` resumes.
-- The LDAP bind password file is written **without a trailing newline**
-  (`ldapsearch -y` reads the file verbatim) — relevant to anyone placing it
-  by hand instead of via the wizard.
+Install the certificate and key at their fixed homes, then remove the loose
+key copy:
 
-## 1a. Active Directory — two facts the first live pass added
+```bash
+sudo install -m 0644 ~/gideon-tls.pem /etc/gideon/tls/cert.pem
+sudo install -m 0400 ~/gideon-tls.key /etc/gideon/secrets/tls_key
+shred -u ~/gideon-tls.key
+sudo python3 -m gideon host provision
+```
 
-- **Group location**: if `GIDEON-Users` / `GIDEON-Admins` (or a mirrored group)
-  live anywhere but the default `Users` container, set the site keys to the
-  groups' full distinguished names (`Get-ADGroup GIDEON-Users | select
-  DistinguishedName`); preflight refuses with that fix otherwise.
-- **`userPrincipalName` on every signing-in account** (see §1 above): the
-  identity the frontend, reconcile, and the audit log key a person by; `mail`
-  is not required. Preflight refuses naming any users-group member without one,
-  and any member it cannot see through `memberOf` (a per-OU delegation that
-  misses an OU, or a member outside `auth.ldap.search_base`).
-- **`memberOf` must be readable by the bind account.** Open WebUI's login
-  filter and `gideon users reconcile` select users by `memberOf`, a back-link
-  AD only shows to accounts allowed to read it (domains that removed
-  *Authenticated Users* from *Pre-Windows 2000 Compatible Access* hide it).
-  Grant `svc-gideon-ldap` read of `memberOf` on user objects — add it to
-  *Pre-Windows 2000 Compatible Access*, or delegate *Read memberOf* on the
-  users OU. Preflight's LDAP check refuses until it can see the users group's
-  members that way.
+To renew, repeat this section's key, CSR, check, and install steps, then run
+`sudo python3 -m gideon tls reload`.
 
-## 1b. One-time re-key of accounts created before v0.0.12
+**TNMD example — an office CA on AD CS.** On a domain-joined Windows machine,
+export the root from its trust store with PowerShell, one command at a time:
 
-Frontend accounts created under `v0.0.11` were keyed by the `mail` attribute.
-From `v0.0.12` the frontend keys accounts by the UPN, so an old row no longer
-matches its person: the next sign-in would create a second account under the
-UPN and the old row would drift to `pending` (its chats and knowledge bases
-stay with it). Re-key each such account once, **before its person signs in
-again**:
+```powershell
+$ca = Get-ChildItem Cert:\LocalMachine\Root | ? Subject -like "*<your-CA-CN>*" | Sort NotAfter -Descending | Select -First 1
+$ca | Export-Certificate -FilePath $env:TEMP\ca.cer
+certutil -encode $env:TEMP\ca.cer $env:USERPROFILE\Desktop\root-ca.pem
+```
 
-1. Sign in as the break-glass admin (`gideon-admin@gideon.invalid`; the
-   password is in the office password manager).
-2. Admin panel → Users → the account's edit (pencil) → set **Email** to the
-   account's UPN exactly as the directory has it
-   (`Get-ADUser <sAMAccountName> | select UserPrincipalName`) → Save. The
-   frontend updates both its auth row and its user row, so the user id
-   survives and chats, knowledge bases, and the audit rows already written stay
-   attached.
-3. Verify: `sudo python3 -m gideon users reconcile` (bare) prints no
-   `would … → pending` line for the account, and the person signs in on the
-   LDAP form and lands on the same account.
+Publish the Web Server template and grant Enroll if this CA has not issued
+one before. On the Windows machine, submit the CSR and encode the issued
+certificate:
 
-Deleting the row (Admin panel → Users → delete) is the fallback only for an
-account with nothing worth keeping. A receiving office never needs this
-section: its accounts are UPN-keyed from the first sign-in.
+```powershell
+certreq -submit -attrib "CertificateTemplate:WebServer" gideon-tls.csr gideon-tls.cer
+certutil -encode gideon-tls.cer gideon-tls.pem
+```
 
-## 7. The SMTP relay, Grafana's door, and one more egress host (`v0.0.22`)
+That template's default validity is two years.
 
-- **The relay's STARTTLS and certificate.** Preflight's SMTP check already sends
-  one message; from `v0.0.22` Grafana sends every page-class alert through the
-  same relay (`alerts.smtp.{host, port, from}`, `alerts.recipients[]`). Grafana
-  uses STARTTLS when the relay offers it, and **requires** it when
-  `alerts.smtp.user` is set (the credentials never travel in the clear — the
-  same fail-closed rule preflight applies). The relay's certificate must chain
-  to a CA the box trusts: a public CA, or the office CA at
-  `/etc/gideon/ca.pem`, which Grafana is handed in its trust directory. A relay
-  presenting a self-signed certificate fails `gideon alerts test` with the
-  relay's TLS error; fix the relay, never verification.
-- **Who opens Grafana.** Members of `GIDEON-Admins` (and only they) sign in at
-  `https://<hostname>/grafana/` with their directory account. Anyone else is
-  refused at the form and left as a disabled Grafana record — expected. The
-  local break-glass administrator (`grafana-admin`) is for a broken directory.
-- **Egress.** The DCGM exporter image is published only on `nvcr.io`; the
-  office firewall must allow it (HTTPS) for `registry mirror` and the CI
-  runner, beside the hosts already in `config/egress.yaml`. cAdvisor comes from
-  GHCR, already allowed.
-- **Search egress** (`v0.1.25`). With `web.search` on, the box reaches the internet's search engines and fetches result pages, directly or through `egress_proxy`, from the `searxng` container and the frontend's page loader — the one runtime path user-authored text leaves the box, and only after a user has turned search on in General and confirmed the reminder. The destinations are whatever the engines return, so no allowlist names them; `web.search: off` removes the feature and the service.
+## 5. The mail relay, Grafana's sign-in, and egress
+
+The office relay must accept mail from the box and from the sender in
+`alerts.smtp.from`, sending to `alerts.recipients[]` through
+`alerts.smtp.host` and `alerts.smtp.port` (25 by default; a submission port
+such as 587 is set there). Preflight's `smtp` row sends one test message
+through it. Configure the relay to offer STARTTLS: preflight and Grafana use
+it when offered and require it when `alerts.smtp.user` is set, so credentials
+never travel in the clear. Its certificate must chain to a CA the box trusts,
+either a public CA or the office CA at `/etc/gideon/ca.pem`, which Grafana
+receives in its trust directory. A self-signed relay certificate makes
+`gideon alerts test` fail with a TLS error; fix the relay's certificate,
+not TLS verification.
+
+When `alerts.smtp.user` is set, put its password in
+`/etc/gideon/secrets/smtp_password`. Use the same Bash command in §1,
+changing the prompt to `SMTP password: ` and the `sudo tee` destination to
+`/etc/gideon/secrets/smtp_password`; it likewise writes no trailing newline.
+Run `sudo python3 -m gideon host provision` after the write to converge its
+owner and mode.
+
+Members of the admins group (`auth.ldap.admins_group`), and only they, sign
+in to `https://<hostname>/grafana/` with their directory accounts. Other users
+are refused at the form and left as disabled Grafana records. The local
+`grafana-admin` account is for a broken directory.
+
+The box's outbound HTTPS destinations are listed in `config/egress.yaml` in
+the release's checkout; allow them through the office firewall. Among them,
+the DCGM exporter image is published only on `nvcr.io` and cAdvisor comes
+from GHCR, both needed by `registry mirror`.
+
+With `web.search` on, SearXNG and the frontend's page loader reach search
+engines and result pages, directly or through `egress_proxy`. This is the
+runtime path by which user-authored text leaves the box, and it runs only
+after a user turns on search in General and confirms the reminder. Returned
+destinations vary, so no fixed allowlist names them; `web.search: off`
+removes the feature and its service.

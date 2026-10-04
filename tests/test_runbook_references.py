@@ -4,9 +4,10 @@ A reference is ``docs/runbooks/<name>.md §<n>``, the file optionally in
 backticks: the form the refusals, the alert templates, and the pin watch's
 bump bodies share. It resolves when the runbook holds a ``## <n>.`` heading.
 A section that product text names keeps its number, so a runbook appends a
-section and never renumbers. A reference into a runbook the export omits is
-skipped only where that runbook is absent; a kept runbook's absence is a
-finding everywhere.
+section and never renumbers. A section no product text names moves only with
+every citation of it, in the same change. A reference into a runbook the
+export omits is skipped only where that runbook is absent; a kept runbook's
+absence is a finding everywhere.
 """
 
 from __future__ import annotations

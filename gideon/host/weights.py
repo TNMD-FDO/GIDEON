@@ -561,7 +561,8 @@ _FOREIGN_FIX: Final = (
     "file in the snapshot."
 )
 _REPUBLISH_FIX: Final = (
-    "The pinned upstream is gone or changed; report it to TNMD; the source "
+    "The pinned upstream is gone or changed; open an issue at "
+    "https://github.com/TNMD-FDO/GIDEON/issues; the source "
     "archive is republished and models.lock repinned in the next patch release."
 )
 _WGET_FIX: Final = "Install wget with sudo apt-get install wget, then re-run gideon models pull."
