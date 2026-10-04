@@ -35,12 +35,18 @@ from gideon.evaluation.results import CaseResult, JSONValue, RunContext, SliceRe
 from gideon.evaluation.slices import SLICE_RUNNERS, SliceSpec
 from gideon.evaluation.turns import access, door, run
 from gideon.host import backuplock, courts, engine, nogpu, site, stack
-from gideon.host.render.owui import GENERAL_PRESET_ID
+from gideon.host.render.ci import CI_STACK, PRODUCTION_STACK
+from gideon.host.render.owui import GENERAL_MODEL_ID
 from gideon.host.report import Problem, StageResult, print_stage, refusal
 from gideon.host.sysio import Host, LockingHost, PathLike, RealHost
 
 _COMMAND: Final[str] = "eval run"
+_MANUAL_KIND: Final[str] = "manual"
+_SMOKE_KIND: Final[str] = "smoke"
 NIGHTLY_KIND: Final[str] = "nightly"
+_DECISION_KIND: Final[str] = "decision"
+_KINDS: Final[frozenset[str]] = frozenset({_MANUAL_KIND, _SMOKE_KIND, NIGHTLY_KIND, _DECISION_KIND})
+"""The kind words the mode's rules are written for; a word the parser offers outside them is a test failure."""
 NIGHTLY_LOCK_POLL_SECONDS: Final[int] = 60
 _SLICE_FIX: Final[str] = "Run gideon eval run --slice extraction."
 _LOAD_FIX: Final[str] = "Correct every listed eval-set finding, then retry."
@@ -49,6 +55,135 @@ _UNSIGNED_RESULT_FIX: Final[str] = "The runner must select through the loader, t
 _WINDOW_START_FIX: Final[str] = "Start the run at the window's opening, then retry."
 _LOSES_FIX: Final[str] = "A change that loses is not adopted; keep the default."
 _PARTIAL_DETAIL: Final[str] = "partial: aborted at the window's end, nothing kept"
+
+
+@dataclass(frozen=True, slots=True)
+class _Mode:
+    """The run kind and the rules it gives an ordinary or challenger pass."""
+
+    kind: str
+    challenger: bool
+
+    def judgement(self, started: datetime, timezone: str) -> window.WindowJudgement:
+        """The weekend span for a decision run, the night for a nightly, the quiet window otherwise."""
+
+        if self.pairs:
+            return window.decision_judgement(started, timezone)
+        if self.kind == NIGHTLY_KIND:
+            return window.nightly_judgement(started, timezone)
+        return window.window_judgement(started, timezone)
+
+    @property
+    def allows_any_hour(self) -> bool:
+        """The any-hour allowance sizes a person's run, not a decision repeat or a scheduled nightly."""
+
+        return self.kind in {_MANUAL_KIND, _SMOKE_KIND}
+
+    @property
+    def waits_for_engine_lock(self) -> bool:
+        """Manual refuses a holder, smoke passes its caller's nested lock, nightly waits."""
+
+        return self.kind == NIGHTLY_KIND
+
+    @property
+    def pairs(self) -> bool:
+        """Whether the run pairs against a recorded comparand."""
+
+        return self.kind == _DECISION_KIND
+
+    @property
+    def kind_flags(self) -> str:
+        """The kind's fragment of the retry flags; a decision run's are its own pair."""
+
+        return "" if self.kind in {_MANUAL_KIND, _DECISION_KIND} else f" --kind {self.kind}"
+
+    @property
+    def admits_challenger(self) -> bool:
+        """Whether a challenger pair runs under this kind."""
+
+        return self.kind in {_MANUAL_KIND, NIGHTLY_KIND}
+
+
+def _challenger_retry(flags: str) -> str:
+    """The challenger pair's one command, which names no slice."""
+
+    return f"eval run --challenger --stack {CI_STACK}{flags}"
+
+
+@dataclass(frozen=True, slots=True)
+class _Request:
+    """The selected slice, flags, and commands printed by their fixes."""
+
+    slice_name: object
+    mode: _Mode
+    paths: stacks.StackPaths
+    force: bool
+    against: object
+    ranked_path: object
+    set_root: Path
+    supplied_set: bool
+    command_flags: str
+    paired_problem: Problem | None
+
+    def retry_command(self, *, ranked_flag: str = "", flags: str | None = None) -> str:
+        command_flags = self.command_flags if flags is None else flags
+        if self.mode.challenger:
+            return _challenger_retry(command_flags)
+        return f"eval run --slice {self.slice_name}{ranked_flag}{command_flags}"
+
+    def engine_root_fix(self) -> str:
+        return f"Run sudo python3 -m gideon {self.retry_command()}, then retry."
+
+    def record_root_fix(self, slice_spec: SliceSpec) -> str:
+        ranked_flag = " --ranked <file>" if slice_spec.takes_ranked else ""
+        return (
+            f"Run sudo python3 -m gideon {self.retry_command(ranked_flag=ranked_flag)} "
+            "as root with the stack up, then retry."
+        )
+
+    def ranked_required_fix(self) -> str:
+        return f"Run gideon {self.retry_command(ranked_flag=' --ranked <file>')}, then retry."
+
+    def engine_lock_label(self) -> str:
+        flags = self.command_flags if self.mode.challenger else f" --stack {self.paths.name}"
+        return "gideon " + self.retry_command(flags=flags)
+
+
+@dataclass(frozen=True, slots=True)
+class _Seams:
+    """The host paths and injected operations available to every pass."""
+
+    host: Host
+    checkout: Path
+    rendered_dir: PathLike
+    site_path: PathLike
+    models_path: PathLike
+    court_path: Path
+    clock: Callable[[], datetime]
+    sleep: Callable[[float], None]
+    lock_claim: "_EngineLockClaim"
+
+
+@dataclass(frozen=True, slots=True)
+class _Pass:
+    """The identity and challenger settings of one pass through the stages."""
+
+    run_id: str
+    prompt_id: str | None = None
+    subject_change: Callable[[RunContext, str], RunContext] | None = None
+    overrides: Mapping[str, object] | None = None
+
+
+def _resolve_mode(args: argparse.Namespace, slice_name: object) -> tuple[_Mode, Problem | None]:
+    """Read mode flags once and report incompatible paired flags."""
+
+    kind = getattr(args, "kind", _MANUAL_KIND)
+    decision = bool(getattr(args, "decision", False))
+    against = getattr(args, "against", None)
+    challenger_mode = bool(getattr(args, "challenger", False))
+    mode = _Mode(_DECISION_KIND if decision and not challenger_mode else kind, challenger_mode)
+    label = slice_name if isinstance(slice_name, str) and slice_name else "<name>"
+    return mode, _paired_flag_problem(label, decision=decision, against=against, kind=kind)
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,19 +268,13 @@ def load_set_with_courts(
     return load_set(set_root, court_result.court_map.courts)
 
 
-def _run_slice(
-    spec: SliceSpec, loaded: LoadedSet, slice_name: str, context: RunContext
-) -> SliceResult:
-    return spec.runner(loaded, slice_name, context)
-
-
 def _run_repeats(
     spec: SliceSpec,
     loaded: LoadedSet,
     slice_name: str,
     context: RunContext,
     *,
-    decision_run: bool,
+    mode: _Mode,
 ) -> _RunRepeats:
     """Call the runner inside the run's deadline and keep only completed calls.
 
@@ -158,8 +287,8 @@ def _run_repeats(
     re-raised, so the completed repeats are still recorded and gated.
     """
 
-    requested = decision_stats.DECISION_REPEATS if decision_run else spec.repeats
-    calls = requested if decision_run else 1
+    requested = decision_stats.DECISION_REPEATS if mode.pairs else spec.repeats
+    calls = requested if mode.pairs else 1
     completed: list[SliceResult] = []
     kept_results: list[CaseResult] = []
     report_lines: list[str] = []
@@ -168,13 +297,13 @@ def _run_repeats(
     for repeat in range(1, calls + 1):
         try:
             context.checkpoint()
-            result = _run_slice(spec, loaded, slice_name, context)
+            result = spec.runner(loaded, slice_name, context)
             context.checkpoint()
         except window.WindowOverrun as exc:
             overrun = exc.end
             break
         completed.append(result)
-        if decision_run:
+        if mode.pairs:
             kept_results.extend(replace(case, repeat=repeat) for case in result.results)
             verdict = "pass" if result.verdict else "fail"
             report_lines.append(f"repeat {repeat} of {requested}: {verdict}\n")
@@ -182,7 +311,7 @@ def _run_repeats(
             if result.report and not result.report.endswith("\n"):
                 report_lines.append("\n")
 
-    if decision_run:
+    if mode.pairs:
         # Zero tolerance holds on every repeat: one failing repeat fails the run.
         return _RunRepeats(
             SliceResult(
@@ -319,13 +448,10 @@ def _reference_detail(
 
 def _reference_fix(
     comparison: reference.Comparison,
-    slice_spec: SliceSpec,
     *,
-    slice_name: str,
     run_id: str,
     written: bool,
-    command_flags: str,
-    challenger_mode: bool = False,
+    record_root_fix: str,
 ) -> str:
     """Return the fix for a failing reference half, or empty when it held."""
 
@@ -334,9 +460,7 @@ def _reference_fix(
     if comparison.outcome == "other-version":
         if written:
             return f"Run sudo python3 -m gideon eval reference --run {run_id} as root with the stack up, then retry."
-        return _record_root_fix(
-            slice_name, slice_spec, command_flags, challenger_mode=challenger_mode
-        )
+        return record_root_fix
     if comparison.outcome == "malformed":
         return reference.SLICE_REPAIR_FIX
     return ""
@@ -352,9 +476,8 @@ def _reference_gate(
     reference_version: str,
     run_id: str,
     written: bool,
-    command_flags: str,
+    record_root_fix: str,
     partial: bool,
-    challenger_mode: bool = False,
 ) -> bool:
     """Print the gate of a slice that compares against its reference.
 
@@ -384,12 +507,9 @@ def _reference_gate(
         fixes.append(slice_spec.gate_fix)
     reference_fix = _reference_fix(
         comparison,
-        slice_spec,
-        slice_name=slice_name,
         run_id=run_id,
         written=written,
-        command_flags=command_flags,
-        challenger_mode=challenger_mode,
+        record_root_fix=record_root_fix,
     )
     if reference_fix:
         fixes.append(reference_fix)
@@ -417,7 +537,7 @@ def _decision_gate(
     reference_version: str,
     run_id: str,
     written: bool,
-    command_flags: str,
+    record_root_fix: str,
 ) -> bool:
     """Print the gate of a decision run: bounds, reference, decision, completion.
 
@@ -459,11 +579,9 @@ def _decision_gate(
     elif not reference_ok:
         fix = _reference_fix(
             comparison,
-            slice_spec,
-            slice_name=slice_name,
             run_id=run_id,
             written=written,
-            command_flags=command_flags,
+            record_root_fix=record_root_fix,
         )
     elif loses:
         fix = _LOSES_FIX
@@ -521,32 +639,6 @@ def _provenance(
     return (commit.stdout.strip(), bool(status.stdout.splitlines())), None
 
 
-def _retry_command(
-    slice_name: str,
-    command_flags: str = "",
-    *,
-    challenger_mode: bool = False,
-    ranked_flag: str = "",
-) -> str:
-    """Build the command that retries the selected evaluation mode."""
-
-    if challenger_mode:
-        return f"eval run --challenger --stack ci{command_flags}"
-    return f"eval run --slice {slice_name}{ranked_flag}{command_flags}"
-
-
-def _engine_root_fix(
-    slice_name: str, command_flags: str, *, challenger_mode: bool = False
-) -> str:
-    return f"Run sudo python3 -m gideon {_retry_command(slice_name, command_flags, challenger_mode=challenger_mode)}, then retry."
-
-
-def _waits_for_engine_lock(kind: str) -> bool:
-    """Manual refuses a holder, smoke passes its caller's nested lock, nightly waits."""
-
-    return kind == NIGHTLY_KIND
-
-
 def _waited_duration(started: datetime, finished: datetime) -> str:
     """Describe the time spent waiting for the engine lock in hours and minutes."""
 
@@ -560,24 +652,6 @@ def _holder_text(holder: backuplock.Record | None) -> str:
     if holder is None:
         return "another gideon command (record unreadable)"
     return f"{holder.command} (pid {holder.pid})"
-
-
-def _record_root_fix(
-    slice_name: str,
-    slice_spec: SliceSpec,
-    command_flags: str = "",
-    *,
-    challenger_mode: bool = False,
-) -> str:
-    ranked_flag = " --ranked <file>" if slice_spec.takes_ranked else ""
-    return (
-        f"Run sudo python3 -m gideon {_retry_command(slice_name, command_flags, challenger_mode=challenger_mode, ranked_flag=ranked_flag)} "
-        "as root with the stack up, then retry."
-    )
-
-
-def _ranked_required_fix(slice_name: str, command_flags: str) -> str:
-    return f"Run gideon eval run --slice {slice_name} --ranked <file>{command_flags}, then retry."
 
 
 def _ranked_forbidden_fix(slice_name: str) -> str:
@@ -594,7 +668,7 @@ def _paired_flag_problem(
         )
     if against is not None and not decision:
         return Problem("--against requires --decision", "Remove --against or add --decision, then retry.")
-    if decision and kind != "manual":
+    if decision and kind != _MANUAL_KIND:
         # A decision run's record carries the word decision, so another word would be lost.
         return Problem(
             f"--decision records its own kind, not {kind!r}",
@@ -604,11 +678,8 @@ def _paired_flag_problem(
 
 
 def _flag_problem(
-    slice_name: str,
+    request: _Request,
     slice_spec: SliceSpec | None,
-    *,
-    decision: bool,
-    force: bool,
 ) -> Problem | None:
     """Refuse a flag the named slice cannot honour.
 
@@ -618,14 +689,15 @@ def _flag_problem(
 
     if slice_spec is None:
         return None
-    if decision and slice_spec.decision is None:
+    slice_name = cast(str, request.slice_name)
+    if request.mode.pairs and slice_spec.decision is None:
         names = ", ".join(sorted(name for name, spec in SLICE_RUNNERS.items() if spec.decision))
         return Problem(
             f"slice {slice_name!r} has no decision metric",
             f"Choose a decision slice ({names}), then run gideon eval run --slice <name> "
             "--decision --against <run id> and retry.",
         )
-    if force and not slice_spec.reaches_engine:
+    if request.force and not slice_spec.reaches_engine:
         return Problem(
             f"--force is not valid for slice {slice_name!r}, which does not reach the engine",
             f"Remove --force when running --slice {slice_name}, then retry.",
@@ -704,43 +776,27 @@ def _paired_decision(
 
 
 def _engine_preconditions(
-    io: Host,
-    rendered_dir: PathLike,
+    request: _Request,
+    seams: _Seams,
+    pass_value: _Pass,
     *,
-    checkout: Path,
-    models_path: PathLike,
-    site_path: PathLike,
     started: datetime,
-    supplied_set: bool,
-    decision: bool,
-    kind: str,
-    force: bool,
-    slice_name: str,
     slice_spec: SliceSpec,
     loaded: LoadedSet,
-    paths: stacks.StackPaths,
-    command_flags: str,
-    lock_claim: _EngineLockClaim,
-    sleep: Callable[[float], None],
-    clock: Callable[[], datetime],
-    challenger_mode: bool = False,
-    side_prompt_id: str | None = None,
 ) -> _EnginePreconditions | None:
     """Refuse engine runs before a request when a required seam is unavailable."""
 
-    if io.geteuid() != 0:
+    if seams.host.geteuid() != 0:
         print_stage(
             StageResult(
                 "preconditions",
                 False,
                 "root privileges are required",
-                _engine_root_fix(
-                    slice_name, command_flags, challenger_mode=challenger_mode
-                ),
+                request.engine_root_fix(),
             )
         )
         return None
-    if nogpu.is_no_gpu_host(io):
+    if nogpu.is_no_gpu_host(seams.host):
         print_stage(
             StageResult(
                 "preconditions",
@@ -750,32 +806,23 @@ def _engine_preconditions(
             )
         )
         return None
-    site_result = site.load_site(Path(site_path), host=io)
+    site_result = site.load_site(Path(seams.site_path), host=seams.host)
     if not site_result.ok or site_result.config is None:
         detail = site.render_errors(site_result.errors)
         fix = site_result.errors[0].fix if site_result.errors else "Create a valid site file, then retry."
         print_stage(StageResult("preconditions", False, detail, fix))
         return None
     config = site_result.config
-    judgement = (
-        window.decision_judgement(started, config.office.timezone)
-        if decision
-        else (
-            window.nightly_judgement(started, config.office.timezone)
-            if kind == NIGHTLY_KIND
-            else window.window_judgement(started, config.office.timezone)
-        )
-    )
+    judgement = request.mode.judgement(started, config.office.timezone)
     engine_call_count = (
         None
         if slice_spec.engine_calls is None
-        else slice_spec.engine_calls(loaded, slice_name)
+        else slice_spec.engine_calls(loaded, cast(str, request.slice_name))
     )
     # The any-hour allowance sizes a person's ordinary run, not a decision
     # repeat or a scheduled nightly run.
     waived = (
-        not decision
-        and kind != NIGHTLY_KIND
+        request.mode.allows_any_hour
         and not judgement.inside
         and engine_call_count is not None
         and engine_call_count <= run.SMOKE_TURNS
@@ -788,7 +835,7 @@ def _engine_preconditions(
         )
     else:
         calls_detail = f"{engine_call_count} engine calls, "
-    if not judgement.inside and not waived and not force:
+    if not judgement.inside and not waived and not request.force:
         over = (
             ""
             if engine_call_count is None
@@ -797,7 +844,7 @@ def _engine_preconditions(
         # The weekend judgement's description already says which window it missed.
         detail = (
             judgement.description
-            if decision
+            if request.mode.pairs
             else f"outside the quiet window: {judgement.description}"
         ) + over
         fix = (
@@ -814,20 +861,16 @@ def _engine_preconditions(
         )
         return None
 
-    lock_command = "gideon " + _retry_command(
-        slice_name,
-        command_flags if challenger_mode else f" --stack {paths.name}",
-        challenger_mode=challenger_mode,
-    )
+    lock_command = request.engine_lock_label()
     effective_start = started
     lock_outcome = backuplock.take(
-        cast(LockingHost, io),
+        cast(LockingHost, seams.host),
         command=lock_command,
         now=effective_start,
         lock=backuplock.ENGINE_LOCK,
     )
     waited_for_lock = (
-        lock_outcome.state is backuplock.State.REFUSED and _waits_for_engine_lock(kind)
+        lock_outcome.state is backuplock.State.REFUSED and request.mode.waits_for_engine_lock
     )
     first_holder = lock_outcome.holder
     if waited_for_lock:
@@ -841,8 +884,8 @@ def _engine_preconditions(
             f"polling every {NIGHTLY_LOCK_POLL_SECONDS} s until {judgement.end.isoformat()}"
         )
         while lock_outcome.state is backuplock.State.REFUSED:
-            sleep(NIGHTLY_LOCK_POLL_SECONDS)
-            effective_start = clock()
+            seams.sleep(NIGHTLY_LOCK_POLL_SECONDS)
+            effective_start = seams.clock()
             if effective_start >= judgement.end:
                 print_stage(
                     StageResult(
@@ -852,12 +895,12 @@ def _engine_preconditions(
                         f"{judgement.end.isoformat()}; waited {_waited_duration(started, effective_start)}",
                         "The next nightly fires at 21:00 office time; run this suite by hand "
                         "inside the window with "
-                        f"sudo python3 -m gideon {_retry_command(slice_name, command_flags if challenger_mode else '', challenger_mode=challenger_mode)}.",
+                        f"sudo python3 -m gideon {request.retry_command(flags=request.command_flags if request.mode.challenger else '')}.",
                     )
                 )
                 return None
             lock_outcome = backuplock.take(
-                cast(LockingHost, io),
+                cast(LockingHost, seams.host),
                 command=lock_command,
                 now=effective_start,
                 lock=backuplock.ENGINE_LOCK,
@@ -874,7 +917,7 @@ def _engine_preconditions(
         )
         return None
     if lock_outcome.state is backuplock.State.HELD:
-        lock_claim.taken = True
+        seams.lock_claim.taken = True
         lock_detail = "engine lock taken"
         if waited_for_lock:
             lock_detail += (
@@ -885,17 +928,17 @@ def _engine_preconditions(
         lock_detail = "engine lock held by this process"
 
     target = engine.resolve_engine_target(
-        io,
-        rendered_dir,
+        seams.host,
+        seams.rendered_dir,
         hardware_profile=config.hardware_profile,
-        models_path=models_path,
-        sleep=sleep,
+        models_path=seams.models_path,
+        sleep=seams.sleep,
     )
     if isinstance(target, Problem):
         print_stage(StageResult("preconditions", False, target.problem, target.fix))
         return None
 
-    if paths.name == "ci" and not io.exists(paths.turns_dir / "compose.yaml"):
+    if request.paths.name == CI_STACK and not seams.host.exists(request.paths.turns_dir / "compose.yaml"):
         print_stage(
             StageResult(
                 "preconditions",
@@ -908,14 +951,14 @@ def _engine_preconditions(
 
     turns: access.TurnAccess | None = None
     if slice_spec.drives_turns:
-        password = access.read_eval_password(io)
+        password = access.read_eval_password(seams.host)
         if isinstance(password, Problem):
             print_stage(StageResult("preconditions", False, password.problem, password.fix))
             return None
         probe = door.probe(
-            io,
-            paths.turns_dir,
-            model=GENERAL_PRESET_ID,
+            seams.host,
+            request.paths.turns_dir,
+            model=GENERAL_MODEL_ID,
             max_time=run.TURN_TIMEOUT_SECONDS,
         )
         if probe.problem is not None:
@@ -927,46 +970,46 @@ def _engine_preconditions(
             password=password,
             client_factory=access.make_client_factory(
                 config.hostname,
-                stack=paths.name,
+                stack=request.paths.name,
                 timeout=run.TURN_TIMEOUT_SECONDS,
             ),
             sentinel=run.new_sentinel(),
         )
 
     provenance: tuple[str | None, bool | None] = (None, None)
-    if not supplied_set:
-        resolved_provenance, provenance_fix = _provenance(io, checkout)
+    if not request.supplied_set:
+        resolved_provenance, provenance_fix = _provenance(seams.host, seams.checkout)
         if resolved_provenance is None:
             print_stage(
                 StageResult(
                     "preconditions",
                     False,
                     "git provenance could not be read",
-                    provenance_fix or _git_fix(str(checkout)),
+                    provenance_fix or _git_fix(str(seams.checkout)),
                 )
             )
             return None
         provenance = resolved_provenance
-        probe_problem = record.probe(io, rendered_dir)
+        probe_problem = record.probe(seams.host, seams.rendered_dir)
         if probe_problem is not None:
             print_stage(
                 StageResult(
                     "preconditions",
                     False,
                     probe_problem,
-                    stack.logs_fix(rendered_dir, record.POSTGRES_SERVICE),
+                    stack.logs_fix(seams.rendered_dir, record.POSTGRES_SERVICE),
                 )
             )
             return None
     # One row for the stage, as engine verify prints one. The writer clause
     # states the guarantee and no more: the probe proves the role connects, so a
     # write can still fail after the run and is reported at the record stage.
-    prompt_id = side_prompt_id if challenger_mode else slice_spec.judge_prompt
+    prompt_id = pass_value.prompt_id if request.mode.challenger else slice_spec.judge_prompt
     prompt_id = prompt_id or "none"
-    window_detail = judgement.description + (", forced" if force else "")
+    window_detail = judgement.description + (", forced" if request.force else "")
     writer = (
         "set supplied, so no writer probe"
-        if supplied_set
+        if request.supplied_set
         else f"{record.EVAL_ROLE} connects (the insert is not proven)"
     )
     print_stage(
@@ -993,35 +1036,27 @@ def _engine_preconditions(
         turns,
         effective_start,
         judgement.end,
-        force,
+        request.force,
     )
 
 
 def _record(
+    request: _Request,
+    seams: _Seams,
+    pass_value: _Pass,
     loaded: LoadedSet,
-    slice_name: str,
+    slice_spec: SliceSpec,
     slice_result: SliceResult,
     *,
     started: datetime,
     finished: datetime,
-    checkout: Path,
-    host: Host,
-    rendered_dir: PathLike,
-    site_path: PathLike,
-    supplied_set: bool,
-    run_id: str,
     gate_verdict: bool,
-    stack_name: str,
-    kind: str,
-    command_flags: str,
     forced: bool,
     partial: bool,
     requested_repeats: int,
     decision_json: Mapping[str, JSONValue] | None,
-    slice_spec: SliceSpec,
     prepared: _EnginePreconditions | None,
-    overrides: Mapping[str, object] = {},
-    challenger_mode: bool = False,
+    overrides: Mapping[str, object],
 ) -> _RecordOutcome:
     """Write the run and its results.
 
@@ -1031,7 +1066,7 @@ def _record(
     with the rows it has always printed.
     """
 
-    if supplied_set:
+    if request.supplied_set:
         print_stage(
             StageResult(
                 "record",
@@ -1043,26 +1078,21 @@ def _record(
         return _RecordOutcome(True, False)
 
     if prepared is None:
-        probe_problem = record.probe(host, rendered_dir)
+        probe_problem = record.probe(seams.host, seams.rendered_dir)
         if probe_problem is not None:
             print_stage(
                 StageResult(
                     "record",
                     True,
                     f"skipped — no database reachable; rows were not written ({probe_problem})",
-                    _record_root_fix(
-                        slice_name,
-                        slice_spec,
-                        command_flags,
-                        challenger_mode=challenger_mode,
-                    ),
+                    request.record_root_fix(slice_spec),
                 )
             )
             return _RecordOutcome(True, False)
 
     site_config = None if prepared is None else prepared.site_config
     if site_config is None:
-        site_result = site.load_site(Path(site_path), host=host)
+        site_result = site.load_site(Path(seams.site_path), host=seams.host)
         if not site_result.ok or site_result.config is None:
             detail = "; ".join(error.problem for error in site_result.errors)
             fix = site_result.errors[0].fix if site_result.errors else "Create a valid site file, then retry."
@@ -1072,14 +1102,14 @@ def _record(
 
     provenance = None if prepared is None else prepared.provenance
     if provenance is None:
-        resolved_provenance, provenance_fix = _provenance(host, checkout)
+        resolved_provenance, provenance_fix = _provenance(seams.host, seams.checkout)
         if resolved_provenance is None:
             print_stage(
                 StageResult(
                     "record",
                     False,
                     "git provenance could not be read; rows were not written",
-                    provenance_fix or _git_fix(str(checkout)),
+                    provenance_fix or _git_fix(str(seams.checkout)),
                 )
             )
             return _RecordOutcome(False, False)
@@ -1089,17 +1119,17 @@ def _record(
         site_config.hardware_profile if prepared is None else prepared.hardware_profile
     )
     run = record.RunRow(
-        run_id=run_id,
+        run_id=pass_value.run_id,
         started_at=started,
         finished_at=finished,
         product_version=gideon.__version__,
         corpus_lockfile=None,
         eval_set_version=loaded.version,
         hardware_profile=resolved_hardware_profile,
-        stack=stack_name,
+        stack=request.paths.name,
         generation_id=None,
-        kind=kind,
-        slice=slice_name,
+        kind=request.mode.kind,
+        slice=cast(str, request.slice_name),
         overrides=overrides,
         repeats=requested_repeats,
         git_sha=git_sha,
@@ -1112,7 +1142,7 @@ def _record(
     )
     results = tuple(
         record.ResultRow(
-            run_id=run_id,
+            run_id=pass_value.run_id,
             run_started_at=started,
             case_id=result.case_id,
             repeat=result.repeat,
@@ -1124,14 +1154,14 @@ def _record(
         )
         for result in slice_result.results
     )
-    write_problem = record.write_rows(host, rendered_dir, run, results)
+    write_problem = record.write_rows(seams.host, seams.rendered_dir, run, results)
     if write_problem is not None:
         print_stage(
             StageResult(
                 "record",
                 False,
-                f"run {run_id} and {len(results)} result rows were not written ({write_problem})",
-                stack.logs_fix(rendered_dir, record.POSTGRES_SERVICE),
+                f"run {pass_value.run_id} and {len(results)} result rows were not written ({write_problem})",
+                stack.logs_fix(seams.rendered_dir, record.POSTGRES_SERVICE),
             )
         )
         return _RecordOutcome(False, False)
@@ -1139,7 +1169,7 @@ def _record(
         StageResult(
             "record",
             True,
-            f"run {run_id} recorded (1 run row, {len(results)} result rows)",
+            f"run {pass_value.run_id} recorded (1 run row, {len(results)} result rows)",
             "",
         )
     )
@@ -1147,60 +1177,28 @@ def _record(
 
 
 def _run_body(
-    args: argparse.Namespace,
-    *,
-    set_root: Path,
-    court_path: Path,
-    host: Host,
-    checkout: Path,
-    rendered_dir: PathLike,
-    site_path: PathLike,
-    started: datetime,
-    run_id: str,
-    supplied_set: bool,
-    finished_clock: Callable[[], datetime],
-    models_path: PathLike,
-    sleep: Callable[[float], None],
-    paths: stacks.StackPaths,
-    kind: str,
-    command_flags: str,
-    lock_claim: _EngineLockClaim,
-    challenger_mode: bool = False,
-    side_slice: str | None = None,
-    side_prompt_id: str | None = None,
-    subject_change: Callable[[RunContext, str], RunContext] | None = None,
-    overrides: Mapping[str, object] | None = None,
+    request: _Request,
+    seams: _Seams,
+    pass_value: _Pass,
 ) -> _RunBodyOutcome:
-    decision = bool(getattr(args, "decision", False))
-    force = bool(getattr(args, "force", False))
-    against = getattr(args, "against", None)
-    slice_name = side_slice if challenger_mode else getattr(args, "slice", None)
-    slice_label = slice_name if isinstance(slice_name, str) and slice_name else "<name>"
-    paired_problem = _paired_flag_problem(
-        slice_label,
-        decision=decision,
-        against=against,
-        kind=kind,
-    )
-    if paired_problem is not None:
-        print(refusal(_COMMAND, paired_problem.problem, paired_problem.fix), file=sys.stderr)
+    started = seams.clock()
+    slice_name = request.slice_name
+    if request.paired_problem is not None:
+        print(refusal(_COMMAND, request.paired_problem.problem, request.paired_problem.fix), file=sys.stderr)
         return _RunBodyOutcome(1)
     if not isinstance(slice_name, str) or not slice_name:
         print(refusal(_COMMAND, "no slice was selected", _SLICE_FIX), file=sys.stderr)
         return _RunBodyOutcome(1)
 
     slice_spec = SLICE_RUNNERS.get(slice_name)
-    flag_problem = _flag_problem(
-        slice_name,
-        slice_spec,
-        decision=decision,
-        force=force,
-    )
+    flag_problem = _flag_problem(request, slice_spec)
     if flag_problem is not None:
         print(refusal(_COMMAND, flag_problem.problem, flag_problem.fix), file=sys.stderr)
         return _RunBodyOutcome(1)
 
-    loaded_result = load_set_with_courts(set_root, court_path=court_path, host=host)
+    loaded_result = load_set_with_courts(
+        request.set_root, court_path=seams.court_path, host=seams.host
+    )
     if loaded_result.findings:
         print_findings(loaded_result.findings)
         print_stage(StageResult("load", False, "eval set refused", _LOAD_FIX))
@@ -1241,7 +1239,7 @@ def _run_body(
         )
         return _RunBodyOutcome(1)
 
-    if paths.name == "ci" and not slice_spec.drives_turns and slice_spec.judge_prompt is None:
+    if request.paths.name == CI_STACK and not slice_spec.drives_turns and slice_spec.judge_prompt is None:
         print_stage(
             StageResult(
                 "load",
@@ -1263,8 +1261,8 @@ def _run_body(
     )
 
     ranked_lists: Mapping[str, tuple[rankmetrics.Coordinates, ...]] | None = None
-    run_overrides: Mapping[str, object] = {} if overrides is None else overrides
-    ranked_path = getattr(args, "ranked", None)
+    run_overrides: Mapping[str, object] = {} if pass_value.overrides is None else pass_value.overrides
+    ranked_path = request.ranked_path
     if slice_spec.takes_ranked:
         if not isinstance(ranked_path, str) or not ranked_path:
             print_stage(
@@ -1272,7 +1270,7 @@ def _run_body(
                     "ranked",
                     False,
                     f"slice {slice_name} requires --ranked",
-                    _ranked_required_fix(slice_name, command_flags),
+                    request.ranked_required_fix(),
                 )
             )
             return _RunBodyOutcome(1)
@@ -1316,38 +1314,24 @@ def _run_body(
     engine_preconditions: _EnginePreconditions | None = None
     if slice_spec.reaches_engine:
         engine_preconditions = _engine_preconditions(
-            host,
-            rendered_dir,
-            checkout=checkout,
-            models_path=models_path,
-            site_path=site_path,
+            request,
+            seams,
+            pass_value,
             started=started,
-            supplied_set=supplied_set,
-            decision=decision,
-            kind=kind,
-            force=force,
-            slice_name=slice_name,
             slice_spec=slice_spec,
             loaded=loaded,
-            paths=paths,
-            command_flags=command_flags,
-            lock_claim=lock_claim,
-            sleep=sleep,
-            clock=finished_clock,
-            challenger_mode=challenger_mode,
-            side_prompt_id=side_prompt_id,
         )
         if engine_preconditions is None:
             return _RunBodyOutcome(1)
 
     comparand: record.ComparandRun | None = None
-    if decision:
+    if request.mode.pairs:
         comparand_result = _read_comparand(
-            host,
-            rendered_dir,
+            seams.host,
+            seams.rendered_dir,
             loaded,
             slice_name,
-            cast(str, against),
+            cast(str, request.against),
         )
         if isinstance(comparand_result, Problem):
             print_stage(
@@ -1379,9 +1363,9 @@ def _run_body(
         )
 
     context = RunContext(
-        host=host,
-        rendered_dir=paths.turns_dir,
-        engine_dir=rendered_dir,
+        host=seams.host,
+        turns_dir=request.paths.turns_dir,
+        production_dir=seams.rendered_dir,
         served_model_name=(
             None
             if engine_preconditions is None
@@ -1392,22 +1376,22 @@ def _run_body(
         progress=print,
         ranked=ranked_lists,
         turns=None if engine_preconditions is None else engine_preconditions.turns,
-        checkout=checkout,
+        checkout=seams.checkout,
     )
-    if subject_change is not None:
-        assert side_prompt_id is not None
-        context = subject_change(context, side_prompt_id)
+    if pass_value.subject_change is not None:
+        assert pass_value.prompt_id is not None
+        context = pass_value.subject_change(context, pass_value.prompt_id)
     if engine_preconditions is not None:
         context = replace(
             context,
-            checkpoint=window.deadline_checkpoint(finished_clock, engine_preconditions.end),
+            checkpoint=window.deadline_checkpoint(seams.clock, engine_preconditions.end),
         )
     run_result = _run_repeats(
         slice_spec,
         loaded,
         slice_name,
         context,
-        decision_run=decision,
+        mode=request.mode,
     )
     slice_result = run_result.result
     selection = select_cases(loaded, slice_name)
@@ -1430,7 +1414,7 @@ def _run_body(
             )
         )
         return _RunBodyOutcome(1)
-    if decision or run_result.partial:
+    if request.mode.pairs or run_result.partial:
         cases = len({result.case_id for result in slice_result.results})
         run_detail = (
             f"{len(slice_result.results)} results over {cases} active cases, "
@@ -1466,11 +1450,11 @@ def _run_body(
             loaded,
             slice_name,
             slice_result,
-            checkout=checkout,
-            host=host,
+            checkout=seams.checkout,
+            host=seams.host,
         )
     paired: decision_stats.PairedDecision | None = None
-    if decision:
+    if request.mode.pairs:
         assert comparand is not None
         paired = _paired_decision(
             loaded,
@@ -1493,31 +1477,24 @@ def _run_body(
     )
 
     recorded = _record(
+        request,
+        seams,
+        pass_value,
         loaded,
-        slice_name,
+        slice_spec,
         slice_result,
         started=started if engine_preconditions is None else engine_preconditions.started,
-        finished=finished_clock(),
-        checkout=checkout,
-        host=host,
-        rendered_dir=rendered_dir,
-        site_path=site_path,
-        supplied_set=supplied_set,
-        run_id=run_id,
+        finished=seams.clock(),
         gate_verdict=recorded_verdict,
-        stack_name=paths.name,
-        kind="decision" if decision else kind,
-        command_flags=command_flags,
         forced=False if engine_preconditions is None else engine_preconditions.forced,
         partial=run_result.partial,
         requested_repeats=run_result.requested_repeats,
         decision_json=None if paired is None else decision_stats.to_json(paired),
-        slice_spec=slice_spec,
         prepared=engine_preconditions,
         overrides=run_overrides,
-        challenger_mode=challenger_mode,
     )
-    if decision:
+    record_root_fix = request.record_root_fix(slice_spec)
+    if request.mode.pairs:
         assert paired is not None
         assert comparison is not None
         gate_ok = _decision_gate(
@@ -1529,9 +1506,9 @@ def _run_body(
             slice_name=slice_name,
             set_version=loaded.version,
             reference_version=reference_version,
-            run_id=run_id,
+            run_id=pass_value.run_id,
             written=recorded.written,
-            command_flags=command_flags,
+            record_root_fix=record_root_fix,
         )
     elif comparison is None:
         gate_ok = _gate(slice_result, slice_spec, partial=run_result.partial)
@@ -1543,11 +1520,10 @@ def _run_body(
             slice_name=slice_name,
             set_version=loaded.version,
             reference_version=reference_version,
-            run_id=run_id,
+            run_id=pass_value.run_id,
             written=recorded.written,
-            command_flags=command_flags,
+            record_root_fix=record_root_fix,
             partial=run_result.partial,
-            challenger_mode=challenger_mode,
         )
     return _RunBodyOutcome(
         0 if gate_ok and recorded.ok else 1,
@@ -1575,19 +1551,19 @@ def _side_overrides(
 def _challenger_flag_problem(args: argparse.Namespace) -> Problem | None:
     """Refuse flags that cannot describe a committed challenger pair."""
 
-    kind = getattr(args, "kind", "manual")
-    flags = (f" --kind {kind}" if kind == NIGHTLY_KIND else "") + (
+    mode, _paired_problem = _resolve_mode(args, None)
+    flags = (mode.kind_flags if mode.admits_challenger else "") + (
         " --force" if getattr(args, "force", False) else ""
     )
-    fix = f"Run gideon {_retry_command('', flags, challenger_mode=True)}, then retry."
+    fix = f"Run gideon {_challenger_retry(flags)}, then retry."
     for name in ("slice", "set", "ranked", "decision", "against"):
         value = getattr(args, name, None)
         if value is not None and value is not False:
             return Problem(f"--challenger cannot be combined with --{name}", fix)
-    if getattr(args, "stack", "production") != "ci":
+    if getattr(args, "stack", PRODUCTION_STACK) != CI_STACK:
         return Problem("--challenger requires --stack ci", fix)
-    if kind == "smoke":
-        return Problem("--challenger cannot use --kind smoke", fix)
+    if not mode.admits_challenger:
+        return Problem(f"--challenger cannot use --kind {mode.kind}", fix)
     return None
 
 
@@ -1610,10 +1586,10 @@ def run_eval(
     io = RealHost() if host is None else host
     now = (lambda: datetime.now(UTC)) if clock is None else clock
     new_run_id = (lambda: str(uuid4())) if run_id_factory is None else run_id_factory
-    challenger_mode = bool(getattr(args, "challenger", False))
+    mode, paired_problem = _resolve_mode(args, getattr(args, "slice", None))
     entry: challenger.ChallengerEntry | None = None
     subject: challenger.ChallengerSubject | None = None
-    if challenger_mode:
+    if mode.challenger:
         flag_problem = _challenger_flag_problem(args)
         if flag_problem is not None:
             print(refusal(_COMMAND, flag_problem.problem, flag_problem.fix), file=sys.stderr)
@@ -1665,14 +1641,11 @@ def run_eval(
                 "",
             )
         )
-    stack_name = getattr(args, "stack", "production")
-    kind = getattr(args, "kind", "manual")
+    stack_name = getattr(args, "stack", PRODUCTION_STACK)
     paths = stacks.resolve_stack(stack_name, rendered_dir)
-    command_flags = ("" if challenger_mode else paths.flag_fragment) + (
-        f" --kind {kind}" if kind != "manual" else ""
-    )
+    command_flags = ("" if mode.challenger else paths.flag_fragment) + mode.kind_flags
     against = getattr(args, "against", None)
-    if getattr(args, "decision", False) and isinstance(against, str) and against:
+    if mode.pairs and isinstance(against, str) and against:
         command_flags += f" --decision --against {against}"
     if getattr(args, "force", False):
         command_flags += " --force"
@@ -1680,44 +1653,37 @@ def run_eval(
     supplied_root = getattr(args, "set", None)
     set_root = checkout / SET_ROOT if supplied_root is None else Path(supplied_root)
     selected_court_path = courts.default_courts_path() if court_path is None else Path(court_path)
-    lock_claim = _EngineLockClaim()
-
-    def run_pass(
-        run_id: str,
-        *,
-        side_slice: str | None = None,
-        side_prompt_id: str | None = None,
-        subject_change: Callable[[RunContext, str], RunContext] | None = None,
-        overrides: Mapping[str, object] | None = None,
-    ) -> _RunBodyOutcome:
-        return _run_body(
-            args,
-            set_root=set_root,
-            court_path=selected_court_path,
-            host=io,
-            checkout=checkout,
-            rendered_dir=rendered_dir,
-            site_path=site_path,
-            started=now(),
-            run_id=run_id,
-            supplied_set=supplied_root is not None,
-            finished_clock=now,
-            models_path=actual_models,
-            sleep=sleep,
-            paths=paths,
-            kind=kind,
-            command_flags=command_flags,
-            lock_claim=lock_claim,
-            challenger_mode=challenger_mode,
-            side_slice=side_slice,
-            side_prompt_id=side_prompt_id,
-            subject_change=subject_change,
-            overrides=overrides,
-        )
+    request = _Request(
+        slice_name=(
+            subject.slice_name
+            if mode.challenger and subject is not None
+            else getattr(args, "slice", None)
+        ),
+        mode=mode,
+        paths=paths,
+        force=bool(getattr(args, "force", False)),
+        against=against,
+        ranked_path=getattr(args, "ranked", None),
+        set_root=set_root,
+        supplied_set=supplied_root is not None,
+        command_flags=command_flags,
+        paired_problem=paired_problem,
+    )
+    seams = _Seams(
+        host=io,
+        checkout=checkout,
+        rendered_dir=rendered_dir,
+        site_path=site_path,
+        models_path=actual_models,
+        court_path=selected_court_path,
+        clock=now,
+        sleep=sleep,
+        lock_claim=_EngineLockClaim(),
+    )
 
     try:
-        if not challenger_mode:
-            return run_pass(new_run_id()).exit_code
+        if not mode.challenger:
+            return _run_body(request, seams, _Pass(new_run_id())).exit_code
 
         assert entry is not None and subject is not None
         release_id, challenger_id = new_run_id(), new_run_id()
@@ -1726,11 +1692,14 @@ def run_eval(
                 "side", True, f"release run {release_id}: {entry.release}", ""
             )
         )
-        release_outcome = run_pass(
-            release_id,
-            side_slice=subject.slice_name,
-            side_prompt_id=entry.release,
-            overrides=_side_overrides(entry, challenger.RELEASE_SIDE, entry.release),
+        release_outcome = _run_body(
+            request,
+            seams,
+            _Pass(
+                release_id,
+                prompt_id=entry.release,
+                overrides=_side_overrides(entry, challenger.RELEASE_SIDE, entry.release),
+            ),
         )
         if not release_outcome.written or release_outcome.partial:
             print_stage(
@@ -1739,9 +1708,7 @@ def run_eval(
                     False,
                     f"challenger run {challenger_id} did not start: release run {release_id} "
                     "was not recorded or was partial, so nothing can pair",
-                    _engine_root_fix(
-                        subject.slice_name, command_flags, challenger_mode=True
-                    ),
+                    request.engine_root_fix(),
                 )
             )
             return 1
@@ -1754,17 +1721,20 @@ def run_eval(
                 "",
             )
         )
-        challenger_outcome = run_pass(
-            challenger_id,
-            side_slice=subject.slice_name,
-            side_prompt_id=entry.challenger,
-            subject_change=subject.change,
-            overrides=_side_overrides(
-                entry, challenger.CHALLENGER_SIDE, entry.challenger, pairs=release_id
+        challenger_outcome = _run_body(
+            request,
+            seams,
+            _Pass(
+                challenger_id,
+                prompt_id=entry.challenger,
+                subject_change=subject.change,
+                overrides=_side_overrides(
+                    entry, challenger.CHALLENGER_SIDE, entry.challenger, pairs=release_id
+                ),
             ),
         )
         return 0 if release_outcome.exit_code == challenger_outcome.exit_code == 0 else 1
     finally:
         # A nested pass holds nothing of its own; the real host keys one descriptor per path.
-        if lock_claim.taken:
+        if seams.lock_claim.taken:
             backuplock.release(cast(LockingHost, io), lock=backuplock.ENGINE_LOCK)

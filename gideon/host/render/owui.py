@@ -42,7 +42,7 @@ PERMISSIONS_TEMPLATE: Final = "open-webui/permissions.yaml"
 GENERAL_TEMPLATE: Final = "open-webui/general.yaml"
 # Effectively permanent: chat rows, URLs, the service's listing, and the
 # default-model value name the frontend's row on this id.
-GENERAL_PRESET_ID: Final = "gideon-general"
+GENERAL_MODEL_ID: Final = "gideon-general"
 # General carries no Filter since the cutover: the citation stamp is the
 # service's.  The key is kept and rendered empty rather than dropped, so the
 # push overwrites a live attachment whether the sync route merges `meta` or
@@ -404,7 +404,7 @@ def owui_environment(
                 # form is unused, and the service reads the email header as its
                 # source identity.
                 "ENABLE_FORWARD_USER_INFO_HEADERS": "true",
-                "TASK_MODEL_EXTERNAL": GENERAL_PRESET_ID,
+                "TASK_MODEL_EXTERNAL": GENERAL_MODEL_ID,
                 "ENABLE_TITLE_GENERATION": "true",
                 "ENABLE_TAGS_GENERATION": "true",
                 "ENABLE_SEARCH_QUERY_GENERATION": "true",
@@ -429,7 +429,7 @@ def owui_environment(
                 # GPU host).  A panel edit lives in the process's memory until
                 # the frontend next starts, which apply causes only when a
                 # frontend-owned file changed.
-                "DEFAULT_MODELS": GENERAL_PRESET_ID,
+                "DEFAULT_MODELS": GENERAL_MODEL_ID,
             }
         )
     if searching:
@@ -548,7 +548,7 @@ def general_preset_record(inputs: RenderInputs) -> Mapping[str, object]:
     # its params to the discovered service model. General's instruction belongs
     # to the service, so the frontend splices none.
     return {
-        "id": GENERAL_PRESET_ID,
+        "id": GENERAL_MODEL_ID,
         "user_id": SYNC_ROW_USER_ID,
         "base_model_id": None,
         "name": texts.name,
@@ -559,7 +559,7 @@ def general_preset_record(inputs: RenderInputs) -> Mapping[str, object]:
             "suggestion_prompts": [dict(prompt) for prompt in GENERAL_SUGGESTION_PROMPTS],
             "filterIds": list(GENERAL_FILTER_IDS),
         },
-        "access_grants": [dict(public_read_grant(GENERAL_PRESET_ID))],
+        "access_grants": [dict(public_read_grant(GENERAL_MODEL_ID))],
         "is_active": True,
         "updated_at": SYNC_ROW_UPDATED_AT,
         "created_at": SYNC_ROW_CREATED_AT,

@@ -36,7 +36,7 @@ from gideon.evaluation.turns import (
 from gideon.host import backuplock, models, owuiturn, secrets, site
 from gideon.host.owui import Client, OwuiError, OwuiTimeout, Response
 from gideon.host.render.ci import CI_PORT, CI_ROOT, CI_SECRETS_DIR
-from gideon.host.render.owui import EVAL_IDENTITY, GENERAL_PRESET_ID
+from gideon.host.render.owui import EVAL_IDENTITY, GENERAL_MODEL_ID
 from gideon.host.report import Problem, StageResult
 from gideon.host.secrets import secret_path
 from gideon.host.sysio import Host, LockingHost
@@ -845,7 +845,7 @@ class TurnHarness(TestCase):
             args,
             (run.RunSpec(Path("general"), 2, True, None, False, False, "1234abcd"),),
         )
-        self.assertEqual(args[0].model, GENERAL_PRESET_ID)
+        self.assertEqual(args[0].model, GENERAL_MODEL_ID)
         self.assertEqual(args[0].stack, "production")
         self.assertIs(kwargs["client"], suite.client)
         self.assertIsInstance(kwargs["driver"], run.ApiTurnDriver)
@@ -1163,7 +1163,7 @@ class TurnHarness(TestCase):
             return 0
 
         with (
-            patch.object(cli.secrets, "select_directory", side_effect=select),
+            patch.object(cli.stacks.secrets, "select_directory", side_effect=select),
             patch.object(cli, "run", side_effect=fake_run),
             TemporaryDirectory() as directory,
         ):
@@ -1277,7 +1277,7 @@ class TurnHarness(TestCase):
         self.assertEqual(
             body,
             {
-                "model": GENERAL_PRESET_ID,
+                "model": GENERAL_MODEL_ID,
                 "stream": True,
                 "messages": [{"role": "user", "content": user_message["content"]}],
                 "parent_id": None,
@@ -1288,7 +1288,7 @@ class TurnHarness(TestCase):
                     "parentId": None,
                     "childrenIds": [assistant_id],
                     "timestamp": int(FIXED_NOW.timestamp()),
-                    "models": [GENERAL_PRESET_ID],
+                    "models": [GENERAL_MODEL_ID],
                 },
                 "id": assistant_id,
             },
@@ -3200,7 +3200,7 @@ class TurnHarness(TestCase):
         self.assertEqual(
             frontend.stream_calls[0][2],
             {
-                "model": GENERAL_PRESET_ID,
+                "model": GENERAL_MODEL_ID,
                 "stream": True,
                 "messages": [{"role": "user", "content": turn_prompt}],
             },

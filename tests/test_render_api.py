@@ -31,7 +31,7 @@ from gideon.host.render.command import (
 )
 from gideon.host.render.compose import api_service, engine_service, service_names
 from gideon.host.render.engine import ENGINE_SECRET_NAME, ENGINE_SERVICE_NAME
-from gideon.host.render.owui import EVAL_IDENTITY, GENERAL_PRESET_ID
+from gideon.host.render.owui import EVAL_IDENTITY, GENERAL_MODEL_ID
 from gideon.host.sysio import PathLike
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -70,7 +70,7 @@ class ApiRender(unittest.TestCase):
         self.assertEqual(api["environment"]["GIDEON_INSTRUCTION_FILE"], API_INSTRUCTION_MOUNT)
         generator = gpu.profile.model("generator")
         assert generator is not None
-        self.assertEqual(api["environment"]["GIDEON_MODEL_ID"], GENERAL_PRESET_ID)
+        self.assertEqual(api["environment"]["GIDEON_MODEL_ID"], GENERAL_MODEL_ID)
         self.assertEqual(
             api["environment"]["GIDEON_ENGINE_MODEL"], generator.serve.served_name
         )

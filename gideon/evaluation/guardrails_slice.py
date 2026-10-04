@@ -45,7 +45,7 @@ from gideon.evaluation.results import CaseResult, JSONValue, RunContext, SliceRe
 from gideon.evaluation.turns import cases, managed, run
 from gideon.evaluation.turns.access import TurnAccess
 from gideon.host import owui
-from gideon.host.render.owui import GENERAL_PRESET_ID
+from gideon.host.render.owui import GENERAL_MODEL_ID
 from gideon.host.report import failure_lines
 from gideon.host.sysio import PathLike
 
@@ -728,7 +728,7 @@ def _read_controls(
         assert isinstance(question, str)
         grading = judge.grade(
             context.host,
-            context.engine_dir,
+            context.production_dir,
             served_model_name=context.served_model_name,
             prompt=prompt,
             slots={"question": question, "candidate": outcome.answer},
@@ -757,8 +757,8 @@ def run_guardrails(eval_set: LoadedSet, slice_name: str, context: RunContext) ->
     seed_patterns, seed_unavailable, seed_head = _load_seed_patterns(source, context.checkout)
     door = run.ServiceTurnDriver(
         context.host,
-        context.rendered_dir,
-        model=GENERAL_PRESET_ID,
+        context.turns_dir,
+        model=GENERAL_MODEL_ID,
         stream=True,
     )
     try:

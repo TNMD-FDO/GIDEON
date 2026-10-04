@@ -7,7 +7,7 @@ from typing import Final
 
 from gideon.host import owui, secrets, tls
 from gideon.host.render import command as render_command
-from gideon.host.render.ci import CI_BASE_URL, CI_SECRET_NAMES
+from gideon.host.render.ci import CI_BASE_URL, CI_SECRET_NAMES, CI_STACK
 from gideon.host.render.owui import EVAL_PASSWORD_SECRET, general_texts
 from gideon.host.report import Problem
 from gideon.host.sysio import Host, PathLike
@@ -46,7 +46,7 @@ def load_general_instruction(
         models_path=root / "models.lock",
         root=root,
         command=command,
-        secret_names=CI_SECRET_NAMES if stack == "ci" else None,
+        secret_names=CI_SECRET_NAMES if stack == CI_STACK else None,
     )
     if inputs is None:
         return Problem("render inputs are unavailable", _RENDER_INPUTS_FIX)
@@ -77,6 +77,6 @@ def make_client_factory(
 ) -> Callable[..., owui.Client]:
     """Build the frontend client factory for production or the CI sibling."""
 
-    if stack == "ci":
+    if stack == CI_STACK:
         return owui.loopback_client_factory(CI_BASE_URL, timeout=timeout)
     return owui.ingress_client_factory(hostname, ca_path=tls.CA_PATH, timeout=timeout)

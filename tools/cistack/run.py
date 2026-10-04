@@ -38,6 +38,7 @@ from gideon.host.render.ci import (
     CI_ROOT,
     CI_SECRET_NAMES,
     CI_SKIPPED_SECRETS,
+    CI_STACK,
     CI_WIPE_PATHS,
     RELAY_SERVICE_NAME,
     ci_compose_document,
@@ -638,7 +639,7 @@ def smoke(
         code = evaluator(
             Namespace(
                 slice="smoke",
-                stack="ci",
+                stack=CI_STACK,
                 kind="smoke",
                 set=None,
                 ranked=None,

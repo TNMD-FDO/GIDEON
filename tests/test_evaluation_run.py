@@ -1,5 +1,6 @@
 """Evaluation runner and CLI contracts."""
 
+import argparse
 import ast
 import contextlib
 import inspect
@@ -25,7 +26,7 @@ from test_evaluation_record import read_psql_set
 from test_judge import engine_output, valid_content
 
 import gideon
-from gideon.cli import main
+from gideon.cli import build_parser, main
 from gideon.evaluation import (
     challenger,
     command,
@@ -42,7 +43,8 @@ from gideon.evaluation.slices import SLICE_RUNNERS
 from gideon.extraction import KEYED_TYPES, SECTION_TYPES, ExactObject, extract
 from gideon.extraction.scoring import MIN_RECALL
 from gideon.host import backuplock, nogpu
-from gideon.host.render.owui import GENERAL_PRESET_ID
+from gideon.host.render.ci import CI_STACK, PRODUCTION_STACK
+from gideon.host.render.owui import GENERAL_MODEL_ID
 from gideon.host.sysio import Host, PathLike
 from tools.exportboundary import absent_from_export
 
@@ -369,6 +371,35 @@ class Runner(unittest.TestCase):
 
 class Command(unittest.TestCase):
     """The in-process CLI exposes the ordered run and its refusals."""
+
+    def test_parser_kinds_and_decision_resolve_to_modes(self) -> None:
+        parser = build_parser()
+        command_action = next(
+            action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
+        )
+        eval_parser = command_action.choices["eval"]
+        subcommand_action = next(
+            action for action in eval_parser._actions if isinstance(action, argparse._SubParsersAction)
+        )
+        run_parser = subcommand_action.choices["run"]
+        kind_action = next(action for action in run_parser._actions if action.dest == "kind")
+        assert kind_action.choices is not None
+        for kind in kind_action.choices:
+            with self.subTest(kind=kind):
+                args = parser.parse_args(["eval", "run", "--slice", "smoke", "--kind", kind])
+                mode, problem = command._resolve_mode(args, args.slice)
+                self.assertIsNone(problem)
+                self.assertEqual(mode.kind, kind)
+                self.assertIn(mode.kind, command._KINDS)
+                self.assertFalse(mode.challenger)
+        args = parser.parse_args(
+            ["eval", "run", "--slice", "smoke", "--decision", "--against", RUN_ID]
+        )
+        mode, problem = command._resolve_mode(args, args.slice)
+        self.assertIsNone(problem)
+        self.assertEqual(mode.kind, "decision")
+        self.assertIn(mode.kind, command._KINDS)
+        self.assertTrue(mode.pairs)
 
     def test_quiet_window_refusal_fix_names_force(self) -> None:
         opening = NOW + timedelta(days=1)
@@ -1022,7 +1053,7 @@ def _invoke_engine_command(
         return command.door.ProbeResult(True, "door ready", None)
 
     def run_slice(
-        _spec: Any, _loaded: LoadedSet, _slice_name: str, context: RunContext
+        _loaded: LoadedSet, _slice_name: str, context: RunContext
     ) -> SliceResult:
         observed["contexts"].append(context)
         if on_run is not None:
@@ -1047,6 +1078,8 @@ def _invoke_engine_command(
         run_kwargs["clock"] = clock
     if sleep is not None:
         run_kwargs["sleep"] = sleep
+    replacement = dict(command.SLICE_RUNNERS)
+    replacement[slice_name] = replace(replacement[slice_name], runner=run_slice)
     with (
         patch.object(
             command.engine,
@@ -1056,7 +1089,7 @@ def _invoke_engine_command(
         patch.object(command.access, "read_eval_password", return_value="fictitious-password"),
         patch.object(command.access, "make_client_factory", side_effect=make_client),
         patch.object(command.door, "probe", side_effect=probe_door),
-        patch.object(command, "_run_slice", side_effect=run_slice),
+        patch.object(command, "SLICE_RUNNERS", replacement),
         patch.object(command.stacks.secrets, "select_directory") as select_directory,
     ):
         outcome = _invoke(args, **run_kwargs)
@@ -1118,11 +1151,11 @@ class EngineStackAndLock(unittest.TestCase):
         self.assertEqual(observed["engine_paths"], [production_dir])
         self.assertEqual(observed["client"][0][1]["stack"], "ci")
         self.assertEqual(observed["door"][0][0][1], Path(stacks.CI_ROOT))
-        self.assertEqual(observed["door"][0][1]["model"], GENERAL_PRESET_ID)
+        self.assertEqual(observed["door"][0][1]["model"], GENERAL_MODEL_ID)
         self.assertEqual(observed["door"][0][1]["max_time"], command.run.TURN_TIMEOUT_SECONDS)
         self.assertEqual(observed["client"][0][1]["timeout"], command.run.TURN_TIMEOUT_SECONDS)
-        self.assertEqual(observed["contexts"][0].rendered_dir, Path(stacks.CI_ROOT))
-        self.assertEqual(observed["contexts"][0].engine_dir, production_dir)
+        self.assertEqual(observed["contexts"][0].turns_dir, Path(stacks.CI_ROOT))
+        self.assertEqual(observed["contexts"][0].production_dir, production_dir)
         self.assertEqual(observed["contexts"][0].served_model_name, "fictitious-model")
         self.assertEqual(host.locks, {})
         self.assertEqual(len(host.lock_records), 1)
@@ -1211,11 +1244,23 @@ class EngineStackAndLock(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("--stack ci --kind smoke", stdout)
         self.assertEqual(unprivileged.lock_records, [])
+        with patch.object(stacks.secrets, "select_directory"):
+            ci_paths = stacks.resolve_stack("ci", "/rendered")
+        smoke_request = command._Request(
+            slice_name="smoke",
+            mode=command._Mode("smoke", False),
+            paths=ci_paths,
+            force=False,
+            against=None,
+            ranked_path=None,
+            set_root=ROOT / SET_ROOT,
+            supplied_set=False,
+            command_flags=" --stack ci --kind smoke",
+            paired_problem=None,
+        )
         self.assertIn(
             "--stack ci --kind smoke",
-            command._record_root_fix(
-                "smoke", SLICE_RUNNERS["smoke"], " --stack ci --kind smoke"
-            ),
+            smoke_request.record_root_fix(SLICE_RUNNERS["smoke"]),
         )
 
     def test_count_over_allowance_refuses_outside_window_and_releases(self) -> None:
@@ -1286,8 +1331,8 @@ class NightlyCommand(unittest.TestCase):
         self.assertIn("engine lock taken", stdout)
         self.assertNotIn("waiting for the engine lock", stdout)
         production_dir = _run_kwargs(host)["rendered_dir"]
-        self.assertEqual(observed["contexts"][0].rendered_dir, Path(production_dir))
-        self.assertEqual(observed["contexts"][0].engine_dir, production_dir)
+        self.assertEqual(observed["contexts"][0].turns_dir, Path(production_dir))
+        self.assertEqual(observed["contexts"][0].production_dir, production_dir)
         self.assertEqual(len(host.lock_records), 1)
         lock_record = backuplock.parse(host.lock_records[0][1])
         assert lock_record is not None
@@ -1674,6 +1719,25 @@ class RunnerReportContract(unittest.TestCase):
 class Imports(unittest.TestCase):
     """The evaluation package stays within the standard-library import boundary."""
 
+    def test_stack_names_have_no_bare_literals_outside_their_home(self) -> None:
+        paths = (
+            ROOT / "gideon/cli.py",
+            *sorted(EVALUATION.rglob("*.py")),
+            *sorted((ROOT / "tools/turns").rglob("*.py")),
+            *sorted((ROOT / "tools/cistack").rglob("*.py")),
+        )
+        offenders: list[str] = []
+        for path in paths:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Constant)
+                    and isinstance(node.value, str)
+                    and node.value in {PRODUCTION_STACK, CI_STACK}
+                ):
+                    offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}: {node.value!r}")
+        self.assertEqual(offenders, [])
+
     def test_every_import_is_standard_library_yaml_or_gideon(self) -> None:
         standard_library = set(sys.stdlib_module_names)
         for path in sorted(EVALUATION.rglob("*.py")):
@@ -1770,32 +1834,39 @@ def _challenger_invoke(
     contexts: list[RunContext] = []
     ids = iter((RUN_ID, "22222222-3333-4444-8555-666666666666"))
 
-    def run_slice(_spec: object, loaded: LoadedSet, slice_name: str, context: RunContext) -> SliceResult:
+    def run_slice(loaded: LoadedSet, slice_name: str, context: RunContext) -> SliceResult:
         contexts.append(context)
         prompt_id = context.judge_prompt_id
         assert prompt_id is not None and context.served_model_name is not None
         slots = {slot: f"visibly fictitious {slot}" for slot in judge.PROMPT_REGISTRY[prompt_id].slots}
         slots["candidate"] = "visibly-fictitious-case-text-sentinel"
         judge.grade(
-            cast(Host, host), context.engine_dir,
+            cast(Host, host),
+            context.production_dir,
             served_model_name=context.served_model_name,
-            prompt=judge.PROMPT_REGISTRY[prompt_id], slots=slots,
+            prompt=judge.PROMPT_REGISTRY[prompt_id],
+            slots=slots,
         )
         case_id = next(case_id for case_id in loaded.slices[slice_name] if case_id in loaded.active_ids)
         verdict = run_results[len(contexts) - 1]
         return SliceResult(verdict, "fixture report\n", (CaseResult(case_id, 1, "pass" if verdict else "fail", {}),))
 
     def repeats(*args: Any, **kwargs: Any) -> command._RunRepeats:
-        result = run_slice(args[0], args[1], args[2], args[3])
+        result = run_slice(args[1], args[2], args[3])
         return command._RunRepeats(result, 1, 0 if partial_release else 1, NOW if partial_release else None)
 
     kwargs = _run_kwargs(host)
     kwargs["run_id_factory"] = lambda: next(ids)
+    replacement = dict(command.SLICE_RUNNERS)
+    slice_name = challenger.SUBJECTS[0].slice_name
+    replacement[slice_name] = replace(replacement[slice_name], runner=run_slice)
     with (
         patch.object(command.engine, "resolve_engine_target", return_value=command.engine.EngineTarget("fixture-profile", "fixture-model", 1000)),
         patch.object(command.window, "window_judgement", return_value=window.WindowJudgement(True, "fixture window", NOW, NOW + timedelta(hours=1))),
         patch.object(command.stacks.secrets, "select_directory"),
-        patch.object(command, "_run_slice", side_effect=run_slice) if not partial_release else patch.object(command, "_run_repeats", side_effect=repeats),
+        patch.object(command, "SLICE_RUNNERS", replacement)
+        if not partial_release
+        else patch.object(command, "_run_repeats", side_effect=repeats),
     ):
         code, stdout, stderr = _invoke(["eval", "run", "--challenger", "--stack", "ci", *extra], **kwargs)
     return code, stdout, stderr, contexts

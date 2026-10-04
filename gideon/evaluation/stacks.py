@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from gideon.host import secrets
-from gideon.host.render.ci import CI_ROOT, CI_SECRETS_DIR
+from gideon.host.render.ci import CI_ROOT, CI_SECRETS_DIR, CI_STACK, PRODUCTION_STACK
 from gideon.host.sysio import PathLike
 
 
@@ -26,10 +26,10 @@ class StackPaths:
 def resolve_stack(name: str, production_dir: PathLike) -> StackPaths:
     """Resolve a stack name, selecting the sibling's secrets for a ``ci`` run."""
 
-    if name == "production":
+    if name == PRODUCTION_STACK:
         return StackPaths(name, Path(production_dir), None, "")
-    if name == "ci":
+    if name == CI_STACK:
         secrets_dir = Path(CI_SECRETS_DIR)
         secrets.select_directory(secrets_dir)
-        return StackPaths(name, Path(CI_ROOT), secrets_dir, " --stack ci")
+        return StackPaths(name, Path(CI_ROOT), secrets_dir, f" --stack {CI_STACK}")
     raise ValueError(f"unsupported evaluation stack: {name}")

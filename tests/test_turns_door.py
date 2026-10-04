@@ -36,7 +36,7 @@ from gideon.host.render.api import (
     API_USER_ROLE_HEADER,
 )
 from gideon.host.render.ci import CI_ROOT
-from gideon.host.render.owui import EVAL_IDENTITY, GENERAL_PRESET_ID
+from gideon.host.render.owui import EVAL_IDENTITY, GENERAL_MODEL_ID
 from gideon.host.report import Problem, Timeout
 from gideon.host.sysio import Command, Host, PathLike
 from tools.turns import cli
@@ -115,7 +115,7 @@ class _LoopbackHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         self.server.requests.append({"method": "GET", "path": self.path, "headers": dict(self.headers)})
-        self._reply({"data": [{"id": GENERAL_PRESET_ID}]})
+        self._reply({"data": [{"id": GENERAL_MODEL_ID}]})
 
     def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length", "0"))
@@ -411,7 +411,7 @@ class FakeHost:
         if body is None:
             if self.fail_probe:
                 return subprocess.CompletedProcess(command, 7, "", "")
-            response: object = {"data": [{"id": GENERAL_PRESET_ID}]}
+            response: object = {"data": [{"id": GENERAL_MODEL_ID}]}
         else:
             body_mapping = cast(dict[str, object], body)
             if self.failure_exception is not None:
@@ -602,7 +602,7 @@ class ServiceDoor(unittest.TestCase):
         assert record is not None
         self.assertEqual(record.command, "tools.turns --service")
         self.assertIn("preconditions: ok", stdout)
-        self.assertIn(f"door: ok — door lists model {GENERAL_PRESET_ID}", stdout)
+        self.assertIn(f"door: ok — door lists model {GENERAL_MODEL_ID}", stdout)
         self.assertIn("plain: ok — answered", stdout)
         self.assertIn(f"control-27: ok — {expected.kind}", stdout)
         self.assertIn("summary: ok", stdout)
@@ -623,7 +623,7 @@ class ServiceDoor(unittest.TestCase):
 
         for request in requests[1:]:
             body = cast(dict[str, object], request["body"])
-            self.assertEqual(body["model"], GENERAL_PRESET_ID)
+            self.assertEqual(body["model"], GENERAL_MODEL_ID)
             self.assertFalse(body["stream"])
 
         output_prefix = str(output) + "/"
@@ -655,7 +655,7 @@ class ServiceDoor(unittest.TestCase):
                 FakeHost(), cases_path, arguments=("--service", "--dry-run")
             )
         self.assertEqual(code, 0, stderr)
-        self.assertIn(f"model: {GENERAL_PRESET_ID}", stdout)
+        self.assertIn(f"model: {GENERAL_MODEL_ID}", stdout)
         self.assertIn("(instruction: service)", stdout)
 
     def test_service_turn_structured_facts_exist_with_and_without_output(self) -> None:
@@ -1009,7 +1009,7 @@ class ServiceDoor(unittest.TestCase):
                     driver=run_module.ServiceTurnDriver(
                         cast(Host, row_host),
                         RENDERED_COMPOSE.parent,
-                        model=GENERAL_PRESET_ID,
+                        model=GENERAL_MODEL_ID,
                         stream=True,
                     ),
                     guardrail=guardrail,
@@ -1270,7 +1270,7 @@ class DoorBody(unittest.TestCase):
 
     def test_instruction_rides_as_the_system_message_and_one_flag_drops_it(self) -> None:
         instructed = door.completion_body(
-            model=GENERAL_PRESET_ID,
+            model=GENERAL_MODEL_ID,
             prompt="tagged prompt",
             instruction="You are General.",
             stream=False,
@@ -1282,17 +1282,17 @@ class DoorBody(unittest.TestCase):
                 {"role": "user", "content": "tagged prompt"},
             ],
         )
-        self.assertEqual(instructed["model"], GENERAL_PRESET_ID)
+        self.assertEqual(instructed["model"], GENERAL_MODEL_ID)
         self.assertIs(instructed["stream"], False)
 
         bare = door.completion_body(
-            model=GENERAL_PRESET_ID,
+            model=GENERAL_MODEL_ID,
             prompt="tagged prompt",
             instruction=None,
             stream=True,
         )
         self.assertEqual(bare["messages"], [{"role": "user", "content": "tagged prompt"}])
-        self.assertEqual(bare["model"], GENERAL_PRESET_ID)
+        self.assertEqual(bare["model"], GENERAL_MODEL_ID)
         self.assertIs(bare["stream"], True)
 
     def test_the_service_driver_sends_only_the_tagged_user_message(self) -> None:
@@ -1300,7 +1300,7 @@ class DoorBody(unittest.TestCase):
         driver = run_module.ServiceTurnDriver(
             cast(Any, host),
             "/etc/gideon/rendered",
-            model=GENERAL_PRESET_ID,
+            model=GENERAL_MODEL_ID,
         )
         driver.turn(
             Case(id="one", prompt="plain", expect="answered"),
@@ -1311,7 +1311,7 @@ class DoorBody(unittest.TestCase):
             row_name="one",
         )
         body = cast(dict[str, object], host.requests[-1]["body"])
-        self.assertEqual(body["model"], GENERAL_PRESET_ID)
+        self.assertEqual(body["model"], GENERAL_MODEL_ID)
         messages = cast(list[dict[str, str]], body["messages"])
         self.assertEqual(messages, [
             {"role": "user", "content": "tagged prompt [turn harness abcd1234 one]"}

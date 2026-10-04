@@ -35,6 +35,11 @@ from gideon.host.render.pgbackrest import PGDATA
 from gideon.host.render.searxng import SEARXNG_SECRET_NAME
 
 CI_PROJECT: Final[str] = "gideon-ci"
+# The stacks a run's turns drive, production first, the order --stack offers them in;
+# here because the bare-host entry chain reads them for its parser.
+PRODUCTION_STACK: Final[str] = "production"
+CI_STACK: Final[str] = "ci"
+STACKS: Final[tuple[str, str]] = (PRODUCTION_STACK, CI_STACK)
 CI_ROOT: Final[str] = "/data/ci"
 CI_SECRETS_DIR: Final[str] = f"{CI_ROOT}/secrets"
 CI_PORT: Final[int] = 18100

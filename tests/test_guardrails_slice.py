@@ -47,7 +47,7 @@ from gideon.evaluation.turns import classify, run
 from gideon.evaluation.turns.access import TurnAccess
 from gideon.evaluation.turns.cases import Case, load_cases
 from gideon.host.owui import OwuiError
-from gideon.host.render.owui import EVAL_IDENTITY, GENERAL_PRESET_ID
+from gideon.host.render.owui import EVAL_IDENTITY, GENERAL_MODEL_ID
 from gideon.host.report import Problem
 from gideon.host.sysio import Command, Host, PathLike
 
@@ -1183,7 +1183,7 @@ class GuardrailsRunner(unittest.TestCase):
             if isinstance(request.get("body"), dict)
         ]
         self.assertTrue(door_bodies)
-        self.assertEqual({body["model"] for body in door_bodies}, {GENERAL_PRESET_ID})
+        self.assertEqual({body["model"] for body in door_bodies}, {GENERAL_MODEL_ID})
         self.assertTrue(all(request["model"] == _served_name() for _, request in host.judge_requests))
         self.assertTrue(all("response_format" in request and "body" not in request for _, request in host.judge_requests))
         for candidate, request in host.judge_requests:
@@ -1865,8 +1865,9 @@ class GuardrailsCommand(unittest.TestCase):
                     with patch.object(stacks.secrets, "select_directory"):
                         turns_dir = stacks.resolve_stack(stack_name, production).turns_dir
                     _run_fixture(
-                        loaded, "guardrails",
-                        replace(context, rendered_dir=turns_dir, engine_dir=production),
+                        loaded,
+                        "guardrails",
+                        replace(context, turns_dir=turns_dir, production_dir=production),
                     )
                     self.assertTrue(host.judge_requests)
                     judge_argv = host.judge_argv
@@ -1981,9 +1982,9 @@ class GuardrailsCommand(unittest.TestCase):
                 _slice_name: str,
                 context: RunContext,
                 *,
-                decision_run: bool,
+                mode: command._Mode,
             ) -> command._RunRepeats:
-                del decision_run
+                del mode
                 events.append("runner")
                 contexts.append(context)
                 return command._RunRepeats(result, 1, 1, None)

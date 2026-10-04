@@ -20,7 +20,7 @@ from gideon.host.render.api import (
 from gideon.host.render.engine import ENGINE_PORT, ENGINE_SECRET_NAME, engine_base_url
 from gideon.host.render.owui import (
     EVAL_IDENTITY,
-    GENERAL_PRESET_ID,
+    GENERAL_MODEL_ID,
     PERMISSIONS_TEMPLATE,
 )
 from gideon.host.render.services import (
@@ -142,7 +142,7 @@ def api_service(
             "GIDEON_SOURCE_HEADER": API_SOURCE_HEADER,
             "GIDEON_EVAL_IDENTITY": EVAL_IDENTITY.email,
             "GIDEON_CHAT_HEADER": API_CHAT_HEADER,
-            "GIDEON_MODEL_ID": GENERAL_PRESET_ID,
+            "GIDEON_MODEL_ID": GENERAL_MODEL_ID,
             "GIDEON_ENGINE_MODEL": generator_pin(inputs).serve.served_name,
             "TZ": inputs.site.office.timezone,
         },

@@ -21,6 +21,7 @@ from typing import Final
 
 import gideon
 from gideon.host import cli as host_cli
+from gideon.host.render.ci import PRODUCTION_STACK, STACKS
 
 _EVERYTHING_ELSE: Final = "Everything else\n  gideon --help, and the operator card at docs/runbooks/start-here.md"
 _ROOT_LINE: Final = (
@@ -311,8 +312,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     eval_run.add_argument(
         "--stack",
-        choices=("production", "ci"),
-        default="production",
+        choices=STACKS,
+        default=PRODUCTION_STACK,
         help="run the turns against the standing CI sibling instead of production",
     )
     eval_run.add_argument(

@@ -64,8 +64,8 @@ def _no_checkpoint() -> None:
 class RunContext:
     """The host seams and runner settings for one evaluation slice.
 
-    ``rendered_dir`` is the rendered directory of the stack whose turns run.
-    ``engine_dir`` is the rendered directory of the project whose engine the judge calls.
+    ``turns_dir`` is the rendered directory of the stack whose turns run.
+    ``production_dir`` is the rendered directory of the project whose engine the judge calls.
     ``checkout`` is the tree the run takes its cases, reference, and provenance
     from; a runner reads release content such as seeds beneath it, never beside
     its own module. It is none when no command supplied a checkout.
@@ -79,8 +79,8 @@ class RunContext:
     """
 
     host: Host
-    rendered_dir: PathLike
-    engine_dir: PathLike
+    turns_dir: PathLike
+    production_dir: PathLike
     served_model_name: str | None
     judge_prompt_id: str | None
     repeats: int

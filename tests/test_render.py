@@ -81,7 +81,7 @@ from gideon.host.render.grafana import (
     GRAFANA_SUB_PATH,
     GrafanaOverviewArtifact,
 )
-from gideon.host.render.owui import GENERAL_PRESET_ID
+from gideon.host.render.owui import GENERAL_MODEL_ID
 from gideon.host.render.pgbackrest import (
     PGDATA,
     REPOSITORY_PATH,
@@ -551,12 +551,12 @@ class Engine(unittest.TestCase):
             render_all(rendered_inputs).by_path["open-webui/manifest.yaml"].content
         )
         self.assertEqual(len(manifest["models"]), 1)
-        self.assertEqual(manifest["models"][0]["id"], GENERAL_PRESET_ID)
+        self.assertEqual(manifest["models"][0]["id"], GENERAL_MODEL_ID)
         self.assertIsNone(manifest["models"][0]["base_model_id"])
         frontend = yaml.safe_load(ComposeArtifact().emit(rendered_inputs))["services"]["open-webui"]
         frontend_environment = frontend["environment"]
         self.assertEqual(frontend_environment["DEFAULT_MODELS"], manifest["models"][0]["id"])
-        self.assertEqual(frontend_environment["TASK_MODEL_EXTERNAL"], GENERAL_PRESET_ID)
+        self.assertEqual(frontend_environment["TASK_MODEL_EXTERNAL"], GENERAL_MODEL_ID)
         self.assertEqual(urlsplit(frontend_environment["OPENAI_API_BASE_URLS"]).hostname, API_SERVICE_NAME)
         self.assertEqual(frontend_environment["OPENAI_API_BASE_URLS"], api_base_url())
 

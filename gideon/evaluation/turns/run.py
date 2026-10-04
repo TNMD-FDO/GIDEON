@@ -16,7 +16,8 @@ from gideon.evaluation.turns import browser, chromium, classify, door, session
 from gideon.evaluation.turns.cases import CASE_KINDS, Case
 from gideon.host import engine, owui, owuiturn
 from gideon.host.owui import Client
-from gideon.host.render.owui import EVAL_IDENTITY, GENERAL_PRESET_ID
+from gideon.host.render.ci import PRODUCTION_STACK
+from gideon.host.render.owui import EVAL_IDENTITY, GENERAL_MODEL_ID
 from gideon.host.report import Problem, StageResult, Timeout, print_stage
 from gideon.host.sysio import Host, PathLike, RealHost
 
@@ -79,7 +80,7 @@ class RunSpec:
     force: bool
     dry_run: bool
     sentinel: str
-    model: str = GENERAL_PRESET_ID
+    model: str = GENERAL_MODEL_ID
     browser: bool = False
     trust_ca: bool = False
     concurrent: int = 1
@@ -87,7 +88,7 @@ class RunSpec:
     case_ids: tuple[str, ...] = ()
     service: bool = False
     instruction: bool = True
-    stack: str = "production"
+    stack: str = PRODUCTION_STACK
     beside: bool = False
 
 
@@ -207,7 +208,7 @@ class ApiTurnDriver:
         self,
         client_factory: Callable[..., Client],
         password: str,
-        model: str = GENERAL_PRESET_ID,
+        model: str = GENERAL_MODEL_ID,
     ) -> None:
         self._client_factory = client_factory
         self._password = password
@@ -1870,7 +1871,7 @@ def _run_cases(
         offline_counts=reported_offline,
         replayed=not spec.service,
     )
-    if spec.stack != "production":
+    if spec.stack != PRODUCTION_STACK:
         summary_detail = f"stack: {spec.stack}; {summary_detail}"
     summary_ok = (
         bookkeeping.offline_counts["error"] == 0

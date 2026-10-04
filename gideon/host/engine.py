@@ -38,7 +38,7 @@ from gideon.host.render.engine import (
 from gideon.host.render.owui import (
     EVAL_IDENTITY,
     EVAL_PASSWORD_SECRET,
-    GENERAL_PRESET_ID,
+    GENERAL_MODEL_ID,
 )
 from gideon.host.report import Problem, StageResult, print_stage
 from gideon.host.sysio import Host, LockingHost, PathLike, RealHost
@@ -968,7 +968,7 @@ def _frontend_case(
         started = time.monotonic()
         turn_problem = owuiturn.managed_turn(
             client,
-            model=GENERAL_PRESET_ID,
+            model=GENERAL_MODEL_ID,
             prompt=prompt,
             user_id=user_id,
             assistant_id=assistant_id,

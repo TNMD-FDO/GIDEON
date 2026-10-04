@@ -134,9 +134,13 @@ class Subject(unittest.TestCase):
         entry = loaded.config.challenger
         subject = next(item for item in challenger.SUBJECTS if item.name == entry.subject)
         context = RunContext(
-            host=cast(Host, DictHost()), rendered_dir="/tmp/turns", engine_dir="/tmp/engine",
-            served_model_name="fixture-model", judge_prompt_id=entry.release,
-            repeats=1, progress=lambda _line: None,
+            host=cast(Host, DictHost()),
+            turns_dir="/tmp/turns",
+            production_dir="/tmp/engine",
+            served_model_name="fixture-model",
+            judge_prompt_id=entry.release,
+            repeats=1,
+            progress=lambda _line: None,
         )
         self.assertEqual(subject.change(context, entry.challenger), replace(context, judge_prompt_id=entry.challenger))
         self.assertEqual(subject.slice_name, "judge-triples")

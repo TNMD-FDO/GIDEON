@@ -37,7 +37,7 @@ from gideon.host.render.compose import (
 )
 from gideon.host.render.engine import ENGINE_SERVICE_NAME
 from gideon.host.render.grafana import GRAFANA_ADMIN_USER
-from gideon.host.render.owui import GENERAL_PRESET_ID
+from gideon.host.render.owui import GENERAL_MODEL_ID
 from gideon.host.render.services import all_service_names, store_services
 from gideon.host.site import SiteConfig, load_site
 from gideon.host.stack import compose_argv, exec_argv
@@ -1363,7 +1363,7 @@ class NewStages(unittest.TestCase):
             [item["id"] for item in host.frontend.functions],
             [],
         )
-        self.assertEqual([item["id"] for item in host.frontend.models], [GENERAL_PRESET_ID])
+        self.assertEqual([item["id"] for item in host.frontend.models], [GENERAL_MODEL_ID])
         code, out, _ = apply(host)
         self.assertIn("apply-manifest: ok — frontend state matches the manifest", out)
 

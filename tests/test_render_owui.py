@@ -38,7 +38,7 @@ from gideon.host.render.owui import (
     FEEDBACK_LIST_ROUTE,
     GENERAL_CAPABILITIES,
     GENERAL_FUNCTION_CALLING,
-    GENERAL_PRESET_ID,
+    GENERAL_MODEL_ID,
     GENERAL_TEMPLATE,
     MODEL_GRANT_CREATED_AT,
     MODEL_GRANT_ID,
@@ -176,12 +176,12 @@ class Environment(unittest.TestCase):
             env["WEB_SEARCH_CONFIRMATION_CONTENT"], WEB_SEARCH_CONFIRMATION_TEXT
         )
         self.assertEqual(env["WEB_SEARCH_DOMAIN_FILTER_LIST"], "[]")
-        self.assertEqual(env["DEFAULT_MODELS"], GENERAL_PRESET_ID)
+        self.assertEqual(env["DEFAULT_MODELS"], GENERAL_MODEL_ID)
         self.assertEqual(env["ENABLE_EVALUATION_ARENA_MODELS"], "false")
         self.assertEqual(env["ENABLE_OPENAI_API"], "true")
         self.assertEqual(env["OPENAI_API_BASE_URLS"], api_base_url())
         self.assertEqual(env["ENABLE_FORWARD_USER_INFO_HEADERS"], "true")
-        self.assertEqual(env["TASK_MODEL_EXTERNAL"], GENERAL_PRESET_ID)
+        self.assertEqual(env["TASK_MODEL_EXTERNAL"], GENERAL_MODEL_ID)
         self.assertEqual(
             {
                 name: env[name]
@@ -202,7 +202,7 @@ class Environment(unittest.TestCase):
                 "ENABLE_RETRIEVAL_QUERY_GENERATION": "false",
                 "ENABLE_FOLLOW_UP_GENERATION": "false",
                 "ENABLE_AUTOCOMPLETE_GENERATION": "false",
-                "DEFAULT_MODELS": GENERAL_PRESET_ID,
+                "DEFAULT_MODELS": GENERAL_MODEL_ID,
             },
         )
         self.assertEqual(
@@ -520,7 +520,7 @@ class Manifest(unittest.TestCase):
         self.assertEqual(len(document["models"]), 1)
         general = document["models"][0]
         self.assertEqual(general, general_preset_record(inputs(SECOND)))
-        self.assertEqual(general["id"], GENERAL_PRESET_ID)
+        self.assertEqual(general["id"], GENERAL_MODEL_ID)
         self.assertEqual(general["name"], "General")
         self.assertIsNone(general["base_model_id"])
         self.assertEqual(general["params"], {"function_calling": GENERAL_FUNCTION_CALLING})
@@ -538,7 +538,7 @@ class Manifest(unittest.TestCase):
             [{
                 "id": MODEL_GRANT_ID,
                 "resource_type": MODEL_GRANT_RESOURCE_TYPE,
-                "resource_id": GENERAL_PRESET_ID,
+                "resource_id": GENERAL_MODEL_ID,
                 "principal_type": "user",
                 "principal_id": "*",
                 "permission": "read",

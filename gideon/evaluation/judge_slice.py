@@ -131,7 +131,7 @@ def run_judge_triples(eval_set: LoadedSet, slice_name: str, context: RunContext)
             question, reference, candidate = inputs[case_id]
             grading = judge.grade(
                 context.host,
-                context.engine_dir,
+                context.production_dir,
                 served_model_name=context.served_model_name,
                 prompt=prompt,
                 slots={

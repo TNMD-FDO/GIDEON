@@ -45,7 +45,7 @@ from gideon.host.render.owui import (
     BREAK_GLASS,
     EVAL_IDENTITY,
     GENERAL_CAPABILITIES,
-    GENERAL_PRESET_ID,
+    GENERAL_MODEL_ID,
     SERVICE_GROUP,
 )
 from gideon.host.report import Problem
@@ -75,7 +75,7 @@ HAND_ADDED_FUNCTION = {
 def stub_model_id() -> str:
     """Return the service model id the connection stub lists."""
 
-    return GENERAL_PRESET_ID
+    return GENERAL_MODEL_ID
 
 
 def engine_served_name() -> str:
@@ -140,7 +140,7 @@ class ContractStack:
             f"OPEN_WEBUI_IMAGE={images['open-webui']}\n"
             f"CONTRACT_PORT={PORT}\n"
             f"ALLOWED_ENDPOINTS={','.join(ALLOWED_ENDPOINTS)}\n"
-            f"DEFAULT_MODELS={GENERAL_PRESET_ID}\n"
+            f"DEFAULT_MODELS={GENERAL_MODEL_ID}\n"
             "STUB_MODE=ok\n"
             f"STUB_MODEL_ID={stub_model_id()}\n"
         )
@@ -235,7 +235,7 @@ class ApplyManifestContract(unittest.TestCase):
         self.assertEqual(len(rendered_models), 1)
         rendered_general = rendered_models[0]
         assert isinstance(rendered_general, dict)
-        self.assertEqual(rendered_general["id"], GENERAL_PRESET_ID)
+        self.assertEqual(rendered_general["id"], GENERAL_MODEL_ID)
         self.assertIsNone(rendered_general["base_model_id"])
 
         base = admin.request("GET", "/api/v1/models/base")
@@ -244,7 +244,7 @@ class ApplyManifestContract(unittest.TestCase):
         self.assertEqual(len(base.body), 1)
         general = base.body[0]
         assert isinstance(general, dict)
-        self.assertEqual(general["id"], GENERAL_PRESET_ID)
+        self.assertEqual(general["id"], GENERAL_MODEL_ID)
         self.assertEqual(general["name"], rendered_general["name"])
         self.assertIsNone(general["base_model_id"])
         self.assertTrue(general["is_active"])
@@ -273,7 +273,7 @@ class ApplyManifestContract(unittest.TestCase):
             (grant["principal_type"], grant["principal_id"], grant["permission"]),
             ("user", "*", "read"),
         )
-        self.assertEqual((grant["resource_type"], grant["resource_id"]), ("model", GENERAL_PRESET_ID))
+        self.assertEqual((grant["resource_type"], grant["resource_id"]), ("model", GENERAL_MODEL_ID))
         self.assertEqual(general["user_id"], admin_id)
 
         presets = admin.request("GET", "/api/v1/models/list?page=1")
@@ -303,7 +303,7 @@ class ApplyManifestContract(unittest.TestCase):
             for row in rows
             if isinstance(row, dict) and isinstance(row.get("id"), str)
         }
-        expected = {GENERAL_PRESET_ID}
+        expected = {GENERAL_MODEL_ID}
         if arena:
             self.assertEqual(len(rows), len(expected) + 1)
             self.assertEqual(len(ids - expected), 1)
@@ -370,7 +370,7 @@ class ApplyManifestContract(unittest.TestCase):
             "POST",
             "/api/v1/models/model/update",
             {
-                "id": GENERAL_PRESET_ID,
+                "id": GENERAL_MODEL_ID,
                 "base_model_id": None,
                 "name": "General",
                 "meta": {
@@ -437,7 +437,7 @@ class ApplyManifestContract(unittest.TestCase):
         self.assertEqual(config.status, 200, config.body)
         assert isinstance(config.body, dict)
         self.assertIsInstance(config.body["default_models"], str)
-        self.assertEqual(config.body["default_models"], GENERAL_PRESET_ID)
+        self.assertEqual(config.body["default_models"], GENERAL_MODEL_ID)
         features = config.body["features"]
         self.assertIsInstance(features, dict)
         assert isinstance(features, dict)
@@ -502,7 +502,7 @@ class ApplyManifestContract(unittest.TestCase):
         restored_config = admin.request("GET", "/api/config")
         self.assertEqual(restored_config.status, 200, restored_config.body)
         assert isinstance(restored_config.body, dict)
-        self.assertEqual(restored_config.body["default_models"], GENERAL_PRESET_ID)
+        self.assertEqual(restored_config.body["default_models"], GENERAL_MODEL_ID)
         restored_features = restored_config.body["features"]
         self.assertIsInstance(restored_features, dict)
         assert isinstance(restored_features, dict)
@@ -535,7 +535,7 @@ class ApplyManifestContract(unittest.TestCase):
                 "type": "rating",
                 "data": {
                     "rating": -1,
-                    "model_id": GENERAL_PRESET_ID,
+                    "model_id": GENERAL_MODEL_ID,
                     "comment": sentinel,
                     "tags": [sentinel],
                 },
@@ -544,7 +544,7 @@ class ApplyManifestContract(unittest.TestCase):
                     "chat_id": chat_id,
                     "message_id": message_id,
                     "message_index": 0,
-                    "model_id": GENERAL_PRESET_ID,
+                    "model_id": GENERAL_MODEL_ID,
                 },
                 "snapshot": {
                     "chat": {"messages": [{"role": "user", "content": sentinel}]}
@@ -573,7 +573,7 @@ class ApplyManifestContract(unittest.TestCase):
                 record.model_id,
                 record.created_at,
             ),
-            ("down", chat_id, message_id, GENERAL_PRESET_ID, created_at),
+            ("down", chat_id, message_id, GENERAL_MODEL_ID, created_at),
         )
         self.assertNotIn(sentinel, repr(reading))
 

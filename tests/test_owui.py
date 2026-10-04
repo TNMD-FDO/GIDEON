@@ -29,7 +29,7 @@ from gideon.host.owui import (
 from gideon.host.render.owui import (
     BREAK_GLASS,
     EVAL_IDENTITY,
-    GENERAL_PRESET_ID,
+    GENERAL_MODEL_ID,
     SERVICE_GROUP,
 )
 from gideon.host.secrets import SECRETS_DIR
@@ -216,7 +216,7 @@ class Frontend:
             entries: list[dict[str, Any]] = []
             for model in self.models:
                 info = {key: value for key, value in model.items() if key != "params"}
-                if self.stale_live_models and model["id"] == GENERAL_PRESET_ID and isinstance(info.get("meta"), dict):
+                if self.stale_live_models and model["id"] == GENERAL_MODEL_ID and isinstance(info.get("meta"), dict):
                     info["meta"] = {
                         **info["meta"],
                         "filterIds": ["stale-filter"],
@@ -620,7 +620,7 @@ class Bootstrap(unittest.TestCase):
         self,
         mutate: Callable[[dict[str, Any]], None],
         field: str,
-        model_id: str = GENERAL_PRESET_ID,
+        model_id: str = GENERAL_MODEL_ID,
     ) -> None:
         frontend = Frontend()
         host = FakeHost(secrets())
@@ -643,7 +643,7 @@ class Bootstrap(unittest.TestCase):
         self.assertFalse(report.ok)
         self.assertIn("models sync", report.problem or "")
         self.assertIn("read-back differs by id", report.problem or "")
-        self.assertIn(GENERAL_PRESET_ID, report.problem or "")
+        self.assertIn(GENERAL_MODEL_ID, report.problem or "")
         self.assertIn("logs open-webui", report.fix)
         self.assertEqual(frontend.models, [])
 
@@ -710,7 +710,7 @@ class Bootstrap(unittest.TestCase):
         host = FakeHost(secrets())
         self.run_bootstrap(frontend, host)
         suggestion_text = "Fictitious suggestion text used only by this test."
-        general = next(model for model in frontend.models if model["id"] == GENERAL_PRESET_ID)
+        general = next(model for model in frontend.models if model["id"] == GENERAL_MODEL_ID)
         meta = general["meta"]
         assert isinstance(meta, dict)
         meta["suggestion_prompts"] = [{"title": suggestion_text, "content": suggestion_text}]
@@ -719,7 +719,7 @@ class Bootstrap(unittest.TestCase):
         self.assertFalse(report.ok)
         problem = report.problem or ""
         self.assertIn("models sync", problem)
-        self.assertIn(GENERAL_PRESET_ID, problem)
+        self.assertIn(GENERAL_MODEL_ID, problem)
         self.assertIn("meta.suggestion_prompts", problem)
         self.assertNotIn(suggestion_text, problem)
         self.assertIn("logs open-webui", report.fix)
@@ -748,7 +748,7 @@ class Bootstrap(unittest.TestCase):
         self.assertFalse(report.ok)
         problem = report.problem or ""
         self.assertIn("models refresh", problem)
-        self.assertIn(GENERAL_PRESET_ID, problem)
+        self.assertIn(GENERAL_MODEL_ID, problem)
         self.assertIn("meta.filterIds", problem)
         self.assertIn("logs open-webui", report.fix)
 

@@ -39,7 +39,7 @@ from gideon.host.render.owui import (
     AUDIT_LOG_FILE,
     EVAL_IDENTITY,
     EVAL_PASSWORD_SECRET,
-    GENERAL_PRESET_ID,
+    GENERAL_MODEL_ID,
     owui_environment,
 )
 from gideon.host.render.searxng import (
@@ -169,7 +169,7 @@ def _manifest_model_id(manifest: Mapping[str, object]) -> str:
     assert isinstance(general, Mapping)
     assert general.get("base_model_id") is None
     identifier = general.get("id")
-    assert isinstance(identifier, str) and identifier == GENERAL_PRESET_ID
+    assert isinstance(identifier, str) and identifier == GENERAL_MODEL_ID
     return identifier
 
 
@@ -538,7 +538,7 @@ class SearchSentinelContract(unittest.TestCase):
             not isinstance(listed, list)
             or len(listed) != 1
             or not isinstance(listed[0], Mapping)
-            or listed[0].get("id") != GENERAL_PRESET_ID
+            or listed[0].get("id") != GENERAL_MODEL_ID
         ):
             raise AssertionError("model listing does not show General alone")
         before = owuiturn.chat_ids(client)
@@ -546,7 +546,7 @@ class SearchSentinelContract(unittest.TestCase):
         assistant_id = str(uuid.uuid4())
         problem = owuiturn.managed_turn(
             client,
-            model=GENERAL_PRESET_ID,
+            model=GENERAL_MODEL_ID,
             prompt=f"Search the web for {sentinel} and summarize the result.",
             user_id=user_id,
             assistant_id=assistant_id,

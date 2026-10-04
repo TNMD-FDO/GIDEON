@@ -10,7 +10,7 @@ from typing import Final
 from zoneinfo import ZoneInfo
 
 from gideon import guardrail
-from gideon.evaluation import window
+from gideon.evaluation import stacks, window
 from gideon.evaluation.turns import access, browser, cases, chromium
 from gideon.evaluation.turns.run import (
     BROWSER_ENGINE_CALLS_PER_TURN,
@@ -21,9 +21,9 @@ from gideon.evaluation.turns.run import (
     new_sentinel,
     run,
 )
-from gideon.host import backuplock, models, nogpu, owui, secrets, site
-from gideon.host.render.ci import CI_ROOT, CI_SECRETS_DIR
-from gideon.host.render.owui import GENERAL_PRESET_ID
+from gideon.host import backuplock, models, nogpu, owui, site
+from gideon.host.render.ci import CI_STACK, PRODUCTION_STACK, STACKS
+from gideon.host.render.owui import GENERAL_MODEL_ID
 from gideon.host.report import Problem, StageResult, print_stage
 from gideon.host.sysio import Host, LockingHost, PathLike, RealHost
 from tools.ownership import restore_ownership, sudo_ids
@@ -140,7 +140,7 @@ def _parser() -> argparse.ArgumentParser:
         "--beside", action="store_true", help="run beside the engine lock's holder, naming it"
     )
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--stack", choices=("production", "ci"), default="production")
+    parser.add_argument("--stack", choices=STACKS, default=PRODUCTION_STACK)
     return parser
 
 
@@ -230,8 +230,8 @@ def _lock_command(options: argparse.Namespace) -> str:
             words.append(flag)
     if options.concurrent > 1:
         words.extend(("--concurrent", str(options.concurrent)))
-    if options.stack == "ci":
-        words.extend(("--stack", "ci"))
+    if options.stack == CI_STACK:
+        words.extend(("--stack", CI_STACK))
     return " ".join(words)
 
 
@@ -253,7 +253,7 @@ def main(
     if refused_direct_flag is not None:
         print_stage(refused_direct_flag)
         return 1
-    if options.stack == "ci" and options.browser:
+    if options.stack == CI_STACK and options.browser:
         print_stage(
             StageResult(
                 "preconditions",
@@ -263,7 +263,7 @@ def main(
             )
         )
         return 1
-    if options.stack == "ci" and options.unfiltered:
+    if options.stack == CI_STACK and options.unfiltered:
         print_stage(
             StageResult(
                 "preconditions",
@@ -273,16 +273,15 @@ def main(
             )
         )
         return 1
-    if options.stack == "ci":
-        secrets.select_directory(Path(CI_SECRETS_DIR))
+    stack_paths = stacks.resolve_stack(options.stack, _RENDERED_DIR)
     io = host or RealHost()
     root = checkout or Path(__file__).resolve().parents[2]
     output = options.out.resolve() if options.out is not None else None
     # Direct modes need no frontend eval password. Unfiltered reads the engine's
     # served name and General's instruction; service mode addresses General.
     direct_mode = options.service or options.unfiltered
-    rendered_dir = Path(CI_ROOT) if options.stack == "ci" else Path(_RENDERED_DIR)
-    rendered_fix = _CI_RENDERED_FIX if options.stack == "ci" else _RENDERED_FIX
+    rendered_dir = stack_paths.turns_dir
+    rendered_fix = _CI_RENDERED_FIX if stack_paths.name == CI_STACK else _RENDERED_FIX
     if options.unfiltered:
         refused_flag = _unfiltered_refusal(options, output)
         if refused_flag is not None:
@@ -359,7 +358,7 @@ def main(
 
     # The model a run addresses: General's id, or the engine's served name when
     # --unfiltered asks the engine directly.
-    run_model = GENERAL_PRESET_ID
+    run_model = GENERAL_MODEL_ID
     if options.unfiltered:
         models_result = models.load_models_lock(root / "models.lock", host=io)
         if models_result.errors or models_result.lock is None:
@@ -558,7 +557,7 @@ def main(
         window_detail += "; window overridden by --force"
     precondition_detail = (
         f"stack: {options.stack}; "
-        if options.stack == "ci"
+        if stack_paths.name == CI_STACK
         else ""
     )
     claim: backuplock.Claim | None = None
@@ -626,7 +625,7 @@ def main(
                 )
                 print(f"model: {run_model} (instruction: {instruction_state})")
             else:
-                print(f"model: {GENERAL_PRESET_ID}")
+                print(f"model: {GENERAL_MODEL_ID}")
             print(f"output directory: {output if output is not None else 'none'}")
             if options.browser:
                 print("mode: browser")

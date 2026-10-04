@@ -162,7 +162,7 @@ def _run_registered(
             _host, _frontend, turn_context = _fixture_turns(
                 replace(loaded, active_ids=selected_ids), host=host
             )
-            rendered_dir = turn_context.rendered_dir
+            rendered_dir = turn_context.turns_dir
             served_model = turn_context.served_model_name
             for case_id in loaded.slices[slice_name]:
                 if case_id not in active:

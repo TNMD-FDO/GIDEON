@@ -54,7 +54,7 @@ from gideon.host.render.engine import (
     ENGINE_SERVICE_NAME,
 )
 from gideon.host.render.facts import HostFacts
-from gideon.host.render.owui import GENERAL_PRESET_ID, owui_secret_names
+from gideon.host.render.owui import GENERAL_MODEL_ID, owui_secret_names
 from gideon.host.site import load_site
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -252,7 +252,7 @@ class Compose(unittest.TestCase):
         environment = mapping(api["environment"])
         generator = render_inputs.profile.model("generator")
         assert generator is not None
-        self.assertEqual(environment["GIDEON_MODEL_ID"], GENERAL_PRESET_ID)
+        self.assertEqual(environment["GIDEON_MODEL_ID"], GENERAL_MODEL_ID)
         self.assertEqual(environment["GIDEON_ENGINE_MODEL"], generator.serve.served_name)
         self.assertEqual(
             environment["GIDEON_ENGINE_URL"],
