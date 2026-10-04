@@ -2,6 +2,7 @@
 
 import ast
 import contextlib
+import inspect
 import io
 import json
 import os
@@ -1622,6 +1623,52 @@ class SliceRegistry(unittest.TestCase):
             if spec.decision is not None:
                 with self.subTest(slice_name=slice_name):
                     self.assertEqual(spec.repeats, 1)
+
+
+class RunnerReportContract(unittest.TestCase):
+    """Registered runners keep failure rendering and managed turns at their seams."""
+
+    def test_registered_runner_modules_do_not_spell_fix_lines(self) -> None:
+        for slice_name, spec in SLICE_RUNNERS.items():
+            with self.subTest(slice_name=slice_name):
+                path = Path(inspect.getfile(spec.runner))
+                tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+                self.assertFalse(
+                    any(
+                        isinstance(node, ast.Constant)
+                        and isinstance(node.value, str)
+                        and "Fix:" in node.value
+                        for node in ast.walk(tree)
+                    ),
+                    f"{path}: failure fix text belongs in report.failure_lines",
+                )
+
+    def test_turn_driving_runners_read_managed_rows(self) -> None:
+        for slice_name in ("general-smoke", "guardrails"):
+            with self.subTest(slice_name=slice_name):
+                path = Path(inspect.getfile(SLICE_RUNNERS[slice_name].runner))
+                tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+                nodes = tuple(ast.walk(tree))
+                self.assertFalse(
+                    any(
+                        isinstance(node, ast.Constant)
+                        and isinstance(node.value, str)
+                        and node.value in {"unverified", "cleanup-failed"}
+                        for node in nodes
+                    ),
+                    f"{path}: managed owns cleanup problem codes",
+                )
+                self.assertFalse(
+                    any(
+                        (isinstance(node, ast.Name) and node.id in {"ApiTurnDriver", "frontend_turn"})
+                        or (
+                            isinstance(node, ast.Attribute)
+                            and node.attr in {"ApiTurnDriver", "frontend_turn"}
+                        )
+                        for node in nodes
+                    ),
+                    f"{path}: managed owns frontend turns",
+                )
 
 
 class Imports(unittest.TestCase):

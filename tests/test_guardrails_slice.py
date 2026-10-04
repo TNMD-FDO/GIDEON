@@ -45,8 +45,9 @@ from gideon.evaluation.evalset import (
 from gideon.evaluation.results import CaseResult, JSONValue, RunContext, SliceResult
 from gideon.evaluation.turns import classify, run
 from gideon.evaluation.turns.access import TurnAccess
-from gideon.evaluation.turns.cases import Case
-from gideon.host.render.owui import GENERAL_PRESET_ID
+from gideon.evaluation.turns.cases import Case, load_cases
+from gideon.host.owui import OwuiError
+from gideon.host.render.owui import EVAL_IDENTITY, GENERAL_PRESET_ID
 from gideon.host.report import Problem
 from gideon.host.sysio import Command, Host, PathLike
 
@@ -705,6 +706,25 @@ class FalseRefusal(unittest.TestCase):
 
 class GuardrailsRunner(unittest.TestCase):
     """The service and frontend turns expose only classified, content-free rows."""
+
+    def test_problem_vocabulary_matches_the_current_runner(self) -> None:
+        self.assertEqual(
+            guardrails_slice.PROBLEMS,
+            frozenset(
+                {
+                    "turns-unavailable",
+                    "door-unavailable",
+                    "turn-error",
+                    "turn-cut",
+                    "check-failed",
+                    "frontend-signin",
+                    "frontend-error",
+                    "cleanup-failed",
+                    "unverified",
+                    "seed-unavailable",
+                }
+            ),
+        )
 
     def test_seed_patterns_follow_the_context_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1398,7 +1418,10 @@ class GuardrailsRunner(unittest.TestCase):
                 case_id for case_id in loaded.active_ids if case_id.startswith("guidelines-range/")
                 and cast(list[object], loaded.cases_by_id[case_id]["labels"])[1] == "positive"
             )
-            (seed_root / "deadline-trap.yaml").unlink()
+            missing_seed_path = seed_root / "deadline-trap.yaml"
+            missing_seed_path.unlink()
+            seed_problem = load_cases(missing_seed_path)
+            assert isinstance(seed_problem, Problem)
             seed_path = seed_root / "guidelines-range.yaml"
             document = cast(dict[str, object], yaml.safe_load(seed_path.read_text(encoding="utf-8")))
             retained = cast(list[dict[str, object]], document["cases"])
@@ -1428,6 +1451,15 @@ class GuardrailsRunner(unittest.TestCase):
             result.report,
         )
         self.assertIn("Fix: Restore those ids in the committed seed, then retry.", result.report)
+        self.assertEqual(
+            result.report.splitlines()[:4],
+            [
+                f"seed {missing_seed_path}: {seed_problem.problem}",
+                f"Fix: {seed_problem.fix}",
+                f"seed {seed_path}: active positive ids absent from retained seed: {missing_case_id}",
+                "Fix: Restore those ids in the committed seed, then retry.",
+            ],
+        )
         self.assertTrue(any(case_id.startswith("sentence-credit/") for case_id in turned))
 
     def test_fake_host_runner_records_classes_progress_and_no_sentinel_stream(self) -> None:
@@ -1473,6 +1505,45 @@ class GuardrailsRunner(unittest.TestCase):
         self.assertNotIn(guardrail.DEADLINE_REFUSAL, printed)
         self.assertNotIn("A plain answer without a deadline.", printed)
 
+    def test_door_and_frontend_rows_with_both_ids_report_stored_patterns(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            loaded = _small_set(Path(directory) / "eval-v1")
+            case_id = next(case_id for case_id in SAMPLE_IDS if case_id in loaded.active_ids)
+            _host, _frontend, context = _fixture_turns(loaded)
+            actual_door_turn = run.service_turn
+            actual_frontend_turn = run.frontend_turn
+
+            def door_both_ids(*args: Any, **kwargs: Any) -> run.TurnRow:
+                row = actual_door_turn(*args, **kwargs)
+                if kwargs["case"].id == case_id:
+                    return replace(
+                        row,
+                        pattern_id="fictional-stored-door-pattern",
+                        stream_pattern_id="fictional-stream-door-pattern",
+                    )
+                return row
+
+            def frontend_both_ids(*args: Any, **kwargs: Any) -> run.TurnRow:
+                row = actual_frontend_turn(*args, **kwargs)
+                if kwargs["case"].id == case_id:
+                    return replace(
+                        row,
+                        pattern_id="fictional-stored-frontend-pattern",
+                        stream_pattern_id="fictional-stream-frontend-pattern",
+                    )
+                return row
+
+            with (
+                patch.object(run, "service_turn", side_effect=door_both_ids),
+                patch.object(run, "frontend_turn", side_effect=frontend_both_ids),
+            ):
+                result = _run_fixture(loaded, "guardrails", context)
+
+        row = next(row for row in result.results if row.case_id == case_id)
+        frontend = cast(Mapping[str, JSONValue], row.metrics["frontend"])
+        self.assertEqual(row.metrics["pattern"], "fictional-stored-door-pattern")
+        self.assertEqual(frontend["pattern"], "fictional-stored-frontend-pattern")
+
     def test_stream_leak_fails_its_case(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             loaded = _small_set(Path(directory) / "eval-v1")
@@ -1516,8 +1587,17 @@ class GuardrailsRunner(unittest.TestCase):
             else:
                 self.assertNotIn("problem", row.metrics)
                 self.assertEqual(row.verdict, "pass")
-        self.assertIn("frontend signin:", result.report)
-        self.assertIn("Fix:", result.report)
+        lines = result.report.splitlines()
+        signin = lines.index(
+            "frontend signin: Open WebUI /api/v1/auths/signin returned HTTP 503."
+        )
+        self.assertEqual(
+            lines[signin : signin + 2],
+            [
+                "frontend signin: Open WebUI /api/v1/auths/signin returned HTTP 503.",
+                "Fix: Check Open WebUI availability, then retry.",
+            ],
+        )
 
     def test_unverified_frontend_case_fails_and_reports_cleanup_fix(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1530,6 +1610,10 @@ class GuardrailsRunner(unittest.TestCase):
         self.assertEqual(row.verdict, "fail")
         self.assertEqual(row.metrics["problem"], "unverified")
         self.assertIn(run.unverified_fix("gideon-eval"), result.report)
+        self.assertEqual(
+            result.report.splitlines()[-2],
+            f"Fix: {run.unverified_fix(EVAL_IDENTITY.username)}",
+        )
 
     def test_reasoning_on_the_door_wire_fails_the_case_as_a_failed_check(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1593,6 +1677,21 @@ class GuardrailsRunner(unittest.TestCase):
         self.assertEqual(len(result.results), len(loaded.active_ids))
         self.assertTrue(all(row.metrics["problem"] == "door-unavailable" for row in result.results))
         self.assertEqual(len(host.requests), 1)
+
+    def test_door_signin_failure_keeps_adjacent_problem_and_fix_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            loaded = _small_set(Path(directory) / "eval-v1")
+            _host, _frontend, context = _fixture_turns(loaded)
+            with patch.object(
+                run.ServiceTurnDriver,
+                "signin",
+                side_effect=OwuiError("Fictional door unavailable.", "Retry the fictional door."),
+            ):
+                result = _run_fixture(loaded, "guardrails", context)
+        self.assertEqual(
+            result.report.splitlines()[:2],
+            ["door: Fictional door unavailable.", "Fix: Retry the fictional door."],
+        )
 
     def test_turns_unavailable_is_deterministic_and_makes_no_host_call(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

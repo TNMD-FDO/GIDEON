@@ -16,6 +16,14 @@ def refusal(command: str, problem: object, fix: str) -> str:
     return f"gideon {command}: {one_line(problem)} Fix: {fix}"
 
 
+def failure_lines(fix: str, problem: str | None = None) -> tuple[str, ...]:
+    """Return a report's problem line when present, then its fix line."""
+
+    if problem is None:
+        return (f"Fix: {fix}",)
+    return (problem, f"Fix: {fix}")
+
+
 def command_detail(result: subprocess.CompletedProcess[str]) -> str:
     """What a failed command said, stderr first, for a report row's detail.
 

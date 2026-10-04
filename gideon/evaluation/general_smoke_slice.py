@@ -12,38 +12,32 @@ names, and fixed codes, never text.
 """
 
 import re
-import time
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final, cast
 
-from gideon import guardrail
 from gideon.evaluation.evalset import Case as EvalCase
 from gideon.evaluation.evalset import LoadedSet, select_cases
 from gideon.evaluation.results import CaseResult, JSONValue, RunContext, SliceResult
-from gideon.evaluation.turns import cases, run
+from gideon.evaluation.turns import cases, managed, run
 from gideon.host import owui, owuiturn
-from gideon.host.render.owui import EVAL_IDENTITY, GENERAL_PRESET_ID
+from gideon.host.report import failure_lines
 
 PROBLEMS: Final[frozenset[str]] = frozenset(
     {
         "turns-unavailable",
         "frontend-signin",
         "turn-error",
-        "turn-cut",
-        "unverified",
-        "cleanup-failed",
         "stream-error",
         "stream-leak",
         "check-failed",
     }
-)
+) | managed.PROBLEMS
 """Closed codes of a failed turn, including one cut by the harness bound."""
 _CASES_PATH: Final[Path] = Path("general")
-_CLEANUP: Final[frozenset[str]] = frozenset({"unverified", "cleanup-failed"})
+"""The General cases label used by the managed turn session."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,17 +93,15 @@ def _turn_outcome(record: EvalCase, repeat: int, row: run.TurnRow) -> _Outcome:
     """The per-turn verdict: code over the row's facts, cleanup first.
 
     The harness's loop reads cleanup in its own row; a caller of the per-turn
-    unit reads it here, so a chat left behind fails its turn.
+    unit reads it through the managed reading, so a chat left behind fails its
+    turn.
     """
 
+    reading = managed.read(row)
     failed = tuple(name for name, ok in row.checks.items() if not ok)
     problem: str | None
-    if row.chat_id is None:
-        problem = "unverified"
-    elif not row.deleted:
-        problem = "cleanup-failed"
-    elif row.cut:
-        problem = "turn-cut"
+    if reading.problem is not None:
+        problem = reading.problem
     elif row.verdict_kind is None:
         problem = "turn-error"
     elif row.stream_kind == "leak":
@@ -128,7 +120,7 @@ def _turn_outcome(record: EvalCase, repeat: int, row: run.TurnRow) -> _Outcome:
         base.search,
         class_name=row.verdict_kind,
         stream=row.stream_kind,
-        pattern=row.pattern_id or row.stream_pattern_id,
+        pattern=reading.pattern_id,
         checks=dict(row.checks),
         failed=failed,
         elapsed=row.elapsed,
@@ -215,8 +207,9 @@ def _slice_result(
         f"chats: {turns_made} turns made, {chats_deleted} chats deleted; "
         f"the eval identity's chats at the end: {chat_count}"
     )
-    if any(row.problem in _CLEANUP for row in outcomes):
-        lines.append(f"Fix: {run.unverified_fix(EVAL_IDENTITY.username)}")
+    cleanup_fix = managed.cleanup_fix(row.problem for row in outcomes)
+    if cleanup_fix is not None:
+        lines.extend(failure_lines(cleanup_fix))
     classes = Counter(row.class_name for row in outcomes if row.class_name is not None)
     class_detail = ", ".join(f"{name} {classes[name]}" for name in sorted(classes)) or "none"
     failed_ids = tuple(
@@ -230,10 +223,6 @@ def _slice_result(
     )
     report = "\n".join(lines) + "\n"
     return SliceResult(passed, report, tuple(_result(row) for row in outcomes))
-
-
-def _now() -> datetime:
-    return datetime.now(UTC)
 
 
 def run_general_smoke(eval_set: LoadedSet, slice_name: str, context: RunContext) -> SliceResult:
@@ -259,40 +248,24 @@ def run_general_smoke(eval_set: LoadedSet, slice_name: str, context: RunContext)
         # The tripwires' construction: no host call, one failed row per turn.
         return failed_all("turns-unavailable", ("turn access unavailable: the command supplies it",))
 
-    driver = run.ApiTurnDriver(turns.client_factory, turns.password)
-    try:
-        signin_detail = driver.signin()
-    except owui.OwuiError as exc:
-        return failed_all("frontend-signin", (f"frontend signin: {exc.problem}", f"Fix: {exc.fix}"))
-
-    spec = run.RunSpec(
-        cases=_CASES_PATH,
-        repeat=context.repeats,
-        stream=True,
-        out=None,
-        force=False,
-        dry_run=False,
-        sentinel=turns.sentinel,
-        model=GENERAL_PRESET_ID,
-        stack="production",
+    session = managed.ManagedTurns(
+        turns, cases=_CASES_PATH, repeat=context.repeats, stream=True
     )
+    try:
+        signin_detail = session.signin()
+    except owui.OwuiError as exc:
+        return failed_all(
+            "frontend-signin",
+            failure_lines(exc.fix, f"frontend signin: {exc.problem}"),
+        )
+
     collected: list[_Outcome] = []
     chats_deleted = 0
     for repeat in repeats:
         for record in records:
             context.checkpoint()
             case = _turn_case(record)
-            row = run.frontend_turn(
-                spec,
-                client=driver.client,
-                driver=driver,
-                guardrail=guardrail,
-                case=case,
-                session_number=1,
-                row_name=f"{case.id}#{repeat}",
-                now=_now,
-                monotonic=time.monotonic,
-            )
+            row = session.turn(case, row_name=f"{case.id}#{repeat}")
             outcome = _turn_outcome(record, repeat, row)
             collected.append(outcome)
             chats_deleted += row.deleted
@@ -300,7 +273,7 @@ def run_general_smoke(eval_set: LoadedSet, slice_name: str, context: RunContext)
 
     # Reported and never gated: a chat another session holds is a person's.
     try:
-        chat_count = str(len(owuiturn.chat_ids(driver.client)))
+        chat_count = str(len(owuiturn.chat_ids(session.client)))
     except owui.OwuiError:
         chat_count = "unknown"
     return _slice_result(

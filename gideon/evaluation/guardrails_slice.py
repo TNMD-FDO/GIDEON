@@ -42,10 +42,11 @@ from gideon.evaluation import judge
 from gideon.evaluation.decision import DecisionMetric
 from gideon.evaluation.evalset import TIER_2_CATEGORY, Case, LoadedSet, select_cases
 from gideon.evaluation.results import CaseResult, JSONValue, RunContext, SliceResult
-from gideon.evaluation.turns import cases, run
+from gideon.evaluation.turns import cases, managed, run
 from gideon.evaluation.turns.access import TurnAccess
 from gideon.host import owui
-from gideon.host.render.owui import EVAL_IDENTITY, GENERAL_PRESET_ID
+from gideon.host.render.owui import GENERAL_PRESET_ID
+from gideon.host.report import failure_lines
 from gideon.host.sysio import PathLike
 
 OVER_TRIP_DIVISOR: Final[int] = 20
@@ -71,16 +72,13 @@ PROBLEMS: Final[frozenset[str]] = frozenset(
         "check-failed",
         "frontend-signin",
         "frontend-error",
-        "cleanup-failed",
-        "unverified",
         "seed-unavailable",
     }
-)
+) | managed.PROBLEMS
 """Closed codes for a case that failed before or beside its class, including a harness cut."""
 _BLOCKED: Final[frozenset[str]] = frozenset({"replaced", "declined", "disclaimed"})
 _OVER_TRIP: Final[frozenset[str]] = frozenset({"replaced", "leak"})
 _CASES_PATH: Final[Path] = Path("guardrails")
-_FRONTEND_CLEANUP: Final[frozenset[str]] = frozenset({"cleanup-failed", "unverified"})
 JUDGE_READ_CLASSES: Final[frozenset[str]] = frozenset({"declined", "disclaimed"})
 INSTRUCTED_CLASSES: Final[frozenset[str]] = frozenset({"declined", "disclaimed"})
 READINGS: Final[tuple[str, str]] = ("green", "red")
@@ -310,7 +308,9 @@ def _load_seed_patterns(
                 for case in source
                 if case["category"] == category
             )
-            head.extend((f"seed {seed_path}: {seed_set.problem}", f"Fix: {seed_set.fix}"))
+            head.extend(
+                failure_lines(seed_set.fix, f"seed {seed_path}: {seed_set.problem}")
+            )
             continue
 
         retained_ids: set[str] = set()
@@ -328,10 +328,10 @@ def _load_seed_patterns(
         if missing:
             unavailable.update(missing)
             head.extend(
-                (
+                failure_lines(
+                    "Restore those ids in the committed seed, then retry.",
                     f"seed {seed_path}: active positive ids absent from retained seed: "
                     f"{_ids(missing)}",
-                    "Fix: Restore those ids in the committed seed, then retry.",
                 )
             )
     return patterns, frozenset(unavailable), tuple(head)
@@ -566,8 +566,9 @@ def _report(outcomes: tuple[_Outcome, ...], head: tuple[str, ...]) -> tuple[bool
     )
     if differing:
         lines.append(f"sample classes differ at an equal verdict (not gated): {_ids(differing)}")
-    if any(row.frontend_problem in _FRONTEND_CLEANUP for row in outcomes):
-        lines.append(f"Fix: {run.unverified_fix(EVAL_IDENTITY.username)}")
+    cleanup_fix = managed.cleanup_fix(row.frontend_problem for row in outcomes)
+    if cleanup_fix is not None:
+        lines.extend(failure_lines(cleanup_fix))
     harness_count = sum(
         row.role == "control" and row.door_class == "declined" for row in outcomes
     )
@@ -593,28 +594,21 @@ class _Frontend:
 
     def __init__(self, turns: TurnAccess) -> None:
         self._turns = turns
-        self._driver: run.ApiTurnDriver | None = None
+        self._driver: managed.ManagedTurns | None = None
         self.problem: owui.OwuiError | None = None
         self.detail = ""
-        self._spec = run.RunSpec(
-            cases=_CASES_PATH,
-            repeat=1,
-            stream=False,
-            out=None,
-            force=False,
-            dry_run=False,
-            sentinel=turns.sentinel,
-        )
 
-    def _signed_in(self) -> run.ApiTurnDriver | None:
+    def _signed_in(self) -> managed.ManagedTurns | None:
         if self._driver is None and self.problem is None:
-            driver = run.ApiTurnDriver(self._turns.client_factory, self._turns.password)
+            session = managed.ManagedTurns(
+                self._turns, cases=_CASES_PATH, repeat=1, stream=False
+            )
             try:
-                self.detail = driver.signin()
+                self.detail = session.signin()
             except owui.OwuiError as exc:
                 self.problem = exc
                 return None
-            self._driver = driver
+            self._driver = session
         return self._driver
 
     def turn(
@@ -622,34 +616,21 @@ class _Frontend:
     ) -> tuple[str | None, Mapping[str, bool] | None, str | None, str | None]:
         """Return the frontend class, checks, problem code, and pattern id."""
 
-        driver = self._signed_in()
-        if driver is None:
+        session = self._signed_in()
+        if session is None:
             return None, None, "frontend-signin", None
-        row = run.frontend_turn(
-            self._spec,
-            client=driver.client,
-            driver=driver,
-            guardrail=guardrail,
-            case=case,
-            session_number=1,
-            row_name=case.id,
-            now=_now,
-            monotonic=time.monotonic,
-        )
-        pattern = row.stream_pattern_id or row.pattern_id
+        row = session.turn(case, row_name=case.id)
+        reading = managed.read(row)
         # The harness's loop reads cleanup in its own row; a runner calling
-        # the per-turn unit reads it here, so a left chat fails the case.
-        if row.chat_id is None:
-            return row.verdict_kind, row.checks, "unverified", pattern
-        if not row.deleted:
-            return row.verdict_kind, row.checks, "cleanup-failed", pattern
-        if row.cut:
-            return row.verdict_kind, row.checks, "turn-cut", pattern
+        # the per-turn unit reads it through managed.read, so a left chat fails
+        # the case.
+        if reading.problem is not None:
+            return row.verdict_kind, row.checks, reading.problem, reading.pattern_id
         if row.verdict_kind is None:
-            return None, row.checks, "frontend-error", pattern
+            return None, row.checks, "frontend-error", reading.pattern_id
         if _check_failed(row.checks, row.verdict_kind):
-            return row.verdict_kind, row.checks, "check-failed", pattern
-        return row.verdict_kind, row.checks, None, pattern
+            return row.verdict_kind, row.checks, "check-failed", reading.pattern_id
+        return row.verdict_kind, row.checks, None, reading.pattern_id
 
 
 def _door_outcome(case: Case, row: run.TurnRow) -> _Outcome:
@@ -668,7 +649,7 @@ def _door_outcome(case: Case, row: run.TurnRow) -> _Outcome:
         outcome,
         door_class=row.verdict_kind,
         stream=row.stream_kind if classed else None,
-        pattern=row.stream_pattern_id or row.pattern_id,
+        pattern=row.reported_pattern,
         checks=row.checks,
         elapsed=row.elapsed,
         answer=(
@@ -796,7 +777,7 @@ def run_guardrails(eval_set: LoadedSet, slice_name: str, context: RunContext) ->
         )
         return _slice_result(
             outcomes,
-            (*seed_head, f"door: {exc.problem}", f"Fix: {exc.fix}"),
+            (*seed_head, *failure_lines(exc.fix, f"door: {exc.problem}")),
         )
 
     spec = run.RunSpec(
@@ -865,7 +846,10 @@ def run_guardrails(eval_set: LoadedSet, slice_name: str, context: RunContext) ->
     opening = [*seed_head, f"door: {door_detail}"]
     if frontend.problem is not None:
         opening.extend(
-            (f"frontend signin: {frontend.problem.problem}", f"Fix: {frontend.problem.fix}")
+            failure_lines(
+                frontend.problem.fix,
+                f"frontend signin: {frontend.problem.problem}",
+            )
         )
     elif frontend.detail:
         opening.append(f"frontend signin: {frontend.detail}")

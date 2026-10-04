@@ -26,6 +26,7 @@ from gideon.evaluation.evalset import SET_ROOT, LoadedSet, load_set, select_case
 from gideon.evaluation.results import CaseResult, RunContext
 from gideon.evaluation.turns import run
 from gideon.evaluation.turns.access import TurnAccess
+from gideon.host.render.owui import EVAL_IDENTITY
 from gideon.host.sysio import Host
 
 SENTINEL = "1234abcd"
@@ -141,6 +142,24 @@ def _context(
 class GeneralSmokeRunner(unittest.TestCase):
     """The runner exposes turn facts through results, report, and progress."""
 
+    def test_problem_vocabulary_matches_the_current_runner(self) -> None:
+        self.assertEqual(
+            general_smoke_slice.PROBLEMS,
+            frozenset(
+                {
+                    "turns-unavailable",
+                    "frontend-signin",
+                    "turn-error",
+                    "turn-cut",
+                    "unverified",
+                    "cleanup-failed",
+                    "stream-error",
+                    "stream-leak",
+                    "check-failed",
+                }
+            ),
+        )
+
     def test_all_active_cases_pass_twice_and_keep_content_out_of_outputs(self) -> None:
         loaded = _loaded()
         frontend = SmokeFrontend(loaded, preexisting=1)
@@ -197,6 +216,31 @@ class GeneralSmokeRunner(unittest.TestCase):
             for answer in _FICTIONAL_ANSWERS.values():
                 self.assertNotIn(answer, str(row.metrics))
             self.assertFalse(any("judge" in key.lower() for key in row.metrics))
+
+    def test_turn_with_both_pattern_ids_reports_the_stored_one(self) -> None:
+        loaded = _loaded()
+        case_id = select_cases(loaded, "general-smoke").counted[0]
+        frontend = SmokeFrontend(loaded)
+        _host, context = _context(frontend, [])
+        original = run.frontend_turn
+
+        def both_ids(*args: Any, **kwargs: Any) -> run.TurnRow:
+            row = original(*args, **kwargs)
+            if kwargs["row_name"] == f"{case_id}#1":
+                return replace(
+                    row,
+                    pattern_id="fictional-stored-pattern",
+                    stream_pattern_id="fictional-stream-pattern",
+                )
+            return row
+
+        with patch.object(run, "frontend_turn", side_effect=both_ids):
+            result = general_smoke_slice.run_general_smoke(loaded, "general-smoke", context)
+
+        row = next(
+            row for row in result.results if (row.case_id, row.repeat) == (case_id, 1)
+        )
+        self.assertEqual(row.metrics["pattern"], "fictional-stored-pattern")
 
     def test_failed_checks_fail_the_turn_and_name_the_check_everywhere(self) -> None:
         loaded = _loaded()
@@ -316,6 +360,10 @@ class GeneralSmokeRunner(unittest.TestCase):
         self.assertTrue(all(row.metrics["problem"] == "cleanup-failed" for row in result.results))
         self.assertIn("cleanup-failed", result.report)
         self.assertIn(run.unverified_fix("gideon-eval"), result.report)
+        self.assertEqual(
+            result.report.splitlines()[-2],
+            f"Fix: {run.unverified_fix(EVAL_IDENTITY.username)}",
+        )
 
     def test_checkpoint_stops_before_the_next_turn(self) -> None:
         loaded = _loaded()
@@ -355,8 +403,13 @@ class GeneralSmokeRunner(unittest.TestCase):
             [],
         )
         self.assertEqual(frontend.stream_calls, [])
-        self.assertIn("frontend signin:", result.report)
-        self.assertIn("Fix:", result.report)
+        self.assertEqual(
+            result.report.splitlines()[:2],
+            [
+                "frontend signin: Open WebUI /api/v1/auths/signin returned HTTP 503.",
+                "Fix: Check Open WebUI availability, then retry.",
+            ],
+        )
 
     def test_missing_turn_access_is_deterministic_and_makes_no_host_call(self) -> None:
         loaded = _loaded()

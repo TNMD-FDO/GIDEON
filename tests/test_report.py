@@ -4,7 +4,7 @@ import subprocess
 import unittest
 from dataclasses import fields
 
-from gideon.host.report import Problem, Timeout, command_detail, refusal
+from gideon.host.report import Problem, Timeout, command_detail, failure_lines, refusal
 
 
 class CommandDetail(unittest.TestCase):
@@ -18,6 +18,17 @@ class CommandDetail(unittest.TestCase):
 
     def test_refusal_shape(self) -> None:
         self.assertEqual(refusal("restore", "no set.", "Run it."), "gideon restore: no set. Fix: Run it.")
+
+
+class FailureLines(unittest.TestCase):
+    """A report's failure: its problem line when given, then its fix, nothing collapsed."""
+
+    def test_failure_lines_with_and_without_a_problem(self) -> None:
+        self.assertEqual(failure_lines("Repair\nthis"), ("Fix: Repair\nthis",))
+        self.assertEqual(
+            failure_lines("Repair\nthis", "Problem\nline"),
+            ("Problem\nline", "Fix: Repair\nthis"),
+        )
 
 
 class TimeoutProblem(unittest.TestCase):

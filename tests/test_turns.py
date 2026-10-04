@@ -8,6 +8,7 @@ import threading
 import time
 from collections.abc import Callable
 from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import replace
 from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
@@ -23,12 +24,20 @@ import yaml  # type: ignore[import-untyped]
 
 from gideon import guardrail
 from gideon.api import progress, stamp
-from gideon.evaluation.turns import access, cases, classify, figures, run, session
+from gideon.evaluation.turns import (
+    access,
+    cases,
+    classify,
+    figures,
+    managed,
+    run,
+    session,
+)
 from gideon.host import backuplock, models, owuiturn, secrets, site
 from gideon.host.owui import Client, OwuiError, OwuiTimeout, Response
 from gideon.host.render.ci import CI_PORT, CI_ROOT, CI_SECRETS_DIR
 from gideon.host.render.owui import EVAL_IDENTITY, GENERAL_PRESET_ID
-from gideon.host.report import Problem
+from gideon.host.report import Problem, StageResult
 from gideon.host.secrets import secret_path
 from gideon.host.sysio import Host, LockingHost
 from tools.turns import cli
@@ -764,6 +773,107 @@ class TurnHarness(TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.guardrail = guardrail
+
+    def test_reported_pattern_prefers_the_stored_verdict(self) -> None:
+        row = run.TurnRow(
+            StageResult("turn", True, "done", ""),
+            None,
+            "positive",
+            "leak",
+            False,
+            "chat-1",
+            True,
+            False,
+            "leak",
+            1,
+            None,
+            pattern_id="stored-pattern",
+            stream_pattern_id="stream-pattern",
+        )
+        self.assertEqual(row.reported_pattern, "stored-pattern")
+        self.assertEqual(replace(row, pattern_id=None).reported_pattern, "stream-pattern")
+        self.assertIsNone(
+            replace(row, pattern_id=None, stream_pattern_id=None).reported_pattern
+        )
+
+    def test_managed_read_orders_cleanup_and_cut_with_pattern_on_each_branch(self) -> None:
+        row = run.TurnRow(
+            StageResult("turn", False, "cut", ""),
+            None,
+            "positive",
+            "leak",
+            False,
+            None,
+            False,
+            True,
+            "leak",
+            1,
+            None,
+            cut=True,
+            pattern_id="stored-pattern",
+            stream_pattern_id="stream-pattern",
+        )
+        for candidate, problem in (
+            (row, "unverified"),
+            (replace(row, chat_id="chat-1"), "cleanup-failed"),
+            (replace(row, chat_id="chat-1", deleted=True), "turn-cut"),
+            (replace(row, chat_id="chat-1", deleted=True, cut=False), None),
+        ):
+            with self.subTest(problem=problem):
+                self.assertEqual(managed.read(candidate), managed.Reading(problem, "stored-pattern"))
+        self.assertEqual(managed.PROBLEMS, frozenset({"unverified", "cleanup-failed", "turn-cut"}))
+        self.assertEqual(managed.CLEANUP, frozenset({"unverified", "cleanup-failed"}))
+
+    def test_managed_cleanup_fix_only_for_cleanup_problems(self) -> None:
+        fix = run.unverified_fix(EVAL_IDENTITY.username)
+        self.assertEqual(managed.cleanup_fix((None, "turn-cut", "unverified")), fix)
+        self.assertEqual(managed.cleanup_fix(("cleanup-failed", None)), fix)
+        self.assertIsNone(managed.cleanup_fix((None, "turn-cut")))
+
+    def test_managed_session_signs_in_and_passes_every_fixed_turn_argument(self) -> None:
+        source = seed_case("direct-01")
+        case = cases.Case("direct-01", cast(str, source["prompt"]), "refused", kind="positive")
+        frontend = Frontend(self.guardrail, {case.id: "replaced"})
+        turn_access = access.TurnAccess(PASSWORD, frontend.factory, "1234abcd")
+        suite = managed.ManagedTurns(turn_access, cases=Path("general"), repeat=2, stream=True)
+        self.assertEqual(suite.signin(), "signed in as gideon-eval; leftover chats: 0")
+        with patch.object(run, "frontend_turn", wraps=run.frontend_turn) as turn_spy:
+            row = suite.turn(case, row_name=f"{case.id}#1")
+        self.assertEqual(turn_spy.call_count, 1)
+        args, kwargs = turn_spy.call_args
+        self.assertEqual(
+            args,
+            (run.RunSpec(Path("general"), 2, True, None, False, False, "1234abcd"),),
+        )
+        self.assertEqual(args[0].model, GENERAL_PRESET_ID)
+        self.assertEqual(args[0].stack, "production")
+        self.assertIs(kwargs["client"], suite.client)
+        self.assertIsInstance(kwargs["driver"], run.ApiTurnDriver)
+        self.assertIs(kwargs["driver"].client, suite.client)
+        self.assertIs(kwargs["guardrail"], self.guardrail)
+        self.assertIs(kwargs["case"], case)
+        self.assertEqual(kwargs["session_number"], 1)
+        self.assertEqual(kwargs["row_name"], f"{case.id}#1")
+        self.assertEqual(kwargs["now"]().tzinfo, UTC)
+        self.assertIs(kwargs["monotonic"], time.monotonic)
+        self.assertEqual(row.chat_id, "chat/1")
+        self.assertTrue(row.deleted)
+        self.assertEqual(len(frontend.deleted_chats), 1)
+        self.assertEqual(len([call for call in frontend.calls if call[1] == "/api/v1/auths/signin"]), 1)
+
+    def test_managed_session_propagates_signin_refusal(self) -> None:
+        frontend = Frontend(self.guardrail, {})
+        frontend.refuse_signin_after = 0
+        suite = managed.ManagedTurns(
+            access.TurnAccess(PASSWORD, frontend.factory, "1234abcd"),
+            cases=Path("guardrails"),
+            repeat=1,
+            stream=False,
+        )
+        with self.assertRaises(OwuiError) as raised:
+            suite.signin()
+        self.assertIn("/api/v1/auths/signin", raised.exception.problem)
+        self.assertEqual(raised.exception.fix, "Check Open WebUI availability, then retry.")
 
     def test_entry_help_text_is_byte_stable(self) -> None:
         stdout = StringIO()

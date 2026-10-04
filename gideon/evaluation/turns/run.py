@@ -145,6 +145,12 @@ class TurnRow:
     stream_withdrawn: tuple[classify.StreamTrip, ...] = ()
     answer: str | None = field(default=None, repr=False)
 
+    @property
+    def reported_pattern(self) -> str | None:
+        """Prefer the stored verdict's pattern, which explains the reported class."""
+
+        return self.pattern_id or self.stream_pattern_id
+
 
 class TurnDriver(Protocol):
     """The mode-specific opening and turn behind the one per-case loop.
