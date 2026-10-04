@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.27](docs/release-notes/v0.3.27.md) — 2026-10-04 — the content-addressed store
 - [v0.3.26](docs/release-notes/v0.3.26.md) — 2026-10-04 — the tests read services from the registry
 - [v0.3.25](docs/release-notes/v0.3.25.md) — 2026-10-04 — a turn row read once by both suites
 - [v0.3.24](docs/release-notes/v0.3.24.md) — 2026-10-04 — each backup root behind its kind

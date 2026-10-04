@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+from gideon.host import cas
 from gideon.host.steps import (
     CheckResult,
     Disposition,
@@ -49,6 +50,9 @@ class _DataDirectory:
 _DATA_DIRS: Final[tuple[_DataDirectory, ...]] = (
     _DataDirectory("fast", "gideon", 0o755),
     _DataDirectory("bulk", "gideon", 0o755),
+    _DataDirectory(
+        str(cas.ROOT.relative_to(_DATA_MOUNT)), "gideon", cas.DIRECTORY_MODE
+    ),
     _DataDirectory("work", "gideon", 0o755),
     _DataDirectory("models", "gideon", 0o755),
     _DataDirectory("registry", "gideon", 0o755),

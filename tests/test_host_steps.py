@@ -746,6 +746,9 @@ class DiskLayoutStepTests(unittest.TestCase):
                 "observability",
             )
         }
+        stats["/data/bulk/cas"] = os.stat_result(
+            (0o42770, 0, 0, 0, 998, 998, 0, 0, 0, 0, 0)
+        )
         stats["/data/observability/prometheus"] = os.stat_result(
             (0o40750, 0, 0, 0, 65534, 65534, 0, 0, 0, 0)
         )
@@ -781,6 +784,26 @@ class DiskLayoutStepTests(unittest.TestCase):
         self.assertEqual(len(data_entries), 1)
         recheck = step.check(context(host))
         self.assertEqual(recheck.disposition, Disposition.CONVERGED, recheck)
+        cas_path = "/data/bulk/cas"
+        bulk_chown = host.calls.index(("chown", ("/data/bulk", 998, 998)))
+        self.assertEqual(
+            host.calls[bulk_chown + 1 : bulk_chown + 4],
+            [
+                ("mkdir", (cas_path, 0o2770, False, True)),
+                ("chmod", (cas_path, 0o2770)),
+                ("chown", (cas_path, 998, 998)),
+            ],
+        )
+        correct_cas = host.stats.pop(cas_path)
+        missing_cas = step.check(context(host))
+        self.assertEqual(missing_cas.disposition, Disposition.DRIFT)
+        self.assertIn(cas_path, missing_cas.detail)
+        host.stats[cas_path] = directory_stat(0o770, 998, 998)
+        wrong_mode = step.check(context(host))
+        self.assertEqual(wrong_mode.disposition, Disposition.DRIFT)
+        self.assertIn(cas_path, wrong_mode.detail)
+        self.assertIn("2770", wrong_mode.detail)
+        host.stats[cas_path] = correct_cas
         self.assertIn(
             ("chown", ("/data/observability", 998, 998)),
             host.calls,
@@ -2542,6 +2565,7 @@ class BaselineCheckPass(unittest.TestCase):
                 )
             }
         )
+        host.stats["/data/bulk/cas"] = directory_stat(0o2770, 998, 998)
         result = DiskLayoutStep().check(context(host))
         self.assertEqual(result.disposition, Disposition.DRIFT)
         self.assertIn("/data/observability", result.detail)

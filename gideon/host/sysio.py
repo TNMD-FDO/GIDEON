@@ -4,7 +4,8 @@ Only this module is allowed to call :mod:`subprocess` or perform filesystem
 operations for the host path.  Provisioning code can therefore be exercised
 against a recording or replaying fixture without requiring root or a Linux
 host.  The seam also owns the one advisory lock shared by the ordered backup
-and restore commands.
+and restore commands, and the write-once byte operations the
+content-addressed store is built on.
 """
 
 import contextlib
@@ -82,8 +83,20 @@ class LockingHost(Host, Protocol):
         """Release *path* by closing its descriptor; never unlink the file."""
 
 
+class BytesHost(Host, Protocol):
+    """The host operations for reading and durably creating byte objects."""
+
+    def read_bytes(self, path: PathLike) -> bytes: ...
+
+    def create_exclusive(self, path: PathLike, data: bytes, *, mode: int) -> bool:
+        """Create *path* once; return whether this call created it."""
+
+    def sync_directory(self, path: PathLike) -> None:
+        """Flush a directory's entries to disk."""
+
+
 class RealHost:
-    """The production implementation of :class:`Host` and :class:`LockingHost`."""
+    """The production host operations, advisory lock, and byte-object I/O."""
 
     def __init__(self) -> None:
         self._lock_descriptors: dict[str, int] = {}
@@ -141,6 +154,9 @@ class RealHost:
     def read_text(self, path: PathLike, *, encoding: str = "utf-8") -> str:
         return Path(path).read_text(encoding=encoding)
 
+    def read_bytes(self, path: PathLike) -> bytes:
+        return Path(path).read_bytes()
+
     def write_text(
         self,
         path: PathLike,
@@ -170,6 +186,46 @@ class RealHost:
             with contextlib.suppress(FileNotFoundError):
                 temporary.unlink()
             raise
+
+    def create_exclusive(self, path: PathLike, data: bytes, *, mode: int) -> bool:
+        """Write through a same-directory temporary and hard-link it into place.
+
+        A link refuses an existing path where a rename would replace it, so an
+        existing file is never touched.  The directory is flushed on both
+        outcomes.
+        """
+
+        target = Path(path)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{target.name}.", dir=target.parent
+        )
+        temporary = Path(temporary_name)
+        try:
+            os.fchmod(descriptor, mode)
+            with os.fdopen(descriptor, "wb") as handle:
+                descriptor = -1
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            try:
+                os.link(temporary, target)
+            except FileExistsError:
+                created = False
+            else:
+                created = True
+        finally:
+            if descriptor != -1:
+                os.close(descriptor)
+            temporary.unlink()
+        self.sync_directory(target.parent)
+        return created
+
+    def sync_directory(self, path: PathLike) -> None:
+        descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
     def exists(self, path: PathLike) -> bool:
         return Path(path).exists()
