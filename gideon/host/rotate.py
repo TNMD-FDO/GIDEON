@@ -17,11 +17,11 @@ from typing import Final
 from gideon.host import apply, backuplock, grafana, owui, secrets, weights
 from gideon.host.render import RenderedSet, RenderInputs, render_all
 from gideon.host.render import command as render_command
-from gideon.host.render.compose import ENGINE_READY_SECONDS, service_names
+from gideon.host.render.compose import service_names
 from gideon.host.render.consumers import SecretConsumers, consumers_of
-from gideon.host.render.engine import ENGINE_SERVICE_NAME
 from gideon.host.render.grafana import GRAFANA_ADMIN_USER
 from gideon.host.render.owui import BREAK_GLASS, EVAL_IDENTITY
+from gideon.host.render.services import slow_start_services
 from gideon.host.report import StageResult, print_stage, refusal
 from gideon.host.secrets import registry_entry, secret_path
 from gideon.host.stores import ROLE_SPECS
@@ -256,9 +256,10 @@ def _plan(name: str, entry: secrets.GeneratedSecret, consumers: SecretConsumers)
         )
     parts: list[str] = []
     if consumers.mounts:
+        allowances = slow_start_services()
         mounts = ", ".join(
-            f"{service} (cold start; apply waits up to {ENGINE_READY_SECONDS} s)"
-            if service == ENGINE_SERVICE_NAME
+            f"{service} (cold start; apply waits up to {allowances[service]} s)"
+            if service in allowances
             else f"{service} (seconds)"
             for service in consumers.mounts
         )

@@ -42,14 +42,13 @@ from gideon.host.render.command import (
     render_to_disk,
 )
 from gideon.host.render.compose import (
-    ENGINE_READY_SECONDS,
     STORE_SERVICES,
     service_images,
     service_names,
 )
-from gideon.host.render.engine import ENGINE_SERVICE_NAME
 from gideon.host.render.grafana import GRAFANA_ADMIN_USER
 from gideon.host.render.owui import BREAK_GLASS
+from gideon.host.render.services import slow_start_services
 from gideon.host.report import StageResult, command_detail, print_stage, refusal
 from gideon.host.site import SiteConfig
 from gideon.host.sysio import Host, LockingHost, PathLike, RealHost
@@ -763,20 +762,22 @@ def _verify_stage(
     clock: Callable[[], float],
 ) -> StageResult:
     expected = service_names(context.inputs)
-    engine_healthy_seconds: int | None = None
-    # The engine alone gets the long wait, counted from the start stage on
-    # the same clock as its healthcheck's start_period; every other service
+    slow_start_healthy_seconds: int | None = None
+    allowances = slow_start_services()
+    slow_starters = tuple(service for service in expected if service in allowances)
+    # The slow starters get the long wait, counted from the start stage on
+    # the same clock as their healthchecks' start_period; every other service
     # keeps the default bound, so an unrelated failure is reported within a
-    # minute with its own logs, never after the engine's fifteen.
-    if ENGINE_SERVICE_NAME in expected:
-        without_engine = tuple(
-            service for service in expected if service != ENGINE_SERVICE_NAME
+    # minute with its own logs, never after a slow starter's full allowance.
+    if slow_starters:
+        without_slow_starters = tuple(
+            service for service in expected if service not in allowances
         )
-        if without_engine:
+        if without_slow_starters:
             ready, detail, service = wait_for_services(
                 io,
                 rendered_dir,
-                without_engine,
+                without_slow_starters,
                 sleep,
                 exact=False,
                 require_healthy=False,
@@ -786,24 +787,26 @@ def _verify_stage(
                     "verify", False, detail, _logs_fix(rendered_dir, service)
                 )
 
-        remaining_seconds = ENGINE_READY_SECONDS - (clock() - start_time)
-        engine_attempts = max(
+        remaining_seconds = max(allowances[name] for name in slow_starters) - (
+            clock() - start_time
+        )
+        slow_start_attempts = max(
             1, math.floor(remaining_seconds / _VERIFY_SLEEP_SECONDS)
         )
         ready, detail, service = wait_for_services(
             io,
             rendered_dir,
-            (ENGINE_SERVICE_NAME,),
+            slow_starters,
             sleep,
             exact=False,
             require_healthy=True,
-            attempts=engine_attempts,
+            attempts=slow_start_attempts,
         )
         if not ready:
             return StageResult(
                 "verify", False, detail, _logs_fix(rendered_dir, service)
             )
-        engine_healthy_seconds = math.floor(clock() - start_time)
+        slow_start_healthy_seconds = math.floor(clock() - start_time)
 
         ready, detail, service = wait_for_services(
             io,
@@ -873,8 +876,8 @@ def _verify_stage(
     verify_detail = (
         "Compose services are running, ingress is verified, and Open WebUI and Grafana are ready"
     )
-    if engine_healthy_seconds is not None:
-        verify_detail += f", engine healthy {engine_healthy_seconds} s after start"
+    if slow_start_healthy_seconds is not None:
+        verify_detail += f", engine healthy {slow_start_healthy_seconds} s after start"
     return StageResult(
         "verify",
         True,

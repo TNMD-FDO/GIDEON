@@ -1,7 +1,7 @@
 """SearXNG's identity and its three rendered files.
 
 The service name, port, secret name, and probe job name are shared by
-the Compose service in ``render/compose.py``, the frontend's search connection
+the Compose definition in ``render/services/searxng.py``, the frontend's search connection
 in ``render/owui.py``, and the probe in ``render/prometheus.py``; they live
 here so those modules name the service without importing the document
 builder. All three artifacts exist only while ``web.search`` is on — the
