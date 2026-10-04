@@ -43,6 +43,7 @@ from gideon.host.render.caddy import CaddyfileArtifact
 from gideon.host.render.command import (
     AppliedManifest,
     RecreateJudgment,
+    SecretPart,
     compose_digests,
     manifest_document,
     read_applied_manifest,
@@ -59,6 +60,7 @@ from gideon.host.render.compose import (
     OWUI_COMMAND,
     UNIT_PATTERN,
     ComposeArtifact,
+    compose_top_level,
     engine_command,
     engine_service,
     engine_wrapper,
@@ -66,6 +68,7 @@ from gideon.host.render.compose import (
     service_images,
     service_names,
 )
+from gideon.host.render.consumers import secret_consumers
 from gideon.host.render.drill import drill_compose_document
 from gideon.host.render.engine import (
     ENGINE_JOB_NAME,
@@ -97,6 +100,7 @@ from gideon.host.render.prometheus import (
     PrometheusConfigArtifact,
 )
 from gideon.host.render.searxng import SEARXNG_JOB_NAME, searxng_health_url
+from gideon.host.render.yamlout import dump_fragment
 from gideon.host.site import SiteConfig, load_site
 from gideon.host.sysio import Command, PathLike
 
@@ -1479,6 +1483,59 @@ class RenderCommand(unittest.TestCase):
             out,
         )
 
+    def test_diff_reason_lines_for_first_apply_mapless_record_and_clean_record(self) -> None:
+        """The unchanged recreate row is followed only by reasons that name services."""
+
+        host = DirHost(checkout_files())
+        names = ", ".join(service_names(inputs()))
+        row = f"Services apply would recreate: {names}"
+        code, out, err = render(host, diff=True)
+        self.assertEqual((code, err), (0, ""))
+        lines = out.splitlines()
+        self.assertEqual(lines[lines.index(row) + 1], f"  first apply: {names}")
+        self.assertTrue(lines[lines.index(row) + 2].startswith("Summary:"))
+
+        self.assertEqual(render(host)[0], 0)
+        applied = yaml.safe_load(host.files[f"{RENDERED}/manifest.yaml"])
+        del applied["services"]
+        del applied["top_level"]
+        host.files[f"{RENDERED}/applied.yaml"] = yaml.safe_dump(applied, sort_keys=False)
+        code, out, err = render(host, diff=True)
+        self.assertEqual((code, err), (0, ""))
+        lines = out.splitlines()
+        self.assertEqual(lines[lines.index(row) + 1], f"  changed compose block: {names}")
+        self.assertTrue(lines[lines.index(row) + 2].startswith("Summary:"))
+
+        host.files[f"{RENDERED}/applied.yaml"] = host.files[f"{RENDERED}/manifest.yaml"]
+        code, out, err = render(host, diff=True)
+        self.assertEqual((code, err), (0, ""))
+        lines = out.splitlines()
+        self.assertIn("Services apply would recreate: none", lines)
+        self.assertTrue(
+            lines[lines.index("Services apply would recreate: none") + 1].startswith("Summary:")
+        )
+
+    def test_diff_names_changed_secret_entry_and_only_its_mounters(self) -> None:
+        """A changed entry prints its name and mounters beneath the recreate row."""
+
+        host = DirHost(checkout_files())
+        self.assertEqual(render(host)[0], 0)
+        applied = yaml.safe_load(host.files[f"{RENDERED}/manifest.yaml"])
+        applied["top_level"] = "0" * 64
+        applied["top_level_parts"]["secrets"][ENGINE_SECRET_NAME]["sha256"] = "0" * 64
+        host.files[f"{RENDERED}/applied.yaml"] = yaml.safe_dump(applied, sort_keys=False)
+        code, out, err = render(host, diff=True)
+        self.assertEqual((code, err), (0, ""))
+        names = f"{ENGINE_SERVICE_NAME}, {API_SERVICE_NAME}"
+        lines = out.splitlines()
+        row = f"Services apply would recreate: {names}"
+        self.assertIn(row, lines)
+        self.assertEqual(
+            lines[lines.index(row) + 1],
+            f"  changed compose secrets ({ENGINE_SECRET_NAME}): {names}",
+        )
+        self.assertTrue(lines[lines.index(row) + 2].startswith("Summary:"))
+
     def test_emitter_failure_is_a_refusal_not_a_traceback(self) -> None:
         files = checkout_files()
         files[SITE] += "\nregistry: http://user:pw@ghcr.io\n"
@@ -1503,6 +1560,13 @@ class RecreateRule(unittest.TestCase):
             files[rendered.relative_path] = {"sha256": digest, "owners": list(rendered.owners)}
         digests = compose_digests(rendered_inputs)
         return AppliedManifest(files, digests.services, digests.top_level)
+
+    def applied_with_parts(self) -> AppliedManifest:
+        """A verified record carrying the candidate's top-level parts."""
+
+        return replace(
+            self.applied(), top_level_parts=compose_digests(inputs()).top_level_parts
+        )
 
     def judgment(
         self,
@@ -1640,6 +1704,164 @@ class RecreateRule(unittest.TestCase):
             ("caddy", "searxng"),
         )
 
+    def test_changed_secret_entry_names_both_engine_key_mounters(self) -> None:
+        """An entry change selects its mounts even when blocks are equal."""
+
+        applied = self.applied_with_parts()
+        assert applied.top_level_parts is not None
+        parts = applied.top_level_parts
+        recorded = dict(parts.secrets)
+        recorded[ENGINE_SECRET_NAME] = replace(recorded[ENGINE_SECRET_NAME], sha256="0" * 64)
+        applied = replace(
+            applied,
+            top_level="0" * 64,
+            top_level_parts=replace(parts, secrets=recorded),
+        )
+        judgment = self.judgment(applied)
+        self.assertEqual(
+            judgment.secrets, (ENGINE_SERVICE_NAME, API_SERVICE_NAME)
+        )
+        self.assertEqual(judgment.services, judgment.secrets)
+        self.assertEqual(judgment.changed_entries, (ENGINE_SECRET_NAME,))
+        self.assertEqual(judgment.block, ())
+        self.assertEqual(judgment.top_level, ())
+
+    def test_secret_reorder_does_not_trigger_whole_file_fallback(self) -> None:
+        """A reordered declaration with equal entries selects no service."""
+
+        applied = self.applied_with_parts()
+        assert applied.top_level_parts is not None
+        parts = applied.top_level_parts
+        self.assertGreater(len(parts.secrets), 1)
+        reordered = dict(reversed(tuple(parts.secrets.items())))
+        files = dict(applied.files)
+        files["compose.yaml"] = {"sha256": "0" * 64, "owners": []}
+        judgment = self.judgment(
+            replace(
+                applied,
+                files=files,
+                top_level="0" * 64,
+                top_level_parts=replace(parts, secrets=reordered),
+            )
+        )
+        self.assertEqual(judgment.services, ())
+        self.assertEqual(judgment.secrets, ())
+        self.assertEqual(judgment.top_level, ())
+        self.assertEqual(judgment.changed_entries, ())
+
+    def test_changed_static_part_names_every_service_even_with_secret_change(self) -> None:
+        """A static move takes precedence over a changed secret entry."""
+
+        applied = self.applied_with_parts()
+        assert applied.top_level_parts is not None
+        parts = applied.top_level_parts
+        name = next(iter(parts.secrets))
+        changed_secrets = dict(parts.secrets)
+        changed_secrets[name] = replace(changed_secrets[name], sha256="0" * 64)
+        for recorded_entries in (parts.secrets, changed_secrets):
+            with self.subTest(secret_changed=recorded_entries is changed_secrets):
+                judgment = self.judgment(
+                    replace(
+                        applied,
+                        top_level="0" * 64,
+                        top_level_parts=replace(
+                            parts, static="0" * 64, secrets=recorded_entries
+                        ),
+                    )
+                )
+                self.assertEqual(judgment.services, service_names(inputs()))
+                self.assertEqual(judgment.top_level, judgment.services)
+                self.assertEqual(judgment.secrets, ())
+                self.assertEqual(judgment.changed_entries, ())
+
+    def test_unattributed_top_level_move_names_every_service(self) -> None:
+        """Old or unexplained records retain the shared top-level rule."""
+
+        with_parts = self.applied_with_parts()
+        for applied in (replace(with_parts, top_level_parts=None), with_parts):
+            with self.subTest(parts_present=applied.top_level_parts is not None):
+                judgment = self.judgment(replace(applied, top_level="0" * 64))
+                self.assertEqual(judgment.services, service_names(inputs()))
+                self.assertEqual(judgment.top_level, judgment.services)
+                self.assertEqual(judgment.secrets, ())
+                self.assertEqual(judgment.changed_entries, ())
+
+    def test_removed_secret_with_departed_mounter_names_no_current_service(self) -> None:
+        """A former mount outside the current service set is dropped."""
+
+        applied = self.applied_with_parts()
+        assert applied.top_level_parts is not None
+        parts = applied.top_level_parts
+        recorded = dict(parts.secrets)
+        recorded["example_departed_key"] = SecretPart("0" * 64, ("retired-service",))
+        judgment = self.judgment(
+            replace(
+                applied,
+                top_level="0" * 64,
+                top_level_parts=replace(parts, secrets=recorded),
+            )
+        )
+        self.assertEqual(judgment.changed_entries, ("example_departed_key",))
+        self.assertEqual(judgment.services, ())
+        self.assertEqual(judgment.secrets, ())
+        self.assertEqual(judgment.top_level, ())
+
+    def test_manifest_records_ordered_secret_parts_and_mounters(self) -> None:
+        """The serialized record preserves entry order and mount order."""
+
+        rendered_inputs = inputs()
+        document = yaml.safe_load(
+            manifest_document(
+                self.rendered(),
+                rendered_inputs,
+                site_text=EXAMPLE.read_text(),
+                lock_text=(ROOT / "host.lock").read_text(),
+                models_lock_text=(ROOT / "models.lock").read_text(),
+            )
+        )
+        top_level = compose_top_level(rendered_inputs)
+        entries = top_level["secrets"]
+        assert isinstance(entries, Mapping)
+        parts = document["top_level_parts"]
+        keys = tuple(document)
+        self.assertEqual(keys[keys.index("top_level") + 1], "top_level_parts")
+        self.assertEqual(tuple(parts), ("static", "secrets"))
+        self.assertEqual(tuple(parts["secrets"]), tuple(entries))
+        static = {name: value for name, value in top_level.items() if name != "secrets"}
+        self.assertEqual(
+            parts["static"], hashlib.sha256(dump_fragment(static).encode()).hexdigest()
+        )
+        consumers = secret_consumers(rendered_inputs)
+        for name, entry in entries.items():
+            with self.subTest(secret=name):
+                part = parts["secrets"][name]
+                assert isinstance(entry, Mapping)
+                self.assertEqual(tuple(part), ("sha256", "mounts"))
+                self.assertEqual(
+                    part["sha256"], hashlib.sha256(dump_fragment(entry).encode()).hexdigest()
+                )
+                self.assertEqual(part["mounts"], list(consumers[name].mounts))
+
+    def test_written_manifest_read_back_judges_empty(self) -> None:
+        """A persisted candidate record attributes no pending change."""
+
+        rendered_inputs = inputs()
+        document = manifest_document(
+            self.rendered(),
+            rendered_inputs,
+            site_text=EXAMPLE.read_text(),
+            lock_text=(ROOT / "host.lock").read_text(),
+            models_lock_text=(ROOT / "models.lock").read_text(),
+        )
+        path = Path(f"{RENDERED}/applied.yaml")
+        applied = read_applied_manifest(DirHost({str(path): document}), path)
+        self.assertIsNotNone(applied)
+        assert applied is not None
+        self.assertIsNotNone(applied.top_level_parts)
+        judgment = self.judgment(applied)
+        self.assertEqual(judgment.services, ())
+        self.assertEqual(judgment.changed_entries, ())
+
     def test_applied_manifest_absent_vs_corrupt(self) -> None:
         host = DirHost({})
         self.assertIsNone(read_applied_manifest(host, Path(f"{RENDERED}/applied.yaml")))
@@ -1656,6 +1878,27 @@ class RecreateRule(unittest.TestCase):
             with self.subTest(text=text):
                 host = DirHost({f"{RENDERED}/applied.yaml": text})
                 with self.assertRaises((TypeError, ValueError)):
+                    read_applied_manifest(host, Path(f"{RENDERED}/applied.yaml"))
+        invalid_parts: tuple[object, ...] = (
+            None,
+            [],
+            {"secrets": {}},
+            {"static": 1, "secrets": {}},
+            {"static": "digest"},
+            {"static": "digest", "secrets": []},
+            {"static": "digest", "secrets": {"example_key": []}},
+            {"static": "digest", "secrets": {1: {"sha256": "digest", "mounts": []}}},
+            {"static": "digest", "secrets": {"example_key": {"mounts": []}}},
+            {"static": "digest", "secrets": {"example_key": {"sha256": 1, "mounts": []}}},
+            {"static": "digest", "secrets": {"example_key": {"sha256": "digest"}}},
+            {"static": "digest", "secrets": {"example_key": {"sha256": "digest", "mounts": "service"}}},
+            {"static": "digest", "secrets": {"example_key": {"sha256": "digest", "mounts": [1]}}},
+        )
+        for parts in invalid_parts:
+            with self.subTest(parts=parts):
+                text = yaml.safe_dump({"files": {}, "top_level_parts": parts})
+                host = DirHost({f"{RENDERED}/applied.yaml": text})
+                with self.assertRaisesRegex(TypeError, "top_level_parts"):
                     read_applied_manifest(host, Path(f"{RENDERED}/applied.yaml"))
 
 

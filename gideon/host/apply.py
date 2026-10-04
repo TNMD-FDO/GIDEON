@@ -433,15 +433,9 @@ def _recreate_detail(
 
     if not services:
         return none_text
-    if judgment.first_apply:
-        return f"recreated {', '.join(services)}: first apply"
     clauses = [
         (label, [service for service in services if service in covered])
-        for label, covered in (
-            ("changed rendered files", judgment.files),
-            ("changed compose block", judgment.block),
-            ("changed compose top-level", judgment.top_level),
-        )
+        for label, covered in judgment.reasons()
     ]
     clauses = [(label, members) for label, members in clauses if members]
     if len(clauses) == 1:

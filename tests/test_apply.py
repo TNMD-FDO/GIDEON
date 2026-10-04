@@ -805,6 +805,31 @@ class HappyPath(unittest.TestCase):
             )
             self.assertIn(recreate, argv_calls(host))
 
+    def test_secret_entry_and_block_change_recreate_only_the_mounter(self) -> None:
+        """A service selected twice is force recreated once with both reasons."""
+
+        host = ApplyHost(healthy_commands(), base_files())
+        self.assertEqual(apply(host)[0], 0)
+        applied = yaml.safe_load(host.files[f"{RENDERED}/applied.yaml"])
+        applied["services"]["grafana"] = "0" * 64
+        applied["top_level"] = "0" * 64
+        applied["top_level_parts"]["secrets"]["grafana_admin_password"]["sha256"] = "0" * 64
+        host.files[f"{RENDERED}/applied.yaml"] = yaml.safe_dump(applied, sort_keys=False)
+        host.calls.clear()
+
+        code, out, err = apply(host)
+
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertIn(
+            "start: ok — recreated grafana: changed compose block (grafana); "
+            "changed compose secrets (grafana)",
+            out,
+        )
+        self.assertEqual(
+            [call for call in argv_calls(host) if "--force-recreate" in call],
+            [tuple(compose_argv(RENDERED, "up", "-d", "--no-deps", "--force-recreate", "grafana"))],
+        )
+
     def test_mixed_recreate_reasons_are_grouped_in_fixed_order(self) -> None:
         host = ApplyHost(healthy_commands(), base_files())
         self.assertEqual(apply(host)[0], 0)

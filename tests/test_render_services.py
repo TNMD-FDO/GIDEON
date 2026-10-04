@@ -1,5 +1,6 @@
 """Behavior of the ordered Compose service definitions."""
 
+import hashlib
 import json
 import unittest
 from collections.abc import Mapping
@@ -22,10 +23,17 @@ from test_render import EXAMPLE, SECOND, inputs
 from gideon.host import apply as apply_module
 from gideon.host.images import RegistryTarget, parse_registry, reference
 from gideon.host.models import MemoryRow
-from gideon.host.render import RenderInputs
+from gideon.host.render import RenderedFile, RenderedSet, RenderInputs
 from gideon.host.render.api import API_SECRET_NAME, API_SERVICE_NAME
+from gideon.host.render.command import (
+    AppliedManifest,
+    ComposeDigests,
+    compose_digests,
+    recreate_judgment,
+)
 from gideon.host.render.compose import (
     STORE_SERVICES,
+    ComposeArtifact,
     compose_top_level,
     service_blocks,
     service_images,
@@ -166,6 +174,100 @@ class Registry(unittest.TestCase):
                             for name in expected
                         },
                     )
+
+    def test_secret_joining_or_leaving_a_block_names_its_mounter(self) -> None:
+        """The changed block and secret entry select their one mounter."""
+
+        secret_name = "example_secret"
+
+        class FirstService(ServiceDefinition):
+            name = "example-first"
+
+            def __init__(self, mounts_secret: bool) -> None:
+                self.mounts_secret = mounts_secret
+
+            def block(
+                self, inputs: RenderInputs, target: RegistryTarget
+            ) -> Mapping[str, object]:
+                block: dict[str, object] = {"image": "example.invalid/first"}
+                if self.mounts_secret:
+                    block["secrets"] = [secret_name]
+                return block
+
+        class SecondService(ServiceDefinition):
+            name = "example-second"
+
+            def block(
+                self, inputs: RenderInputs, target: RegistryTarget
+            ) -> Mapping[str, object]:
+                return {"image": "example.invalid/second"}
+
+        base = inputs()
+        gb = base.profile.memory[0].gb
+        profile = replace(
+            base.profile,
+            memory=(
+                MemoryRow(FirstService.name, gb, None),
+                MemoryRow(SecondService.name, gb, None),
+            ),
+        )
+        rendered_inputs = replace(base, profile=profile)
+
+        def state(mounts_secret: bool) -> tuple[RenderedSet, ComposeDigests]:
+            with patch(
+                "gideon.host.render.services.SERVICES",
+                [FirstService(mounts_secret), SecondService()],
+            ):
+                artifact = ComposeArtifact()
+                rendered = RenderedSet(
+                    (
+                        RenderedFile(
+                            artifact.relative_path,
+                            artifact.emit(rendered_inputs),
+                            artifact.mode,
+                            artifact.owners,
+                        ),
+                    )
+                )
+                return rendered, compose_digests(rendered_inputs)
+
+        for before, after in ((False, True), (True, False)):
+            with self.subTest(joining=after):
+                previous_rendered, previous_digests = state(before)
+                current_rendered, current_digests = state(after)
+                applied = AppliedManifest(
+                    files={
+                        "compose.yaml": {
+                            "sha256": hashlib.sha256(
+                                previous_rendered.by_path["compose.yaml"].content.encode()
+                            ).hexdigest(),
+                            "owners": [],
+                        }
+                    },
+                    services=previous_digests.services,
+                    top_level=previous_digests.top_level,
+                    top_level_parts=previous_digests.top_level_parts,
+                )
+                judgment = recreate_judgment(
+                    current_rendered,
+                    applied,
+                    tuple(current_digests.services),
+                    current_digests,
+                )
+                self.assertEqual(judgment.services, (FirstService.name,))
+                self.assertEqual(judgment.block, (FirstService.name,))
+                self.assertEqual(judgment.secrets, (FirstService.name,))
+                self.assertEqual(judgment.top_level, ())
+                self.assertEqual(judgment.changed_entries, (secret_name,))
+                self.assertEqual(judgment.files, ())
+                source_parts = (
+                    current_digests.top_level_parts
+                    if after
+                    else previous_digests.top_level_parts
+                )
+                self.assertEqual(
+                    source_parts.secrets[secret_name].mounts, (FirstService.name,)
+                )
 
     def test_names_are_unique_and_nonempty(self) -> None:
         names = all_service_names()

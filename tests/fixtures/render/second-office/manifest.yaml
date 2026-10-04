@@ -175,3 +175,48 @@ services:
   cadvisor: "7bd0e221d909e45fc1555750f1839250774b89d6333a0fb7b0443bcca62ec837"
   blackbox-exporter: "5b3942cc5a72cac952fe8085233662b727ad6e9ee6caf933d7f4590572db8024"
 top_level: "2f8ae6e0eb80640361f0f456fde3288fea322010a756dbf71df53b006e4a4514"
+top_level_parts:
+  static: "0642157a4acd76578712e56d5b1878c477e770bbd149ffe108b067427ca78f36"
+  secrets:
+    tls_key:
+      sha256: "7f0573b4c1802e8ff8b41a7577595a36ff897f93a664cbda3c291a1da8cd17cf"
+      mounts:
+        - "caddy"
+    grafana_admin_password:
+      sha256: "a391a06547292cae5d49086bdf79ba483da0b0cb0f7b3bf0e767b17f0ed1f8dd"
+      mounts:
+        - "grafana"
+    ldap_bind_password:
+      sha256: "4846da086aafafb7753cf184b212dad76c80579723b1fe60b0ebffeb44cef478"
+      mounts:
+        - "grafana"
+    postgres_gideon_ro_metrics_password:
+      sha256: "0c10c5ef6e7295d4020d9375ab656dbc55906a64fc24941d394f18430f69d26d"
+      mounts:
+        - "grafana"
+        - "postgres-exporter"
+    smtp_password:
+      sha256: "ac498b5f3ddf4de4fa59d21ed73eca1bc0dec36ea94afcb04da225ca01ce183f"
+      mounts:
+        - "grafana"
+    postgres_superuser_password:
+      sha256: "1e5f8715568749fcabbf9434f6388683eb72421e22d36edf980a9dae5f57d652"
+      mounts:
+        - "postgres"
+    webui_secret_key:
+      sha256: "ea4ab28e0ad8e72131740833ac2759dafd6de5b2bdb599e4b633ada952650441"
+      mounts:
+        - "open-webui"
+    engine_api_key:
+      sha256: "74d16b21e3eade386e3290d3b792af76ffb736c880b8b542525217d3e5bf8c9d"
+      mounts:
+        - "gideon-generator"
+        - "gideon-api"
+    gideon_api_key:
+      sha256: "b1f5f536032e9f7587130ee2adafafabe82444e7e53b3d3421a2440dcc3382c7"
+      mounts:
+        - "gideon-api"
+    postgres_gideon_audit_password:
+      sha256: "7c04d633f705cafaa051c26b01ee3b2bffd595ff1ff778172fe54343fdcb9ecb"
+      mounts:
+        - "gideon-api"

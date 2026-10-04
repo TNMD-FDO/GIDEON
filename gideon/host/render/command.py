@@ -9,7 +9,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
-from typing import Final, cast
+from typing import ClassVar, Final, cast
 
 import yaml  # type: ignore[import-untyped]
 
@@ -28,6 +28,7 @@ from gideon.host.render.compose import (
     service_blocks,
     service_names,
 )
+from gideon.host.render.consumers import secret_consumers
 from gideon.host.render.facts import FactsError, HostFacts, gather_facts
 from gideon.host.render.owui import OWUI_SECRET_NAMES
 from gideon.host.render.proxy import PROXY_AUTH_NAME
@@ -176,38 +177,76 @@ def _sha256(text: str) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class SecretPart:
+    """One top-level secret entry's digest and its mounting services."""
+
+    sha256: str
+    mounts: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class TopLevelParts:
+    """The non-secret top level and its ordered secret entries."""
+
+    static: str
+    secrets: Mapping[str, SecretPart]
+
+
+@dataclass(frozen=True, slots=True)
 class ComposeDigests:
-    """The candidate's service-block and Compose top-level digests."""
+    """The candidate's service-block and whole and parted top-level digests."""
 
     services: Mapping[str, str]
     top_level: str
+    top_level_parts: TopLevelParts
 
 
 @dataclass(frozen=True, slots=True)
 class AppliedManifest:
-    """The last verified apply's file and optional Compose digest records."""
+    """The last verified apply's files and optional Compose digest records."""
 
     files: Mapping[str, Mapping[str, object]]
     services: Mapping[str, str] | None
     top_level: str | None
+    top_level_parts: TopLevelParts | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class RecreateJudgment:
     """The ordered recreate union and the reasons that selected its services."""
 
+    SECRETS_REASON: ClassVar[str] = "changed compose secrets"
+
     services: tuple[str, ...]
     files: tuple[str, ...]
     block: tuple[str, ...]
     top_level: tuple[str, ...]
     first_apply: bool
+    secrets: tuple[str, ...] = ()
+    changed_entries: tuple[str, ...] = ()
+
+    def reasons(self) -> tuple[tuple[str, tuple[str, ...]], ...]:
+        """Return nonempty recreate reasons in the order shown to operators."""
+
+        if self.first_apply:
+            return (("first apply", self.services),) if self.services else ()
+        return tuple(
+            (label, services)
+            for label, services in (
+                ("changed rendered files", self.files),
+                ("changed compose block", self.block),
+                (self.SECRETS_REASON, self.secrets),
+                ("changed compose top-level", self.top_level),
+            )
+            if services
+        )
 
 
 def compose_digests(inputs: RenderInputs) -> ComposeDigests:
-    """The candidate's digests: one per service block, one over the top-level sections.
+    """Digest each service block, the whole top level, and its separate parts.
 
-    Each is the sha256 of the deterministic serializer's header-less text, so
-    a digest is a function of the block alone.
+    Each digest hashes the deterministic serializer's header-less text. Secret
+    parts contain the entry and its mounters, never the secret's value.
     """
 
     blocks = service_blocks(inputs)
@@ -216,9 +255,23 @@ def compose_digests(inputs: RenderInputs) -> ComposeDigests:
         if not isinstance(block, Mapping):
             raise TypeError(f"Compose service block is not a mapping: {name}")
         services[name] = _sha256(dump_fragment(block))
+    top_level = compose_top_level(inputs)
+    secret_entries = top_level["secrets"]
+    if not isinstance(secret_entries, Mapping):
+        raise TypeError("Compose top-level secrets is not a mapping")
+    consumers = secret_consumers(inputs)
+    secrets: dict[str, SecretPart] = {}
+    for name, entry in secret_entries.items():
+        if not isinstance(name, str) or not isinstance(entry, Mapping):
+            raise TypeError("Compose top-level secret entry is not a named mapping")
+        if name not in consumers:
+            raise ValueError(f"Compose top-level secret has no consumer: {name}")
+        secrets[name] = SecretPart(_sha256(dump_fragment(entry)), consumers[name].mounts)
+    static = {name: value for name, value in top_level.items() if name != "secrets"}
     return ComposeDigests(
         services=services,
-        top_level=_sha256(dump_fragment(compose_top_level(inputs))),
+        top_level=_sha256(dump_fragment(top_level)),
+        top_level_parts=TopLevelParts(_sha256(dump_fragment(static)), secrets),
     )
 
 
@@ -255,6 +308,13 @@ def _manifest_mapping(
         "files": files,
         "services": dict(digests.services),
         "top_level": digests.top_level,
+        "top_level_parts": {
+            "static": digests.top_level_parts.static,
+            "secrets": {
+                name: {"sha256": part.sha256, "mounts": list(part.mounts)}
+                for name, part in digests.top_level_parts.secrets.items()
+            },
+        },
     }
 
 
@@ -377,8 +437,8 @@ def _current_classification(
 
 def _manifest_digests(
     document: object, path: Path
-) -> tuple[Mapping[str, str] | None, str | None]:
-    """The record's Compose digests: each None when its key is absent, a refusal when malformed."""
+) -> tuple[Mapping[str, str] | None, str | None, TopLevelParts | None]:
+    """Read optional Compose digests, refusing any present malformed field."""
 
     if not isinstance(document, Mapping):
         raise TypeError(f"manifest is not a mapping: {path}")
@@ -397,24 +457,47 @@ def _manifest_digests(
         if not isinstance(top_level_value, str):
             raise TypeError(f"manifest top_level is not a string: {path}")
         top_level = top_level_value
-    return services, top_level
+    top_level_parts: TopLevelParts | None = None
+    if "top_level_parts" in document:
+        parts_value = document["top_level_parts"]
+        if not isinstance(parts_value, Mapping):
+            raise TypeError(f"manifest top_level_parts is not a mapping: {path}")
+        static = parts_value.get("static")
+        secrets_value = parts_value.get("secrets")
+        if not isinstance(static, str) or not isinstance(secrets_value, Mapping):
+            raise TypeError(f"manifest top_level_parts has invalid fields: {path}")
+        secrets: dict[str, SecretPart] = {}
+        for name, part_value in secrets_value.items():
+            if not isinstance(name, str) or not isinstance(part_value, Mapping):
+                raise TypeError(f"manifest top_level_parts has invalid secrets: {path}")
+            digest = part_value.get("sha256")
+            mounts = part_value.get("mounts")
+            if not isinstance(digest, str) or not isinstance(mounts, list) or not all(
+                isinstance(mount, str) for mount in mounts
+            ):
+                raise TypeError(f"manifest top_level_parts has invalid secret entry: {path}")
+            secrets[name] = SecretPart(digest, tuple(mounts))
+        top_level_parts = TopLevelParts(static, secrets)
+    return services, top_level, top_level_parts
 
 
 def read_applied_manifest(host: Host, path: Path) -> AppliedManifest | None:
     """The record of the last apply that verified, or None when none has.
 
-    The files, and the Compose digests when the record carries them (a record
-    written before they existed reads as every block changed).  A present but
-    unreadable or malformed record raises: it is never treated as absent,
-    because absence means "recreate everything".
+    A record written before the digest fields existed reads without them. A
+    present but unreadable or malformed record raises: it is never treated as
+    absent, because absence means "recreate everything".
     """
 
     if not host.exists(path):
         return None
     document = _load_manifest(host, path)
-    services, top_level = _manifest_digests(document, path)
+    services, top_level, top_level_parts = _manifest_digests(document, path)
     return AppliedManifest(
-        files=_manifest_files(document, path), services=services, top_level=top_level
+        files=_manifest_files(document, path),
+        services=services,
+        top_level=top_level,
+        top_level_parts=top_level_parts,
     )
 
 
@@ -424,11 +507,11 @@ def recreate_judgment(
     current_services: Iterable[str],
     digests: ComposeDigests,
 ) -> RecreateJudgment:
-    """Judge file owners, Compose blocks, and Compose top level against the record.
+    """Judge file, block, secret-entry, and shared top-level owners against the record.
 
     The applied record is the only reference: the disk may have changed through
-    a standalone render.  A service owns its rendered files, its Compose block,
-    and the Compose top level jointly with every other current service.
+    a standalone render. A changed secret entry names its current and recorded
+    mounters; other top-level changes name every current service.
     """
 
     ordered = tuple(dict.fromkeys(current_services))
@@ -436,9 +519,7 @@ def recreate_judgment(
         return RecreateJudgment(ordered, (), (), (), True)
 
     if applied.services is None:
-        return RecreateJudgment(
-            ordered, (), ordered, (), False
-        )
+        return RecreateJudgment(ordered, (), ordered, (), False)
 
     file_services: set[str] = set()
     for rendered_file in rendered.files:
@@ -457,13 +538,37 @@ def recreate_judgment(
         for service, digest in digests.services.items()
         if applied.services.get(service) != digest
     }
-    top_level_changed = applied.top_level is None or applied.top_level != digests.top_level
-    compose_entry = applied.files.get("compose.yaml")
-    compose_changed = compose_entry is None or compose_entry.get("sha256") != _sha256(
-        rendered.by_path["compose.yaml"].content
-    )
-    if not top_level_changed and compose_changed and not block_services:
+    top_level_changed = False
+    changed_entries: tuple[str, ...] = ()
+    secret_services: set[str] = set()
+    if applied.top_level == digests.top_level:
+        compose_entry = applied.files.get("compose.yaml")
+        compose_changed = compose_entry is None or compose_entry.get("sha256") != _sha256(
+            rendered.by_path["compose.yaml"].content
+        )
+        top_level_changed = compose_changed and not block_services
+    elif applied.top_level is None or applied.top_level_parts is None:
         top_level_changed = True
+    else:
+        candidate = digests.top_level_parts
+        recorded = applied.top_level_parts
+        if candidate.static != recorded.static:
+            top_level_changed = True
+        else:
+            changed_entries = tuple(
+                name
+                for name, part in candidate.secrets.items()
+                if name not in recorded.secrets
+                or part.sha256 != recorded.secrets[name].sha256
+            ) + tuple(name for name in recorded.secrets if name not in candidate.secrets)
+            for name in changed_entries:
+                if name in candidate.secrets:
+                    secret_services.update(candidate.secrets[name].mounts)
+                if name in recorded.secrets:
+                    secret_services.update(recorded.secrets[name].mounts)
+            # No entry differs: a reorder names no one; anything else is unexplained.
+            if not changed_entries and tuple(candidate.secrets) == tuple(recorded.secrets):
+                top_level_changed = True
 
     def current(values: Iterable[str]) -> tuple[str, ...]:
         selected = set(values)
@@ -471,9 +576,10 @@ def recreate_judgment(
 
     files = current(file_services)
     block = current(block_services)
+    secrets = current(secret_services)
     top_level = ordered if top_level_changed else ()
-    union = current((*files, *block, *top_level))
-    return RecreateJudgment(union, files, block, top_level, False)
+    union = current((*files, *block, *secrets, *top_level))
+    return RecreateJudgment(union, files, block, top_level, False, secrets, changed_entries)
 
 
 def recreate_services(
@@ -484,9 +590,9 @@ def recreate_services(
 ) -> tuple[str, ...]:
     """Return the tuple view of the applied-record recreate judgment.
 
-    The three owners are rendered-file owners, each service's Compose block,
-    and the Compose top level shared by all services.  The judgment reads the
-    applied record only; what a standalone render left on disk is irrelevant.
+    The four owners are rendered files, each service's Compose block, changed
+    secret entries' mounters, and the rest of the Compose top level jointly.
+    The judgment reads the applied record only; a standalone render is irrelevant.
     """
 
     return recreate_judgment(rendered, applied, current_services, digests).services
@@ -496,7 +602,7 @@ def _print_diff(
     rendered_dir: Path,
     rendered: RenderedSet,
     classifications: list[tuple[str, FileChange, str]],
-    services: tuple[str, ...],
+    judgment: RecreateJudgment,
     stale: set[str],
 ) -> None:
     for relative_path, change, existing in classifications:
@@ -513,7 +619,14 @@ def _print_diff(
             tofile=os.fspath(rendered_dir / relative_path),
         )
         sys.stdout.write("".join(diff))
-    print(f"Services apply would recreate: {', '.join(services) or 'none'}")
+    print(f"Services apply would recreate: {', '.join(judgment.services) or 'none'}")
+    for label, services in judgment.reasons():
+        entries = (
+            f" ({', '.join(judgment.changed_entries)})"
+            if label == judgment.SECRETS_REASON
+            else ""
+        )
+        print(f"  {label}{entries}: {', '.join(services)}")
     _print_summary(classifications, stale)
 
 
@@ -738,7 +851,7 @@ def render_to_disk(
         judgment = recreate_judgment(
             rendered, applied, service_names(inputs), digests
         )
-        _print_diff(output, rendered, classifications, judgment.services, stale)
+        _print_diff(output, rendered, classifications, judgment, stale)
         return RenderOutcome(
             rendered=rendered,
             inputs=inputs,

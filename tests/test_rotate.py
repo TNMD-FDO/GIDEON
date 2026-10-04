@@ -997,6 +997,32 @@ class Preconditions(RealStack):
         self.assertEqual(host.lock_log, [])
         assert_no_secret_text(self, out + err)
 
+    def test_pending_secret_entry_change_names_its_mounters(self) -> None:
+        """A changed entry is named in the pending-change refusal."""
+
+        host = self.applied_host()
+        applied = yaml.safe_load(host.files[f"{RENDERED}/applied.yaml"])
+        applied["top_level"] = "0" * 64
+        applied["top_level_parts"]["secrets"]["engine_api_key"]["sha256"] = "0" * 64
+        host.files[f"{RENDERED}/applied.yaml"] = yaml.safe_dump(applied, sort_keys=False)
+        host.calls.clear()
+        host.writes.clear()
+        host.lock_log.clear()
+
+        code, out, err = run_rotate(host, "engine_api_key")
+
+        self.assertEqual((code, err), (1, ""))
+        self.assertIn(
+            f"changed compose secrets: {ENGINE_SERVICE_NAME}, {API_SERVICE_NAME}", out
+        )
+        self.assertIn("preconditions: refuse", out)
+        self.assertEqual(host.writes, [])
+        self.assertEqual(host.lock_log, [])
+        self.assertEqual(
+            [call for call in argv_calls(host) if "--force-recreate" in call], []
+        )
+        assert_no_secret_text(self, out + err)
+
 
 class PartialRotation(RealStack):
     def test_chown_failure_reports_written_but_unowned_and_does_not_recreate(self) -> None:

@@ -140,16 +140,10 @@ def _pre_run_refusal(name: str) -> int | None:
 
 
 def _pending_reason(judgment: render_command.RecreateJudgment) -> str:
-    reasons: list[str] = []
-    if judgment.first_apply:
-        reasons.append("first apply")
-    for label, services in (
-        ("changed rendered files", judgment.files),
-        ("changed compose block", judgment.block),
-        ("changed compose top-level", judgment.top_level),
-    ):
-        if services:
-            reasons.append(f"{label}: {', '.join(services)}")
+    reasons = [
+        label if judgment.first_apply else f"{label}: {', '.join(services)}"
+        for label, services in judgment.reasons()
+    ]
     return "; ".join(reasons) or "pending change"
 
 
