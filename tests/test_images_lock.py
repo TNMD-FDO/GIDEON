@@ -148,24 +148,9 @@ class CommittedLock(unittest.TestCase):
         self.assertEqual(result.lock.version, 1)
         # Shape, never values: the pin watch moves values through its pull
         # requests, and this contract must hold on every bump branch.
-        self.assertEqual(
-            [pin.name for pin in result.lock.images],
-            [
-                "caddy",
-                "open-webui",
-                "vllm-openai",
-                "searxng",
-                "prometheus",
-                "grafana",
-                "node-exporter",
-                "dcgm-exporter",
-                "postgres-exporter",
-                "cadvisor",
-                "blackbox-exporter",
-                "postgres",
-                "gideon",
-            ],
-        )
+        self.assertTrue(result.lock.images)
+        names = [pin.name for pin in result.lock.images]
+        self.assertEqual(len(names), len(set(names)))
         for pin in result.lock.images:
             with self.subTest(image=pin.name):
                 if isinstance(pin, MirroredImagePin):

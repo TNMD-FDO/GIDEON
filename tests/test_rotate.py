@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import yaml  # type: ignore[import-untyped]
+from test_render import inputs
 
 from gideon.host import backuplock, grafana, nogpu, owui, pgbackrest, rotate, weights
 from gideon.host.apply import run_apply
@@ -20,10 +21,12 @@ from gideon.host.egress import EgressAllowlist
 from gideon.host.images import load_image_lock
 from gideon.host.models import HardwareProfile
 from gideon.host.owui import Response
-from gideon.host.render import ARTIFACTS
+from gideon.host.render import ARTIFACTS, RenderInputs
 from gideon.host.render.api import API_SERVICE_NAME
 from gideon.host.render.command import run_render
+from gideon.host.render.compose import service_blocks
 from gideon.host.render.engine import ENGINE_SERVICE_NAME
+from gideon.host.render.services import all_service_names
 from gideon.host.secrets import SECRET_REGISTRY, SECRETS_DIR
 from gideon.host.site import SiteConfig, load_site
 from gideon.host.stack import compose_argv, exec_argv
@@ -33,6 +36,7 @@ from gideon.host.tls import CA_PATH, CERT_PATH
 ROOT = Path(__file__).resolve().parent.parent
 EXAMPLE = ROOT / "config/site.example.yaml"
 SECOND = ROOT / "tests/fixtures/site/second-office.yaml"
+_EXAMPLE_INPUTS = inputs(EXAMPLE)
 TEMPLATE_PATHS = tuple(
     dict.fromkeys(path for artifact in ARTIFACTS for path in artifact.template_paths)
 )
@@ -225,37 +229,18 @@ def ps_rows(*rows: Mapping[str, str]) -> str:
     return "\n".join(json.dumps(row) for row in rows) + "\n"
 
 
-_FIXTURE_SERVICES: tuple[str, ...] = tuple(
-    yaml.safe_load((ROOT / "tests/fixtures/render/example/compose.yaml").read_text())["services"]
-)
-_HEALTHCHECKED = frozenset({"postgres", "open-webui", ENGINE_SERVICE_NAME, API_SERVICE_NAME})
-
-
 def running_rows(
     *,
-    include_dcgm: bool = True,
-    include_engine: bool = True,
-    include_api: bool = True,
-    include_searxng: bool = True,
+    render_inputs: RenderInputs = _EXAMPLE_INPUTS,
 ) -> str:
-    services = tuple(
-        service
-        for service in _FIXTURE_SERVICES
-        if (include_dcgm or service != "dcgm-exporter")
-        and (include_engine or service != ENGINE_SERVICE_NAME)
-        and (include_api or service != API_SERVICE_NAME)
-        and (include_searxng or service != "searxng")
-    )
-    return ps_rows(
-        *(
-            {
-                "Service": service,
-                "State": "running",
-                "Health": "healthy" if service in _HEALTHCHECKED else "",
-            }
-            for service in services
-        )
-    )
+    """Every service the host renders running, healthy where its block has a healthcheck."""
+
+    rows = []
+    for service, block in service_blocks(render_inputs).items():
+        assert isinstance(block, Mapping)
+        health = "healthy" if "healthcheck" in block else ""
+        rows.append({"Service": service, "State": "running", "Health": health})
+    return ps_rows(*rows)
 
 
 class FakeFrontend:
@@ -583,7 +568,7 @@ def healthy_commands(
     ref: str = PUBLIC_REF,
     *,
     insecure: bool = False,
-    include_searxng: bool = True,
+    render_inputs: RenderInputs = _EXAMPLE_INPUTS,
 ) -> dict[tuple[str, ...], Outcome]:
     commands: dict[tuple[str, ...], Outcome] = {
         SMI: done(SMI, stdout="GPU 0: X (UUID: GPU-aaaa)\nGPU 1: X (UUID: GPU-bbbb)\n"),
@@ -620,17 +605,10 @@ def healthy_commands(
         SYSTEMCTL_LINK_PROPOSALS: done(SYSTEMCTL_LINK_PROPOSALS),
         SYSTEMCTL_ENABLE_PROPOSALS: done(SYSTEMCTL_ENABLE_PROPOSALS),
         SYSTEMCTL_ACTIVE_PROPOSALS: done(SYSTEMCTL_ACTIVE_PROPOSALS, stdout="active\n"),
-        PS: done(
-            PS,
-            stdout=running_rows(
-                include_searxng=include_searxng,
-                include_engine=True,
-                include_dcgm=True,
-            ),
-        ),
+        PS: done(PS, stdout=running_rows(render_inputs=render_inputs)),
         **healthy_ingress(),
     }
-    for service in _FIXTURE_SERVICES:
+    for service in all_service_names():
         command = tuple(
             compose_argv(RENDERED, "up", "-d", "--no-deps", "--force-recreate", service)
         )
@@ -739,7 +717,7 @@ def assert_no_secret_text(test: unittest.TestCase, output: str, extra: tuple[str
 
 
 class RealStack(unittest.TestCase):
-    def new_host(self, site: Path = EXAMPLE, *, include_searxng: bool = True) -> ApplyHost:
+    def new_host(self, site: Path = EXAMPLE) -> ApplyHost:
         site_result = load_site(site)
         assert site_result.config is not None
         loopback = site_result.config.registry.startswith("127.0.0.1:")
@@ -747,7 +725,7 @@ class RealStack(unittest.TestCase):
             healthy_commands(
                 LOOPBACK_REF if loopback else PUBLIC_REF,
                 insecure=loopback,
-                include_searxng=include_searxng,
+                render_inputs=inputs(site),
             ),
             base_files(site),
         )
@@ -759,8 +737,8 @@ class RealStack(unittest.TestCase):
             host.commands[second_handshake] = host.commands[HANDSHAKE]
         return host
 
-    def applied_host(self, site: Path = EXAMPLE, *, include_searxng: bool = True) -> ApplyHost:
-        host = self.new_host(site, include_searxng=include_searxng)
+    def applied_host(self, site: Path = EXAMPLE) -> ApplyHost:
+        host = self.new_host(site)
         code, _out, err = run_apply_once(host)
         self.assertEqual((code, err), (0, ""))
         return host
@@ -1129,7 +1107,7 @@ class OtherRotations(RealStack):
         self.assertIn("start: ok — recreated searxng: changed rendered files", out)
         assert_no_secret_text(self, out + err)
 
-        off = self.applied_host(SECOND, include_searxng=False)
+        off = self.applied_host(SECOND)
         baseline_writes = len(off.writes)
         baseline_calls = len(off.calls)
         code, out, err = run_rotate(off, "searxng_secret_key")
@@ -1164,9 +1142,7 @@ class OtherRotations(RealStack):
         host.files[os.fspath(nogpu.NO_GPU_PATH)] = "declared\n"
         host.commands[PS] = done(
             PS,
-            stdout=running_rows(
-                include_dcgm=False, include_engine=False, include_api=False
-            ),
+            stdout=running_rows(render_inputs=inputs(EXAMPLE, no_gpu=True)),
         )
         code, _out, err = run_apply_once(host)
         self.assertEqual((code, err), (0, ""))

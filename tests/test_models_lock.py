@@ -203,24 +203,15 @@ class CommittedLock(unittest.TestCase):
                 data_volume_gb=4000,
             ),
         )
-        self.assertEqual(
-            profile.memory,
-            (
-                MemoryRow("caddy", 1, None),
-                MemoryRow("prometheus", 2, None),
-                MemoryRow("node-exporter", 1, None),
-                MemoryRow("grafana", 3, None),
-                MemoryRow("postgres", 20, None),
-                MemoryRow("open-webui", 4, None),
-                MemoryRow("gideon-generator", 32, "generator"),
-                MemoryRow("searxng", 1, None),
-                MemoryRow("dcgm-exporter", 2, None),
-                MemoryRow("postgres-exporter", 1, None),
-                MemoryRow("cadvisor", 5, None),
-                MemoryRow("blackbox-exporter", 1, None),
-                MemoryRow("gideon-api", 1, None),
-            ),
-        )
+        self.assertTrue(profile.memory)
+        names = [row.service for row in profile.memory]
+        self.assertEqual(len(names), len(set(names)))
+        for row in profile.memory:
+            with self.subTest(service=row.service):
+                self.assertIs(type(row.gb), int)
+                self.assertGreater(row.gb, 0)
+                if row.role is not None:
+                    self.assertIsNotNone(profile.model(row.role))
         self.assertEqual(profile.memory_row("gideon-generator"), MemoryRow("gideon-generator", 32, "generator"))
         self.assertIsNone(profile.memory_row("missing-service"))
         self.assertEqual(len(profile.models), 1)

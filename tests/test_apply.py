@@ -15,6 +15,7 @@ from pathlib import Path
 from urllib.parse import unquote
 
 import yaml  # type: ignore[import-untyped]
+from test_render import inputs
 
 from gideon.host import backuplock, grafana, nogpu, owui, pgbackrest, weights
 from gideon.host.apply import (
@@ -27,13 +28,17 @@ from gideon.host.egress import EgressAllowlist, load_egress_allowlist
 from gideon.host.images import load_image_lock
 from gideon.host.models import HardwareProfile, load_models_lock
 from gideon.host.owui import Response
-from gideon.host.render import ARTIFACTS
-from gideon.host.render.api import API_SERVICE_NAME
+from gideon.host.render import ARTIFACTS, RenderInputs
 from gideon.host.render.command import run_render
-from gideon.host.render.compose import ENGINE_READY_SECONDS
+from gideon.host.render.compose import (
+    ENGINE_READY_SECONDS,
+    service_blocks,
+    service_names,
+)
 from gideon.host.render.engine import ENGINE_SERVICE_NAME
 from gideon.host.render.grafana import GRAFANA_ADMIN_USER
 from gideon.host.render.owui import GENERAL_PRESET_ID
+from gideon.host.render.services import all_service_names, store_services
 from gideon.host.site import SiteConfig, load_site
 from gideon.host.stack import compose_argv, exec_argv
 from gideon.host.sysio import Command, Host, PathLike
@@ -42,6 +47,7 @@ from gideon.host.tls import CA_PATH, CERT_PATH
 ROOT = Path(__file__).resolve().parent.parent
 EXAMPLE = ROOT / "config/site.example.yaml"
 SECOND = ROOT / "tests/fixtures/site/second-office.yaml"
+_EXAMPLE_INPUTS = inputs(EXAMPLE)
 # Every template the artifact registry declares, so a new artifact never
 # leaves this module's fake checkout behind.
 TEMPLATE_PATHS = tuple(
@@ -131,41 +137,23 @@ def ps_rows(*rows: Mapping[str, str]) -> str:
     return "\n".join(json.dumps(row) for row in rows) + "\n"
 
 
-# The rendered project's services, from the example fixture: verify demands
-# every one running, so the fake `compose ps` derives its rows here rather
-# than naming services (a new service moves the fixture, never this table).
-_FIXTURE_SERVICES: tuple[str, ...] = tuple(
-    yaml.safe_load((ROOT / "tests/fixtures/render/example/compose.yaml").read_text())["services"]
-)
-_HEALTHCHECKED = frozenset({"postgres", "open-webui", ENGINE_SERVICE_NAME, API_SERVICE_NAME})
-
-
 def running_rows(
     *,
-    include_dcgm: bool = True,
-    include_engine: bool = True,
-    include_api: bool = True,
-    include_searxng: bool = True,
+    render_inputs: RenderInputs = _EXAMPLE_INPUTS,
     omit: frozenset[str] = frozenset(),
     states: Mapping[str, str] | None = None,
 ) -> str:
-    """Every service running (healthchecked ones healthy); *states* overrides a service's State."""
+    """Every service the host renders running, healthy where its block has a healthcheck; *states* overrides a service's State."""
 
     states = states or {}
     rows = []
-    services = tuple(
-        service
-        for service in _FIXTURE_SERVICES
-        if (include_dcgm or service != "dcgm-exporter")
-        and (include_engine or service != ENGINE_SERVICE_NAME)
-        and (include_api or service != API_SERVICE_NAME)
-        and (include_searxng or service != "searxng")
-        and service not in omit
-    )
-    for service in services:
-        health = "healthy" if service in _HEALTHCHECKED else ""
+    for service, block in service_blocks(render_inputs).items():
+        if service in omit:
+            continue
+        assert isinstance(block, Mapping)
         state = states.get(service, "running")
-        rows.append({"Service": service, "State": state, "Health": health if state == "running" else ""})
+        health = "healthy" if state == "running" and "healthcheck" in block else ""
+        rows.append({"Service": service, "State": state, "Health": health})
     return ps_rows(*rows)
 
 
@@ -471,7 +459,7 @@ def healthy_commands(
     ref: str = PUBLIC_REF,
     *,
     insecure: bool = False,
-    include_searxng: bool = True,
+    render_inputs: RenderInputs = _EXAMPLE_INPUTS,
 ) -> dict[tuple[str, ...], Outcome]:
     smi = "GPU 0: X (UUID: GPU-aaaa)\nGPU 1: X (UUID: GPU-bbbb)\n"
     commands: dict[tuple[str, ...], Outcome] = {
@@ -512,12 +500,12 @@ def healthy_commands(
         SYSTEMCTL_LINK_PROPOSALS: done(SYSTEMCTL_LINK_PROPOSALS),
         SYSTEMCTL_ENABLE_PROPOSALS: done(SYSTEMCTL_ENABLE_PROPOSALS),
         SYSTEMCTL_ACTIVE_PROPOSALS: done(SYSTEMCTL_ACTIVE_PROPOSALS, stdout="active\n"),
-        PS: done(PS, stdout=running_rows(include_searxng=include_searxng)),
+        PS: done(PS, stdout=running_rows(render_inputs=render_inputs)),
         **healthy_ingress(),
     }
-    # The start stage recreates every changed owner outside the store tier on
-    # a first apply: one answer per rendered service, derived like the rows.
-    for service in _FIXTURE_SERVICES:
+    # Both tiers' force-recreate commands need answers on every host, so the
+    # fake covers every definition, including ones that do not apply here.
+    for service in all_service_names():
         recreate = tuple(compose_argv(RENDERED, "up", "-d", "--no-deps", "--force-recreate", service))
         commands.setdefault(recreate, done(recreate))
     # Every committed pin answers the registry and pull stages — derived from
@@ -704,7 +692,10 @@ class HappyPath(unittest.TestCase):
         self.assertIn(SYSTEMCTL_LINK_PROPOSALS, argv_calls(host))
         self.assertIn(SYSTEMCTL_ENABLE_PROPOSALS, argv_calls(host))
         self.assertIn(SYSTEMCTL_ACTIVE_PROPOSALS, argv_calls(host))
-        started = ", ".join(service for service in _FIXTURE_SERVICES if service != "postgres")
+        started = ", ".join(
+            service for service in service_names(_EXAMPLE_INPUTS)
+            if service not in store_services()
+        )
         self.assertIn(f"start: ok — recreated {started}: first apply", out)
         self.assertIn(RECREATE_CADDY, argv_calls(host))
         site_result = load_site(EXAMPLE)
@@ -799,7 +790,8 @@ class HappyPath(unittest.TestCase):
         )
         host.calls.clear()
         started = ", ".join(
-            service for service in _FIXTURE_SERVICES if service != "postgres"
+            service for service in service_names(_EXAMPLE_INPUTS)
+            if service not in store_services()
         )
 
         code, out, err = apply(host)
@@ -807,7 +799,7 @@ class HappyPath(unittest.TestCase):
         self.assertEqual((code, err), (0, ""), out)
         self.assertIn("recreate: ok — recreated postgres: changed compose block", out)
         self.assertIn(f"start: ok — recreated {started}: changed compose block", out)
-        for service in _FIXTURE_SERVICES:
+        for service in service_names(_EXAMPLE_INPUTS):
             recreate = tuple(
                 compose_argv(RENDERED, "up", "-d", "--no-deps", "--force-recreate", service)
             )
@@ -825,7 +817,8 @@ class HappyPath(unittest.TestCase):
         )
         host.calls.clear()
         started_services = tuple(
-            service for service in _FIXTURE_SERVICES if service != "postgres"
+            service for service in service_names(_EXAMPLE_INPUTS)
+            if service not in store_services()
         )
         started = ", ".join(started_services)
 
@@ -840,7 +833,7 @@ class HappyPath(unittest.TestCase):
 
     def test_loopback_registry_uses_insecure_manifest_inspect_and_proxy_env(self) -> None:
         host = ApplyHost(
-            healthy_commands(LOOPBACK_REF, insecure=True, include_searxng=False),
+            healthy_commands(LOOPBACK_REF, insecure=True, render_inputs=inputs(SECOND)),
             base_files(SECOND),
         )
         handshake2 = tuple("gideon.exd.example.internal" if part == "gideon.example.org" else part for part in HANDSHAKE)
@@ -860,7 +853,7 @@ class HappyPath(unittest.TestCase):
             "registry: 127.0.0.1:5000", "registry: 192.168.122.1:5000"
         )
         host = ApplyHost(
-            healthy_commands(bridge_ref, insecure=True, include_searxng=False), files
+            healthy_commands(bridge_ref, insecure=True, render_inputs=inputs(SECOND)), files
         )
         handshake2 = tuple(
             "gideon.exd.example.internal"
@@ -879,7 +872,7 @@ class HappyPath(unittest.TestCase):
         files[SITE] = files[SITE].replace(
             "registry: 127.0.0.1:5000", "registry: registry.example:5000"
         )
-        host = ApplyHost(healthy_commands(hostname_ref, include_searxng=False), files)
+        host = ApplyHost(healthy_commands(hostname_ref, render_inputs=inputs(SECOND)), files)
         handshake2 = tuple(
             "gideon.exd.example.internal"
             if part == "gideon.example.org"
@@ -1196,9 +1189,7 @@ class NoGpuModeSwitch(unittest.TestCase):
         host.files[os.fspath(nogpu.NO_GPU_PATH)] = "declared\n"
         host.commands[PS] = done(
             PS,
-            stdout=running_rows(
-                include_dcgm=False, include_engine=False, include_api=False
-            ),
+            stdout=running_rows(render_inputs=inputs(EXAMPLE, no_gpu=True)),
         )
         sleeps: list[float] = []
         code, out, _ = apply(host, sleep_calls=sleeps)
@@ -1215,9 +1206,7 @@ class NoGpuModeSwitch(unittest.TestCase):
         host.files[os.fspath(nogpu.NO_GPU_PATH)] = "declared\n"
         host.commands[PS] = done(
             PS,
-            stdout=running_rows(
-                include_dcgm=False, include_engine=False, include_api=False
-            ),
+            stdout=running_rows(render_inputs=inputs(EXAMPLE, no_gpu=True)),
         )
         nightly_disables = (
             ("systemctl", "disable", "--now", "gideon-eval-nightly.timer"),
@@ -1386,7 +1375,7 @@ class NewStages(unittest.TestCase):
         self.assertEqual(code, 0, out)
         host.files[os.fspath(nogpu.NO_GPU_PATH)] = "declared\n"
         host.commands[PS] = done(
-            PS, stdout=running_rows(include_dcgm=False, include_engine=False, include_api=False)
+            PS, stdout=running_rows(render_inputs=inputs(EXAMPLE, no_gpu=True))
         )
         for unit in ("gideon-eval-nightly.timer", "gideon-eval-nightly.service"):
             disable = ("systemctl", "disable", "--now", unit)

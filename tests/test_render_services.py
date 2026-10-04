@@ -20,11 +20,16 @@ from test_apply import (
 from test_render import EXAMPLE, SECOND, inputs
 
 from gideon.host import apply as apply_module
-from gideon.host.images import RegistryTarget, parse_registry
+from gideon.host.images import RegistryTarget, parse_registry, reference
 from gideon.host.models import MemoryRow
 from gideon.host.render import RenderInputs
 from gideon.host.render.api import API_SERVICE_NAME
-from gideon.host.render.compose import STORE_SERVICES, service_blocks, service_names
+from gideon.host.render.compose import (
+    STORE_SERVICES,
+    service_blocks,
+    service_images,
+    service_names,
+)
 from gideon.host.render.engine import ENGINE_SERVICE_NAME
 from gideon.host.render.services import (
     SERVICES,
@@ -34,6 +39,10 @@ from gideon.host.render.services import (
     slow_start_services,
     store_services,
 )
+from gideon.host.render.services.api import ApiService
+from gideon.host.render.services.dcgm_exporter import DcgmExporterService
+from gideon.host.render.services.generator import GeneratorService
+from gideon.host.render.services.searxng import SearxngService
 
 
 def host_inputs() -> tuple[RenderInputs, ...]:
@@ -107,6 +116,43 @@ class Registry(unittest.TestCase):
             set(all_service_names()),
             {row.service for row in inputs().profile.memory},
         )
+
+    def test_rendered_images_match_committed_lock_pins(self) -> None:
+        hosts = host_inputs()
+        pin_names = {pin.name for pin in hosts[0].images.images}
+        matched_pin_names: set[str] = set()
+        for rendered_inputs in hosts:
+            with self.subTest(
+                site=rendered_inputs.site.hostname, no_gpu=rendered_inputs.no_gpu
+            ):
+                target = parse_registry(rendered_inputs.site.registry)
+                assert target is not None
+                pin_names_by_reference = {
+                    reference(target, pin): pin.name
+                    for pin in rendered_inputs.images.images
+                }
+                for image in service_images(rendered_inputs):
+                    self.assertIn(image, pin_names_by_reference, f"unpinned image {image}")
+                    matched_pin_names.add(pin_names_by_reference[image])
+        self.assertEqual(
+            matched_pin_names,
+            pin_names,
+            f"orphan pin: {', '.join(sorted(pin_names - matched_pin_names))}",
+        )
+
+    def test_conditional_definitions_apply_on_their_hosts(self) -> None:
+        hosts = host_inputs()
+        for definition, expected in (
+            (GeneratorService(), (True, True, False)),
+            (ApiService(), (True, True, False)),
+            (DcgmExporterService(), (True, True, False)),
+            (SearxngService(), (True, False, True)),
+        ):
+            with self.subTest(service=definition.name):
+                self.assertEqual(
+                    tuple(definition.applies(rendered_inputs) for rendered_inputs in hosts),
+                    expected,
+                )
 
     def test_substituted_registry_orders_and_skips_blocks(self) -> None:
         class FirstService(ServiceDefinition):
