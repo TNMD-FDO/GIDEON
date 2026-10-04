@@ -12,7 +12,7 @@ import stat
 import subprocess
 import sys
 import uuid
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -22,6 +22,7 @@ import gideon
 from gideon.host import (
     audit,
     backuplock,
+    backuproots,
     backupset,
     pgbackrest,
     secrets,
@@ -368,9 +369,7 @@ def _sample_at_most(paths: Sequence[str], limit: int) -> tuple[str, ...]:
 
 def _link_verdict(
     io: Host,
-    previous: backupset.SetRef,
-    roots: Sequence[backupset.InventoryRoot],
-    partial: str,
+    pairs: Mapping[str, tuple[str, str]],
 ) -> backupset.LinkVerdict:
     """Compare inodes for a sample of files the previous set also holds.
 
@@ -379,22 +378,10 @@ def _link_verdict(
     from either tree is skipped rather than sampled.
     """
 
-    if previous.manifest is None:
-        return backupset.LinkVerdict(0, 0)
-    candidates = [
-        (root.name, entry.path)
-        for root in roots
-        if root.snapshotted
-        for entry in previous.manifest.inventory.get(root.name, ())
-        if entry.kind == "f"
-    ]
-    keyed = {f"{root_name}/{path}": (root_name, path) for root_name, path in candidates}
     sampled = 0
     linked = 0
-    for key in _sample_at_most(tuple(keyed), 100):
-        root_name, path = keyed[key]
-        current_path = os.path.join(partial, backupset.FILES_DIR, root_name, path)
-        previous_path = os.path.join(previous.path, backupset.FILES_DIR, root_name, path)
+    for key in _sample_at_most(tuple(pairs), 100):
+        current_path, previous_path = pairs[key]
         try:
             current_stat = io.stat(current_path)
             previous_stat = io.stat(previous_path)
@@ -409,51 +396,18 @@ def _link_verdict(
 def _files_stage(
     io: Host,
     *,
-    previous: backupset.SetRef | None,
-    roots: tuple[backupset.InventoryRoot, ...],
-    partial: str,
+    roots: tuple[backuproots.TakingRoot, ...],
 ) -> tuple[StageResult, backupset.LinkVerdict]:
-    try:
-        for root in roots:
-            if not root.snapshotted:
-                continue
-            destination = os.path.join(partial, backupset.FILES_DIR, root.name)
-            io.mkdir(destination, mode=0o750, parents=True, exist_ok=True)
-            argv = ["rsync", "-a"]
-            argv.extend(f"--exclude={pattern}" for pattern in root.exclusions)
-            if previous is not None:
-                link_dest = os.path.join(
-                    previous.path, backupset.FILES_DIR, root.name
-                )
-                argv.append(f"--link-dest={link_dest}/")
-            argv.extend(
-                [
-                    root.source.rstrip("/") + "/",
-                    destination.rstrip("/") + "/",
-                ]
-            )
-            result = io.run(argv)
-            if result.returncode != 0:
-                return (
-                    _run_failure(
-                        "files",
-                        f"rsync failed for {root.name}",
-                        result,
-                        _STAGE_FIX,
-                    ),
-                    backupset.LinkVerdict(0, 0),
-                )
-    except (OSError, subprocess.SubprocessError) as exc:
-        return (
-            StageResult("files", False, f"file snapshot failed: {exc}", _STAGE_FIX),
-            backupset.LinkVerdict(0, 0),
-        )
+    copies = 0
+    pairs: dict[str, tuple[str, str]] = {}
+    for root in roots:
+        outcome = root.take()
+        if isinstance(outcome, Problem):
+            return StageResult("files", False, outcome.problem, outcome.fix or _STAGE_FIX), backupset.LinkVerdict(0, 0)
+        copies += outcome.copied
+        pairs.update(outcome.link_pairs)
 
-    verdict = (
-        _link_verdict(io, previous, roots, partial)
-        if previous is not None
-        else backupset.LinkVerdict(0, 0)
-    )
+    verdict = _link_verdict(io, pairs) if pairs else backupset.LinkVerdict(0, 0)
     if verdict.sampled > 0 and verdict.linked == 0:
         return (
             StageResult(
@@ -468,7 +422,7 @@ def _files_stage(
         StageResult(
             "files",
             True,
-            f"snapshotted {sum(root.snapshotted for root in roots)} root(s); "
+            f"snapshotted {copies} root(s); "
             f"linked {verdict.linked} of {verdict.sampled} sampled",
             "",
         ),
@@ -741,78 +695,6 @@ def _counts_stage(
     return StageResult("counts", True, "row counts recorded for gideon and openwebui", ""), counts
 
 
-def _relative_hashes(directory: str, hashes: Mapping[str, str]) -> Mapping[str, str]:
-    prefix = directory.rstrip("/") + "/"
-    return {
-        path.removeprefix(prefix) if path.startswith(prefix) else path: digest
-        for path, digest in hashes.items()
-    }
-
-
-def _find_entries(io: Host, directory: str) -> tuple[backupset.Entry, ...] | StageResult:
-    try:
-        found = io.run(["find", directory, "-printf", backupset.FIND_FORMAT])
-    except (OSError, subprocess.SubprocessError) as exc:
-        return StageResult("manifest", False, f"find failed for {directory}: {exc}", _STAGE_FIX)
-    if found.returncode != 0:
-        return _run_failure("manifest", f"find failed for {directory}", found, _STAGE_FIX)
-    try:
-        return tuple(sorted(backupset.parse_find_listing(found.stdout), key=lambda entry: entry.path))
-    except ValueError as exc:
-        return StageResult("manifest", False, f"find listing was malformed for {directory}: {exc}", _STAGE_FIX)
-
-
-def _hash_entries(
-    io: Host,
-    directory: str,
-    entries: tuple[backupset.Entry, ...],
-    *,
-    repository: bool,
-    previous_entries: Mapping[str, backupset.Entry],
-) -> tuple[backupset.Entry, ...] | StageResult:
-    carried = tuple(
-        backupset.carry_forward(previous_entries, entry) if repository else entry
-        for entry in entries
-    )
-    paths = tuple(
-        os.path.join(directory, entry.path)
-        for entry in carried
-        if entry.kind == "f" and entry.sha256 is None
-    )
-    hashes: dict[str, str] = {
-        entry.path: entry.sha256
-        for entry in carried
-        if entry.kind == "f" and entry.sha256 is not None
-    }
-    commands: Iterable[list[str]]
-    if repository:
-        all_paths = paths
-        commands = (
-            ["sha256sum", "--", *all_paths[start : start + 200]]
-            for start in range(0, len(all_paths), 200)
-        )
-    else:
-        commands = iter(
-            [["find", directory, "-type", "f", "-exec", "sha256sum", "{}", "+"]]
-        )
-    for argv in commands:
-        try:
-            result = io.run(argv)
-        except (OSError, subprocess.SubprocessError) as exc:
-            return StageResult("manifest", False, f"hashing failed for {directory}: {exc}", _STAGE_FIX)
-        if result.returncode != 0:
-            return _run_failure("manifest", f"hashing failed for {directory}", result, _STAGE_FIX)
-        try:
-            parsed = backupset.parse_sha256sum(result.stdout)
-        except ValueError as exc:
-            return StageResult("manifest", False, f"hash listing was malformed for {directory}: {exc}", _STAGE_FIX)
-        hashes.update(_relative_hashes(directory, parsed))
-    merged = backupset.merge_hashes(carried, hashes)
-    if isinstance(merged, backupset.Problem):
-        return StageResult("manifest", False, merged.problem, merged.fix)
-    return tuple(sorted(merged, key=lambda entry: entry.path))
-
-
 def _commit_for(io: Host, checkout: str) -> str:
     # Root reads a checkout a CSA account owns; without the safe.directory grant
     # git refuses it as dubious ownership and the record would say "unknown".
@@ -832,7 +714,7 @@ def _manifest_stage(
     *,
     partial: str,
     final: str,
-    roots: tuple[backupset.InventoryRoot, ...],
+    roots: tuple[backuproots.TakingRoot, ...],
     previous: backupset.SetRef | None,
     started: datetime,
     finished: datetime,
@@ -847,33 +729,15 @@ def _manifest_stage(
     checkout: str,
     secrets_fingerprint: str,
     gideon_ids: backupset.AccountIds,
-) -> tuple[StageResult, backupset.Manifest | None]:
+) -> tuple[StageResult, backupset.Manifest | None, int]:
     inventory: dict[str, tuple[backupset.Entry, ...]] = {}
+    set_bytes = 0
     for root in roots:
-        directory = (
-            os.path.join(partial, backupset.FILES_DIR, root.name)
-            if root.snapshotted
-            else root.source
-        )
-        entries = _find_entries(io, directory)
-        if isinstance(entries, StageResult):
-            return entries, None
-        previous_entries_value: Sequence[backupset.Entry] = ()
-        if previous is not None and previous.manifest is not None:
-            previous_entries_value = previous.manifest.inventory.get(root.name, ())
-        previous_entries: Mapping[str, backupset.Entry] = {
-            entry.path: entry for entry in previous_entries_value
-        }
-        hashed = _hash_entries(
-            io,
-            directory,
-            entries,
-            repository=not root.snapshotted,
-            previous_entries=previous_entries,
-        )
-        if isinstance(hashed, StageResult):
-            return hashed, None
-        inventory[root.name] = hashed
+        outcome = root.inventory()
+        if isinstance(outcome, Problem):
+            return StageResult("manifest", False, outcome.problem, outcome.fix or _STAGE_FIX), None, 0
+        inventory[root.name] = outcome.entries
+        set_bytes += outcome.set_bytes
 
     commit = _commit_for(io, checkout)
     manifest = backupset.Manifest(
@@ -903,10 +767,10 @@ def _manifest_stage(
         io.write_text(manifest_path, manifest.to_json())
         moved = io.run(["mv", partial, final])
     except (OSError, subprocess.SubprocessError) as exc:
-        return StageResult("manifest", False, f"manifest finalization failed: {exc}", _STAGE_FIX), None
+        return StageResult("manifest", False, f"manifest finalization failed: {exc}", _STAGE_FIX), None, 0
     if moved.returncode != 0:
-        return _run_failure("manifest", "manifest finalization failed", moved, _STAGE_FIX), None
-    return StageResult("manifest", True, f"manifest written and set renamed to {label}", ""), manifest
+        return _run_failure("manifest", "manifest finalization failed", moved, _STAGE_FIX), None, 0
+    return StageResult("manifest", True, f"manifest written and set renamed to {label}", ""), manifest, set_bytes
 
 
 def _safe_set_path(path: str, new_set: str) -> bool:
@@ -972,6 +836,7 @@ def _applied_stage(
     started: datetime,
     finished: datetime,
     inventory: Mapping[str, Sequence[backupset.Entry]],
+    set_bytes: int,
     links: backupset.LinkVerdict,
     pruned: int,
 ) -> StageResult:
@@ -979,13 +844,6 @@ def _applied_stage(
         name: sum(entry.kind == "f" for entry in entries)
         for name, entries in inventory.items()
     }
-    set_bytes = sum(
-        entry.size
-        for name, entries in inventory.items()
-        if name != "pgbackrest"
-        for entry in entries
-        if entry.kind == "f"
-    )
     duration = max(0.0, (finished - started).total_seconds())
     row = audit.AuditRow(
         run_id,
@@ -1115,9 +973,9 @@ def _backup_run_body(
     if not intent.ok:
         return 1
 
-    roots = backupset.inventory_roots(checkout_text)
+    roots = backuproots.taking(io, backupset.inventory_roots(checkout_text), partial, previous)
     files, links = _files_stage(
-        io, previous=previous, roots=roots, partial=partial
+        io, roots=roots
     )
     print_stage(files)
     if not files.ok:
@@ -1154,7 +1012,7 @@ def _backup_run_body(
         return 1
 
     finished = started if now_was_supplied else datetime.now(UTC)
-    manifest_result, manifest = _manifest_stage(
+    manifest_result, manifest, set_bytes = _manifest_stage(
         io,
         partial=partial,
         final=final,
@@ -1198,6 +1056,7 @@ def _backup_run_body(
         started=started,
         finished=finished,
         inventory=manifest.inventory,
+        set_bytes=set_bytes,
         links=links,
         pruned=pruned,
     )
@@ -1712,51 +1571,18 @@ def _push_check_input(
         remote_manifest.tarball_sha256,
     )
 
-    repository_entries = {
-        entry.path: entry
-        for entry in remote_manifest.inventory.get("pgbackrest", ())
-        if entry.kind == "f" and entry.sha256 is not None
-    }
-    # pgBackRest keeps its info files below the stanza directories; every one
-    # of these is what a restore reads first, so the set must inventory them.
-    special_paths = (
-        f"backup/{pgbackrest.STANZA}/backup.info",
-        f"archive/{pgbackrest.STANZA}/archive.info",
-        f"backup/{pgbackrest.STANZA}/{remote_manifest.pgbackrest_label}/backup.manifest",
-    )
-    for path in special_paths:
-        entry = repository_entries.get(path)
-        if entry is None or entry.sha256 is None:
-            return StageResult(
-                "check",
-                False,
-                f"the set's repository inventory lacks {path}",
-                _PUSH_SET_FIX,
-            )
-        _add_check_hash(lines, seen, f"pgbackrest/{path}", entry.sha256)
-
-    for root_name in sorted(remote_manifest.inventory):
-        file_entries = tuple(
-            entry
-            for entry in remote_manifest.inventory[root_name]
-            if entry.kind == "f" and entry.sha256 is not None
-        )
-        paths = tuple(entry.path for entry in file_entries)
-        selected = (
-            paths
-            if verify_all
-            else backupset.sample_paths(paths, percent=1, floor=1)
-        )
-        entries_by_path = {entry.path: entry for entry in file_entries}
-        for path in selected:
-            entry = entries_by_path[path]
-            relative = (
-                f"pgbackrest/{path}"
-                if root_name == "pgbackrest"
-                else f"sets/{local_set.label}/{backupset.FILES_DIR}/{root_name}/{path}"
-            )
-            assert entry.sha256 is not None
-            _add_check_hash(lines, seen, relative, entry.sha256)
+    sampled: list[tuple[str, str]] = []
+    for root in backuproots.pushed(
+        backupset.inventory_roots(remote_manifest.checkout), remote_manifest, local_set.label
+    ):
+        outcome = root.check(verify_all=verify_all)
+        if isinstance(outcome, Problem):
+            return StageResult("check", False, outcome.problem, outcome.fix or _PUSH_SET_FIX)
+        for relative, digest in outcome.mandatory:
+            _add_check_hash(lines, seen, relative, digest)
+        sampled.extend(outcome.sampled)
+    for relative, digest in sampled:
+        _add_check_hash(lines, seen, relative, digest)
     return "".join(lines)
 
 

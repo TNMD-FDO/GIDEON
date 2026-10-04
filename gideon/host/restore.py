@@ -6,7 +6,6 @@ backup, a push, and a restore never overlap; ``backuplock.py`` owns the rules.
 
 import argparse
 import os
-import stat
 import subprocess
 import sys
 import time
@@ -22,6 +21,7 @@ from gideon.host import (
     audit,
     backup,
     backuplock,
+    backuproots,
     backupset,
     nogpu,
     pgbackrest,
@@ -31,7 +31,6 @@ from gideon.host import (
     stack,
 )
 from gideon.host.render.compose import STORE_SERVICES
-from gideon.host.render.pgbackrest import REPOSITORY_PATH
 from gideon.host.report import (
     Problem,
     StageResult,
@@ -73,7 +72,6 @@ _UNDECLARED_REGISTRY_FIX: Final = (
     "removed by hand), or declare this host with host provision --build-box, then retry."
 )
 _RESTORE_TIMEOUT: Final = 18000.0
-_CHUNK_SIZE: Final = 200
 
 
 @dataclass(frozen=True, slots=True)
@@ -442,252 +440,6 @@ def _staging_bound(
     return None
 
 
-def _chunks(values: Sequence[str]) -> tuple[tuple[str, ...], ...]:
-    return tuple(
-        tuple(values[index : index + _CHUNK_SIZE])
-        for index in range(0, len(values), _CHUNK_SIZE)
-    )
-
-
-# Owner groups are keyed by (uid, gid, is_link): a symlink is re-owned with
-# ``chown -h`` so its referent — possibly outside the tree — is never touched,
-# and it is never chmod-ed (a link has no mode of its own).
-OwnerKey = tuple[int, int, bool]
-
-
-def _run_grouped_chown(
-    io: Host,
-    paths_by_owner: Mapping[OwnerKey, Sequence[str]],
-    *,
-    stage: str,
-) -> StageResult | None:
-    for (uid, gid, is_link), paths in sorted(paths_by_owner.items()):
-        for chunk in _chunks(tuple(paths)):
-            result = run_stage(
-                io,
-                stage,
-                ["chown", *(("-h",) if is_link else ()), f"{uid}:{gid}", "--", *chunk],
-                f"re-owned {len(chunk)} path(s)",
-                _REOWN_FIX,
-            )
-            if not result.ok:
-                return result
-    return None
-
-
-def _run_grouped_chmod(
-    io: Host,
-    paths_by_mode: Mapping[int, Sequence[str]],
-    *,
-    stage: str,
-) -> StageResult | None:
-    for mode, paths in sorted(paths_by_mode.items()):
-        for chunk in _chunks(tuple(paths)):
-            result = run_stage(
-                io,
-                stage,
-                ["chmod", f"{mode:04o}", "--", *chunk],
-                f"applied mode {mode:04o} to {len(chunk)} path(s)",
-                _REOWN_FIX,
-            )
-            if not result.ok:
-                return result
-    return None
-
-
-def _entry_path(set_ref: backupset.SetRef, root_name: str, path: str) -> str:
-    return os.path.join(
-        set_ref.path,
-        backupset.FILES_DIR,
-        root_name,
-        path,
-    )
-
-
-def _snapshotted_root_names(checkout: str) -> frozenset[str]:
-    return frozenset(
-        root.name
-        for root in backupset.inventory_roots(checkout)
-        if root.snapshotted
-    )
-
-
-_PHYSICAL_FIX: Final = (
-    "The fetched or restored tree does not match its manifest; re-run "
-    "sudo python3 -m gideon backup push --verify-all on the source box, "
-    "then retry restore."
-)
-
-
-def _validate_physical(
-    io: Host,
-    *,
-    stage: str,
-    base: str,
-    entries: Sequence[backupset.Entry],
-    exact: bool = False,
-) -> StageResult | None:
-    """Refuse unless every inventoried path exists physically with its declared kind.
-
-    ``find`` never follows symlinks, so a path beneath a link is absent from
-    the listing and a link where the manifest records a file or directory is
-    listed as a link: both refuse before any ownership or mode is applied,
-    which is what keeps a corrupt tree from steering ``chown`` or ``chmod``
-    at a referent outside it.
-    """
-
-    try:
-        listed = io.run(["find", base, "-printf", backupset.FIND_FORMAT])
-    except (OSError, subprocess.SubprocessError) as exc:
-        return StageResult(stage, False, f"cannot list {base}: {exc}", _PHYSICAL_FIX)
-    if listed.returncode != 0:
-        return StageResult(stage, False, f"cannot list {base}: {command_detail(listed)}", _PHYSICAL_FIX)
-    try:
-        kinds = {entry.path: entry.kind for entry in backupset.parse_find_listing(listed.stdout)}
-    except ValueError as exc:
-        return StageResult(stage, False, f"listing of {base} is malformed: {exc}", _PHYSICAL_FIX)
-    mismatched = sum(1 for entry in entries if kinds.get(entry.path) != entry.kind)
-    if mismatched:
-        return StageResult(
-            stage,
-            False,
-            f"{mismatched} inventoried path(s) under {base} are not what the manifest "
-            "declares (a link in place of a file or directory, or a path beneath a link)",
-            _PHYSICAL_FIX,
-        )
-    if exact:
-        # A snapshotted root is the manifest's set and nothing else: a path the
-        # manifest never inventoried (an empty root's stray file included) is
-        # refused before it can reach live state. The repository is never
-        # judged this way — later backups legitimately add files there, and
-        # pgBackRest's own verify covers it.
-        inventoried = {entry.path for entry in entries}
-        extraneous = sorted(
-            path for path in kinds if path not in inventoried and path not in ("", backupset.ROOT_ENTRY)
-        )
-        if extraneous:
-            return StageResult(
-                stage,
-                False,
-                f"{len(extraneous)} path(s) under {base} are not in the manifest: {extraneous[0]}",
-                _PHYSICAL_FIX,
-            )
-    return None
-
-
-def _root_owned_metadata(
-    io: Host,
-    side: str,
-    sets: Sequence[backupset.SetRef],
-    gideon_ids: backupset.AccountIds,
-) -> StageResult | None:
-    paths_by_owner: dict[OwnerKey, list[str]] = {}
-    paths_by_mode: dict[int, list[str]] = {}
-    root_owned: list[str] = [os.path.join(side, backupset.PUSH_RECORD_NAME)]
-    for set_ref in sets:
-        if not set_ref.complete or set_ref.manifest is None:
-            continue
-        manifest = set_ref.manifest
-        owner_map = backupset.OwnerMap(manifest.gideon_ids, gideon_ids)
-        snapshotted = _snapshotted_root_names(manifest.checkout)
-        for root_name, entries in manifest.inventory.items():
-            if root_name not in snapshotted:
-                continue
-            failure = _validate_physical(
-                io,
-                stage="fetch",
-                base=_entry_path(set_ref, root_name, ""),
-                entries=entries,
-            )
-            if failure is not None:
-                return failure
-            for entry in entries:
-                path = _entry_path(set_ref, root_name, entry.path)
-                is_link = entry.kind == "l"
-                uid, gid = owner_map.map(entry.uid, entry.gid)
-                paths_by_owner.setdefault((uid, gid, is_link), []).append(path)
-                if not is_link:
-                    paths_by_mode.setdefault(entry.mode, []).append(path)
-        root_owned.extend(
-            (
-                os.path.join(set_ref.path, backupset.MANIFEST_NAME),
-                os.path.join(set_ref.path, backupset.TARBALL_NAME),
-            )
-        )
-
-    owner_result = _run_grouped_chown(io, paths_by_owner, stage="fetch")
-    if owner_result is not None:
-        return owner_result
-    mode_result = _run_grouped_chmod(io, paths_by_mode, stage="fetch")
-    if mode_result is not None:
-        return mode_result
-
-    # The skeleton around the sets is nobody's inventory: the staging root is
-    # provision's (gideon), everything from sets/ down to each set's files/
-    # is root's, and each root directory's own owner is its manifest "." entry.
-    skeleton: list[str] = [os.path.join(side, "sets")]
-    for set_ref in sets:
-        if set_ref.complete:
-            skeleton.extend((set_ref.path, os.path.join(set_ref.path, backupset.FILES_DIR)))
-    owner_result = _run_grouped_chown(
-        io,
-        {(0, 0, False): root_owned + skeleton},
-        stage="fetch",
-    )
-    if owner_result is not None:
-        return owner_result
-    staging_root = run_stage(
-        io,
-        "fetch",
-        ["chown", "gideon:gideon", "--", side],
-        "re-owned the staging root",
-        _REOWN_FIX,
-    )
-    if not staging_root.ok:
-        return staging_root
-    skeleton_modes = _run_grouped_chmod(io, {0o755: [side, *skeleton]}, stage="fetch")
-    if skeleton_modes is not None:
-        return skeleton_modes
-    paths_by_root_mode: dict[int, list[str]] = {
-        0o644: [
-            path
-            for path in root_owned
-            if not path.endswith(backupset.TARBALL_NAME)
-        ],
-        0o600: [
-            path for path in root_owned if path.endswith(backupset.TARBALL_NAME)
-        ],
-    }
-    return _run_grouped_chmod(io, paths_by_root_mode, stage="fetch")
-
-
-def _repository_mode_overrides(
-    io: Host,
-    side: str,
-    newest: backupset.SetRef,
-) -> StageResult | None:
-    if newest.manifest is None:
-        return StageResult("fetch", False, "newest fetched set has no manifest", _SET_FIX)
-    repository_entries = newest.manifest.inventory.get("pgbackrest", ())
-    failure = _validate_physical(
-        io,
-        stage="fetch",
-        base=os.path.join(side, "pgbackrest"),
-        entries=repository_entries,
-    )
-    if failure is not None:
-        return failure
-    paths_by_mode: dict[int, list[str]] = {}
-    for entry in repository_entries:
-        default = 0o750 if entry.kind == "d" else 0o640 if entry.kind == "f" else None
-        if default is None or entry.mode == default:
-            continue
-        paths_by_mode.setdefault(entry.mode, []).append(
-            os.path.join(side, "pgbackrest", entry.path)
-        )
-    return _run_grouped_chmod(io, paths_by_mode, stage="fetch")
-
-
 def _fetch_stage(
     io: Host,
     config: SiteConfig,
@@ -697,6 +449,7 @@ def _fetch_stage(
     at: datetime | None,
     operation_label: str,
     gideon_ids: backupset.AccountIds,
+    roots: tuple[backupset.InventoryRoot, ...],
 ) -> tuple[StageResult, _Fetched | None]:
     side = f"{backupset.STAGING}.fetch-{operation_label}"
     remote_root = config.backup.target.path.rstrip("/") or "/"
@@ -722,37 +475,10 @@ def _fetch_stage(
     if not rsync.ok:
         return rsync, None
 
-    identity, identity_failure = pgbackrest.container_identity(io, rendered_dir)
-    if identity_failure is not None or identity is None:
-        if identity_failure is None:
-            return StageResult(
-                "fetch", False, "postgres identity lookup failed", _REOWN_FIX
-            ), None
-        return (
-            StageResult(
-                "fetch",
-                False,
-                identity_failure.problem or "postgres identity lookup failed",
-                identity_failure.fix or _REOWN_FIX,
-            ),
-            None,
-        )
-    uid, gid = identity
-    repository = os.path.join(side, "pgbackrest")
-    for argv, detail in (
-        (["chown", "-R", "-h", f"{uid}:{gid}", repository], f"re-owned {repository}"),
-        (
-            ["find", repository, "-type", "d", "-exec", "chmod", "0750", "{}", "+"],
-            f"applied pgBackRest directory modes under {repository}",
-        ),
-        (
-            ["find", repository, "-type", "f", "-exec", "chmod", "0640", "{}", "+"],
-            f"applied pgBackRest file modes under {repository}",
-        ),
-    ):
-        result = run_stage(io, "fetch", argv, detail, _REOWN_FIX)
-        if not result.ok:
-            return result, None
+    for landed_root in backuproots.landed(io, roots, side):
+        problem = landed_root.arrive(rendered_dir)
+        if problem is not None:
+            return StageResult("fetch", False, problem.problem, problem.fix or _REOWN_FIX), None
 
     try:
         sets = backupset.list_sets(io, staging=side)
@@ -761,38 +487,72 @@ def _fetch_stage(
     newest = next((ref for ref in sets if ref.complete and ref.manifest is not None), None)
     if newest is None:
         return StageResult("fetch", False, "fetched snapshot has no complete backup set", _SET_FIX), None
-    repository_modes = _repository_mode_overrides(io, side, newest)
-    if repository_modes is not None and not repository_modes.ok:
-        return repository_modes, None
+    claims = backuproots.Claims()
+    for fetched_root in backuproots.fetched(io, roots, side, sets):
+        outcome = fetched_root.reown(gideon_ids)
+        if isinstance(outcome, Problem):
+            return StageResult("fetch", False, outcome.problem, outcome.fix or _REOWN_FIX), None
+        claims.merge(outcome)
+    problem = claims.apply(io, "fetch")
+    if problem is not None:
+        return StageResult("fetch", False, problem.problem, problem.fix or _REOWN_FIX), None
 
-    # The row's three figures over the same entries the re-own walks: every
-    # snapshotted root of every complete set, and each set's own record.
-    reowned = 0
-    mapped = 0
     no_record_sets = 0
+    root_owned: list[str] = [os.path.join(side, backupset.PUSH_RECORD_NAME)]
     for ref in sets:
         if not ref.complete or ref.manifest is None:
             continue
         owner_map = backupset.OwnerMap(ref.manifest.gideon_ids, gideon_ids)
         if owner_map.is_identity:
             no_record_sets += 1
-        for root_name, entries in ref.manifest.inventory.items():
-            if root_name not in _snapshotted_root_names(ref.manifest.checkout):
-                continue
-            reowned += len(entries)
-            mapped += sum(
-                1 for entry in entries if owner_map.matches(entry.uid, entry.gid)
+        root_owned.extend(
+            (
+                os.path.join(ref.path, backupset.MANIFEST_NAME),
+                os.path.join(ref.path, backupset.TARBALL_NAME),
             )
-    root_metadata = _root_owned_metadata(io, side, sets, gideon_ids)
-    if root_metadata is not None:
-        return root_metadata, None
+        )
+
+    # The skeleton around the sets is nobody's inventory: the staging root is
+    # provision's (gideon), everything from sets/ down to each set's files/
+    # is root's, and each root directory's own owner is its manifest "." entry.
+    skeleton = [backupset.sets_dir(side)]
+    for ref in sets:
+        if ref.complete:
+            skeleton.extend((ref.path, backupset.files_dir(ref.path)))
+    owner_claims = backuproots.Claims()
+    for path in (*root_owned, *skeleton):
+        owner_claims.add_owner(path, 0, 0)
+    problem = owner_claims.apply(io, "fetch")
+    if problem is not None:
+        return StageResult("fetch", False, problem.problem, problem.fix or _REOWN_FIX), None
+    staging_root = run_stage(
+        io,
+        "fetch",
+        ["chown", "gideon:gideon", "--", side],
+        "re-owned the staging root",
+        _REOWN_FIX,
+    )
+    if not staging_root.ok:
+        return staging_root, None
+    directory_claims = backuproots.Claims()
+    for path in (side, *skeleton):
+        directory_claims.add_mode(path, 0o755)
+    problem = directory_claims.apply(io, "fetch")
+    if problem is not None:
+        return StageResult("fetch", False, problem.problem, problem.fix or _REOWN_FIX), None
+    file_claims = backuproots.Claims()
+    for path in root_owned:
+        file_claims.add_mode(path, 0o600 if path.endswith(backupset.TARBALL_NAME) else 0o644)
+    problem = file_claims.apply(io, "fetch")
+    if problem is not None:
+        return StageResult("fetch", False, problem.problem, problem.fix or _REOWN_FIX), None
 
     selected = backupset.select_set(sets, at=at)
     if isinstance(selected, Problem):
         return StageResult("fetch", False, selected.problem, selected.fix), None
     replaced = f"{backupset.STAGING}.replaced-{operation_label}"
     ownership = (
-        f"{mapped} {REOWN_MAPPED_DETAIL} {gideon_ids.uid}:{gideon_ids.gid}"
+        f"{claims.gideon_owned} {REOWN_MAPPED_DETAIL} {gideon_ids.uid}:{gideon_ids.gid}"
         if no_record_sets == 0
         else (
             f"re-owned by their recorded ids "
@@ -804,65 +564,11 @@ def _fetch_stage(
             "fetch",
             True,
             f"fetched {snapshot.label}; selected set {selected.label}; "
-            f"re-owned {reowned} path(s), {ownership}",
+            f"re-owned {claims.entries_claimed} path(s), {ownership}",
             "",
         ),
-        _Fetched(side, replaced, selected, reowned),
+        _Fetched(side, replaced, selected, claims.entries_claimed),
     )
-
-
-def _verify_file_root(
-    io: Host,
-    root_name: str,
-    entries: Sequence[backupset.Entry],
-    base: str,
-) -> StageResult | None:
-    lines = "".join(
-        f"{entry.sha256}  {entry.path}\n"
-        for entry in sorted(entries, key=lambda item: item.path)
-        if entry.kind == "f" and entry.sha256 is not None
-    )
-    if any(
-        entry.kind == "f" and entry.sha256 is None for entry in entries
-    ):
-        return StageResult(
-            "verify",
-            False,
-            f"{root_name} contains a file without an inventory hash",
-            _VERIFY_FIX,
-        )
-    if not lines:
-        # A root with no files has no hash to check — the exact walk above has
-        # already refused any stray path; sha256sum -c refuses an empty list
-        # ("no properly formatted checksum lines found"), which is what
-        # /data/registry is on a no-GPU host (the acceptance VM's first
-        # rollback found this).
-        return None
-    try:
-        result = io.run(
-            ["sha256sum", "-c", "-"],
-            input=lines,
-            cwd=base,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        return StageResult("verify", False, f"checksum verification failed for {root_name}: {exc}", _VERIFY_FIX)
-    okay, failed = sshtarget.parse_check_output(result.stdout)
-    del okay
-    if failed:
-        return StageResult(
-            "verify",
-            False,
-            f"checksum verification failed for {len(failed)} path(s) in {root_name}",
-            _VERIFY_FIX,
-        )
-    if result.returncode != 0:
-        return StageResult(
-            "verify",
-            False,
-            f"checksum verification failed for {root_name}: {command_detail(result)}",
-            _VERIFY_FIX,
-        )
-    return None
 
 
 def _verify_stage(
@@ -870,44 +576,24 @@ def _verify_stage(
     rendered_dir: PathLike,
     *,
     selected: backupset.SetRef,
-    source: str,
 ) -> StageResult:
     if selected.manifest is None:
         return StageResult("verify", False, "selected set has no manifest", _SET_FIX)
     manifest = selected.manifest
-    roots = backupset.inventory_roots(manifest.checkout)
-    repository = (
-        REPOSITORY_PATH
-        if source == "staging"
-        else os.path.join(
-            os.path.dirname(os.path.dirname(selected.path)),
-            "pgbackrest",
-        )
+    roots = backuproots.held(
+        io,
+        backupset.inventory_roots(manifest.checkout),
+        selected,
     )
     for root in roots:
-        entries: Sequence[backupset.Entry] = manifest.inventory.get(root.name, ())
-        if root.snapshotted:
-            base = os.path.join(selected.path, backupset.FILES_DIR, root.name)
-            walked = _validate_physical(io, stage="verify", base=base, entries=entries, exact=True)
-            if walked is not None:
-                return walked
-        else:
-            base = repository
-            # A later backup has legitimately rewritten the info files since
-            # this set was made; pgBackRest's verify below proves them.
-            entries = tuple(
-                entry
-                for entry in entries
-                if backupset.MUTABLE_REPOSITORY_FILE.fullmatch(entry.path.rsplit("/", 1)[-1]) is None
+        problem = root.verify()
+        if problem is not None:
+            return StageResult(
+                "verify",
+                False,
+                problem.problem,
+                problem.fix or _VERIFY_FIX,
             )
-        failure = _verify_file_root(
-            io,
-            root.name,
-            entries,
-            base,
-        )
-        if failure is not None:
-            return failure
 
     tarball = os.path.join(selected.path, backupset.TARBALL_NAME)
     try:
@@ -928,13 +614,15 @@ def _verify_stage(
     if hashes.get(tarball, "").casefold() != manifest.tarball_sha256.casefold():
         return StageResult("verify", False, "tarball checksum does not match the manifest", _VERIFY_FIX)
 
-    repository_arg = None if source == "staging" else repository
-    problem = pgbackrest.verify(
-        io,
-        pgbackrest.verify_argv(rendered_dir, repository=repository_arg),
-    )
-    if problem is not None:
-        return StageResult("verify", False, problem, _VERIFY_FIX)
+    for root in roots:
+        problem = root.prove(rendered_dir)
+        if problem is not None:
+            return StageResult(
+                "verify",
+                False,
+                problem.problem,
+                problem.fix or _VERIFY_FIX,
+            )
     return StageResult("verify", True, "backup set hashes and pgBackRest verification passed", "")
 
 
@@ -1018,84 +706,58 @@ def _restore_files_stage(
 ) -> tuple[StageResult, tuple[str, ...], int]:
     if selected.manifest is None:
         return StageResult("files", False, "selected set has no manifest", _SET_FIX), (), 0
-    roots = backupset.inventory_roots(selected.manifest.checkout)
+    roots = backuproots.held(
+        io,
+        backupset.inventory_roots(selected.manifest.checkout),
+        selected,
+    )
     restored: list[str] = []
-    paths_by_owner: dict[OwnerKey, list[str]] = {}
-    paths_by_mode: dict[int, list[str]] = {}
-    owner_map = backupset.OwnerMap(selected.manifest.gideon_ids, gideon_ids)
-    mapped = 0
+    clauses: list[str] = []
+    claims = backuproots.Claims()
     for root in roots:
-        if not root.restore_in_place:
-            continue
-        source = os.path.join(selected.path, backupset.FILES_DIR, root.name)
-        root_entries = selected.manifest.inventory.get(root.name, ())
-        # rsync applies the source directory's own attributes to the live
-        # directory; a set that records no "." entry for the root (one made
-        # before the entry existed) must not hand the copy's owner to it, so
-        # the live directory's owner and mode are taken now and put back.
-        keep: tuple[int, int, int] | None = None
-        if not any(entry.path == backupset.ROOT_ENTRY for entry in root_entries):
-            try:
-                details = io.stat(root.source)
-                keep = (details.st_uid, details.st_gid, stat.S_IMODE(details.st_mode))
-            except OSError:
-                keep = None
-        argv = ["rsync", "-a", "--delete"]
-        argv.extend(f"--exclude={pattern}" for pattern in root.exclusions)
-        argv.extend(
-            [source.rstrip("/") + "/", root.source.rstrip("/") + "/"]
+        outcome = root.put_back(gideon_ids)
+        if isinstance(outcome, Problem):
+            return (
+                StageResult(
+                    "files",
+                    False,
+                    outcome.problem,
+                    outcome.fix or _STAGE_FIX,
+                ),
+                tuple(restored),
+                0,
+            )
+        restored.extend(outcome.restored)
+        clauses.extend(outcome.clauses)
+        claims.merge(outcome.claims)
+    problem = claims.apply(io, "files")
+    if problem is not None:
+        return (
+            StageResult(
+                "files",
+                False,
+                problem.problem,
+                problem.fix or _REOWN_FIX,
+            ),
+            tuple(restored),
+            0,
         )
-        result = run_stage(
-            io,
-            "files",
-            argv,
-            f"restored {root.name}",
-            _STAGE_FIX,
-        )
-        if not result.ok:
-            return result, tuple(restored), 0
-        restored.append(root.name)
-        if keep is not None:
-            uid, gid, mode = keep
-            paths_by_owner.setdefault((uid, gid, False), []).append(root.source)
-            paths_by_mode.setdefault(mode, []).append(root.source)
-        failure = _validate_physical(
-            io, stage="files", base=root.source, entries=root_entries
-        )
-        if failure is not None:
-            return failure, tuple(restored), 0
-        for entry in root_entries:
-            path = os.path.join(root.source, entry.path)
-            is_link = entry.kind == "l"
-            if owner_map.matches(entry.uid, entry.gid):
-                mapped += 1
-            uid, gid = owner_map.map(entry.uid, entry.gid)
-            paths_by_owner.setdefault((uid, gid, is_link), []).append(path)
-            if not is_link:
-                paths_by_mode.setdefault(entry.mode, []).append(path)
-
-    owner_result = _run_grouped_chown(io, paths_by_owner, stage="files")
-    if owner_result is not None:
-        return owner_result, tuple(restored), 0
-    mode_result = _run_grouped_chmod(io, paths_by_mode, stage="files")
-    if mode_result is not None:
-        return mode_result, tuple(restored), 0
-    checkout_copy = os.path.join(selected.path, backupset.FILES_DIR, "checkout")
+    owner_map = backupset.OwnerMap(selected.manifest.gideon_ids, gideon_ids)
     ownership = (
         f"re-owned by the recorded ids ({REOWN_NO_RECORD_DETAIL})"
         if owner_map.is_identity
-        else f"{mapped} {REOWN_MAPPED_DETAIL} {gideon_ids.uid}:{gideon_ids.gid}"
+        else f"{claims.gideon_owned} {REOWN_MAPPED_DETAIL} {gideon_ids.uid}:{gideon_ids.gid}"
     )
+    detail = "; ".join((f"restored {', '.join(restored)}", *clauses, ownership))
     return (
         StageResult(
             "files",
             True,
-            f"restored {', '.join(restored)}; the checkout copy stays in {checkout_copy} "
-            f"(clone the tag the manifest names); {ownership}",
+            detail,
             "",
         ),
         tuple(restored),
-        sum(len(paths) for paths in paths_by_owner.values()),
+        claims.owner_paths,
     )
 
 
@@ -1431,6 +1093,8 @@ def _restore_body(
     selected = selection.set_ref
     if source == "target":
         assert selection.snapshot is not None
+        checkout = Path(__file__).parents[2] if root is None else Path(root)
+        roots = backupset.inventory_roots(os.fspath(checkout))
         fetch_result, fetched = _fetch_stage(
             io,
             config,
@@ -1439,6 +1103,7 @@ def _restore_body(
             at=at,
             operation_label=operation_label,
             gideon_ids=gideon_ids,
+            roots=roots,
         )
         print_stage(fetch_result)
         if not fetch_result.ok or fetched is None:
@@ -1452,7 +1117,6 @@ def _restore_body(
         io,
         rendered_dir,
         selected=selected,
-        source=source,
     )
     print_stage(verify_result)
     if not verify_result.ok:

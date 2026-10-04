@@ -24,6 +24,7 @@ SETS_DIR: Final = f"{STAGING}/sets"
 MANIFEST_NAME: Final = "manifest.json"
 TARBALL_NAME: Final = "secrets.tar.age"
 FILES_DIR: Final = "files"
+FRONTEND_UPLOADS: Final = "/data/bulk/openwebui"
 PUSH_RECORD_NAME: Final = "push.json"
 PARTIAL_SUFFIX: Final = ".partial"
 # The system account provision creates for the host services; the one name
@@ -47,6 +48,13 @@ def partial_dir(label: str) -> str:
     return f"{set_dir(label)}{PARTIAL_SUFFIX}"
 
 
+class RootKind(StrEnum):
+    """How an inventory root is taken into a backup set."""
+
+    SNAPSHOT = "snapshot"
+    REPOSITORY = "repository"
+
+
 @dataclass(frozen=True, slots=True)
 class InventoryRoot:
     """One root included in a backup set's inventory."""
@@ -54,8 +62,12 @@ class InventoryRoot:
     name: str
     source: str
     exclusions: tuple[str, ...]
-    snapshotted: bool
+    kind: RootKind
     restore_in_place: bool
+
+    @property
+    def snapshotted(self) -> bool:
+        return self.kind is RootKind.SNAPSHOT
 
 
 # Derived tool state under a checkout: never release content, never restored.
@@ -95,14 +107,15 @@ def inventory_roots(checkout: str) -> tuple[InventoryRoot, ...]:
 
     # A root a container writes under an id of its image's own would carry
     # its ownership policy here, beside restore_in_place; none does today.
+    # restore_in_place is per-root policy read by the snapshot kind.
     return (
-        InventoryRoot("etc-gideon", "/etc/gideon", etc_gideon_exclusions(), True, True),
-        InventoryRoot("checkout", checkout, CHECKOUT_EXCLUSIONS, True, False),
-        InventoryRoot("data-registry", "/data/registry", (), True, True),
+        InventoryRoot("etc-gideon", "/etc/gideon", etc_gideon_exclusions(), RootKind.SNAPSHOT, True),
+        InventoryRoot("checkout", checkout, CHECKOUT_EXCLUSIONS, RootKind.SNAPSHOT, False),
+        InventoryRoot("data-registry", "/data/registry", (), RootKind.SNAPSHOT, True),
         InventoryRoot(
-            "data-bulk-openwebui", "/data/bulk/openwebui", (), True, True
+            "data-bulk-openwebui", FRONTEND_UPLOADS, (), RootKind.SNAPSHOT, True
         ),
-        InventoryRoot("pgbackrest", REPOSITORY_PATH, (), False, False),
+        InventoryRoot("pgbackrest", REPOSITORY_PATH, (), RootKind.REPOSITORY, False),
     )
 
 
@@ -821,14 +834,20 @@ class SetRef:
             object.__setattr__(self, "finished", _utc(self.finished, "finished"))
 
 
-def _staging_sets_dir(staging: PathLike) -> str:
+def sets_dir(staging: PathLike) -> str:
     return os.path.join(os.fspath(staging), "sets")
+
+
+def files_dir(set_path: PathLike) -> str:
+    """Return the directory holding a set's copied roots."""
+
+    return os.path.join(os.fspath(set_path), FILES_DIR)
 
 
 def list_sets(host: Host, staging: PathLike = STAGING) -> tuple[SetRef, ...]:
     """Discover local sets through the injectable host seam."""
 
-    sets_path = _staging_sets_dir(staging)
+    sets_path = sets_dir(staging)
     try:
         names = host.listdir(sets_path)
     except FileNotFoundError:
@@ -979,7 +998,7 @@ def prune_candidates(
         and ref.finished is not None
         and ref.finished < complete_cutoff
     ]
-    sets_path = _staging_sets_dir(staging)
+    sets_path = sets_dir(staging)
     candidates.extend(
         os.path.join(sets_path, name)
         for name, mtime in sorted(partial_mtimes.items())

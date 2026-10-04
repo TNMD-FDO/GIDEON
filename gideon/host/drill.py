@@ -15,7 +15,16 @@ from pathlib import Path
 from typing import Final
 
 import gideon
-from gideon.host import apply, audit, backupset, owui, pgbackrest, site, stack
+from gideon.host import (
+    apply,
+    audit,
+    backuproots,
+    backupset,
+    owui,
+    pgbackrest,
+    site,
+    stack,
+)
 from gideon.host.images import load_image_lock
 from gideon.host.lock import load_host_lock
 from gideon.host.models import load_models_lock, select_profile
@@ -275,11 +284,15 @@ def _prepare_stage(io: Host, context: _DrillContext, *, rendered_dir: PathLike) 
             _PREPARE_FIX,
         )
 
-    source = os.path.join(
-        context.local_set.path,
-        backupset.FILES_DIR,
-        "data-bulk-openwebui",
-    )
+    assert context.local_set.manifest is not None
+    source = backuproots.carrying(
+        backuproots.held(
+            io,
+            backupset.inventory_roots(context.local_set.manifest.checkout),
+            context.local_set,
+        ),
+        backupset.FRONTEND_UPLOADS,
+    ).copy
     return run_stage(
         io,
         "prepare",
