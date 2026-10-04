@@ -41,6 +41,7 @@ The `smoke` slice is the push gate's, with one list per source list. Its
 guardrails lists name the frontend sample's six cases, each run at the service
 door and through the frontend. Its two extraction lists mirror `extraction`'s
 and change with them. Every list changes only by append; a successor to a
-superseded sample case is appended beside it. Each later slice adds its
-categories as they land. `harvest.ids` leaves at the export boundary with its
-cases.
+superseded sample case is appended to the lists and named in the runner's
+`FRONTEND_SAMPLE` constant in `gideon/evaluation/guardrails_slice.py` in the
+same release. Each later slice adds its categories as they land. `harvest.ids`
+leaves at the export boundary with its cases.

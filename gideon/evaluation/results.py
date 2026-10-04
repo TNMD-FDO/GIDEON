@@ -66,6 +66,9 @@ class RunContext:
 
     ``rendered_dir`` is the rendered directory of the stack whose turns run.
     ``engine_dir`` is the rendered directory of the project whose engine the judge calls.
+    ``checkout`` is the tree the run takes its cases, reference, and provenance
+    from; a runner reads release content such as seeds beneath it, never beside
+    its own module. It is none when no command supplied a checkout.
     ``turns`` is present for a slice that drives turns through the harness's
     service or managed frontend drivers.
     ``checkpoint`` is called by a runner between cases and before a case's
@@ -85,3 +88,4 @@ class RunContext:
     ranked: Mapping[str, tuple[Coordinates, ...]] | None = None
     turns: TurnAccess | None = None
     checkpoint: Callable[[], None] = _no_checkpoint
+    checkout: PathLike | None = None

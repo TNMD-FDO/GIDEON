@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.23](docs/release-notes/v0.3.23.md) — 2026-10-04 — the guardrails seed follows the run's checkout
 - [v0.3.22](docs/release-notes/v0.3.22.md) — 2026-10-04 — each service one definition, the move
 - [v0.3.21](docs/release-notes/v0.3.21.md) — 2026-10-03 — the office-services runbook reads as any office's checklist
 - [v0.3.20](docs/release-notes/v0.3.20.md) — 2026-10-03 — the Install section's prerequisites

@@ -421,6 +421,9 @@ class SmokeCommand(unittest.TestCase):
                 loaded = _load(set_root)
             checkout = root / "checkout"
             checkout.mkdir()
+            shutil.copytree(
+                ROOT / guardrails_slice.SEED_ROOT, checkout / guardrails_slice.SEED_ROOT
+            )
             host = CommandDoorHost()
             _host, turns_context = _context(loaded, host=host)
             assert turns_context.turns is not None

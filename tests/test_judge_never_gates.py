@@ -147,6 +147,7 @@ def _run_registered(
         default_reading = pair[variation]
         host = JudgingDoorHost(default=default_reading)
         turns = None
+        checkout: PathLike | None = None
         rendered_dir: PathLike = "/rendered"
         served_model = "fixture-model" if spec.reaches_engine else None
         if spec.drives_turns and spec.judge_prompt is not None:
@@ -172,6 +173,7 @@ def _run_registered(
                     guardrail.DEADLINE_REFUSAL if role == "positive" else _DECLINE
                 )
             turns = turn_context.turns
+            checkout = turn_context.checkout
         progress: list[str] = []
         context = RunContext(
             cast(Host, host),
@@ -182,8 +184,13 @@ def _run_registered(
             spec.repeats,
             progress.append,
             turns=turns,
+            checkout=checkout,
         )
         result = spec.runner(loaded, slice_name, context)
+        if spec.drives_turns and spec.judge_prompt is not None:
+            assert all(
+                row.metrics.get("problem") != "seed-unavailable" for row in result.results
+            )
         assert not [line for line in result.report.splitlines() if line.startswith("verdict ")], (
             f"{slice_name} report printed a verdict line in variation {variation}"
         )

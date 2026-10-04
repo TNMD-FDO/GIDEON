@@ -1392,6 +1392,7 @@ def _run_body(
         progress=print,
         ranked=ranked_lists,
         turns=None if engine_preconditions is None else engine_preconditions.turns,
+        checkout=checkout,
     )
     if subject_change is not None:
         assert side_prompt_id is not None

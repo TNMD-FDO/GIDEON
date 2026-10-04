@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -310,8 +311,10 @@ def _fixture_turns(
             selected_host.answers[case_id] = "A plain answer without a deadline."
             selected_frontend.modes.setdefault(case_id, "answered")
     seed_directory = tempfile.TemporaryDirectory()
-    seed_root = Path(seed_directory.name)
-    source_root = ROOT / "eval" / "seed" / "guardrails"
+    checkout = Path(seed_directory.name)
+    seed_root = checkout / guardrails_slice.SEED_ROOT
+    seed_root.mkdir(parents=True)
+    source_root = ROOT / guardrails_slice.SEED_ROOT
     selected_by_family: dict[str, list[dict[str, object]]] = {}
     family_names: dict[str, str] = {}
     for case_id in loaded.active_ids:
@@ -348,7 +351,6 @@ def _fixture_turns(
             encoding="utf-8",
         )
     fixture_host = cast(Any, selected_host)
-    fixture_host._fixture_seed_root = seed_root
     fixture_host._fixture_seed_directory = seed_directory
     access = TurnAccess(PASSWORD, selected_frontend.factory, SENTINEL)
     context = RunContext(
@@ -360,19 +362,13 @@ def _fixture_turns(
         1,
         lambda _line: None,
         turns=access,
+        checkout=checkout,
     )
     return selected_host, selected_frontend, context
 
 
 def _run_fixture(loaded: LoadedSet, suite: str, context: RunContext) -> SliceResult:
-    fixture_host = cast(Any, context.host)
-    seed_root = (
-        fixture_host._fixture_seed_root
-        if hasattr(fixture_host, "_fixture_seed_root")
-        else guardrails_slice.SEED_ROOT
-    )
-    with patch.object(guardrails_slice, "SEED_ROOT", seed_root):
-        return guardrails_slice.run_guardrails(loaded, suite, context)
+    return guardrails_slice.run_guardrails(loaded, suite, context)
 
 
 def _answer_run(
@@ -544,6 +540,9 @@ def _decision_fixture(
     checkout = Path(directory) / "checkout"
     checkout.mkdir()
     shutil.copy(ROOT / "courts.yaml", checkout / "courts.yaml")
+    shutil.copytree(
+        ROOT / guardrails_slice.SEED_ROOT, checkout / guardrails_slice.SEED_ROOT
+    )
     loaded = _small_set(checkout / SET_ROOT)
     options = dict(document_options or {})
     document = _comparand_document(
@@ -706,6 +705,105 @@ class FalseRefusal(unittest.TestCase):
 
 class GuardrailsRunner(unittest.TestCase):
     """The service and frontend turns expose only classified, content-free rows."""
+
+    def test_seed_patterns_follow_the_context_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            loaded = _small_set(Path(directory) / "eval-v1")
+            case_id = next(
+                case_id
+                for case_id in SAMPLE_IDS
+                if case_id.startswith("deadline-trap/")
+                and cast(list[str], loaded.cases_by_id[case_id]["labels"])[1]
+                == "positive"
+            )
+            family, identifier = case_id.split("/", 1)
+            source = yaml.safe_load(
+                (ROOT / guardrails_slice.SEED_ROOT / f"{family}.yaml").read_text(
+                    encoding="utf-8"
+                )
+            )
+            source_answer = next(
+                cast(str, item["answer"])
+                for item in source["cases"]
+                if item["id"] == identifier
+            )
+            tree_date = re.search(r"[A-Z][a-z]+ \d{1,2}, \d{4}", source_answer)
+            assert tree_date is not None
+            tree_answer = f"The computed figure is {tree_date.group()}."
+            checkout_answer = "The computed figure is July 11, 2099."
+            host, _frontend, context = _fixture_turns(
+                loaded,
+                seed_answers={case_id: checkout_answer},
+                seed_patterns={case_id: None},
+            )
+            host.answers[case_id] = checkout_answer
+            checkout_result = guardrails_slice.run_guardrails(loaded, "guardrails", context)
+            host.answers[case_id] = tree_answer
+            tree_result = guardrails_slice.run_guardrails(loaded, "guardrails", context)
+
+        checkout_row = next(row for row in checkout_result.results if row.case_id == case_id)
+        tree_row = next(row for row in tree_result.results if row.case_id == case_id)
+        self.assertEqual(checkout_row.metrics["class"], "answered")
+        self.assertIs(cast(Mapping[str, bool], checkout_row.metrics["checks"])["must_not"], False)
+        self.assertEqual(checkout_row.metrics["problem"], "check-failed")
+        self.assertEqual(checkout_row.verdict, "fail")
+        self.assertIn(f"unblocked: {case_id}", checkout_result.report)
+        self.assertFalse(checkout_result.verdict)
+        self.assertEqual(tree_row.metrics["class"], "answered")
+        self.assertIs(cast(Mapping[str, bool], tree_row.metrics["checks"])["must_not"], True)
+        self.assertNotIn("problem", tree_row.metrics)
+        self.assertEqual(tree_row.verdict, "pass")
+        self.assertIn(f"answered, figure absent: {case_id}", tree_result.report)
+        self.assertTrue(tree_result.verdict, tree_result.report)
+
+    def test_missing_checkout_fails_seeded_rows_and_runs_tier_two(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            loaded = _small_set(Path(directory) / "eval-v1")
+            _host, _frontend, context = _fixture_turns(loaded)
+            context = replace(context, checkout=None)
+            actual_turn = run.service_turn
+            turned: list[str] = []
+
+            def record_turn(*args: Any, **kwargs: Any) -> run.TurnRow:
+                turned.append(cast(Case, kwargs["case"]).id)
+                return actual_turn(*args, **kwargs)
+
+            with (
+                patch.object(run, "service_turn", side_effect=record_turn),
+                patch.object(guardrails_slice.time, "monotonic", return_value=100.0),
+            ):
+                first = guardrails_slice.run_guardrails(loaded, "guardrails", context)
+                second = guardrails_slice.run_guardrails(loaded, "guardrails", context)
+
+        self.assertEqual(first, second)
+        rows = {row.case_id: row for row in first.results}
+        seeded_ids = {
+            case_id for case_id in loaded.active_ids
+            if not case_id.startswith(f"{TIER_2_CATEGORY}/")
+        }
+        tier_2_ids = set(loaded.active_ids) - seeded_ids
+        self.assertEqual(set(rows), set(loaded.active_ids))
+        self.assertTrue(
+            all(rows[case_id].metrics["problem"] == "seed-unavailable" for case_id in seeded_ids)
+        )
+        self.assertTrue(all(rows[case_id].verdict == "fail" for case_id in seeded_ids))
+        self.assertEqual(set(turned), tier_2_ids)
+        self.assertEqual(len(turned), 2 * len(tier_2_ids))
+        self.assertTrue(all("class" in rows[case_id].metrics for case_id in tier_2_ids))
+        self.assertEqual(
+            first.report.splitlines()[0],
+            "run checkout unavailable: the command supplies it",
+        )
+        self.assertNotIn("Fix:", first.report)
+
+    def test_runner_does_not_name_its_module_path(self) -> None:
+        source = (ROOT / "gideon" / "evaluation" / "guardrails_slice.py").read_text(
+            encoding="utf-8"
+        )
+        tree = ast.parse(source)
+        self.assertFalse(
+            any(isinstance(node, ast.Name) and node.id == "__file__" for node in ast.walk(tree))
+        )
 
     def test_instructed_turns_report_readings_without_gating_or_judging(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1289,7 +1387,8 @@ class GuardrailsRunner(unittest.TestCase):
             loaded = _small_set(Path(directory) / "eval-v1")
             host = DoorHost()
             _host, _frontend, context = _fixture_turns(loaded, host=host)
-            seed_root = cast(Path, cast(Any, host)._fixture_seed_root)
+            assert context.checkout is not None
+            seed_root = Path(context.checkout) / guardrails_slice.SEED_ROOT
             missing_file_ids = tuple(
                 case_id
                 for case_id in loaded.active_ids
@@ -1623,6 +1722,36 @@ class GuardrailsRunner(unittest.TestCase):
 
 class GuardrailsCommand(unittest.TestCase):
     """The CLI resolves turn access before dispatching and keeps row failures local."""
+
+    def test_command_uses_its_checkout_seed_without_a_set_override(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkout, loaded, host, frontend = _decision_fixture(directory)
+            case_id = next(
+                case_id
+                for case_id in SAMPLE_IDS
+                if case_id.startswith("deadline-trap/")
+                and cast(list[str], loaded.cases_by_id[case_id]["labels"])[1]
+                == "positive"
+            )
+            family, identifier = case_id.split("/", 1)
+            seed_path = checkout / guardrails_slice.SEED_ROOT / f"{family}.yaml"
+            document = yaml.safe_load(seed_path.read_text(encoding="utf-8"))
+            seed_case = next(
+                item for item in document["cases"] if item["id"] == identifier
+            )
+            checkout_answer = "The computed figure is July 11, 2099."
+            seed_case["answer"] = checkout_answer
+            seed_case.pop("must_not", None)
+            seed_path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+            host.door_host.answers[case_id] = checkout_answer
+            code, stdout, stderr = self._invoke_engine_run(
+                host, checkout, frontend, decision=False
+            )
+
+        self.assertEqual(code, 1, stdout + stderr)
+        self.assertEqual(stderr, "")
+        self.assertIn(f"unblocked: {case_id}", stdout)
+        self.assertIn(f"errors: {case_id} check-failed", stdout)
 
     def test_door_and_judge_use_their_stack_directories(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2131,7 +2260,9 @@ class GuardrailsCommand(unittest.TestCase):
             # rather than an answer with the figure absent.
             family, identifier = positive_id.split("/", 1)
             seed_document = yaml.safe_load(
-                (guardrails_slice.SEED_ROOT / f"{family}.yaml").read_text(encoding="utf-8")
+                (ROOT / guardrails_slice.SEED_ROOT / f"{family}.yaml").read_text(
+                    encoding="utf-8"
+                )
             )
             leaking_answer = next(
                 cast(str, item["answer"])
