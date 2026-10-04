@@ -8,10 +8,19 @@ assistant, on one box the office controls. Built by TNMD-FDO (the Office of
 the Federal Public Defender, Middle District of Tennessee) and designed from
 day one for distribution: clone a tag, edit `site.yaml`, run one script.
 
-**Status:** 0.x — slice 0 (platform) complete at `v0.1.0`, the clean-VM acceptance at minor tags its standing proof; slice 1 (General) complete at `v0.2.0`, with no user on the box until go-live; slice 2 (eval harness) complete at `v0.3.0`; slice 3 (corpus machinery and tranche 1) next; this tree is `v0.3.19`.
+**Status:** 0.x — slice 0 (platform) complete at `v0.1.0`, the clean-VM acceptance at minor tags its standing proof; slice 1 (General) complete at `v0.2.0`, with no user on the box until go-live; slice 2 (eval harness) complete at `v0.3.0`; slice 3 (corpus machinery and tranche 1) next; this tree is `v0.3.20`.
 What each release changed is in [`CHANGELOG.md`](CHANGELOG.md), one line per release; from `v0.2.0` each line links its release note. Later-slice commands still print "not implemented".
 
 ## Install
+
+### Before you begin
+
+- **Operating system** — Ubuntu Server 26.04 on `x86_64`; provision refuses any other release or architecture.
+- **Packages** — Install `git` and `python3-yaml` with `sudo apt install -y git python3-yaml`; this is safe to run if they are already installed.
+- **Login** — Use the CSA's own Linux login with `sudo`, never root; this login will own `/opt/gideon`.
+- **Hardware** — The reference profile `2x96v-256d` needs 2 × NVIDIA RTX PRO 6000 Blackwell Server Edition, 96 GB VRAM per GPU, 256 GB RAM, and a 4000 GB data volume; preflight refuses a shortfall. Alternatively, declare a no-GPU host with `--no-gpu` at step 2; preflight judges none of these figures on that host.
+- **Download** — Allow about 31 GB of model files at the first apply, including on a no-GPU host.
+- **Office services** — Have the directory, DNS, backup target, certificates, and mail relay ready as described in [office services setup](docs/runbooks/office-services-setup.md).
 
 The receiving-office sequence, run from the checkout:
 
@@ -23,7 +32,9 @@ The receiving-office sequence, run from the checkout:
    cd /opt/gideon
    ```
 
-   The owner matters later: `upgrade` runs git as whoever owns the directory, so that account's credentials fetch the next release and no root-owned file lands in the tree.
+   `<account>` is the CSA's own Linux login, the one `id -un` prints, never root or a GitHub account. `<tag>` is a release tag. For example, with login `csa` and tag `v0.3.0`, run `sudo install -d -o csa -g csa /opt/gideon` and `git clone --branch v0.3.0 https://github.com/TNMD-FDO/GIDEON /opt/gideon`. Tags are listed newest first in [`CHANGELOG.md`](CHANGELOG.md) and on the [repository's tags page](https://github.com/TNMD-FDO/GIDEON/tags).
+
+   The owner matters later: `upgrade` runs git as whoever owns the directory, so no root-owned file lands in the tree. The repository is public, so the clone and `upgrade`'s fetch need no GitHub account or credentials.
 
 2. Provision the host:
 
@@ -33,11 +44,7 @@ The receiving-office sequence, run from the checkout:
 
    The first run prints the backup public key and the age identity **once**: store the identity in the office password manager and authorize the public key on the backup target before going on. A `reboot-required` row means reboot, then provision again until every step reads `ok`. A host without a GPU is provisioned once with `sudo python3 -m gideon host provision --no-gpu`; every later command reads that declaration. TNMD's box is declared once with `sudo python3 -m gideon host provision --build-box`.
 
-3. Write `/etc/gideon/site.yaml` from `config/site.example.yaml` (authoritative for keys and defaults), place the supplied secrets under `/etc/gideon/secrets/`, then pull the release's images into the loopback registry (Docker access):
-
-   ```bash
-   python3 -m gideon registry mirror
-   ```
+3. Write `/etc/gideon/site.yaml` from `config/site.example.yaml` (authoritative for keys and defaults), and place the supplied secrets under `/etc/gideon/secrets/`. On the build box, `sudo python3 -m gideon registry mirror` pulls the release's images into its loopback registry, and where a receiving office pulls its images from is settled with the release registry at `v1.0.0`.
 
 4. Provision again — the site-dependent steps are blocked until the site file exists:
 

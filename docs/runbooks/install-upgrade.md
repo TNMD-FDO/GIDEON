@@ -9,22 +9,42 @@ an `audit_log` row an operator can query, never a log line. The
 acceptance section below records the clean-VM exercise by two CSAs; it arrived
 with `v0.1.0`.
 
-## 1. The receiving-office sequence, steps 3–7
+## 1. The receiving-office sequence
+
+### Before you begin
+
+- **Operating system** — Ubuntu Server 26.04 on `x86_64`; provision refuses any other release or architecture.
+- **Packages** — Install `git` and `python3-yaml` with `sudo apt install -y git python3-yaml`; this is safe to run if they are already installed.
+- **Login** — Use the CSA's own Linux login with `sudo`, never root; this login will own `/opt/gideon`.
+- **Hardware** — The reference profile `2x96v-256d` needs 2 × NVIDIA RTX PRO 6000 Blackwell Server Edition, 96 GB VRAM per GPU, 256 GB RAM, and a 4000 GB data volume; preflight refuses a shortfall. Alternatively, declare a no-GPU host with `--no-gpu` at step 2; preflight judges none of these figures on that host.
+- **Download** — Allow about 31 GB of model files at the first apply, including on a no-GPU host.
+- **Office services** — Have the directory, DNS, backup target, certificates, and mail relay ready as described in [office services setup](office-services-setup.md).
 
 Every step is re-runnable; a refusal prints its fix and exits non-zero, and the
 same command is run again after the fix.
 
-1. **Clone the release** to `/opt/gideon` as the account that will own the
-   checkout (a CSA account with GitHub credentials, never root). Because
-   `/opt` is root-owned, create and assign the directory first:
-   `sudo install -d -o <account> -g <account> /opt/gideon`
-   Then clone the release:
-   `git clone --branch <tag> <repository> /opt/gideon`. The owner matters
-   later: `upgrade` runs git as whoever owns the directory, so that account's
-   credentials fetch the next release and no root-owned file lands in the tree.
-   The later commands run from `/opt/gideon`: `cd /opt/gideon`.
-2. **Provision the host**: `sudo python3 -m gideon host provision`. One line
-   per step; the first run prints the backup public key and the age identity
+1. **Clone the release** to `/opt/gideon` as the CSA's own Linux login, never
+   root. Because `/opt` is root-owned, create and assign the directory first,
+   then clone the release. The later commands run from `/opt/gideon`:
+
+   ```bash
+   sudo install -d -o <account> -g <account> /opt/gideon
+   git clone --branch <tag> https://github.com/TNMD-FDO/GIDEON /opt/gideon
+   cd /opt/gideon
+   ```
+
+   `<account>` is the CSA's own Linux login, the one `id -un` prints, never root
+   or a GitHub account. `<tag>` is a release tag. For example, with login `csa`
+   and tag `v0.3.0`, run `sudo install -d -o csa -g csa /opt/gideon` and
+   `git clone --branch v0.3.0 https://github.com/TNMD-FDO/GIDEON /opt/gideon`.
+   Tags are listed newest first in [`CHANGELOG.md`](../../CHANGELOG.md) and on
+   the [repository's tags page](https://github.com/TNMD-FDO/GIDEON/tags).
+
+   The owner matters later: `upgrade` runs git as whoever owns the directory,
+   so no root-owned file lands in the tree. The repository is public, so the
+   clone and `upgrade`'s fetch need no GitHub account or credentials.
+2. **Provision the host**. One line per step; the first run prints the backup
+   public key and the age identity
    **once** (store the identity in the office password manager before going
    on, `backup-restore.md` §2). A `reboot-required` row (the NVIDIA
    driver, a kernel) means: reboot, then run provision again until every step
@@ -34,23 +54,39 @@ same command is run again after the fix.
    `gideon <command>` from any directory runs
    `sudo python3 -m gideon <command>` from `/opt/gideon`; this runbook keeps
    the long form because it is the only form available before this step.
+
+   ```bash
+   sudo python3 -m gideon host provision
+   ```
 3. **Write the site file** at `/etc/gideon/site.yaml` from
    `config/site.example.yaml`, and place the supplied secrets as described in
-   `office-services-setup.md`. On the build box, `python3 -m gideon registry
-   mirror` (Docker access) pulls the release's images into the loopback
-   registry; where a receiving office pulls its images from is settled with
-   the release registry at `v1.0.0`.
-4. **Provision again**: `sudo python3 -m gideon host provision`. The
+   `office-services-setup.md`. On the build box,
+   `sudo python3 -m gideon registry mirror` pulls the release's images into its
+   loopback registry, and where a receiving office pulls its images from is
+   settled with the release registry at `v1.0.0`.
+4. **Provision again**. The
    site-dependent steps — `egress-proxy`, `firewall`, `time-sync`, and
    `timezone` — are blocked until the site file exists, and preflight refuses
    on any unconverged step. This second run is required because those
    site-dependent steps cannot converge until the site file exists.
-5. **Preflight**: `sudo ./preflight.sh`. Every provisioning step re-checked,
+
+   ```bash
+   sudo python3 -m gideon host provision
+   ```
+5. **Preflight**. Every provisioning step re-checked,
    then the install-time checks (the directory, the relay, the backup target,
    TLS material, ports, disk). Exit 0 iff nothing refuses. Install opens with
    the same preflight, so a refusal here is a refusal there.
-6. **Install**: `sudo ./install.sh`. Eight phases, each nested command printing
+
+   ```bash
+   sudo ./preflight.sh
+   ```
+6. **Install**. Eight phases, each nested command printing
    its own rows first and install one phase row after it:
+
+   ```bash
+   sudo ./install.sh
+   ```
 
    | Phase | Runs | What it proves |
    |---|---|---|
@@ -137,9 +173,14 @@ same command is run again after the fix.
    record. A restore of a set made before a rotation brings the
    older value back: after that restore's `apply`, run `secrets rotate <name>`
    for every secret rotated since the set was made.
-7. **Corpus** (`gideon corpus install`, `index promote`) arrives with slice 3.
-8. **Hand over the URL**, and `sudo python3 -m gideon alerts test` once so the
+7. **Hand over the URL**, and test alerts once so the
    page path is proven through the relay (`observability.md`).
+
+   ```bash
+   sudo python3 -m gideon alerts test
+   ```
+
+`gideon corpus install` and `index promote` arrive with slice 3.
 
 **No-GPU host.** `sudo python3 -m gideon host provision --no-gpu` writes
 `/etc/gideon/no-gpu` once. It is refused on a host with an NVIDIA device; every

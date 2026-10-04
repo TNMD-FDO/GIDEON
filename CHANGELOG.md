@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.20](docs/release-notes/v0.3.20.md) — 2026-10-03 — the Install section's prerequisites
 - [v0.3.19](docs/release-notes/v0.3.19.md) — 2026-10-03 — the runbook's tile table held
 - [v0.3.18](docs/release-notes/v0.3.18.md) — 2026-10-03 — a GPU drawn once across a recreate
 - [v0.3.17](docs/release-notes/v0.3.17.md) — 2026-10-03 — the lister's box row names who applies
