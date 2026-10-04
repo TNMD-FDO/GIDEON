@@ -2,9 +2,9 @@
 #
 # The one file a receiving office edits. It states the office's facts and the
 # policies the office is entitled to set; it never sets GIDEON's behaviour.
-# It contains no secret and no path: secrets are files in
-# /etc/gideon/secrets/, the certificate is /etc/gideon/tls/cert.pem, the office
-# CA root is /etc/gideon/ca.pem.
+# It contains no secret and no path to a file on this server: every supplied
+# file has a fixed home — secrets in /etc/gideon/secrets/, the certificate
+# in /etc/gideon/tls/cert.pem, and the office CA root in /etc/gideon/ca.pem.
 #
 # Required keys are uncommented. Every commented key shows its default; leave
 # it commented to accept the default. Unknown keys refuse. Enumerated keys list
@@ -37,7 +37,7 @@ auth:
 
 backup:
   target:
-    host: nas.example.org          # any SSH host with disk; Synology/QNAP: the account must be a NAS administrator
+    host: nas.example.org          # any SSH host with rsync and disk; the account is an ordinary user; a NAS whose SSH service admits administrators alone (Synology and QNAP) needs the account in its administrators group
     path: /volume3/gideon-backup   # all dated snapshots live under this one path (same filesystem)
     # user: gideon-backup           # SSH account on the backup target (default; used by backup push and preflight)
   # local_days: 7                  nightly sets kept on the server's own disk (at least 1; also the repository's point-in-time window)
