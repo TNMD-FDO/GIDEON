@@ -23,14 +23,16 @@ from gideon.host import apply as apply_module
 from gideon.host.images import RegistryTarget, parse_registry, reference
 from gideon.host.models import MemoryRow
 from gideon.host.render import RenderInputs
-from gideon.host.render.api import API_SERVICE_NAME
+from gideon.host.render.api import API_SECRET_NAME, API_SERVICE_NAME
 from gideon.host.render.compose import (
     STORE_SERVICES,
+    compose_top_level,
     service_blocks,
     service_images,
     service_names,
 )
-from gideon.host.render.engine import ENGINE_SERVICE_NAME
+from gideon.host.render.consumers import secret_consumers
+from gideon.host.render.engine import ENGINE_SECRET_NAME, ENGINE_SERVICE_NAME
 from gideon.host.render.services import (
     SERVICES,
     ServiceDefinition,
@@ -50,6 +52,121 @@ def host_inputs() -> tuple[RenderInputs, ...]:
 
 
 class Registry(unittest.TestCase):
+    def test_declared_secrets_equal_rendered_mounts_on_each_host(self) -> None:
+        """Declarations include every mount and no orphan."""
+
+        for rendered_inputs in host_inputs():
+            with self.subTest(
+                site=rendered_inputs.site.hostname, no_gpu=rendered_inputs.no_gpu
+            ):
+                blocks = service_blocks(rendered_inputs)
+                mounted: set[str] = set()
+                for block in blocks.values():
+                    assert isinstance(block, Mapping)
+                    names = block.get("secrets", ())
+                    assert isinstance(names, (list, tuple))
+                    mounted.update(names)
+                declared = compose_top_level(rendered_inputs)["secrets"]
+                assert isinstance(declared, Mapping)
+                self.assertEqual(set(declared), mounted)
+
+    def test_declared_secrets_match_consumer_order_and_files(self) -> None:
+        """Each mounted secret uses its production file path."""
+
+        for rendered_inputs in host_inputs():
+            with self.subTest(
+                site=rendered_inputs.site.hostname, no_gpu=rendered_inputs.no_gpu
+            ):
+                declared = compose_top_level(rendered_inputs)["secrets"]
+                assert isinstance(declared, Mapping)
+                mounted = tuple(
+                    name
+                    for name, consumers in secret_consumers(rendered_inputs).items()
+                    if consumers.mounts
+                )
+                self.assertEqual(tuple(declared), mounted)
+                self.assertEqual(
+                    dict(declared),
+                    {
+                        name: {"file": f"/etc/gideon/secrets/{name}"}
+                        for name in mounted
+                    },
+                )
+
+    def test_no_gpu_omits_gpu_only_secrets(self) -> None:
+        """Skipped service mounts make no declarations."""
+
+        declared = compose_top_level(inputs(EXAMPLE, no_gpu=True))["secrets"]
+        assert isinstance(declared, Mapping)
+        for name in (
+            ENGINE_SECRET_NAME,
+            API_SECRET_NAME,
+            "postgres_gideon_audit_password",
+        ):
+            with self.subTest(secret=name):
+                self.assertNotIn(name, declared)
+
+    def test_substituted_registry_derives_secrets_from_applying_blocks(self) -> None:
+        """A credential joins through its rendered block alone."""
+
+        class FirstService(ServiceDefinition):
+            name = "example-first"
+
+            def applies(self, inputs: RenderInputs) -> bool:
+                return not inputs.no_gpu
+
+            def block(
+                self, inputs: RenderInputs, target: RegistryTarget
+            ) -> Mapping[str, object]:
+                return {
+                    "image": "example.invalid/first",
+                    "secrets": ["example-shared", "example-first-secret"],
+                }
+
+        class SecondService(ServiceDefinition):
+            name = "example-second"
+
+            def block(
+                self, inputs: RenderInputs, target: RegistryTarget
+            ) -> Mapping[str, object]:
+                return {
+                    "image": "example.invalid/second",
+                    "secrets": ["example-second-secret", "example-shared"],
+                }
+
+        base = inputs()
+        gb = base.profile.memory[0].gb
+        profile = replace(
+            base.profile,
+            memory=(
+                MemoryRow(FirstService.name, gb, None),
+                MemoryRow(SecondService.name, gb, None),
+            ),
+        )
+        gpu = replace(base, profile=profile)
+        no_gpu = replace(gpu, no_gpu=True)
+        with patch(
+            "gideon.host.render.services.SERVICES", [FirstService(), SecondService()]
+        ):
+            for rendered_inputs, expected in (
+                (
+                    gpu,
+                    ("example-shared", "example-first-secret", "example-second-secret"),
+                ),
+                (no_gpu, ("example-second-secret", "example-shared")),
+            ):
+                with self.subTest(no_gpu=rendered_inputs.no_gpu):
+                    declared = compose_top_level(rendered_inputs)["secrets"]
+                    assert isinstance(declared, Mapping)
+                    self.assertEqual(tuple(declared), expected)
+                    self.assertEqual(
+                        dict(declared),
+                        {
+                            name: {"file": f"/etc/gideon/secrets/{name}"}
+                            for name in expected
+                        },
+                    )
+
     def test_names_are_unique_and_nonempty(self) -> None:
         names = all_service_names()
         self.assertTrue(names)

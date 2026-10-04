@@ -112,10 +112,7 @@ class ApiRender(unittest.TestCase):
         self.assertNotIn(API_SERVICE_NAME, no_gpu_document["services"])
         self.assertNotIn(API_INSTRUCTION_PATH, no_gpu_rendered.by_path)
         self.assertNotIn(API_SECRET_NAME, no_gpu_document["secrets"])
-        self.assertEqual(
-            gpu_document["secrets"]["postgres_gideon_audit_password"],
-            no_gpu_document["secrets"]["postgres_gideon_audit_password"],
-        )
+        self.assertNotIn("postgres_gideon_audit_password", no_gpu_document["secrets"])
         self.assertNotIn(
             f"job_name: {API_JOB_NAME}",
             no_gpu_rendered.by_path["prometheus/prometheus.yml"].content,

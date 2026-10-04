@@ -229,6 +229,18 @@ def memory_limit_bytes(profile: HardwareProfile, service: str) -> int:
     return row.gb * GIGABYTE
 
 
+def _mounted_secret_names(services: Mapping[str, object]) -> tuple[str, ...]:
+    """Return mounted secret names once each, in first-mounted order."""
+
+    names: dict[str, None] = {}
+    for block in services.values():
+        assert isinstance(block, Mapping)
+        for name in block.get("secrets", ()):
+            assert isinstance(name, str)
+            names[name] = None
+    return tuple(names)
+
+
 def _compose_document(inputs: RenderInputs) -> Mapping[str, object]:
     target = parse_registry(inputs.site.registry)
     if target is None:
@@ -278,40 +290,12 @@ def _compose_document(inputs: RenderInputs) -> Mapping[str, object]:
             "mem_limit": memory_limit_bytes(inputs.profile, definition.name),
         }
 
-    secrets: dict[str, object] = {
-        "tls_key": {"file": "/etc/gideon/secrets/tls_key"},
-        "postgres_superuser_password": {
-            "file": "/etc/gideon/secrets/postgres_superuser_password"
-        },
-        "webui_secret_key": {"file": "/etc/gideon/secrets/webui_secret_key"},
-        "grafana_admin_password": {
-            "file": "/etc/gideon/secrets/grafana_admin_password"
-        },
-        "ldap_bind_password": {"file": "/etc/gideon/secrets/ldap_bind_password"},
-        "postgres_gideon_ro_metrics_password": {
-            "file": "/etc/gideon/secrets/postgres_gideon_ro_metrics_password"
-        },
-        "postgres_gideon_audit_password": {
-            "file": "/etc/gideon/secrets/postgres_gideon_audit_password"
-        },
+    # A secret is declared when a rendered block mounts it, in first-mounted
+    # order; a new credential joins through its block's list.
+    secrets = {
+        name: {"file": f"/etc/gideon/secrets/{name}"}
+        for name in _mounted_secret_names(services)
     }
-    if inputs.site.alerts.smtp.user:
-        secrets["smtp_password"] = {"file": "/etc/gideon/secrets/smtp_password"}
-
-    # The engine key and the API key are declared when a rendered block
-    # mounts them, after the fixed entries.
-    used_secrets = {
-        secret
-        for block in services.values()
-        if isinstance(block, Mapping)
-        for secret in block.get("secrets", ())
-    }
-    if ENGINE_SECRET_NAME in used_secrets:
-        secrets[ENGINE_SECRET_NAME] = {
-            "file": f"/etc/gideon/secrets/{ENGINE_SECRET_NAME}"
-        }
-    if API_SECRET_NAME in used_secrets:
-        secrets[API_SECRET_NAME] = {"file": f"/etc/gideon/secrets/{API_SECRET_NAME}"}
     return {
         "name": PROJECT_NAME,
         "services": services,

@@ -11,7 +11,7 @@ inputs:
   build_box: true
 files:
   compose.yaml:
-    sha256: "6c80d552eb868ba139976c15b8e6052bc9184aa3a424dbc40460c7392ccf3965"
+    sha256: "1560aa002b85c37e12b32bc53dcbd824b4473031d3d172f3954e48fb51268d65"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
@@ -190,4 +190,4 @@ services:
   postgres-exporter: "71024e25f248a0a94b2ea92c4f48813f8b4f95e3d17d41522f300fa9f1407291"
   cadvisor: "6e4def0c2cc0e80a5357574ad6a8e81286c1f29140a78422632c6e860d14d83e"
   blackbox-exporter: "959ff7e850d35c00a0a178fca5cf671d37dffa6ea5db86790b9166f5182999d3"
-top_level: "fdb7fba569cac2ca7c8a03841e51301847b66e9cd2e745fb1c0f10cfe674c8ca"
+top_level: "a66be53f2c0ffd15fe9e427bf19cae4f689d51504c09c87e1e75e831ac58d31f"

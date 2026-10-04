@@ -526,19 +526,19 @@ volumes:
 secrets:
   tls_key:
     file: "/etc/gideon/secrets/tls_key"
-  postgres_superuser_password:
-    file: "/etc/gideon/secrets/postgres_superuser_password"
-  webui_secret_key:
-    file: "/etc/gideon/secrets/webui_secret_key"
   grafana_admin_password:
     file: "/etc/gideon/secrets/grafana_admin_password"
   ldap_bind_password:
     file: "/etc/gideon/secrets/ldap_bind_password"
   postgres_gideon_ro_metrics_password:
     file: "/etc/gideon/secrets/postgres_gideon_ro_metrics_password"
-  postgres_gideon_audit_password:
-    file: "/etc/gideon/secrets/postgres_gideon_audit_password"
+  postgres_superuser_password:
+    file: "/etc/gideon/secrets/postgres_superuser_password"
+  webui_secret_key:
+    file: "/etc/gideon/secrets/webui_secret_key"
   engine_api_key:
     file: "/etc/gideon/secrets/engine_api_key"
   gideon_api_key:
     file: "/etc/gideon/secrets/gideon_api_key"
+  postgres_gideon_audit_password:
+    file: "/etc/gideon/secrets/postgres_gideon_audit_password"
