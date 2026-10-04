@@ -22,7 +22,7 @@
       "type": "text"
     },
     {
-      "description": "This shows one tile per check a down rule watches: a tile named for a service is its metrics scrape, a tile ending in probe is the door check itself, and a tile ending in database is the database check. Up is healthy; a tile down for ten minutes (five for the engine) causes a page. Follow docs/runbooks/observability.md §4.",
+      "description": "This shows one tile per check a down rule watches: a tile named for a service is its metrics scrape, a tile ending in probe is the door check itself, and a tile ending in database is the database check. Up is healthy; a tile down for ten minutes (five for the engine) causes a page. Each tile is named in docs/runbooks/observability.md §3. Follow docs/runbooks/observability.md §4.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "fieldConfig": {"defaults": {"unit": "short", "mappings": [{"type": "value", "options": {"1": {"text": "up", "color": "green", "index": 0}, "0": {"text": "down", "color": "red", "index": 1}}}]}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
