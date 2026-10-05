@@ -57,13 +57,16 @@ pull request: `git fetch origin && git checkout pin-watch/<pin id>`):
    about a minute — choose the moment.
 
 The `gideon` build follows the same five steps with `python3 -m tools.imagebuild
-gideon`. Its smoke runs Python's `importlib.metadata.version` over the twelve
-image packages after importing `starlette`, `uvicorn`, `httpx`, and `psycopg`,
-and refuses unless the driver loads on the binary libpq implementation and its
-two distributions report the same version — one build argument installs both
-wheels; `--check` repeats that smoke against the recorded built digest. The image is the
-`gideon-api` interpreter and dependency set, while the applying checkout is
-mounted into the running container.
+gideon`. Its smoke runs Python's `importlib.metadata.version` over the twenty
+image packages after importing `starlette`, `uvicorn`, `httpx`, `psycopg`, and
+`procrastinate` (whose import fails without `psycopg-pool`, a gap `pip check`
+does not see), refuses an image whose default user is root, and refuses unless
+the driver loads on the binary libpq implementation and its two distributions
+report the same version — one build argument installs both wheels; `--check`
+repeats that smoke against the recorded built digest. The image is the
+interpreter and dependency set of both `gideon-api` and `gideon-worker`, while
+the applying checkout is mounted into the running containers. A Procrastinate
+bump carries more than the rebuild: §6.
 
 ### Several proposals for one image
 
@@ -115,3 +118,30 @@ the image history and cache.
 The tool needs Docker: run it with `sudo` (it restores ownership of the files
 it writes to you) or as a member of the docker group. Nothing it does needs
 root otherwise.
+
+## 6. A Procrastinate bump
+
+The worker's queue tables are GIDEON's own migration, never the library's own
+apply: `migrations/0007_procrastinate_queue.sql` is Procrastinate 3.10.0's
+`procrastinate/sql/schema.sql` byte for byte, followed by the worker role's
+grants. A pin-watch proposal that moves `PROCRASTINATE_VERSION` is red at
+`tests/test_worker_schema.py` whenever the new wheel's schema moved, because that
+test holds the installed `schema.sql` to a recorded digest and the wheel's newest
+migration file to a recorded name. Complete such a bump on the proposal's branch:
+
+1. Install the proposal's pins in a checkout's development environment and
+   list the wheel's `procrastinate/sql/migrations/*.sql`
+   files whose version prefix is above the old pin's version, in filename order
+   (a `pre` file sorts before a `post` file of the same version).
+2. Read the diff of `schema.sql` between the two versions beside those files;
+   the files reproduce the new schema from the old.
+3. Write the next GIDEON migration from those files in that order, each
+   statement as the file has it, and grant `gideon_worker` whatever new table or
+   sequence the worker's queries reach. A file that adds an enum value and uses
+   it goes in two GIDEON migrations, since the runner applies each in one
+   transaction and a value added inside one cannot be used until it commits.
+4. Move the test's recorded digest and newest file name to the new wheel's.
+   Never edit `0007_procrastinate_queue.sql`: an applied migration is history.
+5. Build, check, and commit as in §2. The worker waits at its start until its
+   schema answers a probe; if the new migration adds an object the worker needs
+   from its first query, move the probe in `gideon/worker/__main__.py` to it.

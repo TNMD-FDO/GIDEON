@@ -249,6 +249,17 @@ def build_parser() -> argparse.ArgumentParser:
     verify = engine_sub.add_parser("verify", help="engine verification gate")
     verify.set_defaults(handler=host_cli.run_engine_verify, command_path="engine verify")
 
+    worker = commands.add_parser("worker", help="job worker operations")
+    worker_sub = worker.add_subparsers(
+        dest="subcommand", metavar="<subcommand>", required=True
+    )
+    worker_verify = worker_sub.add_parser(
+        "verify", help="run one job through the queue and read its row back"
+    )
+    worker_verify.set_defaults(
+        handler=host_cli.run_worker_verify, command_path="worker verify"
+    )
+
     models = commands.add_parser("models", help="model artifacts")
     models_sub = models.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)
     pull = models_sub.add_parser(

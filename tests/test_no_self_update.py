@@ -60,6 +60,8 @@ SELF_UPDATE_SWITCHES: Mapping[str, Mapping[str, str]] = {
     },
     # The API image has no update check or telemetry.
     "gideon-api": {},
+    # The worker image has no update check or telemetry.
+    "gideon-worker": {},
     # No update check or telemetry at the pinned commit; no checker module,
     # and the two user-triggered outbound resolvers are off in its settings.
     "searxng": {},

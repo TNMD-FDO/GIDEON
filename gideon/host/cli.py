@@ -20,6 +20,7 @@ from gideon.host import (
     upgrade,
     users,
     weights,
+    worker,
 )
 from gideon.host.render import command as render_command
 from gideon.host.report import refusal
@@ -108,3 +109,7 @@ def run_alerts_test(args: argparse.Namespace) -> int:
 
 def run_engine_verify(args: argparse.Namespace) -> int:
     return _guarded("engine verify", engine.run_engine_verify, args)
+
+
+def run_worker_verify(args: argparse.Namespace) -> int:
+    return _guarded("worker verify", worker.run_worker_verify, args)

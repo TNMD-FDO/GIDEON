@@ -14,7 +14,7 @@ from gideon.host.steps import STEPS
 
 TOP_LEVEL = [
     "host", "render", "apply", "preflight", "install", "upgrade", "tls",
-    "users", "secrets", "engine", "models", "corpus", "index", "registry", "eval", "proposals", "status",
+    "users", "secrets", "engine", "worker", "models", "corpus", "index", "registry", "eval", "proposals", "status",
     "backup", "restore", "audit", "retention", "alerts",
 ]
 

@@ -192,6 +192,7 @@ class Registry(unittest.TestCase):
                 "grafana_admin_password",
                 "postgres_gideon_ro_metrics_password",
                 "postgres_gideon_eval_password",
+                "postgres_gideon_worker_password",
                 "engine_api_key",
                 "embed_api_key",
                 "gideon_api_key",
@@ -220,6 +221,14 @@ class Registry(unittest.TestCase):
         self.assertEqual(eval_secret.kind, "password")
         self.assertFalse(eval_secret.print_once)
         self.assertEqual(eval_secret.rotation, "role")
+        worker_secret = next(
+            secret for secret in SECRET_REGISTRY
+            if secret.name == "postgres_gideon_worker_password"
+        )
+        self.assertEqual(
+            (worker_secret.kind, worker_secret.print_once, worker_secret.rotation),
+            ("password", False, "role"),
+        )
         self.assertTrue(all(secret.consumer for secret in SECRET_REGISTRY))
 
         engine = next(secret for secret in SECRET_REGISTRY if secret.name == "engine_api_key")
@@ -263,6 +272,7 @@ class Registry(unittest.TestCase):
                 "grafana_admin_password": "seeded",
                 "postgres_gideon_ro_metrics_password": "role",
                 "postgres_gideon_eval_password": "role",
+                "postgres_gideon_worker_password": "role",
                 "engine_api_key": "rewrite",
                 "embed_api_key": "rewrite",
                 "gideon_api_key": "rewrite",

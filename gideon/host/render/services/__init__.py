@@ -112,6 +112,7 @@ def _registered_services() -> tuple[ServiceDefinition, ...]:
     from gideon.host.render.services.prometheus import PrometheusService
     from gideon.host.render.services.qdrant import QdrantService
     from gideon.host.render.services.searxng import SearxngService
+    from gideon.host.render.services.worker import WorkerService
 
     return (
         CaddyService(),
@@ -125,6 +126,7 @@ def _registered_services() -> tuple[ServiceDefinition, ...]:
         GeneratorService(),
         EmbedService(),
         ApiService(),
+        WorkerService(),
         SearxngService(),
         DcgmExporterService(),
         PostgresExporterService(),

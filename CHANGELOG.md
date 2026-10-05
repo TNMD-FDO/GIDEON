@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.42](docs/release-notes/v0.3.42.md) — 2026-10-05 — the worker: one job from CLI to a row
 - [v0.3.41](docs/release-notes/v0.3.41.md) — 2026-10-05 — gideon-embed and the model-server family
 - [v0.3.40](docs/release-notes/v0.3.40.md) — 2026-10-05 — the content-addressed store joins the backup set
 - [v0.3.39](docs/release-notes/v0.3.39.md) — 2026-10-05 — each service declares its own sources

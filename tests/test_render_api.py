@@ -184,7 +184,7 @@ class ApiRender(unittest.TestCase):
 
     def test_moving_the_digest_recreates_only_the_api_service_block(self) -> None:
         original = inputs()
-        moved = replace(original, source_digests={API_SERVICE_NAME: OTHER_DIGEST})
+        moved = replace(original, source_digests={**original.source_digests, API_SERVICE_NAME: OTHER_DIGEST})
         judgment = recreate_judgment(
             render_all(moved),
             applied_record(original),

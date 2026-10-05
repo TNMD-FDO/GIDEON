@@ -85,6 +85,8 @@ profiles:
         gb: 1
       gideon-api:
         gb: 1
+      gideon-worker:
+        gb: 12
     models:
       generator:
         repo: example/fixture

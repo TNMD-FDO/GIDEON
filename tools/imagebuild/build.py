@@ -27,10 +27,14 @@ class Smoke:
 
 _GIDEON_SMOKE_SCRIPT: Final[str] = (
     "import importlib.metadata\n"
+    "import os\n"
     "import starlette\n"
     "import uvicorn\n"
     "import httpx\n"
     "import psycopg\n"
+    "import procrastinate\n"
+    "if os.getuid() == 0:\n"
+    "    raise SystemExit(\"the image's default user must be unprivileged\")\n"
     "if psycopg.pq.__impl__ != \"binary\":\n"
     "    raise SystemExit(\"psycopg is not using the binary libpq implementation\")\n"
     # One build argument installs both driver wheels, so a pair at two versions
@@ -42,7 +46,9 @@ _GIDEON_SMOKE_SCRIPT: Final[str] = (
     "    raise SystemExit(\"psycopg and psycopg-binary are at different versions\")\n"
     "for package in (\"starlette\", \"uvicorn\", \"httpx\", \"anyio\", "
     "\"httpcore\", \"h11\", \"certifi\", \"idna\", \"click\", "
-    "\"typing_extensions\", \"psycopg\", \"psycopg-binary\"):\n"
+    "\"typing_extensions\", \"psycopg\", \"psycopg-binary\", "
+    "\"procrastinate\", \"psycopg-pool\", \"asgiref\", \"attrs\", "
+    "\"croniter\", \"python-dateutil\", \"six\", \"packaging\"):\n"
     "    print(package, importlib.metadata.version(package))\n"
 )
 
@@ -61,6 +67,14 @@ SMOKE: Final[Mapping[str, Smoke]] = {
         "CLICK_VERSION",
         "TYPING_EXTENSIONS_VERSION",
         "PSYCOPG_VERSION",
+        "PROCRASTINATE_VERSION",
+        "PSYCOPG_POOL_VERSION",
+        "ASGIREF_VERSION",
+        "ATTRS_VERSION",
+        "CRONITER_VERSION",
+        "PYTHON_DATEUTIL_VERSION",
+        "SIX_VERSION",
+        "PACKAGING_VERSION",
     )),
 }
 

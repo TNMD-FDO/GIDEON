@@ -520,7 +520,7 @@ services:
       - "gideon"
     mem_limit: 16000000000
   gideon-api:
-    image: "ghcr.io/tnmd-fdo/gideon@sha256:2baac5c2bff21a6762c478b99f79a953ded02579df0a65144eaa9ca9a2d85683"
+    image: "ghcr.io/tnmd-fdo/gideon@sha256:de46c1a7e66d5d89a5b75a22ad00c7faa5b123140753a6059459baf78c832613"
     restart: "unless-stopped"
     environment:
       GIDEON_ENGINE_URL: "http://gideon-generator:8000/v1"
@@ -563,6 +563,45 @@ services:
     networks:
       - "gideon"
     mem_limit: 1000000000
+  gideon-worker:
+    image: "ghcr.io/tnmd-fdo/gideon@sha256:de46c1a7e66d5d89a5b75a22ad00c7faa5b123140753a6059459baf78c832613"
+    restart: "unless-stopped"
+    command:
+      - "python"
+      - "-m"
+      - "gideon.worker"
+    working_dir: "/opt/gideon-src"
+    volumes:
+      - "/opt/gideon/gideon:/opt/gideon-src/gideon:ro"
+    read_only: true
+    group_add:
+      - "4242"
+    secrets:
+      - "postgres_gideon_worker_password"
+    environment:
+      GIDEON_WORKER_DB_HOST: "postgres"
+      GIDEON_WORKER_DB_PORT: "5432"
+      GIDEON_WORKER_DB_NAME: "gideon"
+      GIDEON_WORKER_DB_ROLE: "gideon_worker"
+      GIDEON_WORKER_PASSWORD_FILE: "/run/secrets/postgres_gideon_worker_password"
+      GIDEON_WORKER_CONCURRENCY: "4"
+      TZ: "America/Chicago"
+    labels:
+      org.gideon.worker-sources-digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    stop_grace_period: "20s"
+    healthcheck:
+      test:
+        - "CMD"
+        - "python"
+        - "-m"
+        - "gideon.worker.health"
+      interval: "30s"
+      timeout: "10s"
+      retries: 3
+      start_period: "30s"
+    networks:
+      - "gideon"
+    mem_limit: 12000000000
   searxng:
     image: "ghcr.io/tnmd-fdo/searxng@sha256:1dab138ea70a8ceb4d1c182f5c8f256088406c1742b99e279976157dbe1e9759"
     restart: "unless-stopped"
@@ -694,3 +733,5 @@ secrets:
     file: "/etc/gideon/secrets/gideon_api_key"
   postgres_gideon_audit_password:
     file: "/etc/gideon/secrets/postgres_gideon_audit_password"
+  postgres_gideon_worker_password:
+    file: "/etc/gideon/secrets/postgres_gideon_worker_password"

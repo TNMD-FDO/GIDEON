@@ -1,5 +1,6 @@
 # GIDEON's service image: the pinned Python interpreter and the
-# service's exact dependency set, one role per Compose block (gideon-api now).
+# service's exact dependency set, one role per Compose block (gideon-api and
+# gideon-worker).
 # Every version is an images.lock value passed in as a build argument, installed
 # without resolution and checked by `pip check`; the only way it is built is
 # `python3 -m tools.imagebuild gideon` on the box. The package is bind-mounted
@@ -20,6 +21,14 @@ ARG IDNA_VERSION
 ARG CLICK_VERSION
 ARG TYPING_EXTENSIONS_VERSION
 ARG PSYCOPG_VERSION
+ARG PROCRASTINATE_VERSION
+ARG PSYCOPG_POOL_VERSION
+ARG ASGIREF_VERSION
+ARG ATTRS_VERSION
+ARG CRONITER_VERSION
+ARG PYTHON_DATEUTIL_VERSION
+ARG SIX_VERSION
+ARG PACKAGING_VERSION
 RUN set -eux; \
     pip install --no-deps --only-binary=:all: --no-cache-dir \
         "starlette==${STARLETTE_VERSION}" \
@@ -33,7 +42,15 @@ RUN set -eux; \
         "click==${CLICK_VERSION}" \
         "typing_extensions==${TYPING_EXTENSIONS_VERSION}" \
         "psycopg==${PSYCOPG_VERSION}" \
-        "psycopg-binary==${PSYCOPG_VERSION}"; \
+        "psycopg-binary==${PSYCOPG_VERSION}" \
+        "procrastinate==${PROCRASTINATE_VERSION}" \
+        "psycopg-pool==${PSYCOPG_POOL_VERSION}" \
+        "asgiref==${ASGIREF_VERSION}" \
+        "attrs==${ATTRS_VERSION}" \
+        "croniter==${CRONITER_VERSION}" \
+        "python-dateutil==${PYTHON_DATEUTIL_VERSION}" \
+        "six==${SIX_VERSION}" \
+        "packaging==${PACKAGING_VERSION}"; \
     pip check
 RUN groupadd --gid 10001 gideon; \
     useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin gideon

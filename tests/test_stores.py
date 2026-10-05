@@ -1,6 +1,7 @@
 """Store convergence: roles, databases, and the forward-only migration runner."""
 
 import os
+import re
 import subprocess
 import unittest
 from collections.abc import Callable, Mapping
@@ -18,6 +19,7 @@ SECRETS = {
     "/etc/gideon/secrets/postgres_gideon_audit_password": "audit-pw\n",
     "/etc/gideon/secrets/postgres_gideon_ro_metrics_password": "metrics-pw\n",
     "/etc/gideon/secrets/postgres_gideon_eval_password": "eval-pw\n",
+    "/etc/gideon/secrets/postgres_gideon_worker_password": "worker-pw\n",
 }
 MIGRATIONS = {
     f"{ROOT}/migrations/0001_audit_log.sql": (ROOT / "migrations/0001_audit_log.sql").read_text(),
@@ -26,7 +28,8 @@ MIGRATIONS = {
     f"{ROOT}/migrations/0004_eval_runs.sql": (ROOT / "migrations/0004_eval_runs.sql").read_text(),
     f"{ROOT}/migrations/0005_eval_runs_decision.sql": (ROOT / "migrations/0005_eval_runs_decision.sql").read_text(),
     f"{ROOT}/migrations/0006_guardrail_trips_chat_id.sql": (ROOT / "migrations/0006_guardrail_trips_chat_id.sql").read_text(),
-    f"{ROOT}/migrations/0007_second.sql": "CREATE TABLE second (id int);\n",
+    f"{ROOT}/migrations/0007_procrastinate_queue.sql": (ROOT / "migrations/0007_procrastinate_queue.sql").read_text(),
+    f"{ROOT}/migrations/0008_second.sql": "CREATE TABLE second (id int);\n",
     f"{ROOT}/migrations/README.md": "not a migration",
 }
 
@@ -134,7 +137,7 @@ class Converge(unittest.TestCase):
         host = FakeHost(server, {**SECRETS, **MIGRATIONS})
         report = converge(host, RENDERED, root=ROOT)
         self.assertTrue(report.ok, report.problem)
-        self.assertEqual(report.created_roles, ("openwebui", "gideon", "gideon_audit", "gideon_ro_metrics", "gideon_eval"))
+        self.assertEqual(report.created_roles, ("openwebui", "gideon", "gideon_audit", "gideon_ro_metrics", "gideon_eval", "gideon_worker"))
         self.assertEqual(report.created_databases, ("openwebui", "gideon"))
         self.assertEqual(
             report.applied_migrations,
@@ -145,14 +148,15 @@ class Converge(unittest.TestCase):
                 "0004_eval_runs",
                 "0005_eval_runs_decision",
                 "0006_guardrail_trips_chat_id",
-                "0007_second",
+                "0007_procrastinate_queue",
+                "0008_second",
             ),
         )
 
         argvs = [call[0] for call in host.calls]
         self.assertEqual(argvs[0], psql("postgres", "postgres", *QUERY))
         role_statements = [call for call in host.calls if call[1] and "CREATE ROLE" in call[1]]
-        self.assertEqual([call[0] for call in role_statements], [psql("postgres", "postgres", *STATEMENT)] * 5)
+        self.assertEqual([call[0] for call in role_statements], [psql("postgres", "postgres", *STATEMENT)] * 6)
         gideon_sql = role_statements[1][1] or ""
         self.assertIn("\\set pw 'gid''eon-pw'\n", gideon_sql)
         self.assertIn("CREATE ROLE gideon LOGIN PASSWORD :'pw';", gideon_sql)
@@ -163,13 +167,14 @@ class Converge(unittest.TestCase):
             self.assertNotIn("audit-pw", joined)
             self.assertNotIn("metrics-pw", joined)
             self.assertNotIn("eval-pw", joined)
+            self.assertNotIn("worker-pw", joined)
         database_statements = [call[1] for call in host.calls if call[1] and "CREATE DATABASE" in call[1]]
         self.assertEqual(database_statements, ["CREATE DATABASE openwebui OWNER openwebui;\n", "CREATE DATABASE gideon OWNER gideon;\n"])
         # Every migration-side call runs as gideon in gideon; the version row rides in the same transaction.
         self.assertIn(psql("gideon", "gideon", *STATEMENT), argvs)
         self.assertIn(psql("gideon", "gideon", *QUERY), argvs)
         migration_runs = [call for call in host.calls if call[0] == psql("gideon", "gideon", *MIGRATION)]
-        self.assertEqual(len(migration_runs), 7)
+        self.assertEqual(len(migration_runs), 8)
         first_migration = MIGRATIONS[f"{ROOT}/migrations/0001_audit_log.sql"]
         self.assertTrue((migration_runs[0][1] or "").startswith(first_migration))
         self.assertTrue((migration_runs[0][1] or "").endswith("INSERT INTO schema_migrations (version) VALUES ('0001_audit_log');\n"))
@@ -204,7 +209,7 @@ class Converge(unittest.TestCase):
 
     def test_existing_role_password_is_never_altered(self) -> None:
         server = FreshServer()
-        server.roles.extend(("gideon", "gideon_ro_metrics", "gideon_eval"))
+        server.roles.extend(("gideon", "gideon_ro_metrics", "gideon_eval", "gideon_worker"))
         host = FakeHost(server, {**SECRETS, **MIGRATIONS})
         report = converge(host, RENDERED, root=ROOT)
         self.assertTrue(report.ok, report.problem)
@@ -257,8 +262,8 @@ class Converge(unittest.TestCase):
 
         report = converge(FakeHost(respond, {**SECRETS, **MIGRATIONS}), RENDERED, root=ROOT)
         self.assertFalse(report.ok)
-        self.assertIn("0007_second.sql", report.problem or "")
-        self.assertIn("0007_second.sql", report.fix)
+        self.assertIn("0008_second.sql", report.problem or "")
+        self.assertIn("0008_second.sql", report.fix)
         self.assertEqual(
             report.applied_migrations,
             (
@@ -268,6 +273,7 @@ class Converge(unittest.TestCase):
                 "0004_eval_runs",
                 "0005_eval_runs_decision",
                 "0006_guardrail_trips_chat_id",
+                "0007_procrastinate_queue",
             ),
         )
         self.assertEqual(
@@ -279,6 +285,7 @@ class Converge(unittest.TestCase):
                 "0004_eval_runs",
                 "0005_eval_runs_decision",
                 "0006_guardrail_trips_chat_id",
+                "0007_procrastinate_queue",
             ],
         )
 
@@ -295,7 +302,8 @@ class Converge(unittest.TestCase):
                 "0004_eval_runs",
                 "0005_eval_runs_decision",
                 "0006_guardrail_trips_chat_id",
-                "0007_second",
+                "0007_procrastinate_queue",
+                "0008_second",
             ),
         )
 
@@ -390,3 +398,38 @@ class Migration0005(unittest.TestCase):
         self.assertIn("ADD COLUMN forced boolean NOT NULL DEFAULT false", text)
         self.assertIn("ADD COLUMN partial boolean NOT NULL DEFAULT false", text)
         self.assertIn("ADD COLUMN decision jsonb", text)
+
+
+class Migration0007(unittest.TestCase):
+    def test_worker_grants_are_exact_and_keep_finished_jobs(self) -> None:
+        text = MIGRATIONS[f"{ROOT}/migrations/0007_procrastinate_queue.sql"]
+        expected = (
+            "GRANT USAGE ON SCHEMA public TO gideon_worker;",
+            "GRANT SELECT, INSERT, UPDATE ON TABLE procrastinate_jobs TO gideon_worker;",
+            "GRANT INSERT ON TABLE procrastinate_events TO gideon_worker;",
+            "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE procrastinate_workers TO gideon_worker;",
+            "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE procrastinate_periodic_defers TO gideon_worker;",
+            "GRANT USAGE ON SEQUENCE procrastinate_jobs_id_seq TO gideon_worker;",
+            "GRANT USAGE ON SEQUENCE procrastinate_events_id_seq TO gideon_worker;",
+            "GRANT USAGE ON SEQUENCE procrastinate_periodic_defers_id_seq TO gideon_worker;",
+        )
+        self.assertEqual(
+            tuple(line for line in text.splitlines() if line.startswith("GRANT ")),
+            expected,
+            "Fix: restore the worker's reviewed table and sequence grants.",
+        )
+        jobs_grant = re.search(r"^GRANT .+ ON TABLE procrastinate_jobs TO gideon_worker;$", text, re.M)
+        self.assertIsNotNone(jobs_grant, "Fix: restore the worker's jobs-table grant.")
+        assert jobs_grant is not None
+        self.assertNotIn(
+            "DELETE", jobs_grant.group(),
+            "Fix: keep finished jobs; remove DELETE from the jobs-table grant.",
+        )
+        self.assertNotIn(
+            "SECURITY DEFINER", text,
+            "Fix: leave queue functions as invoker functions.",
+        )
+        self.assertNotIn(
+            "schema_migrations", text,
+            "Fix: leave version bookkeeping to the migration runner.",
+        )

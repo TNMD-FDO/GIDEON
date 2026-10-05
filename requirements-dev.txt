@@ -30,3 +30,14 @@ idna==3.20
 click==8.5.0
 typing_extensions==4.16.0
 psycopg==3.3.6
+# The image installs both driver wheels from PSYCOPG_VERSION; the binary one is
+# here too so the queue library imports where no system libpq is installed.
+psycopg-binary==3.3.6
+procrastinate==3.10.0
+psycopg-pool==3.3.3
+asgiref==3.12.1
+attrs==26.1.0
+croniter==6.2.4
+python-dateutil==2.9.0.post0
+six==1.17.0
+packaging==26.3

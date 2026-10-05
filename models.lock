@@ -61,8 +61,7 @@ profiles:
     # starting value on the same basis: its weights are about 15.1 GB of file
     # pages, and E9 corrects the row from its measured cold start. A row's
     # `role` names the model the service loads, which is the subject of the
-    # size-change rule. The remaining worker (gideon-worker) lands its row
-    # with its service. Every scalar is a value-only patch for the pin watch.
+    # size-change rule. Every scalar is a value-only patch for the pin watch.
     memory:
       caddy:
         gb: 1
@@ -98,6 +97,8 @@ profiles:
         gb: 1
       gideon-api:
         gb: 1
+      gideon-worker:
+        gb: 12
     # The embedding space: the one vector space every stored chunk and every
     # query is embedded into. Its id names the model, the dimension, and the
     # precision together, and is the third part of a generation's name and

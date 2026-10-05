@@ -1,0 +1,83 @@
+"""Compose definition for the queue worker."""
+
+from collections.abc import Mapping
+from typing import Final
+
+from gideon.host.images import RegistryTarget, reference
+from gideon.host.render import RenderInputs
+from gideon.host.render.api import (
+    API_IMAGE_NAME,
+    API_MOUNT_TARGET,
+    API_WORKING_DIRECTORY,
+)
+from gideon.host.render.services import ServiceDefinition, image_pin, source_digest
+from gideon.host.render.worker import (
+    CONCURRENCY_ENV,
+    DATABASE_HOST_ENV,
+    DATABASE_NAME_ENV,
+    DATABASE_PORT_ENV,
+    DATABASE_ROLE_ENV,
+    PASSWORD_FILE_ENV,
+    WORKER_CONCURRENCY,
+    WORKER_DATABASE_HOST,
+    WORKER_DATABASE_NAME,
+    WORKER_DATABASE_PORT,
+    WORKER_ROLE,
+    WORKER_SECRET_NAME,
+    WORKER_SERVICE_NAME,
+)
+
+WORKER_SOURCES_DIGEST_LABEL: Final = "org.gideon.worker-sources-digest"
+
+# exempt: these bounds allow a database round trip before the next probe.
+WORKER_HEALTHCHECK: Final[Mapping[str, object]] = {
+    "test": ["CMD", "python", "-m", "gideon.worker.health"],
+    "interval": "30s",
+    "timeout": "10s",
+    "retries": 3,
+    "start_period": "30s",
+}
+
+
+class WorkerService(ServiceDefinition):
+    """The queue worker on every host, with only its mounted package."""
+
+    name = WORKER_SERVICE_NAME
+    sources = ("gideon/worker",)
+
+    def block(
+        self, inputs: RenderInputs, target: RegistryTarget
+    ) -> Mapping[str, object]:
+        if not inputs.checkout:
+            raise ValueError(
+                "Render input checkout is empty; the worker needs the release "
+                "checkout's absolute path. Re-run render with a checkout."
+            )
+        return {
+            "image": reference(target, image_pin(inputs, API_IMAGE_NAME)),
+            "restart": "unless-stopped",
+            "command": ["python", "-m", "gideon.worker"],
+            "working_dir": API_WORKING_DIRECTORY,
+            "volumes": [f"{inputs.checkout}/gideon:{API_MOUNT_TARGET}:ro"],
+            "read_only": True,
+            "group_add": [str(inputs.facts.service_gid)],
+            "secrets": [WORKER_SECRET_NAME],
+            "environment": {
+                DATABASE_HOST_ENV: WORKER_DATABASE_HOST,
+                DATABASE_PORT_ENV: str(WORKER_DATABASE_PORT),
+                DATABASE_NAME_ENV: WORKER_DATABASE_NAME,
+                DATABASE_ROLE_ENV: WORKER_ROLE,
+                PASSWORD_FILE_ENV: f"/run/secrets/{WORKER_SECRET_NAME}",
+                CONCURRENCY_ENV: str(WORKER_CONCURRENCY),
+                "TZ": inputs.site.office.timezone,
+            },
+            "labels": {
+                WORKER_SOURCES_DIGEST_LABEL: source_digest(inputs, self.name)
+            },
+            # exempt: above an idle worker's few seconds to unregister, below the
+            # thirty-second stall window, so a job outliving a stop dies with its
+            # process before another worker could read its silence as a stall.
+            "stop_grace_period": "20s",
+            "healthcheck": dict(WORKER_HEALTHCHECK),
+            "networks": ["gideon"],
+        }

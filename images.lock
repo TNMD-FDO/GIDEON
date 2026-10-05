@@ -97,7 +97,7 @@ images:
         package: pgbackrest
     inputs_digest: sha256:0523493b9a622c5a1d3e4e0ba5a745bb878ab47ecfb09801cf72f0613ca2b790
     digest: sha256:131964147511d0b6053c4fd41c95c5cb6801cb900281bdff82a62e40eca20523
-  # GIDEON's shared Python runtime for the gideon-api and future gideon-worker
+  # GIDEON's shared Python runtime for the gideon-api and gideon-worker
   # roles. Its dependencies are pinned as build arguments; the service package
   # is mounted by Compose rather than copied into this image. Resolved on the
   # box with `skopeo inspect` on 2026-09-19. A dependency or base bump is
@@ -105,6 +105,7 @@ images:
   # same commit. One argument feeds the driver's two wheels because the two
   # projects release in lockstep and a half-bump would be silent under this
   # writer.
+  # The queue's eight wheels are watched as PyPI projects alongside the API set.
   gideon:
     build: images/gideon
     base: docker.io/library/python:3.14-slim-trixie
@@ -121,6 +122,14 @@ images:
       CLICK_VERSION: 8.5.0
       TYPING_EXTENSIONS_VERSION: 4.16.0
       PSYCOPG_VERSION: 3.3.6
+      PROCRASTINATE_VERSION: 3.10.0
+      PSYCOPG_POOL_VERSION: 3.3.3
+      ASGIREF_VERSION: 3.12.1
+      ATTRS_VERSION: 26.1.0
+      CRONITER_VERSION: 6.2.4
+      PYTHON_DATEUTIL_VERSION: 2.9.0.post0
+      SIX_VERSION: 1.17.0
+      PACKAGING_VERSION: "26.3"
     watch:
       STARLETTE_VERSION:
         pypi_project: starlette
@@ -144,5 +153,21 @@ images:
         pypi_project: typing-extensions
       PSYCOPG_VERSION:
         pypi_project: psycopg
-    inputs_digest: sha256:d7da44c829794c433a4e2dacc18adf70ee08df2b0deeecb7f781ef4eacda4d4a
-    digest: sha256:2baac5c2bff21a6762c478b99f79a953ded02579df0a65144eaa9ca9a2d85683
+      PROCRASTINATE_VERSION:
+        pypi_project: procrastinate
+      PSYCOPG_POOL_VERSION:
+        pypi_project: psycopg-pool
+      ASGIREF_VERSION:
+        pypi_project: asgiref
+      ATTRS_VERSION:
+        pypi_project: attrs
+      CRONITER_VERSION:
+        pypi_project: croniter
+      PYTHON_DATEUTIL_VERSION:
+        pypi_project: python-dateutil
+      SIX_VERSION:
+        pypi_project: six
+      PACKAGING_VERSION:
+        pypi_project: packaging
+    inputs_digest: sha256:4f825749cd8f074c9cfca0437a3364d6b4ba54a5a39d3cd2218db2c0d74f69b1
+    digest: sha256:de46c1a7e66d5d89a5b75a22ad00c7faa5b123140753a6059459baf78c832613

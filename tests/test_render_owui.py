@@ -916,6 +916,7 @@ class ComposeShape(unittest.TestCase):
                 "ldap_bind_password",
                 "postgres_gideon_ro_metrics_password",
                 "postgres_gideon_audit_password",
+                "postgres_gideon_worker_password",
                 "engine_api_key",
                 "embed_api_key",
                 "gideon_api_key",

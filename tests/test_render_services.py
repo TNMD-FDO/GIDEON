@@ -67,6 +67,8 @@ from gideon.host.render.services.dcgm_exporter import DcgmExporterService
 from gideon.host.render.services.embed import EmbedService
 from gideon.host.render.services.generator import GeneratorService
 from gideon.host.render.services.searxng import SearxngService
+from gideon.host.render.services.worker import WorkerService
+from gideon.host.render.worker import WORKER_SERVICE_NAME
 
 
 def host_inputs() -> tuple[RenderInputs, ...]:
@@ -74,10 +76,13 @@ def host_inputs() -> tuple[RenderInputs, ...]:
 
 
 class Registry(unittest.TestCase):
-    def test_projection_names_only_the_api_and_its_declared_sources(self) -> None:
+    def test_projection_names_the_mounted_service_sources(self) -> None:
         self.assertEqual(
             declared_sources(),
-            {API_SERVICE_NAME: ("gideon/api", "gideon/guardrail")},
+            {
+                API_SERVICE_NAME: ("gideon/api", "gideon/guardrail"),
+                WORKER_SERVICE_NAME: ("gideon/worker",),
+            },
         )
 
     def test_declaring_definitions_label_their_blocks_and_own_checkout_mounts(self) -> None:
@@ -531,6 +536,7 @@ class Registry(unittest.TestCase):
             (GeneratorService(), (True, True, False)),
             (EmbedService(), (True, True, False)),
             (ApiService(), (True, True, False)),
+            (WorkerService(), (True, True, True)),
             (DcgmExporterService(), (True, True, False)),
             (SearxngService(), (True, False, True)),
         ):

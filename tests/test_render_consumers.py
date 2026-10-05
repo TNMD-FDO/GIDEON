@@ -15,6 +15,7 @@ from gideon.host.render.facts import HostFacts
 from gideon.host.render.owui import OwuiEnvArtifact
 from gideon.host.render.searxng import SearxngEnvArtifact
 from gideon.host.render.services import declared_sources
+from gideon.host.render.worker import WORKER_SECRET_NAME, WORKER_SERVICE_NAME
 from gideon.host.site import load_site
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -92,6 +93,11 @@ class ConsumerMap(unittest.TestCase):
         self.assertEqual(gpu["engine_api_key"], SecretConsumers(("gideon-generator", "gideon-api"), ()))
         self.assertEqual(gpu["embed_api_key"], SecretConsumers(("gideon-embed",), ()))
         self.assertEqual(gpu["gideon_api_key"], SecretConsumers(("gideon-api",), ("open-webui",)))
+        for consumers in (gpu, second, no_gpu):
+            self.assertEqual(
+                consumers[WORKER_SECRET_NAME],
+                SecretConsumers((WORKER_SERVICE_NAME,), ()),
+            )
         self.assertEqual(no_gpu.get("engine_api_key"), None)
         self.assertEqual(no_gpu.get("embed_api_key"), None)
         self.assertEqual(no_gpu.get("gideon_api_key"), None)

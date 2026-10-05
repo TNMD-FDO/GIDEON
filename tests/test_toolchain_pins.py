@@ -4,8 +4,8 @@ CI installs the development toolchain from the one file, so a ruff, mypy, or
 pytest copy cannot drift: there is none. Two copies are read by nothing that
 installs from the file — `pin-watch.yml`'s PyYAML install line and the Playwright
 constant the browser mode checks on the box — and this module holds them equal to
-`requirements-dev.txt`. The `gideon` image's ten packages run the other way:
-`images.lock` is the source and `requirements-dev.txt` carries the copy, so mypy
+`requirements-dev.txt`. The `gideon` image's nineteen build arguments run the other
+way: `images.lock` is the source and `requirements-dev.txt` carries the copy, so mypy
 and the unit suite see the service's imports, and each build argument is
 matched to its requirement by normalized project name.
 It states no version: every value is read from the tree.
@@ -68,6 +68,12 @@ class ToolchainCopies(unittest.TestCase):
                     version,
                     f"Fix: move requirements-dev.txt's {package} line with images.lock",
                 )
+        # One argument installs both driver wheels in the image.
+        self.assertEqual(
+            requirement(ROOT, "psycopg-binary"),
+            pin.build_args["PSYCOPG_VERSION"],
+            "Fix: move requirements-dev.txt's psycopg-binary line with PSYCOPG_VERSION",
+        )
 
     def test_pin_watch_installs_the_pinned_pyyaml(self) -> None:
         if in_export_tree(ROOT):

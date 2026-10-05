@@ -13,7 +13,7 @@ from gideon.host.render.services import declared_sources
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PARENT_INITIALIZER = REPO_ROOT / "gideon/__init__.py"
 ALLOWED_DEPENDENCIES = frozenset(
-    {"starlette", "uvicorn", "httpx", "anyio", guardrail.TRIP_DRIVER_MODULE}
+    {"starlette", "uvicorn", "httpx", "anyio", "procrastinate", guardrail.TRIP_DRIVER_MODULE}
 )
 _FIX = (
     "Keep service imports at module level and limited to the standard library, "

@@ -108,6 +108,7 @@ from gideon.host.render.prometheus import (
 )
 from gideon.host.render.searxng import SEARXNG_JOB_NAME, searxng_health_url
 from gideon.host.render.services import declared_sources
+from gideon.host.render.worker import WORKER_SERVICE_NAME
 from gideon.host.render.yamlout import dump_fragment
 from gideon.host.site import SiteConfig, load_site
 from gideon.host.sysio import Command, PathLike
@@ -413,6 +414,8 @@ class Compose(unittest.TestCase):
         self.assertNotIn(ENGINE_SERVICE_NAME, service_names(inputs(no_gpu=True)))
         self.assertIn("gideon-api", service_names(inputs()))
         self.assertNotIn("gideon-api", service_names(inputs(no_gpu=True)))
+        self.assertIn(WORKER_SERVICE_NAME, service_names(inputs()))
+        self.assertIn(WORKER_SERVICE_NAME, service_names(inputs(no_gpu=True)))
         # The images apply pulls follow the rendered services, one per service.
         gpu_images = service_images(inputs())
         no_gpu_images = service_images(inputs(no_gpu=True))

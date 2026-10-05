@@ -3,16 +3,17 @@ release: "fixture"
 inputs:
   site_sha256: "3032cbc05ff6133992600e2f7b9f12e8488f068b2a747e88a45159753d250cb1"
   host_lock_sha256: "c487a5a60259c393ac20649336ff45b24747e8155aa0e4d5afe84e51e8424680"
-  models_lock_sha256: "76e4b42bc05601fbbca53c31fd3f37e7e8a2f2ebda8f7be736f533c088fa21e1"
+  models_lock_sha256: "099874c143e504f0ca2f5bc7139247aea58e262e122a8c2eab24a069326c59cb"
   hardware_profile: "2x96v-256d"
   images_lock_version: 1
   source_digests:
     gideon-api: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    gideon-worker: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
   no_gpu: false
   build_box: false
 files:
   compose.yaml:
-    sha256: "115668652516c27fde0bff940a44d8fed8d5b475c1c394a1c7a146223127c279"
+    sha256: "ecbb5abd4ec8bddac5e8ff4e39c02d088140b499e7fca8474cb38e31b5ca0a7a"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
@@ -208,12 +209,13 @@ services:
   open-webui: "ab6f28a087b2cacffc68f9ca6c8f5c88f4d809c0936e4375f852e9f66c063700"
   gideon-generator: "7e6fb8478dc880dc237408c62456aa742b2612de5c2bb1e2882ad65d8eaf800b"
   gideon-embed: "a1799c9ceff0b6159be9b8588da119879ef38280aaeb577c6a3542828eb20d8e"
-  gideon-api: "6434c2fc9859cf96c2aa9f349c96fdd68c13c0e76dfa826dc40a8a33ba80d188"
+  gideon-api: "21752477bdd4845d76190c8903b534cb256353150b96c9e70ccc2bbed069ead5"
+  gideon-worker: "a5597ac78ff38441946d93c4857ec6bd44baa228d8f6ea31b8f31aedb7b1cd4a"
   dcgm-exporter: "80440fa3a0466766fec774772d26eed3389e9f239c1e1c0d96d81a5f7cc62a85"
   postgres-exporter: "d36e03785dee0d52e65763c1d7f6dda2c4c09b17c129d7e8439fe5994338bfe7"
   cadvisor: "7bd0e221d909e45fc1555750f1839250774b89d6333a0fb7b0443bcca62ec837"
   blackbox-exporter: "5b3942cc5a72cac952fe8085233662b727ad6e9ee6caf933d7f4590572db8024"
-top_level: "5465198b3c969a4338b2e61266b192188d1751d191677ec6d74f96d0daf1a547"
+top_level: "efc3035cd5e6f19ada0e9bea95076c5108ccf77abe8e836730daa857d5988c39"
 top_level_parts:
   static: "0642157a4acd76578712e56d5b1878c477e770bbd149ffe108b067427ca78f36"
   secrets:
@@ -283,3 +285,7 @@ top_level_parts:
       sha256: "7c04d633f705cafaa051c26b01ee3b2bffd595ff1ff778172fe54343fdcb9ecb"
       mounts:
         - "gideon-api"
+    postgres_gideon_worker_password:
+      sha256: "a89f49fbb102aa419c38007e9f09d713bde51256f25062db22689378542dfab1"
+      mounts:
+        - "gideon-worker"

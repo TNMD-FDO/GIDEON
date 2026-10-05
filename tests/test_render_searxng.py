@@ -48,6 +48,7 @@ from gideon.host.render.searxng import (
     searxng_settings_document,
 )
 from gideon.host.render.services import declared_sources
+from gideon.host.render.worker import WORKER_SERVICE_NAME
 from gideon.host.site import WEB_ENGINE_VALUES, load_site
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -257,10 +258,12 @@ class Service(unittest.TestCase):
     def test_present_iff_search_is_on_after_the_frontend_and_the_engine(self) -> None:
         gpu = service_names(inputs())
         self.assertEqual(gpu.index(API_SERVICE_NAME), gpu.index(MODEL_SERVERS[-1].service_name) + 1)
-        self.assertEqual(gpu.index(SEARXNG_SERVICE_NAME), gpu.index(API_SERVICE_NAME) + 1)
+        self.assertEqual(gpu.index(WORKER_SERVICE_NAME), gpu.index(API_SERVICE_NAME) + 1)
+        self.assertEqual(gpu.index(SEARXNG_SERVICE_NAME), gpu.index(WORKER_SERVICE_NAME) + 1)
         self.assertEqual(gpu.index(ENGINE_SERVICE_NAME), gpu.index("open-webui") + 1)
         no_gpu = service_names(inputs(no_gpu=True))
-        self.assertEqual(no_gpu.index(SEARXNG_SERVICE_NAME), no_gpu.index("open-webui") + 1)
+        self.assertEqual(no_gpu.index(WORKER_SERVICE_NAME), no_gpu.index("open-webui") + 1)
+        self.assertEqual(no_gpu.index(SEARXNG_SERVICE_NAME), no_gpu.index(WORKER_SERVICE_NAME) + 1)
         self.assertNotIn(SEARXNG_SERVICE_NAME, service_names(inputs(SECOND)))
         self.assertNotIn(SEARXNG_SERVICE_NAME, service_names(inputs(SECOND, no_gpu=True)))
         for base in (inputs(), inputs(no_gpu=True), inputs(SECOND)):

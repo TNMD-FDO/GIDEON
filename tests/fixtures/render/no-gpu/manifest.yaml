@@ -3,16 +3,17 @@ release: "fixture"
 inputs:
   site_sha256: "ce3ac9046d968f318f3d18cd4b21120411fe7e9319fd918e0d890df60d30514f"
   host_lock_sha256: "c487a5a60259c393ac20649336ff45b24747e8155aa0e4d5afe84e51e8424680"
-  models_lock_sha256: "76e4b42bc05601fbbca53c31fd3f37e7e8a2f2ebda8f7be736f533c088fa21e1"
+  models_lock_sha256: "099874c143e504f0ca2f5bc7139247aea58e262e122a8c2eab24a069326c59cb"
   hardware_profile: "2x96v-256d"
   images_lock_version: 1
   source_digests:
     gideon-api: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    gideon-worker: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
   no_gpu: true
   build_box: false
 files:
   compose.yaml:
-    sha256: "8a6e854c8d850020be0ac035ac307cc2c7dc9d99fa790369be75b841648e49ba"
+    sha256: "a6e75caa24ba9eadf40cbb2922ff2f71f2c92cfaf0070705f8027b611d74f84b"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
@@ -193,11 +194,12 @@ services:
   qdrant: "aa46e367fc2d427547c9c7e04b245528def906e17d6f5c3b62727d6505116d63"
   opensearch: "14ff919afdd302e4694291bfd07e6222f50b62dd9c004d3d925673378025dbb7"
   open-webui: "2c9777db9c7144d4712aa8fd93ca419b417d3e7bafd5c1e6d3a7b469c3e1b209"
+  gideon-worker: "8ceeec69b0e01f0be72ccb91c9fa695473518bb70bb567640f07b5beda20f78f"
   searxng: "790f3d23c5a48d8b2e3c02d12c6615884bb4073095bdf7faa51ccee49aa51c2c"
   postgres-exporter: "71024e25f248a0a94b2ea92c4f48813f8b4f95e3d17d41522f300fa9f1407291"
   cadvisor: "6e4def0c2cc0e80a5357574ad6a8e81286c1f29140a78422632c6e860d14d83e"
   blackbox-exporter: "959ff7e850d35c00a0a178fca5cf671d37dffa6ea5db86790b9166f5182999d3"
-top_level: "215ba94692820817d072b8c81d3d7888598faa6ce10a084982d295425b75933c"
+top_level: "58428ea61bd987ce68092ac16ebb2da9c74ed2dbfea0d4853bb1558f1b88fbb2"
 top_level_parts:
   static: "0642157a4acd76578712e56d5b1878c477e770bbd149ffe108b067427ca78f36"
   secrets:
@@ -246,3 +248,7 @@ top_level_parts:
       sha256: "ea4ab28e0ad8e72131740833ac2759dafd6de5b2bdb599e4b633ada952650441"
       mounts:
         - "open-webui"
+    postgres_gideon_worker_password:
+      sha256: "a89f49fbb102aa419c38007e9f09d713bde51256f25062db22689378542dfab1"
+      mounts:
+        - "gideon-worker"

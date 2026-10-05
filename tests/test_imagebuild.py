@@ -278,9 +278,17 @@ class BuildPlans(unittest.TestCase):
                 "CLICK_VERSION",
                 "TYPING_EXTENSIONS_VERSION",
                 "PSYCOPG_VERSION",
+                "PROCRASTINATE_VERSION",
+                "PSYCOPG_POOL_VERSION",
+                "ASGIREF_VERSION",
+                "ATTRS_VERSION",
+                "CRONITER_VERSION",
+                "PYTHON_DATEUTIL_VERSION",
+                "SIX_VERSION",
+                "PACKAGING_VERSION",
             ),
         )
-        for package in ("starlette", "uvicorn", "httpx", "psycopg"):
+        for package in ("starlette", "uvicorn", "httpx", "psycopg", "procrastinate"):
             self.assertIn(f"import {package}", smoke.argv[2])
         for package in (
             "starlette",
@@ -295,9 +303,19 @@ class BuildPlans(unittest.TestCase):
             "typing_extensions",
             "psycopg",
             "psycopg-binary",
+            "procrastinate",
+            "psycopg-pool",
+            "asgiref",
+            "attrs",
+            "croniter",
+            "python-dateutil",
+            "six",
+            "packaging",
         ):
             self.assertIn(f'"{package}"', smoke.argv[2])
         self.assertIn("importlib.metadata.version", smoke.argv[2])
+        self.assertIn("if os.getuid() == 0:", smoke.argv[2])
+        self.assertIn("default user must be unprivileged", smoke.argv[2])
         self.assertIn('psycopg.pq.__impl__ != "binary"', smoke.argv[2])
         self.assertIn(
             'importlib.metadata.version("psycopg") '
