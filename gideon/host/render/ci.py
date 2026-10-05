@@ -24,6 +24,11 @@ from gideon.host.render.engine import (
     ENGINE_SECRET_NAME,
     ENGINE_SERVICE_NAME,
 )
+from gideon.host.render.opensearch import (
+    OPENSEARCH_CERT_SECRET_NAME,
+    OPENSEARCH_KEY_SECRET_NAME,
+    OPENSEARCH_PASSWORD_SECRET_NAME,
+)
 from gideon.host.render.owui import (
     ApplyManifestArtifact,
     general_instruction_text,
@@ -70,11 +75,15 @@ CI_SECRET_NAMES: Final[tuple[str, ...]] = (
     API_SECRET_NAME,
 )
 # Generated entries the sibling's directory never holds: the engine key is
-# production's, mounted by path, and the sibling runs no Grafana or SearXNG.
+# production's, mounted by path, and the sibling runs no Grafana, SearXNG,
+# or lexical store yet.
 CI_SKIPPED_SECRETS: Final[tuple[str, ...]] = (
     ENGINE_SECRET_NAME,
     "grafana_admin_password",
     SEARXNG_SECRET_NAME,
+    OPENSEARCH_PASSWORD_SECRET_NAME,
+    OPENSEARCH_KEY_SECRET_NAME,
+    OPENSEARCH_CERT_SECRET_NAME,
 )
 CI_WIPE_PATHS: Final[tuple[str, ...]] = (
     f"{CI_ROOT}/postgres",

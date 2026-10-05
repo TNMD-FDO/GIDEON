@@ -47,7 +47,9 @@ BIOS_BOOT_TYPE: Final = "21686148-6449-6E6F-744E-656564454649"
 ESP_TYPE: Final = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
 LVM_TYPE: Final = "E6D6D379-F507-44C2-A23C-238F2A3DF928"
 ROOT_LV_MIB: Final = 128 * 1024
-DOCKER_LV_MIB: Final = 12 * 1024
+# The Docker LV holds the no-GPU image set unpacked (13.5 GB with the lexical
+# store's image) beside the compressed layers a pull keeps while it extracts.
+DOCKER_LV_MIB: Final = 24 * 1024
 SWAP_LV_MIB: Final = 2 * 1024
 IMAGE_FIX: Final = "Inspect qemu-img, guestfish, and virt-customize output, then retry acceptance."
 

@@ -168,6 +168,15 @@ def _registered_artifacts() -> tuple[Artifact, ...]:
         GrafanaRulesArtifact,
         GrafanaTimeIntervalsArtifact,
     )
+    from gideon.host.render.opensearch import (
+        OpensearchActionGroupsArtifact,
+        OpensearchConfigArtifact,
+        OpensearchInternalUsersArtifact,
+        OpensearchRolesArtifact,
+        OpensearchRolesMappingArtifact,
+        OpensearchSettingsArtifact,
+        OpensearchTenantsArtifact,
+    )
     from gideon.host.render.owui import (
         ApiInstructionArtifact,
         ApplyManifestArtifact,
@@ -223,6 +232,13 @@ def _registered_artifacts() -> tuple[Artifact, ...]:
         SearxngSettingsArtifact(),
         SearxngEnvArtifact(),
         SearxngLoggingArtifact(),
+        OpensearchSettingsArtifact(),
+        OpensearchConfigArtifact(),
+        OpensearchInternalUsersArtifact(),
+        OpensearchRolesMappingArtifact(),
+        OpensearchRolesArtifact(),
+        OpensearchActionGroupsArtifact(),
+        OpensearchTenantsArtifact(),
         ReconcileServiceArtifact(),
         ReconcileTimerArtifact(),
         BackupServiceArtifact(),

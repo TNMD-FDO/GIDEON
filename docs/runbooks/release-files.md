@@ -68,6 +68,7 @@ The maintaining office reviews the open pin-watch and Dependabot pull requests o
 | `images.prometheus`, `grafana`, `node-exporter`, `dcgm-exporter`, `postgres-exporter`, `cadvisor`, `blackbox-exporter` | Merge when green. The observability services move at the next release's upgrade. |
 | `images.caddy`, `images.searxng`, `images.vllm-openai`, `images.open-webui`, `models.*` | Leave open for a release cycle. These recreate a service a user's turn uses. A hand merge changes the recreate set of every open cycle; open a bump cycle to move one sooner. A frontend bump goes to the developer; a model bump follows `model-upgrade.md` §2. |
 | `images.postgres`, `images.gideon`, and their build arguments | Leave open for a cycle. Checks stay red until the image is rebuilt on the box (`built-images.md` §2). Postgres is user-facing. |
+| `images.opensearch` | A new digest under the same tag (upstream refreshes a version's operating-system packages): merge when green. A new version: leave open for a release cycle. |
 | `host.registry_image`, `host.acceptance_vm_image` | Merge when green. The registry moves at the next provision; the VM image at the next acceptance run. |
 | `host.gh_runner` | Merge when green, then provision the box within thirty days to update its runner. |
 | `host.driver.branch`, `host.minimums.*` proposals | Leave open until the box runs the new version. Merging first makes preflight refuse. Close a version you decide to skip. |

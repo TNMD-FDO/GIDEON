@@ -3,7 +3,7 @@ release: "fixture"
 inputs:
   site_sha256: "3032cbc05ff6133992600e2f7b9f12e8488f068b2a747e88a45159753d250cb1"
   host_lock_sha256: "c487a5a60259c393ac20649336ff45b24747e8155aa0e4d5afe84e51e8424680"
-  models_lock_sha256: "c0ab918dbc568437c91bf900e79a89f8223ef6b254c24a00816eb2e0831f04d8"
+  models_lock_sha256: "f19a593eb56207243bd5fdb7dafe099c6be75b937a997e9f80ded40fa132ff1f"
   hardware_profile: "2x96v-256d"
   images_lock_version: 1
   api_sources_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
@@ -11,11 +11,11 @@ inputs:
   build_box: false
 files:
   compose.yaml:
-    sha256: "2be1f627271ed9551c0518f2daef44a1321886a4fabb5e970c36a708afc23e51"
+    sha256: "798c0331b95e1b98e68cce364ce6eec3cf3101d9cc132e2c42be486256e0d0e2"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
-    sha256: "d8827c83fe6ff282345bf33f5768bf3a6674d5318bb093e9132cb49ad22bd8ed"
+    sha256: "a27aef02b5ae6d83ee9bcf5b424c6951a0ecb683e71c88139de4cdb6d3caeb99"
     mode: "0644"
     owners:
       - "prometheus"
@@ -55,7 +55,7 @@ files:
     owners:
       - "grafana"
   "grafana/provisioning/alerting/rules.yaml":
-    sha256: "e8c20cd7fda91841bb2c8d6a5a1aed67b6d5149217dd6b609d9b0832a4ac973f"
+    sha256: "663d2f96c54d472782df50de7dac073b644b83af9db62a68bd31e7a5752ddbf6"
     mode: "0644"
     owners:
       - "grafana"
@@ -108,6 +108,41 @@ files:
     mode: "0644"
     owners:
       - "gideon-api"
+  "opensearch/opensearch.yml":
+    sha256: "ea118e622f020bb641dbc7fcccfb56b75de0b458e5dcc7aab0761595d7eee31b"
+    mode: "0644"
+    owners:
+      - "opensearch"
+  "opensearch/security/config.yml":
+    sha256: "d3a9b2b164dcaf0de60841b1ac19b1ea2f8091e976da005eba19fe745da6e003"
+    mode: "0644"
+    owners:
+      - "opensearch"
+  "opensearch/security/internal_users.yml":
+    sha256: "2cf335fa389e65166f022e18100e74706a8483647c6802f2f996efee43b5ae32"
+    mode: "0644"
+    owners:
+      - "opensearch"
+  "opensearch/security/roles_mapping.yml":
+    sha256: "21d243aebe9625546b4866baf991ada95deb4df9d87cc618bf51941891585ca5"
+    mode: "0644"
+    owners:
+      - "opensearch"
+  "opensearch/security/roles.yml":
+    sha256: "e16c9e2a11302cc12c6f528f3b94cc56847e20661e4f7fedfaa37e0e5b891a95"
+    mode: "0644"
+    owners:
+      - "opensearch"
+  "opensearch/security/action_groups.yml":
+    sha256: "24c908327a1d4f75b4d16b8336944385ec9c73c02bf9c684c882217c70bf6285"
+    mode: "0644"
+    owners:
+      - "opensearch"
+  "opensearch/security/tenants.yml":
+    sha256: "49e8c21829083cc2751c5681cd062c68a0bebdc82bcfa1be98fef0eaa8a4f1c6"
+    mode: "0644"
+    owners:
+      - "opensearch"
   "systemd/gideon-users-reconcile.service":
     sha256: "10a219009a102f03eb5d5772cc3c5d1d1dafaef8bf8ca3cbaaa9ab314f35398c"
     mode: "0644"
@@ -168,6 +203,7 @@ services:
   grafana: "8cf471d68cd28c115f629b1a03da4ff28bde059925895e6bbcc4a932939f3eba"
   postgres: "28166dcbe7645857c7e325986bbe54091782536983eccc65c65eee3d639d817b"
   qdrant: "906522eb51968c6bcc07ce19dab62c4e89fb6864f98cbf2f750cb8ede3fa077a"
+  opensearch: "08e7f7f187f8096b0ffe685762cecb8eef93910df4a9e3167147e1c189bc4478"
   open-webui: "e1438cfe49ef8112ec2270b9ce1ed72680fac02b4f0fc3b44853c3ca42ee0590"
   gideon-generator: "7e6fb8478dc880dc237408c62456aa742b2612de5c2bb1e2882ad65d8eaf800b"
   gideon-api: "6434c2fc9859cf96c2aa9f349c96fdd68c13c0e76dfa826dc40a8a33ba80d188"
@@ -175,7 +211,7 @@ services:
   postgres-exporter: "d36e03785dee0d52e65763c1d7f6dda2c4c09b17c129d7e8439fe5994338bfe7"
   cadvisor: "7bd0e221d909e45fc1555750f1839250774b89d6333a0fb7b0443bcca62ec837"
   blackbox-exporter: "5b3942cc5a72cac952fe8085233662b727ad6e9ee6caf933d7f4590572db8024"
-top_level: "81a26a109494a51a58d2ef15535bc8326d417a32b01d904c1e137e22ea739033"
+top_level: "ea51725ae20af972ca1b34108d68ff257a32d18775203be295c7379c02445d3d"
 top_level_parts:
   static: "0642157a4acd76578712e56d5b1878c477e770bbd149ffe108b067427ca78f36"
   secrets:
@@ -208,6 +244,18 @@ top_level_parts:
       sha256: "b7213797520b30b98c6799cb95411028c2c742fc7891eda331d101c84ab34ae8"
       mounts:
         - "qdrant"
+    opensearch_password:
+      sha256: "da45d7dad49988d789346923aa2c20ae72406e8861979cbc7ad6a9fbe41a35d6"
+      mounts:
+        - "opensearch"
+    opensearch_transport_key:
+      sha256: "93e5d65205b136354e07af07cafa33348d1f90ee6ad52a048f2aba8508267c1a"
+      mounts:
+        - "opensearch"
+    opensearch_transport_cert:
+      sha256: "09a8a25fba626f8bd6c1c778fa0c7e6102e7b0cf7120c61a14f2f505cd2ab988"
+      mounts:
+        - "opensearch"
     webui_secret_key:
       sha256: "ea4ab28e0ad8e72131740833ac2759dafd6de5b2bdb599e4b633ada952650441"
       mounts:

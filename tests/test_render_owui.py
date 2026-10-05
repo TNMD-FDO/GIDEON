@@ -786,6 +786,16 @@ class Units(unittest.TestCase):
 
 
 class ComposeShape(unittest.TestCase):
+    def test_opensearch_follows_qdrant_on_every_host(self) -> None:
+        for site_inputs in (inputs(), inputs(SECOND), inputs(no_gpu=True)):
+            with self.subTest(
+                site=site_inputs.site.hostname, no_gpu=site_inputs.no_gpu
+            ):
+                names = service_names(site_inputs)
+                self.assertEqual(
+                    names.index("opensearch"), names.index("qdrant") + 1
+                )
+
     def test_service_order_and_the_store_tier(self) -> None:
         fixture = yaml.safe_load(
             (ROOT / "tests/fixtures/render/example/compose.yaml").read_text()
@@ -847,6 +857,9 @@ class ComposeShape(unittest.TestCase):
                 "engine_api_key",
                 "gideon_api_key",
                 "qdrant_api_key",
+                "opensearch_password",
+                "opensearch_transport_key",
+                "opensearch_transport_cert",
             },
         )
         for secret in SECRETS.values():

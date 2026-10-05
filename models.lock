@@ -45,6 +45,8 @@ profiles:
     # in whole 4 KiB pages, so a row that is not a multiple of 4,096 bytes
     # reads back up to 4,095 bytes lower in the container's memory.max and
     # in cAdvisor's limit series, while docker inspect reports the request.
+    # The OpenSearch heap is half its row capped at 31 GiB and is touched at
+    # start, so the row is held, not merely allowed.
     # The footprint rule names Postgres, Qdrant, the frontend, the generator,
     # and the ~2 GB Caddy+registry+SearXNG group, with Caddy and SearXNG as
     # its halves; the registry is a host service.
@@ -73,6 +75,8 @@ profiles:
         gb: 20
       qdrant:
         gb: 110
+      opensearch:
+        gb: 48
       open-webui:
         gb: 4
       gideon-generator:

@@ -47,6 +47,8 @@ SELF_UPDATE_SWITCHES: Mapping[str, Mapping[str, str]] = {
         "QDRANT__TELEMETRY_DISABLED": "true",
         "QDRANT__SERVICE__ENABLE_STATIC_CONTENT": "false",
     },
+    # OpenSearch's image has no update check; nothing in it updates itself.
+    "opensearch": {},
     "open-webui": {"ENABLE_VERSION_UPDATE_CHECK": "false"},
     "gideon-generator": {
         "VLLM_NO_USAGE_STATS": "1",

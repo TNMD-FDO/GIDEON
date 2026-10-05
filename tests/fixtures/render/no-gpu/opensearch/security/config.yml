@@ -1,0 +1,17 @@
+# Rendered by gideon render — never hand-edit. Re-run gideon apply after editing /etc/gideon/site.yaml.
+_meta:
+  type: "config"
+  config_version: 2
+config:
+  dynamic:
+    http:
+      anonymous_auth_enabled: false
+    authc:
+      basic_internal_auth_domain:
+        http_enabled: true
+        order: 0
+        http_authenticator:
+          type: "basic"
+          challenge: true
+        authentication_backend:
+          type: "intern"

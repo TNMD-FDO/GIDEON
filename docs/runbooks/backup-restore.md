@@ -48,7 +48,9 @@ pid, and a refused nightly fails its unit like any other failure.
 
 The four file roots in a set are `/etc/gideon` (minus `secrets/` and the
 frontend's rendered env file — both carry secrets), the checkout the command ran
-from, `/data/registry`, and `/data/bulk/openwebui`. The secrets ride only as
+from, `/data/registry`, and `/data/bulk/openwebui`. The two stores' directories,
+`/data/fast/qdrant` and `/data/fast/opensearch`, are derived indexes and in no
+set. The secrets ride only as
 `secrets.tar.age`, sealed to two age recipients named in the set's
 `manifest.json`, so the office can open a set anywhere and the box can open its
 own sets. The office recipient (`/etc/gideon/backup_age_recipient`) has an

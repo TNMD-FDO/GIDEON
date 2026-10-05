@@ -14,6 +14,13 @@ from pathlib import Path
 
 import yaml  # type: ignore[import-untyped]
 from test_render import inputs
+from test_secrets import (
+    PAIR_CERT_TEXT,
+    PAIR_KEY_TEXT,
+    PAIR_PUBLIC_TEXT,
+    answer_pair_command,
+    seed_pair,
+)
 
 from gideon.host import backuplock, grafana, nogpu, owui, pgbackrest, rotate, weights
 from gideon.host.apply import run_apply
@@ -414,6 +421,7 @@ class ApplyHost:
         self.write_modes: dict[str, int] = {}
         self.chown_calls: list[tuple[str, int, int]] = []
         self.chown_failure = False
+        self.public_keys: dict[str, str] = {}
         self.lock_holder = lock_holder
         self.lock_error = lock_error
         self.locks: dict[str, str] = {}
@@ -437,6 +445,10 @@ class ApplyHost:
         command = tuple(argv)
         self.calls.append((command, env))
         self.inputs.append((command, input))
+        if command and command[0] in {"openssl", "mv"}:
+            answered = answer_pair_command(command, self.files, self.public_keys)
+            if answered is not None:
+                return answered
         outcome = self.commands.get(command)
         if isinstance(outcome, list):
             return outcome.pop(0) if len(outcome) > 1 else outcome[0]
@@ -556,6 +568,7 @@ def base_files(site: Path = EXAMPLE) -> dict[str, str]:
     for secret in SECRET_REGISTRY:
         if secret.kind == "password":
             files[str(SECRETS_DIR / secret.name)] = f"fixture-{secret.name}\n"
+    seed_pair(files)
     files["/etc/gideon/secrets/ldap_bind_password"] = "fixture-ldap-bind\n"
     site_result = load_site(site)
     assert site_result.config is not None
@@ -711,7 +724,7 @@ def assert_no_secret_text(test: unittest.TestCase, output: str, extra: tuple[str
         f"fixture-{secret.name}"
         for secret in SECRET_REGISTRY
         if secret.kind == "password"
-    ) + ("fixture-ldap-bind", "fixture-smtp") + extra
+    ) + ("fixture-ldap-bind", "fixture-smtp", PAIR_KEY_TEXT.strip(), PAIR_CERT_TEXT.strip()) + extra
     for value in values:
         test.assertNotIn(value, output)
 
@@ -1110,6 +1123,67 @@ class PartialRotation(RealStack):
 
 
 class OtherRotations(RealStack):
+    def test_opensearch_password_rotation_recreates_opensearch_alone(self) -> None:
+        host = self.applied_host()
+        path = f"{SECRETS_DIR}/opensearch_password"
+        old_value = host.files[path]
+        baseline = len(host.calls)
+
+        code, out, err = run_rotate(host, "opensearch_password")
+
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertNotEqual(host.files[path], old_value)
+        self.assertEqual(
+            [call for call in argv_calls(host)[baseline:] if "--force-recreate" in call],
+            [force_recreate("opensearch")],
+        )
+        self.assertIn("recreated opensearch: mount opensearch_password", out)
+        assert_no_secret_text(self, out + err, (host.files[path].strip(),))
+
+    def test_opensearch_key_rotation_reissues_certificate_and_recreates_once(self) -> None:
+        host = self.applied_host()
+        key = f"{SECRETS_DIR}/opensearch_transport_key"
+        cert = f"{SECRETS_DIR}/opensearch_transport_cert"
+        old_public = host.public_keys.get(key)
+        baseline = len(host.calls)
+
+        code, out, err = run_rotate(host, "opensearch_transport_key")
+
+        self.assertEqual((code, err), (0, ""), out)
+        calls = argv_calls(host)[baseline:]
+        self.assertEqual(sum(call[:2] == ("openssl", "genpkey") for call in calls), 1)
+        self.assertEqual(sum(call[:2] == ("openssl", "req") for call in calls), 1)
+        self.assertEqual(host.public_keys[key], host.public_keys[cert])
+        self.assertNotEqual(host.public_keys[key], old_public)
+        self.assertEqual(
+            [call for call in calls if "--force-recreate" in call],
+            [force_recreate("opensearch")],
+        )
+        self.assertIn("recreated opensearch: mount opensearch_transport_key", out)
+        assert_no_secret_text(self, out + err)
+
+    def test_opensearch_certificate_rotation_recreates_opensearch_alone(self) -> None:
+        host = self.applied_host()
+        key = f"{SECRETS_DIR}/opensearch_transport_key"
+        cert = f"{SECRETS_DIR}/opensearch_transport_cert"
+        old_key = host.files[key]
+        baseline = len(host.calls)
+
+        code, out, err = run_rotate(host, "opensearch_transport_cert")
+
+        self.assertEqual((code, err), (0, ""), out)
+        calls = argv_calls(host)[baseline:]
+        self.assertEqual(sum(call[:2] == ("openssl", "genpkey") for call in calls), 0)
+        self.assertEqual(sum(call[:2] == ("openssl", "req") for call in calls), 1)
+        self.assertEqual(host.files[key], old_key)
+        self.assertEqual(host.public_keys.get(key, PAIR_PUBLIC_TEXT), host.public_keys[cert])
+        self.assertEqual(
+            [call for call in calls if "--force-recreate" in call],
+            [force_recreate("opensearch")],
+        )
+        self.assertIn("recreated opensearch: mount opensearch_transport_cert", out)
+        assert_no_secret_text(self, out + err)
+
     def test_qdrant_key_rotation_recreates_qdrant_alone(self) -> None:
         host = self.applied_host()
         path = f"{SECRETS_DIR}/qdrant_api_key"

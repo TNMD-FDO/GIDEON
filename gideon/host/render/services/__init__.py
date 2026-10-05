@@ -79,6 +79,7 @@ def _registered_services() -> tuple[ServiceDefinition, ...]:
     from gideon.host.render.services.grafana import GrafanaService
     from gideon.host.render.services.node_exporter import NodeExporterService
     from gideon.host.render.services.open_webui import OpenWebuiService
+    from gideon.host.render.services.opensearch import OpensearchService
     from gideon.host.render.services.postgres import PostgresService
     from gideon.host.render.services.postgres_exporter import PostgresExporterService
     from gideon.host.render.services.prometheus import PrometheusService
@@ -92,6 +93,7 @@ def _registered_services() -> tuple[ServiceDefinition, ...]:
         GrafanaService(),
         PostgresService(),
         QdrantService(),
+        OpensearchService(),
         OpenWebuiService(),
         GeneratorService(),
         ApiService(),

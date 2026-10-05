@@ -10,6 +10,11 @@ from gideon.host.render import (
 )
 from gideon.host.render.api import API_JOB_NAME, api_enabled, api_health_url
 from gideon.host.render.engine import ENGINE_JOB_NAME, engine_metrics_target
+from gideon.host.render.opensearch import (
+    OPENSEARCH_JOB_NAME,
+    OPENSEARCH_SERVICE_NAME,
+    opensearch_health_url,
+)
 from gideon.host.render.qdrant import QDRANT_JOB_NAME, qdrant_metrics_target
 from gideon.host.render.searxng import (
     SEARXNG_JOB_NAME,
@@ -36,50 +41,45 @@ _GPU_JOBS: Final = (
     "    static_configs:\n"
     f"      - targets: [{engine_metrics_target()}]"
 )
+
+
+def _probe_job(name: str, target: str) -> str:
+    """One blackbox HTTP probe with the target carried through its relabels."""
+
+    return (
+        f"  - job_name: {name}\n"
+        "    metrics_path: /probe\n"
+        "    params:\n"
+        "      module: [http_2xx]\n"
+        "    static_configs:\n"
+        f"      - targets: [{target}]\n"
+        "    relabel_configs:\n"
+        "      - source_labels: [__address__]\n"
+        "        target_label: __param_target\n"
+        "      - source_labels: [__param_target]\n"
+        "        target_label: instance\n"
+        "      - target_label: __address__\n"
+        "        replacement: blackbox-exporter:9115"
+    )
+
+
 # The template's $store_jobs line, on every host: the vector store's metrics
-# listener, which serves the numbers page alone and sits outside the server's
-# API key by the server's design, so the job holds no key.
+# listener sits outside its API key. OpenSearch's health path answers without
+# a credential, so its probe holds none; its own probe_success rule pages on it.
 _STORE_JOBS: Final = (
     f"  - job_name: {QDRANT_JOB_NAME}\n"
     "    static_configs:\n"
-    f"      - targets: [{qdrant_metrics_target()}]"
+    f"      - targets: [{qdrant_metrics_target()}]\n"
+    + _probe_job(OPENSEARCH_JOB_NAME, opensearch_health_url(OPENSEARCH_SERVICE_NAME))
 )
 # The template's $search_jobs line: one blackbox probe of SearXNG's health
 # endpoint, rendered only while the service is (web.search on) and as one
 # blank line otherwise, the $gpu_jobs pattern; its own `probe_success` rule
 # in the Grafana rules file pages on it.
-_SEARCH_JOBS: Final = (
-    f"  - job_name: {SEARXNG_JOB_NAME}\n"
-    "    metrics_path: /probe\n"
-    "    params:\n"
-    "      module: [http_2xx]\n"
-    "    static_configs:\n"
-    f"      - targets: [{searxng_health_url()}]\n"
-    "    relabel_configs:\n"
-    "      - source_labels: [__address__]\n"
-    "        target_label: __param_target\n"
-    "      - source_labels: [__param_target]\n"
-    "        target_label: instance\n"
-    "      - target_label: __address__\n"
-    "        replacement: blackbox-exporter:9115"
-)
+_SEARCH_JOBS: Final = _probe_job(SEARXNG_JOB_NAME, searxng_health_url())
 # The template's $api_jobs line: one blackbox probe of the API service's
 # health endpoint, rendered on every GPU host where the service renders.
-_API_JOBS: Final = (
-    f"  - job_name: {API_JOB_NAME}\n"
-    "    metrics_path: /probe\n"
-    "    params:\n"
-    "      module: [http_2xx]\n"
-    "    static_configs:\n"
-    f"      - targets: [{api_health_url()}]\n"
-    "    relabel_configs:\n"
-    "      - source_labels: [__address__]\n"
-    "        target_label: __param_target\n"
-    "      - source_labels: [__param_target]\n"
-    "        target_label: instance\n"
-    "      - target_label: __address__\n"
-    "        replacement: blackbox-exporter:9115"
-)
+_API_JOBS: Final = _probe_job(API_JOB_NAME, api_health_url())
 
 
 class PrometheusConfigArtifact(Artifact):

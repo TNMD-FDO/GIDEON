@@ -84,6 +84,11 @@ from gideon.host.render.grafana import (
     GRAFANA_SUB_PATH,
     GrafanaOverviewArtifact,
 )
+from gideon.host.render.opensearch import (
+    OPENSEARCH_JOB_NAME,
+    OPENSEARCH_SERVICE_NAME,
+    opensearch_health_url,
+)
 from gideon.host.render.owui import GENERAL_MODEL_ID
 from gideon.host.render.pgbackrest import (
     PGDATA,
@@ -305,6 +310,13 @@ class Registry(unittest.TestCase):
                 "searxng/settings.yml",
                 "searxng/env",
                 "searxng/logging.json",
+                "opensearch/opensearch.yml",
+                "opensearch/security/config.yml",
+                "opensearch/security/internal_users.yml",
+                "opensearch/security/roles_mapping.yml",
+                "opensearch/security/roles.yml",
+                "opensearch/security/action_groups.yml",
+                "opensearch/security/tenants.yml",
                 "systemd/gideon-users-reconcile.service",
                 "systemd/gideon-users-reconcile.timer",
                 "systemd/gideon-backup.service",
@@ -947,12 +959,17 @@ class PrometheusConfig(unittest.TestCase):
             ("frontend", "http_2xx", "http://open-webui:8080/health"),
             (SEARXNG_JOB_NAME, "http_2xx", searxng_health_url()),
             (API_JOB_NAME, "http_2xx", api_health_url()),
+            (
+                OPENSEARCH_JOB_NAME,
+                "http_2xx",
+                opensearch_health_url(OPENSEARCH_SERVICE_NAME),
+            ),
         ):
             self.assertIn(f"job_name: {job}", text)
             self.assertIn(f"module: [{module}]", text)
             self.assertIn(f"targets: [{target}]", text)
-        self.assertEqual(text.count("target_label: __param_target"), 4)
-        self.assertEqual(text.count("replacement: blackbox-exporter:9115"), 4)
+        self.assertEqual(text.count("target_label: __param_target"), 5)
+        self.assertEqual(text.count("replacement: blackbox-exporter:9115"), 5)
 
     def test_missing_template_is_named(self) -> None:
         with self.assertRaises(ValueError) as ctx:
@@ -1129,6 +1146,13 @@ class Core(unittest.TestCase):
                 "searxng/settings.yml",
                 "searxng/env",
                 "searxng/logging.json",
+                "opensearch/opensearch.yml",
+                "opensearch/security/config.yml",
+                "opensearch/security/internal_users.yml",
+                "opensearch/security/roles_mapping.yml",
+                "opensearch/security/roles.yml",
+                "opensearch/security/action_groups.yml",
+                "opensearch/security/tenants.yml",
                 "systemd/gideon-users-reconcile.service",
                 "systemd/gideon-users-reconcile.timer",
                 "systemd/gideon-backup.service",

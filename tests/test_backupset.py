@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 from gideon.host import backupset
 from gideon.host.render.ci import CI_ROOT
+from gideon.host.render.opensearch import OPENSEARCH_DATA_ROOT
 from gideon.host.render.qdrant import QDRANT_DATA_ROOT
 from gideon.host.sysio import Command, PathLike
 
@@ -185,6 +186,15 @@ class LayoutAndLabels(unittest.TestCase):
 
     def test_qdrant_data_root_is_outside_every_inventory_root(self) -> None:
         store = Path(QDRANT_DATA_ROOT)
+        for root in backupset.inventory_roots("/work/GIDEON"):
+            with self.subTest(root=root.name):
+                source = Path(root.source)
+                self.assertNotEqual(source, store)
+                self.assertNotIn(source, store.parents)
+                self.assertNotIn(store, source.parents)
+
+    def test_opensearch_data_root_is_outside_every_inventory_root(self) -> None:
+        store = Path(OPENSEARCH_DATA_ROOT)
         for root in backupset.inventory_roots("/work/GIDEON"):
             with self.subTest(root=root.name):
                 source = Path(root.source)

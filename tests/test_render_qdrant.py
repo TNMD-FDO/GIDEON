@@ -99,7 +99,7 @@ class QdrantRender(unittest.TestCase):
                     with self.subTest(absent=absent):
                         self.assertNotIn(absent, block)
 
-    def test_qdrant_alone_has_a_swap_ceiling_one_page_above_its_memory_limit(self) -> None:
+    def test_only_qdrant_and_opensearch_have_a_swap_ceiling(self) -> None:
         for rendered_inputs in (
             inputs(EXAMPLE),
             inputs(SECOND),
@@ -110,7 +110,7 @@ class QdrantRender(unittest.TestCase):
             ):
                 for name, block in service_blocks(rendered_inputs).items():
                     assert isinstance(block, dict)
-                    if name == QDRANT_SERVICE_NAME:
+                    if name in {QDRANT_SERVICE_NAME, "opensearch"}:
                         self.assertEqual(
                             block["memswap_limit"], block["mem_limit"] + 4096
                         )

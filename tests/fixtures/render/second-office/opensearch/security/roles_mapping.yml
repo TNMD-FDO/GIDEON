@@ -1,0 +1,7 @@
+# Rendered by gideon render — never hand-edit. Re-run gideon apply after editing /etc/gideon/site.yaml.
+_meta:
+  type: "rolesmapping"
+  config_version: 2
+all_access:
+  users:
+    - "gideon"

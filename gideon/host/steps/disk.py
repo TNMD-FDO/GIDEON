@@ -9,6 +9,11 @@ from pathlib import Path
 from typing import Final
 
 from gideon.host import cas
+from gideon.host.render.opensearch import (
+    OPENSEARCH_DATA_ROOT,
+    OPENSEARCH_GID,
+    OPENSEARCH_UID,
+)
 from gideon.host.render.qdrant import QDRANT_DATA_ROOT
 from gideon.host.steps import (
     CheckResult,
@@ -53,6 +58,9 @@ _DATA_DIRS: Final[tuple[_DataDirectory, ...]] = (
     _DataDirectory(
         str(Path(QDRANT_DATA_ROOT).relative_to(_DATA_MOUNT)), "gideon", 0o750
     ),
+    _DataDirectory(
+        str(Path(OPENSEARCH_DATA_ROOT).relative_to(_DATA_MOUNT)), "opensearch", 0o700
+    ),
     _DataDirectory("bulk", "gideon", 0o755),
     _DataDirectory(
         str(cas.ROOT.relative_to(_DATA_MOUNT)), "gideon", cas.DIRECTORY_MODE
@@ -77,6 +85,7 @@ def _owner_ids(uid: int, gid: int) -> Mapping[str, tuple[int, int]]:
         "gideon": (uid, gid),
         "prometheus": (PROMETHEUS_UID, PROMETHEUS_GID),
         "grafana": (GRAFANA_UID, GRAFANA_GID),
+        "opensearch": (OPENSEARCH_UID, OPENSEARCH_GID),
     }
 _BEGIN = "# GIDEON BEGIN provision:disk-layout"
 _END = "# GIDEON END provision:disk-layout"

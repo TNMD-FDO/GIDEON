@@ -25,6 +25,19 @@ scrape_configs:
   - job_name: qdrant
     static_configs:
       - targets: [qdrant:6336]
+  - job_name: opensearch
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets: [http://opensearch:9200/_plugins/_security/health]
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-exporter:9115
   - job_name: cadvisor
     static_configs:
       - targets: [cadvisor:8080]

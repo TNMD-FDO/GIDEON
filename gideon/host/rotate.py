@@ -267,15 +267,25 @@ def _plan(name: str, entry: secrets.GeneratedSecret, consumers: SecretConsumers)
 
 
 def _rotate(io: Host, name: str, entry: secrets.GeneratedSecret) -> StageResult:
-    """Write the new value, or remove a minted key's file; never the value in the row."""
+    """Write a new secret file, or remove a minted key's file; never its value."""
 
     path = secret_path(name)
     if entry.rotation == "rewrite":
         rotation = secrets.rotate_generated(io, name)
         if not rotation.ok:
             return StageResult("rotate", False, rotation.problem or "rotation failed", rotation.fix)
+        if entry.kind == "key":
+            certificate = secrets.issued_certificate(name)
+            detail = (
+                f"{name}: new key written to {path} and certificate re-issued at "
+                f"{secret_path(certificate.name)} (root:gideon 0440)"
+            )
+        elif entry.kind == "certificate":
+            detail = f"{name}: certificate re-issued at {path} (root:gideon 0440)"
+        else:
+            detail = f"{name}: new value written to {path} (root:gideon 0440)"
         return StageResult(
-            "rotate", True, f"{name}: new value written to {path} (root:gideon 0440)", ""
+            "rotate", True, detail, ""
         )
     try:
         io.unlink(path, missing_ok=True)

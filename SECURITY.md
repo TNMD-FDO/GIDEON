@@ -37,9 +37,9 @@ defect itself belongs upstream.
 An office's own `site.yaml` and secrets, its directory, its network and
 hardware, and the host beyond what `host provision` sets are the office's own.
 A defect in an upstream component — Open WebUI, the serving engine, SearXNG,
-PostgreSQL and pgBackRest, Caddy, the exporters, Grafana and Prometheus, or a
-model — is reported to that project; a fix there reaches GIDEON as a reviewed
-pin update. The two scopes meet at the pin: the defect goes upstream, the
+Qdrant and OpenSearch, PostgreSQL and pgBackRest, Caddy, the exporters,
+Grafana and Prometheus, or a model — is reported to that project; a fix there
+reaches GIDEON as a reviewed pin update. The two scopes meet at the pin: the defect goes upstream, the
 exposure comes here.
 
 ## What happens next

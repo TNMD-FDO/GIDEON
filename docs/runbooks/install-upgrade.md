@@ -156,7 +156,11 @@ same command is run again after the fix.
    signed-in session ends), `searxng_secret_key` (SearXNG recreated through the recreate
    rule; with search off nothing consumes it and the command says so and
    writes nothing), `qdrant_api_key` (the vector store recreated in seconds;
-   nothing else consumes it yet), and the two minted keys `gideon_admin_api_key` and
+   nothing else consumes it yet), `opensearch_password` (the lexical store
+   recreated, about ten seconds to healthy), `opensearch_transport_key` and
+   `opensearch_transport_cert` (the lexical store recreated; rotating the
+   certificate alone renews it from its standing key before its ten-year end
+   date, and rotating the key re-issues the certificate with it), and the two minted keys `gideon_admin_api_key` and
    `gideon_eval_api_key` (the file removed and re-minted by the apply-manifest
    stage; nothing recreated). Every other name refuses before any change,
    naming the office's path: a supplied secret — `tls_key`: replace the files

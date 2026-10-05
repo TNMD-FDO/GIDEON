@@ -14,6 +14,11 @@ from pathlib import Path
 
 from gideon.host.lock import load_host_lock
 from gideon.host.provision import run_provision
+from gideon.host.render.opensearch import (
+    OPENSEARCH_DATA_ROOT,
+    OPENSEARCH_GID,
+    OPENSEARCH_UID,
+)
 from gideon.host.render.qdrant import QDRANT_DATA_ROOT
 from gideon.host.site import SiteConfig, load_site
 from gideon.host.steps import (
@@ -753,6 +758,9 @@ class DiskLayoutStepTests(unittest.TestCase):
         stats[QDRANT_DATA_ROOT] = os.stat_result(
             (0o40750, 0, 0, 0, 998, 998, 0, 0, 0, 0, 0)
         )
+        stats[OPENSEARCH_DATA_ROOT] = directory_stat(
+            0o700, OPENSEARCH_UID, OPENSEARCH_GID
+        )
         stats["/data/observability/prometheus"] = os.stat_result(
             (0o40750, 0, 0, 0, 65534, 65534, 0, 0, 0, 0)
         )
@@ -793,6 +801,12 @@ class DiskLayoutStepTests(unittest.TestCase):
         )
         self.assertIn(("chmod", (QDRANT_DATA_ROOT, 0o750)), host.calls)
         self.assertIn(("chown", (QDRANT_DATA_ROOT, 998, 998)), host.calls)
+        self.assertIn(("mkdir", (OPENSEARCH_DATA_ROOT, 0o700, False, True)), host.calls)
+        self.assertIn(("chmod", (OPENSEARCH_DATA_ROOT, 0o700)), host.calls)
+        self.assertIn(
+            ("chown", (OPENSEARCH_DATA_ROOT, OPENSEARCH_UID, OPENSEARCH_GID)),
+            host.calls,
+        )
         correct_qdrant = host.stats.pop(QDRANT_DATA_ROOT)
         missing_qdrant = step.check(context(host))
         self.assertEqual(missing_qdrant.disposition, Disposition.DRIFT)
@@ -802,6 +816,21 @@ class DiskLayoutStepTests(unittest.TestCase):
         self.assertEqual(wrong_qdrant_mode.disposition, Disposition.DRIFT)
         self.assertIn("0750", wrong_qdrant_mode.detail)
         host.stats[QDRANT_DATA_ROOT] = correct_qdrant
+        correct_opensearch = host.stats.pop(OPENSEARCH_DATA_ROOT)
+        missing_opensearch = step.check(context(host))
+        self.assertEqual(missing_opensearch.disposition, Disposition.DRIFT)
+        self.assertIn(OPENSEARCH_DATA_ROOT, missing_opensearch.detail)
+        host.stats[OPENSEARCH_DATA_ROOT] = directory_stat(
+            0o755, OPENSEARCH_UID, OPENSEARCH_GID
+        )
+        wrong_opensearch_mode = step.check(context(host))
+        self.assertEqual(wrong_opensearch_mode.disposition, Disposition.DRIFT)
+        self.assertIn("0700", wrong_opensearch_mode.detail)
+        host.stats[OPENSEARCH_DATA_ROOT] = directory_stat(0o700, 998, 998)
+        wrong_opensearch_owner = step.check(context(host))
+        self.assertEqual(wrong_opensearch_owner.disposition, Disposition.DRIFT)
+        self.assertIn(OPENSEARCH_DATA_ROOT, wrong_opensearch_owner.detail)
+        host.stats[OPENSEARCH_DATA_ROOT] = correct_opensearch
         cas_path = "/data/bulk/cas"
         bulk_chown = host.calls.index(("chown", ("/data/bulk", 998, 998)))
         self.assertEqual(
@@ -2585,6 +2614,9 @@ class BaselineCheckPass(unittest.TestCase):
         )
         host.stats["/data/bulk/cas"] = directory_stat(0o2770, 998, 998)
         host.stats[QDRANT_DATA_ROOT] = directory_stat(0o750, 998, 998)
+        host.stats[OPENSEARCH_DATA_ROOT] = directory_stat(
+            0o700, OPENSEARCH_UID, OPENSEARCH_GID
+        )
         result = DiskLayoutStep().check(context(host))
         self.assertEqual(result.disposition, Disposition.DRIFT)
         self.assertIn("/data/observability", result.detail)

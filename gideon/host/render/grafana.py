@@ -15,6 +15,7 @@ from gideon.host.render import (
 )
 from gideon.host.render.api import API_JOB_NAME, api_enabled
 from gideon.host.render.engine import ENGINE_JOB_NAME
+from gideon.host.render.opensearch import OPENSEARCH_JOB_NAME
 from gideon.host.render.searxng import SEARXNG_JOB_NAME, search_enabled
 from gideon.host.render.systemd import NIGHTLY_SUITES
 from gideon.host.steps.command import INSTALL_HOME
@@ -313,6 +314,7 @@ class GrafanaRulesArtifact(Artifact):
                 "host_unit_rules": host_unit_rule,
                 "nightly_rules": nightly_rules,
                 "engine_job": ENGINE_JOB_NAME,
+                "opensearch_job": OPENSEARCH_JOB_NAME,
             },
         )
 

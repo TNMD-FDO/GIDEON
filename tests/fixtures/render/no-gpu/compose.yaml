@@ -173,6 +173,51 @@ services:
       - "gideon"
     mem_limit: 110000000000
     memswap_limit: 110000004096
+  opensearch:
+    image: "ghcr.io/tnmd-fdo/opensearch@sha256:fafe3fc3587088674669235575aa166228c48bdb940294a8cdbbc1da75236a40"
+    restart: "unless-stopped"
+    environment:
+      TZ: "America/Chicago"
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      DISABLE_PERFORMANCE_ANALYZER_AGENT_CLI: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms1024m -Xmx1024m -XX:-HeapDumpOnOutOfMemoryError"
+    entrypoint:
+      - "sh"
+      - "-c"
+      - "set -eu; if [ ! -s /run/secrets/opensearch_password ]; then echo \"OpenSearch password file is missing or empty: /run/secrets/opensearch_password\" >&2; exit 1; fi; GIDEON_OPENSEARCH_PASSWORD=$(cat /run/secrets/opensearch_password); export GIDEON_OPENSEARCH_PASSWORD; exec ./opensearch-docker-entrypoint.sh \"$@\""
+      - "opensearch"
+    command:
+      - "opensearch"
+    volumes:
+      - "/data/fast/opensearch:/usr/share/opensearch/data"
+      - "/etc/gideon/rendered/opensearch/opensearch.yml:/usr/share/opensearch/config/opensearch.yml:ro"
+      - "/etc/gideon/rendered/opensearch/security:/usr/share/opensearch/config/opensearch-security:ro"
+    secrets:
+      - "opensearch_password"
+      - "opensearch_transport_key"
+      - "opensearch_transport_cert"
+    group_add:
+      - "4242"
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test:
+        - "CMD"
+        - "curl"
+        - "-fsS"
+        - "-o"
+        - "/dev/null"
+        - "http://127.0.0.1:9200/_plugins/_security/health"
+      interval: "30s"
+      timeout: "5s"
+      retries: 3
+      start_period: "30s"
+    networks:
+      - "gideon"
+    mem_limit: 48000000000
+    memswap_limit: 48000004096
   open-webui:
     image: "ghcr.io/tnmd-fdo/open-webui@sha256:41daa0cf2561a5d4c8d1ff31ee2a98d93ab4d3ac2605cac69366ff6a3374a933"
     restart: "unless-stopped"
@@ -435,5 +480,11 @@ secrets:
     file: "/etc/gideon/secrets/postgres_superuser_password"
   qdrant_api_key:
     file: "/etc/gideon/secrets/qdrant_api_key"
+  opensearch_password:
+    file: "/etc/gideon/secrets/opensearch_password"
+  opensearch_transport_key:
+    file: "/etc/gideon/secrets/opensearch_transport_key"
+  opensearch_transport_cert:
+    file: "/etc/gideon/secrets/opensearch_transport_cert"
   webui_secret_key:
     file: "/etc/gideon/secrets/webui_secret_key"

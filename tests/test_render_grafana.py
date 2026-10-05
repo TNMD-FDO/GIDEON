@@ -1862,6 +1862,7 @@ class Alerting(unittest.TestCase):
             "gideon-postgres-down",
             "gideon-ingress-probe-failing",
             "gideon-frontend-probe-failing",
+            "gideon-opensearch-probe-failing",
             "gideon-systemd-collector-failed",
             "gideon-data-volume-low",
             "gideon-host-filesystem-low",

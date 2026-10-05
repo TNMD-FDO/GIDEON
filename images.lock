@@ -52,6 +52,14 @@ images:
   qdrant:
     source: docker.io/qdrant/qdrant:v1.19.1
     digest: sha256:12364fe851b9f17356fc88189fc06d1b521262e04659ec7345975b00c9246a10
+  # The lexical index: OpenSearch's default image, resolved on the box with
+  # `skopeo inspect --raw` on 2026-10-05. Upstream re-pushes a
+  # version tag with refreshed operating-system packages, so the digest moves
+  # under one tag. A version move waits for the service to be healthy and green
+  # on the box; nothing in the image updates itself.
+  opensearch:
+    source: docker.io/opensearchproject/opensearch:3.8.0
+    digest: sha256:fafe3fc3587088674669235575aa166228c48bdb940294a8cdbbc1da75236a40
   # The observability tier: seven mirrored
   # pins resolved on the box with `skopeo inspect --raw` on 2026-09-03. Docker
   # Hub wherever the upstream publishes there; the DCGM exporter is nvcr.io

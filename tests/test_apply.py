@@ -16,6 +16,7 @@ from urllib.parse import unquote
 
 import yaml  # type: ignore[import-untyped]
 from test_render import inputs
+from test_secrets import answer_pair_command
 
 from gideon.host import backuplock, grafana, nogpu, owui, pgbackrest, weights
 from gideon.host.apply import (
@@ -337,6 +338,7 @@ class ApplyHost:
         self.chmod_calls: list[tuple[str, int]] = []
         self.chown_calls: list[tuple[str, int, int]] = []
         self.pull_calls: list[tuple[SiteConfig, HardwareProfile, EgressAllowlist]] = []
+        self.public_keys: dict[str, str] = {}
         self.lock_holder = lock_holder
         self.lock_error = lock_error
         self.locks: dict[str, str] = {}
@@ -350,6 +352,10 @@ class ApplyHost:
         command = tuple(argv)
         self.calls.append((command, env))
         self.inputs.append((command, input))
+        if command and command[0] in {"openssl", "mv"}:
+            answered = answer_pair_command(command, self.files, self.public_keys)
+            if answered is not None:
+                return answered
         outcome = self.commands.get(command)
         if isinstance(outcome, list):
             return outcome.pop(0) if len(outcome) > 1 else outcome[0]
