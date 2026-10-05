@@ -14,6 +14,7 @@ from gideon.host.render.consumers import SecretConsumers, consumers_of, secret_c
 from gideon.host.render.facts import HostFacts
 from gideon.host.render.owui import OwuiEnvArtifact
 from gideon.host.render.searxng import SearxngEnvArtifact
+from gideon.host.render.services import declared_sources
 from gideon.host.site import load_site
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -76,7 +77,7 @@ def inputs(site_path: Path = EXAMPLE, **overrides: object) -> RenderInputs:
             **({"proxy_auth": "proxy-user:proxy-password"} if site_path == SECOND else {}),
         },
         checkout="/opt/gideon",
-        api_sources_digest="sha256:" + "0" * 64,
+        source_digests=dict.fromkeys(declared_sources(), "sha256:" + "0" * 64),
     )
     return replace(base, **overrides)  # type: ignore[arg-type]
 

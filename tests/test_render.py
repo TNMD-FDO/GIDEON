@@ -45,6 +45,8 @@ from gideon.host.render.command import (
     RecreateJudgment,
     SecretPart,
     compose_digests,
+    gather_source_digests,
+    gather_sources_digest,
     manifest_document,
     read_applied_manifest,
     recreate_judgment,
@@ -105,6 +107,7 @@ from gideon.host.render.prometheus import (
     PrometheusConfigArtifact,
 )
 from gideon.host.render.searxng import SEARXNG_JOB_NAME, searxng_health_url
+from gideon.host.render.services import declared_sources
 from gideon.host.render.yamlout import dump_fragment
 from gideon.host.site import SiteConfig, load_site
 from gideon.host.sysio import Command, PathLike
@@ -225,7 +228,7 @@ def inputs(site_path: Path = EXAMPLE, **overrides: object) -> RenderInputs:
             ),
         },
         checkout="/opt/gideon",
-        api_sources_digest="sha256:" + "0" * 64,
+        source_digests=dict.fromkeys(declared_sources(), "sha256:" + "0" * 64),
     )
     return replace(base, **overrides)  # type: ignore[arg-type]
 
@@ -1286,8 +1289,7 @@ def checkout_files() -> dict[str, str]:
             for path in TEMPLATE_PATHS
         },
         SITE: EXAMPLE.read_text(),
-        str(ROOT / "gideon/api/__init__.py"): (ROOT / "gideon/api/__init__.py").read_text(),
-        str(ROOT / "gideon/guardrail/__init__.py"): (ROOT / "gideon/guardrail/__init__.py").read_text(),
+        **declared_source_files(),
         "/etc/gideon/secrets/ldap_bind_password": "bind-$-'\"#password",
         "/etc/gideon/secrets/postgres_openwebui_password": "postgres-openwebui-password",
         "/etc/gideon/secrets/gideon_admin_password": "gideon-admin-password",
@@ -1297,6 +1299,18 @@ def checkout_files() -> dict[str, str]:
         "/etc/gideon/secrets/qdrant_api_key": "qdrant-api-key",
         "/etc/gideon/secrets/qdrant_read_only_api_key": "qdrant-read-only-api-key",
     }
+
+
+def declared_source_files() -> dict[str, str]:
+    """Seed one real checkout entry per declared source for fake host walks."""
+
+    files: dict[str, str] = {}
+    for sources in declared_sources().values():
+        for source in sources:
+            path = ROOT / source
+            entry = path if path.is_file() else path / "__init__.py"
+            files[str(entry)] = entry.read_text()
+    return files
 
 
 def render(host: DirHost, *, diff: bool = False) -> tuple[int, str, str]:
@@ -1311,6 +1325,44 @@ class RenderCommand(unittest.TestCase):
         code, _, err = render(DirHost(checkout_files(), euid=1000))
         self.assertEqual(code, 1)
         self.assertIn("Fix:", err)
+
+    def test_registry_gather_matches_each_service_source_digest(self) -> None:
+        host = DirHost(checkout_files())
+        gathered = gather_source_digests(host, ROOT)
+        self.assertEqual(tuple(gathered), tuple(declared_sources()))
+        for name, sources in declared_sources().items():
+            with self.subTest(service=name):
+                self.assertEqual(gathered[name], gather_sources_digest(host, ROOT, sources))
+
+    def test_missing_declared_source_refuses_before_writing(self) -> None:
+        service, sources = next(iter(declared_sources().items()))
+        source = sources[0]
+        path = ROOT / source
+        entry = path if path.is_file() else path / "__init__.py"
+        files = checkout_files()
+        del files[str(entry)]
+        host = DirHost(files)
+        code, _, err = render(host)
+        self.assertEqual(code, 1)
+        self.assertIn(service, err)
+        self.assertIn(source, err)
+        self.assertIn("Fix:", err)
+        self.assertEqual(host.writes, [])
+
+    def test_written_manifest_records_source_digests_on_gpu_and_no_gpu(self) -> None:
+        for no_gpu in (False, True):
+            with self.subTest(no_gpu=no_gpu):
+                files = checkout_files()
+                if no_gpu:
+                    files[os.fspath(nogpu.NO_GPU_PATH)] = "declared\n"
+                host = DirHost(files)
+                code, _, err = render(host)
+                self.assertEqual((code, err), (0, ""))
+                manifest = yaml.safe_load(host.files[f"{RENDERED}/manifest.yaml"])
+                recorded = manifest["inputs"]
+                self.assertEqual(recorded["source_digests"], gather_source_digests(host, ROOT))
+                self.assertEqual(tuple(recorded["source_digests"]), tuple(declared_sources()))
+                self.assertNotIn("api_sources_digest", recorded)
 
     def test_missing_site_file_refuses_with_fix(self) -> None:
         files = checkout_files()

@@ -58,6 +58,7 @@ from gideon.host.render.grafana import (
 )
 from gideon.host.render.prometheus import PrometheusConfigArtifact
 from gideon.host.render.searxng import search_enabled
+from gideon.host.render.services import declared_sources
 from gideon.host.render.systemd import NIGHTLY_CALENDAR, NIGHTLY_SUITES
 from gideon.host.site import FIELD_REGISTRY, load_site
 from gideon.host.steps.command import INSTALL_HOME
@@ -234,7 +235,7 @@ def inputs(site_path: Path = EXAMPLE, **overrides: object) -> RenderInputs:
         release="fixture",
         secrets={},
         checkout="/opt/gideon",
-        api_sources_digest="sha256:" + "0" * 64,
+        source_digests=dict.fromkeys(declared_sources(), "sha256:" + "0" * 64),
     )
     return replace(base, **overrides)  # type: ignore[arg-type]
 

@@ -24,7 +24,7 @@ class RenderInputs:
     release: str
     secrets: Mapping[str, str] = field(default_factory=dict)
     checkout: str = ""
-    api_sources_digest: str = ""
+    source_digests: Mapping[str, str] = field(default_factory=dict)
     no_gpu: bool = False
     build_box: bool = False
 

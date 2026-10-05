@@ -15,7 +15,7 @@ from pathlib import Path
 from urllib.parse import unquote
 
 import yaml  # type: ignore[import-untyped]
-from test_render import inputs
+from test_render import declared_source_files, inputs
 from test_secrets import answer_pair_command
 
 from gideon.host import backuplock, grafana, nogpu, owui, pgbackrest, weights
@@ -444,8 +444,7 @@ def base_files(site: Path = EXAMPLE) -> dict[str, str]:
         },
         str(ROOT / "migrations" / "0001_audit_log.sql"): (ROOT / "migrations" / "0001_audit_log.sql").read_text(),
         SITE: site.read_text(),
-        str(ROOT / "gideon/api/__init__.py"): (ROOT / "gideon/api/__init__.py").read_text(),
-        str(ROOT / "gideon/guardrail/__init__.py"): (ROOT / "gideon/guardrail/__init__.py").read_text(),
+        **declared_source_files(),
         CERT: "cert",
         "/etc/gideon/secrets/tls_key": "<never read>",
         "/etc/gideon/secrets/ldap_bind_password": "bind-password",

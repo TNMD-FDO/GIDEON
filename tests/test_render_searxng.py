@@ -47,6 +47,7 @@ from gideon.host.render.searxng import (
     searxng_secret_environment,
     searxng_settings_document,
 )
+from gideon.host.render.services import declared_sources
 from gideon.host.site import WEB_ENGINE_VALUES, load_site
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -84,7 +85,7 @@ def inputs(site_path: Path = EXAMPLE, **overrides: object) -> RenderInputs:
         release="fixture",
         secrets=dict(SECRETS),
         checkout="/opt/gideon",
-        api_sources_digest="sha256:" + "0" * 64,
+        source_digests=dict.fromkeys(declared_sources(), "sha256:" + "0" * 64),
     )
     return replace(base, **overrides)  # type: ignore[arg-type]
 

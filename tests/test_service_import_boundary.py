@@ -1,4 +1,4 @@
-"""The mounted API package's import boundary and inert parent initializer."""
+"""Mounted service import boundaries and the inert parent initializer."""
 
 import ast
 import sys
@@ -7,7 +7,8 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from gideon import guardrail
-from gideon.host.render.api import API_SOURCES
+from gideon.host.render.api import API_SERVICE_NAME
+from gideon.host.render.services import declared_sources
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PARENT_INITIALIZER = REPO_ROOT / "gideon/__init__.py"
@@ -16,15 +17,15 @@ ALLOWED_DEPENDENCIES = frozenset(
 )
 _FIX = (
     "Keep service imports at module level and limited to the standard library, "
-    "the image dependencies, or the declared service package."
+    "the image dependencies, or the service's declared sources."
 )
 
 
-def service_files() -> frozenset[Path]:
-    """Return the Python files under the declared mounted service sources."""
+def service_files(sources: tuple[str, ...]) -> frozenset[Path]:
+    """Return Python files under one service's declared sources."""
 
     files: set[Path] = set()
-    for source in API_SOURCES:
+    for source in sources:
         path = REPO_ROOT / source
         if path.is_dir():
             files.update(
@@ -32,7 +33,7 @@ def service_files() -> frozenset[Path]:
                 for candidate in path.rglob("*.py")
                 if "__pycache__" not in candidate.parts
             )
-        elif path.suffix == ".py":
+        elif path.suffix == ".py" and path.is_file():
             files.add(path)
     return frozenset(files)
 
@@ -54,11 +55,16 @@ def package_name(path: Path) -> str:
     return name if path.name == "__init__.py" else name.rpartition(".")[0]
 
 
-def _declared_modules() -> frozenset[str]:
-    return frozenset(module_name(path) for path in service_files())
+def declared_modules(sources: tuple[str, ...]) -> frozenset[str]:
+    """Return module names from one service's declared files."""
+
+    return frozenset(module_name(path) for path in service_files(sources))
 
 
-DECLARED_MODULES = _declared_modules()
+def api_modules() -> frozenset[str]:
+    """Return gideon-api's declared modules, the planted cases' set."""
+
+    return declared_modules(declared_sources()[API_SERVICE_NAME])
 
 
 def _imports(tree: ast.Module) -> Iterator[tuple[ast.Import | ast.ImportFrom, bool]]:
@@ -97,21 +103,18 @@ def _error(path: Path, node: ast.AST, reason: str) -> str:
     return f"{_location(path, node)}: {reason} Fix: {_FIX}"
 
 
-def _is_declared(dotted: str) -> bool:
-    return dotted in DECLARED_MODULES
-
-
 def _internal_import_error(
     path: Path,
     node: ast.Import | ast.ImportFrom,
     dotted: str,
     module_level: bool,
+    modules: frozenset[str],
 ) -> str | None:
-    if dotted == "gideon" or (dotted.startswith("gideon.") and not _is_declared(dotted)):
+    if dotted == "gideon" or (dotted.startswith("gideon.") and dotted not in modules):
         return _error(
             path,
             node,
-            f"`{dotted}` is outside the declared service package or is a bare "
+            f"`{dotted}` is outside the service's declared sources or is a bare "
             "gideon package name.",
         )
     if not module_level:
@@ -119,8 +122,8 @@ def _internal_import_error(
     return None
 
 
-def import_violations(path: Path, source: str) -> list[str]:
-    """Return import-boundary violations for one path and source text."""
+def import_violations(path: Path, source: str, modules: frozenset[str]) -> list[str]:
+    """Return import violations against one service's declared modules."""
 
     tree = ast.parse(source, filename=str(path))
     problems: list[str] = []
@@ -152,7 +155,7 @@ def import_violations(path: Path, source: str) -> list[str]:
                         )
                     )
                 continue
-            violation = _internal_import_error(path, node, dotted, module_level)
+            violation = _internal_import_error(path, node, dotted, module_level, modules)
             if violation is not None:
                 problems.append(violation)
     return problems
@@ -189,47 +192,69 @@ def initializer_violations(path: Path, source: str) -> list[str]:
 
 
 class ServiceImportBoundary(unittest.TestCase):
-    def test_declared_service_imports_and_parent_initializer(self) -> None:
-        self.assertTrue(service_files())
-        for path in sorted(service_files()):
-            with self.subTest(path=path):
-                self.assertEqual(import_violations(path, path.read_text()), [])
+    def test_each_declaring_service_imports_only_its_sources(self) -> None:
+        for service, sources in declared_sources().items():
+            files = service_files(sources)
+            with self.subTest(service=service):
+                self.assertTrue(files)
+            modules = declared_modules(sources)
+            for path in sorted(files):
+                with self.subTest(service=service, path=path):
+                    self.assertEqual(import_violations(path, path.read_text(), modules), [])
+
+    def test_parent_initializer_contains_only_version_and_docstring(self) -> None:
         self.assertEqual(
             initializer_violations(PARENT_INITIALIZER, PARENT_INITIALIZER.read_text()), []
         )
 
     def test_unlisted_import_at_module_and_function_scope_is_rejected(self) -> None:
         path = REPO_ROOT / "gideon/api/app.py"
+        modules = api_modules()
         for source in ("import not_in_the_image\n", "def deferred() -> None:\n    import not_in_the_image\n"):
             with self.subTest(source=source):
-                errors = import_violations(path, source)
+                errors = import_violations(path, source, modules)
                 self.assertTrue(errors)
                 self.assertIn("app.py", errors[0])
                 self.assertIn("Fix:", errors[0])
 
     def test_deferred_gideon_import_is_rejected(self) -> None:
         path = REPO_ROOT / "gideon/api/app.py"
-        errors = import_violations(path, "def deferred() -> None:\n    from .settings import Settings\n")
+        modules = api_modules()
+        errors = import_violations(path, "def deferred() -> None:\n    from .settings import Settings\n", modules)
         self.assertTrue(errors)
         self.assertIn("deferred import", errors[0])
         self.assertIn(":2:", errors[0])
 
     def test_bare_package_import_is_rejected(self) -> None:
         path = REPO_ROOT / "gideon/api/app.py"
-        errors = import_violations(path, "from gideon import host\n")
+        modules = api_modules()
+        errors = import_violations(path, "from gideon import host\n", modules)
         self.assertTrue(errors)
         self.assertIn("bare gideon package", errors[0])
 
     def test_deferred_dependency_import_is_allowed(self) -> None:
         path = REPO_ROOT / "gideon/api/app.py"
+        modules = api_modules()
         self.assertEqual(
-            import_violations(path, "def deferred() -> None:\n    import httpx\n"), []
+            import_violations(path, "def deferred() -> None:\n    import httpx\n", modules), []
         )
 
     def test_trip_driver_is_an_ordinary_image_dependency(self) -> None:
         path = REPO_ROOT / "gideon/api/app.py"
         source = f"import {guardrail.TRIP_DRIVER_MODULE}\n"
-        self.assertEqual(import_violations(path, source), [])
+        modules = api_modules()
+        self.assertEqual(import_violations(path, source, modules), [])
+
+    def test_shared_judge_import_requires_its_own_declared_source(self) -> None:
+        path = REPO_ROOT / "gideon/api/app.py"
+        sources = declared_sources()[API_SERVICE_NAME]
+        source = "from gideon.guardrail import judge\n"
+        self.assertEqual(import_violations(path, source, declared_modules(sources)), [])
+        api_only = ("gideon/api",)
+        errors = import_violations(path, source, declared_modules(api_only))
+        self.assertTrue(errors)
+        self.assertIn("gideon.guardrail", errors[0])
+        self.assertIn("service's declared sources", errors[0])
 
     def test_parent_initializer_rejects_an_added_statement(self) -> None:
         source = PARENT_INITIALIZER.read_text() + "\nanswer = 1\n"

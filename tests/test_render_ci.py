@@ -55,6 +55,7 @@ from gideon.host.render.engine import (
 )
 from gideon.host.render.facts import HostFacts
 from gideon.host.render.owui import GENERAL_MODEL_ID, owui_secret_names
+from gideon.host.render.services import declared_sources
 from gideon.host.site import load_site
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -88,7 +89,7 @@ def inputs(**overrides: object) -> RenderInputs:
             "gideon_api_key": "fixture-api",
         },
         checkout="/opt/gideon",
-        api_sources_digest="sha256:" + "0" * 64,
+        source_digests=dict.fromkeys(declared_sources(), "sha256:" + "0" * 64),
     )
     return replace(base, **overrides)  # type: ignore[arg-type]
 

@@ -22,7 +22,6 @@ from gideon.host.lock import render_errors as render_lock_errors
 from gideon.host.models import load_models_lock, select_profile
 from gideon.host.models import render_errors as render_models_errors
 from gideon.host.render import ARTIFACTS, RenderedSet, RenderInputs, render_all
-from gideon.host.render.api import API_SOURCES
 from gideon.host.render.compose import (
     compose_top_level,
     service_blocks,
@@ -33,6 +32,7 @@ from gideon.host.render.facts import FactsError, HostFacts, gather_facts
 from gideon.host.render.owui import OWUI_SECRET_NAMES
 from gideon.host.render.proxy import PROXY_AUTH_NAME
 from gideon.host.render.searxng import SEARXNG_SECRET_NAME, site_search_enabled
+from gideon.host.render.services import declared_sources
 from gideon.host.render.yamlout import dump, dump_fragment
 from gideon.host.report import Problem, refusal
 from gideon.host.secrets import is_generated, read_secret, secret_path
@@ -46,7 +46,7 @@ _ROOT_FIX: Final = "Run gideon render as root, for example with sudo."
 _TEMPLATE_FIX: Final = (
     "Restore the release checkout's compose template, then re-run render."
 )
-_API_SOURCE_FIX: Final = (
+_SOURCE_FIX: Final = (
     "A checkout without it is not a release tree: restore the path from the "
     "release, then re-run render."
 )
@@ -136,9 +136,7 @@ def load_templates(host: Host, root: PathLike) -> Mapping[str, str]:
     return templates
 
 
-def gather_api_sources_digest(
-    host: Host, root: PathLike, sources: Iterable[str] = API_SOURCES
-) -> str:
+def gather_sources_digest(host: Host, root: PathLike, sources: Iterable[str]) -> str:
     """Digest the service's declared sources by checkout-relative path and text.
 
     A declared source is a package directory, walked, or one module file;
@@ -170,6 +168,18 @@ def gather_api_sources_digest(
     for relative, text in sorted(files.items()):
         digest.update(f"{relative}\0{text}\0".encode())
     return f"sha256:{digest.hexdigest()}"
+
+
+def gather_source_digests(host: Host, root: PathLike) -> dict[str, str]:
+    """Gather one digest for every declaring service in registry order."""
+
+    digests: dict[str, str] = {}
+    for service_name, sources in declared_sources().items():
+        try:
+            digests[service_name] = gather_sources_digest(host, root, sources)
+        except ValueError as exc:
+            raise ValueError(f"{service_name}: {exc}") from exc
+    return digests
 
 
 def _sha256(text: str) -> str:
@@ -301,7 +311,7 @@ def _manifest_mapping(
             "models_lock_sha256": _sha256(models_lock_text),
             "hardware_profile": inputs.profile.name,
             "images_lock_version": inputs.images.version,
-            "api_sources_digest": inputs.api_sources_digest,
+            "source_digests": dict(inputs.source_digests),
             "no_gpu": inputs.no_gpu,
             "build_box": inputs.build_box,
         },
@@ -689,9 +699,9 @@ def load_render_inputs(
         print(_refusal(profile.problem, profile.fix, command), file=sys.stderr)
         return None
     try:
-        api_sources_digest = gather_api_sources_digest(io, root, API_SOURCES)
+        source_digests = gather_source_digests(io, root)
     except ValueError as exc:
-        print(_refusal(exc, _API_SOURCE_FIX, command), file=sys.stderr)
+        print(_refusal(exc, _SOURCE_FIX, command), file=sys.stderr)
         return None
     secrets: dict[str, str] = {}
     if secret_names is not None:
@@ -751,7 +761,7 @@ def load_render_inputs(
             release=gideon.__version__,
             secrets=secrets,
             checkout=os.fspath(root),
-            api_sources_digest=api_sources_digest,
+            source_digests=source_digests,
             no_gpu=no_gpu,
             build_box=build_box,
         ),

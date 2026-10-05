@@ -9,6 +9,7 @@ from string import Template
 from typing import cast
 
 import yaml  # type: ignore[import-untyped]
+from test_render import declared_source_files
 
 from gideon.host.images import load_image_lock
 from gideon.host.lock import load_host_lock
@@ -70,6 +71,7 @@ from gideon.host.render.qdrant import (
     qdrant_rest_url,
 )
 from gideon.host.render.searxng import searxng_query_url
+from gideon.host.render.services import declared_sources
 from gideon.host.render.systemd import (
     BACKUP_CALENDAR,
     DRILL_CALENDAR,
@@ -123,7 +125,7 @@ def inputs(site_path: Path = EXAMPLE, **overrides: object) -> RenderInputs:
         release="fixture",
         secrets=dict(SECRETS),
         checkout="/opt/gideon",
-        api_sources_digest="sha256:" + "0" * 64,
+        source_digests=dict.fromkeys(declared_sources(), "sha256:" + "0" * 64),
     )
     return replace(base, **overrides)  # type: ignore[arg-type]
 
@@ -1013,8 +1015,7 @@ class CommandSecrets(unittest.TestCase):
             str(ROOT / "images.lock"): (ROOT / "images.lock").read_text(),
             str(ROOT / "models.lock"): (ROOT / "models.lock").read_text(),
             "/etc/gideon/site.yaml": EXAMPLE.read_text(),
-            str(ROOT / "gideon/api/__init__.py"): (ROOT / "gideon/api/__init__.py").read_text(),
-            str(ROOT / "gideon/guardrail/__init__.py"): (ROOT / "gideon/guardrail/__init__.py").read_text(),
+            **declared_source_files(),
         }
         for name in TEMPLATE_PATHS:
             files[str(ROOT / "compose" / name)] = (ROOT / "compose" / name).read_text()

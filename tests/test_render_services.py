@@ -5,8 +5,10 @@ import json
 import unittest
 from collections.abc import Mapping
 from dataclasses import replace
+from pathlib import Path
 from unittest.mock import patch
 
+import yaml  # type: ignore[import-untyped]
 from test_apply import (
     PS,
     ApplyHost,
@@ -18,7 +20,7 @@ from test_apply import (
     ps_rows,
     running_rows,
 )
-from test_render import EXAMPLE, SECOND, inputs
+from test_render import EXAMPLE, ROOT, SECOND, DirHost, inputs
 
 from gideon.host import apply as apply_module
 from gideon.host.images import RegistryTarget, parse_registry, reference
@@ -29,6 +31,8 @@ from gideon.host.render.command import (
     AppliedManifest,
     ComposeDigests,
     compose_digests,
+    gather_source_digests,
+    manifest_document,
     recreate_judgment,
 )
 from gideon.host.render.compose import (
@@ -46,7 +50,9 @@ from gideon.host.render.services import (
     ServiceDefinition,
     all_service_names,
     applying_services,
+    declared_sources,
     slow_start_services,
+    source_digest,
     store_services,
 )
 from gideon.host.render.services.api import ApiService
@@ -60,6 +66,149 @@ def host_inputs() -> tuple[RenderInputs, ...]:
 
 
 class Registry(unittest.TestCase):
+    def test_projection_names_only_the_api_and_its_declared_sources(self) -> None:
+        self.assertEqual(
+            declared_sources(),
+            {API_SERVICE_NAME: ("gideon/api", "gideon/guardrail")},
+        )
+
+    def test_declaring_definitions_label_their_blocks_and_own_checkout_mounts(self) -> None:
+        sources = declared_sources()
+        distinct = {
+            name: f"sha256:{index:064x}"
+            for index, name in enumerate(sources, start=1)
+        }
+        for base in host_inputs():
+            rendered_inputs = replace(base, source_digests=distinct)
+            with self.subTest(site=base.site.hostname, no_gpu=base.no_gpu):
+                blocks = service_blocks(rendered_inputs)
+                for definition in applying_services(rendered_inputs):
+                    with self.subTest(service=definition.name):
+                        block = blocks[definition.name]
+                        assert isinstance(block, Mapping)
+                        labels = block.get("labels", {})
+                        assert isinstance(labels, Mapping)
+                        digest_labels = [
+                            value for value in labels.values() if value in distinct.values()
+                        ]
+                        self.assertEqual(
+                            digest_labels,
+                            [distinct[definition.name]] if definition.sources else [],
+                        )
+                        volumes = block.get("volumes", ())
+                        assert isinstance(volumes, (list, tuple))
+                        if any(
+                            isinstance(volume, str)
+                            and Path(volume.split(":", 1)[0]).is_relative_to(
+                                rendered_inputs.checkout
+                            )
+                            for volume in volumes
+                        ):
+                            self.assertTrue(definition.sources)
+
+    def test_two_services_recreate_only_for_declared_changes_and_record_both_digests(self) -> None:
+        class FirstService(ServiceDefinition):
+            name = "example-first"
+            sources = ("example/first", "example/shared.py")
+
+            def block(
+                self, inputs: RenderInputs, target: RegistryTarget
+            ) -> Mapping[str, object]:
+                return {
+                    "image": "example.invalid/first",
+                    "labels": {"org.example.sources-digest": source_digest(inputs, self.name)},
+                }
+
+        class SecondService(ServiceDefinition):
+            name = "example-second"
+            sources = ("example/second", "example/shared.py")
+
+            def block(
+                self, inputs: RenderInputs, target: RegistryTarget
+            ) -> Mapping[str, object]:
+                return {
+                    "image": "example.invalid/second",
+                    "labels": {"org.example.sources-digest": source_digest(inputs, self.name)},
+                }
+
+        files = {
+            str(ROOT / "example/first/__init__.py"): "first\n",
+            str(ROOT / "example/second/__init__.py"): "second\n",
+            str(ROOT / "example/shared.py"): "shared\n",
+            str(ROOT / "example/outside.py"): "outside\n",
+            str(ROOT / "example/first/__pycache__/cached.py"): "cache\n",
+        }
+        base = inputs()
+        gb = base.profile.memory[0].gb
+        profile = replace(
+            base.profile,
+            memory=(
+                MemoryRow(FirstService.name, gb, None),
+                MemoryRow(SecondService.name, gb, None),
+            ),
+        )
+        with patch("gideon.host.render.services.SERVICES", [FirstService(), SecondService()]):
+            gathered = gather_source_digests(DirHost(files), ROOT)
+            self.assertEqual(tuple(gathered), (FirstService.name, SecondService.name))
+            self.assertNotEqual(gathered[FirstService.name], gathered[SecondService.name])
+            rendered_inputs = replace(base, profile=profile, source_digests=gathered)
+            artifact = ComposeArtifact()
+            previous = RenderedSet(
+                (RenderedFile(artifact.relative_path, artifact.emit(rendered_inputs), artifact.mode, artifact.owners),)
+            )
+            previous_digests = compose_digests(rendered_inputs)
+            applied = AppliedManifest(
+                files={
+                    artifact.relative_path: {
+                        "sha256": hashlib.sha256(previous.files[0].content.encode()).hexdigest(),
+                        "owners": list(artifact.owners),
+                    }
+                },
+                services=previous_digests.services,
+                top_level=previous_digests.top_level,
+                top_level_parts=previous_digests.top_level_parts,
+            )
+            manifest = yaml.safe_load(
+                manifest_document(
+                    previous,
+                    rendered_inputs,
+                    site_text="site",
+                    lock_text="host lock",
+                    models_lock_text="models lock",
+                )
+            )
+            self.assertEqual(manifest["inputs"]["source_digests"], gathered)
+            self.assertEqual(
+                tuple(manifest["inputs"]["source_digests"]),
+                (FirstService.name, SecondService.name),
+            )
+
+            for changed_path, expected in (
+                ("example/first/__init__.py", (FirstService.name,)),
+                ("example/shared.py", (FirstService.name, SecondService.name)),
+                ("example/outside.py", ()),
+                ("example/first/__pycache__/cached.py", ()),
+            ):
+                with self.subTest(changed_path=changed_path):
+                    changed_files = dict(files)
+                    changed_files[str(ROOT / changed_path)] += "changed\n"
+                    current_digests = gather_source_digests(DirHost(changed_files), ROOT)
+                    current_inputs = replace(rendered_inputs, source_digests=current_digests)
+                    current = RenderedSet(
+                        (RenderedFile(artifact.relative_path, artifact.emit(current_inputs), artifact.mode, artifact.owners),)
+                    )
+                    judgment = recreate_judgment(
+                        current,
+                        applied,
+                        tuple(declared_sources()),
+                        compose_digests(current_inputs),
+                    )
+                    self.assertEqual(judgment.services, expected)
+                    self.assertEqual(
+                        judgment.reasons(),
+                        (("changed compose block", expected),) if expected else (),
+                    )
+
     def test_declared_secrets_equal_rendered_mounts_on_each_host(self) -> None:
         """Declarations include every mount and no orphan."""
 

@@ -6,7 +6,8 @@ inputs:
   models_lock_sha256: "f19a593eb56207243bd5fdb7dafe099c6be75b937a997e9f80ded40fa132ff1f"
   hardware_profile: "2x96v-256d"
   images_lock_version: 1
-  api_sources_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  source_digests:
+    gideon-api: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
   no_gpu: true
   build_box: false
 files:

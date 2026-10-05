@@ -1,6 +1,6 @@
 """The ``gideon-api`` service's identity as its clients see it.
 
-The Compose block in ``render/compose.py``, the blackbox job in
+The Compose block in ``render/services/api.py``, the blackbox job in
 ``render/prometheus.py``, and the probe rule in ``render/grafana.py`` share
 these names, as ``render/engine.py`` holds the engine's, so neither observer
 imports the document builder. The service listens on the engine's port number
@@ -8,9 +8,6 @@ and the frontend's connection names the service by hostname alone.
 The API Compose block reads the email header name through ``API_SOURCE_HEADER``
 for the source word and the chat id through ``API_CHAT_HEADER`` for the trip row;
 it is the one rendered artifact that reads forwarded header names.
-``API_SOURCES`` is the code the container imports from the mounted checkout,
-including the shared guardrail judge: its digest is the block's label, so a
-change there recreates the service and nothing else.
 General's instruction reaches the container as a rendered file at a fixed
 mount, the one non-secret file beside its secret mounts.
 """
@@ -33,7 +30,6 @@ API_MOUNT_TARGET: Final[str] = "/opt/gideon-src/gideon"
 API_WORKING_DIRECTORY: Final[str] = "/opt/gideon-src"
 API_INSTRUCTION_PATH: Final[str] = "gideon-api/instruction.txt"
 API_INSTRUCTION_MOUNT: Final[str] = "/etc/gideon/instruction.txt"
-API_SOURCES: Final[tuple[str, ...]] = ("gideon/api", "gideon/guardrail")
 
 
 def api_base_url() -> str:

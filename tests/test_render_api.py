@@ -26,12 +26,13 @@ from gideon.host.render.api import (
 from gideon.host.render.command import (
     AppliedManifest,
     compose_digests,
-    gather_api_sources_digest,
+    gather_sources_digest,
     recreate_judgment,
 )
-from gideon.host.render.compose import api_service, engine_service, service_names
+from gideon.host.render.compose import engine_service, service_names
 from gideon.host.render.engine import ENGINE_SECRET_NAME, ENGINE_SERVICE_NAME
 from gideon.host.render.owui import EVAL_IDENTITY, GENERAL_MODEL_ID
+from gideon.host.render.services.api import api_service
 from gideon.host.sysio import PathLike
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -86,7 +87,7 @@ class ApiRender(unittest.TestCase):
         )
         self.assertEqual(
             api["labels"],
-            {"org.gideon.api-sources-digest": gpu.api_sources_digest},
+            {"org.gideon.api-sources-digest": gpu.source_digests[API_SERVICE_NAME]},
         )
 
         gpu_prometheus = gpu_rendered.by_path["prometheus/prometheus.yml"].content
@@ -138,7 +139,7 @@ class ApiRender(unittest.TestCase):
         with self.assertRaisesRegex(
             ValueError, "Re-run render from a release checkout, whose loader gathers it\\."
         ):
-            api_service(replace(base, api_sources_digest=""), registry)
+            api_service(replace(base, source_digests={}), registry)
 
     def test_instruction_mount_accepts_a_rendered_root(self) -> None:
         base = inputs()
@@ -179,7 +180,7 @@ class ApiRender(unittest.TestCase):
 
     def test_moving_the_digest_recreates_only_the_api_service_block(self) -> None:
         original = inputs()
-        moved = replace(original, api_sources_digest=OTHER_DIGEST)
+        moved = replace(original, source_digests={API_SERVICE_NAME: OTHER_DIGEST})
         judgment = recreate_judgment(
             render_all(moved),
             applied_record(original),
@@ -196,9 +197,9 @@ class ApiRender(unittest.TestCase):
         applied = applied_record(original)
         moved_identity = replace(EVAL_IDENTITY, email="moved@gideon.invalid")
         with (
-            patch("gideon.host.render.compose.API_SOURCE_HEADER", "X-Moved-Source"),
-            patch("gideon.host.render.compose.API_CHAT_HEADER", "X-Moved-Chat"),
-            patch("gideon.host.render.compose.EVAL_IDENTITY", moved_identity),
+            patch("gideon.host.render.services.api.API_SOURCE_HEADER", "X-Moved-Source"),
+            patch("gideon.host.render.services.api.API_CHAT_HEADER", "X-Moved-Chat"),
+            patch("gideon.host.render.services.api.EVAL_IDENTITY", moved_identity),
         ):
             moved = render_all(original)
             judgment = recreate_judgment(
@@ -304,25 +305,25 @@ class SourceDigest(unittest.TestCase):
             def listdir(self, path: PathLike) -> list[str]:
                 return list(reversed(super().listdir(path)))
 
-        digest = gather_api_sources_digest(DirHost(files), ROOT, ("service",))
-        shuffled = gather_api_sources_digest(ShuffledHost(files), ROOT, ("service",))
+        digest = gather_sources_digest(DirHost(files), ROOT, ("service",))
+        shuffled = gather_sources_digest(ShuffledHost(files), ROOT, ("service",))
         self.assertEqual(digest, shuffled)
         # A cache entry and a file outside the declared source are not the
         # container's code: neither moves the digest, so neither recreates it.
         blind = dict(files)
         blind[str(ROOT / "service" / "__pycache__" / "cached.py")] = "recompiled"
         blind[str(ROOT / "outside.py")] = "edited"
-        self.assertEqual(digest, gather_api_sources_digest(DirHost(blind), ROOT, ("service",)))
+        self.assertEqual(digest, gather_sources_digest(DirHost(blind), ROOT, ("service",)))
         moved = dict(files)
         moved[str(ROOT / "service" / "nested" / "b.py")] = "changed"
         self.assertNotEqual(
             digest,
-            gather_api_sources_digest(DirHost(moved), ROOT, ("service",)),
+            gather_sources_digest(DirHost(moved), ROOT, ("service",)),
         )
 
     def test_missing_declared_source_names_the_path(self) -> None:
         with self.assertRaisesRegex(ValueError, r"missing.*service-missing"):
-            gather_api_sources_digest(
+            gather_sources_digest(
                 DirHost(checkout_files()), ROOT, ("service-missing",)
             )
 

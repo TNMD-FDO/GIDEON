@@ -50,6 +50,7 @@ from gideon.host.render.searxng import (
     searxng_secret_environment,
     searxng_settings_document,
 )
+from gideon.host.render.services import declared_sources
 from gideon.host.render.yamlout import dump
 from gideon.host.site import load_site
 from gideon.host.sysio import RealHost
@@ -160,7 +161,7 @@ def render_inputs() -> RenderInputs:
             "qdrant_read_only_api_key": "qdrant-read-only-api-key",
         },
         checkout="/opt/gideon",
-        api_sources_digest="sha256:" + "0" * 64,
+        source_digests=dict.fromkeys(declared_sources(), "sha256:" + "0" * 64),
     )
 
 

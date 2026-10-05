@@ -20,7 +20,7 @@ FIXED_SECRETS = {
     "qdrant_api_key": "qdrant-api-key",
     "qdrant_read_only_api_key": "qdrant-read-only-api-key",
 }
-FIXED_API_SOURCES_DIGEST = "sha256:" + "0" * 64
+FIXED_SOURCES_DIGEST = "sha256:" + "0" * 64
 
 def _loaded[T](value: T | None, errors: object) -> T:
     if value is None:
@@ -35,6 +35,7 @@ def main() -> None:
     from gideon.host.render import RenderInputs, render_all
     from gideon.host.render.command import load_templates, manifest_document
     from gideon.host.render.facts import HostFacts
+    from gideon.host.render.services import declared_sources
     from gideon.host.site import load_site
     from gideon.host.sysio import RealHost
 
@@ -86,7 +87,7 @@ def main() -> None:
                 ),
             },
             checkout="/opt/gideon",
-            api_sources_digest=FIXED_API_SOURCES_DIGEST,
+            source_digests=dict.fromkeys(declared_sources(), FIXED_SOURCES_DIGEST),
             no_gpu=no_gpu,
             build_box=build_box,
         )

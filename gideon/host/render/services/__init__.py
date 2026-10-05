@@ -18,12 +18,15 @@ class ServiceDefinition:
     healthcheck.
     ``swap`` is false for a container that may swap no more than one page, the
     document's swap ceiling one page above its memory limit.
+    ``sources`` lists package directories or single module files the container
+    imports from the mounted tree; their digest is the block's label.
     """
 
     name: str = ""
     store: bool = False
     slow_start_seconds: int | None = None
     swap: bool = True
+    sources: tuple[str, ...] = ()
 
     def applies(self, inputs: RenderInputs) -> bool:
         """Whether this service belongs in the rendered project."""
@@ -48,6 +51,19 @@ def image_pin(inputs: RenderInputs, name: str) -> ImagePin:
             f"Add the {name} image to images.lock, then re-run render."
         )
     return pin
+
+
+def source_digest(inputs: RenderInputs, service_name: str) -> str:
+    """Return the service's gathered source digest or refuse a missing input."""
+
+    digest = inputs.source_digests.get(service_name)
+    if not digest:
+        raise ValueError(
+            f"Render input source_digests lacks a digest for {service_name}; "
+            "the service's label needs the digest of its declared sources. "
+            "Re-run render from a release checkout, whose loader gathers it."
+        )
+    return digest
 
 
 @dataclass(frozen=True)
@@ -128,6 +144,12 @@ def all_service_names() -> tuple[str, ...]:
     """Every defined service name, regardless of host or site."""
 
     return tuple(service.name for service in SERVICES)
+
+
+def declared_sources() -> dict[str, tuple[str, ...]]:
+    """Checkout-relative sources by declaring service, in registry order."""
+
+    return {service.name: service.sources for service in SERVICES if service.sources}
 
 
 def store_services() -> tuple[str, ...]:
