@@ -1502,6 +1502,7 @@ class EvalBoard(unittest.TestCase):
                         "gideon_admin_password": "admin",
                         "searxng_secret_key": "searxng",
                         "qdrant_api_key": "qdrant",
+                        "qdrant_read_only_api_key": "qdrant-read-only",
                     },
                 )
             ).by_path,
@@ -2360,6 +2361,7 @@ class Alerting(unittest.TestCase):
                         "gideon_admin_password": "admin",
                         "searxng_secret_key": "searxng",
                         "qdrant_api_key": "qdrant",
+                        "qdrant_read_only_api_key": "qdrant-read-only",
                     },
                 )
             ).files

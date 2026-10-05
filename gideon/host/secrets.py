@@ -104,6 +104,7 @@ SECRET_REGISTRY: Final[tuple[GeneratedSecret, ...]] = (
     GeneratedSecret("gideon_api_key", "password", False, "the gideon-api connection key carried by Open WebUI", "rewrite"),
     GeneratedSecret("searxng_secret_key", "password", False, "SearXNG's signing key", "rewrite"),
     GeneratedSecret("qdrant_api_key", "password", False, "the vector store's API key (qdrant)", "rewrite"),
+    GeneratedSecret("qdrant_read_only_api_key", "password", False, "the vector store's read-only key carried by Open WebUI", "rewrite"),
     GeneratedSecret("opensearch_password", "password", False, "the opensearch service's internal user", "rewrite"),
     GeneratedSecret("opensearch_transport_key", "key", False, "the opensearch service's transport key", "rewrite"),
     GeneratedSecret(

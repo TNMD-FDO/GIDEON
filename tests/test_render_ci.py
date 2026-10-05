@@ -298,6 +298,14 @@ class Compose(unittest.TestCase):
         environment = mapping(frontend["environment"])
         self.assertEqual(environment["ENABLE_WEB_SEARCH"], "false")
         self.assertEqual(environment["ENABLE_LDAP"], "false")
+        for name in (
+            "VECTOR_DB",
+            "QDRANT_URI",
+            "QDRANT_COLLECTION_PREFIX",
+            "ENABLE_QDRANT_MULTITENANCY_MODE",
+            "QDRANT_PREFER_GRPC",
+        ):
+            self.assertNotIn(name, environment)
         for name in environment:
             if name in {"ENABLE_WEB_SEARCH", "ENABLE_LDAP"}:
                 continue
@@ -314,6 +322,15 @@ class Compose(unittest.TestCase):
         env_text = ci_env_file(render_inputs)
         self.assertNotIn("LDAP_APP_PASSWORD=", env_text)
         self.assertNotIn("ENABLE_WEB_SEARCH=", env_text)
+        for name in (
+            "VECTOR_DB",
+            "QDRANT_URI",
+            "QDRANT_COLLECTION_PREFIX",
+            "ENABLE_QDRANT_MULTITENANCY_MODE",
+            "QDRANT_PREFER_GRPC",
+            "QDRANT_API_KEY",
+        ):
+            self.assertNotIn(f"{name}=", env_text)
         self.assertIn("OPENAI_API_KEYS=fixture-api\n", env_text)
 
         manifest_text = ci_manifest(render_inputs)
@@ -326,7 +343,7 @@ class Compose(unittest.TestCase):
         self.assertIn("models", manifest)
 
     def test_secret_names_are_the_env_files_reads_with_the_directory_off(self) -> None:
-        self.assertEqual(CI_SECRET_NAMES, owui_secret_names(inputs(), directory=False))
+        self.assertEqual(CI_SECRET_NAMES, owui_secret_names(inputs(), directory=False, store=False))
 
     def test_wipe_paths_are_all_inside_the_ci_root(self) -> None:
         self.assertTrue(CI_SECRETS_DIR.startswith(f"{CI_ROOT}/"))

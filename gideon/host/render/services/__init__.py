@@ -1,6 +1,7 @@
 """Ordered definitions and projections for Compose services."""
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from shlex import quote
 
 from gideon.host.images import ImagePin, RegistryTarget
@@ -49,23 +50,32 @@ def image_pin(inputs: RenderInputs, name: str) -> ImagePin:
     return pin
 
 
-def secret_wrapper(
-    secret_path: str,
-    variable: str,
-    file_words: str,
-    server: str,
-    process_name: str,
-) -> list[str]:
-    """Read a required mounted secret, then replace the shell with the server."""
+@dataclass(frozen=True)
+class MountedSecret:
+    """A mounted path, server variable, and words for its start refusal."""
 
-    secret = quote(secret_path)
-    line = (
-        "set -eu; "
-        f'if [ ! -s {secret} ]; then echo "{file_words} file is missing or empty: '
-        f'{secret_path}" >&2; exit 1; fi; '
-        f"{variable}=$(cat {secret}); export {variable}; "
-        f'exec {server} "$@"'
-    )
+    path: str
+    variable: str
+    file_words: str
+
+
+def secret_wrapper(
+    secrets: Sequence[MountedSecret], server: str, process_name: str
+) -> list[str]:
+    """Read required mounted secrets in order, then replace the shell with the server."""
+
+    if not secrets:
+        raise ValueError("A server wrapper requires at least one mounted secret.")
+    parts = ["set -eu; "]
+    for mounted in secrets:
+        secret = quote(mounted.path)
+        parts.append(
+            f'if [ ! -s {secret} ]; then echo "{mounted.file_words} file is missing or empty: '
+            f'{mounted.path}" >&2; exit 1; fi; '
+            f"{mounted.variable}=$(cat {secret}); export {mounted.variable}; "
+        )
+    parts.append(f'exec {server} "$@"')
+    line = "".join(parts)
     return ["sh", "-c", line, process_name]
 
 

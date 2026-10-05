@@ -17,15 +17,20 @@ from gideon.host.render.qdrant import (
     QDRANT_DATA_ROOT,
     QDRANT_JOB_NAME,
     QDRANT_METRICS_PORT,
+    QDRANT_READ_ONLY_SECRET_NAME,
     QDRANT_SECRET_NAME,
     QDRANT_SERVICE_NAME,
     QDRANT_STORAGE_MOUNT,
     qdrant_metrics_target,
+    qdrant_rest_url,
 )
-from gideon.host.render.services import secret_wrapper
+from gideon.host.render.services import MountedSecret, secret_wrapper
 
 
 class QdrantRender(unittest.TestCase):
+    def test_rest_address_has_http_scheme_and_store_port(self) -> None:
+        self.assertEqual(qdrant_rest_url(), "http://qdrant:6333")
+
     def test_scrape_job_uses_the_keyless_metrics_listener_on_every_host(self) -> None:
         for rendered_inputs in (
             inputs(EXAMPLE),
@@ -88,11 +93,13 @@ class QdrantRender(unittest.TestCase):
                 self.assertEqual(entrypoint[3], QDRANT_SERVICE_NAME)
                 self.assertIn(f"/run/secrets/{QDRANT_SECRET_NAME}", entrypoint[2])
                 self.assertIn("QDRANT__SERVICE__API_KEY=$(cat", entrypoint[2])
+                self.assertIn(f"/run/secrets/{QDRANT_READ_ONLY_SECRET_NAME}", entrypoint[2])
+                self.assertIn("QDRANT__SERVICE__READ_ONLY_API_KEY=$(cat", entrypoint[2])
                 self.assertIn('exec ./qdrant "$@"', entrypoint[2])
                 self.assertEqual(
                     block["volumes"], [f"{QDRANT_DATA_ROOT}:{QDRANT_STORAGE_MOUNT}"]
                 )
-                self.assertEqual(block["secrets"], [QDRANT_SECRET_NAME])
+                self.assertEqual(block["secrets"], [QDRANT_SECRET_NAME, QDRANT_READ_ONLY_SECRET_NAME])
                 self.assertEqual(block["networks"], ["gideon"])
                 self.assertIn("healthcheck", block)
                 for absent in ("ports", "user", "command", "depends_on", "group_add"):
@@ -131,21 +138,24 @@ class QdrantRender(unittest.TestCase):
 
 
 class QdrantWrapper(unittest.TestCase):
-    def test_wrapper_exports_the_secret_to_the_server(self) -> None:
+    def test_wrapper_exports_both_secrets_to_the_server(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            secret = Path(directory) / "qdrant-key"
-            secret.write_text("fixture-qdrant-key\n")
+            main = Path(directory) / "qdrant-key"
+            read_only = Path(directory) / "qdrant-read-only-key"
+            main.write_text("fixture-qdrant-key\n")
+            read_only.write_text("fixture-read-only-key\n")
             result = subprocess.run(
                 secret_wrapper(
-                    str(secret),
-                    "QDRANT__SERVICE__API_KEY",
-                    "qdrant API key",
+                    (
+                        MountedSecret(str(main), "QDRANT__SERVICE__API_KEY", "qdrant API key"),
+                        MountedSecret(str(read_only), "QDRANT__SERVICE__READ_ONLY_API_KEY", "qdrant read-only API key"),
+                    ),
                     sys.executable,
                     QDRANT_SERVICE_NAME,
                 )
                 + [
                     "-c",
-                    "import os; raise SystemExit(os.environ.get('QDRANT__SERVICE__API_KEY') != 'fixture-qdrant-key')",
+                    "import os; raise SystemExit((os.environ.get('QDRANT__SERVICE__API_KEY'), os.environ.get('QDRANT__SERVICE__READ_ONLY_API_KEY')) != ('fixture-qdrant-key', 'fixture-read-only-key'))",
                 ],
                 check=False,
                 capture_output=True,
@@ -153,26 +163,52 @@ class QdrantWrapper(unittest.TestCase):
             )
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_wrapper_refuses_missing_and_empty_secret(self) -> None:
+    def test_wrapper_refuses_missing_and_empty_file_of_either_secret(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            missing = Path(directory) / "missing-key"
-            empty = Path(directory) / "empty-key"
-            empty.write_text("")
-            for secret in (missing, empty):
-                with self.subTest(secret=secret):
-                    result = subprocess.run(
-                        secret_wrapper(
-                            str(secret),
-                            "QDRANT__SERVICE__API_KEY",
-                            "qdrant API key",
-                            sys.executable,
-                            QDRANT_SERVICE_NAME,
+            for refused_name, words in (
+                ("main", "qdrant API key"),
+                ("read-only", "qdrant read-only API key"),
+            ):
+                for condition in ("missing", "empty"):
+                    refused = Path(directory) / f"{refused_name}-{condition}"
+                    if condition == "empty":
+                        refused.write_text("")
+                    other = Path(directory) / f"other-{refused_name}"
+                    other.write_text("fixture-other-key\n")
+                    main = refused if refused_name == "main" else other
+                    read_only = refused if refused_name == "read-only" else other
+                    with self.subTest(secret=refused):
+                        result = subprocess.run(
+                            secret_wrapper(
+                                (
+                                    MountedSecret(str(main), "QDRANT__SERVICE__API_KEY", "qdrant API key"),
+                                    MountedSecret(str(read_only), "QDRANT__SERVICE__READ_ONLY_API_KEY", "qdrant read-only API key"),
+                                ),
+                                sys.executable,
+                                QDRANT_SERVICE_NAME,
+                            )
+                            + ["-c", "raise SystemExit(23)"],
+                            check=False,
+                            capture_output=True,
+                            text=True,
                         )
-                        + ["-c", "raise SystemExit(23)"],
-                        check=False,
-                        capture_output=True,
-                        text=True,
-                    )
-                    self.assertEqual(result.returncode, 1)
-                    self.assertEqual(len(result.stderr.splitlines()), 1)
-                    self.assertIn(str(secret), result.stderr)
+                        self.assertEqual(result.returncode, 1)
+                        self.assertEqual(len(result.stderr.splitlines()), 1)
+                        self.assertIn(str(refused), result.stderr)
+                        self.assertIn(words, result.stderr)
+
+    def test_one_secret_line_matches_the_engine_entrypoint(self) -> None:
+        secret = "/run/secrets/engine_api_key"
+        self.assertEqual(
+            secret_wrapper(
+                (MountedSecret(secret, "VLLM_API_KEY", "engine API key"),),
+                "vllm serve",
+                "gideon-generator",
+            ),
+            [
+                "sh",
+                "-c",
+                'set -eu; if [ ! -s /run/secrets/engine_api_key ]; then echo "engine API key file is missing or empty: /run/secrets/engine_api_key" >&2; exit 1; fi; VLLM_API_KEY=$(cat /run/secrets/engine_api_key); export VLLM_API_KEY; exec vllm serve "$@"',
+                "gideon-generator",
+            ],
+        )

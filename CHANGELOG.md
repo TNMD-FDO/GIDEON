@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.38](docs/release-notes/v0.3.38.md) — 2026-10-05 — the frontend's vectors point at Qdrant
 - [v0.3.37](docs/release-notes/v0.3.37.md) — 2026-10-05 — OpenSearch runs in the stack
 - [v0.3.36](docs/release-notes/v0.3.36.md) — 2026-10-05 — smoke routes through the registry
 - [v0.3.35](docs/release-notes/v0.3.35.md) — 2026-10-04 — the vector store joins the stack

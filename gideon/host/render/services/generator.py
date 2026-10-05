@@ -12,7 +12,12 @@ from gideon.host.render.engine import (
     ENGINE_SECRET_NAME,
     ENGINE_SERVICE_NAME,
 )
-from gideon.host.render.services import ServiceDefinition, image_pin, secret_wrapper
+from gideon.host.render.services import (
+    MountedSecret,
+    ServiceDefinition,
+    image_pin,
+    secret_wrapper,
+)
 
 # vLLM v0.27.1's image supplies ``[vllm, serve]`` as its entrypoint and no
 # command. The wrapper replaces that entrypoint to read the mounted API-key
@@ -50,7 +55,9 @@ def engine_wrapper(secret_path: str, server: str) -> list[str]:
     """Build the fail-closed entrypoint that supplies vLLM's API key."""
 
     return secret_wrapper(
-        secret_path, "VLLM_API_KEY", "engine API key", server, ENGINE_SERVICE_NAME
+        (MountedSecret(secret_path, "VLLM_API_KEY", "engine API key"),),
+        server,
+        ENGINE_SERVICE_NAME,
     )
 
 

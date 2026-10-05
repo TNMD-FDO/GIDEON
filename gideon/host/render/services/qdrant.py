@@ -8,12 +8,18 @@ from gideon.host.render import RenderInputs
 from gideon.host.render.qdrant import (
     QDRANT_DATA_ROOT,
     QDRANT_METRICS_PORT,
+    QDRANT_READ_ONLY_SECRET_NAME,
     QDRANT_REST_PORT,
     QDRANT_SECRET_NAME,
     QDRANT_SERVICE_NAME,
     QDRANT_STORAGE_MOUNT,
 )
-from gideon.host.render.services import ServiceDefinition, image_pin, secret_wrapper
+from gideon.host.render.services import (
+    MountedSecret,
+    ServiceDefinition,
+    image_pin,
+    secret_wrapper,
+)
 
 # The image has no healthcheck, curl, or wget. Bash asks /readyz through its
 # own TCP facility and requires a 200 status line; the check holds no dollar
@@ -53,15 +59,27 @@ class QdrantService(ServiceDefinition):
                 "QDRANT__SERVICE__METRICS_PORT": str(QDRANT_METRICS_PORT),
                 "TZ": inputs.site.office.timezone,
             },
+            # The server reads an empty read-only key as unset, which would
+            # leave the frontend refused on every request; the guard refuses
+            # the start instead, as it does for the main key.
             "entrypoint": secret_wrapper(
-                f"/run/secrets/{QDRANT_SECRET_NAME}",
-                "QDRANT__SERVICE__API_KEY",
-                "qdrant API key",
+                (
+                    MountedSecret(
+                        f"/run/secrets/{QDRANT_SECRET_NAME}",
+                        "QDRANT__SERVICE__API_KEY",
+                        "qdrant API key",
+                    ),
+                    MountedSecret(
+                        f"/run/secrets/{QDRANT_READ_ONLY_SECRET_NAME}",
+                        "QDRANT__SERVICE__READ_ONLY_API_KEY",
+                        "qdrant read-only API key",
+                    ),
+                ),
                 "./qdrant",
                 self.name,
             ),
             "volumes": [f"{QDRANT_DATA_ROOT}:{QDRANT_STORAGE_MOUNT}"],
-            "secrets": [QDRANT_SECRET_NAME],
+            "secrets": [QDRANT_SECRET_NAME, QDRANT_READ_ONLY_SECRET_NAME],
             "healthcheck": dict(QDRANT_HEALTHCHECK),
             "networks": ["gideon"],
         }

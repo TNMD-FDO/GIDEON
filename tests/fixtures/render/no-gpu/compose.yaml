@@ -153,12 +153,13 @@ services:
     entrypoint:
       - "sh"
       - "-c"
-      - "set -eu; if [ ! -s /run/secrets/qdrant_api_key ]; then echo \"qdrant API key file is missing or empty: /run/secrets/qdrant_api_key\" >&2; exit 1; fi; QDRANT__SERVICE__API_KEY=$(cat /run/secrets/qdrant_api_key); export QDRANT__SERVICE__API_KEY; exec ./qdrant \"$@\""
+      - "set -eu; if [ ! -s /run/secrets/qdrant_api_key ]; then echo \"qdrant API key file is missing or empty: /run/secrets/qdrant_api_key\" >&2; exit 1; fi; QDRANT__SERVICE__API_KEY=$(cat /run/secrets/qdrant_api_key); export QDRANT__SERVICE__API_KEY; if [ ! -s /run/secrets/qdrant_read_only_api_key ]; then echo \"qdrant read-only API key file is missing or empty: /run/secrets/qdrant_read_only_api_key\" >&2; exit 1; fi; QDRANT__SERVICE__READ_ONLY_API_KEY=$(cat /run/secrets/qdrant_read_only_api_key); export QDRANT__SERVICE__READ_ONLY_API_KEY; exec ./qdrant \"$@\""
       - "qdrant"
     volumes:
       - "/data/fast/qdrant:/qdrant/storage"
     secrets:
       - "qdrant_api_key"
+      - "qdrant_read_only_api_key"
     healthcheck:
       test:
         - "CMD"
@@ -263,6 +264,11 @@ services:
       STORAGE_PROVIDER: "local"
       ENABLE_OLLAMA_API: "false"
       ENABLE_OPENAI_API: "false"
+      VECTOR_DB: "qdrant"
+      QDRANT_URI: "http://qdrant:6333"
+      QDRANT_COLLECTION_PREFIX: "owui"
+      ENABLE_QDRANT_MULTITENANCY_MODE: "true"
+      QDRANT_PREFER_GRPC: "false"
       ENABLE_WEB_SEARCH: "true"
       WEB_SEARCH_ENGINE: "searxng"
       SEARXNG_QUERY_URL: "http://searxng:8080/search"
@@ -480,6 +486,8 @@ secrets:
     file: "/etc/gideon/secrets/postgres_superuser_password"
   qdrant_api_key:
     file: "/etc/gideon/secrets/qdrant_api_key"
+  qdrant_read_only_api_key:
+    file: "/etc/gideon/secrets/qdrant_read_only_api_key"
   opensearch_password:
     file: "/etc/gideon/secrets/opensearch_password"
   opensearch_transport_key:

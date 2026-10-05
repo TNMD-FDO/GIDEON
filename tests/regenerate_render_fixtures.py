@@ -18,6 +18,7 @@ FIXED_SECRETS = {
     "gideon_api_key": "gideon-api-key",
     "searxng_secret_key": "searxng-secret-key",
     "qdrant_api_key": "qdrant-api-key",
+    "qdrant_read_only_api_key": "qdrant-read-only-api-key",
 }
 FIXED_API_SOURCES_DIGEST = "sha256:" + "0" * 64
 

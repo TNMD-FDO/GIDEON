@@ -145,7 +145,7 @@ def ci_compose_document(inputs: RenderInputs) -> Mapping[str, object]:
     }
 
     open_webui_environment = dict(
-        owui_environment(inputs, search=False, directory=False)
+        owui_environment(inputs, search=False, directory=False, store=False)
     )
     open_webui_environment["WEBUI_URL"] = CI_BASE_URL
 
@@ -239,7 +239,7 @@ def ci_compose_document(inputs: RenderInputs) -> Mapping[str, object]:
 def ci_env_file(inputs: RenderInputs) -> str:
     """Render the sibling's Open WebUI env file without directory settings."""
 
-    return owui_env_file_text(owui_secret_environment(inputs, directory=False))
+    return owui_env_file_text(owui_secret_environment(inputs, directory=False, store=False))
 
 
 def ci_instruction(inputs: RenderInputs) -> str:

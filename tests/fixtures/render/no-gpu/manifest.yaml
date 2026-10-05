@@ -11,7 +11,7 @@ inputs:
   build_box: false
 files:
   compose.yaml:
-    sha256: "e79c3892e740baf949e0c1c1254e354cb11031176a7ed926fd5521b5b2aafadd"
+    sha256: "8a6e854c8d850020be0ac035ac307cc2c7dc9d99fa790369be75b841648e49ba"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
@@ -85,7 +85,7 @@ files:
     owners:
       - "caddy"
   "open-webui/env":
-    sha256: "664d46576235805fa6c7c83db26eb5155d1c44972a77d1e7715e708ecba46a1b"
+    sha256: "a3f0523e26fb65e923ced615fc84910c5d24d5765dc7a6b1a02f667acf2aab49"
     mode: "0600"
     owners:
       - "open-webui"
@@ -189,14 +189,14 @@ services:
   node-exporter: "8612faaf00b45f47987af313bf79e1df2336243ee6bc9f6eeb2bcaf6f7071e2e"
   grafana: "e49f2699c24321394c1be54c7c63172929cfbe2bcdb44be1e82dfe292e914882"
   postgres: "c646e6eec08c7266e7eb67be874e9dc4d5193cfaeb89f7125f67156bb5924f87"
-  qdrant: "0dbdcdec2969e1ccf5acff27bace7654f41bebc0f4c8c8d946cdfc61cb40804d"
+  qdrant: "aa46e367fc2d427547c9c7e04b245528def906e17d6f5c3b62727d6505116d63"
   opensearch: "14ff919afdd302e4694291bfd07e6222f50b62dd9c004d3d925673378025dbb7"
-  open-webui: "c21888a58ecb53cccbe5f06500250402347254f194fc9824828c42f6af51bf71"
+  open-webui: "2c9777db9c7144d4712aa8fd93ca419b417d3e7bafd5c1e6d3a7b469c3e1b209"
   searxng: "790f3d23c5a48d8b2e3c02d12c6615884bb4073095bdf7faa51ccee49aa51c2c"
   postgres-exporter: "71024e25f248a0a94b2ea92c4f48813f8b4f95e3d17d41522f300fa9f1407291"
   cadvisor: "6e4def0c2cc0e80a5357574ad6a8e81286c1f29140a78422632c6e860d14d83e"
   blackbox-exporter: "959ff7e850d35c00a0a178fca5cf671d37dffa6ea5db86790b9166f5182999d3"
-top_level: "3876a8089a008b27024f0ddf27b0a631d38b583fd1369e62ecaef2b3963b262f"
+top_level: "215ba94692820817d072b8c81d3d7888598faa6ce10a084982d295425b75933c"
 top_level_parts:
   static: "0642157a4acd76578712e56d5b1878c477e770bbd149ffe108b067427ca78f36"
   secrets:
@@ -223,6 +223,10 @@ top_level_parts:
         - "postgres"
     qdrant_api_key:
       sha256: "b7213797520b30b98c6799cb95411028c2c742fc7891eda331d101c84ab34ae8"
+      mounts:
+        - "qdrant"
+    qdrant_read_only_api_key:
+      sha256: "759aa71ff9c8b4c635fdfeedd268d42f56dada1c1ad4ed9f0a6ff5d5a5f60665"
       mounts:
         - "qdrant"
     opensearch_password:

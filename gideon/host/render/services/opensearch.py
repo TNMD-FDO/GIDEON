@@ -20,7 +20,12 @@ from gideon.host.render.opensearch import (
     opensearch_health_url,
     opensearch_heap_mib,
 )
-from gideon.host.render.services import ServiceDefinition, image_pin, secret_wrapper
+from gideon.host.render.services import (
+    MountedSecret,
+    ServiceDefinition,
+    image_pin,
+    secret_wrapper,
+)
 
 # exempt: the health bounds give the observed roughly 11-second warm start
 # room for a cold container while still marking a failed init unhealthy.
@@ -79,9 +84,13 @@ class OpensearchService(ServiceDefinition):
                 ),
             },
             "entrypoint": secret_wrapper(
-                f"/run/secrets/{OPENSEARCH_PASSWORD_SECRET_NAME}",
-                OPENSEARCH_PASSWORD_VARIABLE,
-                "OpenSearch password",
+                (
+                    MountedSecret(
+                        f"/run/secrets/{OPENSEARCH_PASSWORD_SECRET_NAME}",
+                        OPENSEARCH_PASSWORD_VARIABLE,
+                        "OpenSearch password",
+                    ),
+                ),
                 "./opensearch-docker-entrypoint.sh",
                 self.name,
             ),

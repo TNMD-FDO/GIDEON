@@ -217,6 +217,7 @@ def inputs(site_path: Path = EXAMPLE, **overrides: object) -> RenderInputs:
             "gideon_api_key": "gideon-api-key",
             "searxng_secret_key": "searxng-secret-key",
             "qdrant_api_key": "qdrant-api-key",
+            "qdrant_read_only_api_key": "qdrant-read-only-api-key",
             **(
                 {"proxy_auth": "proxy-user:p@$$-'\"#password"}
                 if site_path == SECOND
@@ -1294,6 +1295,7 @@ def checkout_files() -> dict[str, str]:
         "/etc/gideon/secrets/gideon_api_key": "gideon-api-key",
         "/etc/gideon/secrets/searxng_secret_key": "searxng-secret-key",
         "/etc/gideon/secrets/qdrant_api_key": "qdrant-api-key",
+        "/etc/gideon/secrets/qdrant_read_only_api_key": "qdrant-read-only-api-key",
     }
 
 

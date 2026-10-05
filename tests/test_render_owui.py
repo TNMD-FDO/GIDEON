@@ -43,6 +43,7 @@ from gideon.host.render.owui import (
     MODEL_GRANT_CREATED_AT,
     MODEL_GRANT_ID,
     MODEL_GRANT_RESOURCE_TYPE,
+    OWUI_COLLECTION_PREFIX,
     OWUI_SECRET_NAMES,
     SERVICE_GROUP,
     SYNC_ROW_CREATED_AT,
@@ -62,6 +63,11 @@ from gideon.host.render.owui import (
     owui_secret_environment,
     owui_secret_names,
     permission_tree,
+)
+from gideon.host.render.qdrant import (
+    QDRANT_READ_ONLY_SECRET_NAME,
+    QDRANT_SERVICE_NAME,
+    qdrant_rest_url,
 )
 from gideon.host.render.searxng import searxng_query_url
 from gideon.host.render.systemd import (
@@ -95,6 +101,7 @@ SECRETS = {
     "gideon_api_key": "gideon-api-key",
     "searxng_secret_key": "searxng-secret-key",
     "qdrant_api_key": "qdrant-api-key",
+    "qdrant_read_only_api_key": "qdrant-read-only-api-key",
 }
 
 
@@ -122,6 +129,38 @@ def inputs(site_path: Path = EXAMPLE, **overrides: object) -> RenderInputs:
 
 
 class Environment(unittest.TestCase):
+    def test_store_settings_apply_on_every_host_independent_of_engine(self) -> None:
+        expected = {
+            "VECTOR_DB": "qdrant",
+            "QDRANT_URI": qdrant_rest_url(),
+            "QDRANT_COLLECTION_PREFIX": OWUI_COLLECTION_PREFIX,
+            "ENABLE_QDRANT_MULTITENANCY_MODE": "true",
+            "QDRANT_PREFER_GRPC": "false",
+        }
+        self.assertTrue(qdrant_rest_url().startswith("http://"))
+        for site_path, no_gpu in ((EXAMPLE, False), (SECOND, False), (EXAMPLE, True)):
+            with self.subTest(site=site_path.name, no_gpu=no_gpu):
+                rendered_inputs = inputs(site_path, no_gpu=no_gpu)
+                for engine in (True, False):
+                    environment = owui_environment(rendered_inputs, engine=engine)
+                    self.assertEqual(
+                        {name: environment[name] for name in expected}, expected
+                    )
+                    self.assertNotIn(
+                        SECRETS[QDRANT_READ_ONLY_SECRET_NAME], environment.values()
+                    )
+                    self.assertNotIn(SECRETS["qdrant_api_key"], environment.values())
+                    for name in (
+                        "QDRANT_ON_DISK",
+                        "QDRANT_HNSW_M",
+                        "QDRANT_GRPC_PORT",
+                        "QDRANT_TIMEOUT",
+                    ):
+                        self.assertNotIn(name, environment)
+                without_store = owui_environment(rendered_inputs, store=False)
+                for name in expected:
+                    self.assertNotIn(name, without_store)
+
     def test_rating_switch_is_on_for_every_rendered_host_kind(self) -> None:
         for site_path, no_gpu in ((EXAMPLE, False), (SECOND, False), (EXAMPLE, True)):
             with self.subTest(site_path=site_path, no_gpu=no_gpu):
@@ -239,7 +278,6 @@ class Environment(unittest.TestCase):
             self.assertNotIn(name, env)
         self.assertEqual(env["ENABLE_VERSION_UPDATE_CHECK"], "false")
         self.assertEqual(env["CONTENT_SECURITY_POLICY"], "img-src 'self' data: blob:")
-        self.assertNotIn("VECTOR_DB", env)
         self.assertNotIn("NO_PROXY", env)
         for value in env.values():
             self.assertNotIn("password", value.lower())
@@ -374,7 +412,7 @@ class Environment(unittest.TestCase):
         env = owui_environment(second)
         self.assertTrue(
             env["NO_PROXY"].endswith(
-                ",caddy,postgres,open-webui,gideon-api"
+                ",caddy,postgres,open-webui,gideon-api,qdrant"
             )
         )
         self.assertIn(API_SERVICE_NAME, env["NO_PROXY"])
@@ -388,9 +426,11 @@ class Environment(unittest.TestCase):
         searching = owui_environment(replace(second, site=searching_site))
         self.assertTrue(
             searching["NO_PROXY"].endswith(
-                ",caddy,postgres,open-webui,gideon-api,searxng"
+                ",caddy,postgres,open-webui,gideon-api,searxng,qdrant"
             )
         )
+        without_store = owui_environment(second, store=False)["NO_PROXY"]
+        self.assertNotIn(QDRANT_SERVICE_NAME, without_store.split(","))
 
     def test_no_gpu_and_explicitly_disconnected_environments_have_no_connection(self) -> None:
         no_gpu = owui_environment(inputs(no_gpu=True))
@@ -418,7 +458,7 @@ class Environment(unittest.TestCase):
         self.assertNotIn("SEARXNG_QUERY_URL", disconnected)
         proxied_no_gpu = owui_environment(inputs(SECOND, no_gpu=True))
         self.assertTrue(
-            proxied_no_gpu["NO_PROXY"].endswith(",caddy,postgres,open-webui")
+            proxied_no_gpu["NO_PROXY"].endswith(",caddy,postgres,open-webui,qdrant")
         )
         self.assertNotIn(ENGINE_SERVICE_NAME, proxied_no_gpu["NO_PROXY"])
 
@@ -439,16 +479,28 @@ class Environment(unittest.TestCase):
 class SecretEnv(unittest.TestCase):
     def test_env_file_carries_only_the_values_without_a_file_path(self) -> None:
         values = owui_secret_environment(inputs())
-        self.assertEqual(list(values), ["LDAP_APP_PASSWORD", "DATABASE_URL", "WEBUI_ADMIN_PASSWORD", "OPENAI_API_KEYS"])
+        self.assertEqual(list(values), ["LDAP_APP_PASSWORD", "DATABASE_URL", "WEBUI_ADMIN_PASSWORD", "OPENAI_API_KEYS", "QDRANT_API_KEY"])
         self.assertEqual(values["LDAP_APP_PASSWORD"], SECRETS["ldap_bind_password"])
         self.assertEqual(values["DATABASE_URL"], "postgresql://openwebui:p%40ss%2Fword@postgres:5432/openwebui")
         self.assertEqual(values["OPENAI_API_KEYS"], SECRETS["gideon_api_key"])
+        self.assertEqual(values["QDRANT_API_KEY"], SECRETS[QDRANT_READ_ONLY_SECRET_NAME])
         self.assertNotIn(SECRETS["engine_api_key"], values.values())
 
     def test_directory_false_omits_the_bind_secret_and_name(self) -> None:
         values = owui_secret_environment(inputs(), directory=False)
         self.assertNotIn("LDAP_APP_PASSWORD", values)
         self.assertNotIn("ldap_bind_password", owui_secret_names(inputs(), directory=False))
+
+    def test_store_false_omits_its_key_and_declared_name(self) -> None:
+        self.assertNotIn("QDRANT_API_KEY", owui_secret_environment(inputs(), store=False))
+        self.assertNotIn(QDRANT_READ_ONLY_SECRET_NAME, owui_secret_names(inputs(), store=False))
+        proxied_names = owui_secret_names(
+            inputs(SECOND, secrets={**SECRETS, "proxy_auth": "user:password"})
+        )
+        self.assertLess(
+            proxied_names.index(QDRANT_READ_ONLY_SECRET_NAME),
+            proxied_names.index("proxy_auth"),
+        )
 
     def test_no_gpu_env_file_omits_the_connection_key(self) -> None:
         values = owui_secret_environment(inputs(no_gpu=True, secrets={
@@ -457,6 +509,7 @@ class SecretEnv(unittest.TestCase):
             if name not in {"engine_api_key", "gideon_api_key"}
         }))
         self.assertNotIn("OPENAI_API_KEYS", values)
+        self.assertEqual(values["QDRANT_API_KEY"], SECRETS[QDRANT_READ_ONLY_SECRET_NAME])
         self.assertNotIn(SECRETS["engine_api_key"], values.values())
 
     def test_proxy_credentials_ride_in_the_secret_env_only(self) -> None:
@@ -481,6 +534,9 @@ class SecretEnv(unittest.TestCase):
         self.assertEqual(artifact.owners, ("open-webui",))
         lines = artifact.emit(inputs()).splitlines()
         self.assertEqual(lines[0], f"LDAP_APP_PASSWORD={SECRETS['ldap_bind_password']}")
+        self.assertIn(
+            f"QDRANT_API_KEY={SECRETS[QDRANT_READ_ONLY_SECRET_NAME]}", lines
+        )
         self.assertTrue(all("=" in line and not line.startswith(" ") for line in lines))
         self.assertEqual(
             tuple(name for name in OWUI_SECRET_NAMES),
@@ -489,6 +545,7 @@ class SecretEnv(unittest.TestCase):
                 "postgres_openwebui_password",
                 "gideon_admin_password",
                 "gideon_api_key",
+                QDRANT_READ_ONLY_SECRET_NAME,
             ),
         )
 
@@ -857,6 +914,7 @@ class ComposeShape(unittest.TestCase):
                 "engine_api_key",
                 "gideon_api_key",
                 "qdrant_api_key",
+                "qdrant_read_only_api_key",
                 "opensearch_password",
                 "opensearch_transport_key",
                 "opensearch_transport_cert",
@@ -899,6 +957,14 @@ class ComposeShape(unittest.TestCase):
         self.assertNotIn("DEFAULT_MODELS", frontend_environment)
         self.assertEqual(frontend_environment["ENABLE_EVALUATION_ARENA_MODELS"], "false")
         self.assertNotIn("OPENAI_API_BASE_URLS", frontend_environment)
+        for name in (
+            "VECTOR_DB",
+            "QDRANT_URI",
+            "QDRANT_COLLECTION_PREFIX",
+            "ENABLE_QDRANT_MULTITENANCY_MODE",
+            "QDRANT_PREFER_GRPC",
+        ):
+            self.assertNotIn(name, frontend_environment)
         self.assertNotIn("TASK_MODEL_EXTERNAL", frontend_environment)
         self.assertEqual(frontend["depends_on"], {"postgres": {"condition": "service_healthy"}})
         self.assertNotIn("caddy", services)

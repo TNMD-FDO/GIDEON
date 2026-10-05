@@ -196,6 +196,7 @@ class Registry(unittest.TestCase):
                 "gideon_api_key",
                 "searxng_secret_key",
                 "qdrant_api_key",
+                "qdrant_read_only_api_key",
                 "opensearch_password",
             ],
         )
@@ -228,6 +229,10 @@ class Registry(unittest.TestCase):
         self.assertEqual(api.kind, "password")
         self.assertFalse(api.print_once)
         self.assertEqual(api.consumer, "the gideon-api connection key carried by Open WebUI")
+        qdrant_reader = next(secret for secret in SECRET_REGISTRY if secret.name == "qdrant_read_only_api_key")
+        self.assertEqual(qdrant_reader.kind, "password")
+        self.assertFalse(qdrant_reader.print_once)
+        self.assertEqual(qdrant_reader.consumer, "the vector store's read-only key carried by Open WebUI")
         audit = next(
             secret
             for secret in SECRET_REGISTRY
@@ -257,6 +262,7 @@ class Registry(unittest.TestCase):
                 "gideon_api_key": "rewrite",
                 "searxng_secret_key": "rewrite",
                 "qdrant_api_key": "rewrite",
+                "qdrant_read_only_api_key": "rewrite",
                 "opensearch_password": "rewrite",
                 "opensearch_transport_key": "rewrite",
                 "opensearch_transport_cert": "rewrite",
@@ -272,6 +278,7 @@ class Registry(unittest.TestCase):
                 "webui_secret_key",
                 "searxng_secret_key",
                 "qdrant_api_key",
+                "qdrant_read_only_api_key",
                 "opensearch_password",
                 "opensearch_transport_key",
                 "opensearch_transport_cert",

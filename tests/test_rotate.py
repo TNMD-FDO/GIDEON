@@ -1123,6 +1123,44 @@ class PartialRotation(RealStack):
 
 
 class OtherRotations(RealStack):
+    def test_qdrant_read_only_key_rotation_recreates_qdrant_once(self) -> None:
+        host = self.applied_host()
+        path = f"{SECRETS_DIR}/qdrant_read_only_api_key"
+        env_path = f"{RENDERED}/open-webui/env"
+        old_value = host.files[path].strip()
+        baseline = len(host.calls)
+        baseline_writes = len(host.writes)
+
+        code, out, err = run_rotate(host, "qdrant_read_only_api_key")
+
+        self.assertEqual((code, err), (0, ""), out)
+        new_value = host.files[path].strip()
+        self.assertNotEqual(new_value, old_value)
+        calls = argv_calls(host)[baseline:]
+        self.assertEqual(
+            [call for call in calls if "--force-recreate" in call],
+            [force_recreate("qdrant"), force_recreate("open-webui")],
+        )
+        self.assertLess(
+            calls.index(force_recreate("qdrant")),
+            calls.index(force_recreate("open-webui")),
+        )
+        self.assertIn("recreated qdrant: mount qdrant_read_only_api_key", out)
+        self.assertIn("start: ok — recreated open-webui: changed rendered files", out)
+        self.assertIn(f"QDRANT_API_KEY={new_value}\n", host.files[env_path])
+        self.assertGreater(len(host.writes), baseline_writes)
+        for file_path, contents in host.files.items():
+            if new_value in contents:
+                self.assertIn(file_path, {path, env_path})
+        for command, environment in host.calls[baseline:]:
+            self.assertNotIn(new_value, command)
+            if environment is not None:
+                self.assertNotIn(new_value, environment.values())
+        for command, input_text in host.inputs[baseline:]:
+            self.assertNotIn(new_value, command)
+            self.assertNotIn(new_value, input_text or "")
+        assert_no_secret_text(self, out + err, (new_value,))
+
     def test_opensearch_password_rotation_recreates_opensearch_alone(self) -> None:
         host = self.applied_host()
         path = f"{SECRETS_DIR}/opensearch_password"

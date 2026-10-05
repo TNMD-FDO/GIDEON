@@ -62,6 +62,7 @@ SECRETS = {
     "engine_api_key": "engine-api-key",
     "gideon_api_key": "gideon-api-key",
     SEARXNG_SECRET_NAME: "searxng-secret-key",
+    "qdrant_read_only_api_key": "qdrant-read-only-api-key",
 }
 
 

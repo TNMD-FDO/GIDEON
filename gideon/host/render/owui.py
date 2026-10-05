@@ -27,6 +27,11 @@ from gideon.host.render.api import (
     api_enabled,
 )
 from gideon.host.render.proxy import PROXY_AUTH_NAME, proxy_environment_values
+from gideon.host.render.qdrant import (
+    QDRANT_READ_ONLY_SECRET_NAME,
+    QDRANT_SERVICE_NAME,
+    qdrant_rest_url,
+)
 from gideon.host.render.searxng import (
     SEARXNG_SERVICE_NAME,
     search_enabled,
@@ -71,6 +76,7 @@ ALLOWED_ENDPOINTS: Final[tuple[str, ...]] = (
     FEEDBACK_LIST_ROUTE,
 )
 SERVICE_GROUP: Final = "gideon-service"
+OWUI_COLLECTION_PREFIX: Final[str] = "owui"
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +102,7 @@ OWUI_SECRET_NAMES: Final[tuple[str, ...]] = (
     "postgres_openwebui_password",
     "gideon_admin_password",
     API_SECRET_NAME,
+    QDRANT_READ_ONLY_SECRET_NAME,
 )
 # The pinned frontend shows this once per chat while the search toggle stays
 # on.
@@ -317,6 +324,7 @@ def owui_environment(
     engine: bool = True,
     search: bool = True,
     directory: bool = True,
+    store: bool = True,
 ) -> Mapping[str, str]:
     """Return the non-secret Compose environment for Open WebUI.
 
@@ -325,6 +333,8 @@ def owui_environment(
     service to reach. ``search`` and ``directory`` false render the search
     switch and ``ENABLE_LDAP`` off with no search or LDAP keys whatever the
     site says — the ``gideon-ci`` sibling, which has neither.
+    ``store`` false leaves the image's own vector-store settings in place for
+    a project without Qdrant.
     """
 
     ldap = inputs.site.auth.ldap
@@ -391,6 +401,27 @@ def owui_environment(
         "ENABLE_OLLAMA_API": "false",
         "ENABLE_OPENAI_API": "false",
     }
+    if store:
+        # With this prefix and multitenancy on, the client names exactly five
+        # shared collections: owui_memories, owui_knowledge, owui_files,
+        # owui_web-search, and owui_hash-based. Every point carries a tenant_id
+        # equal to the frontend's own collection name, and a collection comes
+        # into being at the first write of its kind and by nothing else. The
+        # frontend's key is the store's read-only key, so every such write is
+        # refused. Multitenancy on and gRPC off are the pinned tag's defaults,
+        # rendered so a pin bump cannot move the layout or the transport.
+        # QDRANT_ON_DISK, QDRANT_HNSW_M, and QDRANT_GRPC_PORT are read only at
+        # a collection's creation or over gRPC, and QDRANT_TIMEOUT stays as
+        # shipped.
+        environment.update(
+            {
+                "VECTOR_DB": "qdrant",
+                "QDRANT_URI": qdrant_rest_url(),
+                "QDRANT_COLLECTION_PREFIX": OWUI_COLLECTION_PREFIX,
+                "ENABLE_QDRANT_MULTITENANCY_MODE": "true",
+                "QDRANT_PREFER_GRPC": "false",
+            }
+        )
     if connected:
         # One Chat Completions connection, discovered from the service's model
         # list. Leaving out OPENAI_API_CONFIGS keeps the request shape Chat
@@ -517,6 +548,8 @@ def owui_environment(
             no_proxy += f",{API_SERVICE_NAME}"
         if searching:
             no_proxy += f",{SEARXNG_SERVICE_NAME}"
+        if store:
+            no_proxy += f",{QDRANT_SERVICE_NAME}"
         environment["NO_PROXY"] = no_proxy
     return environment
 
@@ -567,14 +600,14 @@ def general_preset_record(inputs: RenderInputs) -> Mapping[str, object]:
 
 
 def owui_secret_names(
-    inputs: RenderInputs, *, directory: bool = True
+    inputs: RenderInputs, *, directory: bool = True, store: bool = True
 ) -> tuple[str, ...]:
     """The secret names the frontend's env file reads on this host, in emit order.
 
     The one declaration the emitter and the consumer map share: the LDAP bind
     password, the frontend's database password, the break-glass password, the
-    service's key while the marker is absent, and the proxy credential when the
-    inputs carry it.
+    service's key while the marker is absent, the store's read-only key when
+    ``store`` is true, and the proxy credential when the inputs carry it.
     """
 
     names = ["postgres_openwebui_password", "gideon_admin_password"]
@@ -582,6 +615,8 @@ def owui_secret_names(
         names.insert(0, "ldap_bind_password")
     if not inputs.no_gpu:
         names.append(API_SECRET_NAME)
+    if store:
+        names.append(QDRANT_READ_ONLY_SECRET_NAME)
     # The proxy helper reads the credential only under a configured proxy, so a
     # leftover credential file with the proxy off is carried by nothing.
     if inputs.site.egress_proxy and PROXY_AUTH_NAME in inputs.secrets:
@@ -590,9 +625,9 @@ def owui_secret_names(
 
 
 def owui_secret_environment(
-    inputs: RenderInputs, *, directory: bool = True
+    inputs: RenderInputs, *, directory: bool = True, store: bool = True
 ) -> Mapping[str, str]:
-    """Return raw env-file values, including the service key for GPU hosts."""
+    """Return raw env-file values, including service and store keys when enabled."""
 
     def required(name: str) -> str:
         value = inputs.secrets.get(name)
@@ -600,7 +635,7 @@ def owui_secret_environment(
             raise ValueError(f"Render secret is missing: {name}.")
         return value
 
-    names = owui_secret_names(inputs, directory=directory)
+    names = owui_secret_names(inputs, directory=directory, store=store)
     values: dict[str, str] = {
         "DATABASE_URL": (
             "postgresql://openwebui:"
@@ -613,6 +648,8 @@ def owui_secret_environment(
         values = {"LDAP_APP_PASSWORD": required("ldap_bind_password"), **values}
     if API_SECRET_NAME in names:
         values["OPENAI_API_KEYS"] = required(API_SECRET_NAME)
+    if QDRANT_READ_ONLY_SECRET_NAME in names:
+        values["QDRANT_API_KEY"] = required(QDRANT_READ_ONLY_SECRET_NAME)
     values.update(proxy_environment_values(inputs))
     return values
 
@@ -628,8 +665,8 @@ class OwuiEnvArtifact(Artifact):
 
     The frontend reads passwords and API keys from its environment only, so
     this file carries the LDAP bind password, database URL, break-glass
-    password, and — on a GPU host — the service's key, which the frontend pairs
-    with its one base URL.
+    password, the store's read-only key, and — on a GPU host — the service's
+    key, which the frontend pairs with its one base URL.
     """
 
     name = "open-webui-env"

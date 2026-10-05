@@ -30,6 +30,7 @@ SECRETS = {
     "gideon_api_key": "gideon-api-key",
     "searxng_secret_key": "searxng-secret-key",
     "qdrant_api_key": "qdrant-api-key",
+    "qdrant_read_only_api_key": "qdrant-read-only-api-key",
 }
 
 
@@ -103,6 +104,11 @@ class ConsumerMap(unittest.TestCase):
         self.assertEqual(gpu["qdrant_api_key"], SecretConsumers(("qdrant",), ()))
         self.assertEqual(second["qdrant_api_key"], SecretConsumers(("qdrant",), ()))
         self.assertEqual(no_gpu["qdrant_api_key"], SecretConsumers(("qdrant",), ()))
+        for consumers in (gpu, second, no_gpu):
+            self.assertEqual(
+                consumers["qdrant_read_only_api_key"],
+                SecretConsumers(("qdrant",), ("open-webui",)),
+            )
         self.assertEqual(consumers_of(inputs(), "gideon_admin_api_key"), SecretConsumers((), ()))
         self.assertEqual(consumers_of(inputs(), "gideon_eval_api_key"), SecretConsumers((), ()))
 

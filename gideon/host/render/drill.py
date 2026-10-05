@@ -37,7 +37,7 @@ def drill_compose_document(inputs: RenderInputs) -> Mapping[str, object]:
 
     postgres_pin = image_pin(inputs, "postgres")
     open_webui_pin = image_pin(inputs, "open-webui")
-    environment = dict(owui_environment(inputs, engine=False))
+    environment = dict(owui_environment(inputs, engine=False, store=False))
     environment["WEBUI_URL"] = f"http://127.0.0.1:{DRILL_PORT}"
 
     return {

@@ -40,7 +40,7 @@ from gideon.host.render.opensearch import (
     opensearch_heap_mib,
 )
 from gideon.host.render.prometheus import PrometheusConfigArtifact
-from gideon.host.render.services import secret_wrapper
+from gideon.host.render.services import MountedSecret, secret_wrapper
 
 HOSTS = (inputs(EXAMPLE), inputs(SECOND), inputs(EXAMPLE, no_gpu=True))
 SECURITY_FILES = (
@@ -158,9 +158,13 @@ class Wrapper(unittest.TestCase):
                 with self.subTest(secret=secret):
                     result = subprocess.run(
                         secret_wrapper(
-                            str(secret),
-                            OPENSEARCH_PASSWORD_VARIABLE,
-                            "OpenSearch password",
+                            (
+                                MountedSecret(
+                                    str(secret),
+                                    OPENSEARCH_PASSWORD_VARIABLE,
+                                    "OpenSearch password",
+                                ),
+                            ),
                             sys.executable,
                             OPENSEARCH_SERVICE_NAME,
                         )
@@ -179,9 +183,13 @@ class Wrapper(unittest.TestCase):
             secret.write_text("fictitious-password\n")
             result = subprocess.run(
                 secret_wrapper(
-                    str(secret),
-                    OPENSEARCH_PASSWORD_VARIABLE,
-                    "OpenSearch password",
+                    (
+                        MountedSecret(
+                            str(secret),
+                            OPENSEARCH_PASSWORD_VARIABLE,
+                            "OpenSearch password",
+                        ),
+                    ),
                     sys.executable,
                     OPENSEARCH_SERVICE_NAME,
                 )
