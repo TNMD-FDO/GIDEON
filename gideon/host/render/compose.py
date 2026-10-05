@@ -6,6 +6,7 @@ from typing import Final
 from gideon.host.images import parse_registry
 from gideon.host.models import GIGABYTE, HardwareProfile
 from gideon.host.render import Artifact, RenderInputs
+from gideon.host.render.engine import ENGINE_READY_SECONDS as ENGINE_READY_SECONDS
 from gideon.host.render.owui import PERMISSIONS_TEMPLATE
 from gideon.host.render.services import (
     all_service_names,
@@ -23,9 +24,6 @@ from gideon.host.render.services.generator import (
 )
 from gideon.host.render.services.generator import (
     ENGINE_HEALTHCHECK as ENGINE_HEALTHCHECK,
-)
-from gideon.host.render.services.generator import (
-    ENGINE_READY_SECONDS as ENGINE_READY_SECONDS,
 )
 from gideon.host.render.services.generator import (
     ENGINE_USAGE_SWITCHES as ENGINE_USAGE_SWITCHES,

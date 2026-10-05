@@ -193,6 +193,7 @@ class Registry(unittest.TestCase):
                 "postgres_gideon_ro_metrics_password",
                 "postgres_gideon_eval_password",
                 "engine_api_key",
+                "embed_api_key",
                 "gideon_api_key",
                 "searxng_secret_key",
                 "qdrant_api_key",
@@ -225,6 +226,10 @@ class Registry(unittest.TestCase):
         self.assertEqual(engine.kind, "password")
         self.assertFalse(engine.print_once)
         self.assertEqual(engine.consumer, "the engine's API key (gideon-generator)")
+        embed = next(secret for secret in SECRET_REGISTRY if secret.name == "embed_api_key")
+        self.assertEqual(embed.kind, "password")
+        self.assertFalse(embed.print_once)
+        self.assertEqual(embed.consumer, "the embedding server's API key (gideon-embed)")
         api = next(secret for secret in SECRET_REGISTRY if secret.name == "gideon_api_key")
         self.assertEqual(api.kind, "password")
         self.assertFalse(api.print_once)
@@ -259,6 +264,7 @@ class Registry(unittest.TestCase):
                 "postgres_gideon_ro_metrics_password": "role",
                 "postgres_gideon_eval_password": "role",
                 "engine_api_key": "rewrite",
+                "embed_api_key": "rewrite",
                 "gideon_api_key": "rewrite",
                 "searxng_secret_key": "rewrite",
                 "qdrant_api_key": "rewrite",
@@ -274,6 +280,7 @@ class Registry(unittest.TestCase):
             ROTATABLE_NAMES,
             {
                 "engine_api_key",
+                "embed_api_key",
                 "gideon_api_key",
                 "webui_secret_key",
                 "searxng_secret_key",

@@ -54,6 +54,10 @@ SELF_UPDATE_SWITCHES: Mapping[str, Mapping[str, str]] = {
         "VLLM_NO_USAGE_STATS": "1",
         "DO_NOT_TRACK": "1",
     },
+    "gideon-embed": {
+        "VLLM_NO_USAGE_STATS": "1",
+        "DO_NOT_TRACK": "1",
+    },
     # The API image has no update check or telemetry.
     "gideon-api": {},
     # No update check or telemetry at the pinned commit; no checker module,

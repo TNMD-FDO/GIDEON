@@ -30,7 +30,11 @@ from gideon.host.render.command import (
     recreate_judgment,
 )
 from gideon.host.render.compose import engine_service, service_names
-from gideon.host.render.engine import ENGINE_SECRET_NAME, ENGINE_SERVICE_NAME
+from gideon.host.render.engine import (
+    EMBED_SERVICE_NAME,
+    ENGINE_SECRET_NAME,
+    ENGINE_SERVICE_NAME,
+)
 from gideon.host.render.owui import EVAL_IDENTITY, GENERAL_MODEL_ID
 from gideon.host.render.services.api import api_service
 from gideon.host.sysio import PathLike
@@ -265,6 +269,7 @@ class ApiRender(unittest.TestCase):
         )
         before_digests = compose_digests(original).services
         after_digests = compose_digests(moved).services
+        self.assertEqual(before_digests[EMBED_SERVICE_NAME], after_digests[EMBED_SERVICE_NAME])
         for service in (API_SERVICE_NAME, ENGINE_SERVICE_NAME):
             with self.subTest(service=service):
                 self.assertNotEqual(before_digests[service], after_digests[service])
@@ -275,6 +280,10 @@ class ApiRender(unittest.TestCase):
         after_rendered = render_all(moved)
         before_compose = yaml.safe_load(before_rendered.by_path["compose.yaml"].content)
         after_compose = yaml.safe_load(after_rendered.by_path["compose.yaml"].content)
+        self.assertEqual(
+            before_compose["services"][EMBED_SERVICE_NAME],
+            after_compose["services"][EMBED_SERVICE_NAME],
+        )
         self.assertEqual(before_compose["services"]["open-webui"], after_compose["services"]["open-webui"])
         frontend_environment = after_compose["services"]["open-webui"]["environment"]
         self.assertNotIn(generator.serve.served_name, str(frontend_environment))

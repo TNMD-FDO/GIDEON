@@ -3,7 +3,7 @@ release: "fixture"
 inputs:
   site_sha256: "ce3ac9046d968f318f3d18cd4b21120411fe7e9319fd918e0d890df60d30514f"
   host_lock_sha256: "c487a5a60259c393ac20649336ff45b24747e8155aa0e4d5afe84e51e8424680"
-  models_lock_sha256: "f19a593eb56207243bd5fdb7dafe099c6be75b937a997e9f80ded40fa132ff1f"
+  models_lock_sha256: "76e4b42bc05601fbbca53c31fd3f37e7e8a2f2ebda8f7be736f533c088fa21e1"
   hardware_profile: "2x96v-256d"
   images_lock_version: 1
   source_digests:
@@ -12,11 +12,11 @@ inputs:
   build_box: true
 files:
   compose.yaml:
-    sha256: "2db1541360b2104d38c36315fe0c5ef37eaef99190924afae4823353d9deb5dd"
+    sha256: "53871be3de3f5fecbaac09a1d2da43dbc228c6820b9769981bed293e2da41a85"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
-    sha256: "47d2c6f2104b66e64ed6b41be49010a8a8da862408933d61cf50ecabe005e657"
+    sha256: "b4d5acb49a0117a9bc5adb7448daede898376ad7ba4a25738a91b51d9b86bef3"
     mode: "0644"
     owners:
       - "prometheus"
@@ -76,7 +76,7 @@ files:
     owners:
       - "grafana"
   "grafana/dashboards/gpu.json":
-    sha256: "e7c85e50facfbb24118ac4d36be555b3de8f732ae3967aed7186569fe019a90c"
+    sha256: "5a0a228f7bf8e0afd17c90fd9a9e80f348f0f06e10d769bdcfbc0bad958d64a5"
     mode: "0644"
     owners:
       - "grafana"
@@ -222,13 +222,14 @@ services:
   opensearch: "546120b5ecaaecd955427b35ef0213ed0f132f92884b587e926d8c969033d961"
   open-webui: "9dc1fb53125475a642df4f51e262fdf36c5714029cdf9dc31497e296f2cfb1ea"
   gideon-generator: "4769d4dcc7e4e3de52094a84573d13c76bc57eaaafc7c39cbec954fe93b5efa9"
+  gideon-embed: "c5aed2d953e92ac812520d91825693de687e8352c2f19d36c44e6547d0ae75b3"
   gideon-api: "2ba4d9ee58cc72be69686f3013e7691af7186d2f942cc8f46f1972947bf746ea"
   searxng: "790f3d23c5a48d8b2e3c02d12c6615884bb4073095bdf7faa51ccee49aa51c2c"
   dcgm-exporter: "69b8cf5fe0c7805a28c1690e0ac3f49736a04f2fe8b7822a939073cd435d8a5f"
   postgres-exporter: "71024e25f248a0a94b2ea92c4f48813f8b4f95e3d17d41522f300fa9f1407291"
   cadvisor: "6e4def0c2cc0e80a5357574ad6a8e81286c1f29140a78422632c6e860d14d83e"
   blackbox-exporter: "959ff7e850d35c00a0a178fca5cf671d37dffa6ea5db86790b9166f5182999d3"
-top_level: "6598badac383749156fd50434528a99a18b088f7ffbefbe2b68f298e4e6fb6b2"
+top_level: "0f812033f0700e236e79f39805f78c1ad1f601a279fbd90428112d34cf1c4836"
 top_level_parts:
   static: "0642157a4acd76578712e56d5b1878c477e770bbd149ffe108b067427ca78f36"
   secrets:
@@ -282,6 +283,10 @@ top_level_parts:
       mounts:
         - "gideon-generator"
         - "gideon-api"
+    embed_api_key:
+      sha256: "8403adda24d578a06322a2c9aa7b8553cc621d89b00cc47e620d5b94f7f9cf40"
+      mounts:
+        - "gideon-embed"
     gideon_api_key:
       sha256: "b1f5f536032e9f7587130ee2adafafabe82444e7e53b3d3421a2440dcc3382c7"
       mounts:

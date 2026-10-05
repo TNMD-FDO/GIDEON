@@ -24,6 +24,8 @@ Mirrored images are pinned by their upstream tag and the digest of the published
 
 The hardware profiles contain the minimum host requirements checked by `preflight`. Each profile selects models by repository and revision, records the digest and size of every file to fetch, assigns each model to a GPU, and carries the engine settings used to serve it. The profile's memory table gives each known Compose service its memory limit and names the model role for services that load a model.
 
+A profile may also name its embedding space: an id, the role of the model that embeds into it, and the dimension. Every stored vector belongs to that space, so a person moves the id in the same change whenever the embedding model, any of its weight files, the dimension, or the precision changes; the id is lowercase words and digits joined by single hyphens, and the role must be one of the profile's models.
+
 `models pull` fetches and verifies exactly the files named by the selected profile. It does not select additional files from a model repository.
 
 ## 5. `config/egress.yaml`

@@ -57,11 +57,12 @@ profiles:
     # max_over_time(container_memory_working_set_bytes[14d]) on loopback port
     # 9090. The generator keeps 32 despite a far lower peak because a limit
     # counts the page cache a container is first to touch and its weights are
-    # about 31 GB of file pages. A row's `role` names the model the service
-    # loads, which is the subject of the size-change rule. The remaining
-    # stores and workers (OpenSearch, gideon-worker, gideon-embed) land their
-    # rows with their services. Every scalar is a value-only patch for the pin
-    # watch.
+    # about 31 GB of file pages. The embedding server's 16 is a ruled
+    # starting value on the same basis: its weights are about 15.1 GB of file
+    # pages, and E9 corrects the row from its measured cold start. A row's
+    # `role` names the model the service loads, which is the subject of the
+    # size-change rule. The remaining worker (gideon-worker) lands its row
+    # with its service. Every scalar is a value-only patch for the pin watch.
     memory:
       caddy:
         gb: 1
@@ -82,6 +83,9 @@ profiles:
       gideon-generator:
         gb: 32
         role: generator
+      gideon-embed:
+        gb: 16
+        role: embed
       searxng:
         gb: 1
       dcgm-exporter:
@@ -94,6 +98,18 @@ profiles:
         gb: 1
       gideon-api:
         gb: 1
+    # The embedding space: the one vector space every stored chunk and every
+    # query is embedded into. Its id names the model, the dimension, and the
+    # precision together, and is the third part of a generation's name and
+    # the embedding ledger's key, so vectors of two spaces never meet in one
+    # index. A person moves the id whenever the embedding model, any of its
+    # weight files, the dimension, or the precision changes; the pin watch
+    # patches nothing in this block. `role` names the model in `models` that
+    # embeds into the space, and `dimensions` is the width its server returns.
+    embedding_space:
+      id: qwen3-embedding-8b-1024-bf16
+      role: embed
+      dimensions: 1024
     # The chunk guards arrive with index build.
     models:
       # The generator: GPU 0, whole card, one deployment at the native window.
@@ -380,3 +396,103 @@ profiles:
           vocab.json:
             sha256: sha256:ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003
             size: 6722759
+      # The embedding model: GPU 1, a fixed share of the card beside other
+      # work, every chunk and query embedded into the embedding space above.
+      # Pinned and pulled as the generator is.
+      embed:
+        repo: Qwen/Qwen3-Embedding-8B
+        revision: "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af"
+        gpu: 1
+        # The shipped baseline, verbatim, under the generator's conventions.
+        # runner and convert: the engine resolves both from the repository's
+        # sentence-transformers files; stated, they do not hang on a file's
+        # presence. dtype: the weights' own precision, part of the space's id.
+        # max-model-len: the decided input window. The tokenizer appends one
+        # end token to every input, so the longest text accepted is 8,191
+        # tokens; a longer one is refused with a 400, never truncated.
+        # no-enable-chunked-prefill: chunked prefill, the engine's default for
+        # this model, can leave a request exactly at the window unanswered
+        # (an open upstream scheduler bug). Measured on the reference box, a
+        # text at the edge hung past two minutes with it on, alone and among
+        # concurrent requests, and never with it off, where every step then
+        # takes a whole prompt, the default step budget being the window.
+        # gpu-memory-utilization: a per-process budget the server fills at
+        # start, its KV cache taking whatever the weights leave, of the card's
+        # total as the process reports it; 0.25 reads as 24 GB of a 96 GB card
+        # in the convention that reads the generator's 0.92 as about 88, and
+        # a start refuses when less than the budget is free on the card.
+        # hf-overrides and pooler-config, two settings that only work
+        # together: the width list turns the model's variable widths on and
+        # refuses every width but 1024, so no client leaves the space, and the
+        # pooler's default dimension makes a request that names no width
+        # return 1024 values. Without the list every request is refused;
+        # without the default a request returns 4,096 values. Each is one
+        # JSON string, passed to the server as one argument. Not set, by
+        # decision: kv-cache-dtype, scheduling-policy, reasoning-parser, and
+        # the three scheduler numbers (max-num-seqs, max-num-batched-tokens,
+        # long-prefill-token-threshold), engine defaults until the bulk
+        # embed's throughput is measured; the DeepGEMM switch, which touches
+        # FP8 paths alone.
+        serve:
+          served_name: gideon-embed
+          env:
+            HF_HUB_OFFLINE: "1"
+            HF_HOME: /data/models
+          flags:
+            runner: pooling
+            convert: embed
+            dtype: bfloat16
+            max-model-len: 8192
+            no-enable-chunked-prefill: true
+            gpu-memory-utilization: 0.25
+            hf-overrides: '{"matryoshka_dimensions": [1024]}'
+            pooler-config: '{"dimensions": 1024}'
+        files:
+          1_Pooling/config.json:
+            sha256: sha256:2e1da26b3fd65cf7e370d2fabf28a8c59efa7edb525d1b8b50be8e5ca1048ea6
+            size: 313
+          LICENSE:
+            sha256: sha256:832dd9e00a68dd83b3c3fb9f5588dad7dcf337a0db50f7d9483f310cd292e92e
+            size: 11343
+          README.md:
+            sha256: sha256:1fd6f3583d642a3319efb3eb8c22b6aa6320e6ab92263447bd84fd92615206d4
+            size: 17253
+          config.json:
+            sha256: sha256:dcccf7c7890c8debc4af8dace8d6acd8dd50bd56d50d4d8b60529381ba3de3d7
+            size: 729
+          config_sentence_transformers.json:
+            sha256: sha256:10667c72ddb772627bf1780cb7f86af8e2ae0032b8c243c731172064105c6961
+            size: 215
+          generation_config.json:
+            sha256: sha256:28396d421a2108acce96383f6a7de78008f7f1b17f807958f3c14c51dbfb65fb
+            size: 117
+          merges.txt:
+            sha256: sha256:8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5
+            size: 1671853
+          model-00001-of-00004.safetensors:
+            sha256: sha256:99b343597fe840706146144699a8b9188dd3387e43eb61faf0231b70b249d451
+            size: 4900037024
+          model-00002-of-00004.safetensors:
+            sha256: sha256:dff635b0f6dbbaad2a2d633ef037ec0a39bc165cc1806c712fbd6fcbcb4526c0
+            size: 4915959512
+          model-00003-of-00004.safetensors:
+            sha256: sha256:30b1d4c53d84eb018f642cad7b373f0aabf79699872d8702c1f38577c0a59a2f
+            size: 4983067656
+          model-00004-of-00004.safetensors:
+            sha256: sha256:36cbc9c60375693629f25743c1e77ebb1724af58e671b2376463193c7fd21ef6
+            size: 335570376
+          model.safetensors.index.json:
+            sha256: sha256:ceaf1429bfa18eecc75d079737e8d1fe8dc0627f5ec7e6a985514626d1ac6a77
+            size: 30432
+          modules.json:
+            sha256: sha256:84e40c8e006c9b1d6c122e02cba9b02458120b5fb0c87b746c41e0207cf642cf
+            size: 349
+          tokenizer.json:
+            sha256: sha256:83cdf8c3a34f68862319cb1810ee7b1e2c0a44e0864ae930194ddb76bb7feb8d
+            size: 11422947
+          tokenizer_config.json:
+            sha256: sha256:2f58f4bbd7bbce15d683f525954ef3a92cd82f5e06415a9c513859bf8ab72436
+            size: 7256
+          vocab.json:
+            sha256: sha256:ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910
+            size: 2776833

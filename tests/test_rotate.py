@@ -32,7 +32,7 @@ from gideon.host.render import ARTIFACTS, RenderInputs
 from gideon.host.render.api import API_SERVICE_NAME
 from gideon.host.render.command import run_render
 from gideon.host.render.compose import service_blocks
-from gideon.host.render.engine import ENGINE_SERVICE_NAME
+from gideon.host.render.engine import EMBED_SERVICE_NAME, ENGINE_SERVICE_NAME
 from gideon.host.render.services import all_service_names
 from gideon.host.secrets import SECRET_REGISTRY, SECRETS_DIR
 from gideon.host.site import SiteConfig, load_site
@@ -757,6 +757,31 @@ class RealStack(unittest.TestCase):
 
 
 class EngineRotation(RealStack):
+    def test_embedding_key_rewrites_and_recreates_only_embedding_server(self) -> None:
+        host = self.applied_host()
+        path = f"{SECRETS_DIR}/embed_api_key"
+        old_value = host.files[path].strip()
+        baseline_calls = len(host.calls)
+        before_manifest = yaml.safe_load(host.files[f"{RENDERED}/applied.yaml"])
+
+        code, out, err = run_rotate(host, "embed_api_key")
+
+        self.assertEqual((code, err), (0, ""), out)
+        new_value = host.files[path].strip()
+        self.assertNotEqual(new_value, old_value)
+        self.assertEqual(host.write_modes[path], 0o440)
+        self.assertIn((path, 0, 4242), host.chown_calls)
+        calls = argv_calls(host)[baseline_calls:]
+        self.assertEqual(calls.count(force_recreate(EMBED_SERVICE_NAME)), 1)
+        self.assertEqual(calls.count(force_recreate(ENGINE_SERVICE_NAME)), 0)
+        self.assertEqual(calls.count(force_recreate(API_SERVICE_NAME)), 0)
+        self.assertEqual(calls.count(force_recreate("open-webui")), 0)
+        self.assertEqual(
+            yaml.safe_load(host.files[f"{RENDERED}/applied.yaml"])["services"][EMBED_SERVICE_NAME],
+            before_manifest["services"][EMBED_SERVICE_NAME],
+        )
+        assert_no_secret_text(self, out + err, (new_value,))
+
     def test_engine_rotates_mount_and_carried_consumers_then_converges(self) -> None:
         host = self.applied_host()
         host.lock_log.clear()

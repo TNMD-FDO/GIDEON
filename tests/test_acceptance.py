@@ -25,6 +25,7 @@ from gideon.host import restore as host_restore
 from gideon.host import site as host_site
 from gideon.host.apply import PRINT_ONCE_SUFFIX
 from gideon.host.lock import load_host_lock
+from gideon.host.render.engine import MODEL_SERVERS
 from gideon.host.report import Problem, StageResult, stage_line
 from gideon.host.steps.services import acceptance_image_path
 from gideon.host.steps.site_dirs import AGE_IDENTITY_PATH
@@ -1410,7 +1411,7 @@ class FullRestoreContracts(unittest.TestCase):
         self.assertLess(decrypt_index, site_writes[0])
         self.assertLess(max(site_writes), apply_index)
 
-    def test_health_and_mode_check_release_services_and_no_gpu_generator(self) -> None:
+    def test_health_and_mode_check_release_services_and_no_gpu_model_servers(self) -> None:
         record = {
             "release": "v-test",
             "inputs": {"no_gpu": True},
@@ -1449,19 +1450,37 @@ class FullRestoreContracts(unittest.TestCase):
                 self.assertFalse(result.ok)
                 self.assertIn(expected, result.detail)
 
-        for value, ps, expected in (
-            ({**record, "services": {**cast(dict[str, str], record["services"]), fullrestore.ENGINE_SERVICE_NAME: "digest"}}, listing, fullrestore.ENGINE_SERVICE_NAME),
-            (record, json.dumps(json.loads(listing) + [{"Service": fullrestore.ENGINE_SERVICE_NAME, "State": "running", "Health": "healthy"}]), fullrestore.ENGINE_SERVICE_NAME),
-        ):
-            with self.subTest(expected=expected, ps=ps):
-                host, ctx, _manifest = restore_context()
-                ctx.applied_record = value
-                ctx.services_listing = ps
-                marker = vm_root_argv(ctx, f"test -e {fullrestore.nogpu.NO_GPU_PATH}")
-                host.commands[marker] = completed(marker)
-                result = fullrestore.mode(ctx)
-                self.assertFalse(result.ok)
-                self.assertIn(expected, result.detail)
+        for member in MODEL_SERVERS:
+            for value, ps, expected in (
+                (
+                    {
+                        **record,
+                        "services": {
+                            **cast(dict[str, str], record["services"]),
+                            member.service_name: "digest",
+                        },
+                    },
+                    listing,
+                    f"the applied record declares {member.service_name}",
+                ),
+                (
+                    record,
+                    json.dumps(
+                        json.loads(listing)
+                        + [{"Service": member.service_name, "State": "running", "Health": "healthy"}]
+                    ),
+                    f"the running project contains {member.service_name}",
+                ),
+            ):
+                with self.subTest(expected=expected, ps=ps):
+                    host, ctx, _manifest = restore_context()
+                    ctx.applied_record = value
+                    ctx.services_listing = ps
+                    marker = vm_root_argv(ctx, f"test -e {fullrestore.nogpu.NO_GPU_PATH}")
+                    host.commands[marker] = completed(marker)
+                    result = fullrestore.mode(ctx)
+                    self.assertFalse(result.ok)
+                    self.assertIn(expected, result.detail)
 
     def test_users_program_prints_only_the_manifest_count_without_a_secret(self) -> None:
         def run_users(stdout: str) -> tuple[StageResult, tuple[str, ...]]:

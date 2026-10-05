@@ -9,7 +9,7 @@ from gideon.host.render import (
     substitute_template,
 )
 from gideon.host.render.api import API_JOB_NAME, api_enabled, api_health_url
-from gideon.host.render.engine import ENGINE_JOB_NAME, engine_metrics_target
+from gideon.host.render.engine import MODEL_SERVERS, metrics_target
 from gideon.host.render.opensearch import (
     OPENSEARCH_JOB_NAME,
     OPENSEARCH_SERVICE_NAME,
@@ -29,17 +29,20 @@ BLACKBOX_TEMPLATE: Final = "blackbox/blackbox.yml.tmpl"
 DCGM_COUNTERS_TEMPLATE: Final = "dcgm-exporter/counters.csv"
 DCGM_COUNTERS_PATH: Final = "dcgm-exporter/counters.csv"
 DCGM_COUNTERS_MOUNT: Final = "/etc/dcgm-exporter/gideon-counters.csv"
-# The template's $gpu_jobs line: the DCGM job and the engine's own /metrics
-# (keyless by vLLM's design, on the Compose network alone), both governed by
+# The template's $gpu_jobs line: the DCGM job and the model servers' /metrics
+# (keyless by vLLM's design, on the Compose network alone), all governed by
 # the no-GPU marker like the services they scrape; a no-GPU host renders the
 # block as one blank line (the rules file's $gpu_rules is the same pattern).
 _GPU_JOBS: Final = (
     "  - job_name: dcgm\n"
     "    static_configs:\n"
     "      - targets: [dcgm-exporter:9400]\n"
-    f"  - job_name: {ENGINE_JOB_NAME}\n"
-    "    static_configs:\n"
-    f"      - targets: [{engine_metrics_target()}]"
+    + "\n".join(
+        f"  - job_name: {member.job_name}\n"
+        "    static_configs:\n"
+        f"      - targets: [{metrics_target(member)}]"
+        for member in MODEL_SERVERS
+    )
 )
 
 

@@ -24,6 +24,9 @@ scrape_configs:
   - job_name: engine
     static_configs:
       - targets: [gideon-generator:8000]
+  - job_name: embed
+    static_configs:
+      - targets: [gideon-embed:8000]
   - job_name: postgres
     static_configs:
       - targets: [postgres-exporter:9187]

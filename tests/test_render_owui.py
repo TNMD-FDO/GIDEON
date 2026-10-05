@@ -100,6 +100,7 @@ SECRETS = {
     "postgres_openwebui_password": "p@ss/word",
     "gideon_admin_password": "admin-password",
     "engine_api_key": "engine-api-key",
+    "embed_api_key": "embed-api-key",
     "gideon_api_key": "gideon-api-key",
     "searxng_secret_key": "searxng-secret-key",
     "qdrant_api_key": "qdrant-api-key",
@@ -487,6 +488,7 @@ class SecretEnv(unittest.TestCase):
         self.assertEqual(values["OPENAI_API_KEYS"], SECRETS["gideon_api_key"])
         self.assertEqual(values["QDRANT_API_KEY"], SECRETS[QDRANT_READ_ONLY_SECRET_NAME])
         self.assertNotIn(SECRETS["engine_api_key"], values.values())
+        self.assertNotIn(SECRETS["embed_api_key"], values.values())
 
     def test_directory_false_omits_the_bind_secret_and_name(self) -> None:
         values = owui_secret_environment(inputs(), directory=False)
@@ -508,11 +510,12 @@ class SecretEnv(unittest.TestCase):
         values = owui_secret_environment(inputs(no_gpu=True, secrets={
             name: value
             for name, value in SECRETS.items()
-            if name not in {"engine_api_key", "gideon_api_key"}
+            if name not in {"engine_api_key", "embed_api_key", "gideon_api_key"}
         }))
         self.assertNotIn("OPENAI_API_KEYS", values)
         self.assertEqual(values["QDRANT_API_KEY"], SECRETS[QDRANT_READ_ONLY_SECRET_NAME])
         self.assertNotIn(SECRETS["engine_api_key"], values.values())
+        self.assertNotIn(SECRETS["embed_api_key"], values.values())
 
     def test_proxy_credentials_ride_in_the_secret_env_only(self) -> None:
         values = owui_secret_environment(inputs(SECOND, secrets={**SECRETS, "proxy_auth": "user:p@ss"}))
@@ -914,6 +917,7 @@ class ComposeShape(unittest.TestCase):
                 "postgres_gideon_ro_metrics_password",
                 "postgres_gideon_audit_password",
                 "engine_api_key",
+                "embed_api_key",
                 "gideon_api_key",
                 "qdrant_api_key",
                 "qdrant_read_only_api_key",
@@ -1041,7 +1045,7 @@ class CommandSecrets(unittest.TestCase):
 
             def run(self, argv: Command, *, check: bool = False, input: str | None = None, cwd: PathLike | None = None, env: Mapping[str, str] | None = None, timeout: float | None = None, passthrough: bool = False) -> subprocess.CompletedProcess[str]:
                 if tuple(argv) == ("nvidia-smi", "-L"):
-                    return subprocess.CompletedProcess(list(argv), 0, "GPU 0: X (UUID: GPU-a)\n", "")
+                    return subprocess.CompletedProcess(list(argv), 0, "GPU 0: X (UUID: GPU-a)\nGPU 1: X (UUID: GPU-b)\n", "")
                 if tuple(argv) == ("getent", "group", "gideon"):
                     return subprocess.CompletedProcess(list(argv), 0, "gideon:x:4242:\n", "")
                 return subprocess.CompletedProcess(list(argv), 127, "", "")

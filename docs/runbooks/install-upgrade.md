@@ -123,10 +123,17 @@ same command is run again after the fix.
    `gideon-generator` from the profile's `serve` block — the vLLM image at its
    `images.lock` digest, GPU 0 reserved by UUID through CDI, `/data/models`
    mounted read-only, no published port — and starts it in the `start`
-   stage. The model takes minutes to load, so `verify` waits for the engine
-   alone for up to fifteen minutes from the start stage (the same clock as
-   the container's healthcheck), reports `engine healthy N s after start`,
-   and keeps every other service on its one-minute bound. The engine's API
+   stage. The model takes minutes to load, so `verify` waits for the model
+   servers together for up to the longest of their allowances from the start
+   stage (the same clock as each container's healthcheck), reports
+   `model servers healthy N s after start` — the moment the last of them
+   answered — and keeps every other service on its one-minute bound. The
+   embedding server, `gideon-embed`, is the engine's sibling on the same
+   image: GPU 1 by UUID, a fixed share of that card held from its start, its
+   own key `/etc/gideon/secrets/embed_api_key` read inside its container the
+   same way, the same wait. It starts only when that share is free on the
+   card; otherwise its logs name the shortfall and `verify` fails naming
+   them. The engine's API
    key is the generated secret `/etc/gideon/secrets/engine_api_key`, created
    absent-only by the `secrets` stage and read inside the container — never
    in the Compose file, argv, or a row. The start-up log (the `GPU KV cache
@@ -149,7 +156,10 @@ same command is run again after the fix.
    among the consumers: the engine's key left its env file at the cutover.
    The frontend's own connection key is `gideon_api_key`, and
    `sudo python3 -m gideon secrets rotate gideon_api_key` recreates
-   `gideon-api` (its mount) and the frontend (its env file's owner). Once General is live, a rotation that recreates the
+   `gideon-api` (its mount) and the frontend (its env file's owner).
+   `sudo python3 -m gideon secrets rotate embed_api_key` recreates the
+   embedding server alone, with a cold start bounded by the same wait;
+   nothing else consumes its key yet. Once General is live, a rotation that recreates the
    engine is made in an announced maintenance window because the cold start
    makes General unavailable; the command does not gate on the clock. The same
    command rotates `webui_secret_key` (the frontend is recreated once and every

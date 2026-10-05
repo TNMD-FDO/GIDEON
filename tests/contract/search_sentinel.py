@@ -155,6 +155,7 @@ def render_inputs() -> RenderInputs:
             "postgres_openwebui_password": "p@ss/word",
             "gideon_admin_password": "admin-password",
             "engine_api_key": "engine-api-key",
+            "embed_api_key": "embed-api-key",
             "gideon_api_key": "gideon-api-key",
             "searxng_secret_key": "searxng-secret-key",
             "qdrant_api_key": "qdrant-api-key",

@@ -1007,7 +1007,7 @@ class Refusals(unittest.TestCase):
         code, out, _ = apply(host, sleep_calls=sleeps)
         self.assertEqual(code, 0, out)
         self.assertGreater(sum(sleeps), _VERIFY_ATTEMPTS * _VERIFY_SLEEP_SECONDS)
-        self.assertIn("engine healthy", out)
+        self.assertIn("model servers healthy", out)
 
     def test_engine_failure_after_exhausted_budget_names_engine_logs(self) -> None:
         commands = healthy_commands()
@@ -1050,7 +1050,7 @@ class Refusals(unittest.TestCase):
         )
         self.assertEqual(code, 0, out)
         self.assertEqual(argv_calls(host).count(PS), expected_attempts + 3)
-        self.assertIn("engine healthy 862 s after start", out)
+        self.assertIn("model servers healthy 862 s after start", out)
 
     def test_non_engine_failure_is_reported_before_engine_wait(self) -> None:
         commands = healthy_commands()
@@ -1225,7 +1225,7 @@ class NoGpuModeSwitch(unittest.TestCase):
         code, out, _ = apply(host, sleep_calls=sleeps)
         self.assertEqual(code, 0, out)
         self.assertEqual(argv_calls(host).count(PS), 2)
-        self.assertNotIn("engine healthy", out)
+        self.assertNotIn("model servers healthy", out)
         self.assertLessEqual(len(sleeps), _VERIFY_ATTEMPTS - 1)
 
     def test_switching_mode_removes_and_restores_gpu_rendered_files(self) -> None:

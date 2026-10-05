@@ -7,8 +7,11 @@ box whose site selects the affected hardware profile.
 ## 1. What this runbook decides
 
 Use this sequence when the pin watch finds that a model repository's default
-branch has moved past the pinned revision. It applies to the `generator` role
-now, and to a supporting model from the release that brings the corpus. The
+branch has moved past the pinned revision. It applies to the `generator` role.
+The supporting model `embed` has arrived too, and a proposal for it that
+moves any weight file's digest is a new embedding space, never a routine
+merge: the vectors already stored were made by the old weights, so it takes a
+new space id in `models.lock` and a new index generation built from it. The
 pull request changes the revision and its verified `files` record; the box
 changes only when an operator applies that tree or upgrades to its tag. On a
 no-GPU host this proof cannot run: `engine verify` reports

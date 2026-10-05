@@ -871,7 +871,7 @@ def _verify_stage(
         "Compose services are running, ingress is verified, and Open WebUI and Grafana are ready"
     )
     if slow_start_healthy_seconds is not None:
-        verify_detail += f", engine healthy {slow_start_healthy_seconds} s after start"
+        verify_detail += f", model servers healthy {slow_start_healthy_seconds} s after start"
     return StageResult(
         "verify",
         True,

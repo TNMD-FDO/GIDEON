@@ -11,7 +11,7 @@ import yaml  # type: ignore[import-untyped]
 
 from gideon.host import backuproots, backupset, cas, nogpu, restore, stack, stages
 from gideon.host.backup import parse_rsync_stats
-from gideon.host.render.engine import ENGINE_SERVICE_NAME
+from gideon.host.render.engine import MODEL_SERVERS
 from gideon.host.report import Problem, StageResult, command_detail
 from gideon.host.steps.site_dirs import AGE_IDENTITY_PATH
 from gideon.host.sysio import Host
@@ -697,15 +697,19 @@ def mode(ctx: HarnessContext) -> StageResult:
     declared = applied.get("services")
     if not isinstance(inputs, Mapping) or inputs.get("no_gpu") is not True:
         return _stage_failure("mode", "the applied record does not declare no-GPU mode")
-    if not isinstance(declared, Mapping) or ENGINE_SERVICE_NAME in declared:
-        return _stage_failure("mode", f"the applied record declares {ENGINE_SERVICE_NAME}")
+    if not isinstance(declared, Mapping):
+        return _stage_failure("mode", "the applied record's services are not a mapping")
+    for member in MODEL_SERVERS:
+        if member.service_name in declared:
+            return _stage_failure("mode", f"the applied record declares {member.service_name}")
     if ctx.services_listing is None:
         return _stage_failure("mode", "the health stage did not retain the service listing")
     rows = stack.parse_ps(ctx.services_listing)
     if rows is None:
         return _stage_failure("mode", "the retained Compose service listing is invalid")
-    if any(row.get("Service") == ENGINE_SERVICE_NAME for row in rows):
-        return _stage_failure("mode", f"the running project contains {ENGINE_SERVICE_NAME}")
+    for member in MODEL_SERVERS:
+        if any(row.get("Service") == member.service_name for row in rows):
+            return _stage_failure("mode", f"the running project contains {member.service_name}")
     return StageResult("mode", True, "no-GPU mode is active", "")
 
 

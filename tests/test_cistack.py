@@ -532,9 +532,9 @@ class DownAndSecrets(unittest.TestCase):
         wipe_commands = [command for command in host.commands if command[0] == "rm"]
         self.assertEqual(wipe_commands, [("rm", "-rf", path) for path in CI_WIPE_PATHS])
 
-    def test_sibling_skips_the_lexical_store_secrets(self) -> None:
+    def test_sibling_skips_model_server_and_lexical_store_secrets(self) -> None:
         self.assertTrue(
-            {"opensearch_password", "opensearch_transport_key", "opensearch_transport_cert"}
+            {"engine_api_key", "embed_api_key", "opensearch_password", "opensearch_transport_key", "opensearch_transport_cert"}
             <= set(CI_SKIPPED_SECRETS)
         )
 

@@ -1494,6 +1494,7 @@ class PinContracts(unittest.TestCase):
                 "host.driver.branch",
                 "host.acceptance_vm_image",
                 "models.generator",
+                "models.embed",
                 "skills.matt-pocock",
             ],
         )

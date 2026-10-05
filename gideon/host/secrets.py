@@ -101,6 +101,7 @@ SECRET_REGISTRY: Final[tuple[GeneratedSecret, ...]] = (
     GeneratedSecret("postgres_gideon_ro_metrics_password", "password", False, "metrics reader database role", "role"),
     GeneratedSecret("postgres_gideon_eval_password", "password", False, "eval-run writer database role", "role"),
     GeneratedSecret("engine_api_key", "password", False, "the engine's API key (gideon-generator)", "rewrite"),
+    GeneratedSecret("embed_api_key", "password", False, "the embedding server's API key (gideon-embed)", "rewrite"),
     GeneratedSecret("gideon_api_key", "password", False, "the gideon-api connection key carried by Open WebUI", "rewrite"),
     GeneratedSecret("searxng_secret_key", "password", False, "SearXNG's signing key", "rewrite"),
     GeneratedSecret("qdrant_api_key", "password", False, "the vector store's API key (qdrant)", "rewrite"),

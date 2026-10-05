@@ -1,5 +1,6 @@
 """Contracts for the committed models lock and its refusal shapes."""
 
+import json
 import os
 import subprocess
 import unittest
@@ -9,6 +10,7 @@ from pathlib import Path
 
 from gideon.host.images import DIGEST
 from gideon.host.models import (
+    EMBEDDING_SPACE_ID,
     ENV_NAME,
     FILE_PATH,
     FLAG_NAME,
@@ -17,6 +19,7 @@ from gideon.host.models import (
     REVISION,
     ROLE_NAME,
     SERVICE_NAME,
+    EmbeddingSpace,
     GpuRequirements,
     HardwareProfile,
     MemoryRow,
@@ -111,6 +114,13 @@ profiles:
             sha256: {FAKE_DIGEST}
             size: 0
 """
+
+SPACE = """    embedding_space:
+      id: example-space-17
+      role: generator
+      dimensions: 17
+"""
+VALID_WITH_SPACE = VALID.replace("    models:\n", SPACE + "    models:\n")
 
 
 class FakeHost:
@@ -214,7 +224,7 @@ class CommittedLock(unittest.TestCase):
                     self.assertIsNotNone(profile.model(row.role))
         self.assertEqual(profile.memory_row("gideon-generator"), MemoryRow("gideon-generator", 32, "generator"))
         self.assertIsNone(profile.memory_row("missing-service"))
-        self.assertEqual(len(profile.models), 1)
+        self.assertEqual({pin.role for pin in profile.models}, {"generator", "embed"})
         model = profile.model("generator")
         self.assertIsNotNone(model)
         assert model is not None
@@ -250,6 +260,33 @@ class CommittedLock(unittest.TestCase):
                 self.assertIsNotNone(DIGEST.fullmatch(file.sha256))
                 self.assertGreaterEqual(file.size, 0)
 
+    def test_committed_embedding_space_matches_its_model_flags(self) -> None:
+        result = load_models_lock(LOCK)
+        self.assertTrue(result.ok, render_errors(result.errors))
+        assert result.lock is not None
+        profile = result.lock.profile(result.lock.reference)
+        assert profile is not None
+        space = profile.embedding_space
+        self.assertIsNotNone(space)
+        assert space is not None
+        self.assertIsNotNone(EMBEDDING_SPACE_ID.fullmatch(space.id))
+        pin = profile.model(space.role)
+        self.assertIsNotNone(pin)
+        assert pin is not None
+        self.assertEqual(space.role, "embed")
+        self.assertIs(type(space.dimensions), int)
+        self.assertGreater(space.dimensions, 0)
+        self.assertTrue(pin.serve.served_name)
+        self.assertIn("HF_HOME", pin.serve.env)
+        self.assertTrue(pin.files)
+        hf_overrides = pin.serve.flags["hf-overrides"]
+        pooler_config = pin.serve.flags["pooler-config"]
+        self.assertIsInstance(hf_overrides, str)
+        self.assertIsInstance(pooler_config, str)
+        assert isinstance(hf_overrides, str) and isinstance(pooler_config, str)
+        self.assertEqual(json.loads(hf_overrides)["matryoshka_dimensions"], [space.dimensions])
+        self.assertEqual(json.loads(pooler_config)["dimensions"], space.dimensions)
+
     def test_models_dataclasses_are_frozen_and_slotted(self) -> None:
         for value in (
             PinnedFile("config.json", FAKE_DIGEST, 1),
@@ -258,6 +295,7 @@ class CommittedLock(unittest.TestCase):
             GpuRequirements("Example", "1.0", "Example GPU", 1, 1),
             ProfileRequirements("x86_64", GpuRequirements("Example", "1.0", "Example GPU", 1, 1), 1, 1),
             MemoryRow("example-service", 1, None),
+            EmbeddingSpace("example-space", "generator", 17),
             HardwareProfile("2x1v-1d", ProfileRequirements("x86_64", GpuRequirements("Example", "1.0", "Example GPU", 1, 1), 1, 1), (MemoryRow("example-service", 1, None),), ()),
             ModelsLock(1, "2x1v-1d", ()),
         ):
@@ -299,6 +337,47 @@ class Refusals(unittest.TestCase):
         for error in result.errors:
             self.assertTrue(error.fix)
         self.assertEqual(render_errors(result.errors).count("Fix:"), len(result.errors))
+
+    def assert_space_refused(self, text: str, fragment: str, key_path: str) -> None:
+        self.assert_refused(text, fragment, key_path=key_path)
+        result = load_text(text)
+        self.assertTrue(all(error.fix == "Edit models.lock; consult docs/runbooks/release-files.md §4." for error in result.errors))
+
+    def test_embedding_space_is_optional(self) -> None:
+        result = load_text(VALID)
+        self.assertTrue(result.ok, render_errors(result.errors))
+        assert result.lock is not None
+        self.assertIsNone(result.lock.profiles[0].embedding_space)
+
+        with_space = load_text(VALID_WITH_SPACE)
+        self.assertTrue(with_space.ok, render_errors(with_space.errors))
+        assert with_space.lock is not None
+        self.assertEqual(with_space.lock.profiles[0].embedding_space, EmbeddingSpace("example-space-17", "generator", 17))
+
+    def test_embedding_space_shape_refusals(self) -> None:
+        path = "profiles.2x96v-256d.embedding_space"
+        self.assert_space_refused(VALID_WITH_SPACE.replace(SPACE, "    embedding_space: []\n"), "expected a mapping", path)
+        self.assert_space_refused(VALID_WITH_SPACE.replace("      dimensions: 17\n", "      dimensions: 17\n      future: true\n"), "Unknown key", f"{path}.future")
+        for key, line in (
+            ("id", "      id: example-space-17\n"),
+            ("role", "      role: generator\n"),
+            ("dimensions", "      dimensions: 17\n"),
+        ):
+            with self.subTest(missing=key):
+                text = VALID_WITH_SPACE.replace(SPACE, SPACE.replace(line, ""))
+                self.assert_space_refused(text, "missing required key", f"{path}.{key}")
+
+        for bad_id in ("Example-space", "example--space", "-example-space", "example_space"):
+            with self.subTest(id=bad_id):
+                text = VALID_WITH_SPACE.replace("id: example-space-17", f"id: {bad_id}")
+                self.assert_space_refused(text, "lowercase hyphenated embedding space id", f"{path}.id")
+
+        text = VALID_WITH_SPACE.replace(SPACE, SPACE.replace("role: generator", "role: absent"))
+        self.assert_space_refused(text, "not pinned", f"{path}.role")
+        for bad_dimensions in ("0", "-1", "true", '"17"'):
+            with self.subTest(dimensions=bad_dimensions):
+                text = VALID_WITH_SPACE.replace("dimensions: 17", f"dimensions: {bad_dimensions}")
+                self.assert_space_refused(text, "positive integer", f"{path}.dimensions")
 
     def test_unknown_key_names_nearest(self) -> None:
         result = load_text(VALID.replace("reference: 2x96v-256d", "referance: 2x96v-256d"))

@@ -134,6 +134,7 @@ last column names the *probe* tile's page.
 | `cadvisor` | cAdvisor, which reports each container's memory and processor use: the *Host detail* row's container memory. | core service down |
 | `dcgm` | NVIDIA's DCGM exporter, which reports the graphics cards: everything on the GPU board's first two rows. A GPU host only. | core service down |
 | `engine` | The engine, the model server that writes every answer. A GPU host only. | engine down |
+| `embed` | The embedding server, which turns text into the vectors search runs on. A GPU host only. | core service down |
 | `caddy` | Caddy, the web server every browser reaches first; this tile says it is running, not that the way in works. | core service down |
 | `ingress`, `ingress probe` | The way in. The test asks Caddy for the site over HTTPS under the box's own hostname, as a browser does, and passes only when the site answers with a certificate the office CA signed. The same test reads the certificate's days left. Caddy can be running while this fails, on an expired certificate for one. | core service down |
 | `frontend`, `frontend probe` | The chat frontend, the page users type into. The test asks the frontend directly, on the box's private network, whether it is healthy. | core service down |

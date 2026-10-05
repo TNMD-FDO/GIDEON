@@ -82,6 +82,15 @@ class ProfileRequirements:
 
 
 @dataclass(frozen=True, slots=True)
+class EmbeddingSpace:
+    """The model role and vector width identified by an embedding space."""
+
+    id: str
+    role: str
+    dimensions: int
+
+
+@dataclass(frozen=True, slots=True)
 class HardwareProfile:
     """A named, evaluated hardware configuration in the models lock."""
 
@@ -89,6 +98,7 @@ class HardwareProfile:
     requires: ProfileRequirements
     memory: tuple[MemoryRow, ...]
     models: tuple[ModelPin, ...]
+    embedding_space: EmbeddingSpace | None = None
 
     def model(self, role: str) -> ModelPin | None:
         """Return the model for *role*, or ``None`` when it is absent."""
@@ -177,7 +187,7 @@ _MEMORY_FIX: Final = (
     "Edit models.lock; consult docs/runbooks/release-files.md §4."
 )
 _ROOT_KEYS: Final = ("version", "reference", "profiles")
-_PROFILE_KEYS: Final = ("requires", "memory", "models")
+_PROFILE_KEYS: Final = ("requires", "memory", "models", "embedding_space")
 _REQUIRES_KEYS: Final = ("platform", "gpu", "dram_gb", "data_volume_gb")
 _GPU_KEYS: Final = (
     "architecture",
@@ -190,6 +200,7 @@ _MODEL_KEYS: Final = ("repo", "revision", "gpu", "serve", "files")
 _SERVE_KEYS: Final = ("served_name", "env", "flags")
 _FILE_KEYS: Final = ("sha256", "size")
 _MEMORY_ROW_KEYS: Final = ("gb", "role")
+_EMBEDDING_SPACE_KEYS: Final = ("id", "role", "dimensions")
 
 PROFILE_NAME: Final = re.compile(
     r"^(?:[1-9][0-9]*x[1-9][0-9]*v-[1-9][0-9]*d|[1-9][0-9]*u)$"
@@ -203,6 +214,9 @@ COMPUTE_CAPABILITY: Final = re.compile(r"^[0-9]+\.[0-9]+$")
 """A quoted ``major.minor`` compute capability, as ``nvidia-smi`` prints it."""
 
 ROLE_NAME: Final = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+"""Lowercase words and digits joined by single hyphens."""
+
+EMBEDDING_SPACE_ID: Final = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 """Lowercase words and digits joined by single hyphens."""
 
 SERVICE_NAME: Final = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -576,6 +590,28 @@ def _validate_memory(
     return memory
 
 
+def _validate_embedding_space(
+    profile_path: str,
+    value: object,
+    roles: Sequence[str],
+    errors: list[ModelsLockError],
+) -> None:
+    path = f"{profile_path}.embedding_space"
+    if not isinstance(value, Mapping):
+        errors.append(_mapping_error(path, value))
+        return
+    space = cast(Mapping[str, object], value)
+    _walk_unknown(space, _EMBEDDING_SPACE_KEYS, path, errors)
+    space_id = _string(space, "id", errors, error_path=f"{path}.id")
+    if space_id is not None and EMBEDDING_SPACE_ID.fullmatch(space_id) is None:
+        errors.append(_error(f"{path}.id", "expected a lowercase hyphenated embedding space id"))
+    role = _string(space, "role", errors, error_path=f"{path}.role")
+    if role is not None and role not in roles:
+        role_names = ", ".join(roles) or "none"
+        errors.append(_error(f"{path}.role", f"role '{role}' is not pinned by this profile (available roles: {role_names})"))
+    _int(space, "dimensions", errors, error_path=f"{path}.dimensions")
+
+
 def validate_models_lock(document: Mapping[str, object]) -> list[ModelsLockError]:
     """Return all shape, grammar, pin, and unknown-key errors in a lock."""
 
@@ -634,10 +670,13 @@ def validate_models_lock(document: Mapping[str, object]) -> list[ModelsLockError
                 for role, model_value in models.items():
                     _validate_model(profile_path, role, model_value, gpu_count, errors)
 
+            roles = tuple(role for role in models or {} if isinstance(role, str))
+            if "embedding_space" in profile:
+                _validate_embedding_space(profile_path, profile["embedding_space"], roles, errors)
+
             if "memory" not in profile:
                 errors.append(_error(f"{profile_path}.memory", "missing required key", fix=_MEMORY_FIX))
             else:
-                roles = tuple(role for role in models or {} if isinstance(role, str))
                 _validate_memory(profile_path, profile["memory"], roles, errors)
 
     if reference is not None and profiles_value is not None and reference not in profiles_value:
@@ -678,7 +717,16 @@ def _construct(document: Mapping[str, object]) -> ModelsLock:
             )
             for service, value in memory_value.items()
         )
-        profiles.append(HardwareProfile(cast(str, name), requirements, memory, models))
+        space_value = profile.get("embedding_space")
+        embedding_space = None
+        if space_value is not None:
+            space = cast(Mapping[str, object], space_value)
+            embedding_space = EmbeddingSpace(
+                cast(str, space["id"]),
+                cast(str, space["role"]),
+                cast(int, space["dimensions"]),
+            )
+        profiles.append(HardwareProfile(cast(str, name), requirements, memory, models, embedding_space))
     return ModelsLock(cast(int, document["version"]), cast(str, document["reference"]), tuple(profiles))
 
 

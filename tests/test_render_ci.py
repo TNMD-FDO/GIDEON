@@ -86,6 +86,7 @@ def inputs(**overrides: object) -> RenderInputs:
             "postgres_openwebui_password": "fixture-postgres-openwebui",
             "gideon_admin_password": "fixture-gideon-admin",
             "engine_api_key": "fixture-engine",
+            "embed_api_key": "fixture-embed",
             "gideon_api_key": "fixture-api",
         },
         checkout="/opt/gideon",

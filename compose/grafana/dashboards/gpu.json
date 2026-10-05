@@ -55,7 +55,7 @@
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "fieldConfig": {"defaults": {"min": 0, "max": 1, "unit": "percentunit"}, "overrides": []},
       "gridPos": {"h": 8, "w": 8, "x": 0, "y": 16},
-      "targets": [{"datasource": {"type": "prometheus", "uid": "prometheus"}, "expr": "vllm:kv_cache_usage_perc", "legendFormat": "{{model_name}}", "refId": "A"}],
+      "targets": [{"datasource": {"type": "prometheus", "uid": "prometheus"}, "expr": "vllm:kv_cache_usage_perc{job=\"engine\"}", "legendFormat": "{{model_name}}", "refId": "A"}],
       "title": "KV-cache usage",
       "type": "timeseries"
     },
@@ -64,7 +64,7 @@
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "fieldConfig": {"defaults": {"decimals": 0, "min": 0, "unit": "short"}, "overrides": []},
       "gridPos": {"h": 8, "w": 8, "x": 8, "y": 16},
-      "targets": [{"datasource": {"type": "prometheus", "uid": "prometheus"}, "expr": "vllm:num_requests_waiting", "legendFormat": "{{model_name}} waiting", "refId": "A"}, {"datasource": {"type": "prometheus", "uid": "prometheus"}, "expr": "vllm:num_requests_running", "legendFormat": "{{model_name}} running", "refId": "B"}],
+      "targets": [{"datasource": {"type": "prometheus", "uid": "prometheus"}, "expr": "vllm:num_requests_waiting{job=\"engine\"}", "legendFormat": "{{model_name}} waiting", "refId": "A"}, {"datasource": {"type": "prometheus", "uid": "prometheus"}, "expr": "vllm:num_requests_running{job=\"engine\"}", "legendFormat": "{{model_name}} running", "refId": "B"}],
       "title": "Requests waiting and running",
       "type": "timeseries"
     },
@@ -74,7 +74,7 @@
       "fieldConfig": {"defaults": {"decimals": 1, "unit": "suffix: tokens/s"}, "overrides": []},
       "gridPos": {"h": 8, "w": 8, "x": 16, "y": 16},
       "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "none", "graphMode": "none", "textMode": "value"},
-      "targets": [{"datasource": {"type": "prometheus", "uid": "prometheus"}, "expr": "sum by (model_name) (increase(vllm:inter_token_latency_seconds_count[$__range])) / (sum by (model_name) (increase(vllm:inter_token_latency_seconds_sum[$__range])) > 0)", "instant": true, "legendFormat": "{{model_name}}", "refId": "A"}],
+      "targets": [{"datasource": {"type": "prometheus", "uid": "prometheus"}, "expr": "sum by (model_name) (increase(vllm:inter_token_latency_seconds_count{job=\"engine\"}[$__range])) / (sum by (model_name) (increase(vllm:inter_token_latency_seconds_sum{job=\"engine\"}[$__range])) > 0)", "instant": true, "legendFormat": "{{model_name}}", "refId": "A"}],
       "title": "Answer speed",
       "type": "stat"
     }

@@ -461,6 +461,64 @@ services:
     networks:
       - "gideon"
     mem_limit: 32000000000
+  gideon-embed:
+    image: "ghcr.io/tnmd-fdo/vllm-openai@sha256:0a51ea5b4ae2dc5d81890e5173f54203d2a3ae0cfffe51b8fd2afd4391bfd967"
+    restart: "unless-stopped"
+    environment:
+      HF_HUB_OFFLINE: "1"
+      HF_HOME: "/data/models"
+      VLLM_NO_USAGE_STATS: "1"
+      DO_NOT_TRACK: "1"
+      TZ: "America/Chicago"
+    entrypoint:
+      - "sh"
+      - "-c"
+      - "set -eu; if [ ! -s /run/secrets/embed_api_key ]; then echo \"embedding server API key file is missing or empty: /run/secrets/embed_api_key\" >&2; exit 1; fi; VLLM_API_KEY=$(cat /run/secrets/embed_api_key); export VLLM_API_KEY; exec vllm serve \"$@\""
+      - "gideon-embed"
+    command:
+      - "Qwen/Qwen3-Embedding-8B"
+      - "--revision"
+      - "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af"
+      - "--served-model-name"
+      - "gideon-embed"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8000"
+      - "--disable-access-log-for-endpoints"
+      - "/health,/metrics"
+      - "--runner"
+      - "pooling"
+      - "--convert"
+      - "embed"
+      - "--dtype"
+      - "bfloat16"
+      - "--max-model-len"
+      - "8192"
+      - "--no-enable-chunked-prefill"
+      - "--gpu-memory-utilization"
+      - "0.25"
+      - "--hf-overrides"
+      - "{\"matryoshka_dimensions\": [1024]}"
+      - "--pooler-config"
+      - "{\"dimensions\": 1024}"
+    devices:
+      - "nvidia.com/gpu=GPU-22222222-2222-2222-2222-222222222222"
+    volumes:
+      - "/data/models:/data/models:ro"
+    secrets:
+      - "embed_api_key"
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "curl --silent --fail http://127.0.0.1:8000/health"
+      interval: "30s"
+      timeout: "10s"
+      retries: 3
+      start_period: "300s"
+    networks:
+      - "gideon"
+    mem_limit: 16000000000
   gideon-api:
     image: "ghcr.io/tnmd-fdo/gideon@sha256:2baac5c2bff21a6762c478b99f79a953ded02579df0a65144eaa9ca9a2d85683"
     restart: "unless-stopped"
@@ -630,6 +688,8 @@ secrets:
     file: "/etc/gideon/secrets/webui_secret_key"
   engine_api_key:
     file: "/etc/gideon/secrets/engine_api_key"
+  embed_api_key:
+    file: "/etc/gideon/secrets/embed_api_key"
   gideon_api_key:
     file: "/etc/gideon/secrets/gideon_api_key"
   postgres_gideon_audit_password:

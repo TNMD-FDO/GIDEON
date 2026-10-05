@@ -226,7 +226,7 @@ def build_parser() -> argparse.ArgumentParser:
         "name",
         metavar="<name>",
         help=(
-            "the secret to rotate: engine_api_key, webui_secret_key, searxng_secret_key, "
+            "the secret to rotate: engine_api_key, embed_api_key, webui_secret_key, searxng_secret_key, "
             "qdrant_api_key, qdrant_read_only_api_key, opensearch_password, "
             "opensearch_transport_key, opensearch_transport_cert "
             "(a new value written to the file), gideon_admin_api_key, gideon_eval_api_key "

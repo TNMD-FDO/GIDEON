@@ -229,7 +229,7 @@ def inputs(site_path: Path = EXAMPLE, **overrides: object) -> RenderInputs:
         site=site,
         lock=lock,
         images=images,
-        facts=HostFacts(("GPU-fictitious",), service_gid=4242),
+        facts=HostFacts(("GPU-fictitious-0", "GPU-fictitious-1"), service_gid=4242),
         profile=profile,
         templates=templates,
         release="fixture",
@@ -2250,9 +2250,9 @@ class Alerting(unittest.TestCase):
         )
         speed_expr = (
             "sum by (model_name) "
-            "(increase(vllm:inter_token_latency_seconds_count[$__range])) / "
+            f"(increase(vllm:inter_token_latency_seconds_count{{job=\"{ENGINE_JOB_NAME}\"}}[$__range])) / "
             "(sum by (model_name) "
-            "(increase(vllm:inter_token_latency_seconds_sum[$__range])) > 0)"
+            f"(increase(vllm:inter_token_latency_seconds_sum{{job=\"{ENGINE_JOB_NAME}\"}}[$__range])) > 0)"
         )
         self.assertEqual(
             {
@@ -2261,12 +2261,20 @@ class Alerting(unittest.TestCase):
                 for target in panels[title]["targets"]
             },
             {
-                "vllm:kv_cache_usage_perc",
-                "vllm:num_requests_waiting",
-                "vllm:num_requests_running",
+                f'vllm:kv_cache_usage_perc{{job="{ENGINE_JOB_NAME}"}}',
+                f'vllm:num_requests_waiting{{job="{ENGINE_JOB_NAME}"}}',
+                f'vllm:num_requests_running{{job="{ENGINE_JOB_NAME}"}}',
                 speed_expr,
             },
         )
+        for title in engine_titles:
+            for target in panels[title]["targets"]:
+                with self.subTest(title=title, target=target["refId"]):
+                    series = re.findall(r"vllm:[a-z_]+(?:\{[^}]*\})?", target["expr"])
+                    self.assertTrue(series)
+                    self.assertTrue(
+                        all(series_name.endswith(f'{{job="{ENGINE_JOB_NAME}"}}') for series_name in series)
+                    )
         self.assertEqual(
             [panels[title]["gridPos"] for title in engine_titles],
             [{"h": 8, "w": 8, "x": x, "y": 16} for x in (0, 8, 16)],

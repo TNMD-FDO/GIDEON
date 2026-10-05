@@ -20,6 +20,7 @@ from gideon.host.render.compose import (
     memory_limit_bytes,
 )
 from gideon.host.render.engine import (
+    EMBED_SECRET_NAME,
     ENGINE_PORT,
     ENGINE_SECRET_NAME,
     ENGINE_SERVICE_NAME,
@@ -75,10 +76,12 @@ CI_SECRET_NAMES: Final[tuple[str, ...]] = (
     API_SECRET_NAME,
 )
 # Generated entries the sibling's directory never holds: the engine key is
-# production's, mounted by path, and the sibling runs no Grafana, SearXNG,
+# production's, mounted by path, while the embed key has no sibling consumer
+# because the sibling runs no model server. It also runs no Grafana, SearXNG,
 # or lexical store yet.
 CI_SKIPPED_SECRETS: Final[tuple[str, ...]] = (
     ENGINE_SECRET_NAME,
+    EMBED_SECRET_NAME,
     "grafana_admin_password",
     SEARXNG_SECRET_NAME,
     OPENSEARCH_PASSWORD_SECRET_NAME,

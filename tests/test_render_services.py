@@ -44,7 +44,14 @@ from gideon.host.render.compose import (
     service_names,
 )
 from gideon.host.render.consumers import secret_consumers
-from gideon.host.render.engine import ENGINE_SECRET_NAME, ENGINE_SERVICE_NAME
+from gideon.host.render.engine import (
+    EMBED,
+    EMBED_SECRET_NAME,
+    EMBED_SERVICE_NAME,
+    ENGINE_SECRET_NAME,
+    ENGINE_SERVICE_NAME,
+    GENERATOR,
+)
 from gideon.host.render.services import (
     SERVICES,
     ServiceDefinition,
@@ -57,6 +64,7 @@ from gideon.host.render.services import (
 )
 from gideon.host.render.services.api import ApiService
 from gideon.host.render.services.dcgm_exporter import DcgmExporterService
+from gideon.host.render.services.embed import EmbedService
 from gideon.host.render.services.generator import GeneratorService
 from gideon.host.render.services.searxng import SearxngService
 
@@ -257,6 +265,7 @@ class Registry(unittest.TestCase):
         assert isinstance(declared, Mapping)
         for name in (
             ENGINE_SECRET_NAME,
+            EMBED_SECRET_NAME,
             API_SECRET_NAME,
             "postgres_gideon_audit_password",
         ):
@@ -423,6 +432,7 @@ class Registry(unittest.TestCase):
         self.assertTrue(names)
         self.assertTrue(all(names))
         self.assertEqual(len(names), len(set(names)))
+        self.assertEqual(names.index(EMBED_SERVICE_NAME), names.index(ENGINE_SERVICE_NAME) + 1)
 
     def test_applying_definitions_match_rendered_blocks_on_each_host(self) -> None:
         for rendered_inputs in host_inputs():
@@ -468,7 +478,13 @@ class Registry(unittest.TestCase):
         target = parse_registry(rendered_inputs.site.registry)
         assert target is not None
         allowances = slow_start_services()
-        self.assertTrue(allowances)
+        self.assertEqual(
+            allowances,
+            {
+                ENGINE_SERVICE_NAME: GENERATOR.ready_seconds,
+                EMBED_SERVICE_NAME: EMBED.ready_seconds,
+            },
+        )
         for name, seconds in allowances.items():
             with self.subTest(service=name):
                 self.assertGreater(seconds, 0)
@@ -513,6 +529,7 @@ class Registry(unittest.TestCase):
         hosts = host_inputs()
         for definition, expected in (
             (GeneratorService(), (True, True, False)),
+            (EmbedService(), (True, True, False)),
             (ApiService(), (True, True, False)),
             (DcgmExporterService(), (True, True, False)),
             (SearxngService(), (True, False, True)),
@@ -599,9 +616,9 @@ class Verify(unittest.TestCase):
         commands = healthy_commands()
         commands[PS] = [
             done(PS, stdout=running_rows()),
-            done(PS, stdout=rows_with_unhealthy(API_SERVICE_NAME)),
+            done(PS, stdout=rows_with_unhealthy(EMBED_SERVICE_NAME)),
             *(
-                done(PS, stdout=rows_with_unhealthy(API_SERVICE_NAME))
+                done(PS, stdout=rows_with_unhealthy(EMBED_SERVICE_NAME))
                 for _ in range(attempts - 2)
             ),
             done(PS, stdout=rows_with_unhealthy(ENGINE_SERVICE_NAME)),
@@ -614,7 +631,7 @@ class Verify(unittest.TestCase):
             "slow_start_services",
             return_value={
                 ENGINE_SERVICE_NAME: short_allowance,
-                API_SERVICE_NAME: long_allowance,
+                EMBED_SERVICE_NAME: long_allowance,
             },
         ):
             code, out, _ = apply(host)
@@ -622,7 +639,7 @@ class Verify(unittest.TestCase):
             refused_commands[PS] = [
                 done(PS, stdout=running_rows()),
                 *(
-                    done(PS, stdout=rows_with_unhealthy(API_SERVICE_NAME))
+                    done(PS, stdout=rows_with_unhealthy(EMBED_SERVICE_NAME))
                     for _ in range(attempts + 1)
                 ),
             ]
@@ -630,8 +647,8 @@ class Verify(unittest.TestCase):
             refused_code, refused_out, _ = apply(refused_host)
 
         self.assertEqual(code, 0, out)
-        self.assertIn("engine healthy", out)
+        self.assertIn("model servers healthy", out)
         self.assertEqual(argv_calls(host).count(PS), attempts + 3)
         self.assertEqual(refused_code, 1)
-        self.assertIn(f"logs {API_SERVICE_NAME}", refused_out)
+        self.assertIn(f"logs {EMBED_SERVICE_NAME}", refused_out)
         self.assertEqual(argv_calls(refused_host).count(PS), attempts + 2)

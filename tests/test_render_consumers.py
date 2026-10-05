@@ -28,6 +28,7 @@ SECRETS = {
     "postgres_openwebui_password": "postgres-password",
     "gideon_admin_password": "admin-password",
     "engine_api_key": "engine-api-key",
+    "embed_api_key": "embed-api-key",
     "gideon_api_key": "gideon-api-key",
     "searxng_secret_key": "searxng-secret-key",
     "qdrant_api_key": "qdrant-api-key",
@@ -89,8 +90,10 @@ class ConsumerMap(unittest.TestCase):
         no_gpu = secret_consumers(inputs(no_gpu=True))
 
         self.assertEqual(gpu["engine_api_key"], SecretConsumers(("gideon-generator", "gideon-api"), ()))
+        self.assertEqual(gpu["embed_api_key"], SecretConsumers(("gideon-embed",), ()))
         self.assertEqual(gpu["gideon_api_key"], SecretConsumers(("gideon-api",), ("open-webui",)))
         self.assertEqual(no_gpu.get("engine_api_key"), None)
+        self.assertEqual(no_gpu.get("embed_api_key"), None)
         self.assertEqual(no_gpu.get("gideon_api_key"), None)
         self.assertEqual(gpu["webui_secret_key"], SecretConsumers(("open-webui",), ()))
         self.assertEqual(

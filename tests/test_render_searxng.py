@@ -28,7 +28,7 @@ from gideon.host.render.compose import (
     service_images,
     service_names,
 )
-from gideon.host.render.engine import ENGINE_SERVICE_NAME
+from gideon.host.render.engine import ENGINE_SERVICE_NAME, MODEL_SERVERS
 from gideon.host.render.facts import HostFacts
 from gideon.host.render.searxng import (
     SEARXNG_LOGGING_PATH,
@@ -61,6 +61,7 @@ SECRETS = {
     "postgres_openwebui_password": "postgres-password",
     "gideon_admin_password": "admin-password",
     "engine_api_key": "engine-api-key",
+    "embed_api_key": "embed-api-key",
     "gideon_api_key": "gideon-api-key",
     SEARXNG_SECRET_NAME: "searxng-secret-key",
     "qdrant_read_only_api_key": "qdrant-read-only-api-key",
@@ -255,7 +256,7 @@ class Artifacts(unittest.TestCase):
 class Service(unittest.TestCase):
     def test_present_iff_search_is_on_after_the_frontend_and_the_engine(self) -> None:
         gpu = service_names(inputs())
-        self.assertEqual(gpu.index(API_SERVICE_NAME), gpu.index(ENGINE_SERVICE_NAME) + 1)
+        self.assertEqual(gpu.index(API_SERVICE_NAME), gpu.index(MODEL_SERVERS[-1].service_name) + 1)
         self.assertEqual(gpu.index(SEARXNG_SERVICE_NAME), gpu.index(API_SERVICE_NAME) + 1)
         self.assertEqual(gpu.index(ENGINE_SERVICE_NAME), gpu.index("open-webui") + 1)
         no_gpu = service_names(inputs(no_gpu=True))
