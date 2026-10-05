@@ -400,6 +400,7 @@ FULL_RESTORE_STAGES: Final[tuple[Stage, ...]] = (
     Stage("snapshot", fullrestore.snapshot, fullrestore.FULL_RESTORE_FIX),
     Stage("restore", fullrestore.restore_target, fullrestore.FULL_RESTORE_FIX),
     Stage("counts", fullrestore.counts, fullrestore.FULL_RESTORE_FIX),
+    Stage("store", fullrestore.store, fullrestore.FULL_RESTORE_FIX),
     Stage("decrypt", fullrestore.decrypt, fullrestore.FULL_RESTORE_FIX),
     Stage("reinstall", fullrestore.reinstall, fullrestore.FULL_RESTORE_FIX),
     Stage("apply", fullrestore.apply_again, fullrestore.FULL_RESTORE_FIX, key="apply-2"),

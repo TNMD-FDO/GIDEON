@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from gideon.host import backupset
+from gideon.host import backupset, cas
 from gideon.host.render.ci import CI_ROOT
 from gideon.host.render.opensearch import OPENSEARCH_DATA_ROOT
 from gideon.host.render.qdrant import QDRANT_DATA_ROOT
@@ -155,6 +155,7 @@ class LayoutAndLabels(unittest.TestCase):
                 "checkout",
                 "data-registry",
                 "data-bulk-openwebui",
+                "data-bulk-cas",
                 "pgbackrest",
             ],
         )
@@ -172,10 +173,27 @@ class LayoutAndLabels(unittest.TestCase):
         self.assertEqual(roots[1].source, "/work/GIDEON")
         self.assertEqual(roots[1].exclusions, backupset.CHECKOUT_EXCLUSIONS)
         self.assertIn(".venv/", roots[1].exclusions)
+        self.assertEqual(roots[-2].source, os.fspath(cas.ROOT))
+        self.assertEqual(roots[-2].exclusions, (".*",))
         self.assertEqual(roots[-1].source, backupset.REPOSITORY_PATH)
         self.assertEqual(
+            tuple(root.kind for root in roots),
+            (
+                backupset.RootKind.SNAPSHOT,
+                backupset.RootKind.SNAPSHOT,
+                backupset.RootKind.SNAPSHOT,
+                backupset.RootKind.SNAPSHOT,
+                backupset.RootKind.STORE,
+                backupset.RootKind.REPOSITORY,
+            ),
+        )
+        self.assertEqual(
             [(root.snapshotted, root.restore_in_place) for root in roots],
-            [(True, True), (True, False), (True, True), (True, True), (False, False)],
+            [(True, True), (True, False), (True, True), (True, True), (False, False), (False, False)],
+        )
+        self.assertEqual(
+            backupset.listing_path(backupset.set_dir("label"), roots[-2].name),
+            f"{backupset.SETS_DIR}/label/{roots[-2].name}.listing",
         )
 
     def test_ci_root_is_outside_every_inventory_root(self) -> None:
@@ -293,6 +311,68 @@ class ManifestContracts(unittest.TestCase):
         )
         self.assertEqual(json.loads(text)["version"], 1)
         self.assertIn('"archive_through"', text)
+        self.assertNotIn("listings", json.loads(text))
+
+    def test_manifest_listing_round_trip_and_previous_release_shape(self) -> None:
+        """A listing is optional, and every key and root a previous release reads is still written."""
+
+        value = manifest("20260902T120809Z", aware(12))
+        store = next(root for root in backupset.inventory_roots("/opt/gideon") if root.kind is backupset.RootKind.STORE)
+        older_roots = ("etc-gideon", "checkout", "data-registry", "data-bulk-openwebui", "pgbackrest")
+        previous_release = {
+            "version": 1,
+            "label": value.label,
+            "kind": value.kind.value,
+            "started": value.started.isoformat(),
+            "finished": value.finished.isoformat(),
+            "release": value.release,
+            "checkout": value.checkout,
+            "commit": value.commit,
+            "hostname": value.hostname,
+            "previous_label": None,
+            "pgbackrest_label": value.pgbackrest_label,
+            "pgbackrest_type": value.pgbackrest_type,
+            "archive_through": value.archive_through.isoformat(),
+            "row_counts": {"gideon": {"audit_log": 2}},
+            "inventory": {name: [] for name in older_roots},
+            "tarball_sha256": value.tarball_sha256,
+            "recipient": value.recipients[0],
+            "recipients": list(value.recipients),
+            "hard_links": {"sampled": value.hard_links.sampled, "linked": value.hard_links.linked},
+            "secrets_fingerprint": value.secrets_fingerprint,
+            "gideon_ids": {"uid": value.gideon_ids.uid, "gid": value.gideon_ids.gid} if value.gideon_ids else None,
+        }
+        self.assertNotIn("listings", previous_release)
+        self.assertIsInstance(backupset.parse_manifest(json.dumps(previous_release)), backupset.Manifest)
+
+        pin = backupset.ListingPin(f"{store.name}.listing", 80, "c" * 64, 1, 7)
+        current_inventory = {root.name: () for root in backupset.inventory_roots("/opt/gideon") if root.kind is not backupset.RootKind.STORE}
+        current = replace(value, inventory=current_inventory, listings={store.name: pin})
+        written = json.loads(current.to_json())
+        self.assertEqual(backupset.parse_manifest(current.to_json()), current)
+        self.assertEqual(written["listings"][store.name], {
+            "file": pin.file, "size": pin.size, "sha256": pin.sha256,
+            "objects": pin.objects, "bytes": pin.bytes,
+        })
+        self.assertTrue(previous_release.keys() <= written.keys())
+        self.assertTrue(set(older_roots) <= set(written["inventory"]))
+        self.assertNotIn(store.name, written["inventory"])
+
+    def test_malformed_listing_pin_names_its_field(self) -> None:
+        """A malformed listing pin refuses with its field named and the manifest's fix."""
+
+        value = manifest("20260902T120809Z", aware(12))
+        pin = backupset.ListingPin("data-bulk-cas.listing", 0, "c" * 64, 0, 0)
+        document = json.loads(replace(value, listings={"data-bulk-cas": pin}).to_json())
+        for field, bad in (("file", "../escape"), ("size", -1), ("sha256", "bad"), ("objects", "1"), ("bytes", True)):
+            with self.subTest(field=field):
+                broken = json.loads(json.dumps(document))
+                broken["listings"]["data-bulk-cas"][field] = bad
+                problem = backupset.parse_manifest(json.dumps(broken))
+                self.assertIsInstance(problem, backupset.Problem)
+                assert isinstance(problem, backupset.Problem)
+                self.assertIn(f"listings.data-bulk-cas.{field}", problem.problem)
+                self.assertIn("backup run", problem.fix)
 
     def test_manifest_without_gideon_ids_is_an_earlier_shape(self) -> None:
         value = manifest("20260902T120809Z", aware(12))

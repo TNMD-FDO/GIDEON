@@ -13,13 +13,24 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import patch
 
-from gideon.host import backuplock, backupset, nogpu, restore, secrets, site, sshtarget
+from gideon.host import (
+    backuplock,
+    backuproots,
+    backupset,
+    cas,
+    nogpu,
+    restore,
+    secrets,
+    site,
+    sshtarget,
+)
 from gideon.host.steps.site_dirs import AGE_RECIPIENT_PATH
 from gideon.host.sysio import Command, PathLike
 
 RENDERED = "/etc/gideon/rendered"
 SITE_PATH = "/etc/gideon/site.yaml"
 LOCAL_SET = "20260902T110000Z"
+LATER_SET = "20260902T115000Z"
 REMOTE_SNAPSHOT = "20260902T120000Z"
 NOW = datetime(2026, 9, 2, 12, 0, tzinfo=UTC)
 RECIPIENT = "age1" + "a" * 58
@@ -32,6 +43,7 @@ SECRET_DIGESTS = {"webui_secret_key": "1" * 64, "ldap_bind_password": "2" * 64}
 _fingerprint = secrets.secrets_fingerprint(SECRET_DIGESTS)
 assert _fingerprint is not None
 FINGERPRINT: str = _fingerprint
+STORE_ROOT = next(root for root in backupset.inventory_roots("/work/GIDEON") if root.kind is backupset.RootKind.STORE)
 
 SITE = """\
 office:
@@ -114,6 +126,17 @@ def manifest(*, finished: datetime = NOW - timedelta(hours=1)) -> backupset.Mani
     )
 
 
+def manifest_with_store(sizes: Mapping[str, int]) -> tuple[backupset.Manifest, str]:
+    """Pin a fictitious listing built from the objects named by a case."""
+
+    listing = "".join(f"{name}\t{size}\n" for name, size in sorted(sizes.items()))
+    pin = backupset.ListingPin(
+        f"{STORE_ROOT.name}.listing", len(listing.encode()), hashlib.sha256(listing.encode()).hexdigest(),
+        len(sizes), sum(sizes.values()),
+    )
+    return replace(manifest(), listings={STORE_ROOT.name: pin}), listing
+
+
 class FakeHost:
     """A recording Host with independent local and fetched set listings."""
 
@@ -142,6 +165,9 @@ class FakeHost:
         registry_active: bool = False,
         gideon_ids: backupset.AccountIds = DEFAULT_GIDEON_IDS,
         fail_gideon_ids: bool = False,
+        store_listing: str | None = None,
+        store_live: Mapping[str, int] | None = None,
+        store_damaged: Sequence[str] = (),
     ) -> None:
         value = manifest_value or manifest()
         self.manifest_value = value
@@ -152,6 +178,8 @@ class FakeHost:
         self.registry_active = registry_active
         self.gideon_ids = gideon_ids
         self.fail_gideon_ids = fail_gideon_ids
+        self.store_live = None if store_live is None else dict(store_live)
+        self.store_damaged = set(store_damaged)
         self.running = running
         self.target = target
         self.source = source
@@ -179,8 +207,18 @@ class FakeHost:
                 backupset.set_dir(LOCAL_SET), backupset.MANIFEST_NAME
             ): value.to_json(),
         }
+        if store_listing is not None:
+            self.files[backupset.listing_path(backupset.set_dir(LOCAL_SET), STORE_ROOT.name)] = store_listing
         self.secrets_present = secrets_present
         self.locks: dict[str, str] = {}
+
+    def _local_path(self, path: str) -> str:
+        """Use the local fixture for a fetched set's identical listing."""
+
+        side = f"{backupset.STAGING}.fetch-{REMOTE_SNAPSHOT}"
+        if path.startswith(side + "/sets/"):
+            return backupset.STAGING + path.removeprefix(side)
+        return path
 
     def _root_for(self, base: str) -> str:
         """Which inventory root a find base names: a set's files/<root>, a live source, or the repository."""
@@ -248,7 +286,35 @@ class FakeHost:
                         break
                 return completed(command, stdout=record.to_json())
         if command and command[0] == "rsync":
+            if "--files-from=-" in command:
+                paths = (input or "").splitlines()
+                set_path = command[-2].rstrip("/").rsplit("/files/", 1)[0]
+                listing_path = self._local_path(backupset.listing_path(set_path, STORE_ROOT.name))
+                sizes = dict(line.split("\t", 1) for line in self.files[listing_path].splitlines())
+                if self.store_live is not None:
+                    for path in paths:
+                        name = path.rsplit("/", 1)[-1]
+                        self.store_live[name] = int(sizes[name])
+                count = len(paths)
+                return completed(command, stdout=f"Number of regular files transferred: {count}\n")
             return completed(command)
+        if command[:2] == ("find", ".") and "-fprintf" in command:
+            listing_path = command[command.index("-fprintf") + 1]
+            self.files[listing_path] = "".join(
+                f"{name}\t{size}\n" for name, size in sorted((self.store_live or {}).items())
+            )
+            return completed(command)
+        if command[:3] == ("env", "LC_ALL=C", "sort") and "-o" in command:
+            path = command[-1]
+            self.files[path] = "".join(sorted(self.files[path].splitlines(keepends=True)))
+            return completed(command)
+        if command[:3] == ("env", "LC_ALL=C", "join"):
+            set_lines = self.files[self._local_path(command[-2])].splitlines()
+            live_names = {line.partition("\t")[0] for line in self.files[command[-1]].splitlines()}
+            return completed(
+                command,
+                stdout="".join(f"{line}\n" for line in set_lines if line.partition("\t")[0] not in live_names),
+            )
         if command[0] == "find" and command[-2:] == ("-printf", backupset.FIND_FORMAT):
             # The physical tree under one base: that root's inventoried entries
             # with their declared kinds, unless the tree has been made to escape.
@@ -276,12 +342,23 @@ class FakeHost:
                 return completed(command, returncode=1, stderr="sha256sum: 'standard input': no properly formatted checksum lines found\n")
             if self.fail_checksum:
                 return completed(command, returncode=1, stdout="config.yaml: FAILED\n")
+            if cwd is not None and os.fspath(cwd).endswith("/files/" + STORE_ROOT.name):
+                lines = (input or "").splitlines()
+                damaged_here = self.store_damaged if f"/sets/{LOCAL_SET}/" in os.fspath(cwd) else set()
+                output = "".join(
+                    f"{line.split('  ', 1)[1]}: {'FAILED' if line.split('  ', 1)[0] in damaged_here else 'OK'}\n"
+                    for line in lines
+                )
+                return completed(command, stdout=output, returncode=int(any(line.split("  ", 1)[0] in damaged_here for line in lines)))
             output = "".join(
                 line.split("  ", 1)[1].rstrip("\n") + ": OK\n"
                 for line in (input or "").splitlines(True)
             )
             return completed(command, stdout=output)
         if command and command[0] == "sha256sum":
+            path = self._local_path(command[-1])
+            if path in self.files and path.endswith("/" + STORE_ROOT.name + ".listing"):
+                return completed(command, stdout=f"{hashlib.sha256(self.files[path].encode()).hexdigest()}  {command[-1]}\n")
             return completed(command, stdout=f"{TARBALL_SHA256}  {command[-1]}\n")
         if command and command[0] == "pgbackrest":
             return completed(command, returncode=int(self.fail_pgbackrest))
@@ -312,15 +389,7 @@ class FakeHost:
 
     def read_text(self, path: PathLike, *, encoding: str = "utf-8") -> str:
         del encoding
-        key = os.fspath(path)
-        if ".fetch-" in key and key.endswith(
-            f"/sets/{LOCAL_SET}/{backupset.MANIFEST_NAME}"
-        ):
-            return self.files[
-                os.path.join(
-                    backupset.set_dir(LOCAL_SET), backupset.MANIFEST_NAME
-                )
-            ]
+        key = self._local_path(os.fspath(path))
         if key not in self.files:
             raise FileNotFoundError(key)
         return self.files[key]
@@ -337,7 +406,7 @@ class FakeHost:
         self.files[os.fspath(path)] = text
 
     def exists(self, path: PathLike) -> bool:
-        return os.fspath(path) in self.files
+        return os.fspath(path) in self.files or (os.fspath(path) == os.fspath(cas.ROOT) and self.store_live is not None)
 
     def listdir(self, path: PathLike) -> list[str]:
         key = os.fspath(path)
@@ -356,6 +425,9 @@ class FakeHost:
         self.files.pop(os.fspath(path), None)
 
     def stat(self, path: PathLike) -> os.stat_result:
+        key = self._local_path(os.fspath(path))
+        if key in self.files and key.endswith("/" + STORE_ROOT.name + ".listing"):
+            return os.stat_result((0o100644, 1, 0, 1, 0, 0, len(self.files[key].encode()), 0, 0, 0))
         if os.fspath(path) == "/data/registry":
             return os.stat_result((0o40755, 1, 0, 1, 999, 983, 0, 0, 0, 0))
         raise FileNotFoundError(os.fspath(path))
@@ -1384,6 +1456,191 @@ class RestoreContracts(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StoreRestoreCommands(unittest.TestCase):
+    def _run(self, fake: FakeHost, source: str, *, at: datetime | None = None) -> tuple[int, str]:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = restore.run_restore(
+                argparse.Namespace(source=source, at=at.isoformat() if at is not None else None),
+                host=fake, now=NOW,
+            )
+        return code, output.getvalue()
+
+    def _audit_text(self, fake: FakeHost) -> str:
+        return "\n".join(call[1] or "" for call in fake.calls)
+
+    def test_pinned_store_adds_a_missing_object_without_naming_a_live_only_one(self) -> None:
+        added = hashlib.sha256(b"copy bytes").hexdigest()
+        live_only = hashlib.sha256(b"live only bytes").hexdigest()
+        value, listing = manifest_with_store({added: len(b"copy bytes")})
+        for source in ("staging", "target"):
+            with self.subTest(source=source):
+                fake = make_host(
+                    source=source, manifest_value=value, store_listing=listing,
+                    store_live={live_only: len(b"live only bytes")},
+                    remote_listing=f"{REMOTE_SNAPSHOT}\t1\n" if source == "target" else "",
+                )
+                code, output = self._run(fake, source)
+
+                self.assertEqual(code, 0, output)
+                self.assertIn(
+                    f"{STORE_ROOT.name}: added 1 object(s), {backuproots.NOTHING_LEFT_OUT_DETAIL}", output,
+                )
+                transfers = [call for call in fake.calls if "--files-from=-" in call[0]]
+                self.assertEqual(len(transfers), 1)
+                self.assertNotIn("--delete", transfers[0][0])
+                store_commands = [
+                    call[0] for call in fake.calls
+                    if any(os.fspath(STORE_ROOT.source) in arg or "/files/" + STORE_ROOT.name in arg for arg in call[0])
+                ]
+                self.assertFalse(any("--delete" in argv for argv in store_commands))
+                self.assertEqual(transfers[0][1], f"{added[:2]}/{added[2:4]}/{added}\n")
+                self.assertFalse(any(live_only in str(call) for call in fake.calls))
+                self.assertEqual(fake.store_live, {
+                    live_only: len(b"live only bytes"), added: len(b"copy bytes"),
+                })
+                self.assertIn(
+                    f'"store": {{"{STORE_ROOT.name}": {{"added": 1, "left_out": 0}}}}',
+                    self._audit_text(fake),
+                )
+
+    def test_set_without_store_pin_leaves_live_store_alone(self) -> None:
+        live_only = hashlib.sha256(b"live only bytes").hexdigest()
+        fake = make_host(store_live={live_only: 15})
+        code, output = self._run(fake, "staging")
+
+        self.assertEqual(code, 0, output)
+        self.assertIn(f"{STORE_ROOT.name}: the set predates this root; the live store is left as it is", output)
+        self.assertEqual(fake.store_live, {live_only: 15})
+        self.assertFalse(any(call[0][:3] == ("env", "LC_ALL=C", "join") for call in fake.calls))
+        self.assertFalse(any(call[0][:2] == ("sha256sum", "-c") and call[2] is not None and call[2].endswith("/files/" + STORE_ROOT.name) for call in fake.calls))
+        self.assertFalse(any(call[0][0] == "rsync" and call[0][-1] == os.fspath(cas.ROOT) + "/" for call in fake.calls))
+        self.assertFalse(any(call[2] == os.fspath(cas.ROOT) for call in fake.calls))
+
+    def test_damaged_missing_object_is_named_after_secrets_and_restore_succeeds(self) -> None:
+        damaged = hashlib.sha256(b"intact source bytes").hexdigest()
+        value, listing = manifest_with_store({damaged: len(b"intact source bytes")})
+        fake = make_host(manifest_value=value, store_listing=listing, store_live={}, store_damaged=(damaged,))
+        code, output = self._run(fake, "staging")
+
+        self.assertEqual(code, 0, output)
+        self.assertIn(f"{STORE_ROOT.name}: added 0 object(s), 1 left out", output)
+        lines = output.splitlines()
+        secrets_index = next(index for index, line in enumerate(lines) if line.startswith("Secrets:"))
+        store_index = next(index for index, line in enumerate(lines) if line.startswith("Store:"))
+        next_index = next(index for index, line in enumerate(lines) if line.startswith("Next:"))
+        self.assertLess(secrets_index, store_index)
+        self.assertLess(store_index, next_index)
+        self.assertIn(damaged, lines[store_index])
+        self.assertIn("each object's bytes", lines[store_index])
+        self.assertFalse(any("--files-from=-" in call[0] for call in fake.calls))
+        self.assertIn(
+            f'"store": {{"{STORE_ROOT.name}": {{"added": 0, "left_out": 1}}}}',
+            self._audit_text(fake),
+        )
+
+    def test_live_object_at_another_size_is_not_needed_or_replaced(self) -> None:
+        held = hashlib.sha256(b"set copy bytes").hexdigest()
+        value, listing = manifest_with_store({held: len(b"set copy bytes")})
+        fake = make_host(manifest_value=value, store_listing=listing, store_live={held: 1})
+        code, output = self._run(fake, "staging")
+
+        self.assertEqual(code, 0, output)
+        self.assertIn(f"{STORE_ROOT.name}: added 0 object(s), {backuproots.NOTHING_LEFT_OUT_DETAIL}", output)
+        self.assertEqual(fake.store_live, {held: 1})
+        self.assertFalse(any(call[0][:2] == ("sha256sum", "-c") and call[2] is not None and call[2].endswith("/files/" + STORE_ROOT.name) for call in fake.calls))
+        self.assertFalse(any("--files-from=-" in call[0] for call in fake.calls))
+        self.assertNotIn("Store:", output)
+
+    def test_listing_pin_mismatch_refuses_before_stop(self) -> None:
+        name = hashlib.sha256(b"set copy bytes").hexdigest()
+        value, listing = manifest_with_store({name: len(b"set copy bytes")})
+        pin = value.listings[STORE_ROOT.name]
+        wrong = ("0" if pin.sha256[0] != "0" else "1") + pin.sha256[1:]
+        value = replace(value, listings={STORE_ROOT.name: replace(pin, sha256=wrong)})
+        for source in ("staging", "target"):
+            with self.subTest(source=source):
+                fake = make_host(
+                    source=source, manifest_value=value, store_listing=listing, store_live={},
+                    remote_listing=f"{REMOTE_SNAPSHOT}\t1\n" if source == "target" else "",
+                )
+                code, output = self._run(fake, source)
+                self.assertEqual(code, 1)
+                self.assertIn("verify: refuse", output)
+                self.assertIn("does not match its manifest pin", output)
+                self.assertIn("backup push --verify-all", output)
+                self.assertFalse(any(call[0][-1] == "down" for call in fake.calls))
+
+    def _with_later(
+        self, *, source: str, bad_later_pin: bool = False
+    ) -> tuple[FakeHost, str, str]:
+        repaired = hashlib.sha256(b"whole object").hexdigest()
+        later_only = hashlib.sha256(b"later object").hexdigest()
+        selected, selected_listing = manifest_with_store({repaired: len(b"damaged object")})
+        later, later_listing = manifest_with_store({
+            repaired: len(b"whole object"), later_only: len(b"later object"),
+        })
+        later_finished = NOW - timedelta(minutes=10)
+        later = replace(
+            later, label=LATER_SET, started=later_finished - timedelta(minutes=10),
+            finished=later_finished, archive_through=later_finished,
+        )
+        if bad_later_pin:
+            pin = later.listings[STORE_ROOT.name]
+            wrong = ("0" if pin.sha256[0] != "0" else "1") + pin.sha256[1:]
+            later = replace(later, listings={STORE_ROOT.name: replace(pin, sha256=wrong)})
+        fake = make_host(
+            source=source, names=(LATER_SET, LOCAL_SET), side_names=(LATER_SET, LOCAL_SET),
+            manifest_value=selected, store_listing=selected_listing, store_live={},
+            store_damaged=(repaired,),
+            remote_listing=f"{REMOTE_SNAPSHOT}\t1\n" if source == "target" else "",
+            remote_record=backupset.PushRecord(REMOTE_SNAPSHOT, NOW, LATER_SET, NOW),
+        )
+        later_path = backupset.set_dir(LATER_SET)
+        fake.files[os.path.join(later_path, backupset.MANIFEST_NAME)] = later.to_json()
+        fake.files[backupset.listing_path(later_path, STORE_ROOT.name)] = later_listing
+        return fake, repaired, later_only
+
+    def test_point_in_time_restore_uses_later_set_but_latest_restore_does_not(self) -> None:
+        at = NOW - timedelta(minutes=30)
+        for source in ("staging", "target"):
+            with self.subTest(source=source):
+                fake, repaired, later_only = self._with_later(source=source)
+                code, output = self._run(fake, source, at=at)
+                self.assertEqual(code, 0, output)
+                self.assertIn(
+                    f"{STORE_ROOT.name}: added 2 object(s), 0 left out (with {LATER_SET})", output,
+                )
+                self.assertEqual(fake.store_live, {repaired: len(b"whole object"), later_only: len(b"later object")})
+                self.assertEqual(
+                    len([call for call in fake.calls if call[0][:3] == ("env", "LC_ALL=C", "join")]), 2,
+                )
+                self.assertIn(
+                    f'"store": {{"{STORE_ROOT.name}": {{"added": 2, "left_out": 0}}}}',
+                    self._audit_text(fake),
+                )
+
+                latest, _, _ = self._with_later(source=source)
+                code, output = self._run(latest, source)
+                self.assertEqual(code, 0, output)
+                self.assertNotIn(f"(with {LATER_SET})", output)
+                self.assertEqual(
+                    len([call for call in latest.calls if call[0][:3] == ("env", "LC_ALL=C", "join")]), 1,
+                )
+
+    def test_later_listing_mismatch_refuses_before_stop(self) -> None:
+        at = NOW - timedelta(minutes=30)
+        for source in ("staging", "target"):
+            with self.subTest(source=source):
+                fake, _, _ = self._with_later(source=source, bad_later_pin=True)
+                code, output = self._run(fake, source, at=at)
+                self.assertEqual(code, 1)
+                self.assertIn("verify: refuse", output)
+                self.assertIn("does not match its manifest pin", output)
+                self.assertIn("backup push --verify-all", output)
+                self.assertFalse(any(call[0][-1] == "down" for call in fake.calls))
 
 
 class RestoreBySetLabel(unittest.TestCase):

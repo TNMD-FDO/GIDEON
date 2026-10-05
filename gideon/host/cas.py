@@ -27,12 +27,17 @@ DIRECTORY_MODE: Final = 0o2770
 OBJECT_MODE: Final = 0o440
 
 _NAME: Final = re.compile(r"[0-9a-f]{64}")
-_PROVISION_FIX: Final = (
+PROVISION_FIX: Final = (
     "Run sudo python3 -m gideon host provision --only disk-layout, then retry."
 )
-_SOURCE_FIX: Final = "Write the object's bytes again from their source."
+_SOURCE_FIX: Final = (
+    "Write the object's bytes again from their source, or run sudo python3 -m gideon "
+    "restore --from staging --set <label> to return the whole system to a backup set that holds it."
+)
 _CORRUPT_FIX: Final = (
-    "Move the object's path aside, then write its bytes again from their source."
+    "Move the object's path aside, then write its bytes again from their source or run "
+    "sudo python3 -m gideon restore --from staging --set <label> to return the whole "
+    "system to a backup set that holds it."
 )
 _IO_FIX: Final = "Free space or repair the store root, then retry."
 
@@ -140,12 +145,12 @@ def _root_problem(host: BytesHost, root: Path) -> Problem | None:
         state = host.stat(root)
     except (FileNotFoundError, NotADirectoryError, PermissionError):
         return Problem(
-            f"store root {root} is absent or closed to this process", _PROVISION_FIX
+            f"store root {root} is absent or closed to this process", PROVISION_FIX
         )
     except OSError as error:
         return _io_problem(error, root)
     if not stat.S_ISDIR(state.st_mode):
-        return Problem(f"store root {root} is not a directory", _PROVISION_FIX)
+        return Problem(f"store root {root} is not a directory", PROVISION_FIX)
     return None
 
 

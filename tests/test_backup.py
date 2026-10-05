@@ -15,7 +15,9 @@ from unittest import mock
 from gideon.host import (
     backup,
     backuplock,
+    backuproots,
     backupset,
+    cas,
     pgbackrest,
     secrets,
     stack,
@@ -289,6 +291,8 @@ def _commands(*, old: backupset.Manifest | None = None) -> dict[tuple[str, ...],
         ("mv", backupset.partial_dir("20260902T120000Z"), backupset.set_dir("20260902T120000Z")): [result(())],
     }
     for inventory_root in backupset.inventory_roots(CHECKOUT):
+        if inventory_root.kind is backupset.RootKind.STORE:
+            continue
         directory = (
             os.path.join(backupset.partial_dir("20260902T120000Z"), backupset.FILES_DIR, inventory_root.name)
             if inventory_root.snapshotted
@@ -328,6 +332,20 @@ def _commands(*, old: backupset.Manifest | None = None) -> dict[tuple[str, ...],
                     stdout="".join(f"{'d' * 64}  {path}\n" for path in repository_paths),
                 )
             ]
+    store = next(root for root in backupset.inventory_roots(CHECKOUT) if root.kind is backupset.RootKind.STORE)
+    partial = backupset.partial_dir("20260902T120000Z")
+    copy = os.path.join(backupset.files_dir(partial), store.name)
+    listing_path = backupset.listing_path(partial, store.name)
+    store_rsync = ("rsync", "-rtp", "--stats", "--exclude=.*", store.source + "/", copy + "/")
+    commands[store_rsync] = [
+        result(store_rsync, stdout="Number of regular files transferred: 1\n"),
+        result(store_rsync, stdout="Number of regular files transferred: 0\n"),
+    ]
+    commands[tuple(backuproots._store_stray_argv())] = [result((), stdout="")]
+    commands[tuple(backuproots._store_listing_argv(listing_path))] = [result(())]
+    commands[("env", "LC_ALL=C", "sort", "-o", listing_path, listing_path)] = [result(())]
+    commands[("sha256sum", listing_path)] = [result((), stdout=f"{'d' * 64}  {listing_path}\n")]
+    commands[("awk", "-F", "\t", '{n++; b+=$2} END {printf "%.0f %.0f\\n", n, b}', listing_path)] = [result((), stdout="1 7\n")]
     if old is not None:
         commands[tuple(pgbackrest.backup_argv(RENDERED, "incr"))] = [result(())]
     return commands
@@ -339,6 +357,7 @@ def _host(*, previous: bool = False, euid: int = 0) -> FakeHost:
         f"{RENDERED}/compose.yaml": "services: {}\n",
         os.fspath(AGE_RECIPIENT_PATH): RECIPIENT + "\n",
         os.fspath(AGE_IDENTITY_PATH): IDENTITY + "\n",
+        os.fspath(cas.ROOT): "",
     }
     names: list[str] = []
     stats: dict[str, os.stat_result] = {}
@@ -353,6 +372,8 @@ def _host(*, previous: bool = False, euid: int = 0) -> FakeHost:
     stats[os.fspath(AGE_IDENTITY_PATH)] = stat_result(
         9, mode=0o400, uid=0, gid=0
     )
+    store = next(root for root in backupset.inventory_roots(CHECKOUT) if root.kind is backupset.RootKind.STORE)
+    stats[backupset.listing_path(backupset.partial_dir("20260902T120000Z"), store.name)] = stat_result(10, size=70)
     return FakeHost(files=files, names=names, commands=_commands(old=old), stats=stats, euid=euid)
 
 
@@ -530,8 +551,9 @@ class BackupRun(unittest.TestCase):
         self.assertNotIn(backuplock.BACKUP_LOCK.path, host.locks)
         self.assertEqual(
             [line.split(":", 1)[0] for line in out.getvalue().splitlines()],
-            ["intent", "files", "secrets", "postgres", "counts", "manifest", "prune", "applied"],
+            ["intent", "files", "secrets", "postgres", "complete", "counts", "manifest", "prune", "applied"],
         )
+        self.assertIn("complete: ok — completed 1 root(s); 0 object(s) arrived since the first pass", out.getvalue())
         manifest_path = os.path.join(backupset.set_dir("20260902T120000Z"), backupset.MANIFEST_NAME)
         parsed = backupset.parse_manifest(host.files[manifest_path])
         self.assertIsInstance(parsed, backupset.Manifest)
@@ -540,6 +562,10 @@ class BackupRun(unittest.TestCase):
         self.assertEqual(parsed.commit, "new-commit")
         self.assertEqual(parsed.recipients, (RECIPIENT, "age1" + "c" * 58))
         self.assertEqual(parsed.gideon_ids, GIDEON_IDS)
+        store = next(root for root in backupset.inventory_roots(CHECKOUT) if root.kind is backupset.RootKind.STORE)
+        self.assertNotIn(store.name, parsed.inventory)
+        self.assertEqual(set(parsed.inventory), {root.name for root in backupset.inventory_roots(CHECKOUT) if root.kind is not backupset.RootKind.STORE})
+        self.assertEqual(parsed.listings[store.name], backupset.ListingPin(f"{store.name}.listing", 70, "d" * 64, 1, 7))
         self.assertEqual(
             json.loads(host.files[manifest_path])["gideon_ids"],
             {"gid": GIDEON_IDS.gid, "uid": GIDEON_IDS.uid},
@@ -552,7 +578,7 @@ class BackupRun(unittest.TestCase):
         )
         self.assertEqual(parsed.row_counts, {"gideon": {"public.users": 3}, "openwebui": {"main.chats": 4}})
         rsync = [call[0] for call in host.calls if call[0][0] == "rsync"]
-        self.assertEqual(len(rsync), 4)
+        self.assertEqual(len(rsync), 6)
         etc = next(argv for argv in rsync if any("/etc-gideon/" in value for value in argv))
         self.assertIn("--exclude=secrets/", etc)
         self.assertNotIn("--link-dest=/data/backup-staging/sets/", " ".join(etc))
@@ -594,8 +620,13 @@ class BackupRun(unittest.TestCase):
                 "/data/bulk/openwebui/",
                 f"{backupset.partial_dir('20260902T120000Z')}/files/data-bulk-openwebui/",
             ),
+            (
+                "rsync", "-rtp", "--stats", "--exclude=.*", store.source + "/",
+                f"{backupset.partial_dir('20260902T120000Z')}/files/{store.name}/",
+            ),
         }
         self.assertEqual(set(rsync), expected_rsync)
+        self.assertEqual(rsync.count(next(argv for argv in rsync if argv[1:3] == ("-rtp", "--stats"))), 2)
         audit_inputs = [
             call[1]
             for call in host.calls
@@ -606,6 +637,10 @@ class BackupRun(unittest.TestCase):
         self.assertEqual(len(audit_inputs), 3)
         self.assertIn('"phase": "intent"', audit_inputs[1] or "")
         self.assertIn('"phase": "applied"', audit_inputs[2] or "")
+        applied_line = next(line for line in (audit_inputs[2] or "").splitlines() if line.startswith("\\set v_detail '"))
+        applied_detail = json.loads(applied_line.removeprefix("\\set v_detail '").removesuffix("'"))
+        self.assertEqual(applied_detail["stage_seconds"], dict.fromkeys(("intent", "files", "secrets", "postgres", "complete", "counts", "manifest", "prune"), 0.0))
+        self.assertEqual(applied_detail["files"][store.name], parsed.listings[store.name].objects)
         psql_inputs = [
             call[1]
             for call in host.calls
@@ -682,6 +717,31 @@ class BackupRun(unittest.TestCase):
             ("sha256sum", "--", os.path.join(backupset.REPOSITORY_PATH, "old.dat")),
             [call[0] for call in host.calls],
         )
+
+    def test_refused_complete_leaves_partial_without_manifest(self) -> None:
+        """A failed second pass refuses before the inventory, leaving the set partial and unnamed."""
+
+        host = _host()
+        store = next(root for root in backupset.inventory_roots(CHECKOUT) if root.kind is backupset.RootKind.STORE)
+        copy = os.path.join(backupset.files_dir(backupset.partial_dir("20260902T120000Z")), store.name)
+        argv = ("rsync", "-rtp", "--stats", "--exclude=.*", store.source + "/", copy + "/")
+        host.commands[argv] = [
+            result(argv, stdout="Number of regular files transferred: 1\n"),
+            result(argv, returncode=23, stderr="disk full"),
+        ]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = backup.run_backup_run(argparse.Namespace(full=True, label=None), host=host, root=CHECKOUT, now=NOW)
+        self.assertEqual(code, 1)
+        self.assertEqual([line.split(":", 1)[0] for line in out.getvalue().splitlines()], [
+            "intent", "files", "secrets", "postgres", "complete",
+        ])
+        self.assertIn("complete: refuse", out.getvalue())
+        self.assertIn("disk full", out.getvalue())
+        self.assertIn("Fix: Run sudo python3 -m gideon apply, then retry.", out.getvalue())
+        self.assertNotIn(os.path.join(backupset.partial_dir("20260902T120000Z"), backupset.MANIFEST_NAME), host.files)
+        self.assertNotIn(os.path.join(backupset.set_dir("20260902T120000Z"), backupset.MANIFEST_NAME), host.files)
+        self.assertFalse(any(call[0][0] == "mv" for call in host.calls))
 
     def test_incremental_rule_and_link_dest(self) -> None:
         host = _host(previous=True)

@@ -320,6 +320,9 @@ class FakeStore(unittest.TestCase):
         self.assertIn("does not hash", mismatch.problem)
         self.assertIn(str(path), mismatch.problem)
         self.assertIn("source", mismatch.fix)
+        self.assertIn("Move the object's path aside", mismatch.fix)
+        self.assertIn("restore --from staging --set <label>", mismatch.fix)
+        self.assertIn("whole system to a backup set that holds it", mismatch.fix)
 
         absent_name = hashlib.sha256(b"not stored").hexdigest()
         absent = cas.get(self.host, absent_name, root=self.root)
@@ -327,6 +330,8 @@ class FakeStore(unittest.TestCase):
         assert isinstance(absent, Problem)
         self.assertIn("no object", absent.problem)
         self.assertIn("source", absent.fix)
+        self.assertIn("restore --from staging --set <label>", absent.fix)
+        self.assertIn("whole system to a backup set that holds it", absent.fix)
 
         invalid = "../private matter text"
         self.host.calls.clear()

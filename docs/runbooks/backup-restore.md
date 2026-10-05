@@ -11,7 +11,7 @@ which an operator can query, never as a log line. The backup target's side is §
 | What | Where | When |
 |---|---|---|
 | The pgBackRest repository (weekly full, nightly incremental, every archived WAL segment) | `/data/backup-staging/pgbackrest/` | continuously: the `postgres` service archives each WAL segment as it closes (at most every 5 minutes) |
-| One backup set per run: `manifest.json`, `secrets.tar.age`, `files/<root>/` | `/data/backup-staging/sets/<label>/` | `backup run` — nightly at 01:00 office time by `gideon-backup.timer`, or by hand |
+| One backup set per run: `manifest.json`, `secrets.tar.age`, `files/<root>/`, and `data-bulk-cas.listing` when the content-addressed store is carried | `/data/backup-staging/sets/<label>/` | `backup run` — nightly at 01:00 office time by `gideon-backup.timer`, or by hand |
 | The off-box copy: dated hard-linked snapshots of the whole staging directory | `<backup.target.path>/<label>/` on the target | `backup push` — right after the nightly run in the same unit |
 | The drill's throwaway project (`gideon-drill`, loopback port 18090, no GPU, no Caddy) | `/data/drill/` | `backup drill` — on `backup.drill_interval`, a Saturday at 04:00 office time by `gideon-backup-drill.timer`, or by hand |
 | The standing developer sibling (`gideon-ci`, loopback port 18100, production's engine through its relay, no Caddy) — outside the backup set, rebuilt from scratch by `down --wipe` then `up` | `/data/ci/` | `sudo python3 -m tools.cistack up`, by a developer or the runner's jobs; stopped by `down` |
@@ -50,7 +50,10 @@ The four file roots in a set are `/etc/gideon` (minus `secrets/` and the
 frontend's rendered env file — both carry secrets), the checkout the command ran
 from, `/data/registry`, and `/data/bulk/openwebui`. The two stores' directories,
 `/data/fast/qdrant` and `/data/fast/opensearch`, are derived indexes and in no
-set. The secrets ride only as
+set. The content-addressed store at `/data/bulk/cas` is another root: the run
+copies its objects twice, links unchanged objects to the previous set's copy,
+and pins the copy's sorted names and sizes in `data-bulk-cas.listing` beside
+`manifest.json`. The secrets ride only as
 `secrets.tar.age`, sealed to two age recipients named in the set's
 `manifest.json`, so the office can open a set anywhere and the box can open its
 own sets. The office recipient (`/etc/gideon/backup_age_recipient`) has an
@@ -92,7 +95,9 @@ nothing older is recoverable, and there is no monthly tier.
   verdict against the previous set — zero links with a previous set is a
   failure, because a full copy would hide a retention overrun), `secrets`,
   `postgres` (`full` or `incr`, then the archive boundary and one commit past
-  it before the WAL segment is archived), `counts`, `manifest`, `prune`, `applied`.
+  it before the WAL segment is archived), `complete` (a second copy of the
+  content-addressed store, reporting objects that arrived since the first
+  pass), `counts`, `manifest`, `prune`, `applied`.
   A set is complete only once `manifest.json` exists; an interrupted run leaves
   a `.partial` directory that the next run prunes after a day.
 - **`backup push`** — `record` (`push.json`, the snapshot's coverage record),
@@ -148,6 +153,37 @@ prints the two next steps:
   tarball with the office's age identity:
   `age -d -i <identity file kept off-box> <set>/secrets.tar.age | tar -x -C /etc/gideon`
 - `Next: sudo python3 -m gideon apply, then sudo python3 -m gideon backup run --full`
+
+For the content-addressed store, restore compares the set's pinned listing
+with the live names and adds only objects the live store lacks. It hashes each
+object it adds against its name; it never replaces a live object of that name,
+even when its size differs, and never deletes a live object. The `files:` row
+reports `data-bulk-cas: added N object(s), M left out`. A point-in-time restore
+past the chosen set's archive boundary also adds missing objects from the
+newest complete set in the same source that pins this store. If neither set
+pins the root, restore prints `data-bulk-cas: the set predates this root; the
+live store is left as it is` and runs no store copy. An object the set cannot
+supply whole is left out while restore finishes. A `Store:` line after
+`Secrets:` names the first ten left-out names; a CSA takes each name, obtains
+its original bytes from the source, and writes those bytes again through the
+service that stored it.
+
+After restore, this one command prints the whole list of names the set has
+that the live content-addressed store still lacks. Replace `<label>` with the
+later label named in the `files:` row, if present, or the restored set's label:
+
+```bash
+sudo bash -s -- '/data/backup-staging/sets/<label>/data-bulk-cas.listing' <<'SH'
+set -euo pipefail
+listing=$1
+live=$(mktemp)
+trap 'rm -f "$live"' EXIT
+cd /data/bulk/cas
+find . -regextype posix-basic -type f -regex '\./\([0-9a-f]\{2\}\)/\([0-9a-f]\{2\}\)/\1\2[0-9a-f]\{60\}' -fprintf "$live" '%f\t%s\n'
+LC_ALL=C sort -o "$live" "$live"
+LC_ALL=C join -t $'\t' -j 1 -v 1 "$listing" "$live" | cut -f1
+SH
+```
 
 A set made before a secret rotation restores the older value: after that
 `apply`, run `sudo python3 -m gideon secrets rotate <name>` for every secret

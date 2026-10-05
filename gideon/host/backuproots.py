@@ -5,19 +5,125 @@ command iterates the bound roots and never names one or reads its kind.
 """
 
 import os
+import re
 import stat
 import subprocess
 from collections.abc import Iterable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Final
 
-from gideon.host import backupset, pgbackrest, sshtarget
+from gideon.host import backupset, cas, pgbackrest, sshtarget
 from gideon.host.report import Problem, command_detail
 from gideon.host.stages import run_stage
-from gideon.host.sysio import Host, PathLike
+from gideon.host.sysio import CompletedText, Host, PathLike
 
 # Paths per chown, chmod, or sha256sum argv: far below the kernel's argument limit.
 _CHUNK_SIZE: Final = 200
+LINK_FIX: Final = "Confirm /data/backup-staging is one filesystem, then re-run backup run"
+LINK_PROBLEM: Final = "no hard links to the previous set; a full copy would hide a retention overrun"
+_STORE_SHAPE_FIX: Final = "Move the named path out of the live content-addressed store, then re-run backup run."
+_OBJECT_NAME: Final = re.compile(r"[0-9a-f]{64}")
+_OBJECT_REGEX: Final =r"\./\([0-9a-f]\{2\}\)/\([0-9a-f]\{2\}\)/\1\2[0-9a-f]\{60\}"
+_REGULAR_TRANSFER = re.compile(r"^Number of regular files transferred:\s*([0-9][0-9,]*)\s*$", re.MULTILINE)
+NOTHING_LEFT_OUT_DETAIL: Final = "0 left out"
+# Lines per sha256sum -c batch on stdin, and names in a closing line: display
+# and memory bounds, not thresholds.
+_HASH_BATCH: Final = 1000
+_LEFT_OUT_NAMED: Final = 10
+
+
+def _object_relative(name: str) -> str:
+    """An object's path under its store root: its two shard directories, then its name."""
+
+    return f"{name[:2]}/{name[2:4]}/{name}"
+
+
+def _store_copy_argv(source: str, destination: str, exclusions: Sequence[str], *extra: str) -> list[str]:
+    return [
+        "rsync", "-rtp", "--stats",
+        *(f"--exclude={pattern}" for pattern in exclusions),
+        *extra,
+        source.rstrip("/") + "/", destination.rstrip("/") + "/",
+    ]
+
+
+def _checked(
+    io: Host, argv: Sequence[str], what: str, *, cwd: str | None = None, input: str | None = None
+) -> CompletedText | Problem:
+    """Run *argv*; a failure to start or a non-zero exit is the problem, with no fix of its own."""
+
+    try:
+        if input is None:
+            result = io.run(list(argv), cwd=cwd)
+        else:
+            result = io.run(list(argv), cwd=cwd, input=input)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return Problem(f"{what} failed: {exc}", "")
+    if result.returncode != 0:
+        return Problem(f"{what} failed: {command_detail(result)}", "")
+    return result
+
+
+def _transferred(io: Host, argv: Sequence[str], what: str, *, input: str | None = None) -> int | Problem:
+    """Run a store transfer and return the regular files its own report says it wrote."""
+
+    result = _checked(io, argv, what, input=input)
+    if isinstance(result, Problem):
+        return result
+    match = _REGULAR_TRANSFER.search(result.stdout)
+    if match is None:
+        return Problem(f"{what} reported no transferred file count", "")
+    return int(match.group(1).replace(",", ""))
+
+
+# GNU find's default regular-expression type ignores the \{n\} intervals; the
+# basic type honours them, and its back-references hold an object's name to
+# its own two shard directories.
+def _store_stray_argv() -> list[str]:
+    return [
+        "find", ".", "-regextype", "posix-basic", "-mindepth", "1",
+        "!", "(", "-type", "d", "-regex", r"\./[0-9a-f]\{2\}", ")",
+        "!", "(", "-type", "d", "-regex", r"\./[0-9a-f]\{2\}/[0-9a-f]\{2\}", ")",
+        "!", "(", "-type", "f", "-regex", _OBJECT_REGEX, ")",
+        "-print", "-quit",
+    ]
+
+
+def _store_listing_argv(listing: str) -> list[str]:
+    """The objects under the working directory, one name and size per line, written by find itself."""
+
+    return [
+        "find", ".", "-regextype", "posix-basic", "-type", "f", "-regex", _OBJECT_REGEX,
+        "-fprintf", listing, r"%f\t%s\n",
+    ]
+
+
+def _store_sort_argv(listing: str) -> list[str]:
+    return ["env", "LC_ALL=C", "sort", "-o", listing, listing]
+
+
+def _listing_pin(io: Host, listing: str) -> backupset.ListingPin | Problem:
+    """Pin a sorted listing by its size and hash, with its object count and byte total."""
+
+    hashed = _checked(io, ["sha256sum", listing], f"hashing {listing}")
+    if isinstance(hashed, Problem):
+        return hashed
+    # %.0f rather than %d, so an awk keeping numbers as doubles prints a large total exactly.
+    counted = _checked(
+        io, ["awk", "-F", "\t", '{n++; b+=$2} END {printf "%.0f %.0f\\n", n, b}', listing], f"counting {listing}"
+    )
+    if isinstance(counted, Problem):
+        return counted
+    try:
+        size = io.stat(listing).st_size
+        digest = backupset.parse_sha256sum(hashed.stdout)[listing]
+        objects_text, bytes_text = counted.stdout.split()
+        return backupset.ListingPin(
+            os.path.basename(listing), size, digest, int(objects_text, 10), int(bytes_text, 10)
+        )
+    except (OSError, KeyError, ValueError) as exc:
+        return Problem(f"pinning {listing} failed: {exc}", "")
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,11 +135,20 @@ class Taken:
 
 
 @dataclass(frozen=True, slots=True)
+class Completed:
+    """Whether a root completed a second copy and how many objects arrived."""
+
+    acted: bool
+    objects: int
+
+
+@dataclass(frozen=True, slots=True)
 class Inventoried:
     """A root's inventory, sorted and hashed, and the bytes its copy adds to the set."""
 
     entries: tuple[backupset.Entry, ...]
     set_bytes: int
+    pin: backupset.ListingPin | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +248,12 @@ class TakingRoot:
     def inventory(self) -> Inventoried | Problem:
         raise NotImplementedError
 
+    def complete(self) -> Completed | Problem:
+        raise NotImplementedError
+
+    def _copy(self) -> str:
+        return os.path.join(backupset.files_dir(self.partial), self.name)
+
     def _previous_entries(self) -> Mapping[str, backupset.Entry]:
         entries: Sequence[backupset.Entry] = ()
         if self.previous is not None and self.previous.manifest is not None:
@@ -142,9 +263,6 @@ class TakingRoot:
 
 @dataclass(frozen=True, slots=True)
 class _TakingSnapshot(TakingRoot):
-    def _copy(self) -> str:
-        return os.path.join(backupset.files_dir(self.partial), self.name)
-
     def take(self) -> Taken | Problem:
         destination = self._copy()
         try:
@@ -189,6 +307,9 @@ class _TakingSnapshot(TakingRoot):
             return hashed
         return Inventoried(hashed, sum(entry.size for entry in hashed if entry.kind == "f"))
 
+    def complete(self) -> Completed | Problem:
+        return Completed(False, 0)
+
 
 @dataclass(frozen=True, slots=True)
 class _TakingRepository(TakingRoot):
@@ -207,6 +328,78 @@ class _TakingRepository(TakingRoot):
             return hashed
         return Inventoried(hashed, 0)
 
+    def complete(self) -> Completed | Problem:
+        return Completed(False, 0)
+
+
+@dataclass(frozen=True, slots=True)
+class _TakingStore(TakingRoot):
+    def _transfer(self, *, first: bool) -> int | Problem:
+        destination = self._copy()
+        try:
+            if not self.io.exists(self.source):
+                return Problem(f"content-addressed store root is missing: {self.source}", cas.PROVISION_FIX)
+            self.io.mkdir(destination, mode=0o750, parents=True, exist_ok=True)
+        except OSError as exc:
+            return Problem(f"store copy failed for {self.name}: {exc}", "")
+        extra: tuple[str, ...] = ()
+        if (
+            first
+            and self.previous is not None
+            and self.previous.manifest is not None
+            and self.name in self.previous.manifest.listings
+        ):
+            previous_copy = os.path.join(backupset.files_dir(self.previous.path), self.name)
+            extra = (f"--link-dest={previous_copy}/",)
+        argv = _store_copy_argv(self.source, destination, self.exclusions, *extra)
+        return _transferred(self.io, argv, f"store copy for {self.name}")
+
+    def take(self) -> Taken | Problem:
+        transferred = self._transfer(first=True)
+        if isinstance(transferred, Problem):
+            return transferred
+        if self.previous is not None and self.previous.manifest is not None:
+            pin = self.previous.manifest.listings.get(self.name)
+            if pin is not None and pin.objects > 0:
+                linked = _checked(
+                    self.io,
+                    ["find", self._copy(), "-type", "f", "-links", "+1", "-print", "-quit"],
+                    f"store link check for {self.name}",
+                )
+                if isinstance(linked, Problem):
+                    return linked
+                if not linked.stdout.strip():
+                    return Problem(LINK_PROBLEM, LINK_FIX)
+        return Taken(True, {})
+
+    def complete(self) -> Completed | Problem:
+        transferred = self._transfer(first=False)
+        if isinstance(transferred, Problem):
+            return transferred
+        return Completed(True, transferred)
+
+    def inventory(self) -> Inventoried | Problem:
+        copy = self._copy()
+        listing = backupset.listing_path(self.partial, self.name)
+        stray = _checked(self.io, _store_stray_argv(), f"store shape check for {self.name}", cwd=copy)
+        if isinstance(stray, Problem):
+            return stray
+        if stray.stdout.strip():
+            # The copy mirrors the live store, so the offender is named where it can be moved.
+            offender = os.path.join(self.source, stray.stdout.strip().removeprefix("./"))
+            return Problem(f"{offender} is not an object in its own shard directories", _STORE_SHAPE_FIX)
+        for argv, what, cwd in (
+            (_store_listing_argv(listing), "store listing", copy),
+            (_store_sort_argv(listing), "store listing sort", None),
+        ):
+            done = _checked(self.io, argv, f"{what} for {self.name}", cwd=cwd)
+            if isinstance(done, Problem):
+                return done
+        pin = _listing_pin(self.io, listing)
+        if isinstance(pin, Problem):
+            return pin
+        return Inventoried((), pin.bytes, pin)
+
 
 def taking(
     io: Host,
@@ -216,24 +409,30 @@ def taking(
 ) -> tuple[TakingRoot, ...]:
     """Bind the registry rows to an in-flight set and its previous set, in registry order."""
 
-    return tuple(
-        _TakingSnapshot(io, root.name, root.source, root.exclusions, partial, previous)
-        if root.kind is backupset.RootKind.SNAPSHOT
-        else _TakingRepository(io, root.name, root.source, root.exclusions, partial, previous)
-        for root in roots
-    )
+    kinds = {
+        backupset.RootKind.SNAPSHOT: _TakingSnapshot,
+        backupset.RootKind.REPOSITORY: _TakingRepository,
+        backupset.RootKind.STORE: _TakingStore,
+    }
+    return tuple(kinds[root.kind](io, root.name, root.source, root.exclusions, partial, previous) for root in roots)
 
 
 @dataclass(frozen=True, slots=True)
 class PushedRoot:
     """A root bound to its inventory and relative off-box location."""
 
+    io: Host
     name: str
     entries: tuple[backupset.Entry, ...]
     label: str
 
     def check(self, *, verify_all: bool) -> Checked | Problem:
         raise NotImplementedError
+
+    def arrived(self, previous: backupset.Manifest | None) -> int:
+        """Bytes newly held by this root since the previous remote snapshot's set."""
+
+        return 0
 
     def _sample(self, place: str, verify_all: bool) -> tuple[tuple[str, str], ...]:
         file_entries = tuple(
@@ -291,7 +490,45 @@ class _PushedRepository(PushedRoot):
         return Checked(tuple(mandatory), self._sample(place, verify_all))
 
 
+@dataclass(frozen=True, slots=True)
+class _PushedStore(PushedRoot):
+    pin: backupset.ListingPin | None
+
+    def check(self, *, verify_all: bool) -> Checked | Problem:
+        if self.pin is None:
+            return Checked((), ())
+        listing = os.path.join(backupset.set_dir(self.label), self.pin.file)
+        mandatory = ((_relative_place(listing), self.pin.sha256),)
+        if verify_all:
+            try:
+                text = self.io.read_text(listing)
+            except (OSError, UnicodeError) as exc:
+                return Problem(f"store listing read for {self.name} failed: {exc}", "")
+        else:
+            selected = _checked(
+                self.io, ["awk", "NR % 100 == 1", listing], f"store listing sample for {self.name}"
+            )
+            if isinstance(selected, Problem):
+                return selected
+            text = selected.stdout
+        place = os.path.join(_relative_place(backupset.files_dir(backupset.set_dir(self.label))), self.name)
+        sampled: list[tuple[str, str]] = []
+        for number, line in enumerate(text.splitlines(), start=1):
+            name, separator, size = line.partition("\t")
+            if not separator or _OBJECT_NAME.fullmatch(name) is None or not size.isdecimal():
+                return Problem(f"store listing sample line {number} is malformed for {self.name}", "")
+            sampled.append((f"{place}/{_object_relative(name)}", name))
+        return Checked(mandatory, tuple(sampled))
+
+    def arrived(self, previous: backupset.Manifest | None) -> int:
+        if self.pin is None:
+            return 0
+        older = previous.listings.get(self.name) if previous is not None else None
+        return max(0, self.pin.bytes - (older.bytes if older is not None else 0))
+
+
 def pushed(
+    io: Host,
     roots: Sequence[backupset.InventoryRoot],
     manifest: backupset.Manifest,
     label: str,
@@ -303,10 +540,12 @@ def pushed(
     for name in sorted(set(registry) | set(manifest.inventory)):
         row = registry.get(name)
         entries = manifest.inventory.get(name, ())
-        if row is not None and row.kind is backupset.RootKind.REPOSITORY:
-            bound.append(_PushedRepository(name, entries, label, row.source, manifest.pgbackrest_label))
+        if row is not None and row.kind is backupset.RootKind.STORE:
+            bound.append(_PushedStore(io, name, entries, label, manifest.listings.get(name)))
+        elif row is not None and row.kind is backupset.RootKind.REPOSITORY:
+            bound.append(_PushedRepository(io, name, entries, label, row.source, manifest.pgbackrest_label))
         else:
-            bound.append(_PushedSnapshot(name, entries, label))
+            bound.append(_PushedSnapshot(io, name, entries, label))
     return tuple(bound)
 
 
@@ -451,7 +690,7 @@ class LandedRoot:
 
 @dataclass(frozen=True, slots=True)
 class _LandedSnapshot(LandedRoot):
-    """A fetched snapshot needs no arrival action."""
+    """A fetched snapshot or store needs no arrival action."""
 
     def arrive(self, rendered_dir: PathLike) -> Problem | None:
         return None
@@ -544,13 +783,32 @@ class _FetchedRepository(FetchedRoot):
         return problem if problem is not None else Claims()
 
 
+@dataclass(frozen=True, slots=True)
+class _FetchedStore(FetchedRoot):
+    """A fetched store copy needs one ownership pass and a listing claim."""
+
+    pin: backupset.ListingPin
+    set_path: str
+
+    def reown(self, gideon_ids: backupset.AccountIds) -> Claims | Problem:
+        del gideon_ids
+        result = _checked(self.io, ["chown", "-R", "-h", "0:0", self.base], f"store reown for {self.name}")
+        if isinstance(result, Problem):
+            return result
+        claims = Claims()
+        listing = os.path.join(self.set_path, self.pin.file)
+        claims.add_owner(listing, 0, 0)
+        claims.add_mode(listing, 0o644)
+        return claims
+
+
 def fetched(
     io: Host,
     roots: Sequence[backupset.InventoryRoot],
     side: str,
     sets: Sequence[backupset.SetRef],
 ) -> tuple[FetchedRoot, ...]:
-    """Bind repository roots first, then known snapshots in each complete set."""
+    """Bind repository roots first, then known snapshots and stores in each complete set."""
 
     registry = {root.name: root for root in roots}
     complete = tuple(ref for ref in sets if ref.complete and ref.manifest is not None)
@@ -583,6 +841,15 @@ def fetched(
                         # The walk's base keeps its trailing slash, as the fetch has always listed it.
                         os.path.join(backupset.files_dir(ref.path), name, ""),
                         ref.manifest,
+                    )
+                )
+        for row in roots:
+            pin = ref.manifest.listings.get(row.name)
+            if row.kind is backupset.RootKind.STORE and pin is not None:
+                bound.append(
+                    _FetchedStore(
+                        io, row.name, (), os.path.join(backupset.files_dir(ref.path), row.name),
+                        ref.manifest, pin, ref.path,
                     )
                 )
     return tuple(bound)
@@ -632,6 +899,16 @@ class PutBack:
     restored: tuple[str, ...]
     clauses: tuple[str, ...]
     claims: Claims
+    counts: Mapping[str, "StoreCounts"] = field(default_factory=dict)
+    closing_lines: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class StoreCounts:
+    """Objects added to the live store and objects the set could not supply."""
+
+    added: int
+    left_out: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -735,10 +1012,167 @@ class _HeldRepository(HeldRoot):
         return PutBack((), (), Claims())
 
 
+@dataclass(frozen=True, slots=True)
+class _HeldStore(HeldRoot):
+    """A store verifies its listing and restores only missing, intact objects."""
+
+    pin: backupset.ListingPin | None
+    later: backupset.SetRef | None = None
+
+    def verify(self) -> Problem | None:
+        for copy, pin in self._listings():
+            problem = self._verify_listing(copy, pin)
+            if problem is not None:
+                return problem
+        return None
+
+    def _listings(self) -> tuple[tuple[str, backupset.ListingPin], ...]:
+        listings: list[tuple[str, backupset.ListingPin]] = []
+        if self.pin is not None:
+            listings.append((self.copy, self.pin))
+        if self.later is not None and self.later.manifest is not None:
+            pin = self.later.manifest.listings.get(self.name)
+            if pin is not None:
+                copy = os.path.join(backupset.files_dir(self.later.path), self.name)
+                listings.append((copy, pin))
+        return tuple(listings)
+
+    def _verify_listing(self, copy: str, pin: backupset.ListingPin) -> Problem | None:
+        listing = os.path.join(os.path.dirname(os.path.dirname(copy)), pin.file)
+        try:
+            size = self.io.stat(listing).st_size
+        except OSError as exc:
+            return Problem(f"store listing for {self.name} cannot be read: {exc}", _PHYSICAL_FIX)
+        hashed = _checked(self.io, ["sha256sum", listing], f"store listing hash for {self.name}")
+        if isinstance(hashed, Problem):
+            return Problem(hashed.problem, _PHYSICAL_FIX)
+        try:
+            digest = backupset.parse_sha256sum(hashed.stdout)[listing]
+        except (KeyError, ValueError) as exc:
+            return Problem(f"store listing hash for {self.name} is malformed: {exc}", _PHYSICAL_FIX)
+        if size != pin.size or digest != pin.sha256:
+            return Problem(f"store listing for {self.name} does not match its manifest pin", _PHYSICAL_FIX)
+        return None
+
+    def prove(self, rendered_dir: PathLike) -> Problem | None:
+        return None
+
+    def put_back(self, host_ids: backupset.AccountIds) -> PutBack | Problem:
+        del host_ids
+        listings = self._listings()
+        if not listings:
+            return PutBack((), (f"{self.name}: the set predates this root; the live store is left as it is",), Claims())
+        try:
+            if not self.io.exists(self.source):
+                return Problem(f"content-addressed store root is missing: {self.source}", cas.PROVISION_FIX)
+        except OSError as exc:
+            return Problem(f"store root check for {self.name} failed: {exc}", "")
+        live_listing = f"{backupset.STAGING}.live-{self.name}.listing"
+        added = 0
+        missing: set[str] = set()
+        for copy, pin in listings:
+            try:
+                # A leftover of a killed restore goes first; each pass makes a
+                # fresh live listing so it sees objects added by the prior pass.
+                self.io.unlink(live_listing, missing_ok=True)
+            except OSError as exc:
+                return Problem(f"store listing cleanup for {self.name} failed: {exc}", "")
+            try:
+                needed = self._needed(live_listing, copy, pin)
+            finally:
+                # The next restore removes any scratch file left by this one.
+                with suppress(OSError):
+                    self.io.unlink(live_listing, missing_ok=True)
+            if isinstance(needed, Problem):
+                return needed
+            checked = self._hash_needed(needed, copy)
+            if isinstance(checked, Problem):
+                return checked
+            passing, failed = checked
+            missing.update(failed)
+            if passing:
+                argv = _store_copy_argv(
+                    copy, self.source, (),
+                    f"--chmod=D{cas.DIRECTORY_MODE:o},F{cas.OBJECT_MODE:o}",
+                    "--ignore-existing", "--files-from=-",
+                )
+                transferred = _transferred(
+                    self.io, argv, f"store put-back for {self.name}",
+                    input="".join(f"{_object_relative(name)}\n" for name in passing),
+                )
+                if isinstance(transferred, Problem):
+                    return transferred
+                added += transferred
+                missing.difference_update(passing)
+        left_out = len(missing)
+        detail = NOTHING_LEFT_OUT_DETAIL if left_out == 0 else f"{left_out} left out"
+        suffix = f" (with {self.later.label})" if self.later is not None else ""
+        closing = () if left_out == 0 else (
+            f"Store: {left_out} object(s) the set could not supply whole were left out: "
+            f"{', '.join(sorted(missing)[:_LEFT_OUT_NAMED])}; write each object's bytes again from their source "
+            "(the whole list: docs/runbooks/backup-restore.md §4)",
+        )
+        return PutBack(
+            (), (f"{self.name}: added {added} object(s), {detail}{suffix}",), Claims(),
+            {self.name: StoreCounts(added, left_out)}, closing,
+        )
+
+    def _needed(self, live_listing: str, copy: str, pin: backupset.ListingPin) -> list[str] | Problem:
+        """The names the set lists and the live store lacks, matched by name alone."""
+
+        listing = os.path.join(os.path.dirname(os.path.dirname(copy)), pin.file)
+        joined: CompletedText | None = None
+        for argv, what, cwd in (
+            (_store_listing_argv(live_listing), "live store listing", self.source),
+            (_store_sort_argv(live_listing), "live store listing sort", None),
+            (["env", "LC_ALL=C", "join", "-t", "\t", "-j", "1", "-v", "1", listing, live_listing],
+             "store listing join", None),
+        ):
+            result = _checked(self.io, argv, f"{what} for {self.name}", cwd=cwd)
+            if isinstance(result, Problem):
+                return result
+            joined = result
+        assert joined is not None
+        needed: list[str] = []
+        for line in joined.stdout.splitlines():
+            name, separator, size = line.partition("\t")
+            if not separator or _OBJECT_NAME.fullmatch(name) is None or not size.isdecimal():
+                return Problem(f"store listing join for {self.name} returned a malformed line", "")
+            needed.append(name)
+        return needed
+
+    def _hash_needed(self, needed: Sequence[str], copy: str) -> tuple[list[str], list[str]] | Problem:
+        """Split the needed names into those whose bytes in the set's copy hash to them, and the rest."""
+
+        passing: list[str] = []
+        failed: list[str] = []
+        for start in range(0, len(needed), _HASH_BATCH):
+            paths = {_object_relative(name): name for name in needed[start : start + _HASH_BATCH]}
+            checks = "".join(f"{name}  {path}\n" for path, name in paths.items())
+            try:
+                checked = self.io.run(["sha256sum", "-c", "-"], input=checks, cwd=copy)
+            except (OSError, subprocess.SubprocessError) as exc:
+                return Problem(f"store object check for {self.name} failed: {exc}", "")
+            okay_paths, failed_paths = sshtarget.parse_check_output(checked.stdout)
+            # sha256sum exits 1 whenever a line fails, so the exit alone is no
+            # refusal: a report that does not account for every line is.
+            if (
+                checked.returncode not in (0, 1)
+                or set(okay_paths + failed_paths) != set(paths)
+                or len(okay_paths) + len(failed_paths) != len(paths)
+                or bool(failed_paths) != (checked.returncode == 1)
+            ):
+                return Problem(f"store object check for {self.name} failed: {command_detail(checked)}", "")
+            passing.extend(paths[path] for path in okay_paths)
+            failed.extend(paths[path] for path in failed_paths)
+        return passing, failed
+
+
 def held(
     io: Host,
     roots: Sequence[backupset.InventoryRoot],
     set_ref: backupset.SetRef,
+    later: backupset.SetRef | None = None,
 ) -> tuple[HeldRoot, ...]:
     """Bind registry roots in order to their places in a complete set."""
 
@@ -759,6 +1193,14 @@ def held(
                     set_ref.manifest,
                     row.exclusions,
                     row.restore_in_place,
+                )
+            )
+        elif row.kind is backupset.RootKind.STORE:
+            bound.append(
+                _HeldStore(
+                    io, row.name, row.source,
+                    os.path.join(backupset.files_dir(set_ref.path), row.name), entries,
+                    set_ref.manifest, set_ref.manifest.listings.get(row.name), later,
                 )
             )
         else:

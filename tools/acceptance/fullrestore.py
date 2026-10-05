@@ -1,5 +1,6 @@
 """The clean-VM full-restore stages that run inside the acceptance VM."""
 
+import re
 import shlex
 import subprocess
 from collections.abc import Mapping
@@ -8,7 +9,7 @@ from typing import Final
 
 import yaml  # type: ignore[import-untyped]
 
-from gideon.host import backupset, nogpu, restore, stack, stages
+from gideon.host import backuproots, backupset, cas, nogpu, restore, stack, stages
 from gideon.host.backup import parse_rsync_stats
 from gideon.host.render.engine import ENGINE_SERVICE_NAME
 from gideon.host.report import Problem, StageResult, command_detail
@@ -52,7 +53,19 @@ def _set_size(ref: backupset.SetRef) -> int:
     manifest = ref.manifest
     if manifest is None:
         return 0
-    return sum(entry.size for entries in manifest.inventory.values() for entry in entries)
+    return (
+        sum(entry.size for entries in manifest.inventory.values() for entry in entries)
+        + sum(pin.bytes for pin in manifest.listings.values())
+    )
+
+
+def _pinned_store(
+    manifest: backupset.Manifest,
+) -> tuple[backupset.InventoryRoot, backupset.ListingPin] | None:
+    for root in backupset.inventory_roots(manifest.checkout):
+        if root.kind is backupset.RootKind.STORE and (pin := manifest.listings.get(root.name)) is not None:
+            return root, pin
+    return None
 
 
 def _available(host: Host) -> tuple[int | None, str | None]:
@@ -298,7 +311,7 @@ def restore_target(ctx: HarnessContext) -> StageResult:
     selected = _selected_manifest(ctx)
     if selected is None or ctx.snapshot_label is None:
         return _restore_failure(ctx, "snapshot or selected set is missing")
-    ref, _manifest = selected
+    ref, manifest = selected
     result, text = vm.run_product(
         ctx,
         "restore",
@@ -328,6 +341,15 @@ def restore_target(ctx: HarnessContext) -> StageResult:
     files = details.get("files")
     if files is None or restore.REOWN_MAPPED_DETAIL not in files[1]:
         return _restore_failure(ctx, "files row does not carry the mapped ownership detail")
+    store = _pinned_store(manifest)
+    if store is not None:
+        root, _pin = store
+        clause = re.compile(
+            rf"{re.escape(root.name)}: added [0-9]+ object\(s\), "
+            rf"{re.escape(backuproots.NOTHING_LEFT_OUT_DETAIL)}"
+        )
+        if not any(clause.fullmatch(part) for part in files[1].split("; ")):
+            return _restore_failure(ctx, "files row does not carry the store clause with nothing left out")
     next_row = details.get("next")
     if next_row is None or next_row[0] != "ok":
         return _restore_failure(ctx, "next row is not ok")
@@ -434,6 +456,55 @@ def counts(ctx: HarnessContext) -> StageResult:
         _counts_detail(manifest.row_counts, observed, mismatches),
         "" if not mismatches else FULL_RESTORE_FIX,
     )
+
+
+def store(ctx: HarnessContext) -> StageResult:
+    """Check the restored content-addressed store's count, owners, and modes in the VM."""
+
+    selected = _selected_manifest(ctx)
+    if selected is None:
+        return _stage_failure("store", "the set stage did not select a manifest")
+    _ref, manifest = selected
+    pinned = _pinned_store(manifest)
+    if pinned is None:
+        return StageResult("store", True, "skipped (set has no content-addressed store listing)", "")
+    root, pin = pinned
+    group = vm.run_as_root(ctx, "getent group gideon")
+    if group.returncode != 0:
+        return _stage_failure("store", f"could not read the gideon group: {command_detail(group)}")
+    fields = group.stdout.strip().split(":")
+    if len(fields) < 3 or fields[0] != "gideon" or not fields[2].isdecimal():
+        return _stage_failure("store", "the gideon group record is malformed")
+    gid = int(fields[2], 10)
+    listing_format = r"%p\0%y\0%U\0%G\0%m\0"
+    command = shlex.join(["find", root.source, "-mindepth", "1", "-printf", listing_format])
+    walked = vm.run_as_root(ctx, command)
+    if walked.returncode != 0:
+        return _stage_failure("store", f"could not inspect {root.source}: {command_detail(walked)}")
+    values = walked.stdout.split("\0")
+    if values[-1] != "" or (len(values) - 1) % 5:
+        return _stage_failure("store", f"the listing of {root.source} is malformed")
+    objects = 0
+    for index in range(0, len(values) - 1, 5):
+        path, kind, uid_text, gid_text, mode_text = values[index : index + 5]
+        try:
+            uid, actual_gid, mode = int(uid_text, 10), int(gid_text, 10), int(mode_text, 8)
+        except ValueError:
+            return _stage_failure("store", f"{path}: metadata is malformed")
+        if kind not in ("d", "f"):
+            return _stage_failure("store", f"{path}: unexpected entry kind {kind}")
+        expected_mode = cas.DIRECTORY_MODE if kind == "d" else cas.OBJECT_MODE
+        if uid != 0 or actual_gid != gid or mode != expected_mode:
+            return _stage_failure(
+                "store",
+                f"{path}: uid:gid {uid}:{actual_gid}, mode {mode:04o}; "
+                f"expected 0:{gid}, mode {expected_mode:04o}",
+            )
+        if kind == "f":
+            objects += 1
+    if objects != pin.objects:
+        return _stage_failure("store", f"{root.source} holds {objects} object(s), set pins {pin.objects}")
+    return StageResult("store", True, f"{objects} object(s) at root:gideon and store modes", "")
 
 
 _AUDIT_TABLE: Final = "public.audit_log"

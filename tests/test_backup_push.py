@@ -110,6 +110,7 @@ class FakeHost:
         names: Sequence[str] = (),
         remote_listing: str = "",
         remote_manifest: str | None = None,
+        remote_record: str | None = None,
         stats: str = "Total file size: 100 bytes\nTotal transferred file size: 10 bytes\n",
         check_output: str | None = None,
         euid: int = 0,
@@ -120,6 +121,7 @@ class FakeHost:
         self.names = list(names)
         self.remote_listing = remote_listing
         self.remote_manifest = remote_manifest or manifest().to_json()
+        self.remote_record = remote_record
         self.stats = stats
         self.check_output = check_output
         self.euid = euid
@@ -147,6 +149,13 @@ class FakeHost:
             return result(command, returncode=int(self.fail_audit))
         if command and command[0] == "rsync":
             return result(command, stdout=self.stats)
+        if command and command[0] == "awk":
+            if len(command) != 3 or command[1] != "NR % 100 == 1":
+                return result(command, returncode=1)
+            listing = self.files.get(command[2])
+            if listing is None:
+                return result(command, returncode=1)
+            return result(command, stdout="".join(line for number, line in enumerate(listing.splitlines(keepends=True), start=1) if number % 100 == 1))
         if command and command[0] == "ssh":
             if command[-1] == "true":
                 return result(command, returncode=int(self.fail_target))
@@ -154,6 +163,8 @@ class FakeHost:
             if "for directory in */" in remote_word:
                 return result(command, stdout=self.remote_listing)
             if len(command) >= 2 and command[-2] == "cat":
+                if command[-1].endswith("/push.json"):
+                    return result(command, stdout=self.remote_record or "", returncode=int(self.remote_record is None))
                 return result(command, stdout=self.remote_manifest or "")
             if "sha256sum -c -" in remote_word:
                 output = self.check_output
@@ -240,6 +251,9 @@ def host(
     names: Sequence[str] = (LOCAL_SET,),
     remote_listing: str = "",
     remote_manifest: str | None = None,
+    remote_record: str | None = None,
+    listing_text: str | None = None,
+    previous_set_manifest: backupset.Manifest | None = None,
     stats: str | None = None,
     check_output: str | None = None,
     euid: int = 0,
@@ -256,11 +270,21 @@ def host(
             backupset.set_dir(value.label), backupset.MANIFEST_NAME
         ): value.to_json(),
     }
+    if listing_text is not None:
+        for pin in value.listings.values():
+            files[os.path.join(backupset.set_dir(value.label), pin.file)] = listing_text
+    if previous_set_manifest is not None:
+        files[os.path.join(backupset.set_dir(previous_set_manifest.label), backupset.MANIFEST_NAME)] = previous_set_manifest.to_json()
+    if remote_record is None and remote_listing:
+        previous_label = remote_listing.split("\t", 1)[0]
+        if backupset.validate_label(previous_label) is None:
+            remote_record = backupset.PushRecord(previous_label, NOW - timedelta(days=1), value.label, value.archive_through).to_json()
     return FakeHost(
         files=files,
         names=names,
         remote_listing=remote_listing,
         remote_manifest=remote_manifest,
+        remote_record=remote_record,
         stats=stats
         or "Total file size: 100 bytes\nTotal transferred file size: 10 bytes\n",
         check_output=check_output,
@@ -471,6 +495,98 @@ class PushContracts(unittest.TestCase):
             ),
             0,
         )
+
+    def test_pinned_listing_is_mandatory_and_objects_are_sampled_from_local_listing(self) -> None:
+        store = next(root for root in backupset.inventory_roots("/work/GIDEON") if root.kind is backupset.RootKind.STORE)
+        listing = "".join(f"{index:064x}\t7\n" for index in range(201))
+        pin = backupset.ListingPin(f"{store.name}.listing", len(listing), "9" * 64, 201, 201 * 7)
+        value = replace(manifest(), listings={store.name: pin})
+        fake = host(local_set_manifest=value, remote_manifest=value.to_json(), listing_text=listing)
+        local_set = backupset.SetRef(LOCAL_SET, backupset.set_dir(LOCAL_SET), value.finished, True, value)
+        record_text = backupset.PushRecord(PUSH_LABEL, NOW, LOCAL_SET, value.archive_through).to_json()
+        sample = backup._push_check_input(
+            fake, local_set=local_set, remote_manifest=value, record_text=record_text, verify_all=False
+        )
+        self.assertIsInstance(sample, str)
+        assert isinstance(sample, str)
+        self.assertIn(f"{pin.sha256}  sets/{LOCAL_SET}/{pin.file}\n", sample)
+        for index in (0, 100, 200):
+            name = f"{index:064x}"
+            self.assertIn(f"{name}  sets/{LOCAL_SET}/files/{store.name}/{name[:2]}/{name[2:4]}/{name}\n", sample)
+        self.assertEqual(sum(f"sets/{LOCAL_SET}/files/{store.name}/" in line for line in sample.splitlines()), 3)
+        self.assertIn(
+            (("awk", "NR % 100 == 1", backupset.listing_path(backupset.set_dir(LOCAL_SET), store.name)), None, None),
+            fake.calls,
+        )
+
+        fake.calls.clear()
+        all_lines = backup._push_check_input(
+            fake, local_set=local_set, remote_manifest=value, record_text=record_text, verify_all=True
+        )
+        self.assertIsInstance(all_lines, str)
+        assert isinstance(all_lines, str)
+        self.assertEqual(sum(f"sets/{LOCAL_SET}/files/{store.name}/" in line for line in all_lines.splitlines()), 201)
+        self.assertFalse(any(call[0][0] == "awk" for call in fake.calls))
+
+        previous = manifest()
+        without_pin = host(local_set_manifest=previous)
+        ref = backupset.SetRef(LOCAL_SET, backupset.set_dir(LOCAL_SET), previous.finished, True, previous)
+        unchanged = backup._push_check_input(
+            without_pin, local_set=ref, remote_manifest=previous, record_text=record_text, verify_all=False
+        )
+        self.assertIsInstance(unchanged, str)
+        assert isinstance(unchanged, str)
+        self.assertNotIn(f"sets/{LOCAL_SET}/{pin.file}", unchanged)
+        self.assertFalse(any(call[0][0] == "awk" for call in without_pin.calls))
+
+    def test_full_copy_guard_subtracts_only_bytes_new_since_previous_set(self) -> None:
+        store = next(root for root in backupset.inventory_roots("/work/GIDEON") if root.kind is backupset.RootKind.STORE)
+        name = "a" * 64
+        listing = f"{name}\t400\n"
+        pin = backupset.ListingPin(f"{store.name}.listing", len(listing), "b" * 64, 1, 400)
+        current = replace(manifest(), listings={store.name: pin})
+        older_label = "20260901T110000Z"
+        remote_label = "20260901T120000Z"
+        remote_listing = f"{remote_label}\t1\n"
+        record = backupset.PushRecord(remote_label, NOW - timedelta(days=1), older_label, current.archive_through).to_json()
+        transfer = "Total file size: 1,000 bytes\nTotal transferred file size: 901 bytes\n"
+        cases = (
+            ("empty prior pin", replace(pin, objects=0, bytes=0), True, record, 0),
+            ("equal pins", pin, True, record, 1),
+            ("prior set gone", pin, False, record, 0),
+            # An unreadable record names no prior set: the store counts whole and the push proceeds.
+            ("record unreadable", pin, True, "{", 0),
+        )
+        for case, prior_pin, staged, record_text, expected_code in cases:
+            with self.subTest(case=case):
+                previous_set = replace(
+                    current,
+                    label=older_label,
+                    started=current.started - timedelta(days=1),
+                    finished=current.finished - timedelta(days=1),
+                    listings={store.name: prior_pin},
+                )
+                fake = host(
+                    names=(LOCAL_SET, older_label) if staged else (LOCAL_SET,),
+                    remote_listing=remote_listing,
+                    remote_manifest=current.to_json(),
+                    remote_record=record_text,
+                    stats=transfer,
+                    local_set_manifest=current,
+                    previous_set_manifest=previous_set if staged else None,
+                    listing_text=listing,
+                )
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    code = backup.run_backup_push(argparse.Namespace(verify_all=False), host=fake, now=NOW)
+                self.assertEqual(code, expected_code)
+                push_row = next(line for line in out.getvalue().splitlines() if line.startswith("push:"))
+                if expected_code:
+                    self.assertIn("901 of 1000 bytes", push_row)
+                    self.assertIn("one filesystem", push_row)
+                else:
+                    self.assertIn("push: ok", push_row)
+                    self.assertNotIn("one filesystem", push_row)
 
     def test_prune_names_keep_fresh_and_current_snapshots(self) -> None:
         old = backupset.RemoteSnapshot("20260801T120000Z", None, True)

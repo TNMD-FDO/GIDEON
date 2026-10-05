@@ -11,8 +11,10 @@ import shlex
 import stat
 import subprocess
 import sys
+import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -63,9 +65,6 @@ _IDENTITY_FIX: Final = (
 )
 _ACCOUNT_FIX: Final = "Run sudo python3 -m gideon host provision, then retry."
 _STAGE_FIX: Final = "Run sudo python3 -m gideon apply, then retry."
-_LINK_FIX: Final = (
-    "Confirm /data/backup-staging is one filesystem, then re-run backup run"
-)
 _PRUNE_FIX: Final = "Repair the staging directory, then re-run backup run."
 _SECRET_STAGE_FIX: Final = (
     "Correct /etc/gideon/secrets, /etc/gideon/backup_age_recipient, and "
@@ -413,8 +412,8 @@ def _files_stage(
             StageResult(
                 "files",
                 False,
-                "no hard links to the previous set; a full copy would hide a retention overrun",
-                _LINK_FIX,
+                backuproots.LINK_PROBLEM,
+                backuproots.LINK_FIX,
             ),
             verdict,
         )
@@ -427,6 +426,34 @@ def _files_stage(
             "",
         ),
         verdict,
+    )
+
+
+@contextmanager
+def _timed(seconds: dict[str, float], stage: str, *, measured: bool) -> Iterator[None]:
+    """Record a stage's elapsed seconds; zero under a supplied clock, as ``finished`` is."""
+
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        seconds[stage] = time.monotonic() - started if measured else 0.0
+
+
+def _complete_stage(roots: tuple[backuproots.TakingRoot, ...]) -> StageResult:
+    acted = 0
+    objects = 0
+    for root in roots:
+        outcome = root.complete()
+        if isinstance(outcome, Problem):
+            return StageResult("complete", False, outcome.problem, outcome.fix or _STAGE_FIX)
+        acted += outcome.acted
+        objects += outcome.objects
+    return StageResult(
+        "complete",
+        True,
+        f"completed {acted} root(s); {objects} object(s) arrived since the first pass",
+        "",
     )
 
 
@@ -731,12 +758,16 @@ def _manifest_stage(
     gideon_ids: backupset.AccountIds,
 ) -> tuple[StageResult, backupset.Manifest | None, int]:
     inventory: dict[str, tuple[backupset.Entry, ...]] = {}
+    listings: dict[str, backupset.ListingPin] = {}
     set_bytes = 0
     for root in roots:
         outcome = root.inventory()
         if isinstance(outcome, Problem):
             return StageResult("manifest", False, outcome.problem, outcome.fix or _STAGE_FIX), None, 0
-        inventory[root.name] = outcome.entries
+        if outcome.pin is None or outcome.entries:
+            inventory[root.name] = outcome.entries
+        if outcome.pin is not None:
+            listings[root.name] = outcome.pin
         set_bytes += outcome.set_bytes
 
     commit = _commit_for(io, checkout)
@@ -761,6 +792,7 @@ def _manifest_stage(
         links,
         secrets_fingerprint,
         gideon_ids,
+        listings,
     )
     manifest_path = os.path.join(partial, backupset.MANIFEST_NAME)
     try:
@@ -836,14 +868,17 @@ def _applied_stage(
     started: datetime,
     finished: datetime,
     inventory: Mapping[str, Sequence[backupset.Entry]],
+    listings: Mapping[str, backupset.ListingPin],
     set_bytes: int,
     links: backupset.LinkVerdict,
     pruned: int,
+    stage_seconds: Mapping[str, float],
 ) -> StageResult:
     files = {
         name: sum(entry.kind == "f" for entry in entries)
         for name, entries in inventory.items()
     }
+    files.update({name: pin.objects for name, pin in listings.items()})
     duration = max(0.0, (finished - started).total_seconds())
     row = audit.AuditRow(
         run_id,
@@ -860,6 +895,7 @@ def _applied_stage(
             "pgbackrest_type": pg.backup_type,
             "archive_through": pg.archive_through.isoformat(),
             "duration_s": duration,
+            "stage_seconds": dict(stage_seconds),
             "set_bytes": set_bytes,
             "files": files,
             "hard_links": {"sampled": links.sampled, "linked": links.linked},
@@ -892,7 +928,7 @@ def run_backup_run(
     now: datetime | None = None,
     pre_restore: bool = False,
 ) -> int:
-    """Run the eight ordered stages that create one local backup set."""
+    """Run the nine ordered stages that create one local backup set."""
 
     io = host or RealHost()
     if io.geteuid() != 0:
@@ -960,30 +996,35 @@ def _backup_run_body(
     partial = backupset.partial_dir(label)
     final = backupset.set_dir(label)
     run_id = str(uuid.uuid4())
+    stage_seconds: dict[str, float] = {}
+    measured = not now_was_supplied
 
-    intent = _intent_stage(
-        io,
-        rendered_dir,
-        run_id=run_id,
-        label=label,
-        kind=kind,
-        previous_label=previous.label if previous is not None else None,
-    )
+    with _timed(stage_seconds, "intent", measured=measured):
+        intent = _intent_stage(
+            io,
+            rendered_dir,
+            run_id=run_id,
+            label=label,
+            kind=kind,
+            previous_label=previous.label if previous is not None else None,
+        )
     print_stage(intent)
     if not intent.ok:
         return 1
 
     roots = backuproots.taking(io, backupset.inventory_roots(checkout_text), partial, previous)
-    files, links = _files_stage(
-        io, roots=roots
-    )
+    with _timed(stage_seconds, "files", measured=measured):
+        files, links = _files_stage(
+            io, roots=roots
+        )
     print_stage(files)
     if not files.ok:
         return 1
 
-    secrets_result, secrets_stage = _secrets_stage(
-        io, recipients=recipients, partial=partial
-    )
+    with _timed(stage_seconds, "secrets", measured=measured):
+        secrets_result, secrets_stage = _secrets_stage(
+            io, recipients=recipients, partial=partial
+        )
     print_stage(secrets_result)
     if not secrets_result.ok or secrets_stage is None:
         return 1
@@ -993,55 +1034,65 @@ def _backup_run_body(
         or bool(getattr(args, "full", False))
         or getattr(args, "label", None) is not None
     )
-    postgres_result, pg = _postgres_stage(
-        io,
-        rendered_dir,
-        info=info,
-        full_requested=full_requested,
-        kind=kind,
-        now=started,
-        now_was_supplied=now_was_supplied,
-    )
+    with _timed(stage_seconds, "postgres", measured=measured):
+        postgres_result, pg = _postgres_stage(
+            io,
+            rendered_dir,
+            info=info,
+            full_requested=full_requested,
+            kind=kind,
+            now=started,
+            now_was_supplied=now_was_supplied,
+        )
     print_stage(postgres_result)
     if not postgres_result.ok or pg is None:
         return 1
 
-    counts_result, row_counts = _counts_stage(io, rendered_dir)
+    with _timed(stage_seconds, "complete", measured=measured):
+        complete = _complete_stage(roots)
+    print_stage(complete)
+    if not complete.ok:
+        return 1
+
+    with _timed(stage_seconds, "counts", measured=measured):
+        counts_result, row_counts = _counts_stage(io, rendered_dir)
     print_stage(counts_result)
     if not counts_result.ok or row_counts is None:
         return 1
 
     finished = started if now_was_supplied else datetime.now(UTC)
-    manifest_result, manifest, set_bytes = _manifest_stage(
-        io,
-        partial=partial,
-        final=final,
-        roots=roots,
-        previous=previous,
-        started=started,
-        finished=finished,
-        label=label,
-        kind=kind,
-        config=config,
-        pg=pg,
-        row_counts=row_counts,
-        tarball_sha256=secrets_stage.tarball_sha256,
-        recipients=recipients,
-        links=links,
-        checkout=checkout_text,
-        secrets_fingerprint=secrets_stage.fingerprint,
-        gideon_ids=gideon_ids,
-    )
+    with _timed(stage_seconds, "manifest", measured=measured):
+        manifest_result, manifest, set_bytes = _manifest_stage(
+            io,
+            partial=partial,
+            final=final,
+            roots=roots,
+            previous=previous,
+            started=started,
+            finished=finished,
+            label=label,
+            kind=kind,
+            config=config,
+            pg=pg,
+            row_counts=row_counts,
+            tarball_sha256=secrets_stage.tarball_sha256,
+            recipients=recipients,
+            links=links,
+            checkout=checkout_text,
+            secrets_fingerprint=secrets_stage.fingerprint,
+            gideon_ids=gideon_ids,
+        )
     print_stage(manifest_result)
     if not manifest_result.ok or manifest is None:
         return 1
 
-    prune_result, pruned = _prune_stage(
-        io,
-        now=finished,
-        local_days=config.backup.local_days,
-        final=final,
-    )
+    with _timed(stage_seconds, "prune", measured=measured):
+        prune_result, pruned = _prune_stage(
+            io,
+            now=finished,
+            local_days=config.backup.local_days,
+            final=final,
+        )
     print_stage(prune_result)
     if not prune_result.ok:
         return 1
@@ -1056,9 +1107,11 @@ def _backup_run_body(
         started=started,
         finished=finished,
         inventory=manifest.inventory,
+        listings=manifest.listings,
         set_bytes=set_bytes,
         links=links,
         pruned=pruned,
+        stage_seconds=stage_seconds,
     )
     print_stage(applied)
     return int(not applied.ok)
@@ -1090,7 +1143,7 @@ def _push_preconditions(
     *,
     site_path: PathLike,
     rendered_dir: PathLike,
-) -> tuple[SiteConfig, backupset.SetRef] | None:
+) -> tuple[SiteConfig, backupset.SetRef, tuple[backupset.SetRef, ...]] | None:
     loaded = site.load_site(Path(site_path), host=io)
     if loaded.errors or loaded.config is None:
         _refuse(
@@ -1163,7 +1216,7 @@ def _push_preconditions(
             command="backup push",
         )
         return None
-    return config, newest
+    return config, newest, sets
 
 
 def _push_record_stage(
@@ -1343,12 +1396,48 @@ def parse_rsync_stats(stdout: str) -> PushStats | None:
     return PushStats(values["file size"], values["transferred file size"])
 
 
+def _arrived_bytes(
+    io: Host,
+    config: SiteConfig,
+    *,
+    previous: backupset.RemoteSnapshot,
+    local_set: backupset.SetRef,
+    local_sets: Sequence[backupset.SetRef],
+) -> int:
+    """The bytes the newest set's roots hold that the previous snapshot's newest set did not.
+
+    A record that cannot be read, or a set gone from staging, leaves no set to
+    compare against, so each root counts all it holds as new: the guard is then
+    blind to that root for one push rather than misreading a first load.
+    """
+
+    record = read_push_record(io, config, previous.label)
+    previous_manifest = None
+    if isinstance(record, backupset.PushRecord):
+        previous_manifest = next(
+            (ref.manifest for ref in local_sets if ref.complete and ref.label == record.newest_set),
+            None,
+        )
+    if local_set.manifest is None:
+        return 0
+    return sum(
+        root.arrived(previous_manifest)
+        for root in backuproots.pushed(
+            io,
+            backupset.inventory_roots(local_set.manifest.checkout),
+            local_set.manifest,
+            local_set.label,
+        )
+    )
+
+
 def _push_stage(
     io: Host,
     config: SiteConfig,
     *,
     label: str,
     previous: backupset.RemoteSnapshot | None,
+    arrived: int,
 ) -> tuple[StageResult, PushStats | None]:
     argv = [
         "rsync",
@@ -1389,7 +1478,7 @@ def _push_stage(
             ),
             None,
         )
-    if previous is not None and stats.transferred_bytes > 0.9 * stats.total_bytes:
+    if previous is not None and stats.transferred_bytes - arrived > 0.9 * (stats.total_bytes - arrived):
         return (
             StageResult(
                 "push",
@@ -1573,7 +1662,7 @@ def _push_check_input(
 
     sampled: list[tuple[str, str]] = []
     for root in backuproots.pushed(
-        backupset.inventory_roots(remote_manifest.checkout), remote_manifest, local_set.label
+        io, backupset.inventory_roots(remote_manifest.checkout), remote_manifest, local_set.label
     ):
         outcome = root.check(verify_all=verify_all)
         if isinstance(outcome, Problem):
@@ -1780,7 +1869,7 @@ def _backup_push_body(
     )
     if prerequisites is None:
         return 1
-    config, local_set = prerequisites
+    config, local_set, local_sets = prerequisites
     label = backupset.nightly_label(started)
     run_id = str(uuid.uuid4())
     verify_all = bool(getattr(args, "verify_all", False))
@@ -1800,8 +1889,13 @@ def _backup_push_body(
     if not list_result.ok:
         return 1
 
+    arrived = (
+        _arrived_bytes(io, config, previous=previous, local_set=local_set, local_sets=local_sets)
+        if previous is not None
+        else 0
+    )
     push_result, stats = _push_stage(
-        io, config, label=label, previous=previous
+        io, config, label=label, previous=previous, arrived=arrived
     )
     print_stage(push_result)
     if not push_result.ok or stats is None:

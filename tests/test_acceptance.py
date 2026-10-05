@@ -2,6 +2,7 @@
 
 import ast
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -18,7 +19,7 @@ from unittest.mock import patch
 
 import yaml  # type: ignore[import-untyped]
 
-from gideon.host import backupset, stack, stages
+from gideon.host import backuproots, backupset, cas, stack, stages
 from gideon.host import install as host_install
 from gideon.host import restore as host_restore
 from gideon.host import site as host_site
@@ -48,6 +49,7 @@ from tools.acceptance.run import (
 from tools.pinwatch.fetch import FetchError, Response
 
 ROOT = Path(__file__).resolve().parent.parent
+STORE_ROW = next(root for root in backupset.inventory_roots("/repo") if root.kind is backupset.RootKind.STORE)
 SITE = ROOT / "config/site.example.yaml"
 TEMPLATE = ROOT / "tools/acceptance/domain.xml.tmpl"
 LOCK = ROOT / "host.lock"
@@ -555,6 +557,23 @@ def restore_context(
     return host, ctx, manifest
 
 
+def restore_context_with_store(
+    *, free_space: int = 200
+) -> tuple[FakeHost, HarnessContext, backupset.Manifest, str]:
+    host, ctx, value = restore_context(free_space=free_space)
+    name = hashlib.sha256(b"fictitious object bytes").hexdigest()
+    listing = f"{name}\t{len(b'fictitious object bytes')}\n"
+    pin = backupset.ListingPin(
+        f"{STORE_ROW.name}.listing", len(listing.encode()), hashlib.sha256(listing.encode()).hexdigest(),
+        len(listing.splitlines()), len(b"fictitious object bytes"),
+    )
+    pinned = replace(value, listings={STORE_ROW.name: pin})
+    host.files[backupset.set_dir(value.label) + "/manifest.json"] = pinned.to_json()
+    assert ctx.restore_set is not None
+    ctx.restore_set = replace(ctx.restore_set, manifest=pinned)
+    return host, ctx, pinned, name
+
+
 def vm_root_argv(ctx: HarnessContext, script: str) -> tuple[str, ...]:
     return tuple(vm.ssh_argv(ctx, f"sudo {script}"))
 
@@ -771,6 +790,10 @@ class HarnessCli(unittest.TestCase):
             FULL_RESTORE_IDENTIFIERS.index("restore"),
             FULL_RESTORE_IDENTIFIERS.index("snapshot") + 1,
         )
+        self.assertEqual(
+            FULL_RESTORE_IDENTIFIERS.index("store"),
+            FULL_RESTORE_IDENTIFIERS.index("counts") + 1,
+        )
         self.assertEqual(FULL_RESTORE_IDENTIFIERS[1], "set")
         self.assertEqual(
             FULL_RESTORE_IDENTIFIERS[FULL_RESTORE_IDENTIFIERS.index("apply-2")],
@@ -854,6 +877,28 @@ class HarnessCli(unittest.TestCase):
 
 
 class FullRestoreContracts(unittest.TestCase):
+    def test_set_size_includes_pinned_store_bytes(self) -> None:
+        host, ctx, value, _name = restore_context_with_store()
+        pin = value.listings[STORE_ROW.name]
+        inventory_bytes = sum(entry.size for entries in value.inventory.values() for entry in entries)
+
+        result = fullrestore.select_set(ctx)
+
+        self.assertTrue(result.ok, result.detail)
+        assert ctx.restore_set is not None
+        self.assertEqual(fullrestore._set_size(ctx.restore_set), inventory_bytes + pin.bytes)
+        self.assertIn(f"{inventory_bytes + pin.bytes} bytes", result.detail)
+        self.assertIn("200 bytes free", result.detail)
+        self.assertTrue(any(call[0][:2] == ("df", "-B1") for call in host.calls))
+
+        too_small, selected, _value, _name = restore_context_with_store(
+            free_space=4 * (inventory_bytes + pin.bytes) - 1
+        )
+        refused = fullrestore.select_set(selected)
+        self.assertFalse(refused.ok)
+        self.assertIn(f"at least {4 * (inventory_bytes + pin.bytes)} bytes", refused.detail)
+        self.assertTrue(any(call[0][:2] == ("df", "-B1") for call in too_small.calls))
+
     def test_set_refuses_when_no_complete_set_exists(self) -> None:
         host = FakeHost()
         result = fullrestore.select_set(harness_context(host))
@@ -1109,6 +1154,100 @@ class FullRestoreContracts(unittest.TestCase):
         forward = restore_argv.index("-R")
         self.assertEqual(restore_argv[forward + 1], "127.0.0.1:5000:127.0.0.1:5000")
         self.assertIn("ExitOnForwardFailure=yes", restore_argv)
+
+    def test_restore_requires_the_pinned_store_clause_ending_with_nothing_left_out(self) -> None:
+        host, ctx, value, _name = restore_context_with_store()
+        ctx.snapshot_label = "20260917T020000Z"
+        base = (
+            f"select: ok — snapshot={ctx.snapshot_label}\n"
+            f"pre-restore: ok — {host_restore.FRESH_STACK_SKIPPED_DETAIL}\n"
+            f"fetch: ok — selected set {value.label}\n"
+        )
+        ending = "next: ok — restored\nSecrets: a rebuilt box\n"
+        command = vm_product_argv(
+            ctx, ["python3", "-m", "gideon", "restore", "--from", "target"],
+            "restore.txt", forwards=(fullrestore.REGISTRY_FORWARD,),
+        )
+        good_clause = f"{STORE_ROW.name}: added 1 object(s), {backuproots.NOTHING_LEFT_OUT_DETAIL}"
+        for clause, expected in ((good_clause, True), (f"{STORE_ROW.name}: added 0 object(s), 1 left out", False)):
+            with self.subTest(clause=clause):
+                host.commands[command] = completed(
+                    command,
+                    stdout=base + f"files: ok — {clause}; {host_restore.REOWN_MAPPED_DETAIL}\n" + ending,
+                )
+                result = fullrestore.restore_target(ctx)
+                self.assertEqual(result.ok, expected)
+                if not expected:
+                    self.assertIn("store clause", result.detail)
+
+    def test_store_stage_checks_objects_owners_group_and_modes(self) -> None:
+        host, ctx, value, name = restore_context_with_store()
+        pin = value.listings[STORE_ROW.name]
+        root = Path(STORE_ROW.source)
+        object_path = cas.object_path(name, root)
+        group_command = vm_root_argv(ctx, "getent group gideon")
+        find_script = shlex.join(["find", str(root), "-mindepth", "1", "-printf", r"%p\0%y\0%U\0%G\0%m\0"])
+        find_command = vm_root_argv(ctx, find_script)
+
+        def record(path: Path, kind: str, uid: int, mode: int, *, gid: int = 983) -> str:
+            return "\0".join((str(path), kind, str(uid), str(gid), f"{mode:o}")) + "\0"
+
+        records = "".join(
+            record(path, kind, 0, mode)
+            for path, kind, mode in (
+                (object_path.parent.parent, "d", cas.DIRECTORY_MODE),
+                (object_path.parent, "d", cas.DIRECTORY_MODE),
+                (object_path, "f", cas.OBJECT_MODE),
+            )
+        )
+        host.commands[group_command] = completed(group_command, stdout="gideon:x:983:\n")
+        host.commands[find_command] = completed(find_command, stdout=records)
+
+        result = fullrestore.store(ctx)
+
+        self.assertTrue(result.ok, result.detail)
+        self.assertIn(f"{pin.objects} object(s)", result.detail)
+        self.assertEqual([call[0] for call in host.calls], [group_command, find_command])
+
+        for listing, offender in (
+            (record(object_path, "f", 1, cas.OBJECT_MODE), str(object_path)),
+            (record(object_path, "f", 0, cas.OBJECT_MODE, gid=984), str(object_path)),
+            (record(object_path.parent, "d", 0, 0o755), str(object_path.parent)),
+            (record(object_path, "l", 0, cas.OBJECT_MODE), str(object_path)),
+        ):
+            with self.subTest(offender=offender, listing=listing):
+                host.commands[find_command] = completed(find_command, stdout=listing)
+                refused = fullrestore.store(ctx)
+                self.assertFalse(refused.ok)
+                self.assertIn(offender, refused.detail)
+
+        host.commands[find_command] = completed(find_command, stdout="")
+        missing = fullrestore.store(ctx)
+        self.assertFalse(missing.ok)
+        self.assertIn(f"set pins {pin.objects}", missing.detail)
+
+    def test_store_stage_skips_a_set_without_a_pin_and_refuses_failed_vm_tools(self) -> None:
+        host, ctx, _value = restore_context()
+        skipped = fullrestore.store(ctx)
+        self.assertTrue(skipped.ok)
+        self.assertIn("skipped", skipped.detail)
+        self.assertEqual(host.calls, [])
+
+        host, ctx, _value, _name = restore_context_with_store()
+        group_command = vm_root_argv(ctx, "getent group gideon")
+        host.commands[group_command] = completed(group_command, returncode=1, stderr="denied")
+        refused = fullrestore.store(ctx)
+        self.assertFalse(refused.ok)
+        self.assertIn("gideon group", refused.detail)
+        self.assertIn("denied", refused.detail)
+
+        find_script = shlex.join(["find", STORE_ROW.source, "-mindepth", "1", "-printf", r"%p\0%y\0%U\0%G\0%m\0"])
+        find_command = vm_root_argv(ctx, find_script)
+        host.commands[group_command] = completed(group_command, stdout="gideon:x:983:\n")
+        host.commands[find_command] = completed(find_command, returncode=1, stderr="find denied")
+        refused = fullrestore.store(ctx)
+        self.assertFalse(refused.ok)
+        self.assertIn("find denied", refused.detail)
 
     def test_restore_checks_the_snapshot_fetch_skip_secrets_and_refusals(self) -> None:
         cases = (

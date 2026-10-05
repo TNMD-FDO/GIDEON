@@ -1,5 +1,6 @@
 """The local backup-set layout and its pure data model."""
 
+import dataclasses
 import json
 import math
 import os
@@ -12,7 +13,7 @@ from pathlib import PurePosixPath
 from typing import Final, Literal, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from gideon.host import nogpu
+from gideon.host import cas, nogpu
 from gideon.host.render import ARTIFACTS
 from gideon.host.render.pgbackrest import REPOSITORY_PATH
 from gideon.host.report import Problem
@@ -53,6 +54,7 @@ class RootKind(StrEnum):
 
     SNAPSHOT = "snapshot"
     REPOSITORY = "repository"
+    STORE = "store"
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,7 +105,7 @@ def etc_gideon_exclusions() -> tuple[str, ...]:
 
 
 def inventory_roots(checkout: str) -> tuple[InventoryRoot, ...]:
-    """Return the ordered five-root inventory registry."""
+    """Return the ordered backup-root registry."""
 
     # A root a container writes under an id of its image's own would carry
     # its ownership policy here, beside restore_in_place; none does today.
@@ -115,6 +117,7 @@ def inventory_roots(checkout: str) -> tuple[InventoryRoot, ...]:
         InventoryRoot(
             "data-bulk-openwebui", FRONTEND_UPLOADS, (), RootKind.SNAPSHOT, True
         ),
+        InventoryRoot("data-bulk-cas", os.fspath(cas.ROOT), (".*",), RootKind.STORE, False),
         InventoryRoot("pgbackrest", REPOSITORY_PATH, (), RootKind.REPOSITORY, False),
     )
 
@@ -195,6 +198,34 @@ class AccountIds:
                 raise TypeError(f"AccountIds {field} must be an integer")
             if value < 0:
                 raise ValueError(f"AccountIds {field} must be non-negative")
+
+
+@dataclass(frozen=True, slots=True)
+class ListingPin:
+    """The file and figures that pin a store root's object listing."""
+
+    file: str
+    size: int
+    sha256: str
+    objects: int
+    bytes: int
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.file, str)
+            or not self.file
+            or os.path.basename(self.file) != self.file
+            or self.file in (".", "..")
+        ):
+            raise ValueError("ListingPin file must be a file name")
+        for name in ("size", "objects", "bytes"):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise TypeError(f"ListingPin {name} must be an integer")
+            if value < 0:
+                raise ValueError(f"ListingPin {name} must be non-negative")
+        if not isinstance(self.sha256, str) or _SHA256.fullmatch(self.sha256) is None:
+            raise ValueError("ListingPin sha256 must be hexadecimal")
 
 
 def gideon_account_ids(host: Host) -> AccountIds | None:
@@ -506,6 +537,7 @@ class Manifest:
     hard_links: LinkVerdict
     secrets_fingerprint: str
     gideon_ids: AccountIds | None = None
+    listings: Mapping[str, ListingPin] = dataclasses.field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if (
@@ -525,6 +557,11 @@ class Manifest:
             )
         if self.gideon_ids is not None and not isinstance(self.gideon_ids, AccountIds):
             raise TypeError("Manifest gideon_ids must be AccountIds or None")
+        if not isinstance(self.listings, Mapping) or any(
+            not isinstance(name, str) or not name or not isinstance(pin, ListingPin)
+            for name, pin in self.listings.items()
+        ):
+            raise TypeError("Manifest listings must map root names to ListingPin")
         for field in ("started", "finished", "archive_through"):
             object.__setattr__(self, field, _utc(getattr(self, field), field))
 
@@ -567,6 +604,17 @@ class Manifest:
             document["gideon_ids"] = {
                 "gid": self.gideon_ids.gid,
                 "uid": self.gideon_ids.uid,
+            }
+        if self.listings:
+            document["listings"] = {
+                name: {
+                    "file": pin.file,
+                    "size": pin.size,
+                    "sha256": pin.sha256,
+                    "objects": pin.objects,
+                    "bytes": pin.bytes,
+                }
+                for name, pin in self.listings.items()
             }
         return json.dumps(document, indent=1, sort_keys=True) + "\n"
 
@@ -635,6 +683,27 @@ def _parse_manifest_document(document: object) -> Manifest:
             _entry_from_json(value, f"inventory.{root}[{index}]")
             for index, value in enumerate(entries_value)
         )
+
+    listings_value = document.get("listings", _MISSING)
+    listings: dict[str, ListingPin] = {}
+    if listings_value is not _MISSING:
+        for root, pin_value in _mapping_field(listings_value, "listings").items():
+            if not isinstance(root, str) or not root:
+                raise _ParseError(_field_problem("listings", "root names must be non-empty strings"))
+            pin = _mapping_field(pin_value, f"listings.{root}")
+            file = pin.get("file", _MISSING)
+            if not isinstance(file, str) or not file or os.path.basename(file) != file or file in (".", ".."):
+                raise _ParseError(_field_problem(f"listings.{root}.file", "must be a file name"))
+            sha256 = pin.get("sha256", _MISSING)
+            if not isinstance(sha256, str) or _SHA256.fullmatch(sha256) is None:
+                raise _ParseError(_field_problem(f"listings.{root}.sha256", "must be hexadecimal"))
+            listings[root] = ListingPin(
+                file,
+                _integer(pin.get("size", _MISSING), f"listings.{root}.size", nonnegative=True),
+                sha256.lower(),
+                _integer(pin.get("objects", _MISSING), f"listings.{root}.objects", nonnegative=True),
+                _integer(pin.get("bytes", _MISSING), f"listings.{root}.bytes", nonnegative=True),
+            )
 
     tarball_sha256 = _string_field(document, "tarball_sha256")
     if _SHA256.fullmatch(tarball_sha256) is None:
@@ -711,6 +780,7 @@ def _parse_manifest_document(document: object) -> Manifest:
             LinkVerdict(sampled, linked),
             secrets_fingerprint.lower(),
             gideon_ids,
+            listings,
         )
     except (TypeError, ValueError) as exc:
         raise _ParseError(_field_problem("manifest", str(exc))) from exc
@@ -842,6 +912,12 @@ def files_dir(set_path: PathLike) -> str:
     """Return the directory holding a set's copied roots."""
 
     return os.path.join(os.fspath(set_path), FILES_DIR)
+
+
+def listing_path(set_path: PathLike, root_name: str) -> str:
+    """Return the listing path beside a set's manifest."""
+
+    return os.path.join(os.fspath(set_path), f"{root_name}.listing")
 
 
 def list_sets(host: Host, staging: PathLike = STAGING) -> tuple[SetRef, ...]:
