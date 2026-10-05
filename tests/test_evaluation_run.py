@@ -30,6 +30,7 @@ from gideon.cli import build_parser, main
 from gideon.evaluation import (
     challenger,
     command,
+    evalset,
     judge,
     reference,
     signoffs,
@@ -39,7 +40,7 @@ from gideon.evaluation import (
 from gideon.evaluation.evalset import SET_ROOT, LoadedSet, load_set, select_cases
 from gideon.evaluation.extraction_slice import run_extraction
 from gideon.evaluation.results import CaseResult, RunContext, SliceResult
-from gideon.evaluation.slices import SLICE_RUNNERS
+from gideon.evaluation.slices import SLICE_RUNNERS, SMOKE_PARTS, CallSurface
 from gideon.extraction import KEYED_TYPES, SECTION_TYPES, ExactObject, extract
 from gideon.extraction.scoring import MIN_RECALL
 from gideon.host import backuplock, nogpu
@@ -1181,7 +1182,7 @@ class EngineStackAndLock(unittest.TestCase):
 
     def test_ci_refusals_are_registry_driven_before_the_lock(self) -> None:
         for slice_name, spec in SLICE_RUNNERS.items():
-            if spec.drives_turns or spec.judge_prompt is not None:
+            if CallSurface.TURNS in spec.surfaces or spec.judge_prompt is not None:
                 continue
             with self.subTest(slice_name=slice_name):
                 if absent_from_export(f"eval/sets/eval-v1/slices/{slice_name}", ROOT):
@@ -1602,7 +1603,65 @@ class RunnerSelection(unittest.TestCase):
 
 
 class SliceRegistry(unittest.TestCase):
-    """Every registered slice names a prompt that exists and a reference it reads."""
+    """Contracts for the registered slices' categories, settings, and surfaces."""
+
+    def test_categories_are_loader_shape_keys(self) -> None:
+        for slice_name, spec in SLICE_RUNNERS.items():
+            with self.subTest(slice_name=slice_name):
+                self.assertTrue(spec.categories <= evalset.SHAPE_REGISTRY.keys())
+
+    def test_no_category_is_named_by_two_entries(self) -> None:
+        owners: dict[tuple[str, str], str] = {}
+        for slice_name, spec in SLICE_RUNNERS.items():
+            for category in spec.categories:
+                with self.subTest(category=category):
+                    self.assertNotIn(category, owners)
+                    owners[category] = slice_name
+
+    def test_committed_counted_cases_match_their_entry_categories(self) -> None:
+        loaded = load_set(ROOT / SET_ROOT).loaded
+        self.assertIsNotNone(loaded)
+        assert loaded is not None
+        for slice_name, spec in SLICE_RUNNERS.items():
+            if slice_name == "smoke":
+                continue
+            with self.subTest(slice_name=slice_name):
+                if absent_from_export(f"eval/sets/eval-v1/slices/{slice_name}", ROOT):
+                    self.skipTest("in an export this slice's lists and cases are absent")
+                self.assertTrue(spec.categories)
+                counted = select_cases(loaded, slice_name).counted
+                self.assertTrue(counted)
+                for case_id in counted:
+                    case = loaded.cases_by_id[case_id]
+                    self.assertIn((case["suite"], case["category"]), spec.categories)
+
+    def test_committed_smoke_cases_route_to_a_handed_part(self) -> None:
+        loaded = load_set(ROOT / SET_ROOT).loaded
+        self.assertIsNotNone(loaded)
+        assert loaded is not None
+        counted = select_cases(loaded, "smoke").counted
+        self.assertTrue(counted)
+        for case_id in counted:
+            case = loaded.cases_by_id[case_id]
+            with self.subTest(case_id=case_id):
+                self.assertTrue(
+                    any(
+                        (case["suite"], case["category"]) in part.categories
+                        for part in SMOKE_PARTS.values()
+                    )
+                )
+
+    def test_engine_reaching_smoke_parts_count_their_turns(self) -> None:
+        for name, part in SMOKE_PARTS.items():
+            if CallSurface.ENGINE in part.surfaces:
+                with self.subTest(name=name):
+                    self.assertIsNotNone(part.turn_calls)
+
+    def test_smoke_surfaces_are_the_union_of_its_parts(self) -> None:
+        self.assertEqual(
+            SLICE_RUNNERS["smoke"].surfaces,
+            frozenset(surface for part in SMOKE_PARTS.values() for surface in part.surfaces),
+        )
 
     def test_judge_prompts_are_registered(self) -> None:
         for slice_name, spec in SLICE_RUNNERS.items():
@@ -1619,25 +1678,19 @@ class SliceRegistry(unittest.TestCase):
             with self.subTest(slice_name=slice_name):
                 self.assertTrue(SLICE_RUNNERS[slice_name].compares_reference)
 
-    def test_takes_ranked_is_boolean_and_only_judgments_takes_one(self) -> None:
+    def test_only_judgments_names_the_ranked_file_surface(self) -> None:
         for slice_name, spec in SLICE_RUNNERS.items():
             with self.subTest(slice_name=slice_name):
-                self.assertIs(type(spec.takes_ranked), bool)
-        self.assertTrue(SLICE_RUNNERS["judgments"].takes_ranked)
-        self.assertTrue(
-            all(
-                not spec.takes_ranked
-                for slice_name, spec in SLICE_RUNNERS.items()
-                if slice_name != "judgments"
-            )
-        )
-
-    def test_drives_turns_is_true_only_for_turn_driven_slices(self) -> None:
-        for slice_name, spec in SLICE_RUNNERS.items():
-            with self.subTest(slice_name=slice_name):
-                self.assertIs(type(spec.drives_turns), bool)
                 self.assertEqual(
-                    spec.drives_turns,
+                    CallSurface.RANKED_FILE in spec.surfaces,
+                    slice_name == "judgments",
+                )
+
+    def test_only_turn_driven_slices_name_the_turns_surface(self) -> None:
+        for slice_name, spec in SLICE_RUNNERS.items():
+            with self.subTest(slice_name=slice_name):
+                self.assertEqual(
+                    CallSurface.TURNS in spec.surfaces,
                     slice_name in {"guardrails", "general-smoke", "smoke"},
                 )
 
@@ -1661,6 +1714,12 @@ class SliceRegistry(unittest.TestCase):
         self.assertEqual(
             {name for name, spec in SLICE_RUNNERS.items() if spec.engine_calls is not None},
             {"smoke"},
+        )
+
+    def test_turn_count_is_set_only_for_guardrails(self) -> None:
+        self.assertEqual(
+            {name for name, spec in SLICE_RUNNERS.items() if spec.turn_calls is not None},
+            {"guardrails"},
         )
 
     def test_decision_slices_run_one_repeat_per_call(self) -> None:

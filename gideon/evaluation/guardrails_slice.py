@@ -166,6 +166,10 @@ def _reading(class_name: str | None) -> str | None:
     return READINGS[0] if class_name in INSTRUCTED_CLASSES else READINGS[1]
 
 
+def _drives_frontend(case_id: str, category: str) -> bool:
+    return case_id in FRONTEND_SAMPLE or category == TIER_2_CATEGORY
+
+
 @dataclass(frozen=True, slots=True)
 class _Outcome:
     """One case's facts at the door and, for a sampled or instructed row, at the frontend."""
@@ -671,7 +675,7 @@ def _progress(outcome: _Outcome) -> str:
         else outcome.door_class or "error"
     )
     line = f"guardrails {outcome.case_id}: {door}; seconds {seconds}"
-    if outcome.case_id in FRONTEND_SAMPLE or outcome.instructed:
+    if _drives_frontend(outcome.case_id, outcome.family):
         frontend = (
             run.CUT_AT
             if outcome.frontend_problem == "turn-cut"
@@ -825,7 +829,7 @@ def run_guardrails(eval_set: LoadedSet, slice_name: str, context: RunContext) ->
             monotonic=time.monotonic,
         )
         outcome = _door_outcome(case, row)
-        if turn_case.id in FRONTEND_SAMPLE or outcome.instructed:
+        if _drives_frontend(turn_case.id, category):
             context.checkpoint()
             (
                 frontend_class,
@@ -856,6 +860,23 @@ def run_guardrails(eval_set: LoadedSet, slice_name: str, context: RunContext) ->
     if context.judge_prompt_id is not None:
         collected = _read_controls(eval_set, context, collected)
     return _slice_result(tuple(collected), tuple(opening))
+
+
+def turn_calls(eval_set: LoadedSet, slice_name: str) -> int:
+    """Count the engine calls of a run in which every counted case reaches its turns.
+
+    Each turn is one call: one at the door per case, and one more at the
+    frontend for a sampled or instructed case. A case stopped earlier — its
+    seed unavailable, the door refused, no turn access — makes fewer, never
+    more. The judge's readings of controls are the context's and depend on
+    the answers, so they are not counted.
+    """
+
+    counted = select_cases(eval_set, slice_name).counted
+    return len(counted) + sum(
+        _drives_frontend(case_id, cast(str, eval_set.cases_by_id[case_id]["category"]))
+        for case_id in counted
+    )
 
 
 def _slice_result(outcomes: tuple[_Outcome, ...], head: tuple[str, ...]) -> SliceResult:

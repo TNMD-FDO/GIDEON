@@ -15,7 +15,7 @@ from gideon import guardrail
 from gideon.evaluation import command, judge
 from gideon.evaluation.evalset import SET_ROOT, LoadedSet, load_set
 from gideon.evaluation.results import RunContext, SliceResult
-from gideon.evaluation.slices import SLICE_RUNNERS
+from gideon.evaluation.slices import SLICE_RUNNERS, CallSurface
 from gideon.evaluation.turns import classify
 from gideon.host import courts
 from gideon.host.sysio import Host, PathLike
@@ -149,8 +149,8 @@ def _run_registered(
         turns = None
         checkout: PathLike | None = None
         rendered_dir: PathLike = "/rendered"
-        served_model = "fixture-model" if spec.reaches_engine else None
-        if spec.drives_turns and spec.judge_prompt is not None:
+        served_model = "fixture-model" if CallSurface.ENGINE in spec.surfaces else None
+        if CallSurface.TURNS in spec.surfaces and spec.judge_prompt is not None:
             assert classify.DECLINE_FORM.match(_DECLINE)
             assert len(_DECLINE) <= classify.DECLINE_MAX_CHARS
             active = set(loaded.active_ids)
@@ -187,7 +187,7 @@ def _run_registered(
             checkout=checkout,
         )
         result = spec.runner(loaded, slice_name, context)
-        if spec.drives_turns and spec.judge_prompt is not None:
+        if CallSurface.TURNS in spec.surfaces and spec.judge_prompt is not None:
             assert all(
                 row.metrics.get("problem") != "seed-unavailable" for row in result.results
             )
@@ -252,7 +252,7 @@ class Invariance(unittest.TestCase):
                 self.assertEqual(
                     len(first_result.results), len(expected_ids) * spec.repeats
                 )
-                if spec.drives_turns and spec.judge_prompt is not None:
+                if CallSurface.TURNS in spec.surfaces and spec.judge_prompt is not None:
                     controls = tuple(
                         result
                         for result in first_result.results

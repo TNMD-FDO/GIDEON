@@ -1,4 +1,4 @@
-"""Run the push gate's smoke: guardrails and extraction cases through their own runners.
+"""Run the push gate's smoke cases through the parts handed to it.
 
 A push gate blocks on two things only: a zero-tolerance case failing — a
 positive not blocked, a leak on any row, a turn that errored, a frontend
@@ -12,25 +12,23 @@ metrics, and nothing here prints or stores text.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from dataclasses import replace
-from typing import Final, cast
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
+from types import MappingProxyType
+from typing import TYPE_CHECKING, cast
 
-from gideon.evaluation import extraction_slice, guardrails_slice
+from gideon.evaluation import guardrails_slice
 from gideon.evaluation.evalset import LoadedSet, select_cases
 from gideon.evaluation.results import CaseResult, RunContext, SliceResult
 
-_RUNNERS: Final[Mapping[str, Callable[[LoadedSet, str, RunContext], SliceResult]]] = {
-    "guardrails": guardrails_slice.run_guardrails,
-    "build-gates": extraction_slice.run_extraction,
-}
-_PARTS: Final[tuple[str, ...]] = tuple(_RUNNERS)
+if TYPE_CHECKING:
+    from gideon.evaluation.slices import SliceSpec
 
 
 def _narrowed_set(
     eval_set: LoadedSet, slice_name: str, case_ids: tuple[str, ...]
 ) -> LoadedSet:
-    """Keep one suite's counted cases under the requested slice name."""
+    """Keep one part's counted cases under the requested slice name."""
 
     case_ids_set = set(case_ids)
     slice_lists = {
@@ -141,51 +139,76 @@ def _smoke_report(
     return passed, "\n".join(lines) + "\n"
 
 
-def run_smoke(eval_set: LoadedSet, slice_name: str, context: RunContext) -> SliceResult:
-    """Run the selected guardrails and extraction cases in registry order."""
+@dataclass(frozen=True, slots=True)
+class Composite:
+    """Route counted cases to the handed parts and sum their turn counts."""
 
-    selection = select_cases(eval_set, slice_name)
-    parts: dict[str, list[str]] = {name: [] for name in _PARTS}
-    unrouted: list[str] = []
-    for case_id in selection.counted:
-        suite = eval_set.cases_by_id[case_id].get("suite")
-        if suite in parts:
-            parts[suite].append(case_id)
-        else:
-            unrouted.append(case_id)
-
-    sub_results: dict[str, SliceResult] = {}
-    for suite in _PARTS:
-        case_ids = tuple(parts[suite])
-        if case_ids:
-            narrowed = _narrowed_set(eval_set, slice_name, case_ids)
-            sub_results[suite] = _RUNNERS[suite](narrowed, slice_name, context)
-
-    unrouted_results = tuple(
-        CaseResult(case_id, 1, "fail", {"problem": "unrouted-suite"})
-        for case_id in unrouted
+    parts: Mapping[str, SliceSpec]
+    _category_parts: Mapping[tuple[str, str], str] = field(
+        init=False, repr=False, compare=False
     )
-    results = tuple(
-        row for suite in _PARTS if suite in sub_results for row in sub_results[suite].results
-    ) + unrouted_results
-    verdict, report = _smoke_report(
-        sub_results.get("guardrails"),
-        sub_results.get("build-gates"),
-        results,
-        tuple(unrouted),
-    )
-    return SliceResult(verdict, report, results)
 
+    def __post_init__(self) -> None:
+        category_parts: dict[tuple[str, str], str] = {}
+        for name, spec in self.parts.items():
+            for category in spec.categories:
+                if category in category_parts:
+                    raise ValueError(f"category {category!r} belongs to more than one smoke part")
+                category_parts[category] = name
+        object.__setattr__(self, "_category_parts", MappingProxyType(category_parts))
 
-def engine_calls(eval_set: LoadedSet, slice_name: str) -> int:
-    """Count the guardrails door turns and the sample's frontend turns."""
+    def _group_cases(
+        self, eval_set: LoadedSet, slice_name: str
+    ) -> tuple[dict[str, tuple[str, ...]], tuple[str, ...]]:
+        parts: dict[str, list[str]] = {name: [] for name in self.parts}
+        unrouted: list[str] = []
+        for case_id in select_cases(eval_set, slice_name).counted:
+            case = eval_set.cases_by_id[case_id]
+            category = (cast(str, case["suite"]), cast(str, case["category"]))
+            name = self._category_parts.get(category)
+            if name is None:
+                unrouted.append(case_id)
+            else:
+                parts[name].append(case_id)
+        return {name: tuple(ids) for name, ids in parts.items()}, tuple(unrouted)
 
-    counted = select_cases(eval_set, slice_name).counted
-    guardrails = tuple(
-        case_id
-        for case_id in counted
-        if eval_set.cases_by_id[case_id].get("suite") == "guardrails"
-    )
-    return len(guardrails) + sum(
-        case_id in guardrails_slice.FRONTEND_SAMPLE for case_id in guardrails
-    )
+    def run(self, eval_set: LoadedSet, slice_name: str, context: RunContext) -> SliceResult:
+        """Run each part with its counted cases in mapping order."""
+
+        parts, unrouted = self._group_cases(eval_set, slice_name)
+        sub_results: dict[str, SliceResult] = {}
+        for name, spec in self.parts.items():
+            case_ids = parts[name]
+            if case_ids:
+                narrowed = _narrowed_set(eval_set, slice_name, case_ids)
+                sub_results[name] = spec.runner(narrowed, slice_name, context)
+
+        unrouted_results = tuple(
+            CaseResult(case_id, 1, "fail", {"problem": "unrouted-suite"})
+            for case_id in unrouted
+        )
+        results = tuple(
+            row
+            for name in self.parts
+            if name in sub_results
+            for row in sub_results[name].results
+        ) + unrouted_results
+        verdict, report = _smoke_report(
+            sub_results.get("guardrails"),
+            sub_results.get("extraction"),
+            results,
+            unrouted,
+        )
+        return SliceResult(verdict, report, results)
+
+    def engine_calls(self, eval_set: LoadedSet, slice_name: str) -> int:
+        """Sum the turns the parts drive over their counted cases."""
+
+        parts, _unrouted = self._group_cases(eval_set, slice_name)
+        total = 0
+        for name, spec in self.parts.items():
+            case_ids = parts[name]
+            if case_ids and spec.turn_calls is not None:
+                narrowed = _narrowed_set(eval_set, slice_name, case_ids)
+                total += spec.turn_calls(narrowed, slice_name)
+        return total

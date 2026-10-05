@@ -707,6 +707,49 @@ class FalseRefusal(unittest.TestCase):
 class GuardrailsRunner(unittest.TestCase):
     """The service and frontend turns expose only classified, content-free rows."""
 
+    def test_turn_count_matches_recorded_door_and_frontend_requests(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            loaded = _small_set(Path(directory) / "eval-v1")
+            counted = select_cases(loaded, "guardrails").counted
+            estimate = guardrails_slice.turn_calls(loaded, "guardrails")
+            for with_prompt in (False, True):
+                with self.subTest(with_prompt=with_prompt):
+                    host = JudgingDoorHost()
+                    _host, frontend, context = _fixture_turns(loaded, host=host)
+                    host.answers.update(_decline_answers(loaded)[0])
+                    result = _run_fixture(
+                        loaded,
+                        "guardrails",
+                        replace(
+                            context,
+                            judge_prompt_id=context.judge_prompt_id if with_prompt else None,
+                        ),
+                    )
+                    frontend_posts = sum(
+                        method == "POST" and path == "/api/chat/completions"
+                        for method, path, _body in frontend.calls
+                    )
+                    door_requests = sum(
+                        request.get("body") is not None for request in host.requests
+                    )
+                    self.assertEqual(len(result.results), len(counted))
+                    self.assertEqual(door_requests, len(counted))
+                    self.assertGreater(frontend_posts, 0)
+                    self.assertEqual(estimate, door_requests + frontend_posts)
+                    self.assertEqual(len(host.judge_requests), 2 if with_prompt else 0)
+
+    def test_committed_guardrails_turn_count_uses_counted_cases(self) -> None:
+        loaded = load_set(ROOT / SET_ROOT).loaded
+        self.assertIsNotNone(loaded)
+        assert loaded is not None
+        counted = select_cases(loaded, "guardrails").counted
+        expected = len(counted) + sum(
+            case_id in SAMPLE_IDS
+            or loaded.cases_by_id[case_id]["category"] == TIER_2_CATEGORY
+            for case_id in counted
+        )
+        self.assertEqual(guardrails_slice.turn_calls(loaded, "guardrails"), expected)
+
     def test_problem_vocabulary_matches_the_current_runner(self) -> None:
         self.assertEqual(
             guardrails_slice.PROBLEMS,

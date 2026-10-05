@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import inspect
 import os
 import shutil
 import tempfile
@@ -26,9 +27,15 @@ from gideon.evaluation import (
     smoke_slice,
     stacks,
 )
-from gideon.evaluation.evalset import SET_ROOT, LoadedSet, load_set, select_cases
+from gideon.evaluation.evalset import (
+    SET_ROOT,
+    TIER_2_CATEGORY,
+    LoadedSet,
+    load_set,
+    select_cases,
+)
 from gideon.evaluation.results import CaseResult, JSONValue, RunContext, SliceResult
-from gideon.evaluation.slices import SLICE_RUNNERS
+from gideon.evaluation.slices import SLICE_RUNNERS, SMOKE_PARTS
 from gideon.evaluation.turns import run as turn_run
 from gideon.host.sysio import PathLike
 from tools.exportboundary import absent_from_export
@@ -113,6 +120,19 @@ def _mutating_guardrails(
     return run
 
 
+def _composite_with_runner(
+    part_name: str, runner: Callable[[LoadedSet, str, RunContext], SliceResult]
+) -> smoke_slice.Composite:
+    """Replace one handed part's runner while preserving the parts' order."""
+
+    return smoke_slice.Composite(
+        {
+            name: replace(spec, runner=runner) if name == part_name else spec
+            for name, spec in SMOKE_PARTS.items()
+        }
+    )
+
+
 class CommandDoorHost(JudgingDoorHost):
     """The fake door host with the lock and sibling tree used by eval run."""
 
@@ -181,8 +201,10 @@ class SmokeRunner(unittest.TestCase):
                         metrics["frontend"] = {**frontend, "agrees": False}
                     return replace(row, metrics=metrics)
 
-                with patch.dict(smoke_slice._RUNNERS, {"guardrails": _mutating_guardrails(positive, mutation)}):
-                    result = smoke_slice.run_smoke(loaded, "smoke", context)
+                composite = _composite_with_runner(
+                    "guardrails", _mutating_guardrails(positive, mutation)
+                )
+                result = composite.run(loaded, "smoke", context)
                 self.assertFalse(result.verdict)
                 self.assertIn(positive, result.report)
                 self.assertIn(f"{cause} 1:", result.report)
@@ -208,8 +230,10 @@ class SmokeRunner(unittest.TestCase):
                 metrics["frontend"] = {**frontend, "agrees": True}
                 return replace(row, metrics=metrics)
 
-            with patch.dict(smoke_slice._RUNNERS, {"guardrails": _mutating_guardrails(positive, answered_without_figure)}):
-                result = smoke_slice.run_smoke(loaded, "smoke", context)
+            composite = _composite_with_runner(
+                "guardrails", _mutating_guardrails(positive, answered_without_figure)
+            )
+            result = composite.run(loaded, "smoke", context)
         self.assertTrue(result.verdict, result.report)
         self.assertIn("unblocked 0: none", result.report)
 
@@ -231,11 +255,11 @@ class SmokeRunner(unittest.TestCase):
                 metrics["frontend"] = {**frontend, "class": "replaced", "agrees": True}
                 return replace(row, metrics=metrics)
 
-            with (
-                patch.dict(smoke_slice._RUNNERS, {"guardrails": _mutating_guardrails(control, replace_control)}),
-                patch.object(extraction_slice, "extract", return_value=()),
-            ):
-                result = smoke_slice.run_smoke(loaded, "smoke", context)
+            composite = _composite_with_runner(
+                "guardrails", _mutating_guardrails(control, replace_control)
+            )
+            with patch.object(extraction_slice, "extract", return_value=()):
+                result = composite.run(loaded, "smoke", context)
         self.assertTrue(result.verdict, result.report)
         self.assertIn("controls replaced 1 (reported, not gated)", result.report)
         self.assertIn("controls declined 0 (reported, not gated)", result.report)
@@ -257,18 +281,132 @@ class SmokeRunner(unittest.TestCase):
             cases_by_id[case_id] = {**cases_by_id[case_id], "suite": "fictional-suite"}
             loaded = replace(loaded, cases_by_id=cases_by_id)
             host, context = _context(loaded)
-            result = smoke_slice.run_smoke(loaded, "smoke", context)
+            result = SLICE_RUNNERS["smoke"].runner(loaded, "smoke", context)
         row = next(row for row in result.results if row.case_id == case_id)
         self.assertFalse(result.verdict)
         self.assertEqual(row.verdict, "fail")
         self.assertIn(f"unrouted suite cases: {case_id}", result.report)
         self.assertEqual(host.judge_requests, [])
 
+    def test_build_gates_case_in_an_unrouted_category_fails_by_id(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            _root, loaded = _temporary_smoke_set(Path(directory))
+            build_gates_ids = tuple(
+                case_id
+                for case_id in select_cases(loaded, "smoke").counted
+                if loaded.cases_by_id[case_id]["suite"] == "build-gates"
+            )
+            self.assertTrue(build_gates_ids)
+            case_id = build_gates_ids[0]
+            cases_by_id = dict(loaded.cases_by_id)
+            cases_by_id[case_id] = {**cases_by_id[case_id], "category": "misfiled"}
+            loaded = replace(loaded, cases_by_id=cases_by_id)
+            _host, context = _context(loaded)
+            result = SLICE_RUNNERS["smoke"].runner(loaded, "smoke", context)
+
+        rows = tuple(row for row in result.results if row.case_id == case_id)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].verdict, "fail")
+        self.assertEqual(rows[0].metrics, {"problem": "unrouted-suite"})
+        self.assertIn(f"unrouted suite cases: {case_id}", result.report)
+        self.assertFalse(result.verdict)
+        for other_id in build_gates_ids[1:]:
+            with self.subTest(case_id=other_id):
+                other_rows = tuple(row for row in result.results if row.case_id == other_id)
+                self.assertEqual(len(other_rows), 1)
+                self.assertIsNotNone(other_rows[0].latency_ms)
+
+    def test_build_gates_case_reaches_only_the_part_naming_its_category(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            _root, loaded = _temporary_smoke_set(Path(directory))
+            case_id = next(
+                case_id
+                for case_id in select_cases(loaded, "smoke").counted
+                if loaded.cases_by_id[case_id]["suite"] == "build-gates"
+            )
+            cases_by_id = dict(loaded.cases_by_id)
+            cases_by_id[case_id] = {**cases_by_id[case_id], "category": "misfiled"}
+            loaded = replace(loaded, cases_by_id=cases_by_id)
+            extraction_received: list[str] = []
+            misfiled_received: list[str] = []
+
+            def record_extraction(
+                narrowed: LoadedSet, slice_name: str, context: RunContext
+            ) -> SliceResult:
+                extraction_received.extend(select_cases(narrowed, slice_name).counted)
+                return SMOKE_PARTS["extraction"].runner(narrowed, slice_name, context)
+
+            def record_misfiled(
+                narrowed: LoadedSet, slice_name: str, _context: RunContext
+            ) -> SliceResult:
+                misfiled_received.extend(select_cases(narrowed, slice_name).counted)
+                return SliceResult(
+                    True,
+                    "planted part report\n",
+                    tuple(CaseResult(found, 1, "pass", {}) for found in misfiled_received),
+                )
+
+            composite = smoke_slice.Composite(
+                {
+                    **SMOKE_PARTS,
+                    "misfiled": replace(
+                        SMOKE_PARTS["extraction"],
+                        categories=frozenset({("build-gates", "misfiled")}),
+                        runner=record_misfiled,
+                    ),
+                    "extraction": replace(SMOKE_PARTS["extraction"], runner=record_extraction),
+                }
+            )
+            _host, context = _context(loaded)
+            result = composite.run(loaded, "smoke", replace(context, turns=None))
+
+        self.assertEqual(misfiled_received, [case_id])
+        self.assertNotIn(case_id, extraction_received)
+        rows = tuple(row for row in result.results if row.case_id == case_id)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].metrics, {})
+
+    def test_duplicate_part_category_is_refused(self) -> None:
+        extraction = SMOKE_PARTS["extraction"]
+        category = next(iter(extraction.categories))
+        with self.assertRaises(ValueError) as raised:
+            smoke_slice.Composite({"extraction": extraction, "duplicate": replace(extraction)})
+        self.assertIn(repr(category), str(raised.exception))
+
+    def test_committed_rows_follow_the_parts_order(self) -> None:
+        loaded = _load(ROOT / SET_ROOT)
+        _host, context = _context(loaded)
+        result = SLICE_RUNNERS["smoke"].runner(loaded, "smoke", replace(context, turns=None))
+        counted = select_cases(loaded, "smoke").counted
+        self.assertCountEqual((row.case_id for row in result.results), counted)
+        positions = {row.case_id: index for index, row in enumerate(result.results)}
+        guardrail_positions = tuple(
+            positions[case_id]
+            for case_id in counted
+            if (
+                loaded.cases_by_id[case_id]["suite"],
+                loaded.cases_by_id[case_id]["category"],
+            )
+            in SMOKE_PARTS["guardrails"].categories
+        )
+        extraction_positions = tuple(
+            positions[case_id]
+            for case_id in counted
+            if (
+                loaded.cases_by_id[case_id]["suite"],
+                loaded.cases_by_id[case_id]["category"],
+            )
+            in SMOKE_PARTS["extraction"].categories
+        )
+        self.assertTrue(guardrail_positions)
+        self.assertTrue(extraction_positions)
+        self.assertLess(max(guardrail_positions), min(extraction_positions))
+
     def test_no_turn_access_fails_each_guardrails_case_without_host_calls(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             _root, loaded = _temporary_smoke_set(Path(directory))
             host, context = _context(loaded)
-            result = smoke_slice.run_smoke(
+            result = SLICE_RUNNERS["smoke"].runner(
                 loaded, "smoke", replace(context, turns=None)
             )
         guardrail_ids = {
@@ -298,13 +436,55 @@ class SmokeRunner(unittest.TestCase):
                 loaded, unsigned_ids=loaded.unsigned_ids | {unsigned_id}
             )
             host, context = _context(loaded)
-            result = smoke_slice.run_smoke(loaded, "smoke", context)
+            result = SLICE_RUNNERS["smoke"].runner(loaded, "smoke", context)
         self.assertNotIn(unsigned_id, {row.case_id for row in result.results})
         self.assertEqual(host.judge_requests, [])
 
 
 class SmokeSet(unittest.TestCase):
     """The registered composite follows the committed slice files."""
+
+    def test_tier_two_case_adds_two_calls_to_smoke_estimate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            set_root, loaded = _temporary_smoke_set(Path(directory))
+            tier_2_id = next(
+                case_id
+                for case_id in loaded.slice_lists["guardrails"][TIER_2_CATEGORY]
+                if case_id in loaded.active_ids
+            )
+            engine_calls = SLICE_RUNNERS["smoke"].engine_calls
+            turn_calls = SMOKE_PARTS["guardrails"].turn_calls
+            assert engine_calls is not None and turn_calls is not None
+            previous = engine_calls(loaded, "smoke")
+            (set_root / _SMOKE_LIST / f"{TIER_2_CATEGORY}.ids").write_text(
+                f"{tier_2_id}\n", encoding="utf-8"
+            )
+            planted = _load(set_root)
+
+            guardrail_ids = tuple(
+                case_id
+                for case_id in select_cases(planted, "smoke").counted
+                if (
+                    planted.cases_by_id[case_id]["suite"],
+                    planted.cases_by_id[case_id]["category"],
+                )
+                in SMOKE_PARTS["guardrails"].categories
+            )
+            guardrail_id_set = set(guardrail_ids)
+            narrowed = replace(
+                planted,
+                slices={**planted.slices, "smoke": guardrail_ids},
+                slice_lists={
+                    **planted.slice_lists,
+                    "smoke": {
+                        name: tuple(case_id for case_id in ids if case_id in guardrail_id_set)
+                        for name, ids in planted.slice_lists["smoke"].items()
+                    },
+                },
+            )
+            self.assertIn(tier_2_id, guardrail_ids)
+            self.assertEqual(engine_calls(planted, "smoke"), turn_calls(narrowed, "smoke"))
+            self.assertEqual(engine_calls(planted, "smoke"), previous + 2)
 
     def test_committed_lists_load_match_sources_and_bound_engine_calls(self) -> None:
         loaded = _load(ROOT / SET_ROOT)
@@ -333,12 +513,11 @@ class SmokeSet(unittest.TestCase):
         expected_calls = len(guardrail_ids) + sum(
             case_id in _SAMPLE for case_id in guardrail_ids
         )
-        self.assertEqual(
-            smoke_slice.engine_calls(loaded, "smoke"),
-            expected_calls,
-        )
+        engine_calls = SLICE_RUNNERS["smoke"].engine_calls
+        assert engine_calls is not None
+        self.assertEqual(engine_calls(loaded, "smoke"), expected_calls)
         self.assertEqual(expected_calls, 2 * len(_SAMPLE))
-        self.assertEqual(smoke_slice.engine_calls(loaded, "extraction"), 0)
+        self.assertEqual(engine_calls(loaded, "extraction"), 0)
         self.assertTrue(extraction_ids)
 
         for list_name in loaded.slice_lists["smoke"]:
@@ -355,13 +534,13 @@ class SmokeSet(unittest.TestCase):
             if absent_from_export(smoke_path.relative_to(ROOT), ROOT):
                 continue
             self.assertEqual(smoke_path.read_bytes(), extraction_path.read_bytes())
-        self.assertLessEqual(smoke_slice.engine_calls(loaded, "smoke"), turn_run.SMOKE_TURNS)
+        self.assertLessEqual(engine_calls(loaded, "smoke"), turn_run.SMOKE_TURNS)
 
     def test_runner_selection_excludes_unsigned_cases_and_records_real_metric_shape(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             _root, loaded = _temporary_smoke_set(Path(directory))
             host, context = _context(loaded)
-            result = smoke_slice.run_smoke(loaded, "smoke", context)
+            result = SLICE_RUNNERS["smoke"].runner(loaded, "smoke", context)
             guardrail_ids = {
                 case_id
                 for case_id in select_cases(loaded, "smoke").counted
@@ -382,14 +561,16 @@ class SmokeSet(unittest.TestCase):
             unsigned = replace(
                 loaded, unsigned_ids=loaded.unsigned_ids | {unsigned_id}
             )
-            narrowed_result = smoke_slice.run_smoke(unsigned, "smoke", context)
+            narrowed_result = SLICE_RUNNERS["smoke"].runner(unsigned, "smoke", context)
         self.assertNotIn(unsigned_id, {row.case_id for row in narrowed_result.results})
         self.assertEqual(host.judge_requests, [])
 
     def test_registered_runner_signs_nothing_and_imports_stdlib_and_gideon(self) -> None:
         loaded = _load(ROOT / SET_ROOT)
         self.assertEqual(select_cases(loaded, "smoke").unsigned, ())
-        self.assertIs(SLICE_RUNNERS["smoke"].runner, smoke_slice.run_smoke)
+        self.assertIs(inspect.getmodule(SLICE_RUNNERS["smoke"].runner), smoke_slice)
+        for name, spec in SMOKE_PARTS.items():
+            self.assertIs(spec, SLICE_RUNNERS[name])
         tree = ast.parse(
             (ROOT / "gideon/evaluation/smoke_slice.py").read_text(encoding="utf-8")
         )
@@ -442,6 +623,11 @@ class SmokeCommand(unittest.TestCase):
                 _mutating_guardrails(positive, unblocked)
                 if fail_guardrail else guardrails_slice.run_guardrails
             )
+            replacement = dict(SLICE_RUNNERS)
+            replacement["smoke"] = replace(
+                SLICE_RUNNERS["smoke"],
+                runner=_composite_with_runner("guardrails", guardrails_runner).run,
+            )
             with (
                 patch.object(
                     command.engine,
@@ -465,7 +651,7 @@ class SmokeCommand(unittest.TestCase):
                     "probe",
                     return_value=command.door.ProbeResult(True, "door ready", None),
                 ),
-                patch.dict(smoke_slice._RUNNERS, {"guardrails": guardrails_runner}),
+                patch.object(command, "SLICE_RUNNERS", replacement),
                 (
                     patch.object(extraction_slice, "extract", return_value=())
                     if fail_extraction
@@ -553,6 +739,11 @@ class SmokeCommand(unittest.TestCase):
                     ),
                 )
 
+            replacement = dict(SLICE_RUNNERS)
+            replacement["smoke"] = replace(
+                SLICE_RUNNERS["smoke"],
+                runner=_composite_with_runner("extraction", regress_extraction).run,
+            )
             kwargs = _run_kwargs(cast(EvalHost, host), checkout=checkout)
             with (
                 patch.object(
@@ -577,7 +768,7 @@ class SmokeCommand(unittest.TestCase):
                     "probe",
                     return_value=command.door.ProbeResult(True, "door ready", None),
                 ),
-                patch.dict(smoke_slice._RUNNERS, {"build-gates": regress_extraction}),
+                patch.object(command, "SLICE_RUNNERS", replacement),
                 patch.object(command.stacks.secrets, "select_directory"),
             ):
                 code, stdout, stderr = _invoke(

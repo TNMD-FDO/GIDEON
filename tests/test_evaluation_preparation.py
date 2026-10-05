@@ -29,18 +29,11 @@ class SliceSurfaces(unittest.TestCase):
                 self.assertIs(type(spec.surfaces), frozenset)
                 self.assertTrue(all(type(surface) is CallSurface for surface in spec.surfaces))
 
-    def test_derived_reads_match_membership(self) -> None:
+    def test_reaches_box_matches_surface_membership(self) -> None:
         on_box = {surface for surface in CallSurface if surface.on_box}
         self.assertEqual(on_box, {CallSurface.ENGINE, CallSurface.TURNS})
         for name, spec in SLICE_RUNNERS.items():
             with self.subTest(slice_name=name):
-                for flag, surface in (
-                    (spec.reaches_engine, CallSurface.ENGINE),
-                    (spec.drives_turns, CallSurface.TURNS),
-                    (spec.takes_ranked, CallSurface.RANKED_FILE),
-                ):
-                    self.assertIs(type(flag), bool)
-                    self.assertEqual(flag, surface in spec.surfaces)
                 self.assertIs(type(spec.reaches_box), bool)
                 self.assertEqual(spec.reaches_box, bool(spec.surfaces & on_box))
 
@@ -287,16 +280,13 @@ class SiblingSurfaceRule(unittest.TestCase):
 
 
 class PreparationBoundaries(unittest.TestCase):
-    """Only the registry derives flags, and the record stage uses prepared facts."""
+    """Registry surfaces and prepared record facts stay within their boundaries."""
 
-    def test_derived_flags_have_no_other_product_or_tool_readers(self) -> None:
-        registry_path = Path(inspect.getfile(CallSurface)).resolve()
+    def test_derived_flags_have_no_product_or_tool_readers(self) -> None:
         forbidden = {"reaches_engine", "drives_turns", "takes_ranked"}
         readers: list[str] = []
         for home in (ROOT / "gideon", ROOT / "tools"):
             for path in home.rglob("*.py"):
-                if path.resolve() == registry_path:
-                    continue
                 tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
                 readers.extend(
                     f"{path.relative_to(ROOT)}:{node.lineno}: {node.attr}"
