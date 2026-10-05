@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.34](docs/release-notes/v0.3.34.md) — 2026-10-04 — an eval slice names its call surfaces, one preparation resolving them
 - [v0.3.33](docs/release-notes/v0.3.33.md) — 2026-10-04 — the ledger's v0.4.0 RAM and GPU 1 lines
 - [v0.3.32](docs/release-notes/v0.3.32.md) — 2026-10-04 — a new secret recreates its mounters alone
 - [v0.3.31](docs/release-notes/v0.3.31.md) — 2026-10-04 — top-level secrets derived from the blocks

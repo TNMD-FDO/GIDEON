@@ -31,8 +31,14 @@ from gideon.evaluation.evalset import (
     print_findings,
     select_cases,
 )
-from gideon.evaluation.results import CaseResult, JSONValue, RunContext, SliceResult
-from gideon.evaluation.slices import SLICE_RUNNERS, SliceSpec
+from gideon.evaluation.results import (
+    CaseResult,
+    JSONValue,
+    RunContext,
+    SliceResult,
+    no_checkpoint,
+)
+from gideon.evaluation.slices import SLICE_RUNNERS, CallSurface, SliceSpec
 from gideon.evaluation.turns import access, door, run
 from gideon.host import backuplock, courts, engine, nogpu, site, stack
 from gideon.host.render.ci import CI_STACK, PRODUCTION_STACK
@@ -55,6 +61,10 @@ _UNSIGNED_RESULT_FIX: Final[str] = "The runner must select through the loader, t
 _WINDOW_START_FIX: Final[str] = "Start the run at the window's opening, then retry."
 _LOSES_FIX: Final[str] = "A change that loses is not adopted; keep the default."
 _PARTIAL_DETAIL: Final[str] = "partial: aborted at the window's end, nothing kept"
+# A set outside the release is never written to the release's run record.
+_SET_SKIP_ROW: Final[StageResult] = StageResult(
+    "record", True, "skipped — a set outside the release is never recorded", ""
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,7 +145,7 @@ class _Request:
         return f"Run sudo python3 -m gideon {self.retry_command()}, then retry."
 
     def record_root_fix(self, slice_spec: SliceSpec) -> str:
-        ranked_flag = " --ranked <file>" if slice_spec.takes_ranked else ""
+        ranked_flag = " --ranked <file>" if CallSurface.RANKED_FILE in slice_spec.surfaces else ""
         return (
             f"Run sudo python3 -m gideon {self.retry_command(ranked_flag=ranked_flag)} "
             "as root with the stack up, then retry."
@@ -187,17 +197,26 @@ def _resolve_mode(args: argparse.Namespace, slice_name: object) -> tuple[_Mode, 
 
 
 @dataclass(frozen=True, slots=True)
-class _EnginePreconditions:
-    """The engine and record inputs established before grading starts."""
+class _RecordFacts:
+    """The profile and provenance needed to write a run row."""
 
     hardware_profile: str
-    served_model_name: str
-    provenance: tuple[str | None, bool | None]
-    site_config: site.SiteConfig
+    git_sha: str | None
+    git_dirty: bool | None
+
+
+@dataclass(frozen=True, slots=True)
+class _Prepared:
+    """The context and record inputs resolved before a slice runs."""
+
+    served_model_name: str | None
     turns: access.TurnAccess | None
+    ranked: Mapping[str, tuple[rankmetrics.Coordinates, ...]] | None
+    checkpoint: Callable[[], None]
     started: datetime
-    end: datetime
     forced: bool
+    overrides: Mapping[str, object]
+    record: _RecordFacts | StageResult
 
 
 @dataclass(slots=True)
@@ -697,7 +716,7 @@ def _flag_problem(
             f"Choose a decision slice ({names}), then run gideon eval run --slice <name> "
             "--decision --against <run id> and retry.",
         )
-    if request.force and not slice_spec.reaches_engine:
+    if request.force and CallSurface.ENGINE not in slice_spec.surfaces:
         return Problem(
             f"--force is not valid for slice {slice_name!r}, which does not reach the engine",
             f"Remove --force when running --slice {slice_name}, then retry.",
@@ -775,16 +794,22 @@ def _paired_decision(
     )
 
 
-def _engine_preconditions(
+def _prepare_on_box(
     request: _Request,
     seams: _Seams,
     pass_value: _Pass,
-    *,
-    started: datetime,
     slice_spec: SliceSpec,
     loaded: LoadedSet,
-) -> _EnginePreconditions | None:
-    """Refuse engine runs before a request when a required seam is unavailable."""
+    *,
+    started: datetime,
+    ranked_lists: Mapping[str, tuple[rankmetrics.Coordinates, ...]] | None,
+    overrides: Mapping[str, object],
+) -> _Prepared | None:
+    """Run the ``preconditions`` stage for a slice naming a surface on the box.
+
+    Returns the prepared value with the record's facts, or None after the
+    stage's one refusing row when a required seam is unavailable.
+    """
 
     if seams.host.geteuid() != 0:
         print_stage(
@@ -950,7 +975,7 @@ def _engine_preconditions(
         return None
 
     turns: access.TurnAccess | None = None
-    if slice_spec.drives_turns:
+    if CallSurface.TURNS in slice_spec.surfaces:
         password = access.read_eval_password(seams.host)
         if isinstance(password, Problem):
             print_stage(StageResult("preconditions", False, password.problem, password.fix))
@@ -1022,21 +1047,175 @@ def _engine_preconditions(
             f"prompt {prompt_id}, {writer}"
             + (
                 ", eval password read, door probed"
-                if slice_spec.drives_turns
+                if CallSurface.TURNS in slice_spec.surfaces
                 else ""
             ),
             "",
         )
     )
-    return _EnginePreconditions(
-        target.profile_name,
-        target.served_model_name,
-        provenance,
-        config,
-        turns,
-        effective_start,
-        judgement.end,
-        request.force,
+    return _Prepared(
+        served_model_name=target.served_model_name,
+        turns=turns,
+        ranked=ranked_lists,
+        checkpoint=window.deadline_checkpoint(seams.clock, judgement.end),
+        started=effective_start,
+        forced=request.force,
+        overrides=overrides,
+        record=(
+            _SET_SKIP_ROW
+            if request.supplied_set
+            else _RecordFacts(target.profile_name, *provenance)
+        ),
+    )
+
+
+def _held_record(
+    request: _Request,
+    seams: _Seams,
+    slice_spec: SliceSpec,
+) -> _RecordFacts | StageResult:
+    """Resolve an off-box run's record facts, or hold the row its record stage prints.
+
+    Nothing is printed here: a run that reaches nothing on the box may run
+    anywhere, so a lookup's failure skips or refuses its record after the run
+    and never stops it.
+    """
+
+    if request.supplied_set:
+        return _SET_SKIP_ROW
+    probe_problem = record.probe(seams.host, seams.rendered_dir)
+    if probe_problem is not None:
+        return StageResult(
+            "record",
+            True,
+            f"skipped — no database reachable; rows were not written ({probe_problem})",
+            request.record_root_fix(slice_spec),
+        )
+    site_result = site.load_site(Path(seams.site_path), host=seams.host)
+    if not site_result.ok or site_result.config is None:
+        detail = "; ".join(error.problem for error in site_result.errors)
+        fix = site_result.errors[0].fix if site_result.errors else "Create a valid site file, then retry."
+        return StageResult("record", False, f"site file could not be loaded: {detail}", fix)
+    resolved_provenance, provenance_fix = _provenance(seams.host, seams.checkout)
+    if resolved_provenance is None:
+        return StageResult(
+            "record",
+            False,
+            "git provenance could not be read; rows were not written",
+            provenance_fix or _git_fix(str(seams.checkout)),
+        )
+    return _RecordFacts(site_result.config.hardware_profile, *resolved_provenance)
+
+
+def _prepare_ranked(
+    request: _Request,
+    slice_spec: SliceSpec,
+    loaded: LoadedSet,
+    overrides: Mapping[str, object],
+) -> tuple[Mapping[str, tuple[rankmetrics.Coordinates, ...]] | None, Mapping[str, object]] | None:
+    """Read the ranked-list file a slice names, or refuse a missing or stray one.
+
+    Returns the lists and the run row's overrides, which a read file replaces
+    with its digest and the definition id, or None after the refusing row.
+    """
+
+    slice_name = cast(str, request.slice_name)
+    ranked_path = request.ranked_path
+    if CallSurface.RANKED_FILE in slice_spec.surfaces:
+        if not isinstance(ranked_path, str) or not ranked_path:
+            print_stage(
+                StageResult(
+                    "ranked",
+                    False,
+                    f"slice {slice_name} requires --ranked",
+                    request.ranked_required_fix(),
+                )
+            )
+            return None
+        active_ids = set(loaded.active_ids)
+        allowed_ids = tuple(case_id for case_id in loaded.slices[slice_name] if case_id in active_ids)
+        ranked_result = ranked.read(ranked_path, allowed_ids)
+        if not ranked_result.ok:
+            print_findings(ranked_result.findings)
+            print_stage(
+                StageResult("ranked", False, "ranked file refused", ranked.RANKED_FIX)
+            )
+            return None
+        assert ranked_result.ranked is not None and ranked_result.sha256 is not None
+        passage_count = sum(len(values) for values in ranked_result.ranked.values())
+        print_stage(
+            StageResult(
+                "ranked",
+                True,
+                f"{len(ranked_result.ranked)} queries, {passage_count} passages, SHA-256 {ranked_result.sha256}",
+                "",
+            )
+        )
+        return ranked_result.ranked, {
+            "judgments": {
+                "definition": rankmetrics.DEFINITION_ID,
+                "ranked_sha256": ranked_result.sha256,
+            }
+        }
+    if ranked_path is not None:
+        print_stage(
+            StageResult(
+                "ranked",
+                False,
+                f"slice {slice_name} does not take --ranked",
+                _ranked_forbidden_fix(slice_name),
+            )
+        )
+        return None
+    return None, overrides
+
+
+def _prepare(
+    request: _Request,
+    seams: _Seams,
+    pass_value: _Pass,
+    slice_spec: SliceSpec,
+    loaded: LoadedSet,
+    *,
+    started: datetime,
+) -> _Prepared | None:
+    """Resolve each surface the slice names and the facts its record needs.
+
+    Returns None after exactly one refusing row. A run that reaches the box is
+    recordable before it starts, so its lookups refuse under ``preconditions``;
+    an off-box run's are held for its record stage. A surface the slice does not
+    name leaves its field neutral.
+    """
+
+    ranked_step = _prepare_ranked(
+        request,
+        slice_spec,
+        loaded,
+        {} if pass_value.overrides is None else pass_value.overrides,
+    )
+    if ranked_step is None:
+        return None
+    ranked_lists, overrides = ranked_step
+    if slice_spec.reaches_box:
+        return _prepare_on_box(
+            request,
+            seams,
+            pass_value,
+            slice_spec,
+            loaded,
+            started=started,
+            ranked_lists=ranked_lists,
+            overrides=overrides,
+        )
+    return _Prepared(
+        served_model_name=None,
+        turns=None,
+        ranked=ranked_lists,
+        checkpoint=no_checkpoint,
+        started=started,
+        forced=False,
+        overrides=overrides,
+        record=_held_record(request, seams, slice_spec),
     )
 
 
@@ -1045,105 +1224,48 @@ def _record(
     seams: _Seams,
     pass_value: _Pass,
     loaded: LoadedSet,
-    slice_spec: SliceSpec,
     slice_result: SliceResult,
+    prepared: _Prepared,
     *,
-    started: datetime,
     finished: datetime,
     gate_verdict: bool,
-    forced: bool,
     partial: bool,
     requested_repeats: int,
     decision_json: Mapping[str, JSONValue] | None,
-    prepared: _EnginePreconditions | None,
-    overrides: Mapping[str, object],
 ) -> _RecordOutcome:
-    """Write the run and its results.
+    """Print a held record row or write the run from facts resolved before it."""
 
-    *prepared* is the engine path's already-resolved profile, provenance, and
-    site file, whose ``preconditions`` stage also probed the writer; ``None`` is
-    the engine-free path, which resolves each of them here, in the order and
-    with the rows it has always printed.
-    """
+    if isinstance(prepared.record, StageResult):
+        print_stage(prepared.record)
+        return _RecordOutcome(prepared.record.ok, False)
 
-    if request.supplied_set:
-        print_stage(
-            StageResult(
-                "record",
-                True,
-                "skipped — a set outside the release is never recorded",
-                "",
-            )
-        )
-        return _RecordOutcome(True, False)
-
-    if prepared is None:
-        probe_problem = record.probe(seams.host, seams.rendered_dir)
-        if probe_problem is not None:
-            print_stage(
-                StageResult(
-                    "record",
-                    True,
-                    f"skipped — no database reachable; rows were not written ({probe_problem})",
-                    request.record_root_fix(slice_spec),
-                )
-            )
-            return _RecordOutcome(True, False)
-
-    site_config = None if prepared is None else prepared.site_config
-    if site_config is None:
-        site_result = site.load_site(Path(seams.site_path), host=seams.host)
-        if not site_result.ok or site_result.config is None:
-            detail = "; ".join(error.problem for error in site_result.errors)
-            fix = site_result.errors[0].fix if site_result.errors else "Create a valid site file, then retry."
-            print_stage(StageResult("record", False, f"site file could not be loaded: {detail}", fix))
-            return _RecordOutcome(False, False)
-        site_config = site_result.config
-
-    provenance = None if prepared is None else prepared.provenance
-    if provenance is None:
-        resolved_provenance, provenance_fix = _provenance(seams.host, seams.checkout)
-        if resolved_provenance is None:
-            print_stage(
-                StageResult(
-                    "record",
-                    False,
-                    "git provenance could not be read; rows were not written",
-                    provenance_fix or _git_fix(str(seams.checkout)),
-                )
-            )
-            return _RecordOutcome(False, False)
-        provenance = resolved_provenance
-    git_sha, git_dirty = provenance
-    resolved_hardware_profile = (
-        site_config.hardware_profile if prepared is None else prepared.hardware_profile
-    )
+    facts = prepared.record
     run = record.RunRow(
         run_id=pass_value.run_id,
-        started_at=started,
+        started_at=prepared.started,
         finished_at=finished,
         product_version=gideon.__version__,
         corpus_lockfile=None,
         eval_set_version=loaded.version,
-        hardware_profile=resolved_hardware_profile,
+        hardware_profile=facts.hardware_profile,
         stack=request.paths.name,
         generation_id=None,
         kind=request.mode.kind,
         slice=cast(str, request.slice_name),
-        overrides=overrides,
+        overrides=prepared.overrides,
         repeats=requested_repeats,
-        git_sha=git_sha,
-        git_dirty=git_dirty,
+        git_sha=facts.git_sha,
+        git_dirty=facts.git_dirty,
         set_digest=loaded.digest,
         verdict="pass" if gate_verdict else "fail",
-        forced=forced,
+        forced=prepared.forced,
         partial=partial,
         decision=decision_json,
     )
     results = tuple(
         record.ResultRow(
             run_id=pass_value.run_id,
-            run_started_at=started,
+            run_started_at=prepared.started,
             case_id=result.case_id,
             repeat=result.repeat,
             verdict=result.verdict,
@@ -1239,7 +1361,7 @@ def _run_body(
         )
         return _RunBodyOutcome(1)
 
-    if request.paths.name == CI_STACK and not slice_spec.drives_turns and slice_spec.judge_prompt is None:
+    if request.paths.name == CI_STACK and not slice_spec.reaches_box:
         print_stage(
             StageResult(
                 "load",
@@ -1260,69 +1382,9 @@ def _run_body(
         )
     )
 
-    ranked_lists: Mapping[str, tuple[rankmetrics.Coordinates, ...]] | None = None
-    run_overrides: Mapping[str, object] = {} if pass_value.overrides is None else pass_value.overrides
-    ranked_path = request.ranked_path
-    if slice_spec.takes_ranked:
-        if not isinstance(ranked_path, str) or not ranked_path:
-            print_stage(
-                StageResult(
-                    "ranked",
-                    False,
-                    f"slice {slice_name} requires --ranked",
-                    request.ranked_required_fix(),
-                )
-            )
-            return _RunBodyOutcome(1)
-        active_ids = set(loaded.active_ids)
-        allowed_ids = tuple(case_id for case_id in selected if case_id in active_ids)
-        ranked_result = ranked.read(ranked_path, allowed_ids)
-        if not ranked_result.ok:
-            print_findings(ranked_result.findings)
-            print_stage(
-                StageResult("ranked", False, "ranked file refused", ranked.RANKED_FIX)
-            )
-            return _RunBodyOutcome(1)
-        assert ranked_result.ranked is not None and ranked_result.sha256 is not None
-        ranked_lists = ranked_result.ranked
-        run_overrides = {
-            "judgments": {
-                "definition": rankmetrics.DEFINITION_ID,
-                "ranked_sha256": ranked_result.sha256,
-            }
-        }
-        passage_count = sum(len(values) for values in ranked_lists.values())
-        print_stage(
-            StageResult(
-                "ranked",
-                True,
-                f"{len(ranked_lists)} queries, {passage_count} passages, SHA-256 {ranked_result.sha256}",
-                "",
-            )
-        )
-    elif ranked_path is not None:
-        print_stage(
-            StageResult(
-                "ranked",
-                False,
-                f"slice {slice_name} does not take --ranked",
-                _ranked_forbidden_fix(slice_name),
-            )
-        )
+    prepared = _prepare(request, seams, pass_value, slice_spec, loaded, started=started)
+    if prepared is None:
         return _RunBodyOutcome(1)
-
-    engine_preconditions: _EnginePreconditions | None = None
-    if slice_spec.reaches_engine:
-        engine_preconditions = _engine_preconditions(
-            request,
-            seams,
-            pass_value,
-            started=started,
-            slice_spec=slice_spec,
-            loaded=loaded,
-        )
-        if engine_preconditions is None:
-            return _RunBodyOutcome(1)
 
     comparand: record.ComparandRun | None = None
     if request.mode.pairs:
@@ -1366,26 +1428,18 @@ def _run_body(
         host=seams.host,
         turns_dir=request.paths.turns_dir,
         production_dir=seams.rendered_dir,
-        served_model_name=(
-            None
-            if engine_preconditions is None
-            else engine_preconditions.served_model_name
-        ),
+        served_model_name=prepared.served_model_name,
         judge_prompt_id=slice_spec.judge_prompt,
         repeats=slice_spec.repeats,
         progress=print,
-        ranked=ranked_lists,
-        turns=None if engine_preconditions is None else engine_preconditions.turns,
+        ranked=prepared.ranked,
+        turns=prepared.turns,
         checkout=seams.checkout,
     )
     if pass_value.subject_change is not None:
         assert pass_value.prompt_id is not None
         context = pass_value.subject_change(context, pass_value.prompt_id)
-    if engine_preconditions is not None:
-        context = replace(
-            context,
-            checkpoint=window.deadline_checkpoint(seams.clock, engine_preconditions.end),
-        )
+    context = replace(context, checkpoint=prepared.checkpoint)
     run_result = _run_repeats(
         slice_spec,
         loaded,
@@ -1481,17 +1535,13 @@ def _run_body(
         seams,
         pass_value,
         loaded,
-        slice_spec,
         slice_result,
-        started=started if engine_preconditions is None else engine_preconditions.started,
+        prepared,
         finished=seams.clock(),
         gate_verdict=recorded_verdict,
-        forced=False if engine_preconditions is None else engine_preconditions.forced,
         partial=run_result.partial,
         requested_repeats=run_result.requested_repeats,
         decision_json=None if paired is None else decision_stats.to_json(paired),
-        prepared=engine_preconditions,
-        overrides=run_overrides,
     )
     record_root_fix = request.record_root_fix(slice_spec)
     if request.mode.pairs:

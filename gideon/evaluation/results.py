@@ -56,7 +56,7 @@ class SliceResult:
     results: tuple[CaseResult, ...]
 
 
-def _no_checkpoint() -> None:
+def no_checkpoint() -> None:
     """Let a run with no deadline pass every checkpoint."""
 
 
@@ -87,5 +87,5 @@ class RunContext:
     progress: Callable[[str], None]
     ranked: Mapping[str, tuple[Coordinates, ...]] | None = None
     turns: TurnAccess | None = None
-    checkpoint: Callable[[], None] = _no_checkpoint
+    checkpoint: Callable[[], None] = no_checkpoint
     checkout: PathLike | None = None
