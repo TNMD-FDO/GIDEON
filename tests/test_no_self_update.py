@@ -3,10 +3,9 @@
 The table is the suite's one literal naming of Compose services, held in order
 to the registry. When a service is added, add its self-update switches to the
 table, or an empty entry with a comment saying the image has none. Future
-entries must cover Qdrant's ``QDRANT__TELEMETRY_DISABLED``, Grafana's
-``GF_ANALYTICS_CHECK_FOR_UPDATES`` and ``GF_ANALYTICS_REPORTING_ENABLED``, and
-Loki's ``analytics.reporting_enabled`` (a config-file switch, which will need
-a file form of the table).
+entries must cover Grafana's ``GF_ANALYTICS_CHECK_FOR_UPDATES`` and
+``GF_ANALYTICS_REPORTING_ENABLED``, and Loki's ``analytics.reporting_enabled``
+(a config-file switch, which will need a file form of the table).
 """
 
 import unittest
@@ -43,6 +42,11 @@ SELF_UPDATE_SWITCHES: Mapping[str, Mapping[str, str]] = {
     },
     # PostgreSQL has no update check or telemetry.
     "postgres": {},
+    # Qdrant has no update check; its usage report and dashboard are off.
+    "qdrant": {
+        "QDRANT__TELEMETRY_DISABLED": "true",
+        "QDRANT__SERVICE__ENABLE_STATIC_CONTENT": "false",
+    },
     "open-webui": {"ENABLE_VERSION_UPDATE_CHECK": "false"},
     "gideon-generator": {
         "VLLM_NO_USAGE_STATS": "1",

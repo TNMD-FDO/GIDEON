@@ -81,6 +81,13 @@ from gideon.host.render.yamlout import dump
 
 PROJECT_NAME: Final = "gideon"
 NETWORK_NAME: Final = "gideon"
+# The swap a service that may not be swapped is still allowed: one 4 KiB page.
+# A ceiling equal to the memory limit asks for none, but under the systemd
+# cgroup driver runc writes that zero to the cgroup file alone and systemd
+# records no swap limit, so the next daemon-reload (every apply runs one)
+# resets the container to unlimited swap. A non-zero ceiling is recorded in
+# systemd and survives the reload.
+SWAP_CEILING_BYTES: Final = 4096
 
 # The tier apply starts and converges (roles, databases, migrations) before
 # any other service is recreated: the registry's store projection, bound once
@@ -281,13 +288,20 @@ def _compose_document(inputs: RenderInputs) -> Mapping[str, object]:
     # after the marker and the site have settled which services this host runs.
     # The key is mem_limit, not deploy.resources.limits.memory, and the value
     # is an exact byte count: Compose reads a g suffix as binary, 7.4 % over the
-    # lock's decimal-gigabyte unit.
+    # lock's decimal-gigabyte unit. A definition that may not be swapped also
+    # carries memswap_limit, its memory limit plus SWAP_CEILING_BYTES.
     services: dict[str, object] = {}
     for definition in applying_services(inputs):
         block = definition.block(inputs, target)
+        limit = memory_limit_bytes(inputs.profile, definition.name)
         services[definition.name] = {
             **block,
-            "mem_limit": memory_limit_bytes(inputs.profile, definition.name),
+            "mem_limit": limit,
+            **(
+                {"memswap_limit": limit + SWAP_CEILING_BYTES}
+                if not definition.swap
+                else {}
+            ),
         }
 
     # A secret is declared when a rendered block mounts it, in first-mounted

@@ -113,6 +113,7 @@ class Registry(unittest.TestCase):
                 "engine_api_key",
                 "gideon_api_key",
                 "searxng_secret_key",
+                "qdrant_api_key",
             ],
         )
         self.assertEqual(MINTED_KIND, ["gideon_admin_api_key", "gideon_eval_api_key"])
@@ -162,6 +163,7 @@ class Registry(unittest.TestCase):
                 "engine_api_key": "rewrite",
                 "gideon_api_key": "rewrite",
                 "searxng_secret_key": "rewrite",
+                "qdrant_api_key": "rewrite",
                 "gideon_admin_api_key": "remint",
                 "gideon_eval_api_key": "remint",
             },
@@ -173,6 +175,7 @@ class Registry(unittest.TestCase):
                 "gideon_api_key",
                 "webui_secret_key",
                 "searxng_secret_key",
+                "qdrant_api_key",
                 "gideon_admin_api_key",
                 "gideon_eval_api_key",
             },

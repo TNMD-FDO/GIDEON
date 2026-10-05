@@ -10,6 +10,7 @@ from gideon.host.render import (
 )
 from gideon.host.render.api import API_JOB_NAME, api_enabled, api_health_url
 from gideon.host.render.engine import ENGINE_JOB_NAME, engine_metrics_target
+from gideon.host.render.qdrant import QDRANT_JOB_NAME, qdrant_metrics_target
 from gideon.host.render.searxng import (
     SEARXNG_JOB_NAME,
     search_enabled,
@@ -34,6 +35,14 @@ _GPU_JOBS: Final = (
     f"  - job_name: {ENGINE_JOB_NAME}\n"
     "    static_configs:\n"
     f"      - targets: [{engine_metrics_target()}]"
+)
+# The template's $store_jobs line, on every host: the vector store's metrics
+# listener, which serves the numbers page alone and sits outside the server's
+# API key by the server's design, so the job holds no key.
+_STORE_JOBS: Final = (
+    f"  - job_name: {QDRANT_JOB_NAME}\n"
+    "    static_configs:\n"
+    f"      - targets: [{qdrant_metrics_target()}]"
 )
 # The template's $search_jobs line: one blackbox probe of SearXNG's health
 # endpoint, rendered only while the service is (web.search on) and as one
@@ -87,6 +96,7 @@ class PrometheusConfigArtifact(Artifact):
             PROMETHEUS_TEMPLATE,
             {
                 "gpu_jobs": "" if inputs.no_gpu else _GPU_JOBS,
+                "store_jobs": _STORE_JOBS,
                 "search_jobs": _SEARCH_JOBS if search_enabled(inputs) else "",
                 "api_jobs": _API_JOBS if api_enabled(inputs.no_gpu) else "",
             },

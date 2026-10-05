@@ -14,6 +14,7 @@ from pathlib import Path
 
 from gideon.host.lock import load_host_lock
 from gideon.host.provision import run_provision
+from gideon.host.render.qdrant import QDRANT_DATA_ROOT
 from gideon.host.site import SiteConfig, load_site
 from gideon.host.steps import (
     SITE_MISSING_FIX,
@@ -749,6 +750,9 @@ class DiskLayoutStepTests(unittest.TestCase):
         stats["/data/bulk/cas"] = os.stat_result(
             (0o42770, 0, 0, 0, 998, 998, 0, 0, 0, 0, 0)
         )
+        stats[QDRANT_DATA_ROOT] = os.stat_result(
+            (0o40750, 0, 0, 0, 998, 998, 0, 0, 0, 0, 0)
+        )
         stats["/data/observability/prometheus"] = os.stat_result(
             (0o40750, 0, 0, 0, 65534, 65534, 0, 0, 0, 0)
         )
@@ -784,6 +788,20 @@ class DiskLayoutStepTests(unittest.TestCase):
         self.assertEqual(len(data_entries), 1)
         recheck = step.check(context(host))
         self.assertEqual(recheck.disposition, Disposition.CONVERGED, recheck)
+        self.assertIn(
+            ("mkdir", (QDRANT_DATA_ROOT, 0o750, False, True)), host.calls
+        )
+        self.assertIn(("chmod", (QDRANT_DATA_ROOT, 0o750)), host.calls)
+        self.assertIn(("chown", (QDRANT_DATA_ROOT, 998, 998)), host.calls)
+        correct_qdrant = host.stats.pop(QDRANT_DATA_ROOT)
+        missing_qdrant = step.check(context(host))
+        self.assertEqual(missing_qdrant.disposition, Disposition.DRIFT)
+        self.assertIn(QDRANT_DATA_ROOT, missing_qdrant.detail)
+        host.stats[QDRANT_DATA_ROOT] = directory_stat(0o755, 998, 998)
+        wrong_qdrant_mode = step.check(context(host))
+        self.assertEqual(wrong_qdrant_mode.disposition, Disposition.DRIFT)
+        self.assertIn("0750", wrong_qdrant_mode.detail)
+        host.stats[QDRANT_DATA_ROOT] = correct_qdrant
         cas_path = "/data/bulk/cas"
         bulk_chown = host.calls.index(("chown", ("/data/bulk", 998, 998)))
         self.assertEqual(
@@ -2566,6 +2584,7 @@ class BaselineCheckPass(unittest.TestCase):
             }
         )
         host.stats["/data/bulk/cas"] = directory_stat(0o2770, 998, 998)
+        host.stats[QDRANT_DATA_ROOT] = directory_stat(0o750, 998, 998)
         result = DiskLayoutStep().check(context(host))
         self.assertEqual(result.disposition, Disposition.DRIFT)
         self.assertIn("/data/observability", result.detail)

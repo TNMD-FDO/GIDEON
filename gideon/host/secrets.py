@@ -102,6 +102,7 @@ SECRET_REGISTRY: Final[tuple[GeneratedSecret, ...]] = (
     GeneratedSecret("engine_api_key", "password", False, "the engine's API key (gideon-generator)", "rewrite"),
     GeneratedSecret("gideon_api_key", "password", False, "the gideon-api connection key carried by Open WebUI", "rewrite"),
     GeneratedSecret("searxng_secret_key", "password", False, "SearXNG's signing key", "rewrite"),
+    GeneratedSecret("qdrant_api_key", "password", False, "the vector store's API key (qdrant)", "rewrite"),
     GeneratedSecret("gideon_admin_api_key", "minted", False, "apply and reconcile", "remint"),
     GeneratedSecret("gideon_eval_api_key", "minted", False, "evaluation identity", "remint"),
 )

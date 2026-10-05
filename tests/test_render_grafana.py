@@ -1501,6 +1501,7 @@ class EvalBoard(unittest.TestCase):
                         "postgres_openwebui_password": "postgres",
                         "gideon_admin_password": "admin",
                         "searxng_secret_key": "searxng",
+                        "qdrant_api_key": "qdrant",
                     },
                 )
             ).by_path,
@@ -2357,6 +2358,7 @@ class Alerting(unittest.TestCase):
                         "postgres_openwebui_password": "postgres",
                         "gideon_admin_password": "admin",
                         "searxng_secret_key": "searxng",
+                        "qdrant_api_key": "qdrant",
                     },
                 )
             ).files

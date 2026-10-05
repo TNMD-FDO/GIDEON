@@ -7,10 +7,12 @@ import unittest
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from gideon.host import backupset
 from gideon.host.render.ci import CI_ROOT
+from gideon.host.render.qdrant import QDRANT_DATA_ROOT
 from gideon.host.sysio import Command, PathLike
 
 
@@ -180,6 +182,15 @@ class LayoutAndLabels(unittest.TestCase):
         for root in backupset.inventory_roots("/work/GIDEON"):
             self.assertFalse(ci_root == root.source or ci_root.startswith(f"{root.source}/"))
             self.assertFalse(root.source == ci_root or root.source.startswith(f"{ci_root}/"))
+
+    def test_qdrant_data_root_is_outside_every_inventory_root(self) -> None:
+        store = Path(QDRANT_DATA_ROOT)
+        for root in backupset.inventory_roots("/work/GIDEON"):
+            with self.subTest(root=root.name):
+                source = Path(root.source)
+                self.assertNotEqual(source, store)
+                self.assertNotIn(source, store.parents)
+                self.assertNotIn(store, source.parents)
 
     def test_labels_grammar_and_kind(self) -> None:
         local = datetime(2026, 9, 2, 7, 8, 9, tzinfo=ZoneInfo("America/Chicago"))

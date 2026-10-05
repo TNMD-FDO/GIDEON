@@ -94,6 +94,7 @@ SECRETS = {
     "engine_api_key": "engine-api-key",
     "gideon_api_key": "gideon-api-key",
     "searxng_secret_key": "searxng-secret-key",
+    "qdrant_api_key": "qdrant-api-key",
 }
 
 
@@ -845,6 +846,7 @@ class ComposeShape(unittest.TestCase):
                 "postgres_gideon_audit_password",
                 "engine_api_key",
                 "gideon_api_key",
+                "qdrant_api_key",
             },
         )
         for secret in SECRETS.values():

@@ -3,7 +3,7 @@ release: "fixture"
 inputs:
   site_sha256: "ce3ac9046d968f318f3d18cd4b21120411fe7e9319fd918e0d890df60d30514f"
   host_lock_sha256: "c487a5a60259c393ac20649336ff45b24747e8155aa0e4d5afe84e51e8424680"
-  models_lock_sha256: "72a69dae539cc3df989c8bea78a2f4dc131742ecc31419283fc35b41f3569ea7"
+  models_lock_sha256: "c0ab918dbc568437c91bf900e79a89f8223ef6b254c24a00816eb2e0831f04d8"
   hardware_profile: "2x96v-256d"
   images_lock_version: 1
   api_sources_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
@@ -11,11 +11,11 @@ inputs:
   build_box: false
 files:
   compose.yaml:
-    sha256: "ad20c00797abc26b973964efc0ddb034195aa2ee9843e8a433f986802bab7290"
+    sha256: "b9b51ee0a748573b84e4000c5defb72a8170bb18090ff337d7f7bfeece980e27"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
-    sha256: "8441192afa40b659094bb4ddcacc2ea9c115bcbabd619c75dd7b99a34fd6e26e"
+    sha256: "25de493879137ea87c9cc1cd1b85b2ed517a9f7b8ba10445f2eb43e18a4bce01"
     mode: "0644"
     owners:
       - "prometheus"
@@ -154,12 +154,13 @@ services:
   node-exporter: "8612faaf00b45f47987af313bf79e1df2336243ee6bc9f6eeb2bcaf6f7071e2e"
   grafana: "e49f2699c24321394c1be54c7c63172929cfbe2bcdb44be1e82dfe292e914882"
   postgres: "c646e6eec08c7266e7eb67be874e9dc4d5193cfaeb89f7125f67156bb5924f87"
+  qdrant: "0dbdcdec2969e1ccf5acff27bace7654f41bebc0f4c8c8d946cdfc61cb40804d"
   open-webui: "c21888a58ecb53cccbe5f06500250402347254f194fc9824828c42f6af51bf71"
   searxng: "790f3d23c5a48d8b2e3c02d12c6615884bb4073095bdf7faa51ccee49aa51c2c"
   postgres-exporter: "71024e25f248a0a94b2ea92c4f48813f8b4f95e3d17d41522f300fa9f1407291"
   cadvisor: "6e4def0c2cc0e80a5357574ad6a8e81286c1f29140a78422632c6e860d14d83e"
   blackbox-exporter: "959ff7e850d35c00a0a178fca5cf671d37dffa6ea5db86790b9166f5182999d3"
-top_level: "a523dfecf40fc62e70a238b68194ba457a00205feffedd96d81bdd0e82ecbbdf"
+top_level: "c52052e557948306c572bc246c51ec35c46a49b92468eeeca8d4b8767251260a"
 top_level_parts:
   static: "0642157a4acd76578712e56d5b1878c477e770bbd149ffe108b067427ca78f36"
   secrets:
@@ -184,6 +185,10 @@ top_level_parts:
       sha256: "1e5f8715568749fcabbf9434f6388683eb72421e22d36edf980a9dae5f57d652"
       mounts:
         - "postgres"
+    qdrant_api_key:
+      sha256: "b7213797520b30b98c6799cb95411028c2c742fc7891eda331d101c84ab34ae8"
+      mounts:
+        - "qdrant"
     webui_secret_key:
       sha256: "ea4ab28e0ad8e72131740833ac2759dafd6de5b2bdb599e4b633ada952650441"
       mounts:

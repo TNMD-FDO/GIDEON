@@ -295,6 +295,7 @@ class Registry(unittest.TestCase):
                         assert isinstance(block, Mapping)
                         rendered_block = dict(block)
                         del rendered_block["mem_limit"]
+                        rendered_block.pop("memswap_limit", None)
                         self.assertEqual(
                             definition.block(rendered_inputs, target), rendered_block
                         )

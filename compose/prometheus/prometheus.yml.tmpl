@@ -22,6 +22,7 @@ $gpu_jobs
   - job_name: postgres
     static_configs:
       - targets: [postgres-exporter:9187]
+$store_jobs
   - job_name: cadvisor
     static_configs:
       - targets: [cadvisor:8080]

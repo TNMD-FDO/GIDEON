@@ -156,6 +156,7 @@ def render_inputs() -> RenderInputs:
             "engine_api_key": "engine-api-key",
             "gideon_api_key": "gideon-api-key",
             "searxng_secret_key": "searxng-secret-key",
+            "qdrant_api_key": "qdrant-api-key",
         },
         checkout="/opt/gideon",
         api_sources_digest="sha256:" + "0" * 64,

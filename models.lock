@@ -38,14 +38,16 @@ profiles:
     # service the site turns off or the no-GPU marker removes still has its
     # row — and E9 corrects every row from measured RSS. Render emits each
     # value as an exact byte count, never a suffix (Compose reads a
-    # `g` suffix as binary, 7.4 % over this lock's unit); mem_limit alone,
-    # Docker's default swap allowance standing until slice 3's stores rule on
-    # it. The kernel keeps a cgroup limit in whole 4 KiB pages, so a row that
-    # is not a multiple of 4,096 bytes reads back up to 4,095 bytes lower in
-    # the container's memory.max and in cAdvisor's limit series, while docker
-    # inspect reports the request. The footprint rule names Postgres, the
-    # frontend, the generator, and the ~2 GB Caddy+registry+SearXNG group,
-    # with Caddy and SearXNG as its halves; the registry is a host service.
+    # `g` suffix as binary, 7.4 % over this lock's unit). A store's block
+    # carries a swap ceiling one 4 KiB page above its memory limit, so it
+    # swaps no more than that page; every other service keeps Docker's
+    # default swap allowance. The kernel keeps a cgroup limit
+    # in whole 4 KiB pages, so a row that is not a multiple of 4,096 bytes
+    # reads back up to 4,095 bytes lower in the container's memory.max and
+    # in cAdvisor's limit series, while docker inspect reports the request.
+    # The footprint rule names Postgres, Qdrant, the frontend, the generator,
+    # and the ~2 GB Caddy+registry+SearXNG group, with Caddy and SearXNG as
+    # its halves; the registry is a host service.
     # The reserve rule gives every other row the smallest whole gigabyte at
     # least four times its service's fourteen-day working-set peak, with a
     # 1 GB floor. Peaks were measured 2026-09-07 from the box's cAdvisor series
@@ -54,9 +56,10 @@ profiles:
     # 9090. The generator keeps 32 despite a far lower peak because a limit
     # counts the page cache a container is first to touch and its weights are
     # about 31 GB of file pages. A row's `role` names the model the service
-    # loads, which is the subject of the size-change rule. Slice 3's
-    # services (Qdrant, OpenSearch, the workers) land their rows with their
-    # services. Every scalar is a value-only patch for the pin watch.
+    # loads, which is the subject of the size-change rule. The remaining
+    # stores and workers (OpenSearch, gideon-worker, gideon-embed) land their
+    # rows with their services. Every scalar is a value-only patch for the pin
+    # watch.
     memory:
       caddy:
         gb: 1
@@ -68,6 +71,8 @@ profiles:
         gb: 3
       postgres:
         gb: 20
+      qdrant:
+        gb: 110
       open-webui:
         gb: 4
       gideon-generator:

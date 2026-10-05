@@ -1,6 +1,7 @@
 """Ordered definitions and projections for Compose services."""
 
 from collections.abc import Mapping
+from shlex import quote
 
 from gideon.host.images import ImagePin, RegistryTarget
 from gideon.host.render import RenderInputs
@@ -14,11 +15,14 @@ class ServiceDefinition:
     apply converges before any other; ``slow_start_seconds`` is the seconds
     verify allows it to become healthy, so a service carrying one renders a
     healthcheck.
+    ``swap`` is false for a container that may swap no more than one page, the
+    document's swap ceiling one page above its memory limit.
     """
 
     name: str = ""
     store: bool = False
     slow_start_seconds: int | None = None
+    swap: bool = True
 
     def applies(self, inputs: RenderInputs) -> bool:
         """Whether this service belongs in the rendered project."""
@@ -45,6 +49,26 @@ def image_pin(inputs: RenderInputs, name: str) -> ImagePin:
     return pin
 
 
+def secret_wrapper(
+    secret_path: str,
+    variable: str,
+    file_words: str,
+    server: str,
+    process_name: str,
+) -> list[str]:
+    """Read a required mounted secret, then replace the shell with the server."""
+
+    secret = quote(secret_path)
+    line = (
+        "set -eu; "
+        f'if [ ! -s {secret} ]; then echo "{file_words} file is missing or empty: '
+        f'{secret_path}" >&2; exit 1; fi; '
+        f"{variable}=$(cat {secret}); export {variable}; "
+        f'exec {server} "$@"'
+    )
+    return ["sh", "-c", line, process_name]
+
+
 def _registered_services() -> tuple[ServiceDefinition, ...]:
     from gideon.host.render.services.api import ApiService
     from gideon.host.render.services.blackbox_exporter import BlackboxExporterService
@@ -58,6 +82,7 @@ def _registered_services() -> tuple[ServiceDefinition, ...]:
     from gideon.host.render.services.postgres import PostgresService
     from gideon.host.render.services.postgres_exporter import PostgresExporterService
     from gideon.host.render.services.prometheus import PrometheusService
+    from gideon.host.render.services.qdrant import QdrantService
     from gideon.host.render.services.searxng import SearxngService
 
     return (
@@ -66,6 +91,7 @@ def _registered_services() -> tuple[ServiceDefinition, ...]:
         NodeExporterService(),
         GrafanaService(),
         PostgresService(),
+        QdrantService(),
         OpenWebuiService(),
         GeneratorService(),
         ApiService(),

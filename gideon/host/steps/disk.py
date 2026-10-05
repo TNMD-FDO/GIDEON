@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Final
 
 from gideon.host import cas
+from gideon.host.render.qdrant import QDRANT_DATA_ROOT
 from gideon.host.steps import (
     CheckResult,
     Disposition,
@@ -49,6 +50,9 @@ class _DataDirectory:
 
 _DATA_DIRS: Final[tuple[_DataDirectory, ...]] = (
     _DataDirectory("fast", "gideon", 0o755),
+    _DataDirectory(
+        str(Path(QDRANT_DATA_ROOT).relative_to(_DATA_MOUNT)), "gideon", 0o750
+    ),
     _DataDirectory("bulk", "gideon", 0o755),
     _DataDirectory(
         str(cas.ROOT.relative_to(_DATA_MOUNT)), "gideon", cas.DIRECTORY_MODE

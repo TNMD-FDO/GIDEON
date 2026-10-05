@@ -211,6 +211,7 @@ def inputs(site_path: Path = EXAMPLE, **overrides: object) -> RenderInputs:
             "engine_api_key": "engine-api-key",
             "gideon_api_key": "gideon-api-key",
             "searxng_secret_key": "searxng-secret-key",
+            "qdrant_api_key": "qdrant-api-key",
             **(
                 {"proxy_auth": "proxy-user:p@$$-'\"#password"}
                 if site_path == SECOND
@@ -406,7 +407,7 @@ class Compose(unittest.TestCase):
         self.assertNotIn("dcgm-exporter", no_gpu["services"])
         self.assertNotIn(ENGINE_SERVICE_NAME, no_gpu["services"])
 
-    def test_every_rendered_service_has_its_profile_memory_limit_as_the_last_key(self) -> None:
+    def test_every_rendered_service_has_its_profile_memory_limit_at_the_end(self) -> None:
         for rendered_inputs in (inputs(), inputs(no_gpu=True)):
             with self.subTest(no_gpu=rendered_inputs.no_gpu):
                 document = yaml.safe_load(ComposeArtifact().emit(rendered_inputs))
@@ -419,7 +420,12 @@ class Compose(unittest.TestCase):
                         block = services[name]
                         self.assertIsInstance(block["mem_limit"], int)
                         self.assertEqual(block["mem_limit"], row.gb * GIGABYTE)
-                        self.assertEqual(next(reversed(block)), "mem_limit")
+                        if "memswap_limit" in block:
+                            self.assertEqual(
+                                tuple(block)[-2:], ("mem_limit", "memswap_limit")
+                            )
+                        else:
+                            self.assertEqual(next(reversed(block)), "mem_limit")
 
     def test_memory_table_names_equal_the_rendered_service_union(self) -> None:
         profile = inputs().profile
@@ -465,7 +471,7 @@ class Compose(unittest.TestCase):
 
     def test_unknown_memory_table_row_refuses_with_its_fix(self) -> None:
         rendered_inputs = inputs()
-        extra = MemoryRow("qdrant", rendered_inputs.profile.memory[0].gb, None)
+        extra = MemoryRow("fictitious-service", rendered_inputs.profile.memory[0].gb, None)
         profile = replace(
             rendered_inputs.profile,
             memory=(*rendered_inputs.profile.memory, extra),
@@ -473,7 +479,7 @@ class Compose(unittest.TestCase):
         with self.assertRaises(ValueError) as caught:
             ComposeArtifact().emit(replace(rendered_inputs, profile=profile))
         message = str(caught.exception)
-        self.assertIn("qdrant", message)
+        self.assertIn("fictitious-service", message)
         for service in service_names(rendered_inputs):
             self.assertIn(service, message)
         self.assertTrue(
@@ -1263,6 +1269,7 @@ def checkout_files() -> dict[str, str]:
         "/etc/gideon/secrets/engine_api_key": "engine-api-key",
         "/etc/gideon/secrets/gideon_api_key": "gideon-api-key",
         "/etc/gideon/secrets/searxng_secret_key": "searxng-secret-key",
+        "/etc/gideon/secrets/qdrant_api_key": "qdrant-api-key",
     }
 
 

@@ -141,6 +141,7 @@ the *probe* tile's page.
 | `api`, `api probe` | `gideon-api`, GIDEON's own service between the chat frontend and the engine: every General turn passes through it. The test asks it directly whether it is healthy. A GPU host only. | API probe failing |
 | `postgres` | The Postgres exporter, which reports the database's figures. | core service down |
 | `postgres database` | The database itself: the exporter signed in to it. | core service down |
+| `qdrant` | The vector index, read from its numbers page; this tile says the store is running. | core service down |
 
 Only the `ingress` test goes through the web front door; the `frontend`,
 `search`, and `api` tests reach their service directly. So `ingress probe` down

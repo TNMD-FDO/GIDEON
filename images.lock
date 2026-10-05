@@ -43,6 +43,15 @@ images:
   searxng:
     source: docker.io/searxng/searxng:2026.9.7-3e454637f
     digest: sha256:1dab138ea70a8ceb4d1c182f5c8f256088406c1742b99e279976157dbe1e9759
+  # The vector index: Qdrant's default image, resolved on the box with
+  # `skopeo inspect --raw` on 2026-10-04. Its multi-platform index includes
+  # attestation manifests, which the mirror copies whole. The 1.19 line is
+  # the release's chosen line, so a proposal off it needs a person's ruling.
+  # A person completes a bump after the store is healthy on the box and a
+  # keyed request has answered.
+  qdrant:
+    source: docker.io/qdrant/qdrant:v1.19.1
+    digest: sha256:12364fe851b9f17356fc88189fc06d1b521262e04659ec7345975b00c9246a10
   # The observability tier: seven mirrored
   # pins resolved on the box with `skopeo inspect --raw` on 2026-09-03. Docker
   # Hub wherever the upstream publishes there; the DCGM exporter is nvcr.io

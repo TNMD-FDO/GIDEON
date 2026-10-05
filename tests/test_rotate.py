@@ -1110,6 +1110,24 @@ class PartialRotation(RealStack):
 
 
 class OtherRotations(RealStack):
+    def test_qdrant_key_rotation_recreates_qdrant_alone(self) -> None:
+        host = self.applied_host()
+        path = f"{SECRETS_DIR}/qdrant_api_key"
+        old_value = host.files[path]
+        baseline = len(host.calls)
+
+        code, out, err = run_rotate(host, "qdrant_api_key")
+
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertNotEqual(host.files[path], old_value)
+        calls = argv_calls(host)[baseline:]
+        self.assertEqual(
+            [call for call in calls if "--force-recreate" in call],
+            [force_recreate("qdrant")],
+        )
+        self.assertIn("recreated qdrant: mount qdrant_api_key", out)
+        assert_no_secret_text(self, out + err, (host.files[path].strip(),))
+
     def test_session_key_recreates_frontend_by_mount_and_converge_recreates_nothing(self) -> None:
         host = self.applied_host()
         baseline = len(host.calls)
