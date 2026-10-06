@@ -20,13 +20,24 @@ from gideon.host import stack as host_stack
 from gideon.host.render import ARTIFACTS, RenderInputs
 from gideon.host.render.api import API_INSTRUCTION_PATH, API_SERVICE_NAME
 from gideon.host.render.ci import (
+    CI_OPENSEARCH_DATA_ROOT,
+    CI_OPENSEARCH_RENDERED_DIR,
     CI_PORT,
+    CI_QDRANT_DATA_ROOT,
     CI_ROOT,
     CI_SECRETS_DIR,
     CI_SKIPPED_SECRETS,
     CI_WIPE_PATHS,
+    ci_compose_document,
     ci_instruction,
 )
+from gideon.host.render.engine import EMBED_SECRET_NAME, ENGINE_SECRET_NAME
+from gideon.host.render.opensearch import (
+    OPENSEARCH_GID,
+    OPENSEARCH_SERVICE_NAME,
+    OPENSEARCH_UID,
+)
+from gideon.host.render.searxng import SEARXNG_SECRET_NAME
 from gideon.host.report import StageResult
 from gideon.host.secrets import EnsureResult
 from gideon.host.sysio import Command, PathLike
@@ -66,6 +77,8 @@ class FakeHost:
         self.locks: dict[str, str] = {}
         self.lock_events: list[tuple[str, str]] = []
         self.writes: list[tuple[str, int]] = []
+        self.mkdirs: list[tuple[str, int]] = []
+        self.chowns: list[tuple[str, int, int]] = []
         self._seed_checkout()
 
     def _seed_checkout(self) -> None:
@@ -158,7 +171,7 @@ class FakeHost:
         del path, mode
 
     def chown(self, path: PathLike, uid: int, gid: int) -> None:
-        del path, uid, gid
+        self.chowns.append((os.fspath(path), uid, gid))
 
     def mkdir(
         self,
@@ -168,8 +181,10 @@ class FakeHost:
         parents: bool = False,
         exist_ok: bool = False,
     ) -> None:
-        del mode, parents, exist_ok
-        self.directories.add(os.fspath(path))
+        del parents, exist_ok
+        key = os.fspath(path)
+        self.directories.add(key)
+        self.mkdirs.append((key, mode))
 
     def remove(self, path: str) -> None:
         prefix = path.rstrip("/") + "/"
@@ -266,15 +281,39 @@ class Preconditions(unittest.TestCase):
         self.assertNotIn(API_INSTRUCTION_PATH, result.detail)
         self.assertEqual(host.writes, [])
 
-    def test_render_writes_four_files_and_accepts_the_api_directory(self) -> None:
+    def test_foreign_file_in_opensearch_directories_refuses_before_writing(self) -> None:
+        for relative in ("opensearch/notes.txt", "opensearch/security/notes.txt"):
+            with self.subTest(path=relative):
+                host = FakeHost()
+                host.directories.update(
+                    {CI_OPENSEARCH_RENDERED_DIR, f"{CI_OPENSEARCH_RENDERED_DIR}/security"}
+                )
+                host.files[f"{CI_ROOT}/{relative}"] = "hand-written\n"
+
+                result = cistack_run._render_stage(ci_stack(), host, inputs())
+
+                self.assertFalse(result.ok)
+                self.assertEqual(result.name, "render")
+                self.assertIn(relative, result.detail)
+                self.assertEqual(host.writes, [])
+
+    def test_render_writes_store_files_and_creates_data_roots(self) -> None:
         host = FakeHost()
         render_inputs = inputs()
+        opensearch_artifacts = tuple(
+            artifact
+            for artifact in ARTIFACTS
+            if OPENSEARCH_SERVICE_NAME in artifact.owners
+        )
 
         result = cistack_run._render_stage(ci_stack(), host, render_inputs)
 
         self.assertTrue(result.ok)
         self.assertIn(f"{CI_ROOT}/{API_SERVICE_NAME}", host.directories)
         self.assertIn("API instruction", result.detail)
+        self.assertIn("OpenSearch settings and security files", result.detail)
+        self.assertIn("Qdrant and OpenSearch data roots", result.detail)
+        self.assertEqual(len(opensearch_artifacts), 7)
         self.assertEqual(
             host.writes,
             [
@@ -282,15 +321,45 @@ class Preconditions(unittest.TestCase):
                 (f"{CI_ROOT}/open-webui/env", 0o600),
                 (f"{CI_ROOT}/open-webui/manifest.yaml", 0o644),
                 (f"{CI_ROOT}/{API_INSTRUCTION_PATH}", 0o644),
+            ]
+            + [
+                (f"{CI_ROOT}/{artifact.relative_path}", 0o644)
+                for artifact in opensearch_artifacts
             ],
         )
+        for artifact in opensearch_artifacts:
+            with self.subTest(artifact=artifact.name):
+                self.assertEqual(artifact.mode, 0o644)
+                self.assertEqual(
+                    host.files[f"{CI_ROOT}/{artifact.relative_path}"],
+                    artifact.emit(render_inputs),
+                )
         self.assertEqual(
             host.files[f"{CI_ROOT}/{API_INSTRUCTION_PATH}"],
             ci_instruction(render_inputs),
         )
+        self.assertIn((CI_QDRANT_DATA_ROOT, 0o750), host.mkdirs)
+        self.assertIn((CI_OPENSEARCH_DATA_ROOT, 0o700), host.mkdirs)
+        self.assertIn((CI_OPENSEARCH_RENDERED_DIR, 0o755), host.mkdirs)
+        self.assertIn((f"{CI_OPENSEARCH_RENDERED_DIR}/security", 0o755), host.mkdirs)
+        service_gid = cistack_run.secrets.service_group_gid(host)
+        assert service_gid is not None
+        self.assertIn((CI_QDRANT_DATA_ROOT, 0, service_gid), host.chowns)
+        self.assertIn((CI_OPENSEARCH_DATA_ROOT, OPENSEARCH_UID, OPENSEARCH_GID), host.chowns)
         host.writes.clear()
         self.assertTrue(cistack_run._render_stage(ci_stack(), host, render_inputs).ok)
-        self.assertEqual(len(host.writes), 4)
+        self.assertEqual(len(host.writes), 4 + len(opensearch_artifacts))
+
+    def test_render_leaves_existing_data_roots_untouched(self) -> None:
+        host = FakeHost()
+        roots = {CI_QDRANT_DATA_ROOT, CI_OPENSEARCH_DATA_ROOT}
+        host.directories.update(roots)
+
+        result = cistack_run._render_stage(ci_stack(), host, inputs())
+
+        self.assertTrue(result.ok)
+        self.assertFalse(any(path in roots for path, _ in host.mkdirs))
+        self.assertFalse(any(path in roots for path, _, _ in host.chowns))
 
 
 class SmokeCommand(unittest.TestCase):
@@ -403,6 +472,11 @@ class SmokeCommand(unittest.TestCase):
 
 
 class Stages(unittest.TestCase):
+    def test_service_list_matches_the_rendered_document_order(self) -> None:
+        services = ci_compose_document(inputs())["services"]
+        assert isinstance(services, Mapping)
+        self.assertEqual(cistack_run.CI_SERVICES, tuple(services))
+
     def test_up_stage_order_stops_after_first_refusal(self) -> None:
         host = FakeHost()
         events: list[str] = []
@@ -508,6 +582,15 @@ class Stages(unittest.TestCase):
 class DownAndSecrets(unittest.TestCase):
     def test_down_keeps_data_without_wipe_and_wipes_only_named_paths(self) -> None:
         host = FakeHost()
+        store_paths = (
+            CI_QDRANT_DATA_ROOT,
+            CI_OPENSEARCH_DATA_ROOT,
+            CI_OPENSEARCH_RENDERED_DIR,
+        )
+        self.assertTrue(set(store_paths) <= set(CI_WIPE_PATHS))
+        host.directories.update(store_paths)
+        settings_path = f"{CI_OPENSEARCH_RENDERED_DIR}/opensearch.yml"
+        host.files[settings_path] = "fixture settings\n"
         compose_path = f"{CI_ROOT}/compose.yaml"
         host.files[compose_path] = "name: gideon-ci\n"
         generated = f"{CI_SECRETS_DIR}/postgres_superuser_password"
@@ -521,6 +604,7 @@ class DownAndSecrets(unittest.TestCase):
 
         self.assertEqual(cistack_run.down(ci_stack(), host), 0)
         self.assertIn(generated, host.files)
+        self.assertTrue(set(store_paths) <= host.directories)
         self.assertTrue(any(command[:2] == ("docker", "compose") for command in host.commands))
         host.commands.clear()
         self.assertEqual(cistack_run.down(ci_stack(), host, wipe=True), 0)
@@ -529,13 +613,15 @@ class DownAndSecrets(unittest.TestCase):
         self.assertNotIn(eval_key, host.files)
         self.assertNotIn(instruction_path, host.files)
         self.assertNotIn(f"{CI_ROOT}/{API_SERVICE_NAME}", host.directories)
+        self.assertFalse(set(store_paths) & host.directories)
+        self.assertNotIn(settings_path, host.files)
         wipe_commands = [command for command in host.commands if command[0] == "rm"]
         self.assertEqual(wipe_commands, [("rm", "-rf", path) for path in CI_WIPE_PATHS])
 
-    def test_sibling_skips_model_server_and_lexical_store_secrets(self) -> None:
-        self.assertTrue(
-            {"engine_api_key", "embed_api_key", "opensearch_password", "opensearch_transport_key", "opensearch_transport_cert"}
-            <= set(CI_SKIPPED_SECRETS)
+    def test_sibling_mints_lexical_store_secrets_and_skips_unused_keys(self) -> None:
+        self.assertEqual(
+            set(CI_SKIPPED_SECRETS),
+            {ENGINE_SECRET_NAME, EMBED_SECRET_NAME, "grafana_admin_password", SEARXNG_SECRET_NAME},
         )
 
     def test_selector_precedes_every_render_secret_read(self) -> None:

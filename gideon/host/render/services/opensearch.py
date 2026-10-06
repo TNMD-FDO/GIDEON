@@ -47,6 +47,75 @@ OPENSEARCH_HEALTHCHECK: Final[Mapping[str, object]] = {
 _NOFILE_LIMIT: Final = 65536
 
 
+def opensearch_service(
+    inputs: RenderInputs,
+    target: RegistryTarget,
+    *,
+    limit_bytes: int | None = None,
+) -> Mapping[str, object]:
+    """Build the lexical store; a second project may supply its own memory limit."""
+
+    if limit_bytes is None:
+        row = inputs.profile.memory_row(OPENSEARCH_SERVICE_NAME)
+        if row is None:
+            raise ValueError(
+                f"Cannot render Compose: profile {inputs.profile.name} has no memory row for "
+                f"service '{OPENSEARCH_SERVICE_NAME}'. Add memory.{OPENSEARCH_SERVICE_NAME}.gb "
+                "to models.lock, then re-run render."
+            )
+        limit_bytes = row.gb * GIGABYTE
+    heap_mib = (
+        OPENSEARCH_NO_GPU_HEAP_MIB
+        if inputs.no_gpu
+        else opensearch_heap_mib(limit_bytes)
+    )
+    return {
+        "image": reference(target, image_pin(inputs, OPENSEARCH_SERVICE_NAME)),
+        "restart": "unless-stopped",
+        "environment": {
+            "TZ": inputs.site.office.timezone,
+            # The build ARG does not become an image ENV; without this the
+            # entrypoint installs upstream's demo users and certificates.
+            "DISABLE_INSTALL_DEMO_CONFIG": "true",
+            # The bundled background agent has no runnable main class.
+            "DISABLE_PERFORMANCE_ANALYZER_AGENT_CLI": "true",
+            # OpenSearch touches the full minimum heap at startup; the
+            # final flag overrides the image's heap-dump-on-OOM setting.
+            "OPENSEARCH_JAVA_OPTS": (
+                f"-Xms{heap_mib}m -Xmx{heap_mib}m -XX:-HeapDumpOnOutOfMemoryError"
+            ),
+        },
+        "entrypoint": secret_wrapper(
+            (
+                MountedSecret(
+                    f"/run/secrets/{OPENSEARCH_PASSWORD_SECRET_NAME}",
+                    OPENSEARCH_PASSWORD_VARIABLE,
+                    "OpenSearch password",
+                ),
+            ),
+            "./opensearch-docker-entrypoint.sh",
+            OPENSEARCH_SERVICE_NAME,
+        ),
+        # A Compose entrypoint override drops the image CMD; the image's
+        # entrypoint execs this argument after its own setup.
+        "command": ["opensearch"],
+        "volumes": [
+            f"{OPENSEARCH_DATA_ROOT}:{OPENSEARCH_DATA_MOUNT}",
+            f"/etc/gideon/rendered/opensearch/opensearch.yml:{OPENSEARCH_SETTINGS_PATH}:ro",
+            f"/etc/gideon/rendered/opensearch/security:{OPENSEARCH_SECURITY_PATH}:ro",
+        ],
+        "secrets": [
+            OPENSEARCH_PASSWORD_SECRET_NAME,
+            OPENSEARCH_KEY_SECRET_NAME,
+            OPENSEARCH_CERT_SECRET_NAME,
+        ],
+        "group_add": [str(inputs.facts.service_gid)],
+        "ulimits": {"nofile": {"soft": _NOFILE_LIMIT, "hard": _NOFILE_LIMIT}},
+        "healthcheck": dict(OPENSEARCH_HEALTHCHECK),
+        "networks": ["gideon"],
+    }
+
+
 class OpensearchService(ServiceDefinition):
     """The network-only lexical store, outside apply's record-store tier."""
 
@@ -56,59 +125,4 @@ class OpensearchService(ServiceDefinition):
     def block(
         self, inputs: RenderInputs, target: RegistryTarget
     ) -> Mapping[str, object]:
-        row = inputs.profile.memory_row(self.name)
-        if row is None:
-            raise ValueError(
-                f"Cannot render Compose: profile {inputs.profile.name} has no memory row for "
-                f"service '{self.name}'. Add memory.{self.name}.gb to models.lock, then re-run render."
-            )
-        heap_mib = (
-            OPENSEARCH_NO_GPU_HEAP_MIB
-            if inputs.no_gpu
-            else opensearch_heap_mib(row.gb * GIGABYTE)
-        )
-        return {
-            "image": reference(target, image_pin(inputs, self.name)),
-            "restart": "unless-stopped",
-            "environment": {
-                "TZ": inputs.site.office.timezone,
-                # The build ARG does not become an image ENV; without this the
-                # entrypoint installs upstream's demo users and certificates.
-                "DISABLE_INSTALL_DEMO_CONFIG": "true",
-                # The bundled background agent has no runnable main class.
-                "DISABLE_PERFORMANCE_ANALYZER_AGENT_CLI": "true",
-                # OpenSearch touches the full minimum heap at startup; the
-                # final flag overrides the image's heap-dump-on-OOM setting.
-                "OPENSEARCH_JAVA_OPTS": (
-                    f"-Xms{heap_mib}m -Xmx{heap_mib}m -XX:-HeapDumpOnOutOfMemoryError"
-                ),
-            },
-            "entrypoint": secret_wrapper(
-                (
-                    MountedSecret(
-                        f"/run/secrets/{OPENSEARCH_PASSWORD_SECRET_NAME}",
-                        OPENSEARCH_PASSWORD_VARIABLE,
-                        "OpenSearch password",
-                    ),
-                ),
-                "./opensearch-docker-entrypoint.sh",
-                self.name,
-            ),
-            # A Compose entrypoint override drops the image CMD; the image's
-            # entrypoint execs this argument after its own setup.
-            "command": ["opensearch"],
-            "volumes": [
-                f"{OPENSEARCH_DATA_ROOT}:{OPENSEARCH_DATA_MOUNT}",
-                f"/etc/gideon/rendered/opensearch/opensearch.yml:{OPENSEARCH_SETTINGS_PATH}:ro",
-                f"/etc/gideon/rendered/opensearch/security:{OPENSEARCH_SECURITY_PATH}:ro",
-            ],
-            "secrets": [
-                OPENSEARCH_PASSWORD_SECRET_NAME,
-                OPENSEARCH_KEY_SECRET_NAME,
-                OPENSEARCH_CERT_SECRET_NAME,
-            ],
-            "group_add": [str(inputs.facts.service_gid)],
-            "ulimits": {"nofile": {"soft": _NOFILE_LIMIT, "hard": _NOFILE_LIMIT}},
-            "healthcheck": dict(OPENSEARCH_HEALTHCHECK),
-            "networks": ["gideon"],
-        }
+        return opensearch_service(inputs, target)

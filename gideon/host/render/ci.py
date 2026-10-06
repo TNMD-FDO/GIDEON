@@ -10,14 +10,11 @@ from gideon.host.render import RenderInputs
 from gideon.host.render.api import API_SECRET_NAME, API_SERVICE_NAME
 from gideon.host.render.compose import (
     NETWORK_NAME,
-    OWUI_COMMAND,
-    OWUI_ENV_FILE,
-    OWUI_HEALTHCHECK,
-    POSTGRES_HEALTHCHECK,
     PROJECT_NAME,
-    api_service,
     image_pin,
     memory_limit_bytes,
+    mounted_secret_names,
+    with_memory_limit,
 )
 from gideon.host.render.engine import (
     EMBED_SECRET_NAME,
@@ -26,9 +23,9 @@ from gideon.host.render.engine import (
     ENGINE_SERVICE_NAME,
 )
 from gideon.host.render.opensearch import (
-    OPENSEARCH_CERT_SECRET_NAME,
-    OPENSEARCH_KEY_SECRET_NAME,
-    OPENSEARCH_PASSWORD_SECRET_NAME,
+    OPENSEARCH_DATA_MOUNT,
+    OPENSEARCH_SECURITY_PATH,
+    OPENSEARCH_SETTINGS_PATH,
 )
 from gideon.host.render.owui import (
     ApplyManifestArtifact,
@@ -37,8 +34,16 @@ from gideon.host.render.owui import (
     owui_environment,
     owui_secret_environment,
 )
-from gideon.host.render.pgbackrest import PGDATA
+from gideon.host.render.qdrant import (
+    QDRANT_READ_ONLY_SECRET_NAME,
+    QDRANT_STORAGE_MOUNT,
+)
 from gideon.host.render.searxng import SEARXNG_SECRET_NAME
+from gideon.host.render.services.api import ApiService, api_service
+from gideon.host.render.services.open_webui import OpenWebuiService
+from gideon.host.render.services.opensearch import OpensearchService, opensearch_service
+from gideon.host.render.services.postgres import PostgresService
+from gideon.host.render.services.qdrant import QdrantService
 
 CI_PROJECT: Final[str] = "gideon-ci"
 # The stacks a run's turns drive, production first, the order --stack offers them in;
@@ -68,29 +73,53 @@ CI_INSTRUCTION_DIGEST_LABEL: Final[str] = "org.gideon.instruction-digest"
 # because the table is held to production's services in both directions and
 # the sibling runs on the build box alone.
 CI_POSTGRES_MEMORY_GB: Final[int] = 1
+# The sibling's Qdrant ceiling, sized as the Postgres one above: the smallest
+# whole gigabyte at least four times the working-set peak, floor 1, the peak
+# read the same way: 405 MiB on 2026-10-05, over an empty store through one
+# smoke run, so 2. Re-take it once the sibling's store holds a generation.
+# A constant for the Postgres one's reason.
+# exempt: a measured starting value, corrected by the table's rule.
+CI_QDRANT_MEMORY_GB: Final[int] = 2
+# The sibling's OpenSearch ceiling. Its heap is half the limit and touched at
+# start, so four-fold headroom applies to what it holds beside the heap: the
+# smallest whole gigabyte whose non-heap half is at least four times the
+# off-heap peak, floor 1, the off-heap peak being the working-set peak less
+# the heap in force when it was read. The off-heap part grows with the heap
+# (the collector's structures), so the rule is re-applied at each new figure
+# until it holds. Read as the Postgres one's, over an empty index, on
+# 2026-10-05: 1486 MiB through one smoke run under a 2 GB ceiling's 953 MiB
+# heap, 534 MiB off-heap, so 5; 3005 MiB under 5 GB's 2384 MiB heap, 621 MiB
+# off-heap, four times 2.61 GB, so 6; 3532 MiB under 6 GB's 2861 MiB heap,
+# 671 MiB off-heap, four times 2.82 GB, which 6 holds. Re-take it once the
+# sibling's index holds a generation. A constant for the Postgres one's reason.
+# exempt: a measured starting value, corrected by the stated rule.
+CI_OPENSEARCH_MEMORY_GB: Final[int] = 6
+CI_QDRANT_DATA_ROOT: Final[str] = f"{CI_ROOT}/qdrant"
+CI_OPENSEARCH_DATA_ROOT: Final[str] = f"{CI_ROOT}/opensearch-data"
+CI_OPENSEARCH_RENDERED_DIR: Final[str] = f"{CI_ROOT}/opensearch"
 # The sibling env file's reads on a GPU host with the directory off: what
 # ``tools.cistack`` loads from the sibling's secrets directory, no supplied one.
 CI_SECRET_NAMES: Final[tuple[str, ...]] = (
     "postgres_openwebui_password",
     "gideon_admin_password",
     API_SECRET_NAME,
+    QDRANT_READ_ONLY_SECRET_NAME,
 )
-# Generated entries the sibling's directory never holds: the engine key is
-# production's, mounted by path, while the embed key has no sibling consumer
-# because the sibling runs no model server. It also runs no Grafana, SearXNG,
-# or lexical store yet.
+# The sibling mints its own lexical-store password and transport pair. It skips
+# the two model-server keys (production's engine key is mounted by path),
+# Grafana's password, and SearXNG's key; none has a sibling consumer.
 CI_SKIPPED_SECRETS: Final[tuple[str, ...]] = (
     ENGINE_SECRET_NAME,
     EMBED_SECRET_NAME,
     "grafana_admin_password",
     SEARXNG_SECRET_NAME,
-    OPENSEARCH_PASSWORD_SECRET_NAME,
-    OPENSEARCH_KEY_SECRET_NAME,
-    OPENSEARCH_CERT_SECRET_NAME,
 )
 CI_WIPE_PATHS: Final[tuple[str, ...]] = (
     f"{CI_ROOT}/postgres",
     f"{CI_ROOT}/openwebui",
+    CI_QDRANT_DATA_ROOT,
+    CI_OPENSEARCH_DATA_ROOT,
+    CI_OPENSEARCH_RENDERED_DIR,
     f"{CI_ROOT}/open-webui",
     f"{CI_ROOT}/{API_SERVICE_NAME}",
     f"{CI_ROOT}/compose.yaml",
@@ -116,7 +145,11 @@ def _ci_secret_file(name: str) -> str:
 
 
 def ci_compose_document(inputs: RenderInputs) -> Mapping[str, object]:
-    """Build the isolated sibling Compose document without host I/O."""
+    """Build the sibling's document from the service definitions, stating its differences.
+
+    Each block is its definition's with only the keys the sibling changes
+    replaced or dropped; nothing here touches the host.
+    """
 
     target = parse_registry(inputs.site.registry)
     if target is None:
@@ -125,8 +158,37 @@ def ci_compose_document(inputs: RenderInputs) -> Mapping[str, object]:
             "Correct registry in /etc/gideon/site.yaml, then re-run render."
         )
 
-    postgres_pin = image_pin(inputs, "postgres")
-    open_webui_pin = image_pin(inputs, "open-webui")
+    postgres = dict(PostgresService().block(inputs, target))
+    postgres["volumes"] = [f"{CI_ROOT}/postgres:/var/lib/postgresql"]
+    del postgres["command"]
+
+    open_webui = dict(OpenWebuiService().block(inputs, target))
+    open_webui_env_file = open_webui["env_file"]
+    assert isinstance(open_webui_env_file, list)
+    open_webui["env_file"] = [
+        {**entry, "path": "./open-webui/env"} for entry in open_webui_env_file
+    ]
+    open_webui["environment"] = {
+        **owui_environment(inputs, search=False, directory=False),
+        "WEBUI_URL": CI_BASE_URL,
+    }
+    open_webui["volumes"] = [f"{CI_ROOT}/openwebui:/app/backend/data"]
+    open_webui["ports"] = [f"127.0.0.1:{CI_PORT}:8080"]
+
+    qdrant = dict(QdrantService().block(inputs, target))
+    qdrant["volumes"] = [f"{CI_QDRANT_DATA_ROOT}:{QDRANT_STORAGE_MOUNT}"]
+
+    opensearch = dict(
+        opensearch_service(
+            inputs, target, limit_bytes=CI_OPENSEARCH_MEMORY_GB * GIGABYTE
+        )
+    )
+    opensearch["volumes"] = [
+        f"{CI_OPENSEARCH_DATA_ROOT}:{OPENSEARCH_DATA_MOUNT}",
+        f"{CI_OPENSEARCH_RENDERED_DIR}/opensearch.yml:{OPENSEARCH_SETTINGS_PATH}:ro",
+        f"{CI_OPENSEARCH_RENDERED_DIR}/security:{OPENSEARCH_SECURITY_PATH}:ro",
+    ]
+
     api = dict(api_service(inputs, target, rendered_root=CI_ROOT))
     api_labels = api["labels"]
     assert isinstance(api_labels, Mapping)
@@ -147,86 +209,62 @@ def ci_compose_document(inputs: RenderInputs) -> Mapping[str, object]:
         RELAY_SERVICE_NAME: {"condition": "service_started"},
     }
 
-    open_webui_environment = dict(
-        owui_environment(inputs, search=False, directory=False, store=False)
-    )
-    open_webui_environment["WEBUI_URL"] = CI_BASE_URL
-
-    services: dict[str, object] = {
-        "postgres": {
-            "image": reference(target, postgres_pin),
-            "restart": "unless-stopped",
-            "environment": {
-                "POSTGRES_PASSWORD_FILE": "/run/secrets/postgres_superuser_password",
-                "PGDATA": PGDATA,
-                "TZ": inputs.site.office.timezone,
-            },
-            "volumes": [f"{CI_ROOT}/postgres:/var/lib/postgresql"],
-            "secrets": ["postgres_superuser_password"],
-            "healthcheck": dict(POSTGRES_HEALTHCHECK),
-            "networks": [NETWORK_NAME],
-            "mem_limit": CI_POSTGRES_MEMORY_GB * GIGABYTE,
+    relay: dict[str, object] = {
+        "image": reference(target, image_pin(inputs, "gideon")),
+        "restart": "unless-stopped",
+        "entrypoint": ["python3", RELAY_CONTAINER_PATH],
+        "environment": {
+            "RELAY_TARGET": f"{ENGINE_SERVICE_NAME}:{ENGINE_PORT}",
+            "RELAY_PORT": str(ENGINE_PORT),
         },
-        "open-webui": {
-            "image": reference(target, open_webui_pin),
-            "restart": "unless-stopped",
-            "depends_on": {
-                "postgres": {"condition": "service_healthy"},
-            },
-            "env_file": [{**entry, "path": "./open-webui/env"} for entry in OWUI_ENV_FILE],
-            "environment": open_webui_environment,
-            "command": list(OWUI_COMMAND),
-            "ports": [f"127.0.0.1:{CI_PORT}:8080"],
-            "volumes": [f"{CI_ROOT}/openwebui:/app/backend/data"],
-            "secrets": ["webui_secret_key"],
-            "healthcheck": dict(OWUI_HEALTHCHECK),
-            "networks": [NETWORK_NAME],
-            "mem_limit": memory_limit_bytes(inputs.profile, "open-webui"),
-        },
-        API_SERVICE_NAME: {
-            **api,
-            "mem_limit": memory_limit_bytes(inputs.profile, API_SERVICE_NAME),
-        },
-        RELAY_SERVICE_NAME: {
-            "image": reference(target, image_pin(inputs, "gideon")),
-            "restart": "unless-stopped",
-            "entrypoint": ["python3", RELAY_CONTAINER_PATH],
-            "environment": {
-                "RELAY_TARGET": f"{ENGINE_SERVICE_NAME}:{ENGINE_PORT}",
-                "RELAY_PORT": str(ENGINE_PORT),
-            },
-            "volumes": [
-                f"{inputs.checkout}/{RELAY_SOURCE}:{RELAY_CONTAINER_PATH}:ro"
+        "volumes": [f"{inputs.checkout}/{RELAY_SOURCE}:{RELAY_CONTAINER_PATH}:ro"],
+        "healthcheck": {
+            "test": [
+                "CMD",
+                "python3",
+                "-c",
+                "import socket; socket.create_connection(('127.0.0.1', "
+                f"{ENGINE_PORT}), timeout=4).close()",
             ],
-            "healthcheck": {
-                "test": [
-                    "CMD",
-                    "python3",
-                    "-c",
-                    "import socket; socket.create_connection(('127.0.0.1', "
-                    f"{ENGINE_PORT}), timeout=4).close()",
-                ],
-                "interval": "30s",
-                "timeout": "5s",
-                "retries": 3,
-                "start_period": "5s",
-            },
-            "networks": [NETWORK_NAME, "production"],
-            "mem_limit": RELAY_MEMORY_LIMIT,
+            "interval": "30s",
+            "timeout": "5s",
+            "retries": 3,
+            "start_period": "5s",
         },
+        "networks": [NETWORK_NAME, "production"],
+    }
+    services: dict[str, object] = {
+        PostgresService.name: with_memory_limit(
+            postgres,
+            CI_POSTGRES_MEMORY_GB * GIGABYTE,
+            swap=PostgresService.swap,
+        ),
+        OpenWebuiService.name: with_memory_limit(
+            open_webui,
+            memory_limit_bytes(inputs.profile, OpenWebuiService.name),
+            swap=OpenWebuiService.swap,
+        ),
+        QdrantService.name: with_memory_limit(
+            qdrant,
+            CI_QDRANT_MEMORY_GB * GIGABYTE,
+            swap=QdrantService.swap,
+        ),
+        OpensearchService.name: with_memory_limit(
+            opensearch,
+            CI_OPENSEARCH_MEMORY_GB * GIGABYTE,
+            swap=OpensearchService.swap,
+        ),
+        API_SERVICE_NAME: with_memory_limit(
+            api,
+            memory_limit_bytes(inputs.profile, API_SERVICE_NAME),
+            swap=ApiService.swap,
+        ),
+        RELAY_SERVICE_NAME: with_memory_limit(relay, RELAY_MEMORY_LIMIT, swap=True),
     }
 
-    api_secret_names = api["secrets"]
-    assert isinstance(api_secret_names, list)
-    secrets: dict[str, Mapping[str, str]] = {
-        "postgres_superuser_password": {
-            "file": f"{CI_SECRETS_DIR}/postgres_superuser_password"
-        },
-        "webui_secret_key": {"file": f"{CI_SECRETS_DIR}/webui_secret_key"},
+    secrets = {
+        name: {"file": _ci_secret_file(name)} for name in mounted_secret_names(services)
     }
-    for name in api_secret_names:
-        assert isinstance(name, str)
-        secrets[name] = {"file": _ci_secret_file(name)}
 
     return {
         "name": CI_PROJECT,
@@ -242,7 +280,7 @@ def ci_compose_document(inputs: RenderInputs) -> Mapping[str, object]:
 def ci_env_file(inputs: RenderInputs) -> str:
     """Render the sibling's Open WebUI env file without directory settings."""
 
-    return owui_env_file_text(owui_secret_environment(inputs, directory=False, store=False))
+    return owui_env_file_text(owui_secret_environment(inputs, directory=False))
 
 
 def ci_instruction(inputs: RenderInputs) -> str:

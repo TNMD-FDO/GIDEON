@@ -41,6 +41,7 @@ from gideon.host.render.opensearch import (
 )
 from gideon.host.render.prometheus import PrometheusConfigArtifact
 from gideon.host.render.services import MountedSecret, secret_wrapper
+from gideon.host.render.services.opensearch import opensearch_service
 
 HOSTS = (inputs(EXAMPLE), inputs(SECOND), inputs(EXAMPLE, no_gpu=True))
 SECURITY_FILES = (
@@ -57,6 +58,43 @@ PATHS = ("opensearch/opensearch.yml",) + tuple(
 
 
 class Block(unittest.TestCase):
+    def test_builder_uses_supplied_limit_without_profile_row(self) -> None:
+        rendered_inputs = inputs()
+        target = parse_registry(rendered_inputs.site.registry)
+        assert target is not None
+        row = rendered_inputs.profile.memory_row(OPENSEARCH_SERVICE_NAME)
+        assert row is not None
+        without_row = replace(
+            rendered_inputs,
+            profile=replace(
+                rendered_inputs.profile,
+                memory=tuple(
+                    item
+                    for item in rendered_inputs.profile.memory
+                    if item.service != OPENSEARCH_SERVICE_NAME
+                ),
+            ),
+        )
+        limit_bytes = (row.gb + 1) * GIGABYTE
+        supplied = opensearch_service(without_row, target, limit_bytes=limit_bytes)
+        from_row = opensearch_service(rendered_inputs, target)
+        supplied_environment = supplied["environment"]
+        row_environment = from_row["environment"]
+        assert isinstance(supplied_environment, dict)
+        assert isinstance(row_environment, dict)
+        supplied_heap = opensearch_heap_mib(limit_bytes)
+        row_heap = opensearch_heap_mib(row.gb * GIGABYTE)
+        self.assertEqual(
+            supplied_environment["OPENSEARCH_JAVA_OPTS"],
+            f"-Xms{supplied_heap}m -Xmx{supplied_heap}m -XX:-HeapDumpOnOutOfMemoryError",
+        )
+        self.assertEqual(
+            row_environment["OPENSEARCH_JAVA_OPTS"],
+            f"-Xms{row_heap}m -Xmx{row_heap}m -XX:-HeapDumpOnOutOfMemoryError",
+        )
+        with self.assertRaisesRegex(ValueError, "no memory row for"):
+            opensearch_service(without_row, target)
+
     def test_definition_on_every_host(self) -> None:
         for base_inputs in HOSTS:
             secret_values = {

@@ -28,13 +28,17 @@ from gideon.host import (
 from gideon.host.images import load_image_lock
 from gideon.host.lock import load_host_lock
 from gideon.host.models import load_models_lock
+from gideon.host.render import ARTIFACTS
 from gideon.host.render.api import (
     API_HEALTH_PATH,
     API_INSTRUCTION_PATH,
     API_SERVICE_NAME,
 )
 from gideon.host.render.ci import (
+    CI_OPENSEARCH_DATA_ROOT,
+    CI_OPENSEARCH_RENDERED_DIR,
     CI_PROJECT,
+    CI_QDRANT_DATA_ROOT,
     CI_ROOT,
     CI_SECRET_NAMES,
     CI_SKIPPED_SECRETS,
@@ -49,6 +53,12 @@ from gideon.host.render.ci import (
 )
 from gideon.host.render.command import load_render_inputs
 from gideon.host.render.engine import ENGINE_PORT
+from gideon.host.render.opensearch import (
+    OPENSEARCH_GID,
+    OPENSEARCH_SERVICE_NAME,
+    OPENSEARCH_UID,
+)
+from gideon.host.render.qdrant import QDRANT_SERVICE_NAME
 from gideon.host.render.yamlout import dump
 from gideon.host.report import StageResult, command_detail, print_stage
 from gideon.host.sysio import Host, LockingHost, PathLike
@@ -56,6 +66,8 @@ from gideon.host.sysio import Host, LockingHost, PathLike
 CI_SERVICES: Final[tuple[str, ...]] = (
     "postgres",
     "open-webui",
+    QDRANT_SERVICE_NAME,
+    OPENSEARCH_SERVICE_NAME,
     API_SERVICE_NAME,
     RELAY_SERVICE_NAME,
 )
@@ -82,13 +94,44 @@ _HEALTH_SCRIPT: Final = (
     f"raise SystemExit(urllib.request.urlopen('http://127.0.0.1:{ENGINE_PORT}{API_HEALTH_PATH}', "
     "timeout=4).status != 200)"
 )
+_OPENSEARCH_ARTIFACTS: Final = tuple(
+    artifact for artifact in ARTIFACTS if OPENSEARCH_SERVICE_NAME in artifact.owners
+)
+_OPENSEARCH_PATHS: Final = tuple(
+    PurePosixPath(artifact.relative_path) for artifact in _OPENSEARCH_ARTIFACTS
+)
+_OPENSEARCH_DIRECTORIES: Final = tuple(
+    sorted({path.parent for path in _OPENSEARCH_PATHS}, key=str)
+)
 _RENDERED_NAMES: Final[frozenset[str]] = frozenset(
-    {"compose.yaml", "open-webui", API_SERVICE_NAME}
+    {
+        "compose.yaml",
+        "open-webui",
+        API_SERVICE_NAME,
+        PurePosixPath(CI_OPENSEARCH_RENDERED_DIR).name,
+    }
+)
+_PERSISTENT_DIRECTORY_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "postgres",
+        "openwebui",
+        "secrets",
+        PurePosixPath(CI_QDRANT_DATA_ROOT).name,
+        PurePosixPath(CI_OPENSEARCH_DATA_ROOT).name,
+    }
 )
 # Each rendered directory and the names the render stage writes inside it.
 _RENDERED_DIRECTORY_NAMES: Final[Mapping[str, frozenset[str]]] = {
     "open-webui": frozenset({"env", "manifest.yaml"}),
     API_SERVICE_NAME: frozenset({PurePosixPath(API_INSTRUCTION_PATH).name}),
+    **{
+        str(directory): frozenset(
+            path.relative_to(directory).parts[0]
+            for path in _OPENSEARCH_PATHS
+            if path.is_relative_to(directory)
+        )
+        for directory in _OPENSEARCH_DIRECTORIES
+    },
 }
 _LOCK_ACCESS_FIX: Final = "Repair access to the engine lock, then retry."
 
@@ -304,7 +347,7 @@ def _directory_files(io: Host, path: Path) -> tuple[str, ...]:
 def _foreign_files(io: Host, project_dir: Path) -> tuple[str, ...]:
     foreign: list[str] = []
     for name in io.listdir(project_dir):
-        if name in _RENDERED_NAMES or name in {"postgres", "openwebui", "secrets"}:
+        if name in _RENDERED_NAMES or name in _PERSISTENT_DIRECTORY_NAMES:
             continue
         foreign.append(str(project_dir / name))
     for directory, names in _RENDERED_DIRECTORY_NAMES.items():
@@ -343,12 +386,32 @@ def _render_stage(
         io.write_text(open_webui / "env", env_text, mode=0o600)
         io.write_text(open_webui / "manifest.yaml", manifest_text, mode=0o644)
         io.write_text(ci_stack.project_dir / API_INSTRUCTION_PATH, instruction_text, mode=0o644)
+        for directory in _OPENSEARCH_DIRECTORIES:
+            io.mkdir(ci_stack.project_dir / directory, mode=0o755, parents=True, exist_ok=True)
+        for artifact in _OPENSEARCH_ARTIFACTS:
+            io.write_text(
+                ci_stack.project_dir / artifact.relative_path,
+                artifact.emit(inputs),
+                mode=artifact.mode,
+            )
+        qdrant_root = ci_stack.project_dir / PurePosixPath(CI_QDRANT_DATA_ROOT).name
+        if not io.exists(qdrant_root):
+            gid = secrets.service_group_gid(io)
+            if gid is None:
+                return StageResult("render", False, secrets.SERVICE_GROUP_PROBLEM, _DATA_FIX)
+            io.mkdir(qdrant_root, mode=0o750)
+            io.chown(qdrant_root, 0, gid)
+        opensearch_root = ci_stack.project_dir / PurePosixPath(CI_OPENSEARCH_DATA_ROOT).name
+        if not io.exists(opensearch_root):
+            io.mkdir(opensearch_root, mode=0o700)
+            io.chown(opensearch_root, OPENSEARCH_UID, OPENSEARCH_GID)
     except (OSError, TypeError, ValueError) as exc:
         return StageResult("render", False, f"CI render files could not be written: {exc}", _RENDER_FIX)
     return StageResult(
         "render",
         True,
-        "wrote the CI Compose document, Open WebUI env file and manifest, and API instruction",
+        "wrote the CI Compose document, Open WebUI env file and manifest, API instruction, "
+        "and OpenSearch settings and security files; prepared Qdrant and OpenSearch data roots",
         "",
     )
 

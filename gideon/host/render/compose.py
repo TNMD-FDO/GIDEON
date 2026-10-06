@@ -16,9 +16,6 @@ from gideon.host.render.services import (
 from gideon.host.render.services import (
     image_pin as image_pin,
 )
-from gideon.host.render.services.api import (
-    api_service as api_service,
-)
 from gideon.host.render.services.generator import (
     ENGINE_ACCESS_LOG_EXCLUDED_PATHS as ENGINE_ACCESS_LOG_EXCLUDED_PATHS,
 )
@@ -143,7 +140,19 @@ def memory_limit_bytes(profile: HardwareProfile, service: str) -> int:
     return row.gb * GIGABYTE
 
 
-def _mounted_secret_names(services: Mapping[str, object]) -> tuple[str, ...]:
+def with_memory_limit(
+    block: Mapping[str, object], limit_bytes: int, *, swap: bool
+) -> dict[str, object]:
+    """Return a service block with its memory and optional swap ceiling."""
+
+    limited = dict(block)
+    limited["mem_limit"] = limit_bytes
+    if not swap:
+        limited["memswap_limit"] = limit_bytes + SWAP_CEILING_BYTES
+    return limited
+
+
+def mounted_secret_names(services: Mapping[str, object]) -> tuple[str, ...]:
     """Return mounted secret names once each, in first-mounted order."""
 
     names: dict[str, None] = {}
@@ -201,21 +210,15 @@ def _compose_document(inputs: RenderInputs) -> Mapping[str, object]:
     for definition in applying_services(inputs):
         block = definition.block(inputs, target)
         limit = memory_limit_bytes(inputs.profile, definition.name)
-        services[definition.name] = {
-            **block,
-            "mem_limit": limit,
-            **(
-                {"memswap_limit": limit + SWAP_CEILING_BYTES}
-                if not definition.swap
-                else {}
-            ),
-        }
+        services[definition.name] = with_memory_limit(
+            block, limit, swap=definition.swap
+        )
 
     # A secret is declared when a rendered block mounts it, in first-mounted
     # order; a new credential joins through its block's list.
     secrets = {
         name: {"file": f"/etc/gideon/secrets/{name}"}
-        for name in _mounted_secret_names(services)
+        for name in mounted_secret_names(services)
     }
     return {
         "name": PROJECT_NAME,

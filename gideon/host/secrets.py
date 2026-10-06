@@ -492,9 +492,9 @@ def rotate_generated(host: Host, name: str) -> RotateResult:
 def ensure_generated(host: Host, *, skip: Collection[str] = ()) -> EnsureResult:
     """Create absent passwords and keys, and repair certificates from their keys.
 
-    ``skip`` names entries a selected directory never holds — the
-    ``gideon-ci`` sibling mounts production's engine key and runs no Grafana
-    or SearXNG or opensearch.
+    ``skip`` names entries a selected directory never holds. The ``gideon-ci``
+    sibling mounts production's engine key and skips the two model-server
+    keys, Grafana's password, and SearXNG's key.
     """
 
     if host.geteuid() != 0:

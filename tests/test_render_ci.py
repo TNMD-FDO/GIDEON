@@ -5,6 +5,7 @@ import unittest
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import yaml  # type: ignore[import-untyped]
 
@@ -24,10 +25,16 @@ from gideon.host.render.api import (
     API_SERVICE_NAME,
 )
 from gideon.host.render.ci import (
+    CI_BASE_URL,
     CI_INSTRUCTION_DIGEST_LABEL,
+    CI_OPENSEARCH_DATA_ROOT,
+    CI_OPENSEARCH_MEMORY_GB,
+    CI_OPENSEARCH_RENDERED_DIR,
     CI_PORT,
     CI_POSTGRES_MEMORY_GB,
     CI_PROJECT,
+    CI_QDRANT_DATA_ROOT,
+    CI_QDRANT_MEMORY_GB,
     CI_ROOT,
     CI_SECRET_NAMES,
     CI_SECRETS_DIR,
@@ -44,8 +51,10 @@ from gideon.host.render.ci import (
 from gideon.host.render.compose import (
     NETWORK_NAME,
     PROJECT_NAME,
+    SWAP_CEILING_BYTES,
     image_pin,
     memory_limit_bytes,
+    mounted_secret_names,
     service_names,
 )
 from gideon.host.render.engine import (
@@ -54,8 +63,24 @@ from gideon.host.render.engine import (
     ENGINE_SERVICE_NAME,
 )
 from gideon.host.render.facts import HostFacts
-from gideon.host.render.owui import GENERAL_MODEL_ID, owui_secret_names
+from gideon.host.render.opensearch import (
+    OPENSEARCH_DATA_MOUNT,
+    OPENSEARCH_SECURITY_PATH,
+    OPENSEARCH_SERVICE_NAME,
+    OPENSEARCH_SETTINGS_PATH,
+    opensearch_heap_mib,
+)
+from gideon.host.render.owui import (
+    GENERAL_MODEL_ID,
+    owui_environment,
+    owui_secret_names,
+)
+from gideon.host.render.qdrant import QDRANT_SERVICE_NAME, QDRANT_STORAGE_MOUNT
 from gideon.host.render.services import declared_sources
+from gideon.host.render.services.open_webui import OpenWebuiService
+from gideon.host.render.services.opensearch import OpensearchService
+from gideon.host.render.services.postgres import PostgresService
+from gideon.host.render.services.qdrant import QdrantService
 from gideon.host.site import load_site
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -88,6 +113,7 @@ def inputs(**overrides: object) -> RenderInputs:
             "engine_api_key": "fixture-engine",
             "embed_api_key": "fixture-embed",
             "gideon_api_key": "fixture-api",
+            "qdrant_read_only_api_key": "fixture-qdrant-read-only",
         },
         checkout="/opt/gideon",
         source_digests=dict.fromkeys(declared_sources(), "sha256:" + "0" * 64),
@@ -107,6 +133,8 @@ class Compose(unittest.TestCase):
         expected = {
             "postgres": CI_POSTGRES_MEMORY_GB * GIGABYTE,
             "open-webui": memory_limit_bytes(render_inputs.profile, "open-webui"),
+            QDRANT_SERVICE_NAME: CI_QDRANT_MEMORY_GB * GIGABYTE,
+            OPENSEARCH_SERVICE_NAME: CI_OPENSEARCH_MEMORY_GB * GIGABYTE,
             API_SERVICE_NAME: memory_limit_bytes(render_inputs.profile, API_SERVICE_NAME),
             RELAY_SERVICE_NAME: RELAY_MEMORY_LIMIT,
         }
@@ -115,7 +143,14 @@ class Compose(unittest.TestCase):
                 service = mapping(services[name])
                 self.assertIsInstance(service["mem_limit"], int)
                 self.assertEqual(service["mem_limit"], limit)
-                self.assertEqual(tuple(service)[-1], "mem_limit")
+                if name in {QDRANT_SERVICE_NAME, OPENSEARCH_SERVICE_NAME}:
+                    self.assertEqual(
+                        service["memswap_limit"], limit + SWAP_CEILING_BYTES
+                    )
+                    self.assertEqual(tuple(service)[-2:], ("mem_limit", "memswap_limit"))
+                else:
+                    self.assertNotIn("memswap_limit", service)
+                    self.assertEqual(tuple(service)[-1], "mem_limit")
 
     def test_postgres_limit_is_own_and_frontend_tracks_its_profile_row(self) -> None:
         render_inputs = inputs()
@@ -146,14 +181,90 @@ class Compose(unittest.TestCase):
             frontend["mem_limit"], mapping(baseline["open-webui"])["mem_limit"]
         )
 
-    def test_has_the_four_isolated_services_and_expected_networks(self) -> None:
+    def test_service_blocks_differ_from_definitions_only_at_sibling_keys(self) -> None:
+        render_inputs = inputs()
+        target = parse_registry(render_inputs.site.registry)
+        assert target is not None
+        services = mapping(ci_compose_document(render_inputs)["services"])
+        cases = (
+            (PostgresService(), {"volumes", "command"}),
+            (OpenWebuiService(), {"env_file", "environment", "volumes", "ports"}),
+            (QdrantService(), {"volumes"}),
+            (OpensearchService(), {"volumes", "environment"}),
+        )
+        for definition, differences in cases:
+            with self.subTest(service=definition.name):
+                sibling = mapping(services[definition.name])
+                production = definition.block(render_inputs, target)
+                excluded = differences | {"mem_limit", "memswap_limit"}
+                self.assertEqual(
+                    {key: value for key, value in sibling.items() if key not in excluded},
+                    {key: value for key, value in production.items() if key not in excluded},
+                )
+
+        postgres = mapping(services[PostgresService.name])
+        self.assertEqual(postgres["volumes"], [f"{CI_ROOT}/postgres:/var/lib/postgresql"])
+        self.assertNotIn("command", postgres)
+
+        frontend = mapping(services[OpenWebuiService.name])
+        definition_env_file = OpenWebuiService().block(render_inputs, target)["env_file"]
+        assert isinstance(definition_env_file, list)
+        self.assertEqual(
+            frontend["env_file"],
+            [{**entry, "path": "./open-webui/env"} for entry in definition_env_file],
+        )
+        expected_environment = {
+            **owui_environment(render_inputs, search=False, directory=False),
+            "WEBUI_URL": CI_BASE_URL,
+        }
+        self.assertEqual(frontend["environment"], expected_environment)
+        environment = mapping(frontend["environment"])
+        self.assertEqual(environment["VECTOR_DB"], QDRANT_SERVICE_NAME)
+        self.assertEqual(urlsplit(str(environment["QDRANT_URI"])).hostname, QDRANT_SERVICE_NAME)
+        self.assertEqual(frontend["volumes"], [f"{CI_ROOT}/openwebui:/app/backend/data"])
+        self.assertEqual(frontend["ports"], [f"127.0.0.1:{CI_PORT}:8080"])
+
+        qdrant = mapping(services[QDRANT_SERVICE_NAME])
+        self.assertEqual(qdrant["volumes"], [f"{CI_QDRANT_DATA_ROOT}:{QDRANT_STORAGE_MOUNT}"])
+
+        opensearch = mapping(services[OPENSEARCH_SERVICE_NAME])
+        self.assertEqual(
+            opensearch["volumes"],
+            [
+                f"{CI_OPENSEARCH_DATA_ROOT}:{OPENSEARCH_DATA_MOUNT}",
+                f"{CI_OPENSEARCH_RENDERED_DIR}/opensearch.yml:{OPENSEARCH_SETTINGS_PATH}:ro",
+                f"{CI_OPENSEARCH_RENDERED_DIR}/security:{OPENSEARCH_SECURITY_PATH}:ro",
+            ],
+        )
+        production_environment = mapping(
+            OpensearchService().block(render_inputs, target)["environment"]
+        )
+        sibling_environment = mapping(opensearch["environment"])
+        self.assertEqual(
+            {key: value for key, value in sibling_environment.items() if key != "OPENSEARCH_JAVA_OPTS"},
+            {key: value for key, value in production_environment.items() if key != "OPENSEARCH_JAVA_OPTS"},
+        )
+        heap = opensearch_heap_mib(CI_OPENSEARCH_MEMORY_GB * GIGABYTE)
+        self.assertEqual(
+            sibling_environment["OPENSEARCH_JAVA_OPTS"],
+            f"-Xms{heap}m -Xmx{heap}m -XX:-HeapDumpOnOutOfMemoryError",
+        )
+
+    def test_has_the_six_isolated_services_and_expected_networks(self) -> None:
         render_inputs = inputs()
         document = ci_compose_document(render_inputs)
         self.assertEqual(document["name"], CI_PROJECT)
         services = mapping(document["services"])
         self.assertEqual(
             tuple(services),
-            ("postgres", "open-webui", API_SERVICE_NAME, RELAY_SERVICE_NAME),
+            (
+                "postgres",
+                "open-webui",
+                QDRANT_SERVICE_NAME,
+                OPENSEARCH_SERVICE_NAME,
+                API_SERVICE_NAME,
+                RELAY_SERVICE_NAME,
+            ),
         )
         networks = mapping(document["networks"])
         self.assertEqual(networks[NETWORK_NAME], {})
@@ -288,13 +399,18 @@ class Compose(unittest.TestCase):
             mapping(services["open-webui"])["image"],
             reference(target, image_pin(render_inputs, "open-webui")),
         )
+        for name in (QDRANT_SERVICE_NAME, OPENSEARCH_SERVICE_NAME):
+            self.assertEqual(
+                mapping(services[name])["image"],
+                reference(target, image_pin(render_inputs, name)),
+            )
         for name in (API_SERVICE_NAME, RELAY_SERVICE_NAME):
             self.assertEqual(
                 mapping(services[name])["image"],
                 reference(target, image_pin(render_inputs, "gideon")),
             )
 
-    def test_the_frontend_has_no_search_or_directory_settings(self) -> None:
+    def test_the_frontend_uses_its_store_without_search_or_directory_settings(self) -> None:
         services = mapping(ci_compose_document(inputs())["services"])
         frontend = mapping(services["open-webui"])
         environment = mapping(frontend["environment"])
@@ -307,7 +423,7 @@ class Compose(unittest.TestCase):
             "ENABLE_QDRANT_MULTITENANCY_MODE",
             "QDRANT_PREFER_GRPC",
         ):
-            self.assertNotIn(name, environment)
+            self.assertIn(name, environment)
         for name in environment:
             if name in {"ENABLE_WEB_SEARCH", "ENABLE_LDAP"}:
                 continue
@@ -315,24 +431,13 @@ class Compose(unittest.TestCase):
             self.assertFalse(name.startswith("WEB_LOADER_"))
             self.assertFalse(name.startswith("LDAP_"))
             self.assertFalse(name.startswith("ENABLE_LDAP_"))
-        self.assertEqual(frontend["secrets"], ["webui_secret_key"])
-        self.assertEqual(frontend["env_file"], [{"path": "./open-webui/env", "format": "raw"}])
-        self.assertEqual(frontend["volumes"], [f"{CI_ROOT}/openwebui:/app/backend/data"])
 
-    def test_ci_env_and_manifest_omit_search_and_secret_directory_settings(self) -> None:
+    def test_ci_env_has_store_key_without_search_or_directory_settings(self) -> None:
         render_inputs = inputs()
         env_text = ci_env_file(render_inputs)
         self.assertNotIn("LDAP_APP_PASSWORD=", env_text)
         self.assertNotIn("ENABLE_WEB_SEARCH=", env_text)
-        for name in (
-            "VECTOR_DB",
-            "QDRANT_URI",
-            "QDRANT_COLLECTION_PREFIX",
-            "ENABLE_QDRANT_MULTITENANCY_MODE",
-            "QDRANT_PREFER_GRPC",
-            "QDRANT_API_KEY",
-        ):
-            self.assertNotIn(f"{name}=", env_text)
+        self.assertIn("QDRANT_API_KEY=fixture-qdrant-read-only\n", env_text)
         self.assertIn("OPENAI_API_KEYS=fixture-api\n", env_text)
 
         manifest_text = ci_manifest(render_inputs)
@@ -345,7 +450,26 @@ class Compose(unittest.TestCase):
         self.assertIn("models", manifest)
 
     def test_secret_names_are_the_env_files_reads_with_the_directory_off(self) -> None:
-        self.assertEqual(CI_SECRET_NAMES, owui_secret_names(inputs(), directory=False, store=False))
+        self.assertEqual(CI_SECRET_NAMES, owui_secret_names(inputs(), directory=False))
+
+    def test_top_level_secrets_follow_the_blocks_mounted_names(self) -> None:
+        document = ci_compose_document(inputs())
+        services = mapping(document["services"])
+        names = mounted_secret_names(services)
+        self.assertEqual(
+            document["secrets"],
+            {
+                name: {
+                    "file": (
+                        f"/etc/gideon/secrets/{name}"
+                        if name == ENGINE_SECRET_NAME
+                        else f"{CI_SECRETS_DIR}/{name}"
+                    )
+                }
+                for name in names
+            },
+        )
+        self.assertIn(ENGINE_SECRET_NAME, names)
 
     def test_wipe_paths_are_all_inside_the_ci_root(self) -> None:
         self.assertTrue(CI_SECRETS_DIR.startswith(f"{CI_ROOT}/"))
@@ -355,6 +479,9 @@ class Compose(unittest.TestCase):
             {
                 "postgres",
                 "openwebui",
+                CI_QDRANT_DATA_ROOT.removeprefix(f"{CI_ROOT}/"),
+                CI_OPENSEARCH_DATA_ROOT.removeprefix(f"{CI_ROOT}/"),
+                CI_OPENSEARCH_RENDERED_DIR.removeprefix(f"{CI_ROOT}/"),
                 "open-webui",
                 API_SERVICE_NAME,
                 "compose.yaml",
