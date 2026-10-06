@@ -11,14 +11,14 @@ import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Literal, Protocol
+from typing import Literal, Protocol
 
 from gideon.evaluation.record import (
     EVAL_DATABASE,
     METRICS_ROLE,
     POSTGRES_SERVICE,
 )
-from gideon.host import stack
+from gideon.host import report, stack
 from gideon.host.report import Problem
 from gideon.host.sysio import Host, PathLike
 from gideon.improvement.feedback import FeedbackReading
@@ -77,9 +77,10 @@ class Section(Protocol):
     def render(self, context: Context) -> SectionReport | Problem: ...
 
 
-READ_FIX: Final[str] = (
-    "Run sudo python3 -m gideon proposals as root with the stack up, then retry."
-)
+def read_fix() -> str:
+    """The command to retry a metrics read with root and the stack available."""
+
+    return f"Run {report.command('proposals')} as root with the stack up, then retry."
 
 
 def once[T](read: Callable[[], T]) -> Callable[[], T]:
@@ -118,9 +119,9 @@ def read_rows(
     try:
         result = host.run(argv, input=sql)
     except (OSError, subprocess.SubprocessError):
-        return Problem("metrics reader command could not run", READ_FIX)
+        return Problem("metrics reader command could not run", read_fix())
     if result.returncode != 0:
         return Problem(
-            f"metrics reader failed with exit code {result.returncode}", READ_FIX
+            f"metrics reader failed with exit code {result.returncode}", read_fix()
         )
     return tuple(line.strip() for line in result.stdout.splitlines() if line.strip())

@@ -11,13 +11,13 @@ from dataclasses import dataclass, field
 from typing import Final
 from urllib.parse import quote, urlsplit
 
+from gideon.host import report
 from gideon.host.ingress import SniHTTPSConnection
 from gideon.host.sysio import PathLike
 
 _DEFAULT_TIMEOUT: Final[float] = 15.0
 _READY_SLEEP_SECONDS: Final[float] = 5.0
 _RETRY_FIX: Final[str] = "Check Grafana availability, then retry."
-_APPLY_FIX: Final[str] = "Run sudo python3 -m gideon apply, then retry."
 _HEALTH_PATH: Final[str] = "/api/health"
 _RECEIVERS_NAMESPACE: Final[str] = "default"
 _RECEIVERS_PATH: Final[str] = (
@@ -25,11 +25,11 @@ _RECEIVERS_PATH: Final[str] = (
     f"namespaces/{_RECEIVERS_NAMESPACE}/receivers"
 )
 _ALERTS_PATH: Final[str] = "/api/alertmanager/grafana/api/v2/alerts"
-_CONTACT_TEST_FIX: Final[str] = (
-    "Run sudo python3 -m gideon preflight, then correct "
-    "/etc/gideon/secrets/smtp_password."
-)
 _SMTP_CODE = re.compile(r"(?<!\d)(?:[245]\d{2})(?!\d)")
+
+
+def _apply_fix() -> str:
+    return f"Run {report.command('apply')}, then retry."
 
 
 class GrafanaError(Exception):
@@ -221,7 +221,7 @@ class Client:
         if not 200 <= response.status < 300:
             raise GrafanaError(
                 f"Grafana receiver lookup returned HTTP {response.status}.",
-                _APPLY_FIX,
+                _apply_fix(),
             )
         if not isinstance(response.body, Mapping):
             return None
@@ -257,12 +257,12 @@ class Client:
         if not 200 <= response.status < 300:
             raise GrafanaError(
                 f"Grafana alert lookup returned HTTP {response.status}.",
-                _APPLY_FIX,
+                _apply_fix(),
             )
         if not isinstance(response.body, list):
             raise GrafanaError(
                 "Grafana returned an invalid alert list.",
-                _APPLY_FIX,
+                _apply_fix(),
             )
 
         alerts: list[Alert] = []
@@ -312,7 +312,7 @@ class Client:
         if not isinstance(integration.get("version"), str):
             raise GrafanaError(
                 "Grafana receiver integration has no version.",
-                "Run sudo python3 -m gideon apply, then retry.",
+                _apply_fix(),
             )
         settings = integration.get("settings", {})
         if not isinstance(settings, Mapping):
@@ -363,7 +363,11 @@ class Client:
             ok=ok,
             status_code=response.status,
             problem=None if ok else error_text,
-            fix="" if ok else _CONTACT_TEST_FIX,
+            fix=(
+                ""
+                if ok
+                else f"Run {report.command('preflight')}, then correct /etc/gideon/secrets/smtp_password."
+            ),
             smtp_code=smtp_code,
         )
 

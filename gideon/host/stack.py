@@ -5,14 +5,16 @@ import os
 import subprocess
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Final
 
 import yaml  # type: ignore[import-untyped]
 
+from gideon.host import report
 from gideon.host.report import Problem
 from gideon.host.sysio import Host, PathLike
 
-_APPLY_FIX: Final[str] = "Run sudo python3 -m gideon apply, then retry."
+
+def _apply_fix() -> str:
+    return f"Run {report.command('apply')}, then retry."
 
 
 def compose_argv(rendered_dir: PathLike, *args: str) -> list[str]:
@@ -117,12 +119,12 @@ def declared_services(host: Host, rendered_dir: PathLike) -> tuple[str, ...] | P
     try:
         document = yaml.safe_load(host.read_text(compose_path))
     except (OSError, UnicodeDecodeError) as exc:
-        return Problem(f"rendered Compose file is unavailable: {exc}.", _APPLY_FIX)
+        return Problem(f"rendered Compose file is unavailable: {exc}.", _apply_fix())
     except yaml.YAMLError:
-        return Problem("rendered Compose file is invalid.", _APPLY_FIX)
+        return Problem("rendered Compose file is invalid.", _apply_fix())
     if not isinstance(document, Mapping) or not isinstance(document.get("services"), Mapping):
-        return Problem("rendered Compose file has no services map.", _APPLY_FIX)
+        return Problem("rendered Compose file has no services map.", _apply_fix())
     services = document["services"]
     if not all(isinstance(name, str) for name in services):
-        return Problem("rendered Compose file has an invalid services map.", _APPLY_FIX)
+        return Problem("rendered Compose file has an invalid services map.", _apply_fix())
     return tuple(services)

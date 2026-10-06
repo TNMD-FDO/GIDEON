@@ -7,21 +7,18 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
-from gideon.host import backupset, grafana, nogpu, owui, secrets, site, tls
+from gideon.host import backupset, grafana, nogpu, owui, report, secrets, site, tls
 from gideon.host.render.ci import CI_ROOT
 from gideon.host.render.grafana import GRAFANA_ADMIN_USER
 from gideon.host.report import Problem, one_line, refusal
 from gideon.host.sysio import Host, PathLike, RealHost
 from gideon.improvement import owuifeedback, proposals, triggers
 from gideon.improvement import sections as improvement_sections
-from gideon.status import attention, developer, glance
+from gideon.status import attention, developer, fired, glance
 
 _SITE_PATH: Final[Path] = Path("/etc/gideon/site.yaml")
 _RENDERED_DIR: Final[Path] = Path("/etc/gideon/rendered")
 _STAGING: Final[str] = backupset.STAGING
-_ROOT_FIX: Final[str] = "Run sudo python3 -m gideon status."
-_SITE_FIX: Final[str] = "Correct the site file, then run sudo python3 -m gideon status."
-_APPLY_FIX: Final[str] = "Run sudo python3 -m gideon apply, then retry."
 _REGISTRY_FIX: Final[str] = (
     "Restore config/triggers.yaml from the release checkout, then retry."
 )
@@ -80,26 +77,6 @@ def _status_context(
     )
 
 
-def _waiting_lines(
-    context: improvement_sections.Context,
-    registered: Sequence[improvement_sections.Section],
-) -> tuple[str, ...]:
-    lines: list[str] = []
-    for section in registered:
-        if section.scope != "office":
-            continue
-        result = section.render(context)
-        if isinstance(result, Problem):
-            lines.append(f"{section.name}: {result.problem} Fix: {result.fix}")
-            continue
-        lines.extend(
-            f"{row.name}: {row.detail}"
-            for row in result.rows
-            if row.state == "fired"
-        )
-    return tuple(lines) if lines else ("none",)
-
-
 def _attention_result(
     host: Host,
     hostname: str,
@@ -109,7 +86,7 @@ def _attention_result(
     if not secret.ok or secret.value is None:
         return Problem(
             secret.problem or "Grafana administrator secret is unavailable.",
-            _APPLY_FIX,
+            f"Run {report.command('apply')}, then retry.",
         )
     make_client = client_factory or grafana.ingress_client_factory(
         hostname, ca_path=tls.CA_PATH
@@ -138,13 +115,13 @@ def run_status(
     del args
     io = RealHost() if host is None else host
     if io.geteuid() != 0:
-        print(refusal("status", "root privileges are required.", _ROOT_FIX), file=sys.stderr)
+        print(refusal("status", "root privileges are required.", f"Run {report.command('status')}."), file=sys.stderr)
         return 2
 
     loaded_site = site.load_site(Path(site_path), host=io)
     if loaded_site.errors or loaded_site.config is None:
         problem = site.render_errors(loaded_site.errors) or "site file could not be loaded."
-        print(refusal("status", problem, _SITE_FIX), file=sys.stderr)
+        print(refusal("status", problem, f"Correct the site file, then run {report.command('status')}."), file=sys.stderr)
         return 2
     config = loaded_site.config
     rendered = Path(rendered_dir)
@@ -182,7 +159,18 @@ def run_status(
         build_box=build_box,
     )
     _print_line(_HEADERS[1])
-    waiting = (context,) if isinstance(context, str) else _waiting_lines(context, registered)
+    waiting = (
+        (context,)
+        if isinstance(context, str)
+        else fired.lines(
+            context,
+            registered,
+            scope="office",
+            failure="{section}: {problem} Fix: {fix}",
+            row="{name}: {detail}",
+            empty="none",
+        )
+    )
     for line in waiting:
         _print_line(line)
 

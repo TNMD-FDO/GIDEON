@@ -14,6 +14,7 @@ heavier dependencies inside their handlers, never at module level.
 """
 
 import argparse
+import os
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -21,6 +22,7 @@ from typing import Final
 
 import gideon
 from gideon.host import cli as host_cli
+from gideon.host import report
 from gideon.host.render.ci import PRODUCTION_STACK, STACKS
 
 _EVERYTHING_ELSE: Final = "Everything else\n  gideon --help, and the operator card at docs/runbooks/start-here.md"
@@ -472,6 +474,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    report.set_form_from_environment(os.environ)
     args = build_parser().parse_args(argv)
     result: int = args.handler(args)
     return result

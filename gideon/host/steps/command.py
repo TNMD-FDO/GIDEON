@@ -4,6 +4,7 @@ import shlex
 from pathlib import Path
 from stat import S_IMODE
 
+from gideon.host.report import GIDEON_INSTALLED_COMMAND
 from gideon.host.steps import CheckResult, Disposition, ProvisionContext, Step
 
 COMMAND_PATH = Path("/usr/local/bin/gideon")
@@ -20,14 +21,17 @@ def command_text(home: Path) -> str:
         f"gideon: {home} holds no GIDEON checkout. Fix: clone the release tag to {home} "
         "as docs/runbooks/install-upgrade.md §1 says, then re-run."
     )
+    enter_refusal = f"gideon: cannot enter {home}. Fix: repair access to {home}, then re-run."
     return (
         "#!/bin/sh\n"
         "# Owned by gideon host provision, which rewrites it at every run: an edit does not survive.\n"
         f"# Runs {home}'s release as root from {home}, whatever the working directory.\n"
         f"[ -f {shlex.quote(str(home / 'gideon' / '__main__.py'))} ] || "
-        f"{{ echo {shlex.quote(refusal)} >&2; exit 1; }}\n"
+        f"{{ echo {shlex.quote(refusal)} >&2; exit 2; }}\n"
         f"[ \"$(id -u)\" = 0 ] || exec sudo {shlex.quote(str(COMMAND_PATH))} \"$@\"\n"
-        f"cd {shlex.quote(str(home))} || exit 1\n"
+        f"cd {shlex.quote(str(home))} || "
+        f"{{ echo {shlex.quote(enter_refusal)} >&2; exit 2; }}\n"
+        f"export {GIDEON_INSTALLED_COMMAND}={shlex.quote(str(COMMAND_PATH))}\n"
         "exec python3 -m gideon \"$@\"\n"
     )
 

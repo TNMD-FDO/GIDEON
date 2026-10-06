@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from gideon.host import owui, secrets, site, tls
+from gideon.host import owui, report, secrets, site, tls
 from gideon.host.render.owui import FEEDBACK_LIST_ROUTE
 from gideon.host.report import Problem
 from gideon.host.sysio import Host, PathLike
@@ -30,18 +30,20 @@ RATING_VALUES: Final[Mapping[int, Rating]] = {1: "up", -1: "down"}
 # The route answers 30 items a page; 100 pages is a starting bound.
 FEEDBACK_PAGE_LIMIT: Final[int] = 100
 _SITE_FIX: Final[str] = "Correct the site file, then retry."
-_KEY_FIX: Final[str] = "Run sudo python3 -m gideon apply, which mints the key, then retry."
 _FRONTEND_FIX: Final[str] = "Check Open WebUI availability, then retry."
-_SHAPE_FIX: Final[str] = "Run sudo python3 -m gideon apply to converge the pinned frontend, then retry."
 _BOUND_FIX: Final[str] = (
     "Raise FEEDBACK_PAGE_LIMIT in gideon/improvement/owuifeedback.py in a release, then retry."
 )
 
 
+def _key_fix() -> str:
+    return f"Run {report.command('apply')}, which mints the key, then retry."
+
+
 def _host_fix(host: Host, fix: str) -> str:
     # The site file and the key may be root's alone, and proposals runs its
     # other sections without root; as root, the file's own fix stands.
-    return sections.READ_FIX if host.geteuid() != 0 else fix
+    return sections.read_fix() if host.geteuid() != 0 else fix
 
 
 def _text(value: object) -> str | None:
@@ -91,7 +93,7 @@ def _envelope(body: object) -> tuple[Sequence[object], int] | Problem:
     if not isinstance(items, list) or isinstance(total, bool) or not isinstance(total, int):
         return Problem(
             f"Open WebUI answered {FEEDBACK_LIST_ROUTE} without its items and total.",
-            _SHAPE_FIX,
+            f"Run {report.command('apply')} to converge the pinned frontend, then retry.",
         )
     return items, total
 
@@ -157,9 +159,9 @@ def read(
     secret = secrets.read_secret(host, ADMIN_KEY_SECRET)
     if not secret.ok or secret.value is None:
         if secret.missing:
-            return Problem("the break-glass API key is missing.", _KEY_FIX)
+            return Problem("the break-glass API key is missing.", _key_fix())
         problem = secret.problem or "the break-glass API key is unavailable."
-        return Problem(problem, _host_fix(host, secret.fix or _KEY_FIX))
+        return Problem(problem, _host_fix(host, secret.fix or _key_fix()))
 
     make_client = client_factory or owui.ingress_client_factory(
         loaded.config.hostname, ca_path=tls.CA_PATH

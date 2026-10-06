@@ -7,11 +7,10 @@ from pathlib import Path
 from typing import Final
 
 from gideon.evaluation import record
-from gideon.host import stack
 from gideon.host.report import Problem
 from gideon.host.sysio import Host, PathLike
 from gideon.improvement import sections
-from gideon.status import glance
+from gideon.status import fired, glance
 
 _UP_FIX: Final[str] = "Run sudo python3 -m tools.cistack up, then retry."
 _STATUS_FIX: Final[str] = "Run sudo python3 -m tools.cistack status, then retry."
@@ -33,16 +32,10 @@ def sibling_fact(host: Host, ci_root: PathLike) -> glance.Fact:
     if not converged:
         return glance.Fact(name, _NOT_CONVERGED, _UP_FIX)
 
-    declared = stack.declared_services(host, ci_root)
-    if isinstance(declared, Problem):
-        return glance.failure(name, declared.problem, _STATUS_FIX)
-    running = stack.running_services(host, ci_root)
-    if running is None:
-        return glance.failure(name, "Compose service status is unavailable.", _STATUS_FIX)
-
-    active = set(running)
-    missing = tuple(service for service in declared if service not in active)
-    count = len(declared) - len(missing)
+    counts = glance.service_counts(host, ci_root)
+    if isinstance(counts, Problem):
+        return glance.failure(name, counts.problem, _STATUS_FIX)
+    declared, count, missing = counts
     if not missing:
         return glance.Fact(name, f"up, {count} of {len(declared)} services", "")
     if count == 0:
@@ -79,19 +72,11 @@ def proposal_lines(
 ) -> tuple[str, ...]:
     """Render fired product rows and report any section read failures."""
 
-    lines: list[str] = []
-    for section in registered:
-        if section.scope != "product":
-            continue
-        result = section.render(context)
-        if isinstance(result, Problem):
-            lines.append(
-                f"{section.name}: could not read — {result.problem} Fix: {result.fix}"
-            )
-            continue
-        lines.extend(
-            f"{section.name}: {row.name} — {row.detail}"
-            for row in result.rows
-            if row.state == "fired"
-        )
-    return tuple(lines) if lines else (_NONE_FIRED,)
+    return fired.lines(
+        context,
+        registered,
+        scope="product",
+        failure="{section}: could not read — {problem} Fix: {fix}",
+        row="{section}: {name} — {detail}",
+        empty=_NONE_FIRED,
+    )

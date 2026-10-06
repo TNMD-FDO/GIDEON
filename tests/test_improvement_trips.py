@@ -12,7 +12,7 @@ from gideon.host.report import Problem
 from gideon.host.sysio import Host
 from gideon.improvement import ratings, trips
 from gideon.improvement.feedback import FeedbackReading, FeedbackRecord
-from gideon.improvement.sections import READ_FIX, Context, SectionReport
+from gideon.improvement.sections import Context, SectionReport, read_fix
 from gideon.improvement.triggers import TriggerRegistry
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -110,7 +110,7 @@ class GuardrailTrips(unittest.TestCase):
         self.assertIsInstance(result, Problem)
         assert isinstance(result, Problem)
         self.assertEqual(result.problem, trips.PARSE_PROBLEM.format(count=2))
-        self.assertEqual(result.fix, READ_FIX)
+        self.assertEqual(result.fix, read_fix())
         self.assertNotIn(malformed, result.problem)
         self.assertNotIn(malformed, result.fix)
 

@@ -6,6 +6,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import unittest
@@ -16,12 +17,13 @@ from typing import Any, NoReturn, cast
 from unittest.mock import patch
 
 import gideon
-from gideon.host import backupset, grafana, nogpu, owui, secrets, stack
+from gideon import cli
+from gideon.host import backupset, grafana, nogpu, owui, report, secrets, stack
 from gideon.host.checks.capacity import DATA_DF_ARGV
 from gideon.host.render.ci import CI_ROOT
 from gideon.host.render.grafana import GRAFANA_ADMIN_USER
 from gideon.host.report import Problem
-from gideon.host.sysio import Command, PathLike
+from gideon.host.sysio import Command, PathLike, RealHost
 from gideon.improvement import feedback, ratings, trips
 from gideon.improvement.sections import Context, Row, Scope, Section, SectionReport
 from gideon.status import command, glance
@@ -881,6 +883,121 @@ class Status(unittest.TestCase):
         self.assertEqual(stdout, "")
         self.assertIn("gideon status:", stderr)
         self.assertIn("Correct the site file", stderr)
+
+    def test_main_reads_command_form_before_status_refuses_without_box_access(self) -> None:
+        self.addCleanup(report.set_form_from_environment, os.environ.copy())
+        with (
+            patch.object(RealHost, "geteuid", return_value=1000) as geteuid,
+            patch.object(RealHost, "read_text", side_effect=AssertionError("box read")) as read_text,
+        ):
+            for installed in (True, False):
+                with self.subTest(installed=installed):
+                    environment = (
+                        {report.GIDEON_INSTALLED_COMMAND: "/fictitious/gideon"}
+                        if installed
+                        else {}
+                    )
+                    out, err = io.StringIO(), io.StringIO()
+                    with (
+                        patch.dict(os.environ, environment, clear=True),
+                        contextlib.redirect_stdout(out),
+                        contextlib.redirect_stderr(err),
+                    ):
+                        code = cli.main(["status"])
+                    self.assertEqual(code, 2)
+                    self.assertEqual(out.getvalue(), "")
+                    expected = "gideon status" if installed else "sudo python3 -m gideon status"
+                    self.assertIn(f"Fix: Run {expected}.", err.getvalue())
+            self.assertEqual(geteuid.call_count, 2)
+            read_text.assert_not_called()
+
+    def test_every_status_command_fix_uses_the_runs_form(self) -> None:
+        self.addCleanup(report.set_form_from_environment, os.environ.copy())
+        command_pattern = re.compile(
+            r"(?:sudo python3 -m )?gideon "
+            r"(?P<path>backup run|backup push|backup drill|proposals|status|apply)\b"
+        )
+        expected_paths = {"status", "apply", "backup run", "backup push", "backup drill", "proposals"}
+
+        class MalformedFeedbackClient:
+            def request(self, method: str, path: str, **kwargs: object) -> owui.Response:
+                del method, path, kwargs
+                return owui.Response(200, {})
+
+        def malformed_feedback(**kwargs: object) -> owui.Client:
+            del kwargs
+            return cast(owui.Client, MalformedFeedbackClient())
+
+        for installed in (True, False):
+            with self.subTest(installed=installed):
+                report.set_installed_form(installed)
+                printed: list[str] = []
+
+                # The installed wrapper re-executes under sudo before status,
+                # so this installed-form non-root refusal is reachable in-process only.
+                non_root = self.make_host(euid=1000)
+                code, stdout, stderr, _ = self.run_status(non_root)
+                self.assertEqual(code, 2)
+                printed.extend((stdout, stderr))
+
+                invalid_site = self.make_host()
+                invalid_site.files[os.fspath(SITE_PATH)] = "hostname: []\n"
+                code, stdout, stderr, _ = self.run_status(invalid_site)
+                self.assertEqual(code, 2)
+                printed.extend((stdout, stderr))
+
+                failed_readers = self.make_host(
+                    build_box=True,
+                    set_names=(),
+                    compose_rc=1,
+                    sibling_compose_rc=1,
+                    psql_rc=1,
+                    guardrail_rc=1,
+                    eval_run_rc=1,
+                    df_rc=1,
+                    handshake_rc=1,
+                )
+                del failed_readers.files[os.fspath(secrets.secret_path("grafana_admin_password"))]
+                code, stdout, stderr, _ = self.run_status(
+                    failed_readers,
+                    sections=(ratings.FEEDBACK_SECTION, trips.TRIPS_SECTION),
+                )
+                self.assertEqual(code, 2)
+                printed.extend((stdout, stderr))
+
+                unreadable_registry = self.make_host()
+                unreadable_registry.files[os.fspath(TRIGGERS_PATH)] = "version: [not valid\n"
+                code, stdout, stderr, _ = self.run_status(
+                    unreadable_registry,
+                    FakeGrafana(error=grafana.GrafanaError("fictional Grafana failure")),
+                )
+                self.assertEqual(code, 2)
+                printed.extend((stdout, stderr))
+
+                missing_compose = self.make_host(set_names=(), psql_stdout="")
+                del missing_compose.files[os.fspath(RENDERED / "compose.yaml")]
+                missing_compose.files[os.fspath(secrets.secret_path("gideon_admin_api_key"))] = "fictitious-key"
+                code, stdout, stderr, _ = self.run_status(
+                    missing_compose,
+                    sections=(ratings.FEEDBACK_SECTION,),
+                    owui_factory=malformed_feedback,
+                )
+                self.assertEqual((code, stderr), (0, ""))
+                printed.append(stdout)
+
+                prefix = "gideon" if installed else "sudo python3 -m gideon"
+                found: set[str] = set()
+                for line in "\n".join(printed).splitlines():
+                    if installed:
+                        self.assertNotIn("python3 -m gideon", line)
+                    if "Fix: " not in line:
+                        continue
+                    fix = line.split("Fix: ", 1)[1]
+                    for match in command_pattern.finditer(fix):
+                        path = match.group("path")
+                        found.add(path)
+                        self.assertEqual(match.group(0), f"{prefix} {path}")
+                self.assertEqual(found, expected_paths)
 
     def test_push_uses_the_audit_row_not_a_newer_staging_push_record(self) -> None:
         files = {

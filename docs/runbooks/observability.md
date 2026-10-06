@@ -160,6 +160,9 @@ body's labels, values, and buttons are gone; a silence is made in Grafana
 file (`compose/grafana/provisioning/alerting/rules.yaml.tmpl`). An unresolved
 condition is re-sent daily; acknowledgement follows business hours.
 `sudo python3 -m gideon status` lists the pages firing now with each rule's runbook section.
+Exit code 0 means nothing needs attention; 1 means a page is firing or `sudo`
+itself refused; 2 means status could not check or the installed command itself
+refused (for example, the install home has no checkout).
 
 | Rule | Fires when | Do |
 |---|---|---|

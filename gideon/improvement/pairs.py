@@ -14,12 +14,12 @@ from gideon.evaluation import challenger, decision
 from gideon.host.report import Problem
 from gideon.improvement.ratings import TIME_FORMAT
 from gideon.improvement.sections import (
-    READ_FIX,
     Context,
     Row,
     RowState,
     Scope,
     SectionReport,
+    read_fix,
 )
 
 SECTION_NAME: Final[str] = "challenger"
@@ -268,7 +268,7 @@ def parse_pairs(lines: tuple[str, ...]) -> tuple[PairRow, ...] | Problem:
             )
         )
     if unreadable:
-        return Problem(PARSE_PAIRS_PROBLEM.format(count=unreadable), READ_FIX)
+        return Problem(PARSE_PAIRS_PROBLEM.format(count=unreadable), read_fix())
     return tuple(parsed)
 
 
@@ -318,7 +318,7 @@ def parse_results(lines: tuple[str, ...]) -> tuple[ResultRow, ...] | Problem:
             )
         )
     if unreadable:
-        return Problem(PARSE_RESULTS_PROBLEM.format(count=unreadable), READ_FIX)
+        return Problem(PARSE_RESULTS_PROBLEM.format(count=unreadable), read_fix())
     return tuple(parsed)
 
 
@@ -464,7 +464,7 @@ class ChallengerSection:
                 first.fix,
             )
         if loaded.config is None:
-            return Problem("challenger file could not be loaded", READ_FIX)
+            return Problem("challenger file could not be loaded", read_fix())
         entry = loaded.config.challenger
         if entry is None:
             return SectionReport("none set", (Row(NEWEST_ROW, "skipped", "none set"),))

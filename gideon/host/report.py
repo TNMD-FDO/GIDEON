@@ -1,7 +1,31 @@
 """Operator-facing report and refusal text shared by the host commands."""
 
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass
+
+GIDEON_INSTALLED_COMMAND = "GIDEON_INSTALLED_COMMAND"
+_installed_form = False
+
+
+def set_installed_form(installed: bool) -> None:
+    """Set the command form used for fixes in this run."""
+
+    global _installed_form
+    _installed_form = installed
+
+
+def set_form_from_environment(environment: Mapping[str, str]) -> None:
+    """Read whether the installed command started this run."""
+
+    set_installed_form(GIDEON_INSTALLED_COMMAND in environment)
+
+
+def command(path: str) -> str:
+    """Render a command path as the run's command form."""
+
+    prefix = "gideon" if _installed_form else "sudo python3 -m gideon"
+    return f"{prefix} {path}"
 
 
 def one_line(value: object) -> str:

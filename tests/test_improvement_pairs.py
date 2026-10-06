@@ -16,7 +16,7 @@ from gideon.host.report import Problem
 from gideon.host.sysio import Host
 from gideon.improvement import pairs
 from gideon.improvement.feedback import FeedbackReading
-from gideon.improvement.sections import READ_FIX, Context, Row, SectionReport, read_rows
+from gideon.improvement.sections import Context, Row, SectionReport, read_fix, read_rows
 from gideon.improvement.triggers import TriggerRegistry
 
 CHALLENGER_FILE = ROOT / challenger.CHALLENGER_PATH
@@ -212,7 +212,7 @@ class StatementsAndParsers(unittest.TestCase):
         self.assertEqual(
             result.problem, pairs.PARSE_PAIRS_PROBLEM.format(count=len(malformed))
         )
-        self.assertEqual(result.fix, READ_FIX)
+        self.assertEqual(result.fix, read_fix())
         self.assertNotIn("FICTIONAL_", result.problem + result.fix)
 
     def test_result_parser_accepts_failed_and_null_tokens_and_counts_bad_rows(
@@ -248,7 +248,7 @@ class StatementsAndParsers(unittest.TestCase):
         self.assertEqual(
             result.problem, pairs.PARSE_RESULTS_PROBLEM.format(count=len(malformed))
         )
-        self.assertEqual(result.fix, READ_FIX)
+        self.assertEqual(result.fix, read_fix())
         self.assertNotIn("FICTIONAL_", result.problem + result.fix)
 
 

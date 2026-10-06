@@ -22,12 +22,12 @@ from gideon.improvement import ratings
 from gideon.improvement.feedback import FeedbackReading
 from gideon.improvement.ratings import RATED_STATE
 from gideon.improvement.sections import (
-    READ_FIX,
     Context,
     Row,
     RowState,
     Scope,
     SectionReport,
+    read_fix,
 )
 
 TRIPS_STATEMENT: Final[str] = (
@@ -124,7 +124,7 @@ def parse_rows(lines: tuple[str, ...]) -> tuple[TripCount, ...] | Problem:
             continue
         parsed.append(TripCount(family, pattern_id, chat_text or None, int(trips_text)))
     if unreadable:
-        return Problem(PARSE_PROBLEM.format(count=unreadable), READ_FIX)
+        return Problem(PARSE_PROBLEM.format(count=unreadable), read_fix())
     return tuple(parsed)
 
 
