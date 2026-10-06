@@ -23,7 +23,7 @@ import yaml  # type: ignore[import-untyped]
 
 import gideon
 from gideon.host import audit as audit_module
-from gideon.host import backup, backupset, preflight, site, stack
+from gideon.host import backup, backupset, preflight, report, site, stack
 from gideon.host.checks import PreflightCheck, Severity
 from gideon.host.render.engine import ENGINE_SERVICE_NAME
 from gideon.host.report import StageResult, command_detail, print_stage, refusal
@@ -34,9 +34,20 @@ from gideon.host.sysio import Host, LockingHost, PathLike, RealHost
 
 _SITE_PATH: Final = "/etc/gideon/site.yaml"
 _RENDERED_DIR: Final = "/etc/gideon/rendered"
-_UPGRADE: Final = "sudo python3 -m gideon upgrade"
-_ROLLBACK: Final = f"{_UPGRADE} --rollback"
-_TAG_FIX: Final = f"Provide a release tag such as v1.2.3, then retry {_UPGRADE} <tag>."
+
+
+def _upgrade() -> str:
+    return report.command("upgrade")
+
+
+def _rollback() -> str:
+    return report.command("upgrade --rollback")
+
+
+def _tag_fix() -> str:
+    return f"Provide a release tag such as v1.2.3, then retry {_upgrade()} <tag>."
+
+
 _TAG_GRAMMAR_FIX: Final = (
     "Use a tag matching v<major>.<minor>.<patch> with an optional pre-release suffix, "
     "then retry."
@@ -54,35 +65,54 @@ _HEADING_RE: Final = re.compile(r"^#{1,6}\s+", re.MULTILINE)
 _NO_BREAKING: Final = "Breaking: the release notes name none."
 _PRE_RELEASE_SET_SUFFIX: Final = re.compile(r"-\d{8}T\d{6}Z$")
 
+
 # The next step depends on where the run failed: before the checkout
 # nothing has moved; at the new tree's provision or preflight the product is still
 # the previous release; at or after its apply only a rollback goes back.
-_BEFORE_NEW_TREE_FIX: Final = (
-    "Correct the refusal, then re-run sudo python3 -m gideon upgrade {tag}."
-)
+def _before_new_tree_fix(tag: str) -> str:
+    return f"Correct the refusal, then re-run {_upgrade()} {tag}."
+
+
 _PREFLIGHT_ADVISORY_FIX: Final = (
     "The new release's provision stage converges this step after checkout, and its "
     "preflight judges it. No operator action is needed now."
 )
-_AFTER_CHECKOUT_FIX: Final = (
-    "Reboot if asked or correct the refusal, then re-run sudo python3 -m gideon upgrade "
-    "{tag}; to abandon, sudo python3 -m gideon upgrade --rollback moves the checkout back."
-)
-_AFTER_APPLY_FIX: Final = "Run sudo python3 -m gideon upgrade --rollback."
+
+
+def _after_checkout_fix(tag: str) -> str:
+    return (
+        f"Reboot if asked or correct the refusal, then re-run {_upgrade()} "
+        f"{tag}; to abandon, {_rollback()} moves the checkout back."
+    )
+
+
+def _after_apply_fix() -> str:
+    return f"Run {_rollback()}."
+
+
 # Rollback's next step is always the same command; only the by-hand cases differ.
-_ROLLBACK_FIX: Final = f"Correct the refusal, then re-run {_ROLLBACK}."
-_ROLLBACK_FETCH_FIX: Final = (
-    f"Run git fetch --tags origin in the checkout as its owner, then re-run {_ROLLBACK}."
-)
-_ROLLBACK_BY_HAND_FIX: Final = (
-    "Go back by hand: sudo python3 -m gideon restore --from staging --set <label> of an "
-    "earlier set, then sudo python3 -m gideon apply."
-)
-_ROLLBACK_SAFETY_FIX: Final = (
-    "Correct backup run's refusal above, or stop the stack with docker compose -f "
-    "/etc/gideon/rendered/compose.yaml down to roll back without a safety set, then "
-    f"re-run {_ROLLBACK}."
-)
+def _rollback_fix() -> str:
+    return f"Correct the refusal, then re-run {_rollback()}."
+
+
+def _rollback_fetch_fix() -> str:
+    return f"Run git fetch --tags origin in the checkout as its owner, then re-run {_rollback()}."
+
+
+def _rollback_by_hand_fix() -> str:
+    return (
+        f"Go back by hand: {report.command('restore --from staging --set <label>')} of an "
+        f"earlier set, then {report.command('apply')}."
+    )
+
+
+def _rollback_safety_fix() -> str:
+    return (
+        "Correct backup run's refusal above, or stop the stack with docker compose -f "
+        "/etc/gideon/rendered/compose.yaml down to roll back without a safety set, then "
+        f"re-run {_rollback()}."
+    )
+
 
 Runner = Callable[[argparse.Namespace], int]
 
@@ -199,9 +229,10 @@ class _RollbackPlan:
 # that stopped after its restore's files stage, which leaves the rendered manifest
 # and the applied record both naming the set's release.
 _MARKER_PATH: Final = Path(backupset.STAGING) / "rollback.json"
-_MARKER_FIX: Final = (
-    f"Check {_MARKER_PATH}; remove it when the rollback it names is over, then re-run {_ROLLBACK}."
-)
+
+
+def _marker_fix() -> str:
+    return f"Check {_MARKER_PATH}; remove it when the rollback it names is over, then re-run {_rollback()}."
 
 
 @dataclass(frozen=True, slots=True)
@@ -316,7 +347,7 @@ def _preconditions(
 ) -> tuple[StageResult, _CheckoutOwner | None]:
     """Docker Compose answers and the checkout is a clean work tree with a known owner."""
 
-    docker_fix = f"Run sudo python3 -m gideon host provision --only docker-engine, then re-run {retry}."
+    docker_fix = f"Run {report.command('host provision --only docker-engine')}, then re-run {retry}."
     owner_fix = f"Correct the checkout's ownership and its passwd entry, then re-run {retry}."
     worktree_fix = f"Commit or stash the checkout's changes as its owner, then re-run {retry}."
     try:
@@ -399,7 +430,7 @@ def _resolve_tag(
 def _manual_fetch_fix(checkout: Path, owner: _CheckoutOwner, tag: str) -> str:
     return (
         f"Run git fetch --tags origin in {checkout} as {owner.name}, then re-run "
-        f"sudo python3 -m gideon upgrade {tag}."
+        f"{_upgrade()} {tag}."
     )
 
 
@@ -441,7 +472,7 @@ def _fetch_stage(
         head = _run_git(io, checkout, owner, ("rev-parse", "HEAD"))
     except (OSError, subprocess.SubprocessError) as exc:
         return (
-            StageResult("fetch", False, f"current commit could not be read: {exc}", _BEFORE_NEW_TREE_FIX.format(tag=tag)),
+            StageResult("fetch", False, f"current commit could not be read: {exc}", _before_new_tree_fix(tag)),
             None,
             None,
         )
@@ -451,7 +482,7 @@ def _fetch_stage(
                 "fetch",
                 False,
                 f"current commit could not be read: {command_detail(head)}",
-                _BEFORE_NEW_TREE_FIX.format(tag=tag),
+                _before_new_tree_fix(tag),
             ),
             None,
             None,
@@ -459,7 +490,7 @@ def _fetch_stage(
     from_commit = next((line.strip() for line in head.stdout.splitlines() if line.strip()), None)
     if from_commit is None:
         return (
-            StageResult("fetch", False, "current commit could not be read", _BEFORE_NEW_TREE_FIX.format(tag=tag)),
+            StageResult("fetch", False, "current commit could not be read", _before_new_tree_fix(tag)),
             None,
             None,
         )
@@ -552,7 +583,7 @@ def _version_stage(
         current = Version.parse(gideon.__version__)
         target_from_tag = Version.from_tag(tag)
     except ValueError as exc:
-        return StageResult("version", False, str(exc), _TAG_FIX), None, None
+        return StageResult("version", False, str(exc), _tag_fix()), None, None
     target_from_tree, tree_problem = _tree_version(io, checkout, owner, tag)
     if target_from_tree is None:
         return (
@@ -560,7 +591,7 @@ def _version_stage(
                 "version",
                 False,
                 f"could not read the version from {tag}'s tree: {tree_problem or 'unknown error'}",
-                _BEFORE_NEW_TREE_FIX.format(tag=tag),
+                _before_new_tree_fix(tag),
             ),
             None,
             None,
@@ -582,8 +613,8 @@ def _version_stage(
                 "version",
                 False,
                 f"target {tag} is lower than the current version {current}",
-                "Use sudo python3 -m gideon upgrade --rollback for a release rollback, "
-                "or sudo python3 -m gideon restore --from staging for data restore.",
+                f"Use {_rollback()} for a release rollback, "
+                f"or {report.command('restore --from staging')} for data restore.",
             ),
             current,
             target_from_tag,
@@ -722,7 +753,7 @@ def _backup_stage(
     crossed.
     """
 
-    fix = _BEFORE_NEW_TREE_FIX.format(tag=tag)
+    fix = _before_new_tree_fix(tag)
     try:
         refs = backupset.list_sets(io)
     except OSError as exc:
@@ -746,8 +777,8 @@ def _backup_stage(
                     False,
                     f"checkout is already at {tag}, but no pre-upgrade set for an "
                     "earlier release remains",
-                    "Restore an earlier set by hand with sudo python3 -m gideon restore "
-                    "--from staging --set <label>, then retry upgrade.",
+                    "Restore an earlier set by hand with "
+                    f"{report.command('restore --from staging --set <label>')}, then retry upgrade.",
                 ),
                 None,
             )
@@ -789,7 +820,7 @@ def _backup_stage(
                 f"set {label} records commit {taken.manifest.commit}, not the checkout's "
                 f"{from_commit}, so a rollback could not find it",
                 f"Make git -C {checkout} rev-parse HEAD answer as root, then re-run "
-                f"{_UPGRADE} {tag}.",
+                f"{_upgrade()} {tag}.",
             ),
             None,
         )
@@ -854,7 +885,7 @@ def _child_stage(
 def _checkout_stage(io: Host, plan: UpgradePlan, owner: _CheckoutOwner) -> StageResult:
     if plan.from_commit == plan.target_commit:
         return StageResult("checkout", True, f"checkout already at {plan.tag}", "")
-    fix = _BEFORE_NEW_TREE_FIX.format(tag=plan.tag)
+    fix = _before_new_tree_fix(plan.tag)
     try:
         result = _run_git(io, plan.checkout, owner, ("checkout", "--detach", plan.tag))
     except (OSError, subprocess.SubprocessError) as exc:
@@ -961,7 +992,7 @@ def _verify_stage(
         current = _read_stack(io, rendered_dir)
         problem = current if isinstance(current, str) else current.problem()
     if problem is not None:
-        return StageResult("verify", False, problem, _AFTER_APPLY_FIX)
+        return StageResult("verify", False, problem, _after_apply_fix())
     return StageResult(
         "verify",
         True,
@@ -1005,7 +1036,7 @@ def _rollback_select_stage(
     try:
         refs = backupset.list_sets(io)
     except OSError as exc:
-        return StageResult("select", False, f"cannot list backup sets: {exc}", _ROLLBACK_FIX), None
+        return StageResult("select", False, f"cannot list backup sets: {exc}", _rollback_fix()), None
 
     candidates: list[tuple[backupset.SetRef, str, backupset.Manifest]] = []
     for ref in refs:
@@ -1022,7 +1053,7 @@ def _rollback_select_stage(
                 "select",
                 False,
                 f"no complete pre-upgrade set is available{target_text}",
-                _ROLLBACK_BY_HAND_FIX,
+                _rollback_by_hand_fix(),
             ),
             None,
         )
@@ -1036,14 +1067,14 @@ def _rollback_select_stage(
             ("cat-file", "-e", f"{manifest.commit}^{{commit}}"),
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        return StageResult("select", False, f"cannot verify set commit: {exc}", _ROLLBACK_FETCH_FIX), None
+        return StageResult("select", False, f"cannot verify set commit: {exc}", _rollback_fetch_fix()), None
     if commit.returncode != 0:
         return (
             StageResult(
                 "select",
                 False,
                 f"set {selected.label} names commit {manifest.commit}, which is not in the checkout",
-                _ROLLBACK_FETCH_FIX,
+                _rollback_fetch_fix(),
             ),
             None,
         )
@@ -1051,7 +1082,7 @@ def _rollback_select_stage(
         target_version = Version.parse(manifest.release)
     except ValueError as exc:
         return (
-            StageResult("select", False, f"set {selected.label} has an invalid release: {exc}", _ROLLBACK_BY_HAND_FIX),
+            StageResult("select", False, f"set {selected.label} has an invalid release: {exc}", _rollback_by_hand_fix()),
             None,
         )
     resumed = ""
@@ -1067,7 +1098,7 @@ def _rollback_select_stage(
                     False,
                     f"the running tree and the applied record are both at {manifest.release}; "
                     "there is nothing to roll back to",
-                    f"Run sudo python3 -m gideon restore --from staging --set {selected.label} "
+                    f"Run {report.command(f'restore --from staging --set {selected.label}')} "
                     "for the data alone.",
                 ),
                 None,
@@ -1137,8 +1168,8 @@ def _rollback_plan_stage(
                     "plan",
                     False,
                     f"a rollback of {marker.set_label} begun {marker.started} is in progress",
-                    f"Re-run {_ROLLBACK} {_release_tag_for_set(marker.set_label) or ''} to finish it, "
-                    f"or {_MARKER_FIX}",
+                    f"Re-run {_rollback()} {_release_tag_for_set(marker.set_label) or ''} to finish it, "
+                    f"or {_marker_fix()}",
                 ),
                 None,
                 None,
@@ -1155,7 +1186,7 @@ def _rollback_plan_stage(
     fresh = _Marker(plan.set_label, needed, False, now.isoformat())
     problem = _write_marker(io, fresh)
     if problem is not None:
-        return StageResult("plan", False, problem, _MARKER_FIX), None, None
+        return StageResult("plan", False, problem, _marker_fix()), None, None
     verdict = "restore needed" if needed else "checkout-only"
     return StageResult("plan", True, f"{verdict}; {reason}", ""), replace(plan, restore_needed=needed), fresh
 
@@ -1172,7 +1203,7 @@ def _rollback_safety_stage(
 
     if not plan.restore_needed:
         return StageResult("safety", True, "skipped (the new release never applied)", "")
-    docker_fix = f"Check that Docker is running (systemctl status docker), then re-run {_ROLLBACK}."
+    docker_fix = f"Check that Docker is running (systemctl status docker), then re-run {_rollback()}."
     current = _read_stack(io, rendered_dir)
     if isinstance(current, str):
         return StageResult("safety", False, current, docker_fix)
@@ -1186,7 +1217,7 @@ def _rollback_safety_stage(
     label = f"pre-rollback-{backupset.nightly_label(now)}"
     code = runner(argparse.Namespace(command_path="backup run", full=True, label=label))
     if code != 0:
-        return StageResult("safety", False, f"backup run refused (exit {code})", _ROLLBACK_SAFETY_FIX)
+        return StageResult("safety", False, f"backup run refused (exit {code})", _rollback_safety_fix())
     return StageResult("safety", True, f"whole stack running; safety set {label} taken", "")
 
 
@@ -1194,9 +1225,9 @@ def _rollback_stop_stage(io: Host, rendered_dir: PathLike) -> StageResult:
     try:
         result = io.run(stack.compose_argv(rendered_dir, "down"))
     except (OSError, subprocess.SubprocessError) as exc:
-        return StageResult("stop", False, f"Compose down failed: {exc}", _ROLLBACK_FIX)
+        return StageResult("stop", False, f"Compose down failed: {exc}", _rollback_fix())
     if result.returncode != 0:
-        return StageResult("stop", False, f"Compose down failed: {command_detail(result)}", _ROLLBACK_FIX)
+        return StageResult("stop", False, f"Compose down failed: {command_detail(result)}", _rollback_fix())
     return StageResult("stop", True, "stack stopped", "")
 
 
@@ -1206,14 +1237,14 @@ def _rollback_identity_stage(io: Host, plan: _RollbackPlan) -> StageResult:
     try:
         refs = backupset.list_sets(io)
     except OSError as exc:
-        return StageResult("identity", False, f"cannot list backup sets: {exc}", _ROLLBACK_FIX)
+        return StageResult("identity", False, f"cannot list backup sets: {exc}", _rollback_fix())
     selected = next((ref for ref in refs if ref.label == plan.set_label), None)
     if selected is None or selected.manifest is None:
         return StageResult(
             "identity",
             False,
             f"selected backup set {plan.set_label} was not found",
-            _ROLLBACK_FIX,
+            _rollback_fix(),
         )
 
     try:
@@ -1225,7 +1256,7 @@ def _rollback_identity_stage(io: Host, plan: _RollbackPlan) -> StageResult:
             "identity",
             False,
             f"cannot inspect {AGE_IDENTITY_PATH}: {exc}",
-            _ROLLBACK_FIX,
+            _rollback_fix(),
         )
     else:
         present = True
@@ -1245,7 +1276,7 @@ def _rollback_identity_stage(io: Host, plan: _RollbackPlan) -> StageResult:
                 "identity",
                 False,
                 f"box identity could not be removed: {exc}",
-                _ROLLBACK_FIX,
+                _rollback_fix(),
             )
         return StageResult(
             "identity",
@@ -1268,9 +1299,9 @@ def _rollback_checkout_stage(io: Host, plan: _RollbackPlan) -> StageResult:
     try:
         head = _run_git(io, plan.checkout, plan.owner, ("rev-parse", "HEAD"))
     except (OSError, subprocess.SubprocessError) as exc:
-        return StageResult("checkout", False, f"current commit could not be read: {exc}", _ROLLBACK_FIX)
+        return StageResult("checkout", False, f"current commit could not be read: {exc}", _rollback_fix())
     if head.returncode != 0:
-        return StageResult("checkout", False, f"current commit could not be read: {command_detail(head)}", _ROLLBACK_FIX)
+        return StageResult("checkout", False, f"current commit could not be read: {command_detail(head)}", _rollback_fix())
     current_commit = next((line.strip() for line in head.stdout.splitlines() if line.strip()), None)
     if current_commit == plan.target_commit:
         return StageResult("checkout", True, f"checkout already at {plan.target_commit}", "")
@@ -1282,9 +1313,9 @@ def _rollback_checkout_stage(io: Host, plan: _RollbackPlan) -> StageResult:
             ("tag", "--points-at", plan.target_commit),
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        return StageResult("checkout", False, f"git tag lookup failed: {exc}", _ROLLBACK_FETCH_FIX)
+        return StageResult("checkout", False, f"git tag lookup failed: {exc}", _rollback_fetch_fix())
     if tags.returncode != 0:
-        return StageResult("checkout", False, f"git tag lookup failed: {command_detail(tags)}", _ROLLBACK_FETCH_FIX)
+        return StageResult("checkout", False, f"git tag lookup failed: {command_detail(tags)}", _rollback_fetch_fix())
     ref = next(
         (candidate for candidate in tags.stdout.splitlines() if _release_tag(candidate.strip())),
         plan.target_commit,
@@ -1293,9 +1324,9 @@ def _rollback_checkout_stage(io: Host, plan: _RollbackPlan) -> StageResult:
     try:
         result = _run_git(io, plan.checkout, plan.owner, ("checkout", "--detach", ref))
     except (OSError, subprocess.SubprocessError) as exc:
-        return StageResult("checkout", False, f"git checkout failed: {exc}", _ROLLBACK_FIX)
+        return StageResult("checkout", False, f"git checkout failed: {exc}", _rollback_fix())
     if result.returncode != 0:
-        return StageResult("checkout", False, f"git checkout failed: {command_detail(result)}", _ROLLBACK_FIX)
+        return StageResult("checkout", False, f"git checkout failed: {command_detail(result)}", _rollback_fix())
     return StageResult("checkout", True, f"checked out {ref} for {plan.target_commit} as {plan.owner.name}", "")
 
 
@@ -1326,14 +1357,14 @@ def _run_rollback(
     )
     timer = _StageTimer()
     with timer.timed("preconditions"):
-        preconditions, owner = _preconditions(io, checkout=checkout, retry=_ROLLBACK)
+        preconditions, owner = _preconditions(io, checkout=checkout, retry=_rollback())
     print_stage(preconditions)
     if not preconditions.ok or owner is None:
         return 1
 
     marker = _read_marker(io)
     if isinstance(marker, str):
-        print_stage(StageResult("select", False, marker, _MARKER_FIX))
+        print_stage(StageResult("select", False, marker, _marker_fix()))
         return 1
     with timer.timed("select"):
         select_result, plan = _rollback_select_stage(
@@ -1397,7 +1428,7 @@ def _run_rollback(
             ),
             stage="audit-intent",
             detail="rollback intent recorded",
-            fix=_ROLLBACK_FIX,
+            fix=_rollback_fix(),
         )
     intent_recorded = intent_attempt.ok
     if intent_attempt.ok:
@@ -1425,7 +1456,7 @@ def _run_rollback(
                 ),
                 stage="audit-applied",
                 detail=f"rollback failure recorded at {phase}",
-                fix=_ROLLBACK_FIX,
+                fix=_rollback_fix(),
             )
         print_stage(applied_result)
         return 1
@@ -1460,13 +1491,13 @@ def _run_rollback(
                 checkout=plan.checkout,
                 name="restore",
                 arguments=("restore", "--from", "staging", "--set", plan.set_label),
-                fix=_ROLLBACK_FIX,
+                fix=_rollback_fix(),
             )
         if restore_result.ok:
             problem = _write_marker(io, replace(marker, restored=True))
             if problem is not None:
                 restore_result = StageResult(
-                    "restore", False, f"restore completed, but the record of it failed: {problem}", _MARKER_FIX
+                    "restore", False, f"restore completed, but the record of it failed: {problem}", _marker_fix()
                 )
     elif marker.restored:
         restore_result = StageResult("restore", True, "skipped (already restored by the earlier run)", "")
@@ -1483,7 +1514,7 @@ def _run_rollback(
             checkout=plan.checkout,
             name="apply",
             arguments=("apply",),
-            fix=_ROLLBACK_FIX,
+            fix=_rollback_fix(),
         )
     print_stage(apply_result)
     if not apply_result.ok:
@@ -1511,7 +1542,7 @@ def _run_rollback(
             fix=(
                 "Do not go live on this engine. Run "
                 f"{stack.logs_fix(rendered_dir, ENGINE_SERVICE_NAME)}, correct the engine or driver, "
-                "then run sudo python3 -m gideon engine verify by hand."
+                f"then run {report.command('engine verify')} by hand."
             ),
         )
     print_stage(engine_verify_result)
@@ -1530,7 +1561,7 @@ def _run_rollback(
             ),
             stage="audit-applied",
             detail="rollback applied",
-            fix=_ROLLBACK_FIX,
+            fix=_rollback_fix(),
         )
         # The record goes only once the row is written: a re-run after a failed
         # row must still find it, or it would refuse with nothing left to do.
@@ -1542,7 +1573,7 @@ def _run_rollback(
                     "audit-applied",
                     False,
                     f"rollback applied, but the rollback record could not be removed: {exc}",
-                    _MARKER_FIX,
+                    _marker_fix(),
                 )
     print_stage(applied_result)
     return int(not applied_result.ok)
@@ -1566,7 +1597,7 @@ def run_upgrade(
     audit_api = audit if audit is not None else audit_module
     rollback = bool(getattr(args, "rollback", False))
     tag = getattr(args, "tag", None)
-    retry = _ROLLBACK if rollback else f"{_UPGRADE} {tag or '<tag>'}"
+    retry = _rollback() if rollback else f"{_upgrade()} {tag or '<tag>'}"
     if io.geteuid() != 0:
         return _refuse("root is required.", f"Run {retry} as root.")
     loaded = site.load_site(Path(site_path), host=io)
@@ -1590,7 +1621,7 @@ def run_upgrade(
             audit_api=audit_api,
         )
     if not isinstance(tag, str) or not tag:
-        return _refuse("a target tag is required.", _TAG_FIX)
+        return _refuse("a target tag is required.", _tag_fix())
     try:
         Version.from_tag(tag)
     except ValueError:
@@ -1606,8 +1637,8 @@ def run_upgrade(
         if runners is not None
         else _default_runners(io, site_path=site_path, rendered_dir=rendered_dir)
     )
-    before_fix = _BEFORE_NEW_TREE_FIX.format(tag=tag)
-    after_checkout_fix = _AFTER_CHECKOUT_FIX.format(tag=tag)
+    before_fix = _before_new_tree_fix(tag)
+    after_checkout_fix = _after_checkout_fix(tag)
     audit_fix = f"Check the rendered Postgres service, then re-run {retry}."
     timer = _StageTimer()
 
@@ -1731,7 +1762,7 @@ def run_upgrade(
     for name, key, arguments, fix in (
         ("provision", "provision", ("host", "provision"), after_checkout_fix),
         ("preflight", "new-tree-preflight", ("preflight",), after_checkout_fix),
-        ("apply", "apply", ("apply",), _AFTER_APPLY_FIX),
+        ("apply", "apply", ("apply",), _after_apply_fix()),
     ):
         with timer.timed(key):
             result = _child_stage(
@@ -1765,7 +1796,7 @@ def run_upgrade(
             checkout=plan.checkout,
             name="engine-verify",
             arguments=("engine", "verify"),
-            fix=_AFTER_APPLY_FIX,
+            fix=_after_apply_fix(),
         )
     print_stage(engine_verify_result)
     if not engine_verify_result.ok:

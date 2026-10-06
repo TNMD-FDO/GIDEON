@@ -14,7 +14,7 @@ from typing import ClassVar, Final, cast
 import yaml  # type: ignore[import-untyped]
 
 import gideon
-from gideon.host import nogpu
+from gideon.host import nogpu, report
 from gideon.host.egress import load_egress_allowlist
 from gideon.host.egress import render_errors as render_egress_errors
 from gideon.host.images import load_image_lock
@@ -44,7 +44,6 @@ from gideon.host.sysio import Host, PathLike, RealHost
 
 _SITE_PATH: Final = "/etc/gideon/site.yaml"
 _RENDERED_DIR: Final = "/etc/gideon/rendered"
-_ROOT_FIX: Final = "Run gideon render as root, for example with sudo."
 _TEMPLATE_FIX: Final = (
     "Restore the release checkout's compose template, then re-run render."
 )
@@ -58,15 +57,20 @@ _FOREIGN_FIX: Final = (
 _RENDER_FIX: Final = "Correct the render inputs, then re-run render."
 _MANIFEST_NAME: Final = "manifest.yaml"
 _APPLIED_NAME: Final = "applied.yaml"
-_GENERATED_SECRET_FIX: Final = (
-    "Run sudo python3 -m gideon apply (it generates missing secrets), then retry."
-)
 _SECRET_LINE_FIX: Final = "Correct the secret file, then retry."
 _SMTP_PASSWORD_NAME: Final = "smtp_password"
 _SMTP_PASSWORD_MISSING_FIX: Final = (
     "Place the secret in /etc/gideon/secrets/smtp_password, or clear "
     "alerts.smtp.user, then retry."
 )
+
+
+def _root_fix() -> str:
+    return f"Run {report.command('render', sudo=False)} as root, for example with sudo."
+
+
+def _generated_secret_fix() -> str:
+    return f"Run {report.command('apply')} (it generates missing secrets), then retry."
 
 
 def _render_secret(io: Host, name: str, command: str) -> str | None:
@@ -79,7 +83,7 @@ def _render_secret(io: Host, name: str, command: str) -> str | None:
 
     result = read_secret(io, name)
     if not result.ok or result.value is None:
-        fix = _GENERATED_SECRET_FIX if result.missing and is_generated(name) else result.fix
+        fix = _generated_secret_fix() if result.missing and is_generated(name) else result.fix
         problem = result.problem or f"Secret is unavailable: {name}."
         print(_refusal(problem, fix, command), file=sys.stderr)
         return None
@@ -947,7 +951,7 @@ def run_render(
 
     io = host or RealHost()
     if io.geteuid() != 0:
-        print(_refusal("root is required", _ROOT_FIX), file=sys.stderr)
+        print(_refusal("root is required", _root_fix()), file=sys.stderr)
         return 1
 
     checkout = Path(__file__).parents[3] if root is None else Path(root)

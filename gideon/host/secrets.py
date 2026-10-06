@@ -9,11 +9,12 @@ import hashlib
 import re
 import secrets as token_secrets
 import subprocess
-from collections.abc import Collection, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, Literal
 
+from gideon.host import report
 from gideon.host.sysio import CompletedText, Host
 
 SecretKind = Literal["password", "minted", "key", "certificate"]
@@ -25,9 +26,10 @@ RotationClass = Literal["rewrite", "remint", "role", "account", "seeded"]
 SECRETS_DIR = Path("/etc/gideon/secrets")
 SERVICE_GROUP: Final = "gideon"
 SERVICE_GROUP_PROBLEM: Final = f"the {SERVICE_GROUP} service group is missing or invalid"
-_SERVICE_GROUP_FIX: Final = (
-    "Run sudo python3 -m gideon host provision --only service-user, then retry."
-)
+
+
+def _service_group_fix() -> str:
+    return f"Run {report.command('host provision --only service-user')}, then retry."
 
 
 def select_directory(path: Path) -> None:
@@ -65,7 +67,11 @@ class SuppliedSecret:
     """An office-supplied secret and the path for replacing its value."""
 
     name: str
-    replaced_by: str
+    _replacement: Callable[[], str]
+
+    @property
+    def replaced_by(self) -> str:
+        return self._replacement()
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,13 +148,8 @@ ROTATABLE_NAMES: Final[frozenset[str]] = frozenset(
     if secret.rotation in {"rewrite", "remint"}
 )
 
-_APPLY_COMMAND: Final = "sudo python3 -m gideon apply"
 # exempt: one local openssl operation must finish before apply proceeds.
 _OPENSSL_TIMEOUT: Final = 30.0
-_OPENSSL_FIX: Final = (
-    "openssl ships with Ubuntu Server; reinstall it with "
-    "sudo apt-get install -y openssl, then run sudo python3 -m gideon apply."
-)
 # Grafana mounts these Compose file secrets, and apply's recreate rule judges
 # rendered files only. The replacement therefore needs a manual recreate.
 _GRAFANA_RECREATE: Final = (
@@ -157,31 +158,48 @@ _GRAFANA_RECREATE: Final = (
 )
 
 
+def _apply_command() -> str:
+    return report.command("apply")
+
+
+def _openssl_fix() -> str:
+    return (
+        "openssl ships with Ubuntu Server; reinstall it with "
+        f"sudo apt-get install -y openssl, then run {_apply_command()}."
+    )
+
+
 def _grafana_mounted_replacement(name: str) -> str:
     return (
-        f"Replace {SECRETS_DIR / name}, run {_APPLY_COMMAND}, then force-recreate "
+        f"Replace {SECRETS_DIR / name}, run {_apply_command()}, then force-recreate "
         f"Grafana, which mounts it and which apply's recreate rule does not see: "
         f"{_GRAFANA_RECREATE}."
+    )
+
+
+def _tls_replacement() -> str:
+    return (
+        "Replace the certificate and key at their fixed homes per "
+        "docs/runbooks/office-services-setup.md §4, then run "
+        f"{report.command('tls reload')}."
+    )
+
+
+def _proxy_auth_replacement() -> str:
+    return (
+        f"Replace {SECRETS_DIR / 'proxy_auth'}, then run {_apply_command()} "
+        "(the frontend, SearXNG, and egress env files re-render and their owners "
+        "are recreated through the recreate rule)."
     )
 
 
 # Each office-supplied secret has a replacement path; the rotation command
 # prints it as a command sequence.
 SUPPLIED_REGISTRY: Final[tuple[SuppliedSecret, ...]] = (
-    SuppliedSecret(
-        "tls_key",
-        "Replace the certificate and key at their fixed homes per "
-        "docs/runbooks/office-services-setup.md §4, then run "
-        "sudo python3 -m gideon tls reload.",
-    ),
-    SuppliedSecret("ldap_bind_password", _grafana_mounted_replacement("ldap_bind_password")),
-    SuppliedSecret("smtp_password", _grafana_mounted_replacement("smtp_password")),
-    SuppliedSecret(
-        "proxy_auth",
-        f"Replace {SECRETS_DIR / 'proxy_auth'}, then run {_APPLY_COMMAND} "
-        "(the frontend, SearXNG, and egress env files re-render and their owners "
-        "are recreated through the recreate rule).",
-    ),
+    SuppliedSecret("tls_key", _tls_replacement),
+    SuppliedSecret("ldap_bind_password", lambda: _grafana_mounted_replacement("ldap_bind_password")),
+    SuppliedSecret("smtp_password", lambda: _grafana_mounted_replacement("smtp_password")),
+    SuppliedSecret("proxy_auth", _proxy_auth_replacement),
 )
 SUPPLIED_NAMES: Final[frozenset[str]] = frozenset(
     secret.name for secret in SUPPLIED_REGISTRY
@@ -313,7 +331,7 @@ def _write_secret(
 def _pair_fix(key_name: str, cert_name: str) -> str:
     return (
         f"Remove {secret_path(key_name)} and {secret_path(cert_name)}, "
-        f"then run {_APPLY_COMMAND}."
+        f"then run {_apply_command()}."
     )
 
 
@@ -355,7 +373,7 @@ def _install_openssl_file(
         host.unlink(temporary, missing_ok=True)
         result, unavailable = _run_openssl(host, [*argv, "-out", str(temporary)])
         if unavailable is not None:
-            problem, fix = unavailable, _OPENSSL_FIX
+            problem, fix = unavailable, _openssl_fix()
         else:
             assert result is not None
             if result.returncode != 0:
@@ -413,7 +431,7 @@ def _certificate_matches(
         host, ["openssl", "pkey", "-in", str(secret_path(key_name)), "-pubout"]
     )
     if unavailable is not None:
-        return False, unavailable, _OPENSSL_FIX
+        return False, unavailable, _openssl_fix()
     assert key is not None
     if key.returncode != 0:
         return False, _child_problem(f"openssl read of {secret_path(key_name)}", key), _pair_fix(key_name, cert_name)
@@ -421,7 +439,7 @@ def _certificate_matches(
         host, ["openssl", "x509", "-in", str(secret_path(cert_name)), "-noout", "-pubkey"]
     )
     if unavailable is not None:
-        return False, unavailable, _OPENSSL_FIX
+        return False, unavailable, _openssl_fix()
     assert cert is not None
     return cert.returncode == 0 and key.stdout.strip() == cert.stdout.strip(), None, ""
 
@@ -455,7 +473,7 @@ def rotate_generated(host: Host, name: str) -> RotateResult:
         )
     service_gid = service_group_gid(host)
     if service_gid is None:
-        return RotateResult(problem=f"{SERVICE_GROUP_PROBLEM}.", fix=_SERVICE_GROUP_FIX)
+        return RotateResult(problem=f"{SERVICE_GROUP_PROBLEM}.", fix=_service_group_fix())
     if entry.kind == "key":
         certificate = issued_certificate(name)
         problem, fix = _generate_key(host, name, service_gid, certificate.name)
@@ -464,9 +482,9 @@ def rotate_generated(host: Host, name: str) -> RotateResult:
         problem, fix = _issue_certificate(host, certificate.name, name, service_gid)
         if problem is not None:
             recovery = (
-                f"{fix} Then sudo python3 -m gideon secrets rotate {name} again."
-                if fix == _OPENSSL_FIX
-                else f"Run {_APPLY_COMMAND}, then sudo python3 -m gideon secrets rotate {name} again."
+                f"{fix} Then {report.command(f'secrets rotate {name}')} again."
+                if fix == _openssl_fix()
+                else f"Run {_apply_command()}, then {report.command(f'secrets rotate {name}')} again."
             )
             return RotateResult(
                 written=True, problem=problem, fix=recovery,
@@ -481,8 +499,8 @@ def rotate_generated(host: Host, name: str) -> RotateResult:
         # A value that reached the path is a rotation no consumer has yet:
         # apply converges its carriers, and a fresh rotation reaches the rest.
         fix = (
-            f"Run sudo chown root:{SERVICE_GROUP} {secret_path(name)}, then {_APPLY_COMMAND}, "
-            f"then sudo python3 -m gideon secrets rotate {name}."
+            f"Run sudo chown root:{SERVICE_GROUP} {secret_path(name)}, then {_apply_command()}, "
+            f"then {report.command(f'secrets rotate {name}')}."
             if written
             else f"Correct ownership and mode for {SECRETS_DIR}, then retry."
         )
@@ -501,17 +519,17 @@ def ensure_generated(host: Host, *, skip: Collection[str] = ()) -> EnsureResult:
     if host.geteuid() != 0:
         return EnsureResult(
             problem="generated secrets require root privileges.",
-            fix="Run `sudo python3 -m gideon apply` as root, then retry.",
+            fix=f"Run `{_apply_command()}` as root, then retry.",
         )
     if not host.exists(SECRETS_DIR):
         return EnsureResult(
             problem=f"Secrets directory is missing: {SECRETS_DIR}.",
-            fix="Run `sudo python3 -m gideon host provision --only secrets-dirs`, then retry.",
+            fix=f"Run `{report.command('host provision --only secrets-dirs')}`, then retry.",
         )
 
     service_gid = service_group_gid(host)
     if service_gid is None:
-        return EnsureResult(problem=f"{SERVICE_GROUP_PROBLEM}.", fix=_SERVICE_GROUP_FIX)
+        return EnsureResult(problem=f"{SERVICE_GROUP_PROBLEM}.", fix=_service_group_fix())
 
     created: list[str] = []
     printed: dict[str, str] = {}

@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
-from gideon.host import apply, backuplock, grafana, owui, secrets, weights
+from gideon.host import apply, backuplock, grafana, owui, report, secrets, weights
 from gideon.host.render import RenderedSet, RenderInputs, render_all
 from gideon.host.render import command as render_command
 from gideon.host.render.compose import service_names
@@ -29,16 +29,10 @@ from gideon.host.sysio import Host, LockingHost, PathLike, RealHost
 
 _SITE_PATH: Final = "/etc/gideon/site.yaml"
 _RENDERED_DIR: Final = "/etc/gideon/rendered"
-_APPLY_COMMAND: Final = "sudo python3 -m gideon apply"
-_ROTATE_COMMAND: Final = "sudo python3 -m gideon secrets rotate"
-_RENDER_DIFF_COMMAND: Final = "sudo python3 -m gideon render --diff"
 _COMPOSE_FILE: Final = f"{_RENDERED_DIR}/compose.yaml"
-_PENDING_FIX: Final = f"Run {_RENDER_DIFF_COMMAND}, then {_APPLY_COMMAND}, then retry."
-_APPLY_FIX: Final = f"Run {_APPLY_COMMAND}, then retry."
 _INPUTS_FIX: Final = "Correct the render inputs named above, then retry."
 # The command rotates only a secret whose file is the value's only home; a
-# second home is changed through its consumer's own route first (the ticket's
-# ruling b), and that route is a ticket of its own.
+# second home is changed through its consumer's own route first.
 _ONLY_HOME_RULE: Final = "this command rotates only a secret whose file is its only home"
 _ROTATABLE_CLASSES: Final[frozenset[str]] = frozenset({"rewrite", "remint"})
 
@@ -53,6 +47,26 @@ _ACCOUNT_LOGINS: Final[Mapping[str, str]] = {
     "gideon_admin_password": BREAK_GLASS.username,
     "gideon_eval_password": EVAL_IDENTITY.username,
 }
+
+
+def _apply_command() -> str:
+    return report.command("apply")
+
+
+def _rotate_command() -> str:
+    return report.command("secrets rotate")
+
+
+def _render_diff_command() -> str:
+    return report.command("render --diff")
+
+
+def _pending_fix() -> str:
+    return f"Run {_render_diff_command()}, then {_apply_command()}, then retry."
+
+
+def _apply_fix() -> str:
+    return f"Run {_apply_command()}, then retry."
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,7 +87,7 @@ def _role_fix(name: str, role: str) -> str:
         f"sudo docker compose -f {_COMPOSE_FILE} exec -T postgres psql -U postgres "
         f"-d postgres -f -), rewrite {secret_path(name)} in place, recreate every service "
         f"that mounts or carries it by hand (sudo docker compose -f {_COMPOSE_FILE} up -d "
-        f"--no-deps --force-recreate <service>), then {_APPLY_COMMAND}; a ticket of its "
+        f"--no-deps --force-recreate <service>), then {_apply_command()}; a ticket of its "
         f"own — {_ONLY_HOME_RULE}."
     )
 
@@ -82,7 +96,7 @@ def _account_fix(name: str, login: str) -> str:
     return (
         f"Change {login}'s password in the frontend first (the account's own password "
         f"route, signed in as {login}), rewrite {secret_path(name)} in place, then "
-        f"{_APPLY_COMMAND}; a ticket of its own — {_ONLY_HOME_RULE}."
+        f"{_apply_command()}; a ticket of its own — {_ONLY_HOME_RULE}."
     )
 
 
@@ -114,7 +128,7 @@ def _pre_run_refusal(name: str) -> int | None:
         supplied_names = ", ".join(sorted(secrets.SUPPLIED_NAMES))
         return _refuse(
             f"unknown secret name {name}.",
-            f"Run {_ROTATE_COMMAND} <name> with a rotatable name ({rotatable}); every other "
+            f"Run {_rotate_command()} <name> with a rotatable name ({rotatable}); every other "
             f"registry name refuses naming its path (generated: {generated}; supplied: "
             f"{supplied_names}).",
         )
@@ -169,7 +183,7 @@ def _preconditions(
     if not io.exists(compose_path):
         return (
             StageResult(
-                "preconditions", False, f"rendered Compose file is missing: {compose_path}", _APPLY_FIX
+                "preconditions", False, f"rendered Compose file is missing: {compose_path}", _apply_fix()
             ),
             None,
         )
@@ -177,7 +191,7 @@ def _preconditions(
     if not io.exists(applied_path):
         return (
             StageResult(
-                "preconditions", False, f"no verified apply is recorded: {applied_path}", _APPLY_FIX
+                "preconditions", False, f"no verified apply is recorded: {applied_path}", _apply_fix()
             ),
             None,
         )
@@ -207,7 +221,7 @@ def _preconditions(
     except Exception as exc:  # noqa: BLE001  # command boundary must not traceback
         return (
             StageResult(
-                "preconditions", False, f"rendered state is unreadable: {exc}", _APPLY_FIX
+                "preconditions", False, f"rendered state is unreadable: {exc}", _apply_fix()
             ),
             None,
         )
@@ -218,7 +232,7 @@ def _preconditions(
                 False,
                 f"apply has pending changes ({_pending_reason(judgment)}); a rotation "
                 "recreates exactly the secret's consumers.",
-                _PENDING_FIX,
+                _pending_fix(),
             ),
             None,
         )
@@ -294,7 +308,7 @@ def _rotate(io: Host, name: str, entry: secrets.GeneratedSecret) -> StageResult:
             "rotate",
             False,
             f"could not remove {path}: {exc}",
-            f"Correct {path}, then {_APPLY_COMMAND}, then retry.",
+            f"Correct {path}, then {_apply_command()}, then retry.",
         )
     return StageResult("rotate", True, f"{name}: file removed; re-minted below", "")
 
@@ -313,7 +327,7 @@ def _recreate(
             "recreate",
             False,
             failure.detail,
-            f"sudo {failure.fix}, then {_APPLY_COMMAND}, then {_ROTATE_COMMAND} {name} again.",
+            f"sudo {failure.fix}, then {_apply_command()}, then {_rotate_command()} {name} again.",
         )
     if not mounts:
         return StageResult("recreate", True, f"no service mounts {name}", "")
@@ -343,7 +357,7 @@ def run_secrets_rotate(
     name = str(getattr(args, "name", ""))
     io = host or RealHost()
     if io.geteuid() != 0:
-        return _refuse("root is required.", f"Run {_ROTATE_COMMAND} {name}.")
+        return _refuse("root is required.", f"Run {_rotate_command()} {name}.")
     refusal_code = _pre_run_refusal(name)
     if refusal_code is not None:
         return refusal_code
@@ -373,7 +387,7 @@ def run_secrets_rotate(
 
     lock_claim = backuplock.claim(
         io,
-        command=f"gideon secrets rotate {name}",
+        command=report.command_name(f"secrets rotate {name}"),
         now=now if now is not None else datetime.now(UTC),
     )
     if lock_claim.refusal is not None:

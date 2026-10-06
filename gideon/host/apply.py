@@ -19,6 +19,7 @@ from gideon.host import (
     models,
     owui,
     pgbackrest,
+    report,
     secrets,
     stack,
     stores,
@@ -55,13 +56,6 @@ from gideon.host.sysio import Host, LockingHost, PathLike, RealHost
 
 _SITE_PATH: Final = "/etc/gideon/site.yaml"
 _RENDERED_DIR: Final = "/etc/gideon/rendered"
-_ROOT_FIX: Final = "Run gideon apply as root, for example with sudo."
-_DOCKER_FIX: Final = (
-    "Run gideon host provision --only docker-engine, then re-run apply."
-)
-_REGISTRY_FIX: Final = (
-    "Run python3 -m gideon registry mirror on the box, then re-run apply."
-)
 _PULL_FIX: Final = (
     "Check the registry and the images.lock digests "
     "(docker compose -f /etc/gideon/rendered/compose.yaml pull), then re-run apply."
@@ -75,6 +69,18 @@ _PS_FORMAT: Final = "json"
 _VERIFY_ATTEMPTS: Final = 30
 _VERIFY_SLEEP_SECONDS: Final = 2.0
 _READY_ATTEMPTS: Final = 60
+
+
+def _root_fix() -> str:
+    return f"Run {report.command('apply', sudo=False)} as root, for example with sudo."
+
+
+def _docker_fix() -> str:
+    return f"Run {report.command('host provision --only docker-engine')}, then re-run apply."
+
+
+def _registry_fix() -> str:
+    return f"Run {report.command('registry mirror', sudo=False)} on the box, then re-run apply."
 
 
 @dataclass(slots=True)
@@ -95,18 +101,18 @@ def preconditions(io: Host) -> StageResult:
             "preconditions",
             False,
             f"Docker Compose is unavailable: {exc}",
-            _DOCKER_FIX,
+            _docker_fix(),
         )
     if result.returncode == 127:
         return StageResult(
-            "preconditions", False, "Docker Compose is unavailable", _DOCKER_FIX
+            "preconditions", False, "Docker Compose is unavailable", _docker_fix()
         )
     if result.returncode != 0:
         return StageResult(
             "preconditions",
             False,
             f"Docker Compose version check failed: {command_detail(result)}",
-            _DOCKER_FIX,
+            _docker_fix(),
         )
     return StageResult("preconditions", True, "Docker Compose is available", "")
 
@@ -289,7 +295,7 @@ def _registry_stage(io: Host, context: _ApplyContext) -> StageResult:
             "registry",
             False,
             "missing image digest(s): " + ", ".join(names),
-            _REGISTRY_FIX,
+            _registry_fix(),
         )
     return StageResult("registry", True, "all locked image digests are present", "")
 
@@ -1166,7 +1172,7 @@ def run_apply(
     del args
     io = host or RealHost()
     if io.geteuid() != 0:
-        print(refusal("apply", "root is required.", _ROOT_FIX), file=sys.stderr)
+        print(refusal("apply", "root is required.", _root_fix()), file=sys.stderr)
         return 1
     preconditions_result = preconditions(io)
     if not preconditions_result.ok:
@@ -1175,7 +1181,7 @@ def run_apply(
 
     lock_claim = backuplock.claim(
         io,
-        command="gideon apply",
+        command=report.command_name("apply"),
         now=now if now is not None else datetime.now(UTC),
     )
     if lock_claim.refusal is not None:

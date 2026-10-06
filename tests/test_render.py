@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 
 import yaml  # type: ignore[import-untyped]
 
-from gideon.host import nogpu, secrets, weights
+from gideon.host import nogpu, report, secrets, weights
 from gideon.host.egress import load_egress_allowlist
 from gideon.host.images import (
     ImageLock,
@@ -1348,6 +1348,40 @@ def render(host: DirHost, *, diff: bool = False) -> tuple[int, str, str]:
 
 
 class RenderCommand(unittest.TestCase):
+    def test_fixes_follow_the_run_form(self) -> None:
+        self.addCleanup(report.set_form_from_environment, os.environ.copy())
+        for installed in (False, True):
+            with self.subTest(installed=installed):
+                report.set_installed_form(installed)
+                prefix = "gideon" if installed else "sudo python3 -m gideon"
+                root_prefix = "gideon" if installed else "python3 -m gideon"
+
+                code, _, err = render(DirHost(checkout_files(), euid=1000))
+                self.assertEqual(code, 1)
+                self.assertIn(
+                    f"Fix: Run {root_prefix} render as root, for example with sudo.",
+                    err,
+                )
+
+                files = checkout_files()
+                del files["/etc/gideon/secrets/searxng_secret_key"]
+                code, _, err = render(DirHost(files))
+                self.assertEqual(code, 1)
+                self.assertIn(
+                    f"Fix: Run {prefix} apply (it generates missing secrets), then retry.",
+                    err,
+                )
+
+                host = DirHost(checkout_files())
+                group = ("getent", "group", "gideon")
+                del host.commands[group]
+                code, _, err = render(host)
+                self.assertEqual(code, 1)
+                self.assertIn(
+                    f"Fix: Run {prefix} host provision --only service-user, then re-run render.",
+                    err,
+                )
+
     def test_root_is_required(self) -> None:
         code, _, err = render(DirHost(checkout_files(), euid=1000))
         self.assertEqual(code, 1)

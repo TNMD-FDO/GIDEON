@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from gideon.host import report
 from gideon.host import secrets as secrets_module
 from gideon.host.render.command import _SMTP_PASSWORD_NAME
 from gideon.host.render.proxy import PROXY_AUTH_NAME
@@ -662,6 +663,98 @@ class TransportPair(unittest.TestCase):
 
 
 class Rotation(unittest.TestCase):
+    def test_fixes_and_supplied_replacements_follow_the_run_form(self) -> None:
+        self.addCleanup(report.set_form_from_environment, os.environ.copy())
+        for installed in (False, True):
+            with self.subTest(installed=installed):
+                report.set_installed_form(installed)
+                prefix = "gideon" if installed else "sudo python3 -m gideon"
+                replacements = {entry.name: entry.replaced_by for entry in SUPPLIED_REGISTRY}
+                self.assertEqual(set(replacements), SUPPLIED_NAMES)
+                self.assertTrue(replacements["tls_key"].endswith(f"then run {prefix} tls reload."))
+                for name in ("ldap_bind_password", "smtp_password"):
+                    with self.subTest(name=name):
+                        self.assertIn(f"Replace {SECRETS_DIR / name}, run {prefix} apply", replacements[name])
+                        self.assertIn("sudo docker compose", replacements[name])
+                self.assertIn(
+                    f"Replace {SECRETS_DIR / 'proxy_auth'}, then run {prefix} apply",
+                    replacements["proxy_auth"],
+                )
+                original_directory = current_directory()
+                selected_directory = Path("/tmp/fictitious-supplied-secrets")
+                try:
+                    select_directory(selected_directory)
+                    mounted = next(
+                        entry for entry in SUPPLIED_REGISTRY if entry.name == "ldap_bind_password"
+                    )
+                    self.assertIn(
+                        f"Replace {selected_directory / mounted.name}, run {prefix} apply",
+                        mounted.replaced_by,
+                    )
+                finally:
+                    select_directory(original_directory)
+
+                root = ensure_generated(FakeHost(euid=1000))
+                self.assertEqual(root.fix, f"Run `{prefix} apply` as root, then retry.")
+                directory = ensure_generated(FakeHost(dirs=set()))
+                self.assertEqual(
+                    directory.fix,
+                    f"Run `{prefix} host provision --only secrets-dirs`, then retry.",
+                )
+                group = ensure_generated(FakeHost(service_group=None))
+                self.assertEqual(
+                    group.fix,
+                    f"Run {prefix} host provision --only service-user, then retry.",
+                )
+                rotated_group = rotate_generated(FakeHost(service_group=None), "engine_api_key")
+                self.assertEqual(rotated_group.fix, group.fix)
+
+                unavailable = FakeHost()
+                unavailable.command_failures["genpkey"] = subprocess.CompletedProcess(
+                    ["openssl", "genpkey"], 127, "", "fixture missing tool\n"
+                )
+                ensure_result = ensure_generated(unavailable)
+                self.assertFalse(ensure_result.ok)
+                self.assertEqual(
+                    ensure_result.fix,
+                    "openssl ships with Ubuntu Server; reinstall it with "
+                    f"sudo apt-get install -y openssl, then run {prefix} apply.",
+                )
+
+                failed_write = FakeHost()
+                failed_write.command_failures["genpkey"] = subprocess.CompletedProcess(
+                    ["openssl", "genpkey"], 1, "", "fixture failure\n"
+                )
+                ensure_result = ensure_generated(failed_write)
+                self.assertFalse(ensure_result.ok)
+                self.assertIn(f"then run {prefix} apply.", ensure_result.fix)
+
+                for returncode in (1, 127):
+                    with self.subTest(returncode=returncode):
+                        files: dict[str, str] = {}
+                        seed_pair(files)
+                        host = FakeHost(files)
+                        host.command_failures["req"] = subprocess.CompletedProcess(
+                            ["openssl", "req"], returncode, "", "fixture failure\n"
+                        )
+                        rotation_result = rotate_generated(host, PAIR_NAMES[0])
+                        self.assertFalse(rotation_result.ok)
+                        self.assertTrue(rotation_result.written)
+                        self.assertIn(f"{prefix} secrets rotate {PAIR_NAMES[0]} again.", rotation_result.fix)
+                        if returncode == 127:
+                            self.assertIn(f"then run {prefix} apply.", rotation_result.fix)
+                        else:
+                            self.assertIn(f"Run {prefix} apply, then", rotation_result.fix)
+
+                unowned = FakeHost({f"{SECRETS_DIR}/engine_api_key": "old\n"})
+                unowned.chown_failure = True
+                rotation_result = rotate_generated(unowned, "engine_api_key")
+                self.assertFalse(rotation_result.ok)
+                self.assertIn(f"then {prefix} apply,", rotation_result.fix)
+                self.assertIn(f"then {prefix} secrets rotate engine_api_key.", rotation_result.fix)
+                if installed:
+                    self.assertNotIn("python3 -m gideon", " ".join(replacements.values()))
+
     def test_rewrites_a_fresh_value_at_the_same_path(self) -> None:
         path = f"{SECRETS_DIR}/engine_api_key"
         host = FakeHost({path: "old-value\n"})

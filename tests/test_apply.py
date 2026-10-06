@@ -12,18 +12,20 @@ import unittest
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 from urllib.parse import unquote
 
 import yaml  # type: ignore[import-untyped]
 from test_render import declared_source_files, inputs
 from test_secrets import answer_pair_command
 
-from gideon.host import backuplock, grafana, nogpu, owui, pgbackrest, weights
+from gideon.host import backuplock, grafana, nogpu, owui, pgbackrest, report, weights
 from gideon.host.apply import (
     _VERIFY_ATTEMPTS,
     _VERIFY_SLEEP_SECONDS,
     PRINT_ONCE_LINE,
     PullModels,
+    preconditions,
     run_apply,
 )
 from gideon.host.egress import EgressAllowlist, load_egress_allowlist
@@ -929,6 +931,58 @@ class HappyPath(unittest.TestCase):
 
 
 class Refusals(unittest.TestCase):
+    def test_fixes_follow_the_run_form_and_lock_keeps_its_name(self) -> None:
+        self.addCleanup(report.set_form_from_environment, os.environ.copy())
+        for installed in (False, True):
+            with self.subTest(installed=installed):
+                report.set_installed_form(installed)
+                prefix = "gideon" if installed else "sudo python3 -m gideon"
+                root_prefix = "gideon" if installed else "python3 -m gideon"
+
+                code, _, err = apply(ApplyHost(healthy_commands(), base_files(), euid=1000))
+                self.assertEqual(code, 1)
+                self.assertIn(
+                    f"Fix: Run {root_prefix} apply as root, for example with sudo.", err
+                )
+
+                for returncode in (127, 9):
+                    with self.subTest(returncode=returncode):
+                        commands = healthy_commands()
+                        commands[VERSION] = done(VERSION, returncode)
+                        result = preconditions(ApplyHost(commands, base_files()))
+                        self.assertFalse(result.ok)
+                        self.assertEqual(
+                            result.fix,
+                            f"Run {prefix} host provision --only docker-engine, then re-run apply.",
+                        )
+                host = ApplyHost(healthy_commands(), base_files())
+                with patch.object(host, "run", side_effect=OSError("compose absent")):
+                    result = preconditions(host)
+                self.assertFalse(result.ok)
+                self.assertEqual(
+                    result.fix,
+                    f"Run {prefix} host provision --only docker-engine, then re-run apply.",
+                )
+
+                commands = healthy_commands()
+                commands[manifest_inspect(PUBLIC_REF, insecure=False)] = done(
+                    manifest_inspect(PUBLIC_REF, insecure=False), 1
+                )
+                code, out, _ = apply(ApplyHost(commands, base_files()))
+                self.assertEqual(code, 1)
+                self.assertIn(
+                    f"Fix: Run {root_prefix} registry mirror on the box, then re-run apply.",
+                    out,
+                )
+
+                host = ApplyHost(healthy_commands(), base_files())
+                code, _, err = apply(host)
+                self.assertEqual((code, err), (0, ""))
+                record = backuplock.parse(host.lock_records[0])
+                self.assertIsNotNone(record)
+                assert record is not None
+                self.assertEqual(record.command, "gideon apply")
+
     def test_root_required(self) -> None:
         host = ApplyHost(healthy_commands(), base_files(), euid=1000)
         code, _, err = apply(host)

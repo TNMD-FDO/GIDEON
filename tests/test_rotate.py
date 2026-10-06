@@ -11,6 +11,7 @@ import unittest
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 import yaml  # type: ignore[import-untyped]
 from test_render import declared_source_files, inputs
@@ -22,7 +23,16 @@ from test_secrets import (
     seed_pair,
 )
 
-from gideon.host import backuplock, grafana, nogpu, owui, pgbackrest, rotate, weights
+from gideon.host import (
+    backuplock,
+    grafana,
+    nogpu,
+    owui,
+    pgbackrest,
+    report,
+    rotate,
+    weights,
+)
 from gideon.host.apply import run_apply
 from gideon.host.egress import EgressAllowlist
 from gideon.host.images import load_image_lock
@@ -967,6 +977,78 @@ class ApiRotation(RealStack):
 
 
 class RefusalClasses(RealStack):
+    def test_fixes_follow_the_run_form_and_lock_keeps_its_name(self) -> None:
+        self.addCleanup(report.set_form_from_environment, os.environ.copy())
+        for installed in (False, True):
+            with self.subTest(installed=installed):
+                report.set_installed_form(installed)
+                prefix = "gideon" if installed else "sudo python3 -m gideon"
+
+                code, out, err = run_rotate(
+                    ApplyHost(healthy_commands(), base_files(), euid=1000), "engine_api_key"
+                )
+                self.assertEqual((code, out), (1, ""))
+                self.assertIn(f"Fix: Run {prefix} secrets rotate engine_api_key.", err)
+
+                for name, command in (
+                    ("tls_key", "tls reload"),
+                    ("ldap_bind_password", "apply"),
+                    ("proxy_auth", "apply"),
+                ):
+                    with self.subTest(name=name):
+                        code, out, err = run_rotate(self.new_host(), name)
+                        self.assertEqual((code, out), (1, ""))
+                        self.assertIn(f"{prefix} {command}", err)
+                code, out, err = run_rotate(self.new_host(), "unknown-name")
+                self.assertEqual((code, out), (1, ""))
+                self.assertIn(
+                    f"Run {prefix} secrets rotate <name> with a rotatable name", err
+                )
+                for name in ("postgres_gideon_password", "gideon_admin_password"):
+                    with self.subTest(name=name):
+                        code, out, err = run_rotate(self.new_host(), name)
+                        self.assertEqual((code, out), (1, ""))
+                        self.assertIn(f"then {prefix} apply; a ticket of its own", err)
+
+                code, out, err = run_rotate(self.new_host(), "engine_api_key")
+                self.assertEqual((code, err), (1, ""))
+                self.assertIn(f"Fix: Run {prefix} apply, then retry.", out)
+                host = self.new_host()
+                entry = next(secret for secret in SECRET_REGISTRY if secret.name == "gideon_admin_api_key")
+                with patch.object(host, "unlink", side_effect=OSError("fixture refusal")):
+                    result = rotate._rotate(host, entry.name, entry)
+                self.assertFalse(result.ok)
+                self.assertIn(f"then {prefix} apply, then retry.", result.fix)
+
+                host = self.new_host()
+                recreate = force_recreate(ENGINE_SERVICE_NAME)
+                host.commands[recreate] = done(recreate, rc=1, stderr="fixture refusal")
+                result = rotate._recreate(host, RENDERED, "engine_api_key", (ENGINE_SERVICE_NAME,))
+                self.assertFalse(result.ok)
+                self.assertIn(
+                    f"then {prefix} apply, then {prefix} secrets rotate engine_api_key again.",
+                    result.fix,
+                )
+
+                host = self.applied_host()
+                host.lock_records.clear()
+                code, out, err = run_rotate(host, "engine_api_key")
+                self.assertEqual((code, err), (0, ""), out)
+                record = backuplock.parse(host.lock_records[0])
+                self.assertIsNotNone(record)
+                assert record is not None
+                self.assertEqual(record.command, "gideon secrets rotate engine_api_key")
+
+                host.files[SITE] = host.files[SITE].replace(
+                    "csa1@example.org", "changed@example.org"
+                )
+                code, out, err = run_rotate(host, "engine_api_key")
+                self.assertEqual((code, err), (1, ""))
+                self.assertIn(
+                    f"Fix: Run {prefix} render --diff, then {prefix} apply, then retry.",
+                    out,
+                )
+
     def test_refusals_are_before_any_new_write_or_compose_call(self) -> None:
         host = self.applied_host()
         cases = (

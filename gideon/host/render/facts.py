@@ -3,7 +3,7 @@
 import re
 from dataclasses import dataclass
 
-from gideon.host import nogpu
+from gideon.host import nogpu, report
 from gideon.host.secrets import SERVICE_GROUP_PROBLEM, service_group_gid
 from gideon.host.sysio import Host
 
@@ -25,9 +25,10 @@ class FactsError:
 
 
 _GPU_UUID = re.compile(r"\(UUID:\s*([^\)\s]+)\)")
-_SERVICE_GROUP_FIX = (
-    "Run gideon host provision --only service-user, then re-run render."
-)
+
+
+def _service_group_fix() -> str:
+    return f"Run {report.command('host provision --only service-user')}, then re-run render."
 
 
 def gather_facts(host: Host, *, no_gpu: bool = False) -> HostFacts | FactsError:
@@ -57,5 +58,5 @@ def gather_facts(host: Host, *, no_gpu: bool = False) -> HostFacts | FactsError:
         uuids = tuple(found)
     service_gid = service_group_gid(host)
     if service_gid is None:
-        return FactsError(problem=SERVICE_GROUP_PROBLEM, fix=_SERVICE_GROUP_FIX)
+        return FactsError(problem=SERVICE_GROUP_PROBLEM, fix=_service_group_fix())
     return HostFacts(gpu_uuids=uuids, service_gid=service_gid)

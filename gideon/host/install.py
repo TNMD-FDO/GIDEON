@@ -17,7 +17,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
-from gideon.host import apply, backup, backupset, drill, engine, preflight, site, users
+from gideon.host import (
+    apply,
+    backup,
+    backupset,
+    drill,
+    engine,
+    preflight,
+    report,
+    site,
+    users,
+)
 from gideon.host import audit as audit_module
 from gideon.host.report import StageResult, print_stage, refusal
 from gideon.host.stages import site_problem
@@ -25,10 +35,24 @@ from gideon.host.sysio import Host, LockingHost, PathLike, RealHost
 
 _SITE_PATH: Final = "/etc/gideon/site.yaml"
 _RENDERED_DIR: Final = "/etc/gideon/rendered"
-_ROOT_FIX: Final = "Run sudo python3 -m gideon install, then retry."
 _SITE_FIX: Final = "Correct /etc/gideon/site.yaml, then retry install."
-_AUDIT_FIX: Final = "Run sudo python3 -m gideon apply, then retry install."
 ENGINE_VERIFY_SKIPPED_DETAIL: Final = "engine verify skipped — no-GPU host"
+
+
+def _root_fix() -> str:
+    return f"Run {report.command('install')}, then retry."
+
+
+def _audit_fix() -> str:
+    return f"Run {report.command('apply')}, then retry install."
+
+
+def _gate_fix() -> str:
+    return (
+        f"Do not go live. Run {report.command('engine verify')}, correct its refusal, "
+        "then re-run install."
+    )
+
 
 Runner = Callable[[argparse.Namespace], int]
 
@@ -101,15 +125,9 @@ def _phase_result(phase: _Phase, code: int) -> StageResult:
         phase.name,
         False,
         f"{phase.command_path} refused (exit {code})",
-        f"Run sudo python3 -m gideon {phase.command_path}, correct its refusal, "
+        f"Run {report.command(phase.command_path)}, correct its refusal, "
         "then re-run install.",
     )
-
-
-_GATE_FIX: Final = (
-    "Do not go live. Run sudo python3 -m gideon engine verify, correct its refusal, "
-    "then re-run install."
-)
 
 
 def _gate_result(phase: _Phase, code: int, observed: list[StageResult]) -> StageResult:
@@ -129,7 +147,7 @@ def _gate_result(phase: _Phase, code: int, observed: list[StageResult]) -> Stage
         return StageResult(phase.name, True, f"engine verify completed ({checks} checks ok)", "")
     failed_names = ", ".join(row.name for row in observed if not row.ok)
     return StageResult(
-        phase.name, False, f"engine verify refused (exit {code}): {failed_names}", _GATE_FIX
+        phase.name, False, f"engine verify refused (exit {code}): {failed_names}", _gate_fix()
     )
 
 
@@ -154,7 +172,7 @@ def _audit_stage(
 ) -> StageResult:
     problem = audit_api.write_rows(io, rendered_dir, (row,))
     if problem is not None:
-        return StageResult("audit", False, f"{detail}: {problem}", _AUDIT_FIX)
+        return StageResult("audit", False, f"{detail}: {problem}", _audit_fix())
     return StageResult("audit", True, detail, "")
 
 
@@ -184,7 +202,7 @@ def run_install(
     io = host or RealHost()
     audit_api = audit if audit is not None else audit_module
     if io.geteuid() != 0:
-        return _refuse("root is required.", _ROOT_FIX)
+        return _refuse("root is required.", _root_fix())
     loaded = site.load_site(Path(site_path), host=io)
     if loaded.errors or loaded.config is None:
         return _refuse(site_problem(loaded) or "the site file is invalid.", _SITE_FIX)

@@ -16,6 +16,7 @@ from urllib.parse import quote
 
 import yaml  # type: ignore[import-untyped]
 
+from gideon.host import report
 from gideon.host.egress import EgressAllowlist, load_egress_allowlist
 from gideon.host.models import (
     CandidatePin,
@@ -42,6 +43,7 @@ from gideon.host.weights import (
     PullOutcome,
     PullRecord,
     SnapshotRef,
+    _retry_fix,
     bare_digest,
     blob_link_target,
     blob_path,
@@ -692,6 +694,76 @@ def _wrong_digest_wget(command: list[str], host: FakeHost) -> subprocess.Complet
 class ModelConvergence(unittest.TestCase):
     """Classification and convergence use only the loaded fictitious lock."""
 
+    def test_fixes_follow_the_run_form(self) -> None:
+        self.addCleanup(report.set_form_from_environment, os.environ.copy())
+        for installed in (False, True):
+            with self.subTest(installed=installed):
+                report.set_installed_form(installed)
+                prefix = "gideon" if installed else "sudo python3 -m gideon"
+                retry = f"then re-run {prefix} models pull."
+
+                record = parse_pull_record("in_progress: []\n")
+                self.assertIsInstance(record, Problem)
+                assert isinstance(record, Problem)
+                self.assertTrue(record.fix.endswith(retry), record.fix)
+
+                foreign = snapshot_path(FICTITIOUS_PIN.repo, FICTITIOUS_PIN.revision, "foreign.txt")
+                outcome = converge_model(
+                    FakeHost({str(foreign): "foreign"}),
+                    FICTITIOUS_SITE, FICTITIOUS_PIN, _no_proxy_wgetrc(), root=MODELS_ROOT,
+                )
+                self.assertEqual(outcome.kind, "failed")
+                self.assertIn(f"Remove foreign.txt, then re-run {prefix} models pull;", outcome.fix)
+
+                host = FakeHost(available=0)
+                outcome = converge_model(
+                    host, FICTITIOUS_SITE, FICTITIOUS_PIN, _no_proxy_wgetrc(), root=MODELS_ROOT,
+                )
+                self.assertEqual(outcome.kind, "failed")
+                self.assertEqual(outcome.fix, f"Free space on /data, {retry}")
+
+                file = FICTITIOUS_PIN.files[0]
+                blob = str(blob_path(FICTITIOUS_PIN.repo, file.sha256))
+                host = FakeHost(sizes={blob: file.size}, digests={blob: bare_digest(file.sha256)})
+                host.verify_returncode = 127
+                outcome = converge_model(
+                    host, FICTITIOUS_SITE, FICTITIOUS_PIN, _no_proxy_wgetrc(), root=MODELS_ROOT,
+                )
+                self.assertEqual(outcome.kind, "failed")
+                self.assertIn("Install coreutils", outcome.fix)
+                self.assertTrue(outcome.fix.endswith(retry), outcome.fix)
+
+                missing_wget = FakeHost(
+                    wget=lambda command, _host: subprocess.CompletedProcess(command, 127, "", "")
+                )
+                outcome = converge_model(
+                    missing_wget, FICTITIOUS_SITE, FICTITIOUS_PIN,
+                    _no_proxy_wgetrc(), root=MODELS_ROOT,
+                )
+                self.assertEqual(outcome.kind, "failed")
+                self.assertEqual(
+                    outcome.fix,
+                    f"Install wget with sudo apt-get install wget, {retry}",
+                )
+
+                blocked = FakeHost(
+                    wget=lambda command, _host: subprocess.CompletedProcess(command, 8, "", "")
+                )
+                outcome = converge_model(
+                    blocked, FICTITIOUS_SITE, FICTITIOUS_PIN,
+                    _no_proxy_wgetrc(), root=MODELS_ROOT,
+                )
+                self.assertEqual(outcome.kind, "failed")
+                self.assertTrue(outcome.fix.endswith(retry), outcome.fix)
+
+                unprivileged = FakeHost()
+                unprivileged.euid = 1000
+                error = StringIO()
+                with redirect_stderr(error):
+                    code = run_models_pull(SimpleNamespace(), host=unprivileged)
+                self.assertEqual(code, 1)
+                self.assertIn(f"Fix: Run {prefix} models pull.", error.getvalue())
+
     def test_profile_and_candidate_rows_use_their_own_labels(self) -> None:
         for pin, label in (
             (FICTITIOUS_PIN, FICTITIOUS_PIN.role),
@@ -1226,6 +1298,50 @@ class CandidateReconciliation(unittest.TestCase):
 class PullProfileContracts(unittest.TestCase):
     """The journal writes surround pruning and model convergence."""
 
+    def test_candidate_retries_follow_the_run_form_once(self) -> None:
+        self.addCleanup(report.set_form_from_environment, os.environ.copy())
+        allowlist = _loaded_egress((ROOT / "config/egress.yaml").read_text())
+
+        def blocked_candidate(
+            command: list[str], host: FakeHost
+        ) -> subprocess.CompletedProcess[str]:
+            if any(FICTITIOUS_CANDIDATE.repo in part for part in command):
+                return subprocess.CompletedProcess(command, 8, "", "")
+            return _successful_wget(command, host)
+
+        for installed in (False, True):
+            with self.subTest(installed=installed):
+                report.set_installed_form(installed)
+                prefix = "gideon" if installed else "sudo python3 -m gideon"
+                retry = f"re-run {prefix} models pull {FICTITIOUS_CANDIDATE.name}."
+
+                host = FakeHost(wget=blocked_candidate)
+                _add_process_files(host)
+                with redirect_stdout(StringIO()) as output:
+                    outcome = pull_profile(
+                        host, FICTITIOUS_SITE, FICTITIOUS_MODEL, allowlist,
+                        candidates=(FICTITIOUS_CANDIDATE,), candidate=FICTITIOUS_CANDIDATE,
+                    )
+                self.assertFalse(outcome.ok)
+                self.assertTrue(outcome.fix.endswith(retry), outcome.fix)
+                self.assertIn(retry, output.getvalue())
+
+                already_named = f"then {retry}"
+                self.assertEqual(_retry_fix(already_named, FICTITIOUS_CANDIDATE), already_named)
+                self.assertEqual(
+                    _retry_fix("then re-run models pull.", FICTITIOUS_CANDIDATE),
+                    f"then re-run models pull {FICTITIOUS_CANDIDATE.name}.",
+                )
+
+                invalid_proxy = FakeHost({"/etc/gideon/secrets/proxy_auth": "not-a-pair"})
+                _add_process_files(invalid_proxy)
+                outcome = pull_profile(
+                    invalid_proxy, FICTITIOUS_SITE, FICTITIOUS_MODEL, allowlist,
+                    candidates=(FICTITIOUS_CANDIDATE,), candidate=FICTITIOUS_CANDIDATE,
+                )
+                self.assertFalse(outcome.ok)
+                self.assertTrue(outcome.fix.endswith(f"then {retry}"), outcome.fix)
+
     def test_candidate_rows_and_record_writes_then_verified_rerun_and_bare_keep(self) -> None:
         host = FakeHost(wget=_successful_wget)
         _add_process_files(host)
@@ -1481,7 +1597,7 @@ class PullProfileContracts(unittest.TestCase):
                 candidates=(FICTITIOUS_CANDIDATE,), candidate=FICTITIOUS_CANDIDATE,
             )
         self.assertFalse(outcome.ok)
-        retry = f"re-run gideon models pull {FICTITIOUS_CANDIDATE.name}."
+        retry = f"re-run sudo python3 -m gideon models pull {FICTITIOUS_CANDIDATE.name}."
         self.assertTrue(outcome.fix.endswith(retry), outcome.fix)
         self.assertIn(retry, output.getvalue())
         saved = load_pull_record(host)

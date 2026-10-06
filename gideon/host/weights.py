@@ -19,6 +19,7 @@ from urllib.parse import quote, urlsplit
 
 import yaml  # type: ignore[import-untyped]
 
+from gideon.host import report
 from gideon.host.egress import EgressAllowlist, load_egress_allowlist
 from gideon.host.egress import render_errors as render_egress_errors
 from gideon.host.models import (
@@ -60,12 +61,15 @@ BLOB_MODE: Final = 0o444
 DIRECTORY_MODE: Final = 0o755
 
 _BARE_DIGEST = re.compile(r"^[0-9a-fA-F]{64}$")
-_RECORD_FIX: Final = (
-    f"Repair or remove {PULL_RECORD_PATH} (a removed record forgets which sets "
-    "are complete, so the next pull keeps every tree it finds), then re-run "
-    "gideon models pull."
-)
 _BOOT_ID_PATH: Final = Path("/proc/sys/kernel/random/boot_id")
+
+
+def _record_fix() -> str:
+    return (
+        f"Repair or remove {PULL_RECORD_PATH} (a removed record forgets which sets "
+        "are complete, so the next pull keeps every tree it finds), then re-run "
+        f"{report.command('models pull')}."
+    )
 
 
 def bare_digest(digest: str) -> str:
@@ -477,7 +481,7 @@ def dump_pull_record(record: PullRecord) -> str:
 
 
 def _malformed(detail: str) -> Problem:
-    return Problem(f"{PULL_RECORD_PATH} is malformed: {detail}", _RECORD_FIX)
+    return Problem(f"{PULL_RECORD_PATH} is malformed: {detail}", _record_fix())
 
 
 def _mapping(value: object, field: str) -> Mapping[str, object] | Problem:
@@ -645,7 +649,7 @@ def load_pull_record(
     except FileNotFoundError:
         return PullRecord()
     except (OSError, UnicodeError) as exc:
-        return Problem(f"cannot read {path}: {exc}", _RECORD_FIX)
+        return Problem(f"cannot read {path}: {exc}", _record_fix())
     return parse_pull_record(text)
 
 
@@ -657,7 +661,7 @@ def save_pull_record(
     try:
         host.write_text(path, dump_pull_record(record))
     except OSError as exc:
-        return Problem(f"cannot write {path}: {exc}", _RECORD_FIX)
+        return Problem(f"cannot write {path}: {exc}", _record_fix())
     return None
 
 
@@ -698,23 +702,38 @@ class ModelOutcome:
     seconds: float = 0.0
 
 
-_FOREIGN_FIX: Final = (
-    "Remove {path}, then re-run gideon models pull; the engine loads every "
-    "file in the snapshot."
-)
 _REPUBLISH_FIX: Final = (
     "The pinned upstream is gone or changed; open an issue at "
     "https://github.com/TNMD-FDO/GIDEON/issues; the source "
     "archive is republished and models.lock repinned in the next patch release."
 )
-_WGET_FIX: Final = "Install wget with sudo apt-get install wget, then re-run gideon models pull."
-_FREE_SPACE_FIX: Final = "Free space on /data, then re-run gideon models pull."
-_TOOL_FIX: Final = (
-    "Install coreutils (sha256sum, mv, ln, readlink, rm), then re-run "
-    "gideon models pull."
-)
-_ROOT_FIX: Final = "Run sudo python3 -m gideon models pull."
 _SITE_PATH: Final = Path("/etc/gideon/site.yaml")
+
+
+def _foreign_fix(path: str) -> str:
+    return (
+        f"Remove {path}, then re-run {report.command('models pull')}; the engine loads every "
+        "file in the snapshot."
+    )
+
+
+def _wget_fix() -> str:
+    return f"Install wget with sudo apt-get install wget, then re-run {report.command('models pull')}."
+
+
+def _free_space_fix() -> str:
+    return f"Free space on /data, then re-run {report.command('models pull')}."
+
+
+def _tool_fix() -> str:
+    return (
+        "Install coreutils (sha256sum, mv, ln, readlink, rm), then re-run "
+        f"{report.command('models pull')}."
+    )
+
+
+def _root_fix() -> str:
+    return f"Run {report.command('models pull')}."
 
 
 def _format_gb(byte_count: int) -> str:
@@ -765,7 +784,7 @@ def _readlink(io: Host, path: Path) -> str | None | Problem:
     if result.returncode == 1:
         return None
     if result.returncode != 0:
-        return Problem(_tool_failure(["readlink", str(path)], result), _TOOL_FIX)
+        return Problem(_tool_failure(["readlink", str(path)], result), _tool_fix())
     target = result.stdout.strip()
     return target or None
 
@@ -797,7 +816,7 @@ def _verification_states(
     argv = ["sha256sum", "-c", "-"]
     result = io.run(argv, input=lines)
     if result.returncode not in (0, 1):
-        return Problem(_tool_failure(argv, result), _TOOL_FIX)
+        return Problem(_tool_failure(argv, result), _tool_fix())
     verified = {
         path
         for path, separator, verdict in (
@@ -967,7 +986,7 @@ def _fetch_failure(
         (
             f"Allow {host} (the install-upgrade group of config/egress.yaml) "
             "through the firewall or set egress_proxy in /etc/gideon/site.yaml, "
-            "then re-run gideon models pull."
+            f"then re-run {report.command('models pull')}."
         ),
     )
 
@@ -1022,7 +1041,7 @@ def converge_model(
             started,
             kind="failed",
             problem=f"snapshot contains foreign file {foreign}",
-            fix=_FOREIGN_FIX.format(path=foreign),
+            fix=_foreign_fix(foreign),
             clock=clock,
         )
 
@@ -1046,7 +1065,7 @@ def converge_model(
             started,
             kind="failed",
             problem="could not measure free space on /data",
-            fix=_FREE_SPACE_FIX,
+            fix=_free_space_fix(),
             clock=clock,
         )
     shortfall = _shortfall(io, pin, states, root, available)
@@ -1056,7 +1075,7 @@ def converge_model(
             started,
             kind="failed",
             problem=f"/data is short by {_format_gb(shortfall)} for this model",
-            fix=_FREE_SPACE_FIX,
+            fix=_free_space_fix(),
             clock=clock,
         )
 
@@ -1074,7 +1093,7 @@ def converge_model(
             if failure is not None:
                 return _model_outcome(
                     pin, started, kind="failed", files=outcomes, hosts=hosts,
-                    problem=failure, fix=_TOOL_FIX, clock=clock,
+                    problem=failure, fix=_tool_fix(), clock=clock,
                 )
             print(f"  relinked {model_file.path}")
             outcomes.append(FileOutcome(model_file.path, "relinked", model_file.size))
@@ -1121,7 +1140,7 @@ def converge_model(
                 files=outcomes,
                 hosts=hosts,
                 problem="wget is missing",
-                fix=_WGET_FIX,
+                fix=_wget_fix(),
                 clock=clock,
             )
         if result.returncode != 0:
@@ -1160,7 +1179,7 @@ def converge_model(
             return _model_outcome(
                 pin, started, kind="failed", files=outcomes, hosts=hosts,
                 problem=_tool_failure(["sha256sum", str(partial)], digest_result),
-                fix=_TOOL_FIX, clock=clock,
+                fix=_tool_fix(), clock=clock,
             )
         if digest_result.returncode != 0 or actual_digest != expected_digest:
             io.unlink(partial, missing_ok=True)
@@ -1180,14 +1199,14 @@ def converge_model(
         if moved.returncode != 0:
             return _model_outcome(
                 pin, started, kind="failed", files=outcomes, hosts=hosts,
-                problem=_tool_failure(move, moved), fix=_TOOL_FIX, clock=clock,
+                problem=_tool_failure(move, moved), fix=_tool_fix(), clock=clock,
             )
         io.chmod(blob, BLOB_MODE)
         failure = _link(io, model_file, link)
         if failure is not None:
             return _model_outcome(
                 pin, started, kind="failed", files=outcomes, hosts=hosts,
-                problem=failure, fix=_TOOL_FIX, clock=clock,
+                problem=failure, fix=_tool_fix(), clock=clock,
             )
         action: FileAction = "resumed" if state is FileState.PARTIAL else (
             "refetched" if state is FileState.MISMATCHED else "fetched"
@@ -1259,7 +1278,7 @@ def _contained(child: Path, parent: Path) -> bool:
 def _rm_tree(io: Host, path: Path) -> Problem | None:
     argv = ["rm", "-rf", str(path)]
     result = io.run(argv)
-    return None if result.returncode == 0 else Problem(_tool_failure(argv, result), _TOOL_FIX)
+    return None if result.returncode == 0 else Problem(_tool_failure(argv, result), _tool_fix())
 
 
 def _snapshot_directories(io: Host, repository: Path) -> tuple[Path, ...] | Problem:
@@ -1269,14 +1288,14 @@ def _snapshot_directories(io: Host, repository: Path) -> tuple[Path, ...] | Prob
     except FileNotFoundError:
         return ()
     except OSError as exc:
-        return Problem(f"cannot list {snapshots}: {exc}", _TOOL_FIX)
+        return Problem(f"cannot list {snapshots}: {exc}", _tool_fix())
     directories: list[Path] = []
     for name in names:
         path = snapshots / name
         try:
             is_directory = stat_module.S_ISDIR(io.stat(path).st_mode)
         except OSError as exc:
-            return Problem(f"cannot inspect {path}: {exc}", _TOOL_FIX)
+            return Problem(f"cannot inspect {path}: {exc}", _tool_fix())
         if is_directory:
             directories.append(path)
     return tuple(directories)
@@ -1313,7 +1332,7 @@ def prune(
         snapshot = snapshots_dir / reference.revision
         if not _contained(snapshot, snapshots_dir):
             return Problem(
-                f"refusing to remove {snapshot}: outside {snapshots_dir}", _RECORD_FIX
+                f"refusing to remove {snapshot}: outside {snapshots_dir}", _record_fix()
             )
         if not io.exists(snapshot):
             continue
@@ -1345,7 +1364,7 @@ def prune(
         except FileNotFoundError:
             blob_names = []
         except OSError as exc:
-            return Problem(f"cannot list {blobs}: {exc}", _TOOL_FIX)
+            return Problem(f"cannot list {blobs}: {exc}", _tool_fix())
         for name in blob_names:
             blob = blobs / name
             if name.removesuffix(".partial") in keep or str(blob) in reachable:
@@ -1353,18 +1372,15 @@ def prune(
             try:
                 io.unlink(blob)
             except OSError as exc:
-                return Problem(f"cannot remove {blob}: {exc}", _TOOL_FIX)
+                return Problem(f"cannot remove {blob}: {exc}", _tool_fix())
             line = f"  removed {blob}"
             lines.append(line)
             print(line)
     return lines
 
 
-_RETRY = re.compile(r"\bre-run (?:gideon )?models pull\b(?! [a-z0-9])")
-
-
 def _pull_command(candidate: CandidatePin | None) -> str:
-    return "gideon models pull" + ("" if candidate is None else f" {candidate.name}")
+    return report.command("models pull") + ("" if candidate is None else f" {candidate.name}")
 
 
 def _retry_fix(fix: str, candidate: CandidatePin | None) -> str:
@@ -1372,7 +1388,11 @@ def _retry_fix(fix: str, candidate: CandidatePin | None) -> str:
 
     if candidate is None:
         return fix
-    return _RETRY.sub(lambda match: f"{match.group(0)} {candidate.name}", fix)
+    retry = re.compile(
+        r"\bre-run (?:" + re.escape(report.command("models pull"))
+        + r"|models pull)\b(?! [a-z0-9])"
+    )
+    return retry.sub(lambda match: f"{match.group(0)} {candidate.name}", fix)
 
 
 def kept_lines(record: PullRecord) -> list[str]:
@@ -1428,7 +1448,10 @@ def pull_profile(
         io.mkdir(root / "gideon", parents=True, exist_ok=True)
     except OSError as exc:
         return _problem_outcome(
-            Problem(f"cannot create {root / 'gideon'}: {exc}", "Make /data writable, then re-run gideon models pull.")
+            Problem(
+                f"cannot create {root / 'gideon'}: {exc}",
+                f"Make /data writable, then re-run {report.command('models pull')}.",
+            )
         )
     loaded = load_pull_record(io, record_path)
     if isinstance(loaded, Problem):
@@ -1442,7 +1465,7 @@ def pull_profile(
         identity = process_identity(io)
     except (OSError, UnicodeError, ValueError) as exc:
         return _problem_outcome(
-            Problem(f"cannot establish the pull process identity: {exc}", _TOOL_FIX)
+            Problem(f"cannot establish the pull process identity: {exc}", _tool_fix())
         )
     claimed = claim(
         record,
@@ -1567,7 +1590,7 @@ def run_models_pull(
     candidate_name = getattr(args, "candidate", None)
     io = host or RealHost()
     if io.geteuid() != 0:
-        print(refusal("models pull", "root is required.", _ROOT_FIX), file=sys.stderr)
+        print(refusal("models pull", "root is required.", _root_fix()), file=sys.stderr)
         return 1
     checkout = Path(__file__).parents[2] if root is None else Path(root)
     site_result = load_site(Path(site_path), host=io)

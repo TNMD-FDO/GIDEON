@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
 
-from gideon.host import audit, backuplock, backupset, install, nogpu
+from gideon.host import audit, backuplock, backupset, install, nogpu, report
 from gideon.host.report import StageResult
 from gideon.host.site import load_site
 from gideon.host.sysio import LockingHost, PathLike
@@ -182,6 +182,47 @@ def row_names(text: str) -> list[str]:
 
 
 class InstallTests(unittest.TestCase):
+    def test_fixes_follow_the_run_form(self) -> None:
+        self.addCleanup(report.set_form_from_environment, os.environ.copy())
+        observed = (StageResult("smoke", False, "smoke failed", "fixture fix"),)
+        for installed in (False, True):
+            with self.subTest(installed=installed):
+                report.set_installed_form(installed)
+                prefix = "gideon" if installed else "sudo python3 -m gideon"
+                cases = (
+                    (
+                        FakeHost(),
+                        FakeRunners(failing="preflight"),
+                        FakeAudit(),
+                        f"Fix: Run {prefix} preflight, correct its refusal, then re-run install.",
+                    ),
+                    (
+                        FakeHost(),
+                        FakeRunners(failing="engine-verify", engine_rows=observed),
+                        FakeAudit(),
+                        f"Fix: Do not go live. Run {prefix} engine verify, correct its refusal, then re-run install.",
+                    ),
+                    (
+                        FakeHost(),
+                        FakeRunners(),
+                        FakeAudit(fail_from=0),
+                        f"Fix: Run {prefix} apply, then retry install.",
+                    ),
+                )
+                for host, runners, backend, fix in cases:
+                    with self.subTest(fix=fix):
+                        code, out, _, _, _ = self.run_install(host, runners, backend)
+                        self.assertEqual(code, 1)
+                        self.assertIn(fix, out)
+                        if installed:
+                            self.assertNotIn("python3 -m gideon", out)
+                code, out, err, _, _ = self.run_install(FakeHost(euid=1000))
+                self.assertEqual(code, 1)
+                self.assertEqual(out, "")
+                self.assertIn(f"Fix: Run {prefix} install, then retry.", err)
+                if installed:
+                    self.assertNotIn("python3 -m gideon", err)
+
     def test_default_preflight_runner_keeps_the_refusing_reading(self) -> None:
         host = FakeHost()
         child = argparse.Namespace(command_path="preflight")

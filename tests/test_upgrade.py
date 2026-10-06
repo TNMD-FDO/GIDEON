@@ -16,7 +16,7 @@ from typing import Any, cast
 from unittest.mock import patch
 
 import gideon
-from gideon.host import audit, backupset, nogpu, upgrade
+from gideon.host import audit, backupset, nogpu, report, upgrade
 from gideon.host.checks import CheckReport, PreflightCheck, PreflightContext, Severity
 from gideon.host.site import load_site
 from gideon.host.steps import CheckResult, Disposition, ProvisionContext, Step
@@ -183,6 +183,7 @@ class FakeHost:
         self.points_at = list(points_at)
         self.tag = ""
         self.calls: list[tuple[tuple[str, ...], str | None, bool]] = []
+        self.child_environments: list[Mapping[str, str] | None] = []
         self.files: dict[str, str] = {str(EXAMPLE): EXAMPLE.read_text()}
         for path in (
             ROOT / "host.lock",
@@ -226,7 +227,7 @@ class FakeHost:
         timeout: float | None = None,
         passthrough: bool = False,
     ) -> subprocess.CompletedProcess[str]:
-        del check, input, env, timeout
+        del check, input, timeout
         command = tuple(argv)
         self.calls.append((command, None if cwd is None else os.fspath(cwd), passthrough))
         if command[:2] == ("getent", "passwd"):
@@ -241,6 +242,7 @@ class FakeHost:
         if git and git[0] == "git":
             return self._git(command, git[1:])
         if command[1:3] == ("-m", "gideon"):
+            self.child_environments.append(env)
             arguments = command[3:]
             if arguments == ("--version",):
                 # The new tree answers with the version its __init__ declares.
@@ -571,6 +573,69 @@ class PrecheckoutPreflight(CommandRunner):
 
 class UpgradeTests(CommandRunner):
     """The forward path: ``upgrade <tag>``."""
+
+    def test_fixes_follow_the_run_form(self) -> None:
+        self.addCleanup(report.set_form_from_environment, os.environ.copy())
+        for installed in (False, True):
+            with self.subTest(installed=installed):
+                report.set_installed_form(installed)
+                prefix = "gideon" if installed else "sudo python3 -m gideon"
+                upgrade_command = f"{prefix} upgrade"
+                rollback_command = f"{upgrade_command} --rollback"
+                cases = (
+                    (
+                        FakeHost(),
+                        FakeRunners(preflight=2),
+                        False,
+                        f"Fix: Correct the refusal, then re-run {upgrade_command} {HIGHER}.",
+                    ),
+                    (
+                        FakeHost(failing_child="host provision"),
+                        FakeRunners(),
+                        False,
+                        f"Fix: Reboot if asked or correct the refusal, then re-run {upgrade_command} {HIGHER}; to abandon, {rollback_command} moves the checkout back.",
+                    ),
+                    (
+                        FakeHost(failing_child="apply"),
+                        FakeRunners(),
+                        False,
+                        f"Fix: Run {rollback_command}.",
+                    ),
+                    (
+                        rollback_host(failing_child="apply"),
+                        FakeRunners(),
+                        True,
+                        f"Fix: Correct the refusal, then re-run {rollback_command}.",
+                    ),
+                    (
+                        rollback_host(sets={}),
+                        FakeRunners(),
+                        True,
+                        f"Fix: Go back by hand: {prefix} restore --from staging --set <label> of an earlier set, then {prefix} apply.",
+                    ),
+                )
+                for host, runners, rollback, fix in cases:
+                    with self.subTest(fix=fix):
+                        code, out, _, _, _ = self.run_upgrade(
+                            host, tag=None if rollback else HIGHER, rollback=rollback, runners=runners
+                        )
+                        self.assertEqual(code, 1, out)
+                        self.assertIn(fix, out)
+                        if installed:
+                            self.assertNotIn("python3 -m gideon", out)
+
+    def test_new_tree_children_inherit_the_invocation_environment(self) -> None:
+        for host, rollback in (
+            (FakeHost(applied_release=HIGHER.removeprefix("v")), False),
+            (rollback_host(), True),
+        ):
+            with self.subTest(rollback=rollback):
+                code, out, err, _, _ = self.run_upgrade(
+                    host, tag=None if rollback else HIGHER, rollback=rollback
+                )
+                self.assertEqual(code, 0, out + err)
+                self.assertGreater(len(host.child_environments), 0)
+                self.assertEqual(host.child_environments, [None] * len(host.child_environments))
 
     def test_forward_path_stage_order_argv_and_rows(self) -> None:
         host = FakeHost(applied_release=HIGHER.removeprefix("v"))
