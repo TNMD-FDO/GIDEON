@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.55](docs/release-notes/v0.3.55.md) — 2026-10-06 — the tracker's lint names a standing ticket whose awaited tag is reached
 - [v0.3.54](docs/release-notes/v0.3.54.md) — 2026-10-06 — the worker confined to the corpus group
 - [v0.3.53](docs/release-notes/v0.3.53.md) — 2026-10-06 — the Grafana tests split by subject
 - [v0.3.52](docs/release-notes/v0.3.52.md) — 2026-10-06 — the leaf check holds a Tests entry
