@@ -9,6 +9,7 @@ from pathlib import Path
 
 import yaml  # type: ignore[import-untyped]
 
+from gideon.host import report
 from gideon.host.enginesample import (
     EmbedSection,
     EmbedThroughputCase,
@@ -228,6 +229,19 @@ class SampleTests(unittest.TestCase):
 
 
 class RefusalTests(unittest.TestCase):
+    def test_malformed_sample_fix_follows_the_run_form(self) -> None:
+        self.addCleanup(report.set_form_from_environment, os.environ.copy())
+        for installed in (False, True):
+            with self.subTest(installed=installed):
+                report.set_installed_form(installed)
+                result = self.load_text("version: [")
+                self.assertFalse(result.ok)
+                prefix = "gideon" if installed else "sudo python3 -m gideon"
+                self.assertIn(
+                    f"Fix: Edit eval/engine-verify/sample.yaml, then re-run {prefix} engine verify.",
+                    render_errors(result.errors),
+                )
+
     def load_text(self, text: str) -> SampleLoadResult:
         return load_sample(
             "/tmp/engine-sample.yaml",

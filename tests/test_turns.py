@@ -33,7 +33,7 @@ from gideon.evaluation.turns import (
     run,
     session,
 )
-from gideon.host import backuplock, models, owuiturn, secrets, site
+from gideon.host import backuplock, models, owuiturn, report, secrets, site
 from gideon.host.owui import Client, OwuiError, OwuiTimeout, Response
 from gideon.host.render.ci import CI_PORT, CI_ROOT, CI_SECRETS_DIR
 from gideon.host.render.engine import GENERATOR
@@ -774,6 +774,26 @@ class TurnHarness(TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.guardrail = guardrail
+
+    def test_password_fix_follows_the_run_form(self) -> None:
+        self.addCleanup(report.set_form_from_environment, os.environ.copy())
+        cases = "cases:\n  - id: missing\n    prompt: hidden\n    expect: answered\n"
+        for installed in (False, True):
+            with self.subTest(installed=installed):
+                report.set_installed_form(installed)
+                prefix = "gideon" if installed else "sudo python3 -m gideon"
+                host = FakeHost(password=None)
+                problem = access.read_eval_password(cast(Host, host))
+                self.assertIsInstance(problem, Problem)
+                assert isinstance(problem, Problem)
+                self.assertEqual(problem.fix, f"Run {prefix} apply, then retry.")
+
+                frontend = Frontend(self.guardrail, {"missing": "answered"})
+                code, stdout, stderr = _run_file(frontend, cases, host=host)
+                self.assertEqual((code, stderr), (1, ""))
+                self.assertIn(f"Fix: Run {prefix} apply, then retry.", stdout)
+                if installed:
+                    self.assertNotIn("python3 -m gideon", stdout)
 
     def test_reported_pattern_prefers_the_stored_verdict(self) -> None:
         row = run.TurnRow(

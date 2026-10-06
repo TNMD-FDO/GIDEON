@@ -37,7 +37,7 @@ from urllib.parse import quote
 
 from gideon.evaluation.turns import session
 from gideon.evaluation.turns.doorclient import KEY_FILE_EXIT_CODE
-from gideon.host import stack
+from gideon.host import report, stack
 from gideon.host.engine import RUN_TIMEOUT_MARGIN_SECONDS
 from gideon.host.render.api import (
     API_SECRET_NAME,
@@ -121,14 +121,15 @@ def _api_fix(rendered_dir: PathLike) -> str:
 
     return (
         f"Run {stack.logs_fix(rendered_dir, API_SERVICE_NAME)}, then run "
-        "sudo python3 -m gideon apply, then retry."
+        f"{report.command('apply')}, then retry."
     )
 
 
 def _key_fix() -> str:
     """Return the fix for a missing, refused, or stale API key."""
 
-    return f"Run sudo python3 -m gideon secrets rotate {API_SECRET_NAME}, then retry."
+    rotate_command = report.command(f"secrets rotate {API_SECRET_NAME}")
+    return f"Run {rotate_command}, then retry."
 
 
 def _problem(rendered_dir: PathLike, detail: str, *, key: bool = False) -> Problem:

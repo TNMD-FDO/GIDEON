@@ -28,7 +28,7 @@ from gideon.api import progress
 from gideon.evaluation.turns import classify, door, doorclient, session
 from gideon.evaluation.turns import run as run_module
 from gideon.evaluation.turns.cases import Case
-from gideon.host import backuplock, models, secrets, site
+from gideon.host import backuplock, models, report, secrets, site
 from gideon.host.render.api import (
     API_SECRET_NAME,
     API_USER_EMAIL_HEADER,
@@ -572,6 +572,31 @@ def _run_service(
 
 class ServiceDoor(unittest.TestCase):
     """The whole door has the same class and safe reporting shape as a stored turn."""
+
+    def test_door_fixes_follow_the_run_form(self) -> None:
+        self.addCleanup(report.set_form_from_environment, os.environ.copy())
+        with tempfile.TemporaryDirectory() as directory:
+            cases_path = Path(directory) / "cases.yaml"
+            _case_file(cases_path, [{"id": "plain", "prompt": "plain", "expect": "answered"}])
+            for installed in (False, True):
+                with self.subTest(installed=installed):
+                    report.set_installed_form(installed)
+                    prefix = "gideon" if installed else "sudo python3 -m gideon"
+
+                    code, stdout, stderr = _run_service(FakeHost(fail_probe=True), cases_path)
+                    self.assertEqual((code, stderr), (1, ""))
+                    self.assertIn(f"then run {prefix} apply, then retry.", stdout)
+
+                    code, stdout, stderr = _run_service(
+                        FakeHost(completion_status=401), cases_path
+                    )
+                    self.assertEqual((code, stderr), (1, ""))
+                    self.assertIn(
+                        f"Fix: Run {prefix} secrets rotate {API_SECRET_NAME}, then retry.",
+                        stdout,
+                    )
+                    if installed:
+                        self.assertNotIn("python3 -m gideon", stdout)
 
     def test_whole_rows_body_and_classes_use_the_tagged_user_message(self) -> None:
         supplied_prompt, supplied_answer = _seed_case("control-27")

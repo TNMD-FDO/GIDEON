@@ -21,11 +21,26 @@ def set_form_from_environment(environment: Mapping[str, str]) -> None:
     set_installed_form(GIDEON_INSTALLED_COMMAND in environment)
 
 
-def command(path: str) -> str:
-    """Render a command path as the run's command form."""
+def command(path: str, *, sudo: bool = True) -> str:
+    """Render a command path as the run's command form.
 
-    prefix = "gideon" if _installed_form else "sudo python3 -m gideon"
+    ``sudo=False`` is for a line whose own words say how to gain root: its
+    long form drops ``sudo``.  The installed form needs no ``sudo`` either way.
+    """
+
+    if _installed_form:
+        return f"gideon {path}"
+    prefix = "sudo python3 -m gideon" if sudo else "python3 -m gideon"
     return f"{prefix} {path}"
+
+
+def command_name(path: str) -> str:
+    """Name a command alike in both forms, for a refusal's prefix or a lock's holder label.
+
+    A name says what is running; a fix says what to type, through command().
+    """
+
+    return f"gideon {path}"
 
 
 def one_line(value: object) -> str:
@@ -37,7 +52,7 @@ def one_line(value: object) -> str:
 def refusal(command: str, problem: object, fix: str) -> str:
     """The one refusal shape: the command, what is wrong, and the fix last."""
 
-    return f"gideon {command}: {one_line(problem)} Fix: {fix}"
+    return f"{command_name(command)}: {one_line(problem)} Fix: {fix}"
 
 
 def failure_lines(fix: str, problem: str | None = None) -> tuple[str, ...]:

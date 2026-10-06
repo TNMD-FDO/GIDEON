@@ -12,10 +12,6 @@ ROOT = Path(__file__).resolve().parent.parent
 ENTRIES = {
     "gideon/egress/__main__.py": "slice-3 ticket 80: egress service start fixes",
     "gideon/egress/settings.py": "slice-3 ticket 80: egress service settings fixes",
-    "gideon/evaluation/command.py": "front-door ticket 20: eval command fixes and retries",
-    "gideon/evaluation/record.py": "front-door ticket 20: eval record fixes",
-    "gideon/evaluation/turns/access.py": "front-door ticket 20: turn access checks",
-    "gideon/evaluation/turns/door.py": "front-door ticket 20: turn door checks",
     "gideon/host/alerts.py": "front-door ticket 19: alerts test fixes",
     "gideon/host/apply.py": "front-door ticket 19: apply fixes and rows",
     "gideon/host/backup.py": "front-door ticket 18: backup run and push fixes",
@@ -23,8 +19,6 @@ ENTRIES = {
     "gideon/host/backupset.py": "front-door ticket 18: backup set reader fixes",
     "gideon/host/cas.py": "front-door ticket 19: content-addressed store fixes",
     "gideon/host/drill.py": "front-door ticket 18: backup drill fixes",
-    "gideon/host/engine.py": "front-door ticket 20: engine verify fixes",
-    "gideon/host/enginesample.py": "front-door ticket 20: engine sample fixes",
     "gideon/host/grafana.py": "the test alert's summary names the command that sent it",
     "gideon/host/install.py": "front-door ticket 19: install fixes",
     "gideon/host/nogpu.py": "the mode marker's own text names the declaring command",
@@ -48,9 +42,6 @@ ENTRIES = {
     "gideon/host/users.py": "front-door ticket 19: users reconcile fixes",
     "gideon/host/weights.py": "front-door ticket 19: model pull fixes",
     "gideon/host/worker.py": "front-door ticket 19: worker verify fixes",
-    "gideon/improvement/owuisnapshot.py": "front-door ticket 20: snapshot reader fixes",
-    "gideon/improvement/packet.py": "front-door ticket 20: candidate packet fixes",
-    "gideon/improvement/proposals.py": "front-door ticket 20: proposals report fixes",
     "gideon/worker/settings.py": "front-door ticket 19: worker settings fixes",
 }
 

@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from typing import Final
 from uuid import UUID
 
-from gideon.host import stack
+from gideon.host import report, stack
 from gideon.host.report import Problem
 from gideon.host.sysio import Host, PathLike
 
@@ -298,10 +298,8 @@ def _reader_argv(rendered_dir: PathLike) -> list[str]:
 
 
 def _reader_fix(run_id: str) -> str:
-    return (
-        f"Run sudo python3 -m gideon eval reference --run {run_id} "
-        "as root with the stack up, then retry."
-    )
+    reference_command = report.command(f"eval reference --run {run_id}")
+    return f"Run {reference_command} as root with the stack up, then retry."
 
 
 def _read_sql(run_id: str) -> str:

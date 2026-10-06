@@ -1,9 +1,11 @@
 """The refusal shape and detail returned for a failed command."""
 
+import os
 import subprocess
 import unittest
 from dataclasses import fields
 
+from gideon.host import report
 from gideon.host.report import Problem, Timeout, command_detail, failure_lines, refusal
 
 
@@ -18,6 +20,25 @@ class CommandDetail(unittest.TestCase):
 
     def test_refusal_shape(self) -> None:
         self.assertEqual(refusal("restore", "no set.", "Run it."), "gideon restore: no set. Fix: Run it.")
+
+    def test_command_forms_and_name(self) -> None:
+        self.addCleanup(report.set_form_from_environment, os.environ.copy())
+        for installed, command_prefix, plain_prefix in (
+            (False, "sudo python3 -m gideon", "python3 -m gideon"),
+            (True, "gideon", "gideon"),
+        ):
+            with self.subTest(installed=installed):
+                report.set_installed_form(installed)
+                self.assertEqual(report.command("apply"), f"{command_prefix} apply")
+                self.assertEqual(
+                    report.command("registry mirror", sudo=False),
+                    f"{plain_prefix} registry mirror",
+                )
+                self.assertEqual(report.command_name("engine verify"), "gideon engine verify")
+                self.assertEqual(
+                    report.refusal("eval run", "unavailable", "Retry."),
+                    "gideon eval run: unavailable Fix: Retry.",
+                )
 
 
 class FailureLines(unittest.TestCase):

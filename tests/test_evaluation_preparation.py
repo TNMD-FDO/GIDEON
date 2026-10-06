@@ -2,6 +2,7 @@
 
 import ast
 import inspect
+import os
 import shutil
 import tempfile
 import unittest
@@ -18,6 +19,7 @@ from gideon.evaluation import command
 from gideon.evaluation.evalset import SET_ROOT, LoadedSet
 from gideon.evaluation.results import RunContext, SliceResult
 from gideon.evaluation.slices import SLICE_RUNNERS, CallSurface
+from gideon.host import report
 
 
 class SliceSurfaces(unittest.TestCase):
@@ -113,6 +115,41 @@ def _invoke_planted(
 
 class PreparationRoutes(unittest.TestCase):
     """Each named surface supplies its runner context and record facts."""
+
+    def test_image_mirror_fix_uses_the_run_form(self) -> None:
+        self.addCleanup(report.set_form_from_environment, os.environ.copy())
+        with tempfile.TemporaryDirectory() as directory:
+            checkout, _ids = _fixture(directory, {1: 3})
+            ranked_path, _ranked_bytes = _ranked_file(directory, {1: (1,)})
+            for installed in (False, True):
+                with self.subTest(installed=installed):
+                    environment = (
+                        {report.GIDEON_INSTALLED_COMMAND: "/fictitious/gideon"}
+                        if installed else {}
+                    )
+                    with patch.dict(os.environ, environment, clear=True):
+                        host = EvalHost()
+                        host.image_probe_rc = 1
+                        (code, stdout, stderr), contexts, _target = _invoke_planted(
+                            host, checkout, ranked_path, frozenset({CallSurface.IMAGE})
+                        )
+                    command_text = "gideon registry mirror" if installed else "python3 -m gideon registry mirror"
+                    self.assertEqual((code, stderr, contexts), (1, "", []))
+                    self.assertIn(
+                        f"Fix: Run {command_text}, then retry.", stdout
+                    )
+                    self.assertNotIn("sudo python3 -m gideon registry mirror", stdout)
+
+                    with (
+                        patch.dict(os.environ, environment, clear=True),
+                        patch.object(EvalHost, "run", side_effect=OSError("probe unavailable")),
+                    ):
+                        (code, stdout, stderr), contexts, _target = _invoke_planted(
+                            EvalHost(), checkout, ranked_path, frozenset({CallSurface.IMAGE})
+                        )
+                    self.assertEqual((code, stderr, contexts), (1, "", []))
+                    self.assertIn("image presence could not be checked", stdout)
+                    self.assertIn(f"Fix: Run {command_text}, then retry.", stdout)
 
     def test_every_admissible_surface_set_prepares_context_and_profile(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

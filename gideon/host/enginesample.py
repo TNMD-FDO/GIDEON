@@ -10,6 +10,7 @@ from typing import Any, Final, TypeGuard, cast
 
 import yaml  # type: ignore[import-untyped]
 
+from gideon.host import report
 from gideon.host.sysio import Host, PathLike
 
 
@@ -159,9 +160,6 @@ SampleLoader.add_constructor(
 )
 
 
-_FIX: Final = (
-    "Edit eval/engine-verify/sample.yaml, then re-run sudo python3 -m gideon engine verify."
-)
 _ROOT_KEYS: Final = ("version", "needle", "structured", "smoke", "frontend", "supporting")
 _SMOKE_KEYS: Final = ("id", "prompt", "max_tokens")
 _NEEDLE_KEYS: Final = ("id", "filler", "planted", "question", "expected", "depth")
@@ -190,6 +188,11 @@ _SCHEMA_KEYS: Final = (
 _SCHEMA_TYPES: Final = ("object", "array", "string", "integer", "number", "boolean")
 
 
+def _fix() -> str:
+    verify = report.command("engine verify")
+    return f"Edit eval/engine-verify/sample.yaml, then re-run {verify}."
+
+
 def _path(prefix: str, key: object) -> str:
     rendered = str(key)
     return f"{prefix}.{rendered}" if prefix else rendered
@@ -205,7 +208,7 @@ def _unknown(path: str, valid: Sequence[str]) -> SampleError:
         problem=(
             f"Unknown key '{path}'; nearest valid key is '{_nearest(path, valid)}'."
         ),
-        fix=_FIX,
+        fix=_fix(),
     )
 
 
@@ -228,7 +231,7 @@ def _error(path: str, detail: str) -> SampleError:
     return SampleError(
         path=path,
         problem=f"Invalid value for '{path}': {detail}.",
-        fix=_FIX,
+        fix=_fix(),
     )
 
 
@@ -837,21 +840,21 @@ def load_sample(path: PathLike, *, host: Host) -> SampleLoadResult:
         text = host.read_text(path)
     except FileNotFoundError:
         return SampleLoadResult(
-            errors=(SampleError(None, f"sample file is missing: {path}", _FIX),)
+            errors=(SampleError(None, f"sample file is missing: {path}", _fix()),)
         )
     except UnicodeDecodeError:
         return SampleLoadResult(
-            errors=(SampleError(None, f"sample file is not valid UTF-8: {path}", _FIX),)
+            errors=(SampleError(None, f"sample file is not valid UTF-8: {path}", _fix()),)
         )
     except OSError as exc:
         return SampleLoadResult(
-            errors=(SampleError(None, f"sample file is unreadable: {path} ({exc})", _FIX),)
+            errors=(SampleError(None, f"sample file is unreadable: {path} ({exc})", _fix()),)
         )
 
     try:
         document = yaml.load(text, Loader=SampleLoader)
     except _DuplicateKeyError as exc:
-        return SampleLoadResult(errors=(SampleError(None, f"sample has a {exc}", _FIX),))
+        return SampleLoadResult(errors=(SampleError(None, f"sample has a {exc}", _fix()),))
     except yaml.YAMLError as exc:
         mark = getattr(exc, "problem_mark", None)
         line = getattr(mark, "line", None)
@@ -861,7 +864,7 @@ def load_sample(path: PathLike, *, host: Host) -> SampleLoadResult:
                 SampleError(
                     None,
                     f"sample has a YAML parse error{location}: {exc}",
-                    _FIX,
+                    _fix(),
                 ),
             )
         )

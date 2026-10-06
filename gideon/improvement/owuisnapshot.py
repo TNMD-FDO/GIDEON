@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Final
 
 from gideon.evaluation import record
-from gideon.host import stack
+from gideon.host import report, stack
 from gideon.host.report import Problem
 from gideon.host.sysio import Host, PathLike
 from gideon.improvement import owuifeedback
@@ -28,10 +28,15 @@ FRONTEND_DATABASE: Final[str] = "openwebui"
 FEEDBACK_TABLE: Final[str] = "feedback"
 START_VARIABLE: Final[str] = "snapshot_start"
 END_VARIABLE: Final[str] = "snapshot_end"
-_STACK_FIX: Final[str] = "Check the stack with sudo python3 -m gideon status, then retry."
-_READ_FIX: Final[str] = (
-    "Run sudo python3 -m gideon eval candidates --out <dir> as root with the stack up, then retry."
-)
+
+
+def _stack_fix() -> str:
+    return f"Check the stack with {report.command('status')}, then retry."
+
+
+def _read_fix() -> str:
+    candidates = report.command("eval candidates --out <dir>")
+    return f"Run {candidates} as root with the stack up, then retry."
 
 
 def statement(start: int, end: int) -> str:
@@ -161,9 +166,9 @@ def read(
     try:
         result = host.run(argv(rendered_dir), input=sql)
     except (OSError, subprocess.SubprocessError):
-        return Problem("snapshot reader command could not run", _STACK_FIX)
+        return Problem("snapshot reader command could not run", _stack_fix())
     if result.returncode != 0:
-        return Problem(f"snapshot reader failed with exit code {result.returncode}", _READ_FIX)
+        return Problem(f"snapshot reader failed with exit code {result.returncode}", _read_fix())
     return decode_lines(result.stdout.splitlines())
 
 

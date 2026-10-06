@@ -19,6 +19,7 @@ import gideon
 from gideon.cli import main
 from gideon.evaluation import reference, reference_command
 from gideon.evaluation.evalset import SET_ROOT, load_set
+from gideon.host import report
 from gideon.host.sysio import Command, PathLike
 from tools.exportboundary import absent_from_export
 
@@ -305,6 +306,29 @@ class CheckRefusals(unittest.TestCase):
 
 class ReadRefusals(unittest.TestCase):
     """Reader failures stop before checks and preserve their problem/fix pair."""
+
+    def test_reader_fix_follows_the_command_form(self) -> None:
+        self.addCleanup(report.set_form_from_environment, os.environ.copy())
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = _checkout(directory)
+            for installed in (False, True):
+                with self.subTest(installed=installed):
+                    environment = (
+                        {report.GIDEON_INSTALLED_COMMAND: "/fictitious/gideon"}
+                        if installed else {}
+                    )
+                    with patch.dict(os.environ, environment, clear=True):
+                        host = WriterHost({"run": None, "results": []}, reader_rc=1)
+                        code, stdout, stderr = _invoke(host, checkout)
+                    prefix = "gideon" if installed else "sudo python3 -m gideon"
+                    self.assertEqual((code, stderr), (1, ""))
+                    self.assertIn(
+                        f"Fix: Run {prefix} eval reference --run {RUN_ID} "
+                        "as root with the stack up, then retry.",
+                        stdout,
+                    )
+                    if installed:
+                        self.assertNotIn("python3 -m gideon", stdout)
 
     def test_no_such_run_and_unreachable_database_refuse(self) -> None:
         cases: tuple[tuple[int, Mapping[str, object], str], ...] = (

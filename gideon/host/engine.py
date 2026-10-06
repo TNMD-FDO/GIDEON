@@ -24,6 +24,7 @@ from gideon.host import (
     nogpu,
     owui,
     owuiturn,
+    report,
     secrets,
     site,
     stack,
@@ -41,18 +42,8 @@ from gideon.host.sysio import Host, LockingHost, PathLike, RealHost
 
 _SITE_PATH: Final[str] = "/etc/gideon/site.yaml"
 _RENDERED_DIR: Final[str] = "/etc/gideon/rendered"
-_ROOT_FIX: Final[str] = "Run sudo python3 -m gideon engine verify."
-_APPLY_FIX: Final[str] = "Run sudo python3 -m gideon apply, then retry."
-_SAMPLE_FIX: Final[str] = (
-    "Edit eval/engine-verify/sample.yaml, then re-run sudo python3 -m gideon engine verify."
-)
 _FRONTEND_DELETE_FIX: Final[str] = (
     "Check the eval account's chat list in the frontend, then retry."
-)
-_MODELS_FIX: Final[str] = "Edit models.lock, then re-run sudo python3 -m gideon engine verify."
-_FILLER_FIX: Final[str] = (
-    "Adjust needle.filler in eval/engine-verify/sample.yaml to a paragraph the engine "
-    "tokenizes to a steady count, then re-run sudo python3 -m gideon engine verify."
 )
 # curl's own diagnostic is safe to show (never a response body); one line, bounded.
 _STDERR_LIMIT: Final[int] = 200
@@ -192,20 +183,49 @@ def _failed_reply(problem: Problem) -> EngineReply:
     return EngineReply(None, "", None, (), False, None, None, problem)
 
 
+def _root_fix() -> str:
+    return f"Run {report.command('engine verify')}."
+
+
+def _apply_fix() -> str:
+    return f"Run {report.command('apply')}, then retry."
+
+
+def _sample_fix() -> str:
+    verify = report.command("engine verify")
+    return f"Edit eval/engine-verify/sample.yaml, then re-run {verify}."
+
+
+def _models_fix() -> str:
+    verify = report.command("engine verify")
+    return f"Edit models.lock, then re-run {verify}."
+
+
+def _filler_fix() -> str:
+    verify = report.command("engine verify")
+    return (
+        "Adjust needle.filler in eval/engine-verify/sample.yaml to a paragraph the engine "
+        f"tokenizes to a steady count, then re-run {verify}."
+    )
+
+
 def _engine_fix(rendered_dir: PathLike, member: ModelServerMember) -> str:
+    verify = report.command("engine verify")
     return (
         f"Do not go live on this {member.words}. "
         f"Run {stack.logs_fix(rendered_dir, member.service_name)}, "
-        f"revert the driver or {member.words} change, then re-run sudo python3 -m gideon engine verify."
+        f"revert the driver or {member.words} change, then re-run {verify}."
     )
 
 
 def _frontend_fix(rendered_dir: PathLike) -> str:
+    apply_command = report.command("apply")
+    verify = report.command("engine verify")
     return (
-        "Do not go live on this frontend. Run sudo python3 -m gideon apply "
+        f"Do not go live on this frontend. Run {apply_command} "
         "(which pushes the guardrail Function and reads it back); "
         f"then read the frontend logs with {stack.logs_fix(rendered_dir, 'open-webui')}; "
-        "then re-run sudo python3 -m gideon engine verify."
+        f"then re-run {verify}."
     )
 
 
@@ -378,7 +398,7 @@ def _status_failure(
     message = _error_message(reply)
     if message:
         detail += f": {message}"
-    return detail, (_SAMPLE_FIX if reply.status == 400 else engine_fix)
+    return detail, (_sample_fix() if reply.status == 400 else engine_fix)
 
 
 def _tokenize(
@@ -560,7 +580,7 @@ def _needle_check(
         prompt_tokens=None, blocks=0, sizing_rounds=0,
     )
     if floor < 1:
-        return CheckOutcome(name, False, _BAND_DETAIL, _FILLER_FIX, figures)
+        return CheckOutcome(name, False, _BAND_DETAIL, _filler_fix(), figures)
 
     sizing = _size_needle(
         io,
@@ -577,7 +597,7 @@ def _needle_check(
     if sizing.problem is not None:
         return CheckOutcome(name, False, sizing.problem.problem, engine_fix, figures)
     if sizing.count is None or not floor <= sizing.count <= target:
-        return CheckOutcome(name, False, _BAND_DETAIL, _FILLER_FIX, figures)
+        return CheckOutcome(name, False, _BAND_DETAIL, _filler_fix(), figures)
     count = sizing.count
 
     request: Mapping[str, object] = {
@@ -1122,7 +1142,7 @@ def _selected_profile(
 
     models_result = models.load_models_lock(models_path, host=io)
     if models_result.errors or models_result.lock is None:
-        fix = models_result.errors[0].fix if models_result.errors else _MODELS_FIX
+        fix = models_result.errors[0].fix if models_result.errors else _models_fix()
         return Problem(models.render_errors(models_result.errors), fix)
     return models.select_profile(models_result.lock, hardware_profile)
 
@@ -1140,7 +1160,7 @@ def resolve_engine_target(
     rendered = _rendered_has_model_server(io, rendered_dir, GENERATOR)
     if rendered is not True:
         detail = rendered if isinstance(rendered, str) else "rendered Compose has no engine service"
-        return Problem(detail, _APPLY_FIX)
+        return Problem(detail, _apply_fix())
 
     selected = _selected_profile(io, hardware_profile, models_path)
     if isinstance(selected, Problem):
@@ -1149,13 +1169,13 @@ def resolve_engine_target(
     if generator is None:
         return Problem(
             f"models.lock profile '{selected.name}' has no generator pin",
-            _MODELS_FIX,
+            _models_fix(),
         )
     window = generator.serve.flags.get("max-model-len")
     if type(window) is not int or window <= 0:
         return Problem(
             "models.lock generator pin has no usable max-model-len flag",
-            _MODELS_FIX,
+            _models_fix(),
         )
 
     ready, detail, service = apply.wait_for_services(
@@ -1185,21 +1205,21 @@ def _resolve_embed_target(
     rendered = _rendered_has_model_server(io, rendered_dir, EMBED)
     if rendered is not True:
         detail = rendered if isinstance(rendered, str) else "rendered Compose has no embedding server service"
-        return Problem(detail, _APPLY_FIX)
+        return Problem(detail, _apply_fix())
 
     selected = _selected_profile(io, hardware_profile, models_path)
     if isinstance(selected, Problem):
         return selected
     pin = selected.model(EMBED.role)
     if pin is None:
-        return Problem(f"models.lock profile '{selected.name}' has no embed pin", _MODELS_FIX)
+        return Problem(f"models.lock profile '{selected.name}' has no embed pin", _models_fix())
     space = selected.embedding_space
     if space is None:
-        return Problem(f"models.lock profile '{selected.name}' has no embedding_space", _MODELS_FIX)
+        return Problem(f"models.lock profile '{selected.name}' has no embedding_space", _models_fix())
     if space.role != EMBED.role:
         return Problem(
             f"models.lock profile '{selected.name}' embedding_space names {space.role}, expected {EMBED.role}",
-            _MODELS_FIX,
+            _models_fix(),
         )
 
     ready, detail, _service = apply.wait_for_services(
@@ -1212,11 +1232,13 @@ def _resolve_embed_target(
         attempts=1,
     )
     if not ready:
+        apply_command = report.command("apply")
+        verify = report.command("engine verify")
         return Problem(
             detail,
-            "Run sudo python3 -m gideon apply (which starts the embedding server and waits for its health); "
+            f"Run {apply_command} (which starts the embedding server and waits for its health); "
             f"then read its logs with {stack.logs_fix(rendered_dir, EMBED.service_name)}; "
-            "then re-run sudo python3 -m gideon engine verify.",
+            f"then re-run {verify}.",
         )
     return _EmbedTarget(pin.serve.served_name, space.dimensions, space.id)
 
@@ -1426,7 +1448,7 @@ def run_engine_verify(
     )
 
     if io.geteuid() != 0:
-        show(_failed("preconditions", "root privileges are required.", _ROOT_FIX))
+        show(_failed("preconditions", "root privileges are required.", _root_fix()))
         return 1
     if nogpu.is_no_gpu_host(io):
         show(StageResult("engine", True, "skipped — no-GPU host", ""))
@@ -1434,7 +1456,7 @@ def run_engine_verify(
 
     lock_claim = backuplock.claim(
         io,
-        command="gideon engine verify",
+        command=report.command_name("engine verify"),
         now=datetime.datetime.now(datetime.UTC),
     )
     if lock_claim.refusal is not None:
@@ -1467,19 +1489,19 @@ def run_engine_verify(
 
         sample_result = enginesample.load_sample(actual_sample, host=io)
         if sample_result.errors or sample_result.sample is None:
-            fix = sample_result.errors[0].fix if sample_result.errors else _SAMPLE_FIX
+            fix = sample_result.errors[0].fix if sample_result.errors else _sample_fix()
             show(_failed("preconditions", enginesample.render_errors(sample_result.errors), fix))
             return 1
         sample = sample_result.sample
 
         password_result = secrets.read_secret(io, EVAL_PASSWORD_SECRET)
         if not password_result.ok or password_result.value is None:
-            password_fix = _APPLY_FIX if password_result.missing else password_result.fix
+            password_fix = _apply_fix() if password_result.missing else password_result.fix
             show(
                 _failed(
                     "preconditions",
                     password_result.problem or "eval password is unavailable",
-                    password_fix or _APPLY_FIX,
+                    password_fix or _apply_fix(),
                 )
             )
             return 1
@@ -1490,7 +1512,7 @@ def run_engine_verify(
         except OSError:
             audit_problem = "audit writer probe failed"
         if audit_problem is not None:
-            show(_failed("preconditions", "audit writer is unavailable", _APPLY_FIX))
+            show(_failed("preconditions", "audit writer is unavailable", _apply_fix()))
             return 1
 
         show(

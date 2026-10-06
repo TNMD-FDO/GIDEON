@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from gideon.host import audit, nogpu, owui, stack
+from gideon.host import audit, nogpu, owui, report, stack
 from gideon.host.report import Problem, one_line, refusal
 from gideon.host.sysio import Host, PathLike, RealHost
 from gideon.improvement import owuifeedback, pairs, ratings, triggers, trips
@@ -40,8 +40,12 @@ ROW_STATES: Final[tuple[RowState, ...]] = (
 SECTION_HEADER: Final[str] = "section {name} ({scope}): {detail}"
 CLOSING_LINE: Final[str] = "proposals: {fired} fired, {sections} sections, {skipped} skipped"
 _REGISTRY_FIX: Final[str] = "Restore config/triggers.yaml from the release checkout, then retry."
-_ROOT_FIX: Final[str] = "Run gideon proposals --record as root, for example with sudo."
 RECORDED_LINE: Final[str] = "proposals: recorded {fired} fired"
+
+
+def _root_fix() -> str:
+    record_command = report.command("proposals --record", sudo=False)
+    return f"Run {record_command} as root, for example with sudo."
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,7 +148,7 @@ def run_proposals(
     rendered = Path(rendered_dir)
     record = bool(getattr(args, "record", False))
     if record and io.geteuid() != 0:
-        print(refusal("proposals", "root is required to record the tally.", _ROOT_FIX), file=sys.stderr)
+        print(refusal("proposals", "root is required to record the tally.", _root_fix()), file=sys.stderr)
         return 1
     registry_path = checkout / "config/triggers.yaml" if triggers_path is None else triggers_path
     loaded = triggers.load_trigger_registry(registry_path, host=io)

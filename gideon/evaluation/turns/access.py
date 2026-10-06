@@ -5,15 +5,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
 
-from gideon.host import owui, secrets, tls
+from gideon.host import owui, report, secrets, tls
 from gideon.host.render import command as render_command
 from gideon.host.render.ci import CI_BASE_URL, CI_SECRET_NAMES, CI_STACK
 from gideon.host.render.owui import EVAL_PASSWORD_SECRET, general_texts
 from gideon.host.report import Problem
 from gideon.host.sysio import Host, PathLike
 
-_PASSWORD_FIX: Final[str] = "Run sudo python3 -m gideon apply, then retry."
 _RENDER_INPUTS_FIX: Final[str] = "Correct the checkout's render inputs, then retry."
+
+
+def _password_fix() -> str:
+    return f"Run {report.command('apply')}, then retry."
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,7 +64,7 @@ def read_eval_password(io: Host) -> str | Problem:
 
     result = secrets.read_secret(io, EVAL_PASSWORD_SECRET)
     if not result.ok or result.value is None:
-        fix = _PASSWORD_FIX if result.missing else result.fix or _PASSWORD_FIX
+        fix = _password_fix() if result.missing else result.fix or _password_fix()
         return Problem(
             result.problem or "the evaluation password is unavailable",
             fix,

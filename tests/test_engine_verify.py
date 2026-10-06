@@ -16,6 +16,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
+from unittest.mock import patch
 
 import yaml  # type: ignore[import-untyped]
 
@@ -28,6 +29,7 @@ from gideon.host import (
     models,
     owui,
     owuiturn,
+    report,
     secrets,
 )
 from gideon.host.owui import OwuiError
@@ -696,6 +698,51 @@ class FakeFrontend:
 
 
 class CommandTests(unittest.TestCase):
+    def test_fixes_follow_the_run_form_and_lock_keeps_its_name(self) -> None:
+        self.addCleanup(report.set_form_from_environment, os.environ.copy())
+        for installed in (False, True):
+            with self.subTest(installed=installed):
+                report.set_installed_form(installed)
+                prefix = "gideon" if installed else "sudo python3 -m gideon"
+
+                code, output, _backend = self.run_command(self.make_host(euid=1000))
+                self.assertEqual(code, 1)
+                self.assertIn(f"Fix: Run {prefix} engine verify.", output)
+
+                compose = str(Path(RENDERED) / "compose.yaml")
+                code, output, _backend = self.run_command(
+                    self.make_host(files={compose: "services: {}"})
+                )
+                self.assertEqual(code, 1)
+                self.assertIn(f"Fix: Run {prefix} apply, then retry.", output)
+
+                self.assertEqual(
+                    engine._sample_fix(),
+                    f"Edit eval/engine-verify/sample.yaml, then re-run {prefix} engine verify.",
+                )
+                self.assertEqual(
+                    engine._models_fix(),
+                    f"Edit models.lock, then re-run {prefix} engine verify.",
+                )
+                self.assertIn(f"then re-run {prefix} engine verify.", engine._filler_fix())
+                self.assertIn(f"then re-run {prefix} engine verify.", engine._engine_fix(RENDERED, GENERATOR))
+                frontend_fix = engine._frontend_fix(RENDERED)
+                self.assertIn(f"Run {prefix} apply", frontend_fix)
+                self.assertIn(f"then re-run {prefix} engine verify.", frontend_fix)
+
+                host = self.make_host(ps=ps_output(embed_state="exited", embed_health=""))
+                with patch.object(host, "take_lock", wraps=host.take_lock) as take_lock:
+                    code, output, _backend = self.run_command(host)
+                self.assertEqual(code, 1)
+                self.assertIn(f"Run {prefix} apply (which starts the embedding server", output)
+                self.assertIn(f"then re-run {prefix} engine verify.", output)
+                record = backuplock.parse(take_lock.call_args.args[1])
+                self.assertIsNotNone(record)
+                assert record is not None
+                self.assertEqual(record.command, "gideon engine verify")
+                if installed:
+                    self.assertNotIn("python3 -m gideon", output)
+
     def test_model_server_call_requires_a_member(self) -> None:
         parameters = list(inspect.signature(engine.call_model_server).parameters.values())
         self.assertEqual(parameters[2].name, "member")
@@ -1054,7 +1101,7 @@ class CommandTests(unittest.TestCase):
                     self.assertNotIn(text, output)
                     self.assertNotIn(text, repr(backend.rows[0].detail))
                 if sample_fix:
-                    self.assertIn(engine._SAMPLE_FIX, output)
+                    self.assertIn(engine._sample_fix(), output)
                 else:
                     self.assertIn("logs gideon-embed", output)
 
@@ -1090,7 +1137,7 @@ class CommandTests(unittest.TestCase):
                     self.assertNotIn(text, output)
                     self.assertNotIn(text, repr(backend.rows[0].detail))
                 if sample_fix:
-                    self.assertIn(engine._SAMPLE_FIX, output)
+                    self.assertIn(engine._sample_fix(), output)
                 else:
                     self.assertIn("logs gideon-embed", output)
 
@@ -1563,7 +1610,7 @@ class CommandTests(unittest.TestCase):
             (
                 {"structured_status": 400, "structured_error": "schema rejected"},
                 "schema rejected",
-                engine._SAMPLE_FIX,
+                engine._sample_fix(),
             ),
         )
         for options, detail, fix in variants:
@@ -1585,9 +1632,9 @@ class CommandTests(unittest.TestCase):
             (
                 {"needle_status": 400, "needle_error": "request rejected"},
                 "request rejected",
-                engine._SAMPLE_FIX,
+                engine._sample_fix(),
             ),
-            ({"never_lands": True}, "could not be sized", engine._FILLER_FIX),
+            ({"never_lands": True}, "could not be sized", engine._filler_fix()),
         )
         for options, fragment, fix in variants:
             with self.subTest(fragment=fragment):

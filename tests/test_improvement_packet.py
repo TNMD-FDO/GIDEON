@@ -18,7 +18,7 @@ from gideon import guardrail
 from gideon.api import stamp
 from gideon.cli import main
 from gideon.evaluation import record
-from gideon.host import backupset, stores
+from gideon.host import backupset, report, stores
 from gideon.host.report import Problem
 from gideon.host.sysio import Command, CompletedText, Host, PathLike
 from gideon.improvement import owuisnapshot, packet
@@ -311,6 +311,34 @@ class OutputPath(unittest.TestCase):
 
 
 class SnapshotAdapter(unittest.TestCase):
+    def test_reader_fixes_follow_the_run_form(self) -> None:
+        self.addCleanup(report.set_form_from_environment, os.environ.copy())
+        for installed in (False, True):
+            with self.subTest(installed=installed):
+                report.set_installed_form(installed)
+                prefix = "gideon" if installed else "sudo python3 -m gideon"
+                host = FakeHost()
+                with patch.object(host, "run", side_effect=OSError("fictional missing tool")):
+                    unavailable = owuisnapshot.read(cast(Host, host), "/tmp/fictional-rendered", 100, 200)
+                self.assertEqual(
+                    unavailable,
+                    Problem(
+                        "snapshot reader command could not run",
+                        f"Check the stack with {prefix} status, then retry.",
+                    ),
+                )
+
+                failed = subprocess.CompletedProcess(["fictional-psql"], 7, "", "fictional diagnostic")
+                with patch.object(host, "run", return_value=failed):
+                    refused = owuisnapshot.read(cast(Host, host), "/tmp/fictional-rendered", 100, 200)
+                self.assertEqual(
+                    refused,
+                    Problem(
+                        "snapshot reader failed with exit code 7",
+                        f"Run {prefix} eval candidates --out <dir> as root with the stack up, then retry.",
+                    ),
+                )
+
     def test_argv_statement_projection_and_stdin_boundary(self) -> None:
         command = owuisnapshot.argv("/tmp/fictional-rendered")
         self.assertIn("-T", command)
@@ -440,6 +468,26 @@ class PageAndManifest(unittest.TestCase):
 
 
 class CandidateCommand(unittest.TestCase):
+    def test_root_fix_follows_the_command_form(self) -> None:
+        self.addCleanup(report.set_form_from_environment, os.environ.copy())
+        for installed in (False, True):
+            with self.subTest(installed=installed):
+                environment = (
+                    {report.GIDEON_INSTALLED_COMMAND: "/fictitious/gideon"}
+                    if installed else {}
+                )
+                host = FakeHost(euid=1000)
+                with patch.dict(os.environ, environment, clear=True):
+                    code, stdout, stderr = self._invoke(host, FixtureSource([]))
+                prefix = "gideon" if installed else "sudo python3 -m gideon"
+                self.assertEqual((code, stdout), (1, ""))
+                self.assertEqual(
+                    stderr,
+                    "gideon eval candidates: this command must run as root "
+                    f"Fix: Run {prefix} eval candidates --out <dir>, then retry.\n",
+                )
+                self.assertEqual((host.reads, host.events), ([], []))
+
     def _invoke(
         self,
         host: FakeHost,

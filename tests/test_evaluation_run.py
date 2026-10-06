@@ -44,7 +44,7 @@ from gideon.evaluation.results import CaseResult, RunContext, SliceResult
 from gideon.evaluation.slices import SLICE_RUNNERS, SMOKE_PARTS, CallSurface
 from gideon.extraction import KEYED_TYPES, SECTION_TYPES, ExactObject, extract
 from gideon.extraction.scoring import MIN_RECALL
-from gideon.host import backuplock, nogpu
+from gideon.host import backuplock, nogpu, report
 from gideon.host.render.ci import CI_STACK, PRODUCTION_STACK
 from gideon.host.render.owui import GENERAL_MODEL_ID
 from gideon.host.sysio import Host, PathLike
@@ -813,7 +813,7 @@ class Command(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(stderr, "")
         _assert_comparison_lines(self, stdout, "stale", "pass")
-        self.assertIn(f"re-record with gideon eval reference --run {RUN_ID}", stdout)
+        self.assertIn(f"re-record with sudo python3 -m gideon eval reference --run {RUN_ID}", stdout)
 
     def test_set_run_still_compares_against_release_checkout_reference(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1984,6 +1984,73 @@ def _challenger_invoke(
 
 
 class ChallengerPair(unittest.TestCase):
+    def test_mode_fixes_follow_the_run_and_keep_retry_flags(self) -> None:
+        self.addCleanup(report.set_form_from_environment, os.environ.copy())
+        for installed in (False, True):
+            with self.subTest(installed=installed):
+                environment = {report.GIDEON_INSTALLED_COMMAND: "/fictitious/gideon"} if installed else {}
+                with patch.dict(os.environ, environment, clear=True):
+                    prefix = "gideon" if installed else "sudo python3 -m gideon"
+                    code, stdout, stderr = _invoke(["eval", "run"], **_run_kwargs(EvalHost()))
+                    self.assertEqual((code, stdout), (1, ""))
+                    self.assertEqual(
+                        stderr,
+                        f"gideon eval run: no slice was selected Fix: Run {prefix} eval run --slice extraction.\n",
+                    )
+
+                    argv = ["eval", "run", "--challenger", "--kind", "nightly", "--force"]
+                    code, stdout, stderr = _invoke(argv, **_run_kwargs(ChallengerHost()))
+                    self.assertEqual((code, stdout), (1, ""))
+                    retry = "eval run --challenger --stack ci --kind nightly --force"
+                    self.assertEqual(
+                        stderr,
+                        f"gideon eval run: --challenger requires --stack ci Fix: Run {prefix} {retry}, then retry.\n",
+                    )
+                    parsed = build_parser().parse_args(shlex.split(retry))
+                    self.assertIsNone(command._challenger_flag_problem(parsed))
+
+                    code, stdout, stderr = _invoke(
+                        ["eval", "run", "--slice", "extraction", "--decision"],
+                        **_run_kwargs(EvalHost()),
+                    )
+                    self.assertEqual((code, stdout), (1, ""))
+                    self.assertIn(
+                        f"Run {prefix} eval run --slice extraction --decision --against <run id>, then retry.",
+                        stderr,
+                    )
+                    if installed:
+                        self.assertNotIn("python3 -m gideon", stderr)
+                    else:
+                        self.assertNotIn("Run gideon ", stderr)
+
+                    with patch.object(stacks.secrets, "select_directory"):
+                        paths = stacks.resolve_stack("ci", "/rendered")
+                    request = command._Request(
+                        slice_name="smoke",
+                        mode=command._Mode("nightly", False),
+                        paths=paths,
+                        force=True,
+                        against=None,
+                        ranked_path=None,
+                        set_root=ROOT / SET_ROOT,
+                        supplied_set=False,
+                        command_flags=" --stack ci --kind nightly --force",
+                        paired_problem=None,
+                    )
+                    retry = "eval run --slice smoke --stack ci --kind nightly --force"
+                    self.assertEqual(request.engine_root_fix(), f"Run {prefix} {retry}, then retry.")
+                    self.assertEqual(
+                        request.record_root_fix(SLICE_RUNNERS["smoke"]),
+                        f"Run {prefix} {retry} as root with the stack up, then retry.",
+                    )
+                    self.assertEqual(
+                        request.ranked_required_fix(),
+                        f"Run {prefix} eval run --slice smoke --ranked <file> --stack ci --kind nightly --force, then retry.",
+                    )
+                    self.assertEqual(
+                        request.engine_lock_label(), "gideon eval run --slice smoke --stack ci"
+                    )
+
     def test_retry_commands_parse_in_their_mode_and_ordinary_fix_is_unchanged(self) -> None:
         from gideon.cli import build_parser
 
@@ -2010,7 +2077,7 @@ class ChallengerPair(unittest.TestCase):
                 self.assertIsNone(command._challenger_flag_problem(args))
         code, stdout, stderr = _invoke(["eval", "run"], **_run_kwargs(EvalHost()))
         self.assertEqual((code, stdout), (1, ""))
-        self.assertEqual(stderr, "gideon eval run: no slice was selected Fix: Run gideon eval run --slice extraction.\n")
+        self.assertEqual(stderr, "gideon eval run: no slice was selected Fix: Run sudo python3 -m gideon eval run --slice extraction.\n")
 
     def test_flag_refusals_are_early_and_retry_is_parseable(self) -> None:
         from gideon.cli import build_parser
@@ -2029,7 +2096,9 @@ class ChallengerPair(unittest.TestCase):
                 _assert_no_verdict_line(self, stdout)
                 self.assertFalse(host.calls)
                 self.assertFalse(host.exists_calls)
-                command_text = stderr.split("Run gideon ", 1)[1].split(", then retry", 1)[0]
+                match = re.search(r"Run (?:sudo python3 -m )?gideon (.+?), then retry", stderr)
+                assert match is not None
+                command_text = match.group(1)
                 parsed = build_parser().parse_args(command_text.split())
                 self.assertIsNone(command._challenger_flag_problem(parsed))
         for stack_flags in ((), ("--stack", "production")):

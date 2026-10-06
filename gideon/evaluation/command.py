@@ -41,7 +41,7 @@ from gideon.evaluation.results import (
 )
 from gideon.evaluation.slices import SLICE_RUNNERS, CallSurface, SliceSpec
 from gideon.evaluation.turns import access, door, run
-from gideon.host import backuplock, courts, engine, images, nogpu, site, stack
+from gideon.host import backuplock, courts, engine, images, nogpu, report, site, stack
 from gideon.host.render.ci import CI_STACK, PRODUCTION_STACK
 from gideon.host.render.owui import GENERAL_MODEL_ID
 from gideon.host.report import Problem, StageResult, print_stage, refusal
@@ -55,7 +55,6 @@ _DECISION_KIND: Final[str] = "decision"
 _KINDS: Final[frozenset[str]] = frozenset({_MANUAL_KIND, _SMOKE_KIND, NIGHTLY_KIND, _DECISION_KIND})
 """The kind words the mode's rules are written for; a word the parser offers outside them is a test failure."""
 NIGHTLY_LOCK_POLL_SECONDS: Final[int] = 60
-_SLICE_FIX: Final[str] = "Run gideon eval run --slice extraction."
 _LOAD_FIX: Final[str] = "Correct every listed eval-set finding, then retry."
 _NO_GPU_FIX: Final[str] = "Run the evaluation on a GPU host, then retry."
 _UNSIGNED_RESULT_FIX: Final[str] = "The runner must select through the loader, then retry."
@@ -66,6 +65,10 @@ _PARTIAL_DETAIL: Final[str] = "partial: aborted at the window's end, nothing kep
 _SET_SKIP_ROW: Final[StageResult] = StageResult(
     "record", True, "skipped — a set outside the release is never recorded", ""
 )
+
+
+def _slice_fix() -> str:
+    return f"Run {report.command('eval run --slice extraction')}."
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,21 +146,21 @@ class _Request:
         return f"eval run --slice {self.slice_name}{ranked_flag}{command_flags}"
 
     def engine_root_fix(self) -> str:
-        return f"Run sudo python3 -m gideon {self.retry_command()}, then retry."
+        return f"Run {report.command(self.retry_command())}, then retry."
 
     def record_root_fix(self, slice_spec: SliceSpec) -> str:
         ranked_flag = " --ranked <file>" if CallSurface.RANKED_FILE in slice_spec.surfaces else ""
         return (
-            f"Run sudo python3 -m gideon {self.retry_command(ranked_flag=ranked_flag)} "
+            f"Run {report.command(self.retry_command(ranked_flag=ranked_flag))} "
             "as root with the stack up, then retry."
         )
 
     def ranked_required_fix(self) -> str:
-        return f"Run gideon {self.retry_command(ranked_flag=' --ranked <file>')}, then retry."
+        return f"Run {report.command(self.retry_command(ranked_flag=' --ranked <file>'))}, then retry."
 
     def engine_lock_label(self) -> str:
         flags = self.command_flags if self.mode.challenger else f" --stack {self.paths.name}"
-        return "gideon " + self.retry_command(flags=flags)
+        return report.command_name(self.retry_command(flags=flags))
 
 
 @dataclass(frozen=True, slots=True)
@@ -436,6 +439,10 @@ def _compare_reference(
     return comparison, reference_version
 
 
+def _reference_command(run_id: str) -> str:
+    return report.command(f"eval reference --run {run_id}")
+
+
 def _reference_detail(
     comparison: reference.Comparison,
     *,
@@ -463,7 +470,7 @@ def _reference_detail(
         return f"{count} {noun} against {comparison.tag}"
     detail = f"no regression against {comparison.tag}"
     if comparison.outcome == "stale" and written:
-        detail += f"; re-record with gideon eval reference --run {run_id}"
+        detail += f"; re-record with {_reference_command(run_id)}"
     return detail
 
 
@@ -480,7 +487,7 @@ def _reference_fix(
         return reference.REGRESSION_FIX
     if comparison.outcome == "other-version":
         if written:
-            return f"Run sudo python3 -m gideon eval reference --run {run_id} as root with the stack up, then retry."
+            return f"Run {_reference_command(run_id)} as root with the stack up, then retry."
         return record_root_fix
     if comparison.outcome == "malformed":
         return reference.SLICE_REPAIR_FIX
@@ -683,9 +690,10 @@ def _paired_flag_problem(
     slice_name: str, *, decision: bool, against: object, kind: str
 ) -> Problem | None:
     if decision and (not isinstance(against, str) or not against):
+        retry = f"eval run --slice {slice_name} --decision --against <run id>"
         return Problem(
             "--decision requires --against",
-            f"Run gideon eval run --slice {slice_name} --decision --against <run id>, then retry.",
+            f"Run {report.command(retry)}, then retry.",
         )
     if against is not None and not decision:
         return Problem("--against requires --decision", "Remove --against or add --decision, then retry.")
@@ -715,8 +723,8 @@ def _flag_problem(
         names = ", ".join(sorted(name for name, spec in SLICE_RUNNERS.items() if spec.decision))
         return Problem(
             f"slice {slice_name!r} has no decision metric",
-            f"Choose a decision slice ({names}), then run gideon eval run --slice <name> "
-            "--decision --against <run id> and retry.",
+            f"Choose a decision slice ({names}), then run "
+            f"{report.command('eval run --slice <name> --decision --against <run id>')} and retry.",
         )
     if request.force and CallSurface.ENGINE not in slice_spec.surfaces:
         return Problem(
@@ -819,12 +827,12 @@ def _prepare_image(seams: _Seams, registry: str) -> ImageAccess | Problem:
     except (OSError, subprocess.SubprocessError):
         return Problem(
             "gideon image presence could not be checked",
-            "Run python3 -m gideon registry mirror, then retry.",
+            f"Run {report.command('registry mirror', sudo=False)}, then retry.",
         )
     if probe.returncode != 0:
         return Problem(
             "gideon image is absent from the Docker daemon",
-            "Run python3 -m gideon registry mirror, then retry.",
+            f"Run {report.command('registry mirror', sudo=False)}, then retry.",
         )
     return ImageAccess(reference, seams.checkout)
 
@@ -1003,6 +1011,9 @@ def _prepare_on_box(
             seams.sleep(NIGHTLY_LOCK_POLL_SECONDS)
             effective_start = seams.clock()
             if effective_start >= judgement.end:
+                retry = request.retry_command(
+                    flags=request.command_flags if request.mode.challenger else ""
+                )
                 print_stage(
                     StageResult(
                         "preconditions",
@@ -1011,7 +1022,7 @@ def _prepare_on_box(
                         f"{judgement.end.isoformat()}; waited {_waited_duration(started, effective_start)}",
                         "The next nightly fires at 21:00 office time; run this suite by hand "
                         "inside the window with "
-                        f"sudo python3 -m gideon {request.retry_command(flags=request.command_flags if request.mode.challenger else '')}.",
+                        f"{report.command(retry)}.",
                     )
                 )
                 return None
@@ -1376,7 +1387,7 @@ def _run_body(
         print(refusal(_COMMAND, request.paired_problem.problem, request.paired_problem.fix), file=sys.stderr)
         return _RunBodyOutcome(1)
     if not isinstance(slice_name, str) or not slice_name:
-        print(refusal(_COMMAND, "no slice was selected", _SLICE_FIX), file=sys.stderr)
+        print(refusal(_COMMAND, "no slice was selected", _slice_fix()), file=sys.stderr)
         return _RunBodyOutcome(1)
 
     slice_spec = SLICE_RUNNERS.get(slice_name)
@@ -1403,7 +1414,7 @@ def _run_body(
                 "load",
                 False,
                 f"unknown slice {slice_name!r}; available: {available}",
-                _SLICE_FIX,
+                _slice_fix(),
             )
         )
         return _RunBodyOutcome(1)
@@ -1673,7 +1684,7 @@ def _challenger_flag_problem(args: argparse.Namespace) -> Problem | None:
     flags = (mode.kind_flags if mode.admits_challenger else "") + (
         " --force" if getattr(args, "force", False) else ""
     )
-    fix = f"Run gideon {_challenger_retry(flags)}, then retry."
+    fix = f"Run {report.command(_challenger_retry(flags))}, then retry."
     for name in ("slice", "set", "ranked", "decision", "against"):
         value = getattr(args, name, None)
         if value is not None and value is not False:
@@ -1719,7 +1730,7 @@ def run_eval(
                     False,
                     nogpu.NOT_BUILD_BOX_DETAIL,
                     "The challenger runs on the build box alone; on this box run "
-                    "sudo python3 -m gideon eval run --slice <name> instead.",
+                    f"{report.command('eval run --slice <name>')} instead.",
                 )
             )
             return 1

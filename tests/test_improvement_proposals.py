@@ -745,6 +745,26 @@ triggers:
 class RecordCase(unittest.TestCase):
     """The record flag writes one audit row after its preflight and report."""
 
+    def test_root_fix_follows_the_command_form(self) -> None:
+        self.addCleanup(report.set_form_from_environment, os.environ.copy())
+        for installed in (False, True):
+            with self.subTest(installed=installed):
+                environment = (
+                    {report.GIDEON_INSTALLED_COMMAND: "/fictitious/gideon"}
+                    if installed else {}
+                )
+                host = RecordingHost(root=False)
+                with patch.dict(os.environ, environment, clear=True):
+                    code, stdout, stderr = self._cli(host, (self._section(),))
+                prefix = "gideon" if installed else "python3 -m gideon"
+                self.assertEqual((code, stdout), (1, ""))
+                self.assertEqual(
+                    stderr,
+                    "gideon proposals: root is required to record the tally. "
+                    f"Fix: Run {prefix} proposals --record as root, for example with sudo.\n",
+                )
+                self.assertEqual(host.calls, [])
+
     def _cli(
         self, host: RecordingHost, sections: Sequence[Section]
     ) -> tuple[int, str, str]:

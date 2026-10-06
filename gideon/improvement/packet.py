@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 
 from gideon import guardrail
 from gideon.api import stamp
-from gideon.host import backupset, site
+from gideon.host import backupset, report, site
 from gideon.host.report import Problem, StageResult, print_stage, refusal
 from gideon.host.sysio import Host, PathLike, RealHost
 from gideon.improvement import owuisnapshot
@@ -50,7 +50,6 @@ _EMPTY_FIX: Final[str] = (
     "Name an absent path or an empty directory, since a packet is written whole, then retry."
 )
 _OWNER_FIX: Final[str] = "Create the directory as root, or name an absent path, then retry."
-_ROOT_FIX: Final[str] = "Run sudo python3 -m gideon eval candidates --out <dir>, then retry."
 _SITE_FIX: Final[str] = "Correct the site file, then retry."
 _MONTH_FIX: Final[str] = "Supply --month YYYY-MM, then retry."
 _WRITE_FIX: Final[str] = (
@@ -78,6 +77,10 @@ _GUIDE: Final[tuple[str, ...]] = (
     "- Keep this page on the box and delete its directory once its candidates are",
     "  written. The procedure is docs/runbooks/feedback-packet.md in the release checkout.",
 )
+
+
+def _root_fix() -> str:
+    return f"Run {report.command('eval candidates --out <dir>')}, then retry."
 
 
 @dataclass(frozen=True, slots=True)
@@ -381,7 +384,7 @@ def run_candidates(
     checkout = Path(__file__).parents[2] if checkout_root is None else Path(checkout_root)
     io = RealHost() if host is None else host
     if io.geteuid() != 0:
-        return _preflight_refusal("this command must run as root", _ROOT_FIX)
+        return _preflight_refusal("this command must run as root", _root_fix())
 
     loaded = site.load_site(Path(site_path), host=io)
     if loaded.errors or loaded.config is None:
