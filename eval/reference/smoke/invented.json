@@ -272,16 +272,29 @@
     "extraction-310": "pass",
     "extraction-311": "pass",
     "extraction-312": "pass",
-    "extraction-313": "pass"
+    "extraction-313": "pass",
+    "extraction-355": "pass",
+    "extraction-356": "pass",
+    "extraction-357": "pass",
+    "extraction-358": "pass",
+    "extraction-359": "pass",
+    "extraction-360": "pass",
+    "extraction-361": "pass",
+    "extraction-362": "pass",
+    "extraction-363": "pass",
+    "extraction-364": "pass",
+    "extraction-365": "pass",
+    "extraction-366": "pass",
+    "extraction-367": "pass"
   },
   "corpus_lockfile": null,
   "eval_set_version": "eval-v1",
   "format": 1,
   "hardware_profile": "2x96v-256d",
   "list": "invented",
-  "product_version": "0.3.0",
+  "product_version": "0.3.46",
   "repeats": 1,
-  "set_digest": "a41a29cb46fb403afb709be17730b0741397a9c6f8e5be98166f7551cfdf3dca",
+  "set_digest": "aa98b0e7d878b58461a5a322712713f537eef3736daca62cc3204f5e604fb907",
   "slice": "smoke",
-  "tag": "v0.3.0"
+  "tag": "v0.3.46"
 }

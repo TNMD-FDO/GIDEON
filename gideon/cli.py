@@ -2,7 +2,8 @@
 
 A bare invocation prints the start screen and exits 0. A command is a stub
 until its behaviour lands: its help names where it lands, and it prints
-"not implemented" with the same text and exits non-zero.
+"not implemented" with the same text and exits non-zero. A group holding only
+stubs carries their landing in the top-level help.
 ``preflight.sh``, ``install.sh``, and ``upgrade.sh`` at the repo root are thin
 entrypoints over this CLI.
 
@@ -16,7 +17,7 @@ heavier dependencies inside their handlers, never at module level.
 import argparse
 import os
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final
 
@@ -106,6 +107,21 @@ def _stub_parser(
     parser = parent.add_parser(name, help=labeled, description=labeled)
     parser.set_defaults(handler=_stub, command_path=command_path, landing=landing)
     return parser
+
+
+def _label_stub_groups(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    """Label each group whose every subcommand is a stub with their landings on its top-level help line."""
+    for name, group in commands.choices.items():
+        # argparse exposes nested choices and their help lines only through _actions and _choices_actions.
+        subcommands = next(
+            (action.choices for action in group._actions if isinstance(action.choices, Mapping)),
+            None,
+        )
+        if not subcommands or not all(child.get_default("handler") is _stub for child in subcommands.values()):
+            continue
+        landings = dict.fromkeys(child.get_default("landing") for child in subcommands.values())
+        help_action = next(action for action in commands._choices_actions if action.dest == name)
+        help_action.help = f"{help_action.help} ({'; '.join(landings)})"
 
 
 def _run_eval(args: argparse.Namespace) -> int:
@@ -470,6 +486,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     test.set_defaults(handler=host_cli.run_alerts_test, command_path="alerts test")
 
+    _label_stub_groups(commands)
     return parser
 
 

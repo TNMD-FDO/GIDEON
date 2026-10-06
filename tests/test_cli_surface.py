@@ -5,11 +5,12 @@ implemented" and exits non-zero. A bare invocation prints the start screen,
 and every stub names where it lands.
 """
 
+import argparse
 import contextlib
 import io
 import unittest
 
-from gideon.cli import SITUATIONS, main
+from gideon.cli import SITUATIONS, _label_stub_groups, _stub, main
 from gideon.host.steps import STEPS
 
 TOP_LEVEL = [
@@ -37,6 +38,21 @@ STUBS = [
 def collapsed(text: str) -> str:
     """Argparse wraps help lines, so a phrase is searched with whitespace collapsed."""
     return " ".join(text.split())
+
+
+def help_entries(text: str) -> dict[str, str]:
+    """Read argparse's four-space subcommand entries and their wrapped lines."""
+    entries: dict[str, str] = {}
+    current: str | None = None
+    for line in text.splitlines():
+        if line.startswith("    ") and len(line) > 4 and not line[4].isspace():
+            current, _, summary = line.strip().partition(" ")
+            entries[current] = collapsed(summary)
+        elif line.startswith("     ") and current is not None:
+            entries[current] = collapsed(f"{entries[current]} {line}")
+        else:
+            current = None
+    return entries
 
 
 class Start(unittest.TestCase):
@@ -146,6 +162,71 @@ class Help(unittest.TestCase):
 
 
 class Stubs(unittest.TestCase):
+    def test_top_level_labels_only_groups_whose_commands_are_all_stubs(self) -> None:
+        """A group holding only stubs carries their landing on its top-level line; any other group none."""
+        top_help = io.StringIO()
+        with contextlib.redirect_stdout(top_help), self.assertRaises(SystemExit) as ctx:
+            main(["--help"])
+        self.assertEqual(ctx.exception.code, 0)
+        top_entries = help_entries(top_help.getvalue())
+        stub_only: set[str] = set()
+        mixed: set[str] = set()
+        for group in {argv[0] for argv, _ in STUBS}:
+            with self.subTest(group=group):
+                group_help = io.StringIO()
+                with contextlib.redirect_stdout(group_help), self.assertRaises(SystemExit) as ctx:
+                    main([group, "--help"])
+                self.assertEqual(ctx.exception.code, 0)
+                stub_names = {argv[1] for argv, _ in STUBS if argv[0] == group}
+                listed_names = set(help_entries(group_help.getvalue()))
+                self.assertTrue(stub_names)
+                self.assertTrue(listed_names)
+                self.assertLessEqual(stub_names, listed_names)
+                entry = top_entries[group]
+                landings = {landing for argv, landing in STUBS if argv[0] == group}
+                if stub_names == listed_names:
+                    stub_only.add(group)
+                    summary, separator, tail = entry.partition(" (")
+                    self.assertTrue(summary)
+                    self.assertEqual(separator, " (")
+                    self.assertTrue(tail.endswith(")"))
+                    for landing in landings:
+                        self.assertIn(landing, tail[:-1])
+                else:
+                    mixed.add(group)
+                    for landing in landings:
+                        self.assertNotIn(landing, entry)
+        self.assertTrue(stub_only)
+        self.assertTrue(mixed)
+
+    def test_pass_deduplicates_landings_and_leaves_mixed_groups_plain(self) -> None:
+        """The pass labels a stub-only group with its distinct landings in order and leaves the rest plain."""
+        parser = argparse.ArgumentParser(prog="example")
+        commands = parser.add_subparsers(dest="command")
+
+        same = commands.add_parser("same", help="same summary")
+        same_sub = same.add_subparsers(dest="subcommand")
+        same_sub.add_parser("first").set_defaults(handler=_stub, landing="first place")
+        same_sub.add_parser("second").set_defaults(handler=_stub, landing="first place")
+
+        distinct = commands.add_parser("distinct", help="distinct summary")
+        distinct_sub = distinct.add_subparsers(dest="subcommand")
+        distinct_sub.add_parser("first").set_defaults(handler=_stub, landing="first place")
+        distinct_sub.add_parser("second").set_defaults(handler=_stub, landing="second place")
+
+        mixed = commands.add_parser("mixed", help="mixed summary")
+        mixed_sub = mixed.add_subparsers(dest="subcommand")
+        mixed_sub.add_parser("first").set_defaults(handler=_stub, landing="first place")
+        mixed_sub.add_parser("working").set_defaults(handler=lambda _args: 0)
+
+        commands.add_parser("plain", help="plain summary")
+        _label_stub_groups(commands)
+        entries = help_entries(parser.format_help())
+        self.assertEqual(entries["same"], "same summary (first place)")
+        self.assertEqual(entries["distinct"], "distinct summary (first place; second place)")
+        self.assertEqual(entries["mixed"], "mixed summary")
+        self.assertEqual(entries["plain"], "plain summary")
+
     def test_every_stub_names_its_landing_in_help_and_refusal(self) -> None:
         for argv, landing in STUBS:
             path = " ".join(argv[:2])
