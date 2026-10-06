@@ -7,6 +7,8 @@ from collections.abc import Mapping
 from typing import TextIO
 
 _SAFE_NAME = re.compile(r"[A-Za-z0-9_.:-]+\Z")
+_DROPPED_LOGGERS = frozenset({"httpx", "httpcore"})
+_DROPPED_PREFIXES = tuple(f"{name}." for name in sorted(_DROPPED_LOGGERS))
 
 
 def _name(value: object) -> str | None:
@@ -19,7 +21,11 @@ class QueueLogFilter(logging.Filter):
     """Replace queue messages before the stream handler formats them."""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        if record.name != "procrastinate" and not record.name.startswith("procrastinate."):
+        name = record.name
+        # The HTTP client logs each request's whole URL, query included.
+        if name in _DROPPED_LOGGERS or name.startswith(_DROPPED_PREFIXES):
+            return False
+        if name != "procrastinate" and not name.startswith("procrastinate."):
             return True
         # The queue logs a job's outcome before it records the job finished, so
         # a filter that raised there would leave the job doing for ever.

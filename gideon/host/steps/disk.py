@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Final
 
 from gideon.host import cas
+from gideon.host.render import worker
 from gideon.host.render.opensearch import (
     OPENSEARCH_DATA_ROOT,
     OPENSEARCH_GID,
@@ -64,6 +65,9 @@ _DATA_DIRS: Final[tuple[_DataDirectory, ...]] = (
     _DataDirectory("bulk", "gideon", 0o755),
     _DataDirectory(
         str(cas.ROOT.relative_to(_DATA_MOUNT)), "gideon", cas.DIRECTORY_MODE
+    ),
+    _DataDirectory(
+        str(worker.SNAPSHOTS_ROOT.relative_to(_DATA_MOUNT)), "gideon", worker.DIR_MODE
     ),
     _DataDirectory("work", "gideon", 0o755),
     _DataDirectory("models", "gideon", 0o755),

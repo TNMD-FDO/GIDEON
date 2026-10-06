@@ -2,15 +2,31 @@
 
 import asyncio
 import datetime
+import inspect
+import tempfile
+import threading
 import unittest
+from collections.abc import Iterator
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import procrastinate
 from procrastinate.testing import InMemoryConnector
 
 from gideon.host.render import worker
-from gideon.worker import tasks
+from gideon.worker import fetch, tasks
+
+
+class Unread(httpx.SyncByteStream):
+    """An answer body left unread, as the network serves it."""
+
+    def __init__(self, content: bytes) -> None:
+        self.content = content
+
+    def __iter__(self) -> Iterator[bytes]:
+        yield self.content
 
 
 class RecoveryTask(unittest.TestCase):
@@ -37,6 +53,71 @@ class RecoveryTask(unittest.TestCase):
             (worker.WORKER_VERIFY_TASK, worker.WORKER_VERIFY_QUEUE),
             "Fix: keep the registered verify task equal to the host's queue identity.",
         )
+        self.assertEqual(
+            {name for name in app.tasks if name.startswith("gideon.worker.tasks.")},
+            {tasks.VERIFY_TASK, tasks.RECOVERY_TASK, fetch.FETCH_TASK},
+        )
+        fetching = app.tasks[fetch.FETCH_TASK]
+        self.assertEqual(fetching.queue, fetch.FETCH_QUEUE)
+        self.assertTrue(fetching.pass_context)
+        self.assertIsNone(fetching.queueing_lock)
+        self.assertFalse(inspect.iscoroutinefunction(tasks.fetch))
+
+    def test_fetch_jobs_run_off_the_event_loop_and_a_failure_is_filed(self) -> None:
+        body = b"Fictitious queued corpus object."
+        threads: list[bool] = []
+        original_transfer = fetch.transfer
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("missing"):
+                return httpx.Response(404)
+            return httpx.Response(200, stream=Unread(body))
+
+        def through_fake(
+            root: Path, destination: str, url: str, form: str, job: int
+        ) -> fetch.FetchRecord:
+            threads.append(threading.current_thread() is threading.main_thread())
+            return original_transfer(
+                root, destination, url, form, job,
+                client_factory=lambda: httpx.Client(transport=httpx.MockTransport(respond)),
+            )
+
+        connector = InMemoryConnector()
+        app = procrastinate.App(connector=connector)
+        tasks.register_tasks(app)
+
+        async def exercise() -> tuple[int, int]:
+            async with app.open_async():
+                whole = await app.configure_task(fetch.FETCH_TASK).defer_async(
+                    destination="fictions-2026-09-30/whole",
+                    url="https://archive.example.test/whole", form=fetch.KEPT_FORM,
+                )
+                missing = await app.configure_task(fetch.FETCH_TASK).defer_async(
+                    destination="fictions-2026-09-30/missing",
+                    url="https://archive.example.test/missing", form=fetch.KEPT_FORM,
+                )
+                await app.run_worker_async(wait=False, listen_notify=False)
+            return whole, missing
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with (
+                patch.object(tasks, "transfer", side_effect=through_fake),
+                patch.object(tasks, "SNAPSHOTS_ROOT", root),
+            ):
+                whole, missing = asyncio.run(exercise())
+            self.assertEqual(connector.jobs[whole]["status"], "succeeded")
+            self.assertEqual(connector.jobs[missing]["status"], "failed")
+            self.assertEqual(threads, [False, False],
+                             "Fix: keep the fetch task synchronous, so the queue runs it "
+                             "in a thread and the heartbeat's loop stays free.")
+            self.assertEqual((root / "fictions-2026-09-30/whole").read_bytes(), body)
+            failure = fetch.read_failure(
+                root / ("fictions-2026-09-30/missing" + fetch.FAILURE_SUFFIX)
+            )
+            assert failure is not None
+            self.assertEqual((failure.job, failure.reason, failure.status),
+                             (missing, "upstream-status", 404))
 
     def test_verify_job_runs_without_hold_and_with_injected_sleep(self) -> None:
         for hold in (None, 7):

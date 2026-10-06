@@ -23,6 +23,7 @@ from gideon.host.render.worker import (
     DATABASE_PORT_ENV,
     DATABASE_ROLE_ENV,
     PASSWORD_FILE_ENV,
+    SNAPSHOTS_ROOT,
     WORKER_CONCURRENCY,
     WORKER_DATABASE_HOST,
     WORKER_DATABASE_NAME,
@@ -45,7 +46,7 @@ WORKER_HEALTHCHECK: Final[Mapping[str, object]] = {
 
 
 class WorkerService(ServiceDefinition):
-    """The queue worker on every host, with only its mounted package."""
+    """The queue worker with its package and writable snapshots mount."""
 
     name = WORKER_SERVICE_NAME
     sources = ("gideon/worker",)
@@ -63,7 +64,10 @@ class WorkerService(ServiceDefinition):
             "restart": "unless-stopped",
             "command": ["python", "-m", "gideon.worker"],
             "working_dir": API_WORKING_DIRECTORY,
-            "volumes": [f"{inputs.checkout}/gideon:{API_MOUNT_TARGET}:ro"],
+            "volumes": [
+                f"{inputs.checkout}/gideon:{API_MOUNT_TARGET}:ro",
+                f"{SNAPSHOTS_ROOT}:{SNAPSHOTS_ROOT}",
+            ],
             "read_only": True,
             "group_add": [str(inputs.facts.service_gid)],
             "secrets": [WORKER_SECRET_NAME],

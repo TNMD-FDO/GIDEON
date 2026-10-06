@@ -15,7 +15,7 @@ inputs:
   build_box: false
 files:
   compose.yaml:
-    sha256: "52dc2e5531988ea0839039dd023eaf29caccd06d25972ad36a7013ca0498020a"
+    sha256: "dd51dac064b970370dd3056118722931e03addc1450de8b28a39aa3aa4e54841"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
@@ -196,7 +196,7 @@ services:
   qdrant: "aa46e367fc2d427547c9c7e04b245528def906e17d6f5c3b62727d6505116d63"
   opensearch: "14ff919afdd302e4694291bfd07e6222f50b62dd9c004d3d925673378025dbb7"
   open-webui: "2c9777db9c7144d4712aa8fd93ca419b417d3e7bafd5c1e6d3a7b469c3e1b209"
-  gideon-worker: "4dee89499277f007caf88aef07b49a5aa47295f242e0d66e17c8fd894d1c0b5e"
+  gideon-worker: "4e07055602367d562d0f779358fdf94bd193493f0424d923983a495e58311576"
   gideon-egress: "e675d5f59c4e789a0d873e3c64263e48d483c7b2881eebcad95349de22ed95fe"
   searxng: "790f3d23c5a48d8b2e3c02d12c6615884bb4073095bdf7faa51ccee49aa51c2c"
   postgres-exporter: "71024e25f248a0a94b2ea92c4f48813f8b4f95e3d17d41522f300fa9f1407291"

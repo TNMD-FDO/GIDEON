@@ -27,6 +27,7 @@ from gideon.host.render.egress import (
     INTERNAL_NO_PROXY_HOSTS,
     egress_proxy_url,
 )
+from gideon.host.render.grafana import PUBLIC_REPOSITORY_URL
 from gideon.host.render.services import SERVICES, image_pin
 from gideon.host.render.services.worker import (
     WORKER_HEALTHCHECK,
@@ -34,10 +35,35 @@ from gideon.host.render.services.worker import (
     WorkerService,
 )
 from gideon.host.stores import ROLE_SPECS
-from gideon.worker import settings, tasks
+from gideon.worker import fetch, settings, tasks
 
 
 class WorkerIdentity(unittest.TestCase):
+    def test_fetch_identity_and_grammars_match_the_worker(self) -> None:
+        self.assertEqual(
+            (
+                worker.FETCH_TASK, worker.FETCH_QUEUE, worker.SNAPSHOTS_ROOT,
+                worker.DIR_MODE, worker.RESOLVE_DIR, worker.KEPT_FORM,
+                worker.FRESH_FORM, worker.RECORD_SUFFIX, worker.FAILURE_SUFFIX,
+                worker.RESERVED_SUFFIXES, worker.LANE_COUNT,
+                worker.SEGMENT_PATTERN, worker.SOURCE_PATTERN, worker.DNS_PATTERN,
+                worker.URL_MAX_LENGTH, worker.FAILURE_REASONS,
+            ),
+            (
+                fetch.FETCH_TASK, fetch.FETCH_QUEUE, fetch.SNAPSHOTS_ROOT,
+                fetch.DIR_MODE, fetch.RESOLVE_DIR, fetch.KEPT_FORM,
+                fetch.FRESH_FORM, fetch.RECORD_SUFFIX, fetch.FAILURE_SUFFIX,
+                fetch.RESERVED_SUFFIXES, fetch.LANE_COUNT,
+                fetch.SEGMENT_PATTERN, fetch.SOURCE_PATTERN, fetch.DNS_PATTERN,
+                fetch.URL_MAX_LENGTH, fetch.FAILURE_REASONS,
+            ),
+            "Fix: keep the host fetch identity equal to the worker's grammar and names.",
+        )
+        self.assertEqual(
+            fetch.PUBLIC_REPOSITORY_URL, PUBLIC_REPOSITORY_URL,
+            "Fix: keep the fetch agent's repository address equal to the rendered card.",
+        )
+
     def test_role_matches_the_store_and_runtime_names_match_the_render(self) -> None:
         role = next(spec for spec in ROLE_SPECS if spec.name == worker.WORKER_ROLE)
         self.assertEqual(
@@ -153,7 +179,8 @@ class WorkerBlock(unittest.TestCase):
                         "command": ["python", "-m", "gideon.worker"],
                         "working_dir": API_WORKING_DIRECTORY,
                         "volumes": [
-                            f"{rendered_inputs.checkout}/gideon:{API_MOUNT_TARGET}:ro"
+                            f"{rendered_inputs.checkout}/gideon:{API_MOUNT_TARGET}:ro",
+                            f"{worker.SNAPSHOTS_ROOT}:{worker.SNAPSHOTS_ROOT}",
                         ],
                         "read_only": True,
                         "group_add": [str(rendered_inputs.facts.service_gid)],

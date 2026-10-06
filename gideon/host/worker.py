@@ -1,4 +1,4 @@
-"""Enqueue one worker job and read its queue row back."""
+"""Defer worker jobs and read their queue rows."""
 
 import argparse
 import json
@@ -6,7 +6,7 @@ import math
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final, cast
 
@@ -103,24 +103,30 @@ def _bind(name: str, value: str) -> str:
     return f"\\set {name} '{escaped}'"
 
 
-def defer_job(
-    host: Host, rendered_dir: PathLike, *, hold: float | None = None
+def defer(
+    host: Host,
+    rendered_dir: PathLike,
+    *,
+    task: str,
+    queue: str,
+    args: Mapping[str, object],
+    lock: str | None = None,
 ) -> int | Problem:
-    """Defer one verify job through the worker's database role."""
+    """Defer a worker job through the database role with stdin-bound values."""
 
-    if hold is not None and (isinstance(hold, bool) or not math.isfinite(hold) or hold < 0):
-        return Problem(
-            "the hold duration is invalid",
-            "Use a nonnegative finite number of seconds, then retry.",
-        )
-    args = {} if hold is None else {"hold_seconds": hold}
+    row = (
+        "  ROW(:'v_queue', :'v_task', 0, NULL, NULL, :'v_args'::jsonb, NULL)"
+        if lock is None
+        else "  ROW(:'v_queue', :'v_task', 0, :'v_lock', NULL, :'v_args'::jsonb, NULL)"
+    )
     sql = "\n".join(
         (
-            _bind("v_queue", WORKER_VERIFY_QUEUE),
-            _bind("v_task", WORKER_VERIFY_TASK),
+            _bind("v_queue", queue),
+            _bind("v_task", task),
             _bind("v_args", json.dumps(args, separators=(",", ":"))),
+            *((_bind("v_lock", lock),) if lock is not None else ()),
             "SELECT (procrastinate_defer_jobs_v1(ARRAY[",
-            "  ROW(:'v_queue', :'v_task', 0, NULL, NULL, :'v_args'::jsonb, NULL)",
+            row,
             "]::procrastinate_job_to_defer_v1[]))[1];",
             "",
         )
@@ -139,6 +145,23 @@ def defer_job(
     if not value.isascii() or not value.isdecimal() or int(value) < 1:
         return Problem("queue defer returned no job id", _logs_fix(rendered_dir))
     return int(value)
+
+
+def defer_job(
+    host: Host, rendered_dir: PathLike, *, hold: float | None = None
+) -> int | Problem:
+    """Defer one verify job through the worker's database role."""
+
+    if hold is not None and (isinstance(hold, bool) or not math.isfinite(hold) or hold < 0):
+        return Problem(
+            "the hold duration is invalid",
+            "Use a nonnegative finite number of seconds, then retry.",
+        )
+    args = {} if hold is None else {"hold_seconds": hold}
+    return defer(
+        host, rendered_dir, task=WORKER_VERIFY_TASK, queue=WORKER_VERIFY_QUEUE,
+        args=args,
+    )
 
 
 def read_job(host: Host, rendered_dir: PathLike, job_id: int) -> JobRow | Problem:

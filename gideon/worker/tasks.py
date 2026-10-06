@@ -1,4 +1,4 @@
-"""Queue worker tasks for verification and stalled-job recovery."""
+"""Queue worker tasks for verification, recovery, and corpus fetches."""
 
 import asyncio
 import logging
@@ -6,6 +6,15 @@ from typing import Final
 
 import procrastinate
 from procrastinate.exceptions import UniqueViolation
+
+from .fetch import (
+    FETCH_QUEUE,
+    FETCH_TASK,
+    SNAPSHOTS_ROOT,
+    FetchFailure,
+    transfer,
+    write_job_failure,
+)
 
 VERIFY_TASK: Final = "gideon.worker.tasks.verify"
 VERIFY_QUEUE: Final = "verify"
@@ -44,8 +53,23 @@ async def retry_stalled_jobs(context: procrastinate.JobContext, timestamp: int) 
             _LOGGER.info("stalled job %d waits for its queueing lock", job.id)
 
 
+def fetch(
+    context: procrastinate.JobContext, destination: str, url: str, form: str,
+) -> None:
+    """Run a file transfer outside the worker's event loop."""
+
+    job_id = context.job.id
+    if job_id is None:
+        raise FetchFailure("invalid")
+    try:
+        transfer(SNAPSHOTS_ROOT, destination, url, form, job_id)
+    except FetchFailure as failure:
+        write_job_failure(SNAPSHOTS_ROOT, destination, form, job_id, failure)
+        raise
+
+
 def register_tasks(app: procrastinate.App) -> None:
-    """Register verification and periodic stalled-job recovery."""
+    """Register verification, recovery, and synchronous corpus transfer."""
 
     app.task(name=VERIFY_TASK, queue=VERIFY_QUEUE)(verify)
     task = app.task(
@@ -55,3 +79,9 @@ def register_tasks(app: procrastinate.App) -> None:
         pass_context=True,
     )(retry_stalled_jobs)
     app.periodic(cron=RECOVERY_CRON)(task)
+    app.task(
+        name=FETCH_TASK,
+        queue=FETCH_QUEUE,
+        pass_context=True,
+        retry=False,
+    )(fetch)

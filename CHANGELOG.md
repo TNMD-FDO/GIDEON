@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.60](docs/release-notes/v0.3.60.md) — 2026-10-06 — the corpus fetch, resumable and hashed
 - [v0.3.58](docs/release-notes/v0.3.58.md) — 2026-10-06 — install and upgrade fixes as invoked
 - [v0.3.57](docs/release-notes/v0.3.57.md) — 2026-10-06 — backup and restore fixes as invoked
 - [v0.3.56](docs/release-notes/v0.3.56.md) — 2026-10-06 — engine and eval fixes name the command as it was invoked

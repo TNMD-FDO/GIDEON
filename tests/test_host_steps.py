@@ -14,6 +14,7 @@ from pathlib import Path
 
 from gideon.host.lock import load_host_lock
 from gideon.host.provision import run_provision
+from gideon.host.render import worker
 from gideon.host.render.opensearch import (
     OPENSEARCH_DATA_ROOT,
     OPENSEARCH_GID,
@@ -755,6 +756,7 @@ class DiskLayoutStepTests(unittest.TestCase):
         stats["/data/bulk/cas"] = os.stat_result(
             (0o42770, 0, 0, 0, 998, 998, 0, 0, 0, 0, 0)
         )
+        stats[str(worker.SNAPSHOTS_ROOT)] = directory_stat(worker.DIR_MODE, 998, 998)
         stats[QDRANT_DATA_ROOT] = os.stat_result(
             (0o40750, 0, 0, 0, 998, 998, 0, 0, 0, 0, 0)
         )
@@ -841,6 +843,15 @@ class DiskLayoutStepTests(unittest.TestCase):
                 ("chown", (cas_path, 998, 998)),
             ],
         )
+        snapshots_path = str(worker.SNAPSHOTS_ROOT)
+        self.assertEqual(
+            host.calls[bulk_chown + 4 : bulk_chown + 7],
+            [
+                ("mkdir", (snapshots_path, worker.DIR_MODE, False, True)),
+                ("chmod", (snapshots_path, worker.DIR_MODE)),
+                ("chown", (snapshots_path, 998, 998)),
+            ],
+        )
         correct_cas = host.stats.pop(cas_path)
         missing_cas = step.check(context(host))
         self.assertEqual(missing_cas.disposition, Disposition.DRIFT)
@@ -851,6 +862,15 @@ class DiskLayoutStepTests(unittest.TestCase):
         self.assertIn(cas_path, wrong_mode.detail)
         self.assertIn("2770", wrong_mode.detail)
         host.stats[cas_path] = correct_cas
+        correct_snapshots = host.stats.pop(snapshots_path)
+        missing_snapshots = step.check(context(host))
+        self.assertEqual(missing_snapshots.disposition, Disposition.DRIFT)
+        self.assertIn(snapshots_path, missing_snapshots.detail)
+        host.stats[snapshots_path] = directory_stat(0o770, 998, 998)
+        wrong_snapshots_mode = step.check(context(host))
+        self.assertEqual(wrong_snapshots_mode.disposition, Disposition.DRIFT)
+        self.assertIn("2770", wrong_snapshots_mode.detail)
+        host.stats[snapshots_path] = correct_snapshots
         self.assertIn(
             ("chown", ("/data/observability", 998, 998)),
             host.calls,
@@ -2613,6 +2633,7 @@ class BaselineCheckPass(unittest.TestCase):
             }
         )
         host.stats["/data/bulk/cas"] = directory_stat(0o2770, 998, 998)
+        host.stats[str(worker.SNAPSHOTS_ROOT)] = directory_stat(worker.DIR_MODE, 998, 998)
         host.stats[QDRANT_DATA_ROOT] = directory_stat(0o750, 998, 998)
         host.stats[OPENSEARCH_DATA_ROOT] = directory_stat(
             0o700, OPENSEARCH_UID, OPENSEARCH_GID
