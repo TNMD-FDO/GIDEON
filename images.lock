@@ -101,8 +101,9 @@ images:
   # roles. Its dependencies are pinned as build arguments; the service package
   # is mounted by Compose rather than copied into this image. Resolved on the
   # box with `skopeo inspect` on 2026-09-19. A dependency or base bump is
-  # completed by the box build, then the requirements-dev.txt copy moves in the
-  # same commit. One argument feeds the driver's two wheels because the two
+  # completed by the box build; shared packages move with their
+  # requirements-dev.txt copies, while the case-citation packages stay in the
+  # image alone. One argument feeds the driver's two wheels because the two
   # projects release in lockstep and a half-bump would be silent under this
   # writer.
   # The queue's eight wheels are watched as PyPI projects alongside the API set.
@@ -130,6 +131,13 @@ images:
       PYTHON_DATEUTIL_VERSION: 2.9.0.post0
       SIX_VERSION: 1.17.0
       PACKAGING_VERSION: "26.3"
+      EYECITE_VERSION: 2.7.8
+      REPORTERS_DB_VERSION: 3.2.66
+      COURTS_DB_VERSION: 0.10.27
+      PYAHOCORASICK_VERSION: 2.3.1
+      LXML_VERSION: 6.1.3
+      REGEX_VERSION: 2026.9.29
+      FAST_DIFF_MATCH_PATCH_VERSION: 2.1.0
     watch:
       STARLETTE_VERSION:
         pypi_project: starlette
@@ -169,5 +177,19 @@ images:
         pypi_project: six
       PACKAGING_VERSION:
         pypi_project: packaging
-    inputs_digest: sha256:4f825749cd8f074c9cfca0437a3364d6b4ba54a5a39d3cd2218db2c0d74f69b1
-    digest: sha256:de46c1a7e66d5d89a5b75a22ad00c7faa5b123140753a6059459baf78c832613
+      EYECITE_VERSION:
+        pypi_project: eyecite
+      REPORTERS_DB_VERSION:
+        pypi_project: reporters-db
+      COURTS_DB_VERSION:
+        pypi_project: courts-db
+      PYAHOCORASICK_VERSION:
+        pypi_project: pyahocorasick
+      LXML_VERSION:
+        pypi_project: lxml
+      REGEX_VERSION:
+        pypi_project: regex
+      FAST_DIFF_MATCH_PATCH_VERSION:
+        pypi_project: fast-diff-match-patch
+    inputs_digest: sha256:93fc67b708ec10b566b734ead39a340576b94551d850d5a38e7f2cb4bebd77cc
+    digest: sha256:979cbdacad5820e2b3c98fcfaf19f473edb657faa8a543c3fb5622ad0f0226f9

@@ -3,10 +3,9 @@
 ## What a case is
 
 A case is one message to the Legal chat and every exact object in it,
-labelled by hand: the measure of the extraction grammar, the `extraction` category of the `build-gates` suite. The grammar runs over the case's `question` and
-its objects are scored against the case's `expected` objects, per type:
-precision at least 0.95 and recall at least 0.90 for every type the grammar
-lands. `gideon/extraction/scoring.py` is the measure and
+labelled by hand: the measure of the extraction grammar and the image's case-citation adapter, the `extraction` category of the `build-gates` suite. Their objects are scored against the case's `expected` objects, per type:
+precision at least 0.95 and recall at least 0.90 for every landed type.
+`gideon/extraction/scoring.py` is the measure and
 `tests/test_extraction_set.py` the gate.
 
 The cases live one JSON object per line in four files beside this page, two pairs: a file of written questions and the file of variants derived from it.
@@ -66,7 +65,7 @@ A label records what the **text** states, not what a lawyer knows.
 
 **The objects.** An exact object is a citation, a statute section, a Guidelines id, a rule cite, a docket number, or a party name present verbatim in the message. A named jurisdiction or court, a year or a date, a quantity (months, days, grams, dollars, an offense level, a criminal history category), an act's popular name, a record or page cite, and a redaction placeholder are not.
 
-**The types.** Ten types are the grammar's today; the other three are labelled so the set is whole and a later family edits no label.
+**The types.** Eleven types are landed: ten by the grammar and `case_cite` by the image's eyecite adapter. The other two are labelled so the set is whole and a later family edits no label. `case_cite` is measured on the box through the image; the hosted gate reports it as unlanded.
 
 | Type | What the text states | Key |
 |---|---|---|
@@ -80,15 +79,17 @@ A label records what the **text** states, not what a lawyer knows.
 | `habeas_rule` | a rule of the § 2254 or § 2255 Rules with its set named, long or short, the set's section written `§` or `Section`: `Rule 4 of the Rules Governing Section 2254 Cases`, `Rule 12 of the Rules Governing § 2255 Proceedings`, `§ 2254 Rule 6`, `Section 2255 Rule 8(c)` | `rules/2254/rule<N>`, `rules/2255/rule<N>` |
 | `scotus_rule` | a Supreme Court Rule: `Supreme Court Rule 13`, `Sup. Ct. R. 14.1(a)`, `Rule 10 of the Rules of the Supreme Court` | `rules/scotus/rule<N>` |
 | `docket` | a docket number: a district number (`3:21-cr-00123`, `3:21-cr-00123-ABC-2`), or a two-part number under `No.`, `Case No.`, `Docket No.`, or `Dkt.` (`No. 21-5123`) | none |
-| `case_cite` | a reporter citation | none |
+| `case_cite` | a full case reporter citation: `721 U.S. 418`, `291 S. Ct. 731`, `209 F.2d 634`, `487 F.3d 215`, `126 F.4th 547`, `674 F. App'x 283`, `835 F. App’x 492`, `603 F. App’x. 375`, `918 F. Supp. 3d 264`; a parallel cite, `603 U.S. 375, 144 S. Ct. 628`, is two | none |
 | `state_code` | a state code section: `Tenn. Code Ann. § 39-17-417`, a bare `39-17-417` | none |
-| `caption` | a party name standing for a case: `Strickland`, `Wong Sun` | none |
+| `caption` | a party name standing for a case with no reporter cite beside it: `Strickland`, `Wong Sun` | none |
 
 A section is a `statute` only when its own citation construction states a title, whatever title it plainly belongs to; a rule is a `court_rule` or a `habeas_rule` only when its construction names the set. A bare section and a bare rule never carry a key: deterministic code never guesses the authority (`Rule 41` is a rule of three sets, and `Habeas Rule 6` names neither the § 2254 nor the § 2255 Rules, so it is a `bare_rule`). A dotted section under a marker with no title (`§ 1308.11`) is a `bare_section`; a markerless dotted number is no object.
 
 **The families' own rules.** An appendix compilation is keyed from a fixed table, title and ordinal, the ordinal arabic or roman (`app. 2` is `App. II`): title 18's 2 is the Interstate Agreement on Detainers Act (`pl/91/538`) and its 3 the Classified Information Procedures Act (`pl/96/456`). A compilation outside the table (`5 U.S.C. App. 3 § 6`) is no object, and neither is the section inside it, since no key can be derived. A C.F.R. part cite (`28 C.F.R. pt. 2`) names no section and is no object. A Supreme Court Rule's key is the rule's; a dotted paragraph is inside the span and carried in `subsections` in order, `Sup. Ct. R. 14.1(a)` being `rules/scotus/rule14` with `["1", "a"]` — the dot a paragraph there, where `Fed. R. Crim. P. 32.1` is a rule. A docket's span is the number alone, its marker (`No.`, `Case No.`, `Docket No.`, `Dkt.`) outside: a district number (division, year, case type, number, then any judge's initials and a defendant's suffix, `4:23-cr-00212-GHI-JKL-3`) is a docket with or without a marker; a two-part number (`24-5871`) only under one of the four markers, and never inside a public-law cite (`Pub. L. No. 115-391`); a three-part number (`39-17-417`) is a state-code section, never a docket.
 
-**The span.** The words as typed, from the construction's first token — a title number, a code or manual token (`U.S.C.`, `USSG`), a set's name, a section marker (`§`, `§§`, `sec.`, `section`), or the designator word (`Rule`, `Guideline`) — through its last designator, the parenthesised ones included. Surrounding words (`under`, `the`), punctuation, and markup are outside; an abbreviation's own period is inside (`U.S.C.`). Nothing is respelled: spacing, a non-breaking space, a line break, a curly apostrophe, and letter case are kept as typed. A `case_cite`'s span is the minimal reporter cite — volume, reporter, first page — its pincite, year, and caption outside; a `caption`'s is the party name as typed, its year cue outside. Objects never overlap: a construction that contains a section (`Rule 4 of the Rules Governing Section 2254 Cases`) is one object, the outer one.
+**The span.** The words as typed, from the construction's first token — a title number, a code or manual token (`U.S.C.`, `USSG`), a set's name, a section marker (`§`, `§§`, `sec.`, `section`), or the designator word (`Rule`, `Guideline`) — through its last designator, the parenthesised ones included. Surrounding words (`under`, `the`), punctuation, and markup are outside; an abbreviation's own period is inside (`U.S.C.`). Nothing is respelled: spacing, a non-breaking space, a line break, a curly apostrophe, and letter case are kept as typed. A `case_cite` uses eyecite's `span()`: the volume, reporter, and first page, with the reporter's trailing period inside when typed before the page and any apostrophe exactly as typed. Its pincite, year, court, and party names are outside that span. A parallel cite is one object per reporter. A short form (`Alder, 719 U.S. at 429`) and an `Id.` are no `case_cite` object. A `caption` spans the party name as typed, with its year cue outside. Objects never overlap: a construction that contains a section (`Rule 4 of the Rules Governing Section 2254 Cases`) is one object, the outer one.
+
+A case name typed beside its reporter cite, full or short form, belongs to that citation and has no separate `caption` label. A full cite labels only its `case_cite` span; a short form and an `Id.` label nothing for that reference. A party name standing for a case with no reporter cite beside it, such as `Kelvren` alone, is a `caption`.
 
 **The key.** At section level: `18 U.S.C. § 2511(2)(c)` is `/us/usc/t18/s2511`. A U.S. Code section keeps its letter as typed and its hyphenated part (`/us/usc/t18/s3663A`, `/us/usc/t42/s2000e-5`), since the letter's case cannot be derived from the text and key comparison folds case; a Guidelines id is upper-cased, as every Manual prints it; a rule number keeps its decimal part (`/us/usc/t18a/courtRules/Crim/rule32.1`).
 

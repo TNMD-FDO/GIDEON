@@ -33,6 +33,7 @@ _GIDEON_SMOKE_SCRIPT: Final[str] = (
     "import httpx\n"
     "import psycopg\n"
     "import procrastinate\n"
+    "import eyecite\n"
     "if os.getuid() == 0:\n"
     "    raise SystemExit(\"the image's default user must be unprivileged\")\n"
     "if psycopg.pq.__impl__ != \"binary\":\n"
@@ -44,11 +45,15 @@ _GIDEON_SMOKE_SCRIPT: Final[str] = (
     "if importlib.metadata.version(\"psycopg\") "
     "!= importlib.metadata.version(\"psycopg-binary\"):\n"
     "    raise SystemExit(\"psycopg and psycopg-binary are at different versions\")\n"
+    "if len(eyecite.get_citations(\"Fictional v. Example, 603 U.S. 375\")) != 1:\n"
+    "    raise SystemExit(\"eyecite did not find one full case citation\")\n"
     "for package in (\"starlette\", \"uvicorn\", \"httpx\", \"anyio\", "
     "\"httpcore\", \"h11\", \"certifi\", \"idna\", \"click\", "
     "\"typing_extensions\", \"psycopg\", \"psycopg-binary\", "
     "\"procrastinate\", \"psycopg-pool\", \"asgiref\", \"attrs\", "
-    "\"croniter\", \"python-dateutil\", \"six\", \"packaging\"):\n"
+    "\"croniter\", \"python-dateutil\", \"six\", \"packaging\", "
+    "\"eyecite\", \"reporters-db\", \"courts-db\", \"pyahocorasick\", "
+    "\"lxml\", \"regex\", \"fast-diff-match-patch\"):\n"
     "    print(package, importlib.metadata.version(package))\n"
 )
 
@@ -75,6 +80,13 @@ SMOKE: Final[Mapping[str, Smoke]] = {
         "PYTHON_DATEUTIL_VERSION",
         "SIX_VERSION",
         "PACKAGING_VERSION",
+        "EYECITE_VERSION",
+        "REPORTERS_DB_VERSION",
+        "COURTS_DB_VERSION",
+        "PYAHOCORASICK_VERSION",
+        "LXML_VERSION",
+        "REGEX_VERSION",
+        "FAST_DIFF_MATCH_PATCH_VERSION",
     )),
 }
 

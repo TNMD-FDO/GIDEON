@@ -19,6 +19,7 @@ from gideon.extraction import (
     ObjectType,
     extract,
 )
+from gideon.extraction.contract import EYECITE_TYPES
 from gideon.extraction.grammar import registry_types
 from gideon.extraction.scoring import SetScore, active_cases, build_report, score
 from tools.exportboundary import absent_from_export
@@ -48,6 +49,7 @@ EXTRACTION_VARIANTS_PINNED_PREFIXES: Final[tuple[tuple[int, str], ...]] = (
 INVENTED_PINNED_PREFIXES: Final[tuple[tuple[int, str], ...]] = (
     (22, "8c057174f06ac4afc869a87642ac70eb0a92a3e3b10b2c14f0723d7ee53298a0"),  # CSA-1 2026-09-19
     (55, "3437b4b9e536c67c1a4e909a695afe0c3696fdc04514f0515f0af50c5b020c6e"),  # CSA-1 2026-09-19
+    (68, "1e22405cf62258d59980f8722d7d81fc8af1b7752af58fe31b4f0cce5dc54cac"),  # CSA-1 2026-10-05
 )
 INVENTED_VARIANTS_PINNED_PREFIXES: Final[tuple[tuple[int, str], ...]] = (
     (218, "cbdbec3e0ff9464f844d4c82d29e9c86ce2fb7c31687a2c58885ec0e65398156"),  # CSA-1 2026-09-19
@@ -286,6 +288,31 @@ class SetContract(TestCase):
         ]
         self.assertFalse(findings, f"findings: {findings}")
 
+    def test_case_cite_labels_have_the_reporter_span_shape(self) -> None:
+        findings: list[str] = []
+        for path, _, lines in _available_case_files(self):
+            for line in lines:
+                expected = line.record.get("expected")
+                objects = expected.get("objects") if isinstance(expected, dict) else None
+                if not isinstance(objects, list):
+                    continue
+                for label in objects:
+                    if not isinstance(label, dict) or label.get("type") != "case_cite":
+                        continue
+                    text = label.get("text")
+                    if (
+                        not isinstance(text, str)
+                        or not text
+                        or not ("0" <= text[0] <= "9")
+                        or not ("0" <= text[-1] <= "9")
+                        or "(" in text
+                        or ")" in text
+                    ):
+                        findings.append(
+                            _finding(path, f"line {line.number} {_record_id(line)}", "case_cite span shape")
+                        )
+        self.assertFalse(findings, f"findings: {findings}")
+
     def test_each_file_is_pinned_by_an_append_only_prefix(self) -> None:
         prefixes = (
             (INVENTED_PATH, INVENTED_PINNED_PREFIXES),
@@ -321,9 +348,26 @@ class SetContract(TestCase):
                 numbers.append(number)
 
         # series.txt's order is the order ids were minted in, not ascending, so the
-        # one series is contiguous over the union: from 1 here, from 41 in an export.
+        # one series is contiguous over the union. An export omits the harvest-derived
+        # files, whose ids sit inside the series (1-40, and the harvest variants
+        # before the case_cite cases), so there the ids rise without repeats from 41 and
+        # the gaps hold exactly the omitted files' pinned line counts.
+        omitted = sum(
+            pins[-1][0]
+            for path, pins in (
+                (EXTRACTION_PATH, EXTRACTION_PINNED_PREFIXES),
+                (EXTRACTION_VARIANTS_PATH, EXTRACTION_VARIANTS_PINNED_PREFIXES),
+            )
+            if absent_from_export(path, ROOT)
+        )
         first = 41 if absent_from_export(EXTRACTION_PATH, ROOT) else 1
-        if sorted(numbers) != list(range(first, first + len(numbers))):
+        ordered = sorted(numbers)
+        if (
+            len(set(ordered)) != len(ordered)
+            or not ordered
+            or ordered[0] != first
+            or ordered[-1] != len(ordered) + omitted
+        ):
             findings.append(_finding(INVENTED_PATH, 0, "one contiguous id series"))
         self.assertFalse(findings, f"findings: {findings}")
 
@@ -431,11 +475,13 @@ class SetContract(TestCase):
             "bare_rule": 10,
             "statute": 5,
             "bare_section": 5,
+            "case_cite": 10,
         }
         findings: list[str] = []
-        if set(floor_table) != set(registry_types()):
-            findings.append(_finding(INVENTED_PATH, 0, "registry types have floors"))
-        for object_type in registry_types():
+        declared_types = (*registry_types(), *EYECITE_TYPES)
+        if set(floor_table) != set(declared_types):
+            findings.append(_finding(INVENTED_PATH, 0, "declared types have floors"))
+        for object_type in declared_types:
             floor = floor_table.get(object_type, 0)
             if counts[object_type] < floor:
                 findings.append(_finding(INVENTED_PATH, 0, f"{object_type} label floor"))
@@ -456,6 +502,22 @@ class SetContract(TestCase):
         _warn_residuals(result)
         print(build_report(result), end="")
         self.assertTrue(result.verdict, build_report(result))
+
+    def test_hosted_gate_reports_case_cite_labels_as_unlanded(self) -> None:
+        files, extracted = _score_inputs(self)
+        label_count = sum(
+            1
+            for case in active_cases(files)
+            for label in case["expected"]["objects"]
+            if label["type"] == "case_cite"
+        )
+        result = score(files, extracted, registry_types())
+        self.assertFalse(result.by_type["case_cite"].gated)
+        self.assertEqual(result.unlanded_label_counts["case_cite"], label_count)
+        self.assertIn(
+            f"unlanded case_cite: {label_count} labels, reported, not gated",
+            build_report(result),
+        )
 
     def test_every_registry_type_is_gated(self) -> None:
         files, extracted = _score_inputs(self)

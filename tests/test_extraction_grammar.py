@@ -1,6 +1,7 @@
 """The exact-object contract and the extraction package's import boundary."""
 
 import ast
+import json
 import sys
 import time
 import unittest
@@ -17,7 +18,18 @@ from gideon.extraction import (
     ordering_violations,
     span_violations,
 )
-from gideon.extraction.grammar import PATTERN_BUILDERS, PATTERN_REGISTRY, _candidates
+from gideon.extraction.contract import (
+    EYECITE_TYPES,
+    combine_extractions,
+    object_from_wire,
+    object_to_wire,
+)
+from gideon.extraction.grammar import (
+    PATTERN_BUILDERS,
+    PATTERN_REGISTRY,
+    _candidates,
+    registry_types,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 EXTRACTION = ROOT / "gideon" / "extraction"
@@ -83,6 +95,80 @@ class Contract(unittest.TestCase):
         self.assertFalse(keys_equal("/us/usc/t18/s3663a", "/us/usc/t18/s3663b"))
         self.assertTrue(keys_equal(None, None))
         self.assertFalse(keys_equal(None, "ussg/2B1.1"))
+
+    def test_eyecite_types_are_declared_and_separate_from_the_grammar(self) -> None:
+        self.assertEqual(EYECITE_TYPES, ("case_cite",))
+        self.assertTrue(set(EYECITE_TYPES) <= set(OBJECT_TYPES))
+        self.assertTrue(set(EYECITE_TYPES).isdisjoint(registry_types()))
+
+    def test_combination_keeps_first_objects_and_orders_disjoint_additions(self) -> None:
+        first = ExactObject("statute", 20, 29, "18 U.S.C.", "/us/usc/t18/s1")
+        before = ExactObject("case_cite", 0, 8, "123 F.2d")
+        after = ExactObject("case_cite", 30, 38, "456 F.3d")
+        self.assertEqual(
+            combine_extractions((first,), (after, before)),
+            (before, first, after),
+        )
+        self.assertEqual(combine_extractions((first,), ()), (first,))
+
+    def test_combination_first_wins_nested_partial_and_equal_start_overlaps(self) -> None:
+        first = ExactObject("statute", 10, 20, "abcdefghij", "/us/usc/t18/s1")
+        nested = ExactObject("case_cite", 12, 17, "cdefg")
+        enclosing = ExactObject("case_cite", 8, 22, "yzabcdefghijwx")
+        partial = ExactObject("case_cite", 18, 25, "ijwx123")
+        equal_start = ExactObject("case_cite", 10, 15, "abcde")
+        adjacent = ExactObject("case_cite", 20, 23, "wx1")
+        self.assertEqual(
+            combine_extractions((first,), (nested, enclosing, partial, equal_start, adjacent)),
+            (first, adjacent),
+        )
+
+    def test_combination_resolves_second_extraction_by_start_then_longest(self) -> None:
+        short = ExactObject("case_cite", 2, 7, "abcde")
+        long = ExactObject("case_cite", 2, 10, "abcdefgh")
+        nested = ExactObject("case_cite", 5, 9, "defg")
+        after = ExactObject("case_cite", 10, 13, "xyz")
+        self.assertEqual(
+            combine_extractions((), (short, nested, after, long)),
+            (long, after),
+        )
+
+    def test_wire_shape_round_trips_all_fields_through_json(self) -> None:
+        citation = "18 U.S.C. § 123(a)"
+        obj = ExactObject(
+            "statute", 3, 3 + len(citation), citation,
+            "/us/usc/t18/s123", "usc/titled-section@1", ("a",),
+        )
+        wire = object_to_wire(obj)
+        self.assertEqual(
+            tuple(wire),
+            ("type", "start", "end", "text", "key", "pattern_id", "subsections"),
+        )
+        self.assertEqual(wire["subsections"], ["a"])
+        self.assertEqual(object_from_wire(json.loads(json.dumps(wire))), obj)
+        case = ExactObject("case_cite", 0, 8, "123 F.2d")
+        self.assertEqual(object_from_wire(json.loads(json.dumps(object_to_wire(case)))), case)
+
+    def test_wire_reader_refuses_unknown_type_and_malformed_fields(self) -> None:
+        valid = object_to_wire(ExactObject("case_cite", 0, 8, "123 F.2d"))
+        invalid = (
+            {**valid, "type": "unknown"},
+            {key: item for key, item in valid.items() if key != "text"},
+            {**valid, "extra": "field"},
+            {**valid, "start": True},
+            {**valid, "end": 0},
+            {**valid, "text": "wrong"},
+            {**valid, "key": 1},
+            {**valid, "key": "/wrong/key"},
+            {**valid, "pattern_id": 1},
+            {**valid, "subsections": ("a",)},
+            {**valid, "subsections": [1]},
+            {**valid, "subsections": ["a"]},
+            (),
+        )
+        for value in invalid:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                object_from_wire(value)
 
 
 class Imports(unittest.TestCase):

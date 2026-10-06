@@ -17,6 +17,7 @@ import unittest
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, time, timedelta
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
@@ -58,6 +59,41 @@ NOW = datetime(2026, 9, 19, 12, 0, tzinfo=UTC)
 RUN_ID = "11111111-2222-4333-8444-555555555555"
 
 
+@lru_cache(maxsize=1)
+def _casecite_labels() -> dict[str, list[dict[str, object]]]:
+    """Read citation replies from the committed set used by command fakes."""
+
+    loaded = load_set(ROOT / SET_ROOT).loaded
+    assert loaded is not None
+    replies: dict[str, list[dict[str, object]]] = {}
+    for case_id, case in loaded.cases_by_id.items():
+        expected = case.get("expected")
+        labels = expected.get("objects") if isinstance(expected, dict) else None
+        if not isinstance(labels, list):
+            continue
+        replies[case_id] = [
+            {
+                **label,
+                "key": None,
+                "pattern_id": None,
+                "subsections": [],
+            }
+            for label in labels
+            if isinstance(label, dict) and label.get("type") == "case_cite"
+        ]
+    return replies
+
+
+def _casecite_reply(input_text: str) -> str:
+    """Reply to the entry's JSON lines with labels read from the set."""
+
+    labels = _casecite_labels()
+    return "".join(
+        json.dumps({"id": request["id"], "objects": labels.get(request["id"], [])}) + "\n"
+        for request in (json.loads(line) for line in input_text.splitlines())
+    )
+
+
 class EvalHost:
     def __init__(
         self,
@@ -81,6 +117,8 @@ class EvalHost:
         self.no_git = no_git
         self.ci_stack_present = ci_stack_present
         self.effective_uid = effective_uid
+        self.image_lock_text = (ROOT / "images.lock").read_text(encoding="utf-8")
+        self.image_probe_rc = 0
         self.calls: list[tuple[tuple[str, ...], str | None]] = []
         self.locks: dict[str, str] = {}
         self.lock_records: list[tuple[str, str]] = []
@@ -99,6 +137,11 @@ class EvalHost:
         del check, cwd, env, timeout, passthrough
         command_argv = tuple(argv)
         self.calls.append((command_argv, input))
+        if command_argv[:3] == ("docker", "image", "inspect"):
+            return subprocess.CompletedProcess(list(command_argv), self.image_probe_rc, "", "image diagnostic")
+        if command_argv[:2] == ("docker", "run") and command_argv[-1] == "gideon.casecite":
+            assert input is not None
+            return subprocess.CompletedProcess(list(command_argv), 0, _casecite_reply(input), "")
         if command_argv[0] == "docker":
             rc = self.probe_rc if input == "SELECT 1;\n" else self.write_rc
             return subprocess.CompletedProcess(list(command_argv), rc, "", "database diagnostic")
@@ -109,6 +152,8 @@ class EvalHost:
         raise AssertionError(f"unexpected command: {command_argv}")
 
     def read_text(self, path: str | os.PathLike[str], *, encoding: str = "utf-8") -> str:
+        if Path(path).name == "images.lock":
+            return self.image_lock_text
         return Path(path).read_text(encoding=encoding)
 
     def write_text(self, path: str | os.PathLike[str], text: str, *, encoding: str = "utf-8", mode: int = 0o644) -> None:
@@ -498,7 +543,7 @@ class Command(unittest.TestCase):
         self.assertIn(f"record: ok — run {RUN_ID} recorded", stdout)
         self.assertIn("gate: ok", stdout)
         _assert_comparison_lines(self, stdout, word="pass")
-        writes = [input for argv, input in host.calls if argv[0] == "docker" and input != "SELECT 1;\n"]
+        writes = [input for argv, input in host.calls if argv[0] == "docker" and input is not None and "INSERT INTO eval_runs" in input]
         self.assertEqual(len(writes), 1)
         self.assertIn("INSERT INTO eval_runs", writes[0] or "")
         loaded = load_set(ROOT / SET_ROOT).loaded
@@ -625,7 +670,7 @@ class Command(unittest.TestCase):
         self.assertIn("record: ok — run", stdout)
         self.assertIn("gate: refuse", stdout)
         _assert_comparison_lines(self, stdout, word="FAIL")
-        write_sql = next(input for argv, input in host.calls if argv[0] == "docker" and input != "SELECT 1;\n")
+        write_sql = next(input for argv, input in host.calls if argv[0] == "docker" and input is not None and "INSERT INTO eval_runs" in input)
         self.assertIn("\\set run_verdict 'fail'", write_sql or "")
         self.assertIn("\\set result_0_verdict 'fail'", write_sql or "")
 
@@ -645,7 +690,7 @@ class Command(unittest.TestCase):
                     **_run_kwargs(host, checkout=checkout),
                 )
             write_sql = next(
-                input for argv, input in host.calls if argv[0] == "docker" and input != "SELECT 1;\n"
+                input for argv, input in host.calls if argv[0] == "docker" and input is not None and "INSERT INTO eval_runs" in input
             )
         self.assertEqual(code, 1)
         self.assertEqual(stderr, "")
@@ -672,7 +717,7 @@ class Command(unittest.TestCase):
                 **_run_kwargs(host, checkout=checkout),
             )
             write_sql = next(
-                input for argv, input in host.calls if argv[0] == "docker" and input != "SELECT 1;\n"
+                input for argv, input in host.calls if argv[0] == "docker" and input is not None and "INSERT INTO eval_runs" in input
             )
         self.assertEqual(code, 1)
         self.assertEqual(stderr, "")
@@ -807,13 +852,19 @@ class Command(unittest.TestCase):
             )
         self.assertEqual(code, 0)
         self.assertIn("record: ok — skipped", stdout)
-        self.assertEqual(host.calls, [])
+        self.assertEqual(
+            [argv[:3] for argv, _input in host.calls],
+            [("docker", "image", "inspect"), ("docker", "run", "--rm")],
+        )
 
     def test_unreachable_database_skips_record_and_runs_no_git_probe(self) -> None:
         host = EvalHost(probe_rc=1)
-        code, stdout, _ = _invoke(
-            ["eval", "run", "--slice", "extraction"], **_run_kwargs(host)
-        )
+        off_box = dict(SLICE_RUNNERS)
+        off_box["extraction"] = replace(off_box["extraction"], surfaces=frozenset())
+        with patch.object(command, "SLICE_RUNNERS", off_box):
+            code, stdout, _ = _invoke(
+                ["eval", "run", "--slice", "extraction"], **_run_kwargs(host)
+            )
         self.assertEqual(code, 0)
         self.assertIn("rows were not written", stdout)
         _assert_comparison_lines(self, stdout)
@@ -843,7 +894,7 @@ class Command(unittest.TestCase):
         for argv in git_calls:
             self.assertEqual(argv[1:3], ("-c", f"safe.directory={ROOT}"))
             self.assertEqual(argv[3:5], ("-C", str(ROOT)))
-        write_sql = next(input for argv, input in host.calls if argv[0] == "docker" and input != "SELECT 1;\n")
+        write_sql = next(input for argv, input in host.calls if argv[0] == "docker" and input is not None and "INSERT INTO eval_runs" in input)
         self.assertIn("\\set git_dirty 'true'", write_sql or "")
 
     def test_no_git_entry_records_both_provenance_values_as_null_without_git(self) -> None:
@@ -854,7 +905,7 @@ class Command(unittest.TestCase):
         self.assertEqual(code, 0)
         _assert_comparison_lines(self, stdout)
         self.assertFalse(any(argv[0] == "git" for argv, _ in host.calls))
-        write_sql = next(input for argv, input in host.calls if argv[0] == "docker" and input != "SELECT 1;\n")
+        write_sql = next(input for argv, input in host.calls if argv[0] == "docker" and input is not None and "INSERT INTO eval_runs" in input)
         self.assertIn("NULL, NULL, :'set_digest'", write_sql or "")
 
     def test_git_failure_or_empty_commit_refuses_before_write(self) -> None:
@@ -865,10 +916,10 @@ class Command(unittest.TestCase):
                     ["eval", "run", "--slice", "extraction"], **_run_kwargs(host)
                 )
                 self.assertEqual(code, 1)
-                self.assertIn("record: refuse", stdout)
-                _assert_comparison_lines(self, stdout)
+                self.assertIn("preconditions: refuse", stdout)
+                self.assertNotIn("run: ok", stdout)
                 self.assertFalse(
-                    any(argv[0] == "docker" and input != "SELECT 1;\n" for argv, input in host.calls)
+                    any(argv[0] == "docker" and input is not None and "INSERT INTO eval_runs" in input for argv, input in host.calls)
                 )
                 self.assertIn("as the checkout owner", stdout)
 
@@ -1168,12 +1219,12 @@ class EngineStackAndLock(unittest.TestCase):
         write_sql = next(
             input
             for argv, input in host.calls
-            if argv[0] == "docker" and input is not None and input != "SELECT 1;\n"
+            if argv[0] == "docker" and input is not None and "INSERT INTO eval_runs" in input
         )
         write_argv = next(
             argv
             for argv, input in host.calls
-            if argv[0] == "docker" and input is not None and input != "SELECT 1;\n"
+            if argv[0] == "docker" and input is not None and "INSERT INTO eval_runs" in input
         )
         self.assertIn("\\set run_stack 'ci'", write_sql)
         self.assertIn("\\set kind 'smoke'", write_sql)
@@ -1182,7 +1233,7 @@ class EngineStackAndLock(unittest.TestCase):
 
     def test_ci_refusals_are_registry_driven_before_the_lock(self) -> None:
         for slice_name, spec in SLICE_RUNNERS.items():
-            if CallSurface.TURNS in spec.surfaces or spec.judge_prompt is not None:
+            if spec.reaches_box:
                 continue
             with self.subTest(slice_name=slice_name):
                 if absent_from_export(f"eval/sets/eval-v1/slices/{slice_name}", ROOT):
@@ -1834,6 +1885,7 @@ class ChallengerHost(EvalHost):
             str(ROOT / challenger.CHALLENGER_PATH): self.document,
             str(ROOT / "config/site.example.yaml"): (ROOT / "config/site.example.yaml").read_text(),
             str(ROOT / "courts.yaml"): (ROOT / "courts.yaml").read_text(),
+            str(ROOT / "images.lock"): self.image_lock_text,
         }
         self.build_box = build_box
         self.reads: list[str] = []

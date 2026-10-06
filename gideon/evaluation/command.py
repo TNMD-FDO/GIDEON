@@ -33,6 +33,7 @@ from gideon.evaluation.evalset import (
 )
 from gideon.evaluation.results import (
     CaseResult,
+    ImageAccess,
     JSONValue,
     RunContext,
     SliceResult,
@@ -40,7 +41,7 @@ from gideon.evaluation.results import (
 )
 from gideon.evaluation.slices import SLICE_RUNNERS, CallSurface, SliceSpec
 from gideon.evaluation.turns import access, door, run
-from gideon.host import backuplock, courts, engine, nogpu, site, stack
+from gideon.host import backuplock, courts, engine, images, nogpu, site, stack
 from gideon.host.render.ci import CI_STACK, PRODUCTION_STACK
 from gideon.host.render.owui import GENERAL_MODEL_ID
 from gideon.host.report import Problem, StageResult, print_stage, refusal
@@ -217,6 +218,7 @@ class _Prepared:
     forced: bool
     overrides: Mapping[str, object]
     record: _RecordFacts | StageResult
+    image: ImageAccess | None = None
 
 
 @dataclass(slots=True)
@@ -794,6 +796,61 @@ def _paired_decision(
     )
 
 
+def _prepare_image(seams: _Seams, registry: str) -> ImageAccess | Problem:
+    """Resolve and probe the built service image used by an image-backed slice."""
+
+    target = images.parse_registry(registry)
+    if target is None:
+        return Problem("site registry is invalid", "Correct the site registry, then retry.")
+    loaded = images.load_image_lock(seams.checkout / "images.lock", host=seams.host)
+    if not loaded.ok or loaded.lock is None:
+        return Problem("images.lock is unavailable or invalid", "Correct images.lock, then retry.")
+    pin = next((pin for pin in loaded.lock.images if pin.name == "gideon"), None)
+    if pin is None or not isinstance(pin, images.BuiltImagePin):
+        return Problem("gideon built image pin is missing", "Correct images.lock, then retry.")
+    if not pin.built:
+        return Problem(
+            "gideon image is unbuilt",
+            f"Run sudo python3 -m tools.imagebuild gideon --to {registry}, then retry.",
+        )
+    reference = images.reference(target, pin)
+    try:
+        probe = seams.host.run(stack.image_present_argv(reference))
+    except (OSError, subprocess.SubprocessError):
+        return Problem(
+            "gideon image presence could not be checked",
+            "Run python3 -m gideon registry mirror, then retry.",
+        )
+    if probe.returncode != 0:
+        return Problem(
+            "gideon image is absent from the Docker daemon",
+            "Run python3 -m gideon registry mirror, then retry.",
+        )
+    return ImageAccess(reference, seams.checkout)
+
+
+def _on_box_record_facts(
+    request: _Request, seams: _Seams, profile_name: str
+) -> _RecordFacts | StageResult:
+    """Resolve provenance and writer access before a box-facing runner starts."""
+
+    if request.supplied_set:
+        return _SET_SKIP_ROW
+    resolved_provenance, provenance_fix = _provenance(seams.host, seams.checkout)
+    if resolved_provenance is None:
+        return StageResult(
+            "preconditions", False, "git provenance could not be read",
+            provenance_fix or _git_fix(str(seams.checkout)),
+        )
+    probe_problem = record.probe(seams.host, seams.rendered_dir)
+    if probe_problem is not None:
+        return StageResult(
+            "preconditions", False, probe_problem,
+            stack.logs_fix(seams.rendered_dir, record.POSTGRES_SERVICE),
+        )
+    return _RecordFacts(profile_name, *resolved_provenance)
+
+
 def _prepare_on_box(
     request: _Request,
     seams: _Seams,
@@ -821,7 +878,7 @@ def _prepare_on_box(
             )
         )
         return None
-    if nogpu.is_no_gpu_host(seams.host):
+    if CallSurface.ENGINE in slice_spec.surfaces and nogpu.is_no_gpu_host(seams.host):
         print_stage(
             StageResult(
                 "preconditions",
@@ -838,6 +895,40 @@ def _prepare_on_box(
         print_stage(StageResult("preconditions", False, detail, fix))
         return None
     config = site_result.config
+    image: ImageAccess | None = None
+    if CallSurface.IMAGE in slice_spec.surfaces:
+        resolved_image = _prepare_image(seams, config.registry)
+        if isinstance(resolved_image, Problem):
+            print_stage(StageResult(
+                "preconditions", False, resolved_image.problem, resolved_image.fix
+            ))
+            return None
+        image = resolved_image
+    if CallSurface.ENGINE not in slice_spec.surfaces:
+        record_facts = _on_box_record_facts(request, seams, config.hardware_profile)
+        if isinstance(record_facts, StageResult) and not record_facts.ok:
+            print_stage(record_facts)
+            return None
+        writer = (
+            "set supplied, so no writer probe"
+            if request.supplied_set
+            else f"{record.EVAL_ROLE} connects (the insert is not proven)"
+        )
+        print_stage(StageResult(
+            "preconditions", True,
+            f"root, site, image present, profile {config.hardware_profile}, {writer}", "",
+        ))
+        return _Prepared(
+            served_model_name=None,
+            turns=None,
+            ranked=ranked_lists,
+            checkpoint=no_checkpoint,
+            started=started,
+            forced=False,
+            overrides=overrides,
+            record=record_facts,
+            image=image,
+        )
     judgement = request.mode.judgement(started, config.office.timezone)
     engine_call_count = (
         None
@@ -1001,31 +1092,10 @@ def _prepare_on_box(
             sentinel=run.new_sentinel(),
         )
 
-    provenance: tuple[str | None, bool | None] = (None, None)
-    if not request.supplied_set:
-        resolved_provenance, provenance_fix = _provenance(seams.host, seams.checkout)
-        if resolved_provenance is None:
-            print_stage(
-                StageResult(
-                    "preconditions",
-                    False,
-                    "git provenance could not be read",
-                    provenance_fix or _git_fix(str(seams.checkout)),
-                )
-            )
-            return None
-        provenance = resolved_provenance
-        probe_problem = record.probe(seams.host, seams.rendered_dir)
-        if probe_problem is not None:
-            print_stage(
-                StageResult(
-                    "preconditions",
-                    False,
-                    probe_problem,
-                    stack.logs_fix(seams.rendered_dir, record.POSTGRES_SERVICE),
-                )
-            )
-            return None
+    record_facts = _on_box_record_facts(request, seams, target.profile_name)
+    if isinstance(record_facts, StageResult) and not record_facts.ok:
+        print_stage(record_facts)
+        return None
     # One row for the stage, as engine verify prints one. The writer clause
     # states the guarantee and no more: the probe proves the role connects, so a
     # write can still fail after the run and is reported at the record stage.
@@ -1049,7 +1119,7 @@ def _prepare_on_box(
                 ", eval password read, door probed"
                 if CallSurface.TURNS in slice_spec.surfaces
                 else ""
-            ),
+            ) + (", image present" if image is not None else ""),
             "",
         )
     )
@@ -1061,11 +1131,8 @@ def _prepare_on_box(
         started=effective_start,
         forced=request.force,
         overrides=overrides,
-        record=(
-            _SET_SKIP_ROW
-            if request.supplied_set
-            else _RecordFacts(target.profile_name, *provenance)
-        ),
+        record=record_facts,
+        image=image,
     )
 
 
@@ -1435,6 +1502,7 @@ def _run_body(
         ranked=prepared.ranked,
         turns=prepared.turns,
         checkout=seams.checkout,
+        image=prepared.image,
     )
     if pass_value.subject_change is not None:
         assert pass_value.prompt_id is not None

@@ -6,16 +6,23 @@ import ast
 import inspect
 import os
 import shutil
+import subprocess
 import tempfile
 import unittest
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
-from test_evaluation_run import EvalHost, _assert_comparison_lines, _invoke, _run_kwargs
+from test_evaluation_run import (
+    EvalHost,
+    _assert_comparison_lines,
+    _casecite_reply,
+    _invoke,
+    _run_kwargs,
+)
 from test_guardrails_slice import JudgingDoorHost, _fixture_turns
 
 import gideon
@@ -34,7 +41,13 @@ from gideon.evaluation.evalset import (
     load_set,
     select_cases,
 )
-from gideon.evaluation.results import CaseResult, JSONValue, RunContext, SliceResult
+from gideon.evaluation.results import (
+    CaseResult,
+    ImageAccess,
+    JSONValue,
+    RunContext,
+    SliceResult,
+)
 from gideon.evaluation.slices import SLICE_RUNNERS, SMOKE_PARTS
 from gideon.evaluation.turns import run as turn_run
 from gideon.host.sysio import PathLike
@@ -43,6 +56,7 @@ from tools.exportboundary import absent_from_export
 ROOT = Path(__file__).resolve().parents[1]
 _SAMPLE = guardrails_slice.FRONTEND_SAMPLE
 _SMOKE_LIST = Path("slices/smoke")
+_IMAGE_ACCESS = ImageAccess("registry.example/gideon@sha256:" + "a" * 64, Path("/fictitious-checkout"))
 
 
 def _load(root: Path) -> LoadedSet:
@@ -139,6 +153,36 @@ class CommandDoorHost(JudgingDoorHost):
     def __init__(self) -> None:
         super().__init__()
         self.locks: dict[str, str] = {}
+        self.image_stdout: str | None = None
+        self.image_returncode = 0
+        self.image_error = ""
+
+    def run(
+        self,
+        argv: Sequence[str],
+        *,
+        check: bool = False,
+        input: str | None = None,
+        cwd: PathLike | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        passthrough: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
+        if tuple(argv)[:3] == ("docker", "image", "inspect"):
+            return subprocess.CompletedProcess(list(argv), 0, "", "")
+        if tuple(argv)[:2] == ("docker", "run") and argv[-1] == "gideon.casecite":
+            if self.image_error == "timeout":
+                assert timeout is not None
+                raise subprocess.TimeoutExpired(argv, timeout)
+            assert input is not None
+            output = _casecite_reply(input) if self.image_stdout is None else self.image_stdout
+            return subprocess.CompletedProcess(
+                list(argv), self.image_returncode, output, "PRIVATE MATTER TEXT"
+            )
+        return super().run(
+            argv, check=check, input=input, cwd=cwd, env=env,
+            timeout=timeout, passthrough=passthrough,
+        )
 
     def exists(self, path: PathLike) -> bool:
         if Path(path) == Path(stacks.CI_ROOT) / "compose.yaml":
@@ -156,6 +200,8 @@ class CommandDoorHost(JudgingDoorHost):
         return super().stat(path)
 
     def read_text(self, path: PathLike, *, encoding: str = "utf-8") -> str:
+        if Path(path).name == "images.lock":
+            return (ROOT / "images.lock").read_text(encoding=encoding)
         try:
             return super().read_text(path, encoding=encoding)
         except FileNotFoundError:
@@ -173,7 +219,36 @@ class CommandDoorHost(JudgingDoorHost):
 
 
 class SmokeRunner(unittest.TestCase):
-    """The composite gates only its zero-tolerance guardrail facts."""
+    """The composite gates zero-tolerance guardrail facts and image-leg failures."""
+
+    def test_image_leg_timeout_exit_and_empty_reply_block_smoke(self) -> None:
+        for failure in ("timeout", "exit", "empty"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                _root, loaded = _temporary_smoke_set(Path(directory))
+                host = CommandDoorHost()
+                _host, context = _context(loaded, host=host)
+                if failure == "timeout":
+                    host.image_error = "timeout"
+                elif failure == "exit":
+                    host.image_returncode = 3
+                else:
+                    host.image_stdout = ""
+                result = SLICE_RUNNERS["smoke"].runner(
+                    loaded, "smoke", replace(context, image=_IMAGE_ACCESS)
+                )
+                extraction_ids = {
+                    case_id for case_id in select_cases(loaded, "smoke").counted
+                    if loaded.cases_by_id[case_id]["suite"] == "build-gates"
+                }
+                failed = {
+                    row.case_id for row in result.results
+                    if row.metrics.get("problem") == "image-leg-failed"
+                }
+                self.assertEqual(failed, extraction_ids)
+                self.assertFalse(result.verdict)
+                self.assertIn(f"image leg failed {len(failed)}:", result.report)
+                self.assertIn("zero-tolerance: fail", result.report)
+                self.assertNotIn("PRIVATE MATTER TEXT", result.report)
 
     def test_each_zero_tolerance_cause_fails_by_id(self) -> None:
         for cause in ("unblocked", "leaked", "errored", "disagreeing"):
@@ -240,7 +315,7 @@ class SmokeRunner(unittest.TestCase):
     def test_control_replacement_and_extraction_bounds_are_reported_not_gated(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             _root, loaded = _temporary_smoke_set(Path(directory))
-            host, context = _context(loaded)
+            host, context = _context(loaded, host=CommandDoorHost())
             control = next(
                 case_id
                 for case_id in _SAMPLE
@@ -259,7 +334,7 @@ class SmokeRunner(unittest.TestCase):
                 "guardrails", _mutating_guardrails(control, replace_control)
             )
             with patch.object(extraction_slice, "extract", return_value=()):
-                result = composite.run(loaded, "smoke", context)
+                result = composite.run(loaded, "smoke", replace(context, image=_IMAGE_ACCESS))
         self.assertTrue(result.verdict, result.report)
         self.assertIn("controls replaced 1 (reported, not gated)", result.report)
         self.assertIn("controls declined 0 (reported, not gated)", result.report)

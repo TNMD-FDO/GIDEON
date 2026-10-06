@@ -11,7 +11,7 @@ requires-python = ">=3.12"
 dynamic = ["version"]
 
 [tool.setuptools]
-packages = ["gideon", "gideon.api", "gideon.host", "gideon.guardrail", "gideon.extraction", "gideon.evaluation", "gideon.evaluation.turns", "gideon.status", "gideon.worker"]
+packages = ["gideon", "gideon.api", "gideon.casecite", "gideon.host", "gideon.guardrail", "gideon.extraction", "gideon.evaluation", "gideon.evaluation.turns", "gideon.status", "gideon.worker"]
 
 [tool.setuptools.dynamic]
 # The version lives in exactly one place; releases bump it there.
@@ -47,3 +47,7 @@ select = ["E4", "E7", "E9", "F", "I", "UP", "B", "C4", "SIM", "RUF100", "BLE", "
 python_version = "3.12"
 check_untyped_defs = true
 warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = ["eyecite", "eyecite.*"]
+ignore_missing_imports = true

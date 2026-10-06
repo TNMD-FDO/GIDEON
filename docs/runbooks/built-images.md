@@ -57,16 +57,23 @@ pull request: `git fetch origin && git checkout pin-watch/<pin id>`):
    about a minute — choose the moment.
 
 The `gideon` build follows the same five steps with `python3 -m tools.imagebuild
-gideon`. Its smoke runs Python's `importlib.metadata.version` over the twenty
-image packages after importing `starlette`, `uvicorn`, `httpx`, `psycopg`, and
-`procrastinate` (whose import fails without `psycopg-pool`, a gap `pip check`
-does not see), refuses an image whose default user is root, and refuses unless
+gideon`. Its smoke runs Python's `importlib.metadata.version` over the twenty-seven
+image packages after importing `starlette`, `uvicorn`, `httpx`, `psycopg`,
+`procrastinate`, and `eyecite`. It also asks eyecite to find one full citation in
+a fictitious reporter string, checking that its tokenizer data loads. The smoke
+refuses an image whose default user is root, and refuses unless
 the driver loads on the binary libpq implementation and its two distributions
 report the same version — one build argument installs both wheels; `--check`
 repeats that smoke against the recorded built digest. The image is the
 interpreter and dependency set of both `gideon-api` and `gideon-worker`, while
 the applying checkout is mounted into the running containers. A Procrastinate
 bump carries more than the rebuild: §6.
+
+The Dockerfile builds `fast-diff-match-patch` from its pinned source in a builder
+stage because upstream has no CPython 3.14 wheel. The final stage installs that
+wheel with the other pinned binary packages. Hosted checks do not compile it;
+the box build and smoke check prove it. Remove the builder stage when upstream
+publishes a compatible wheel.
 
 ### Several proposals for one image
 
@@ -145,3 +152,11 @@ migration file to a recorded name. Complete such a bump on the proposal's branch
 5. Build, check, and commit as in §2. The worker waits at its start until its
    schema answers a probe; if the new migration adds an object the worker needs
    from its first query, move the probe in `gideon/worker/__main__.py` to it.
+
+## 7. An eyecite, reporters-db, or courts-db bump
+
+Complete the proposal on its branch with the `gideon` rebuild and `--check` in
+§2. The hosted checks do not install eyecite. Before merging, re-read the
+`case_cite` span rule against the new image and run
+`sudo python3 -m gideon eval run --slice extraction` on the box. Require a green
+`case_cite` row in its report.

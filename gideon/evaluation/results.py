@@ -61,6 +61,14 @@ def no_checkpoint() -> None:
 
 
 @dataclass(frozen=True, slots=True)
+class ImageAccess:
+    """The pinned service image and checkout mounted for one image-backed run."""
+
+    reference: str
+    checkout: PathLike
+
+
+@dataclass(frozen=True, slots=True)
 class RunContext:
     """The host seams and runner settings for one evaluation slice.
 
@@ -71,6 +79,7 @@ class RunContext:
     its own module. It is none when no command supplied a checkout.
     ``turns`` is present for a slice that drives turns through the harness's
     service or managed frontend drivers.
+    ``image`` is present for a slice that runs code in the pinned service image.
     ``checkpoint`` is called by a runner between cases and before a case's
     further turns, and a runner never catches what it raises: past the run's
     deadline it raises ``window.WindowOverrun``, so no turn starts after the
@@ -89,3 +98,4 @@ class RunContext:
     turns: TurnAccess | None = None
     checkpoint: Callable[[], None] = no_checkpoint
     checkout: PathLike | None = None
+    image: ImageAccess | None = None

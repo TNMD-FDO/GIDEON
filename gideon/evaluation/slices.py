@@ -23,6 +23,7 @@ class CallSurface(Enum):
     """A surface an evaluation slice reaches, and whether it is on the box."""
 
     ENGINE = ("engine", True)
+    IMAGE = ("image", True)
     TURNS = ("turns", True)
     RANKED_FILE = ("ranked-file", False)
 
@@ -91,7 +92,7 @@ class SliceSpec:
 
 _EXTRACTION: Final[SliceSpec] = SliceSpec(
     runner=extraction_slice.run_extraction,
-    surfaces=frozenset(),
+    surfaces=frozenset({CallSurface.IMAGE}),
     repeats=1,
     judge_prompt=None,
     compares_reference=True,

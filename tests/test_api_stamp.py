@@ -113,7 +113,7 @@ class Detection(unittest.TestCase):
             "Rule 11",
             "the 2024 report, page 12",
             "9 a.m. to 3 p.m.",
-            "version 2.3.1",
+            "version 9.8.7",
             "Form 1040, line 12",
             "$3,553 over 30 days",
             "United States v. Booker (2005)",

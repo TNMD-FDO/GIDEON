@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from test_evaluation_record import read_psql_set
 from test_evaluation_run import NOW, ROOT, EvalHost, _invoke, _run_kwargs
-from test_judgments_slice import _fixture, _ranked_file, _write_sql
+from test_judgments_slice import _fixture, _ranked_file
 
 from gideon.evaluation import command
 from gideon.evaluation.evalset import SET_ROOT, LoadedSet
@@ -31,7 +31,7 @@ class SliceSurfaces(unittest.TestCase):
 
     def test_reaches_box_matches_surface_membership(self) -> None:
         on_box = {surface for surface in CallSurface if surface.on_box}
-        self.assertEqual(on_box, {CallSurface.ENGINE, CallSurface.TURNS})
+        self.assertEqual(on_box, {CallSurface.ENGINE, CallSurface.IMAGE, CallSurface.TURNS})
         for name, spec in SLICE_RUNNERS.items():
             with self.subTest(slice_name=name):
                 self.assertIs(type(spec.reaches_box), bool)
@@ -137,10 +137,19 @@ class PreparationRoutes(unittest.TestCase):
                     if CallSurface.ENGINE in surfaces:
                         self.assertEqual(context.served_model_name, target.served_model_name)
                     self.assertEqual(context.turns is None, CallSurface.TURNS not in surfaces)
+                    self.assertEqual(context.image is None, CallSurface.IMAGE not in surfaces)
+                    if CallSurface.IMAGE in surfaces:
+                        assert context.image is not None
+                        self.assertEqual(context.image.checkout, checkout)
+                        self.assertIn("gideon@sha256:", context.image.reference)
                     self.assertEqual(
                         context.ranked is None, CallSurface.RANKED_FILE not in surfaces
                     )
-                    sql = _write_sql(host)
+                    sql = next(
+                        input for argv, input in host.calls
+                        if argv[0] == "docker" and input not in (None, "SELECT 1;\n")
+                    )
+                    assert sql is not None
                     profile_line = next(
                         line for line in sql.splitlines()
                         if line.startswith("\\set hardware_profile ")
@@ -151,6 +160,78 @@ class PreparationRoutes(unittest.TestCase):
                         if CallSurface.ENGINE in surfaces
                         else site_result.config.hardware_profile,
                     )
+
+    def test_image_only_skips_engine_guards_while_smoke_keeps_them(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkout, _ids = _fixture(directory, {1: 3})
+            ranked_path, _ = _ranked_file(directory, {1: (1,)})
+            surfaces = SLICE_RUNNERS["smoke"].surfaces
+            self.assertTrue({CallSurface.ENGINE, CallSurface.IMAGE} <= surfaces)
+            site_result = command.site.load_site(ROOT / "config/site.example.yaml")
+            assert site_result.config is not None
+            window_detail = command.window.window_judgement(
+                NOW, site_result.config.office.timezone
+            ).description
+            host = EvalHost()
+            original_exists = host.exists
+            with patch.object(
+                host, "exists",
+                side_effect=lambda path: Path(path) == command.nogpu.NO_GPU_PATH or original_exists(path),
+            ):
+                (code, stdout, _), contexts, _ = _invoke_planted(
+                    host, checkout, ranked_path, frozenset({CallSurface.IMAGE})
+                )
+                self.assertEqual(code, 0, stdout)
+                self.assertEqual(len(contexts), 1)
+                self.assertIsNotNone(contexts[0].image)
+                self.assertNotIn(window_detail, stdout)
+                self.assertNotIn("engine lock", stdout)
+                self.assertEqual(host.lock_records, [])
+
+                (code, stdout, _), contexts, _ = _invoke_planted(
+                    EvalHost(), checkout, ranked_path, surfaces
+                )
+                self.assertEqual(code, 0, stdout)
+                self.assertEqual(len(contexts), 1)
+                self.assertIn("engine lock", stdout)
+                self.assertIn(window_detail, stdout)
+
+                (code, stdout, _), contexts, _ = _invoke_planted(
+                    host, checkout, ranked_path, surfaces
+                )
+                self.assertEqual(code, 1)
+                self.assertIn("no-GPU marker refuses", stdout)
+                self.assertEqual(contexts, [])
+
+    def test_image_refuses_unbuilt_pin_and_absent_daemon_image_with_fixes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkout, _ids = _fixture(directory, {1: 3})
+            ranked_path, _ = _ranked_file(directory, {1: (1,)})
+            loaded = command.images.load_image_lock(ROOT / "images.lock")
+            assert loaded.lock is not None
+            unbuilt = replace(loaded.lock, images=tuple(
+                replace(pin, digest="unbuilt") if pin.name == "gideon" else pin
+                for pin in loaded.lock.images
+            ))
+            with patch.object(command.images, "load_image_lock", return_value=replace(loaded, lock=unbuilt)):
+                (code, stdout, _), contexts, _ = _invoke_planted(
+                    EvalHost(), checkout, ranked_path, frozenset({CallSurface.IMAGE})
+                )
+            self.assertEqual(code, 1)
+            self.assertEqual(contexts, [])
+            self.assertIn("gideon image is unbuilt", stdout)
+            self.assertIn("tools.imagebuild gideon", stdout)
+
+            host = EvalHost()
+            host.image_probe_rc = 1
+            (code, stdout, _), contexts, _ = _invoke_planted(
+                host, checkout, ranked_path, frozenset({CallSurface.IMAGE})
+            )
+            self.assertEqual(code, 1)
+            self.assertEqual(contexts, [])
+            self.assertIn("image is absent", stdout)
+            self.assertIn("gideon registry mirror", stdout)
+            self.assertEqual(host.calls[-1][0][:3], ("docker", "image", "inspect"))
 
     def test_database_refusal_depends_on_whether_a_surface_reaches_the_box(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -209,10 +290,13 @@ class PreparationRoutes(unittest.TestCase):
             host = EvalHost()
             kwargs = _run_kwargs(host)
             kwargs["site_path"] = broken_site
-            code, stdout, stderr = _invoke(
-                ["eval", "run", "--slice", "extraction", "--stack", "production"],
-                **kwargs,
-            )
+            off_box = dict(SLICE_RUNNERS)
+            off_box["extraction"] = replace(off_box["extraction"], surfaces=frozenset())
+            with patch.object(command, "SLICE_RUNNERS", off_box):
+                code, stdout, stderr = _invoke(
+                    ["eval", "run", "--slice", "extraction", "--stack", "production"],
+                    **kwargs,
+                )
         self.assertEqual((code, stderr), (1, ""))
         lines = stdout.splitlines()
         run_index = next(i for i, line in enumerate(lines) if line.startswith("run: ok"))

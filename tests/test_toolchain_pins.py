@@ -4,10 +4,12 @@ CI installs the development toolchain from the one file, so a ruff, mypy, or
 pytest copy cannot drift: there is none. Two copies are read by nothing that
 installs from the file — `pin-watch.yml`'s PyYAML install line and the Playwright
 constant the browser mode checks on the box — and this module holds them equal to
-`requirements-dev.txt`. The `gideon` image's nineteen build arguments run the other
-way: `images.lock` is the source and `requirements-dev.txt` carries the copy, so mypy
+`requirements-dev.txt`. The `gideon` image's build arguments run the other way:
+`images.lock` is the source and `requirements-dev.txt` carries the copy, so mypy
 and the unit suite see the service's imports, and each build argument is
-matched to its requirement by normalized project name.
+matched to its requirement by normalized project name. The case-citation
+packages are the exception, held absent from the file: no module the suite or
+mypy imports needs them, since the extraction leg runs them inside the image.
 It states no version: every value is read from the tree.
 """
 
@@ -25,6 +27,15 @@ from tools.exportboundary import in_export_tree
 ROOT = Path(__file__).resolve().parent.parent
 REQUIREMENTS = Path("requirements-dev.txt")
 PIN_WATCH = Path(".github/workflows/pin-watch.yml")
+IMAGE_ONLY_ARGUMENTS = frozenset({
+    "EYECITE_VERSION",
+    "REPORTERS_DB_VERSION",
+    "COURTS_DB_VERSION",
+    "PYAHOCORASICK_VERSION",
+    "LXML_VERSION",
+    "REGEX_VERSION",
+    "FAST_DIFF_MATCH_PATCH_VERSION",
+})
 _PIN = re.compile(r"^(?P<name>[A-Za-z0-9_.-]+)==(?P<version>\S+)$")
 _INSTALL = re.compile(r"pip install PyYAML==(?P<version>\S+)")
 
@@ -53,16 +64,26 @@ def pin_watch_pyyaml(root: Path) -> str | None:
 
 
 class ToolchainCopies(unittest.TestCase):
-    def test_gideon_image_arguments_equal_the_requirements_copy(self) -> None:
+    def test_gideon_image_arguments_match_dev_copies_or_stay_image_only(self) -> None:
         result = load_image_lock(ROOT / "images.lock")
         self.assertEqual(result.errors, ())
         assert result.lock is not None
         pin = next(pin for pin in result.lock.images if pin.name == "gideon")
         self.assertIsInstance(pin, BuiltImagePin)
         assert isinstance(pin, BuiltImagePin)
+        self.assertTrue(
+            pin.build_args.keys() >= IMAGE_ONLY_ARGUMENTS,
+            "Fix: add all image-only arguments to images.lock",
+        )
         for argument, version in pin.build_args.items():
             package = argument.removesuffix("_VERSION").replace("_", "-")
             with self.subTest(argument=argument):
+                if argument in IMAGE_ONLY_ARGUMENTS:
+                    self.assertIsNone(
+                        requirement(ROOT, package),
+                        f"Fix: remove requirements-dev.txt's image-only {package} line",
+                    )
+                    continue
                 self.assertEqual(
                     requirement(ROOT, package),
                     version,

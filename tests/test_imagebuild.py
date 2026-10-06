@@ -286,9 +286,16 @@ class BuildPlans(unittest.TestCase):
                 "PYTHON_DATEUTIL_VERSION",
                 "SIX_VERSION",
                 "PACKAGING_VERSION",
+                "EYECITE_VERSION",
+                "REPORTERS_DB_VERSION",
+                "COURTS_DB_VERSION",
+                "PYAHOCORASICK_VERSION",
+                "LXML_VERSION",
+                "REGEX_VERSION",
+                "FAST_DIFF_MATCH_PATCH_VERSION",
             ),
         )
-        for package in ("starlette", "uvicorn", "httpx", "psycopg", "procrastinate"):
+        for package in ("starlette", "uvicorn", "httpx", "psycopg", "procrastinate", "eyecite"):
             self.assertIn(f"import {package}", smoke.argv[2])
         for package in (
             "starlette",
@@ -311,8 +318,16 @@ class BuildPlans(unittest.TestCase):
             "python-dateutil",
             "six",
             "packaging",
+            "eyecite",
+            "reporters-db",
+            "courts-db",
+            "pyahocorasick",
+            "lxml",
+            "regex",
+            "fast-diff-match-patch",
         ):
             self.assertIn(f'"{package}"', smoke.argv[2])
+        self.assertIn("eyecite.get_citations", smoke.argv[2])
         self.assertIn("importlib.metadata.version", smoke.argv[2])
         self.assertIn("if os.getuid() == 0:", smoke.argv[2])
         self.assertIn("default user must be unprivileged", smoke.argv[2])

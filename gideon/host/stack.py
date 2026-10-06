@@ -9,6 +9,7 @@ from pathlib import Path
 import yaml  # type: ignore[import-untyped]
 
 from gideon.host import report
+from gideon.host.render.api import API_MOUNT_TARGET, API_WORKING_DIRECTORY
 from gideon.host.report import Problem
 from gideon.host.sysio import Host, PathLike
 
@@ -43,6 +44,34 @@ def exec_argv(
 
     user_args = [] if user is None else ["-u", user]
     return compose_argv(rendered_dir, "exec", "-T", *user_args, service, *args)
+
+
+def image_run_argv(
+    reference: str, checkout: PathLike, *args: str, name: str
+) -> list[str]:
+    """Run mounted checkout code in one isolated, named container of a pinned image.
+
+    The name lets a caller whose client timed out remove the container.
+    """
+
+    source = Path(checkout) / "gideon"
+    return [
+        "docker", "run", "--rm", "-i", "--name", name, "--network", "none",
+        "--log-driver", "none", "-v", f"{source}:{API_MOUNT_TARGET}:ro",
+        "-w", API_WORKING_DIRECTORY, reference, *args,
+    ]
+
+
+def container_remove_argv(name: str) -> list[str]:
+    """Force-remove one named container, running or not."""
+
+    return ["docker", "rm", "-f", name]
+
+
+def image_present_argv(reference: str) -> list[str]:
+    """Probe whether the pinned image is present on the Docker daemon."""
+
+    return ["docker", "image", "inspect", reference]
 
 
 def logs_fix(rendered_dir: PathLike, service: str) -> str:

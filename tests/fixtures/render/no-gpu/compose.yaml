@@ -391,7 +391,7 @@ services:
       - "gideon"
     mem_limit: 4000000000
   gideon-worker:
-    image: "ghcr.io/tnmd-fdo/gideon@sha256:de46c1a7e66d5d89a5b75a22ad00c7faa5b123140753a6059459baf78c832613"
+    image: "ghcr.io/tnmd-fdo/gideon@sha256:979cbdacad5820e2b3c98fcfaf19f473edb657faa8a543c3fb5622ad0f0226f9"
     restart: "unless-stopped"
     command:
       - "python"

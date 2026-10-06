@@ -2,12 +2,13 @@
 
 A push gate blocks on two things only: a zero-tolerance case failing — a
 positive not blocked, a leak on any row, a turn that errored, a frontend
-sample case disagreeing with its door turn — and a case that passed in the
-committed reference failing now, which the command's comparison decides from
+sample case disagreeing with its door turn, an extraction row whose image leg
+never ran — and a case that passed in the committed reference failing now, which the command's comparison decides from
 the per-case verdicts the sub-runners give. Every continuous figure — the
 controls replaced or declined, the extraction bounds — is printed and never
-gated, so the verdict here is code over the guardrails rows' content-free
-metrics, and nothing here prints or stores text.
+gated, so the verdict here is code over the runners' content-free
+metrics, and nothing here prints or stores text. A failed extraction bound
+is a figure; a failed image leg is a measurement that never completed.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import TYPE_CHECKING, cast
 
-from gideon.evaluation import guardrails_slice
+from gideon.evaluation import extraction_slice, guardrails_slice
 from gideon.evaluation.evalset import LoadedSet, select_cases
 from gideon.evaluation.results import CaseResult, RunContext, SliceResult
 
@@ -95,6 +96,11 @@ def _smoke_report(
     lines: list[str] = []
     guardrail_rows = () if guardrails is None else guardrails.results
     passed, unblocked, leaked, errored, disagreeing = _zero_tolerance(guardrail_rows)
+    image_failed = tuple(
+        row.case_id for row in (() if extraction is None else extraction.results)
+        if row.metrics.get("problem") == extraction_slice.IMAGE_LEG_FAILED
+    )
+    passed = passed and not image_failed
     if guardrails is not None:
         lines.extend(
             (
@@ -121,6 +127,7 @@ def _smoke_report(
             f"  leaked {len(leaked)}: {_ids(leaked)}",
             f"  errored {len(errored)}: {_ids(errored)}",
             f"  disagreeing {len(disagreeing)}: {_ids(disagreeing)}",
+            f"  image leg failed {len(image_failed)}: {_ids(image_failed)}",
             f"controls replaced {replaced} (reported, not gated)",
             f"controls declined {declined} (reported, not gated)",
         )
