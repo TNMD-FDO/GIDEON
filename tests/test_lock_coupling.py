@@ -27,7 +27,7 @@ from gideon.host.images import (
     load_image_lock,
 )
 from gideon.host.lock import HostLock, load_host_lock
-from gideon.host.models import ModelsLock, load_models_lock
+from gideon.host.models import ModelsLock, load_models_lock, load_models_lock_text
 from tools.exportboundary import absent_from_export
 from tools.pinwatch.skills import Provenance, parse_provenance
 
@@ -168,6 +168,21 @@ def pinned_values(
                 )
                 for file in model.files
             )
+    for candidate in models_lock.candidates:
+        candidate_path = f"candidates.{candidate.name}"
+        values.extend(
+            (
+                PinnedValue(f"{candidate_path}.repo", candidate.repo),
+                PinnedValue(f"{candidate_path}.revision", candidate.revision),
+            )
+        )
+        values.extend(
+            PinnedValue(
+                f"{candidate_path}.files.{file.path}.sha256",
+                _bare_digest(file.sha256),
+            )
+            for file in candidate.files
+        )
     if provenance is not None:
         values.extend(
             (
@@ -277,6 +292,16 @@ class LockCouplingContracts(unittest.TestCase):
                         for file in model.files
                     ),
                 ]
+        for candidate in models_lock.candidates:
+            candidate_path = f"candidates.{candidate.name}"
+            expected += [
+                f"{candidate_path}.repo",
+                f"{candidate_path}.revision",
+                *(
+                    f"{candidate_path}.files.{file.path}.sha256"
+                    for file in candidate.files
+                ),
+            ]
         if provenance is not None:
             expected += [
                 "skills.matt-pocock.commit",
@@ -287,6 +312,34 @@ class LockCouplingContracts(unittest.TestCase):
         for pin in values:
             if pin.key_path.endswith((".digest", ".sha256")):
                 self.assertIsNotNone(HEX64.fullmatch(pin.value))
+
+    def test_fictitious_candidate_values_are_included(self) -> None:
+        image_lock, host_lock, _, provenance = _committed_locks()
+        text = MODELS_LOCK_PATH.read_text(encoding="utf-8") + """
+candidates:
+  alternate-embed:
+    role: embed
+    repo: example/candidate
+    revision: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    serve:
+      served_name: alternate-embed
+      env: {}
+      flags: {}
+    files:
+      nested/config.json:
+        sha256: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+        size: 1
+"""
+        result = load_models_lock_text(text)
+        self.assertTrue(result.ok, result.errors)
+        assert result.lock is not None
+        values = pinned_values(image_lock, host_lock, result.lock, provenance)
+        paths = {pin.key_path for pin in values}
+        self.assertTrue({
+            "candidates.alternate-embed.repo",
+            "candidates.alternate-embed.revision",
+            "candidates.alternate-embed.files.nested/config.json.sha256",
+        } <= paths)
 
     def test_no_test_module_embeds_a_committed_pin(self) -> None:
         image_lock, host_lock, models_lock, provenance = _committed_locks()

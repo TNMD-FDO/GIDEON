@@ -282,7 +282,13 @@ def build_parser() -> argparse.ArgumentParser:
     models_sub = models.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)
     pull = models_sub.add_parser(
         "pull",
-        help="fetch and verify the profile's models into /data/models",
+        help="fetch and verify the profile's models, and a named candidate, into /data/models",
+    )
+    pull.add_argument(
+        "candidate",
+        nargs="?",
+        metavar="<candidate>",
+        help="candidate from models.lock to pull beside the profile's models",
     )
     pull.set_defaults(handler=host_cli.run_models_pull, command_path="models pull")
 

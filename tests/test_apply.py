@@ -23,11 +23,17 @@ from gideon.host.apply import (
     _VERIFY_ATTEMPTS,
     _VERIFY_SLEEP_SECONDS,
     PRINT_ONCE_LINE,
+    PullModels,
     run_apply,
 )
 from gideon.host.egress import EgressAllowlist, load_egress_allowlist
 from gideon.host.images import load_image_lock
-from gideon.host.models import HardwareProfile, load_models_lock
+from gideon.host.models import (
+    CandidatePin,
+    HardwareProfile,
+    load_models_lock,
+    load_models_lock_text,
+)
 from gideon.host.owui import Response
 from gideon.host.render import ARTIFACTS, RenderInputs
 from gideon.host.render.command import run_render
@@ -529,12 +535,10 @@ def healthy_commands(
 
 def apply(
     host: ApplyHost,
-    pull_models: Callable[
-        [Host, SiteConfig, HardwareProfile, EgressAllowlist], weights.PullOutcome
-    ]
-    | None = None,
+    pull_models: PullModels | None = None,
     *,
     egress_path: PathLike | None = None,
+    models_path: PathLike | None = None,
     sleep_calls: list[float] | None = None,
     clock: Callable[[], float] | None = None,
     now: datetime | None = None,
@@ -547,7 +551,11 @@ def apply(
         site: SiteConfig,
         profile: HardwareProfile,
         allowlist: EgressAllowlist,
+        *,
+        candidates: tuple[CandidatePin, ...],
+        candidate: CandidatePin | None = None,
     ) -> weights.PullOutcome:
+        del candidates, candidate
         host.pull_calls.append((site, profile, allowlist))
         models = tuple(
             weights.ModelOutcome(
@@ -582,6 +590,7 @@ def apply(
             host=host,
             root=ROOT,
             egress_path=egress_path,
+            models_path=models_path,
             pull_models=pull_models or fake_pull,
             sleep=fake_sleep,
             clock=clock or (lambda: 0.0),
@@ -660,7 +669,11 @@ class HappyPath(unittest.TestCase):
             _site: SiteConfig,
             _profile: HardwareProfile,
             _allowlist: EgressAllowlist,
+            *,
+            candidates: tuple[CandidatePin, ...],
+            candidate: CandidatePin | None = None,
         ) -> weights.PullOutcome:
+            del candidates, candidate
             return weights.PullOutcome((), (), False, "fixture pull failure", "fixture fix")
 
         code, out, err = apply(host, failed_pull)
@@ -1122,6 +1135,64 @@ class Refusals(unittest.TestCase):
 
 
 class ModelsStage(unittest.TestCase):
+    def test_passes_candidates_from_the_selected_lock_without_changing_the_row(self) -> None:
+        files = base_files()
+        lock_path = "/fixture/models.lock"
+        committed = load_models_lock(ROOT / "models.lock").lock
+        assert committed is not None
+        profile = committed.profile(committed.reference)
+        assert profile is not None
+        role = profile.models[0].role
+        candidate_text = yaml.safe_dump(
+            {
+                "candidates": {
+                    "alternate-model": {
+                        "role": role,
+                        "repo": "example-org/alternate-model",
+                        "revision": "a" * 40,
+                        "serve": {
+                            "served_name": "fictitious-alternate",
+                            "env": {},
+                            "flags": {},
+                        },
+                        "files": {
+                            "config.json": {
+                                "sha256": "sha256:" + "b" * 64,
+                                "size": 1,
+                            }
+                        },
+                    }
+                }
+            },
+            sort_keys=False,
+        )
+        files[lock_path] = files[str(ROOT / "models.lock")] + candidate_text
+        loaded = load_models_lock_text(files[lock_path]).lock
+        assert loaded is not None
+        host = ApplyHost(healthy_commands(), files)
+        received: list[tuple[CandidatePin, ...]] = []
+
+        def capture_pull(
+            _io: Host,
+            _site: SiteConfig,
+            profile: HardwareProfile,
+            _allowlist: EgressAllowlist,
+            *,
+            candidates: tuple[CandidatePin, ...],
+            candidate: CandidatePin | None = None,
+        ) -> weights.PullOutcome:
+            self.assertIsNone(candidate)
+            received.append(candidates)
+            rows = tuple(weights.ModelOutcome(model.role, "present", ()) for model in profile.models)
+            return weights.PullOutcome(rows, (), True)
+
+        code, out, err = apply(host, capture_pull, models_path=lock_path)
+
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertEqual(received, [loaded.candidates])
+        self.assertEqual(len(loaded.candidates), 1)
+        self.assertIn(f"models: ok — {len(profile.models)} model(s) present", out.splitlines())
+
     def test_present_and_fetched_details(self) -> None:
         host = ApplyHost(healthy_commands(), base_files())
         code, out, _ = apply(host)
@@ -1134,7 +1205,11 @@ class ModelsStage(unittest.TestCase):
             site: SiteConfig,
             received_profile: HardwareProfile,
             allowlist: EgressAllowlist,
+            *,
+            candidates: tuple[CandidatePin, ...],
+            candidate: CandidatePin | None = None,
         ) -> weights.PullOutcome:
+            del candidates, candidate
             host.pull_calls.append((site, received_profile, allowlist))
             outcomes = tuple(
                 weights.ModelOutcome(model.role, "fetched", ())
@@ -1159,7 +1234,11 @@ class ModelsStage(unittest.TestCase):
             _site: SiteConfig,
             profile: HardwareProfile,
             _allowlist: EgressAllowlist,
+            *,
+            candidates: tuple[CandidatePin, ...],
+            candidate: CandidatePin | None = None,
         ) -> weights.PullOutcome:
+            del candidates, candidate
             model = profile.models[0]
             return weights.PullOutcome(
                 (
@@ -1183,8 +1262,15 @@ class ModelsStage(unittest.TestCase):
         host = ApplyHost(healthy_commands(), base_files())
 
         def raising(
-            _io: Host, _site: SiteConfig, _profile: HardwareProfile, _allowlist: EgressAllowlist
+            _io: Host,
+            _site: SiteConfig,
+            _profile: HardwareProfile,
+            _allowlist: EgressAllowlist,
+            *,
+            candidates: tuple[CandidatePin, ...],
+            candidate: CandidatePin | None = None,
         ) -> weights.PullOutcome:
+            del candidates, candidate
             raise OSError(30, "Read-only file system", "/data/models/gideon")
 
         code, out, err = apply(host, raising)

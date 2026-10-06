@@ -28,6 +28,8 @@ A profile may also name its embedding space: an id, the role of the model that e
 
 `models pull` fetches and verifies exactly the files named by the selected profile. It does not select additional files from a model repository.
 
+On the build box the lock may also carry a `candidates:` map of A/B weights. Each entry is keyed by a lowercase hyphenated name that is no profile's model role, and holds `repo`, `revision`, `serve`, and `files` as a profile's model does, but no `gpu`, plus the `role` it stands in for. `models pull <candidate>` pulls the selected profile's files and then that candidate's. The bare `models pull` keeps a candidate while its block is in the lock and removes its files once the block is deleted. A released lock carries no candidate.
+
 ## 5. `config/egress.yaml`
 
 The allowlist groups destinations by the work that needs them:

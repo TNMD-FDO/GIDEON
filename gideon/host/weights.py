@@ -1,8 +1,7 @@
 """The weights tree: the hub-cache layout under /data/models and the pull record.
 
-The layout helpers are pure; the pull record is the ``rollback.json``-shaped
-journal (claim, current, previous, retiring) whose transitions every run of
-``models pull`` walks in order.
+The layout helpers are pure; the pull record journals the profile sets,
+candidates, and retiring snapshots as each model pull progresses.
 """
 
 import os
@@ -27,6 +26,7 @@ from gideon.host.models import (
     HF_REPO,
     REVISION,
     ROLE_NAME,
+    CandidatePin,
     HardwareProfile,
     ModelPin,
     PinnedFile,
@@ -124,7 +124,7 @@ def refs_main_content(revision: str) -> str:
     return revision
 
 
-def resolve_url(pin: ModelPin, file_path: str) -> str:
+def resolve_url(pin: ModelPin | CandidatePin, file_path: str) -> str:
     """Build the pinned Hugging Face resolve URL for one file."""
 
     return (
@@ -208,13 +208,26 @@ class PullEntry:
 
 
 @dataclass(frozen=True, slots=True)
+class CandidateEntry:
+    """A named candidate snapshot tracked by the pull record."""
+
+    name: str
+    role: str
+    repo: str
+    revision: str
+    started: str
+    completed: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class PullRecord:
-    """The four-slot journal for a model pull."""
+    """The journal for profile sets, candidates, and retiring snapshots."""
 
     in_progress: PullEntry | None = None
     current: PullEntry | None = None
     previous: PullEntry | None = None
     retiring: ModelSet = ()
+    candidates: tuple[CandidateEntry, ...] = ()
 
 
 class _PullRecordLoader(yaml.SafeLoader):
@@ -262,8 +275,24 @@ def _entry_refs(entry: PullEntry | None) -> ModelSet:
     return () if entry is None else entry.models
 
 
+def _candidate_refs(candidates: Iterable[CandidateEntry]) -> ModelSet:
+    return tuple(
+        SnapshotRef(candidate.role, candidate.repo, candidate.revision)
+        for candidate in candidates
+    )
+
+
+def _snapshot_key(
+    reference: SnapshotRef | CandidateEntry | CandidatePin,
+) -> tuple[str, str]:
+    return reference.repo, reference.revision
+
+
 def _unique(refs: Iterable[SnapshotRef]) -> ModelSet:
-    return tuple(dict.fromkeys(refs))
+    unique: dict[tuple[str, str], SnapshotRef] = {}
+    for reference in refs:
+        unique.setdefault(_snapshot_key(reference), reference)
+    return tuple(unique.values())
 
 
 def retiring_references(
@@ -273,9 +302,9 @@ def retiring_references(
 ) -> ModelSet:
     """Apply the one retiring rule used by every record transition."""
 
-    named_set = set(named)
+    named_set = {_snapshot_key(reference) for reference in named}
     return _unique(
-        ref for ref in (*existing, *displaced) if ref not in named_set
+        ref for ref in (*existing, *displaced) if _snapshot_key(ref) not in named_set
     )
 
 
@@ -293,7 +322,12 @@ def claim(
             f"{record.in_progress.identity.pid} is running; wait for it",
             "Wait for the running models pull to finish, then re-run models pull.",
         )
-    named = (*_entry_refs(record.current), *_entry_refs(record.previous), *entry.models)
+    named = (
+        *_entry_refs(record.current),
+        *_entry_refs(record.previous),
+        *entry.models,
+        *_candidate_refs(record.candidates),
+    )
     displaced = _entry_refs(record.in_progress)
     retiring = retiring_references(displaced, named, record.retiring)
     return replace(record, in_progress=entry, retiring=retiring)
@@ -315,13 +349,19 @@ def rotate(record: PullRecord, completed: str) -> PullRecord | Problem:
     old_current = record.current
     old_previous = record.previous
     new_previous: PullEntry | None
-    if old_current is not None and old_current.models != new_current.models:
+    if old_current is not None and {
+        _snapshot_key(ref) for ref in old_current.models
+    } != {_snapshot_key(ref) for ref in new_current.models}:
         new_previous = old_current
         displaced = _entry_refs(old_previous)
     else:
         new_previous = old_previous
         displaced = ()
-    named = (*_entry_refs(new_current), *_entry_refs(new_previous))
+    named = (
+        *_entry_refs(new_current),
+        *_entry_refs(new_previous),
+        *_candidate_refs(record.candidates),
+    )
     retiring = retiring_references(displaced, named, record.retiring)
     return replace(
         record,
@@ -335,6 +375,56 @@ def release(record: PullRecord) -> PullRecord:
     """Finish the sequence by clearing the claim and retiring journal."""
 
     return replace(record, in_progress=None, retiring=())
+
+
+def reconcile_candidates(
+    record: PullRecord,
+    candidates: Sequence[CandidatePin],
+    names: set[str],
+) -> PullRecord:
+    """Reconcile selected recorded names with the lock and journal unheld snapshots."""
+
+    lock_by_name = {candidate.name: candidate for candidate in candidates}
+    kept: list[CandidateEntry] = []
+    displaced: list[CandidateEntry] = []
+    for entry in record.candidates:
+        pin = lock_by_name.get(entry.name)
+        if entry.name not in names:
+            kept.append(entry)
+        elif pin is not None and _snapshot_key(pin) == _snapshot_key(entry):
+            kept.append(replace(entry, role=pin.role))
+        else:
+            displaced.append(entry)
+
+    kept_by_name = {entry.name: entry for entry in kept}
+    for entry in displaced:
+        holder = next(
+            (
+                pin
+                for pin in candidates
+                if pin.name != entry.name
+                and _snapshot_key(pin) == _snapshot_key(entry)
+                and (
+                    pin.name not in kept_by_name
+                    or _snapshot_key(kept_by_name[pin.name]) == _snapshot_key(entry)
+                )
+            ),
+            None,
+        )
+        if holder is not None and holder.name not in kept_by_name:
+            renamed = replace(entry, name=holder.name, role=holder.role)
+            kept.append(renamed)
+            kept_by_name[holder.name] = renamed
+
+    named = (
+        *_entry_refs(record.in_progress),
+        *_entry_refs(record.current),
+        *_entry_refs(record.previous),
+        *_candidate_refs(kept),
+        *(SnapshotRef(pin.role, pin.repo, pin.revision) for pin in candidates),
+    )
+    retiring = retiring_references(_candidate_refs(displaced), named, record.retiring)
+    return replace(record, candidates=tuple(kept), retiring=retiring)
 
 
 def _ref_document(ref: SnapshotRef) -> dict[str, object]:
@@ -358,12 +448,24 @@ def _entry_document(entry: PullEntry | None) -> dict[str, object] | None:
 
 
 def pull_record_document(record: PullRecord) -> dict[str, object]:
-    return {
+    document: dict[str, object] = {
         "in_progress": _entry_document(record.in_progress),
         "current": _entry_document(record.current),
         "previous": _entry_document(record.previous),
         "retiring": [_ref_document(ref) for ref in record.retiring],
     }
+    if record.candidates:
+        document["candidates"] = {
+            candidate.name: {
+                "role": candidate.role,
+                "repo": candidate.repo,
+                "revision": candidate.revision,
+                "started": candidate.started,
+                "completed": candidate.completed,
+            }
+            for candidate in record.candidates
+        }
+    return document
 
 
 def dump_pull_record(record: PullRecord) -> str:
@@ -460,6 +562,31 @@ def _entry(
     )
 
 
+def _candidate_entry(name: object, value: object) -> CandidateEntry | Problem:
+    field = f"candidates.{name}"
+    if not isinstance(name, str) or ROLE_NAME.fullmatch(name) is None:
+        return _malformed(f"{field} is not a candidate name")
+    mapping = _mapping(value, field)
+    if isinstance(mapping, Problem):
+        return mapping
+    expected = {"role", "repo", "revision", "started", "completed"}
+    if set(mapping) != expected:
+        return _malformed(f"{field} must contain exactly {', '.join(sorted(expected))}")
+    reference = _ref(
+        {key: mapping[key] for key in ("role", "repo", "revision")}, field
+    )
+    if isinstance(reference, Problem):
+        return reference
+    started, completed = mapping["started"], mapping["completed"]
+    if not isinstance(started, str) or not started:
+        return _malformed(f"{field}.started must be a non-empty string")
+    if completed is not None and (not isinstance(completed, str) or not completed):
+        return _malformed(f"{field}.completed must be a string or null")
+    return CandidateEntry(
+        name, reference.role, reference.repo, reference.revision, started, completed
+    )
+
+
 def parse_pull_record(text: str) -> PullRecord | Problem:
     """Parse and validate every pull-record field without coercion."""
 
@@ -471,8 +598,11 @@ def parse_pull_record(text: str) -> PullRecord | Problem:
     if isinstance(mapping, Problem):
         return mapping
     expected = {"in_progress", "current", "previous", "retiring"}
-    if set(mapping) != expected:
-        return _malformed("record must contain exactly in_progress, current, previous, and retiring")
+    if set(mapping) not in (expected, expected | {"candidates"}):
+        return _malformed(
+            "record must contain in_progress, current, previous, and retiring, "
+            "with optional candidates"
+        )
     entries: list[PullEntry | None] = []
     for field in ("in_progress", "current", "previous"):
         entry = _entry(
@@ -490,7 +620,19 @@ def parse_pull_record(text: str) -> PullRecord | Problem:
         if isinstance(ref, Problem):
             return ref
         retiring.append(ref)
-    return PullRecord(entries[0], entries[1], entries[2], tuple(retiring))
+    candidates: list[CandidateEntry] = []
+    if "candidates" in mapping:
+        candidate_values = _mapping(mapping["candidates"], "candidates")
+        if isinstance(candidate_values, Problem):
+            return candidate_values
+        for name, value in candidate_values.items():
+            candidate = _candidate_entry(name, value)
+            if isinstance(candidate, Problem):
+                return candidate
+            candidates.append(candidate)
+    return PullRecord(
+        entries[0], entries[1], entries[2], tuple(retiring), tuple(candidates)
+    )
 
 
 def load_pull_record(
@@ -630,7 +772,7 @@ def _readlink(io: Host, path: Path) -> str | None | Problem:
 
 def _verification_states(
     io: Host,
-    pin: ModelPin,
+    pin: ModelPin | CandidatePin,
     states: dict[str, FileState],
     root: PathLike,
 ) -> Problem | None:
@@ -678,13 +820,17 @@ def _file_blob_size(io: Host, path: Path) -> int | None:
         return None
 
 
-def _partial_path(pin: ModelPin, model_file: PinnedFile, root: PathLike) -> Path:
+def _partial_path(
+    pin: ModelPin | CandidatePin, model_file: PinnedFile, root: PathLike
+) -> Path:
     return blob_path(pin.repo, model_file.sha256, root).with_name(
         f"{bare_digest(model_file.sha256)}.partial"
     )
 
 
-def classify_model(io: Host, pin: ModelPin, root: PathLike) -> dict[str, FileState] | Problem:
+def classify_model(
+    io: Host, pin: ModelPin | CandidatePin, root: PathLike
+) -> dict[str, FileState] | Problem:
     """Classify every lock file and verify reusable blobs in one pass."""
 
     snapshot = repository_dir(pin.repo, root) / "snapshots" / pin.revision
@@ -728,7 +874,11 @@ def _df_available(io: Host) -> int | None:
 
 
 def _shortfall(
-    io: Host, pin: ModelPin, states: Mapping[str, FileState], root: PathLike, available: int
+    io: Host,
+    pin: ModelPin | CandidatePin,
+    states: Mapping[str, FileState],
+    root: PathLike,
+    available: int,
 ) -> int:
     """The bytes /data lacks for this model, walking the fetch order with its frees.
 
@@ -752,8 +902,12 @@ def _shortfall(
     return max(0, -lowest)
 
 
+def _row_label(pin: ModelPin | CandidatePin) -> str:
+    return pin.name if isinstance(pin, CandidatePin) else pin.role
+
+
 def _model_outcome(
-    pin: ModelPin,
+    pin: ModelPin | CandidatePin,
     started: float,
     *,
     kind: ModelKind,
@@ -764,7 +918,7 @@ def _model_outcome(
     clock: Callable[[], float],
 ) -> ModelOutcome:
     return ModelOutcome(
-        pin.role,
+        _row_label(pin),
         kind,
         tuple(files),
         tuple(sorted(set(hosts))),
@@ -835,7 +989,7 @@ def _link(io: Host, model_file: PinnedFile, link: Path) -> str | None:
 def converge_model(
     io: Host,
     site: SiteConfig,
-    pin: ModelPin,
+    pin: ModelPin | CandidatePin,
     wgetrc: Wgetrc,
     *,
     root: PathLike,
@@ -1206,15 +1360,30 @@ def prune(
     return lines
 
 
+_RETRY = re.compile(r"\bre-run (?:gideon )?models pull\b(?! [a-z0-9])")
+
+
+def _pull_command(candidate: CandidatePin | None) -> str:
+    return "gideon models pull" + ("" if candidate is None else f" {candidate.name}")
+
+
+def _retry_fix(fix: str, candidate: CandidatePin | None) -> str:
+    """Name the candidate in a fix's retry: the bare pull never resumes a candidate."""
+
+    if candidate is None:
+        return fix
+    return _RETRY.sub(lambda match: f"{match.group(0)} {candidate.name}", fix)
+
+
 def kept_lines(record: PullRecord) -> list[str]:
     """Return operator lines for previous snapshots still kept for rollback."""
 
-    current = set(_entry_refs(record.current))
+    current = {_snapshot_key(ref) for ref in _entry_refs(record.current)}
     return [
         f"  kept snapshot {reference.revision} of {reference.repo} "
         "(the previous set, for rollback)"
-        for reference in _entry_refs(record.previous)
-        if reference not in current
+        for reference in _unique(_entry_refs(record.previous))
+        if _snapshot_key(reference) not in current
     ]
 
 
@@ -1245,6 +1414,8 @@ def pull_profile(
     profile: HardwareProfile,
     allowlist: EgressAllowlist,
     *,
+    candidates: tuple[CandidatePin, ...],
+    candidate: CandidatePin | None = None,
     models_root: PathLike = MODELS_ROOT,
     clock: Callable[[], float] = time.monotonic,
     now: Callable[[], str] = _now_iso,
@@ -1280,13 +1451,40 @@ def pull_profile(
     )
     if isinstance(claimed, Problem):
         return _problem_outcome(claimed)
-    record = claimed
+    record = reconcile_candidates(
+        claimed,
+        candidates,
+        (
+            {entry.name for entry in claimed.candidates}
+            if candidate is None
+            else {candidate.name}
+        ),
+    )
+    if candidate is not None:
+        pending = CandidateEntry(
+            candidate.name,
+            candidate.role,
+            candidate.repo,
+            candidate.revision,
+            now(),
+            None,
+        )
+        record = replace(
+            record,
+            candidates=(
+                *(entry for entry in record.candidates if entry.name != candidate.name),
+                pending,
+            ),
+        )
     saved = save_pull_record(io, record, record_path)
     if saved is not None:
         return _problem_outcome(saved)
 
+    pins: tuple[ModelPin | CandidatePin, ...] = profile.models + (
+        (candidate,) if candidate is not None else ()
+    )
     keep = frozenset(
-        bare_digest(model_file.sha256) for pin in profile.models for model_file in pin.files
+        bare_digest(model_file.sha256) for pin in pins for model_file in pin.files
     )
     removed = prune(io, record, root, keep=keep)
     if isinstance(removed, Problem):
@@ -1297,16 +1495,20 @@ def pull_profile(
         return _problem_outcome(saved)
     for line in kept_lines(record):
         print(line)
+    if candidate is None:
+        for entry in record.candidates:
+            print(f"  kept candidate {entry.name}: {entry.revision} of {entry.repo}")
 
     allowed_group = allowlist.group("install-upgrade")
     allowed = set() if allowed_group is None else {entry.host for entry in allowed_group.hosts}
     model_outcomes: list[ModelOutcome] = []
     uncovered: set[str] = set()
-    with temporary_wgetrc(io, command="gideon models pull") as wgetrc:
+    with temporary_wgetrc(io, command=_pull_command(candidate)) as wgetrc:
         if not wgetrc.ok:
             return _problem_outcome(Problem(wgetrc.problem or "proxy credentials unavailable", wgetrc.fix))
-        for pin in profile.models:
+        for pin in pins:
             outcome = converge_model(io, site, pin, wgetrc, root=root, clock=clock)
+            outcome = replace(outcome, fix=_retry_fix(outcome.fix, candidate))
             model_outcomes.append(outcome)
             unknown = tuple(host for host in outcome.hosts if host not in allowed)
             if unknown:
@@ -1335,7 +1537,17 @@ def pull_profile(
     removed = prune(io, rotated, root, keep=keep)
     if isinstance(removed, Problem):
         return _problem_outcome(removed, model_outcomes, uncovered)
-    saved = save_pull_record(io, release(rotated), record_path)
+    released = release(rotated)
+    if candidate is not None:
+        released = replace(
+            released,
+            candidates=tuple(
+                replace(entry, completed=now())
+                if entry.name == candidate.name else entry
+                for entry in released.candidates
+            ),
+        )
+    saved = save_pull_record(io, released, record_path)
     if saved is not None:
         return _problem_outcome(saved, model_outcomes, uncovered)
     return _pull_outcome(model_outcomes, uncovered, ok=True)
@@ -1352,7 +1564,7 @@ def run_models_pull(
 ) -> int:
     """Load release inputs and run the selected profile's model pull."""
 
-    del args
+    candidate_name = getattr(args, "candidate", None)
     io = host or RealHost()
     if io.geteuid() != 0:
         print(refusal("models pull", "root is required.", _ROOT_FIX), file=sys.stderr)
@@ -1371,13 +1583,38 @@ def run_models_pull(
     if isinstance(profile, Problem):
         print(refusal("models pull", profile.problem, profile.fix), file=sys.stderr)
         return 1
+    candidate = None
+    if candidate_name is not None:
+        candidate = models_result.lock.candidate(candidate_name)
+        if candidate is None:
+            available = ", ".join(pin.name for pin in models_result.lock.candidates) or "none"
+            print(
+                refusal(
+                    "models pull",
+                    f"candidate '{candidate_name}' is not in models.lock; candidates held: {available}.",
+                    f"Add a candidates.{candidate_name} block to models.lock per "
+                    "docs/runbooks/release-files.md §4 or name one the lock holds.",
+                ),
+                file=sys.stderr,
+            )
+            return 1
     actual_egress = checkout / "config" / "egress.yaml" if egress_path is None else egress_path
     egress_result = load_egress_allowlist(actual_egress, host=io)
     if egress_result.errors or egress_result.allowlist is None:
         print(render_egress_errors(egress_result.errors), file=sys.stderr)
         return 1
-    outcome = pull_profile(io, site_result.config, profile, egress_result.allowlist)
+    outcome = pull_profile(
+        io,
+        site_result.config,
+        profile,
+        egress_result.allowlist,
+        candidates=models_result.lock.candidates,
+        candidate=candidate,
+    )
     # A failed model already printed its row; every other refusal has no row yet.
     if not outcome.ok and not any(model.kind == "failed" for model in outcome.models):
-        print(refusal("models pull", outcome.problem, outcome.fix), file=sys.stderr)
+        print(
+            refusal("models pull", outcome.problem, _retry_fix(outcome.fix, candidate)),
+            file=sys.stderr,
+        )
     return int(not outcome.ok)

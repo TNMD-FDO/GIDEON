@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.50](docs/release-notes/v0.3.50.md) — 2026-10-06 — models pull takes a candidate
 - [v0.3.49](docs/release-notes/v0.3.49.md) — 2026-10-05 — the top-level help labels the groups holding only stubs
 - [v0.3.46](docs/release-notes/v0.3.46.md) — 2026-10-05 — eyecite behind the extraction contract
 - [v0.3.45](docs/release-notes/v0.3.45.md) — 2026-10-05 — a fix names the command as invoked

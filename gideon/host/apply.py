@@ -10,12 +10,13 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Final
+from typing import Final, Protocol
 
 from gideon.host import (
     backuplock,
     egress,
     grafana,
+    models,
     owui,
     pgbackrest,
     secrets,
@@ -30,7 +31,6 @@ from gideon.host.images import (
     parse_registry,
     proxy_environment,
 )
-from gideon.host.models import HardwareProfile
 from gideon.host.render import RenderedSet, RenderInputs
 from gideon.host.render.command import (
     AppliedManifest,
@@ -347,16 +347,39 @@ def _pull_stage(
 
 # The weights pull apply runs between the image pull and the recreate; injectable
 # so the apply tests prove the ordering and the tests of weights prove the pull.
-PullModels = Callable[[Host, SiteConfig, HardwareProfile, EgressAllowlist], weights.PullOutcome]
+class PullModels(Protocol):
+    """The injected weights pull used by apply's models stage."""
+
+    def __call__(
+        self,
+        io: Host,
+        site: SiteConfig,
+        profile: models.HardwareProfile,
+        allowlist: EgressAllowlist,
+        /,
+        *,
+        candidates: tuple[models.CandidatePin, ...],
+        candidate: models.CandidatePin | None = None,
+    ) -> weights.PullOutcome: ...
 
 
 def _models_stage(
     io: Host,
     context: _ApplyContext,
+    models_path: PathLike,
     egress_path: PathLike,
     pull_models: PullModels,
 ) -> StageResult:
     """Converge the weights tree to the profile before any service restarts."""
+
+    models_result = models.load_models_lock(models_path, host=io)
+    if not models_result.ok or models_result.lock is None:
+        return StageResult(
+            "models",
+            False,
+            models.render_errors(models_result.errors),
+            "Correct models.lock, then re-run apply.",
+        )
 
     allowlist_result = egress.load_egress_allowlist(egress_path, host=io)
     if not allowlist_result.ok or allowlist_result.allowlist is None:
@@ -369,7 +392,11 @@ def _models_stage(
 
     try:
         outcome = pull_models(
-            io, context.inputs.site, context.inputs.profile, allowlist_result.allowlist
+            io,
+            context.inputs.site,
+            context.inputs.profile,
+            allowlist_result.allowlist,
+            candidates=models_result.lock.candidates,
         )
     except Exception as exc:  # noqa: BLE001  # command boundary must not traceback
         return StageResult(
@@ -1053,7 +1080,7 @@ def converge(
     if not pull_result.ok:
         return 1
 
-    models_result = _models_stage(io, context, egress_path, pull_models)
+    models_result = _models_stage(io, context, models_path, egress_path, pull_models)
     print_stage(models_result)
     if not models_result.ok:
         return 1

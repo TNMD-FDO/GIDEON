@@ -6,6 +6,7 @@ import subprocess
 import unittest
 from collections.abc import Callable, Mapping
 from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import replace
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,8 +14,11 @@ from typing import cast
 from unittest import mock
 from urllib.parse import quote
 
+import yaml  # type: ignore[import-untyped]
+
 from gideon.host.egress import EgressAllowlist, load_egress_allowlist
 from gideon.host.models import (
+    CandidatePin,
     HardwareProfile,
     PinnedFile,
     load_models_lock,
@@ -31,6 +35,7 @@ from gideon.host.weights import (
     HUB_DIR_NAME,
     MODELS_ROOT,
     PULL_RECORD_PATH,
+    CandidateEntry,
     FileState,
     ProcessIdentity,
     PullEntry,
@@ -54,6 +59,7 @@ from gideon.host.weights import (
     process_is_alive,
     prune,
     pull_profile,
+    reconcile_candidates,
     refs_main_content,
     refs_main_path,
     release,
@@ -64,6 +70,7 @@ from gideon.host.weights import (
     run_models_pull,
     save_pull_record,
     snapshot_path,
+    snapshot_refs,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -96,6 +103,7 @@ class FakeHost:
         self.available = available
         self.wget = wget
         self.writes: list[tuple[str, str, int]] = []
+        self.reads: list[str] = []
         self.runs: list[tuple[str, ...]] = []
         self.inputs: list[str | None] = []
         self.mkdir_calls: list[tuple[str, int, bool, bool]] = []
@@ -190,6 +198,7 @@ class FakeHost:
     def read_text(self, path: PathLike, *, encoding: str = "utf-8") -> str:
         del encoding
         key = os.fspath(path)
+        self.reads.append(key)
         if key not in self.files:
             raise FileNotFoundError(key)
         return self.files[key]
@@ -387,6 +396,45 @@ class PullRecordContracts(unittest.TestCase):
         self.assertEqual(host.writes[0][0], str(PULL_RECORD_PATH))
         self.assertEqual(parse_pull_record(host.writes[0][1]), record)
 
+    def test_candidate_slot_round_trips_and_is_omitted_when_empty(self) -> None:
+        candidate = recorded_candidate()
+        record = PullRecord(candidates=(candidate,))
+        text = dump_pull_record(record)
+        self.assertIn("candidates:", text)
+        self.assertEqual(parse_pull_record(text), record)
+        self.assertEqual(yaml.safe_load(text)["candidates"][candidate.name]["role"], candidate.role)
+
+        empty_text = dump_pull_record(PullRecord())
+        self.assertNotIn("candidates:", empty_text)
+        self.assertEqual(parse_pull_record(empty_text), PullRecord())
+        self.assertEqual(parse_pull_record(empty_text + "candidates: {}\n"), PullRecord())
+
+    def test_malformed_candidate_slot_is_a_record_problem(self) -> None:
+        document = yaml.safe_load(dump_pull_record(PullRecord(candidates=(recorded_candidate(),))))
+        entry_value = document["candidates"][FICTITIOUS_CANDIDATE.name]
+        ordinary_malformed = parse_pull_record("in_progress: []\n")
+        assert isinstance(ordinary_malformed, Problem)
+        cases: tuple[tuple[str, object, str], ...] = (
+            ("non-mapping slot", [], "candidates must be a mapping"),
+            ("bad name", {"bad.name": entry_value}, "candidates.bad.name"),
+            ("non-mapping entry", {FICTITIOUS_CANDIDATE.name: []}, "candidates.alternate"),
+            ("wrong fields", {FICTITIOUS_CANDIDATE.name: {"role": entry_value["role"]}}, "must contain exactly"),
+            ("non-string field", {FICTITIOUS_CANDIDATE.name: {**entry_value, "started": 17}}, ".started"),
+            ("bad role", {FICTITIOUS_CANDIDATE.name: {**entry_value, "role": "Bad Role"}}, ".role"),
+            ("bad repository", {FICTITIOUS_CANDIDATE.name: {**entry_value, "repo": "../escape"}}, ".repo"),
+            ("bad revision", {FICTITIOUS_CANDIDATE.name: {**entry_value, "revision": "bad"}}, ".revision"),
+            ("bad completion", {FICTITIOUS_CANDIDATE.name: {**entry_value, "completed": False}}, ".completed"),
+        )
+        for label, candidate_values, expected in cases:
+            with self.subTest(label=label):
+                malformed = {**document, "candidates": candidate_values}
+                result = parse_pull_record(yaml.safe_dump(malformed))
+                self.assertIsInstance(result, Problem)
+                assert isinstance(result, Problem)
+                self.assertIn(expected, result.problem)
+                self.assertIn(str(PULL_RECORD_PATH), result.problem)
+                self.assertEqual(result.fix, ordinary_malformed.fix)
+
     def test_missing_record_is_empty_and_malformed_record_is_a_problem(self) -> None:
         self.assertEqual(load_pull_record(FakeHost()), PullRecord())
         malformed = parse_pull_record("in_progress: []\ncurrent: null\nprevious: null\nretiring: []\n")
@@ -459,6 +507,49 @@ class PullRecordContracts(unittest.TestCase):
         rotated = rotate(claimed, "2026-09-04T10:05:00+00:00")
         assert isinstance(rotated, PullRecord)
         self.assertEqual(rotated.retiring, (moved,))
+
+    def test_two_roles_sharing_a_snapshot_do_not_retire_each_other(self) -> None:
+        first = SnapshotRef("generator", FICTITIOUS_PIN.repo, FICTITIOUS_PIN.revision)
+        second = replace(first, role="alternate-role")
+        claimed = claim(PullRecord(in_progress=entry(first)), entry(second))
+        self.assertIsInstance(claimed, PullRecord)
+        assert isinstance(claimed, PullRecord)
+        self.assertEqual(claimed.retiring, ())
+
+        rotated = rotate(
+            PullRecord(in_progress=entry(second), current=entry(first)),
+            "2026-09-04T10:05:00+00:00",
+        )
+        self.assertIsInstance(rotated, PullRecord)
+        assert isinstance(rotated, PullRecord)
+        self.assertEqual(rotated.retiring, ())
+        self.assertIsNone(rotated.previous)
+
+    def test_claim_and_rotate_keep_a_candidate_snapshot_named(self) -> None:
+        candidate = recorded_candidate()
+        same_snapshot = SnapshotRef("former-role", candidate.repo, candidate.revision)
+        another = ref("generator", "c" * 40)
+        claimed = claim(
+            PullRecord(in_progress=entry(same_snapshot), candidates=(candidate,)),
+            entry(another),
+        )
+        self.assertIsInstance(claimed, PullRecord)
+        assert isinstance(claimed, PullRecord)
+        self.assertEqual(claimed.retiring, ())
+
+        rotated = rotate(
+            PullRecord(
+                in_progress=entry(another),
+                current=entry(ref("generator", "d" * 40)),
+                previous=entry(same_snapshot),
+                candidates=(candidate,),
+            ),
+            "2026-09-04T10:05:00+00:00",
+        )
+        self.assertIsInstance(rotated, PullRecord)
+        assert isinstance(rotated, PullRecord)
+        self.assertEqual(rotated.retiring, ())
+        self.assertEqual(rotated.candidates, (candidate,))
 
     def test_dead_claim_with_the_same_set_is_resumed_under_new_identity(self) -> None:
         model = ref("generator", "a" * 40)
@@ -550,6 +641,42 @@ FICTITIOUS_MODEL: HardwareProfile = cast(
 )
 assert FICTITIOUS_MODEL is not None
 FICTITIOUS_PIN = FICTITIOUS_MODEL.models[0]
+FICTITIOUS_CANDIDATE_TEXT = """candidates:
+  alternate:
+    role: generator
+    repo: fictitious-org/alternate
+    revision: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    serve:
+      served_name: fictitious-alternate
+      env:
+        HF_HOME: /data/models
+      flags: {}
+    files:
+      nested/alternate.bin:
+        sha256: sha256:5555555555555555555555555555555555555555555555555555555555555555
+        size: 100000002
+"""
+FICTITIOUS_CANDIDATE_RESULT = load_models_lock_text(
+    FICTITIOUS_LOCK_TEXT + FICTITIOUS_CANDIDATE_TEXT
+)
+assert FICTITIOUS_CANDIDATE_RESULT.lock is not None
+FICTITIOUS_CANDIDATE = cast(
+    CandidatePin, FICTITIOUS_CANDIDATE_RESULT.lock.candidate("alternate")
+)
+assert FICTITIOUS_CANDIDATE is not None
+
+
+def recorded_candidate(
+    pin: CandidatePin = FICTITIOUS_CANDIDATE,
+    *,
+    started: str = "2026-09-04T10:00:00+00:00",
+    completed: str | None = "2026-09-04T10:01:00+00:00",
+) -> CandidateEntry:
+    return CandidateEntry(
+        pin.name, pin.role, pin.repo, pin.revision, started, completed
+    )
+
+
 FICTITIOUS_SITE = cast(
     SiteConfig, SimpleNamespace(egress_proxy="http://proxy.invalid:3128")
 )
@@ -564,6 +691,24 @@ def _wrong_digest_wget(command: list[str], host: FakeHost) -> subprocess.Complet
 
 class ModelConvergence(unittest.TestCase):
     """Classification and convergence use only the loaded fictitious lock."""
+
+    def test_profile_and_candidate_rows_use_their_own_labels(self) -> None:
+        for pin, label in (
+            (FICTITIOUS_PIN, FICTITIOUS_PIN.role),
+            (FICTITIOUS_CANDIDATE, FICTITIOUS_CANDIDATE.name),
+        ):
+            with self.subTest(label=label), redirect_stdout(StringIO()):
+                host = FakeHost(wget=_successful_wget)
+                outcome = converge_model(
+                    host, FICTITIOUS_SITE, pin, _no_proxy_wgetrc(), root=MODELS_ROOT
+                )
+                self.assertEqual(outcome.role, label)
+                self.assertEqual(model_row(outcome).name, label)
+                self.assertEqual(
+                    resolve_url(pin, pin.files[0].path),
+                    f"https://huggingface.co/{pin.repo}/resolve/{pin.revision}/"
+                    f"{quote(pin.files[0].path, safe='/')}",
+                )
 
     def test_classification_truth_table_and_one_verification_pass(self) -> None:
         alpha, beta, gamma, zeta = FICTITIOUS_PIN.files
@@ -869,7 +1014,7 @@ def _add_process_files(host: FakeHost, *, boot: str = "boot-pull", start: int = 
 def _successful_wget(command: list[str], host: FakeHost) -> subprocess.CompletedProcess[str]:
     partial = command[command.index("-qO") + 1]
     pinned = next(
-        file for file in FICTITIOUS_PIN.files
+        file for file in (*FICTITIOUS_PIN.files, *FICTITIOUS_CANDIDATE.files)
         if partial.endswith(f"{bare_digest(file.sha256)}.partial")
     )
     host.sizes[partial] = pinned.size
@@ -934,8 +1079,254 @@ class PruneContracts(unittest.TestCase):
         )
 
 
+class CandidateReconciliation(unittest.TestCase):
+    def test_keep_retire_promote_and_touch_one_name(self) -> None:
+        candidate = recorded_candidate()
+        record = PullRecord(candidates=(candidate,))
+        kept = reconcile_candidates(record, (FICTITIOUS_CANDIDATE,), {candidate.name})
+        self.assertEqual(kept.candidates, (candidate,))
+        self.assertEqual(kept.retiring, ())
+
+        retired = reconcile_candidates(record, (), {candidate.name})
+        self.assertEqual(retired.candidates, ())
+        self.assertEqual(
+            retired.retiring,
+            (SnapshotRef(candidate.role, candidate.repo, candidate.revision),),
+        )
+
+        promoted = reconcile_candidates(
+            replace(
+                record,
+                in_progress=entry(SnapshotRef("generator", candidate.repo, candidate.revision)),
+            ),
+            (),
+            {candidate.name},
+        )
+        self.assertEqual(promoted.candidates, ())
+        self.assertEqual(promoted.retiring, ())
+
+        other = replace(candidate, name="other", repo="fictitious-org/other")
+        selected = reconcile_candidates(
+            PullRecord(candidates=(candidate, other)),
+            (),
+            {candidate.name},
+        )
+        self.assertEqual(selected.candidates, (other,))
+        self.assertEqual(
+            selected.retiring,
+            (SnapshotRef(candidate.role, candidate.repo, candidate.revision),),
+        )
+
+    def test_candidate_pull_leaves_another_recorded_name_alone(self) -> None:
+        host = FakeHost(wget=_successful_wget)
+        _add_process_files(host)
+        selected = recorded_candidate(completed=None)
+        other = replace(
+            recorded_candidate(), name="other", repo="fictitious-org/other"
+        )
+        self.assertIsNone(
+            save_pull_record(host, PullRecord(candidates=(selected, other)))
+        )
+
+        with redirect_stdout(StringIO()):
+            outcome = pull_profile(
+                host,
+                FICTITIOUS_SITE,
+                FICTITIOUS_MODEL,
+                _loaded_egress((ROOT / "config/egress.yaml").read_text()),
+                candidates=(FICTITIOUS_CANDIDATE,),
+                candidate=FICTITIOUS_CANDIDATE,
+            )
+
+        self.assertTrue(outcome.ok)
+        saved = load_pull_record(host)
+        assert isinstance(saved, PullRecord)
+        self.assertIn(other, saved.candidates)
+        self.assertEqual(saved.retiring, ())
+
+    def test_rename_keeps_tracking_then_bare_pull_retires_removed_block(self) -> None:
+        host = FakeHost(wget=_successful_wget)
+        _add_process_files(host)
+        allowlist = _loaded_egress((ROOT / "config/egress.yaml").read_text())
+        with redirect_stdout(StringIO()):
+            pulled = pull_profile(
+                host, FICTITIOUS_SITE, FICTITIOUS_MODEL, allowlist,
+                candidates=(FICTITIOUS_CANDIDATE,), candidate=FICTITIOUS_CANDIDATE,
+            )
+        self.assertTrue(pulled.ok)
+        original = load_pull_record(host)
+        assert isinstance(original, PullRecord)
+        self.assertEqual(len(original.candidates), 1)
+
+        renamed_pin = replace(FICTITIOUS_CANDIDATE, name="replacement")
+        before_wget = sum(command[0] == "wget" for command in host.runs)
+        with redirect_stdout(StringIO()) as output:
+            kept = pull_profile(
+                host, FICTITIOUS_SITE, FICTITIOUS_MODEL, allowlist,
+                candidates=(renamed_pin,),
+            )
+        self.assertTrue(kept.ok)
+        self.assertEqual(sum(command[0] == "wget" for command in host.runs), before_wget)
+        self.assertIn("kept candidate replacement", output.getvalue())
+        renamed = load_pull_record(host)
+        assert isinstance(renamed, PullRecord)
+        self.assertEqual(renamed.candidates, (replace(original.candidates[0], name="replacement"),))
+        self.assertEqual(renamed.retiring, ())
+
+        snapshot = snapshot_path(
+            renamed_pin.repo, renamed_pin.revision, renamed_pin.files[0].path
+        )
+        with redirect_stdout(StringIO()) as output:
+            removed = pull_profile(
+                host, FICTITIOUS_SITE, FICTITIOUS_MODEL, allowlist,
+                candidates=(),
+            )
+        self.assertTrue(removed.ok)
+        self.assertIn(f"removed {snapshot.parents[1]}", output.getvalue())
+        self.assertFalse(host.exists(snapshot))
+        final = load_pull_record(host)
+        assert isinstance(final, PullRecord)
+        self.assertEqual(final.candidates, ())
+        self.assertNotIn("candidates:", host.files[str(PULL_RECORD_PATH)])
+
+    def test_promotion_keeps_snapshot_without_fetching(self) -> None:
+        host = FakeHost(wget=_successful_wget)
+        _add_process_files(host)
+        allowlist = _loaded_egress((ROOT / "config/egress.yaml").read_text())
+        with redirect_stdout(StringIO()):
+            pulled = pull_profile(
+                host, FICTITIOUS_SITE, FICTITIOUS_MODEL, allowlist,
+                candidates=(FICTITIOUS_CANDIDATE,), candidate=FICTITIOUS_CANDIDATE,
+            )
+        self.assertTrue(pulled.ok)
+        promoted_pin = replace(
+            FICTITIOUS_PIN,
+            repo=FICTITIOUS_CANDIDATE.repo,
+            revision=FICTITIOUS_CANDIDATE.revision,
+            serve=FICTITIOUS_CANDIDATE.serve,
+            files=FICTITIOUS_CANDIDATE.files,
+        )
+        promoted_profile = replace(FICTITIOUS_MODEL, models=(promoted_pin,))
+        before_wget = sum(command[0] == "wget" for command in host.runs)
+        with redirect_stdout(StringIO()):
+            promoted = pull_profile(
+                host, FICTITIOUS_SITE, promoted_profile, allowlist,
+                candidates=(),
+            )
+        self.assertTrue(promoted.ok)
+        self.assertEqual(sum(command[0] == "wget" for command in host.runs), before_wget)
+        record = load_pull_record(host)
+        assert isinstance(record, PullRecord)
+        self.assertEqual(record.candidates, ())
+        self.assertEqual(record.retiring, ())
+        self.assertEqual(record.current.models if record.current else (), snapshot_refs(promoted_profile.models))
+        self.assertTrue(host.exists(snapshot_path(promoted_pin.repo, promoted_pin.revision, promoted_pin.files[0].path)))
+
+
 class PullProfileContracts(unittest.TestCase):
     """The journal writes surround pruning and model convergence."""
+
+    def test_candidate_rows_and_record_writes_then_verified_rerun_and_bare_keep(self) -> None:
+        host = FakeHost(wget=_successful_wget)
+        _add_process_files(host)
+        allowlist = _loaded_egress((ROOT / "config/egress.yaml").read_text())
+        current = entry(*snapshot_refs(FICTITIOUS_MODEL.models), completed="2026-09-04T09:00:00+00:00")
+        previous = entry(
+            SnapshotRef("generator", "fictitious-org/previous", "c" * 40),
+            completed="2026-09-03T09:00:00+00:00",
+        )
+        self.assertIsNone(save_pull_record(host, PullRecord(current=current, previous=previous)))
+        host.writes.clear()
+        times = iter(
+            (
+                "2026-09-04T10:00:00+00:00",
+                "2026-09-04T10:01:00+00:00",
+                "2026-09-04T10:02:00+00:00",
+                "2026-09-04T10:03:00+00:00",
+            )
+        )
+        with redirect_stdout(StringIO()) as output:
+            outcome = pull_profile(
+                host, FICTITIOUS_SITE, FICTITIOUS_MODEL, allowlist,
+                candidates=(FICTITIOUS_CANDIDATE,), candidate=FICTITIOUS_CANDIDATE,
+                now=lambda: next(times),
+            )
+        self.assertTrue(outcome.ok)
+        self.assertEqual([model.role for model in outcome.models], [FICTITIOUS_PIN.role, FICTITIOUS_CANDIDATE.name])
+        rows = output.getvalue()
+        self.assertLess(rows.index(f"{FICTITIOUS_PIN.role}: ok"), rows.index(f"{FICTITIOUS_CANDIDATE.name}: ok"))
+        self.assertIn(f"{FICTITIOUS_CANDIDATE.name}: ok — fetched", rows)
+
+        writes = [text for path, text, _mode in host.writes if path == str(PULL_RECORD_PATH)]
+        self.assertEqual(len(writes), 4)
+        records = [parse_pull_record(text) for text in writes]
+        self.assertTrue(all(isinstance(record, PullRecord) for record in records))
+        first, second, third, fourth = cast(tuple[PullRecord, ...], tuple(records))
+        self.assertEqual(first.candidates[0].started, "2026-09-04T10:01:00+00:00")
+        self.assertTrue(all(record.candidates[0].completed is None for record in (first, second, third)))
+        self.assertEqual(fourth.candidates[0].completed, "2026-09-04T10:03:00+00:00")
+        self.assertEqual(first.in_progress.models if first.in_progress else (), current.models)
+        self.assertTrue(all(record.current is not None and record.current.models == current.models for record in (first, second, third, fourth)))
+        self.assertTrue(all(record.previous is not None and record.previous.models == previous.models for record in (first, second, third, fourth)))
+        self.assertIsNone(fourth.in_progress)
+
+        before_wget = sum(command[0] == "wget" for command in host.runs)
+        with redirect_stdout(StringIO()) as output:
+            repeated = pull_profile(
+                host, FICTITIOUS_SITE, FICTITIOUS_MODEL, allowlist,
+                candidates=(FICTITIOUS_CANDIDATE,), candidate=FICTITIOUS_CANDIDATE,
+            )
+        self.assertTrue(repeated.ok)
+        self.assertEqual(sum(command[0] == "wget" for command in host.runs), before_wget)
+        self.assertIn(f"{FICTITIOUS_CANDIDATE.name}: ok — present", output.getvalue())
+
+        with redirect_stdout(StringIO()) as output:
+            bare = pull_profile(
+                host, FICTITIOUS_SITE, FICTITIOUS_MODEL, allowlist,
+                candidates=(FICTITIOUS_CANDIDATE,),
+            )
+        self.assertTrue(bare.ok)
+        self.assertEqual(sum(command[0] == "wget" for command in host.runs), before_wget)
+        self.assertIn(f"kept candidate {FICTITIOUS_CANDIDATE.name}", output.getvalue())
+        self.assertNotIn(f"{FICTITIOUS_CANDIDATE.name}: ok", output.getvalue())
+        saved = load_pull_record(host)
+        assert isinstance(saved, PullRecord)
+        self.assertEqual(saved.candidates[0].name, FICTITIOUS_CANDIDATE.name)
+
+    def test_candidate_partial_survives_first_prune_and_resumes(self) -> None:
+        host = FakeHost(wget=_successful_wget)
+        _add_process_files(host)
+        file = FICTITIOUS_CANDIDATE.files[0]
+        partial = blob_path(FICTITIOUS_CANDIDATE.repo, file.sha256).with_name(
+            f"{bare_digest(file.sha256)}.partial"
+        )
+        old_revision = "d" * 40
+        snapshots = repository_dir(FICTITIOUS_CANDIDATE.repo) / "snapshots"
+        host.directories.update({
+            str(snapshots),
+            str(snapshots / old_revision),
+            str(snapshots / FICTITIOUS_CANDIDATE.revision),
+        })
+        host.sizes[str(partial)] = 3
+        self.assertIsNone(
+            save_pull_record(
+                host,
+                PullRecord(retiring=(SnapshotRef(FICTITIOUS_CANDIDATE.role, FICTITIOUS_CANDIDATE.repo, old_revision),)),
+            )
+        )
+        with redirect_stdout(StringIO()) as output:
+            outcome = pull_profile(
+                host,
+                FICTITIOUS_SITE,
+                FICTITIOUS_MODEL,
+                _loaded_egress((ROOT / "config/egress.yaml").read_text()),
+                candidates=(FICTITIOUS_CANDIDATE,),
+                candidate=FICTITIOUS_CANDIDATE,
+            )
+        self.assertTrue(outcome.ok)
+        self.assertIn(f"resumed {file.path}", output.getvalue())
+        self.assertEqual(outcome.models[-1].files[0].action, "resumed")
+        self.assertNotIn(str(partial), host.unlink_calls)
 
     def test_success_has_four_record_writes_and_second_run_is_present(self) -> None:
         host = FakeHost(wget=_successful_wget)
@@ -944,6 +1335,7 @@ class PullProfileContracts(unittest.TestCase):
         with redirect_stdout(StringIO()) as output:
             outcome = pull_profile(
                 host, FICTITIOUS_SITE, FICTITIOUS_MODEL, covered,
+                candidates=(),
                 now=lambda: "2026-09-04T12:00:00+00:00",
             )
         self.assertIsInstance(outcome, PullOutcome)
@@ -963,6 +1355,7 @@ class PullProfileContracts(unittest.TestCase):
         before_wget = sum(command[0] == "wget" for command in host.runs)
         second_outcome = pull_profile(
             host, FICTITIOUS_SITE, FICTITIOUS_MODEL, covered,
+            candidates=(),
             now=lambda: "2026-09-04T12:01:00+00:00",
         )
         self.assertTrue(second_outcome.ok)
@@ -976,6 +1369,7 @@ class PullProfileContracts(unittest.TestCase):
             outcome = pull_profile(
                 host, FICTITIOUS_SITE, FICTITIOUS_MODEL,
                 _loaded_egress(FICTITIOUS_EGRESS_TEXT),
+                candidates=(),
                 now=lambda: "2026-09-04T12:00:00+00:00",
             )
         self.assertTrue(outcome.ok)
@@ -988,6 +1382,7 @@ class PullProfileContracts(unittest.TestCase):
         outcome = pull_profile(
             failing, FICTITIOUS_SITE, FICTITIOUS_MODEL,
             _loaded_egress(FICTITIOUS_EGRESS_TEXT),
+            candidates=(),
             now=lambda: "2026-09-04T12:00:00+00:00",
         )
         self.assertFalse(outcome.ok)
@@ -1003,6 +1398,7 @@ class PullProfileContracts(unittest.TestCase):
         outcome = pull_profile(
             failed, FICTITIOUS_SITE, FICTITIOUS_MODEL,
             _loaded_egress(FICTITIOUS_EGRESS_TEXT),
+            candidates=(),
             now=lambda: "2026-09-04T12:00:00+00:00",
         )
         self.assertFalse(outcome.ok)
@@ -1025,7 +1421,7 @@ class PullProfileContracts(unittest.TestCase):
         host.runs.clear()
         outcome = pull_profile(
             host, FICTITIOUS_SITE, FICTITIOUS_MODEL,
-            _loaded_egress(FICTITIOUS_EGRESS_TEXT), now=lambda: "now",
+            _loaded_egress(FICTITIOUS_EGRESS_TEXT), candidates=(), now=lambda: "now",
         )
         self.assertFalse(outcome.ok)
         self.assertIn("wait for it", outcome.problem)
@@ -1067,6 +1463,59 @@ class PullProfileContracts(unittest.TestCase):
             )
         self.assertEqual(code, 1)
         self.assertIn("fictitious refusal", error.getvalue())
+
+    def test_failed_candidate_fix_retries_the_candidate_form(self) -> None:
+        def blocked_candidate(
+            command: list[str], host: FakeHost
+        ) -> subprocess.CompletedProcess[str]:
+            if any(FICTITIOUS_CANDIDATE.repo in part for part in command):
+                return subprocess.CompletedProcess(command, 8, "", "")
+            return _successful_wget(command, host)
+
+        host = FakeHost(wget=blocked_candidate)
+        _add_process_files(host)
+        with redirect_stdout(StringIO()) as output:
+            outcome = pull_profile(
+                host, FICTITIOUS_SITE, FICTITIOUS_MODEL,
+                _loaded_egress((ROOT / "config/egress.yaml").read_text()),
+                candidates=(FICTITIOUS_CANDIDATE,), candidate=FICTITIOUS_CANDIDATE,
+            )
+        self.assertFalse(outcome.ok)
+        retry = f"re-run gideon models pull {FICTITIOUS_CANDIDATE.name}."
+        self.assertTrue(outcome.fix.endswith(retry), outcome.fix)
+        self.assertIn(retry, output.getvalue())
+        saved = load_pull_record(host)
+        assert isinstance(saved, PullRecord)
+        self.assertIsNone(saved.candidates[0].completed)
+
+    def test_unknown_candidate_refuses_before_record_or_command(self) -> None:
+        for lock_text, available in (
+            (FICTITIOUS_LOCK_TEXT, "none"),
+            (FICTITIOUS_LOCK_TEXT + FICTITIOUS_CANDIDATE_TEXT, FICTITIOUS_CANDIDATE.name),
+        ):
+            with self.subTest(available=available):
+                host = FakeHost({
+                    "/fixture/site.yaml": FICTITIOUS_SITE_TEXT,
+                    "/fixture/models.lock": lock_text,
+                })
+                error = StringIO()
+                with redirect_stderr(error):
+                    code = run_models_pull(
+                        SimpleNamespace(candidate="missing"),
+                        host=host,
+                        site_path="/fixture/site.yaml",
+                        models_path="/fixture/models.lock",
+                        egress_path="/fixture/egress.yaml",
+                        root="/fixture",
+                    )
+                self.assertEqual(code, 1)
+                self.assertIn(f"candidates held: {available}", error.getvalue())
+                self.assertIn("candidates.missing", error.getvalue())
+                self.assertIn("docs/runbooks/release-files.md §4", error.getvalue())
+                self.assertIn("Fix:", error.getvalue())
+                self.assertNotIn(str(PULL_RECORD_PATH), host.reads)
+                self.assertEqual(host.runs, [])
+                self.assertEqual(host.writes, [])
 
 
 def _partial_for(pinned: PinnedFile) -> str:

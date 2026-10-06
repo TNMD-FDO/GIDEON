@@ -19,6 +19,7 @@ from gideon.host.models import (
     REVISION,
     ROLE_NAME,
     SERVICE_NAME,
+    CandidatePin,
     EmbeddingSpace,
     GpuRequirements,
     HardwareProfile,
@@ -123,6 +124,25 @@ SPACE = """    embedding_space:
       dimensions: 17
 """
 VALID_WITH_SPACE = VALID.replace("    models:\n", SPACE + "    models:\n")
+CANDIDATE = f"""candidates:
+  alternate-embed:
+    role: embed
+    repo: example/candidate
+    revision: "{FAKE_REVISION}"
+    serve:
+      served_name: alternate-embed
+      env:
+        HF_HOME: /data/models
+      flags:
+        max-model-len: 1024
+    files:
+      config.json:
+        sha256: {FAKE_DIGEST}
+        size: 1
+      nested/tokenizer.json:
+        sha256: {FAKE_DIGEST}
+        size: 0
+"""
 
 
 class FakeHost:
@@ -197,6 +217,10 @@ class CommittedLock(unittest.TestCase):
         self.assertEqual(result.lock.version, 1)
         self.assertEqual(result.lock.reference, "2x96v-256d")
         self.assertEqual(len(result.lock.profiles), 1)
+        self.assertEqual(result.lock.candidates, ())
+        self.assertIsNone(result.lock.candidate("alternate-embed"))
+        assert result.document is not None
+        self.assertNotIn("candidates", result.document)
 
         profile = result.lock.profiles[0]
         self.assertEqual(profile.name, result.lock.reference)
@@ -294,6 +318,7 @@ class CommittedLock(unittest.TestCase):
             PinnedFile("config.json", FAKE_DIGEST, 1),
             ServeBaseline("example", {}, {}),
             ModelPin("generator", "example/fixture", FAKE_REVISION, 0, ServeBaseline("example", {}, {}), ()),
+            CandidatePin("alternate-embed", "embed", "example/candidate", FAKE_REVISION, ServeBaseline("example", {}, {}), ()),
             GpuRequirements("Example", "1.0", "Example GPU", 1, 1),
             ProfileRequirements("x86_64", GpuRequirements("Example", "1.0", "Example GPU", 1, 1), 1, 1),
             MemoryRow("example-service", 1, None),
@@ -344,6 +369,66 @@ class Refusals(unittest.TestCase):
         self.assert_refused(text, fragment, key_path=key_path)
         result = load_text(text)
         self.assertTrue(all(error.fix == "Edit models.lock; consult docs/runbooks/release-files.md §4." for error in result.errors))
+
+    def test_candidate_loads_with_nested_file(self) -> None:
+        result = load_text(VALID + CANDIDATE)
+        self.assertTrue(result.ok, render_errors(result.errors))
+        assert result.lock is not None
+        self.assertEqual(len(result.lock.candidates), 1)
+        candidate = result.lock.candidate("alternate-embed")
+        self.assertIsInstance(candidate, CandidatePin)
+        assert candidate is not None
+        self.assertEqual(candidate.name, "alternate-embed")
+        self.assertEqual(candidate.role, "embed")
+        self.assertEqual(candidate.repo, "example/candidate")
+        self.assertEqual(candidate.revision, FAKE_REVISION)
+        self.assertEqual(candidate.serve.served_name, "alternate-embed")
+        self.assertEqual(candidate.serve.env, {"HF_HOME": "/data/models"})
+        self.assertEqual(candidate.serve.flags, {"max-model-len": 1024})
+        self.assertEqual(candidate.files, (
+            PinnedFile("config.json", FAKE_DIGEST, 1),
+            PinnedFile("nested/tokenizer.json", FAKE_DIGEST, 0),
+        ))
+        self.assertIsNone(result.lock.candidate("missing"))
+        empty = load_text(VALID + "candidates: {}\n")
+        self.assertTrue(empty.ok, render_errors(empty.errors))
+        assert empty.lock is not None
+        self.assertEqual(empty.lock.candidates, ())
+
+    def test_candidate_shape_refusals(self) -> None:
+        path = "candidates.alternate-embed"
+        no_serve = CANDIDATE[:CANDIDATE.index("    serve:\n")] + CANDIDATE[CANDIDATE.index("    files:\n"):]
+        no_files = CANDIDATE[:CANDIDATE.index("    files:\n")]
+        cases = (
+            (VALID + "candidates: []\n", "expected a mapping", "candidates"),
+            (VALID + CANDIDATE.replace("alternate-embed:\n", "bad.name:\n", 1), "candidate name", "candidates.bad.name"),
+            (VALID + CANDIDATE.replace("alternate-embed:\n", "generator:\n", 1), "is a model role of profile", "candidates.generator"),
+            (VALID + "candidates:\n  alternate-embed: []\n", "expected a mapping", path),
+            (VALID + CANDIDATE.replace("    role: embed\n", ""), "missing required key", f"{path}.role"),
+            (VALID + CANDIDATE.replace("    role: embed", "    role: bad.name"), "role name", f"{path}.role"),
+            (VALID + CANDIDATE.replace("repo: example/candidate", "repo: invalid"), "owner/name repository", f"{path}.repo"),
+            (VALID + CANDIDATE.replace(FAKE_REVISION, "invalid"), "40-character lowercase", f"{path}.revision"),
+            (VALID + no_serve, "missing required key", f"{path}.serve"),
+            (VALID + no_files, "missing required key", f"{path}.files"),
+            (VALID + no_files + "    files: {}\n", "non-empty mapping", f"{path}.files"),
+            (VALID + CANDIDATE.replace("      config.json:", "      z.json:", 1), "sorted path order", f"{path}.files"),
+        )
+        for text, fragment, key_path in cases:
+            with self.subTest(fragment=fragment, key_path=key_path):
+                self.assert_refused(text, fragment, key_path=key_path)
+                result = load_text(text)
+                self.assertTrue(all("docs/runbooks/release-files.md §4" in error.fix for error in result.errors))
+
+        clash = load_text(VALID + CANDIDATE.replace("alternate-embed:\n", "generator:\n", 1))
+        self.assertTrue(any("2x96v-256d" in error.problem and "Rename the candidate" in error.fix for error in clash.errors))
+
+        gpu = load_text(VALID + CANDIDATE.replace("    role: embed\n", "    role: embed\n    gpu: 0\n"))
+        self.assertFalse(gpu.ok)
+        unknown = next(error for error in gpu.errors if error.key_path == f"{path}.gpu")
+        self.assertIn("Unknown key", unknown.problem)
+        self.assertIn("nearest valid key is", unknown.problem)
+        self.assertNotIn("nearest valid key is 'gpu'", unknown.problem)
+        self.assertIn("docs/runbooks/release-files.md §4", unknown.fix)
 
     def test_embedding_space_is_optional(self) -> None:
         result = load_text(VALID)

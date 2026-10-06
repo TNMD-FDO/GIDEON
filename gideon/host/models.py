@@ -1,8 +1,8 @@
-"""Loading and validation for the committed hardware-model lock.
+"""Loading and validation for the committed models lock.
 
 The models lock is release data, not site configuration.  It names the
-hardware profiles a release has evaluated and the model files and serving
-baseline belonging to each profile.
+hardware profiles a release has evaluated, their model pins, and optional
+candidate pins.
 """
 
 import difflib
@@ -61,6 +61,18 @@ class ModelPin:
 
 
 @dataclass(frozen=True, slots=True)
+class CandidatePin:
+    """One named candidate and the model role it stands in for."""
+
+    name: str
+    role: str
+    repo: str
+    revision: str
+    serve: ServeBaseline
+    files: tuple[PinnedFile, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class GpuRequirements:
     """Minimum GPU facts required by a hardware profile."""
 
@@ -113,16 +125,22 @@ class HardwareProfile:
 
 @dataclass(frozen=True, slots=True)
 class ModelsLock:
-    """The version, reference profile, and ordered profiles in ``models.lock``."""
+    """The version, reference profile, profiles, and candidates in ``models.lock``."""
 
     version: int
     reference: str
     profiles: tuple[HardwareProfile, ...]
+    candidates: tuple[CandidatePin, ...] = ()
 
     def profile(self, name: str) -> HardwareProfile | None:
         """Return the profile named *name*, or ``None`` when it is absent."""
 
         return next((profile for profile in self.profiles if profile.name == name), None)
+
+    def candidate(self, name: str) -> CandidatePin | None:
+        """Return the candidate named *name*, or ``None`` when absent."""
+
+        return next((candidate for candidate in self.candidates if candidate.name == name), None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,7 +204,10 @@ _FIX: Final = (
 _MEMORY_FIX: Final = (
     "Edit models.lock; consult docs/runbooks/release-files.md §4."
 )
-_ROOT_KEYS: Final = ("version", "reference", "profiles")
+_CANDIDATE_CLASH_FIX: Final = (
+    "Rename the candidate in models.lock; consult docs/runbooks/release-files.md §4."
+)
+_ROOT_KEYS: Final =("version", "reference", "profiles", "candidates")
 _PROFILE_KEYS: Final = ("requires", "memory", "models", "embedding_space")
 _REQUIRES_KEYS: Final = ("platform", "gpu", "dram_gb", "data_volume_gb")
 _GPU_KEYS: Final = (
@@ -197,6 +218,7 @@ _GPU_KEYS: Final = (
     "vram_gb",
 )
 _MODEL_KEYS: Final = ("repo", "revision", "gpu", "serve", "files")
+_CANDIDATE_KEYS: Final = ("role", "repo", "revision", "serve", "files")
 _SERVE_KEYS: Final = ("served_name", "env", "flags")
 _FILE_KEYS: Final = ("sha256", "size")
 _MEMORY_ROW_KEYS: Final = ("gb", "role")
@@ -451,32 +473,19 @@ def _validate_files(
     return files
 
 
-def _validate_model(
-    profile_path: str,
-    role: object,
-    value: object,
-    gpu_count: int | None,
+def _validate_model_body(
+    model_path: str,
+    model: Mapping[str, object],
     errors: list[ModelsLockError],
-) -> ModelPin | None:
-    model_path = _path(f"{profile_path}.models", role)
-    role_valid = isinstance(role, str) and ROLE_NAME.fullmatch(role) is not None
-    if not role_valid:
-        errors.append(_error(model_path, "expected a lowercase hyphenated role name"))
-    if not isinstance(value, Mapping):
-        errors.append(_mapping_error(model_path, value))
-        return None
-    model = cast(Mapping[str, object], value)
-    _walk_unknown(model, _MODEL_KEYS, model_path, errors)
+) -> tuple[str, str, ServeBaseline, tuple[PinnedFile, ...]] | None:
+    """Validate the repository, revision, serving baseline, and files."""
+
     repo = _string(model, "repo", errors, error_path=f"{model_path}.repo")
     if repo is not None and HF_REPO.fullmatch(repo) is None:
         errors.append(_error(f"{model_path}.repo", f"expected an owner/name repository (got {repo!r})"))
     revision = _string(model, "revision", errors, error_path=f"{model_path}.revision")
     if revision is not None and REVISION.fullmatch(revision) is None:
         errors.append(_error(f"{model_path}.revision", "expected a 40-character lowercase hexadecimal revision"))
-    gpu = _int(model, "gpu", errors, positive=False, error_path=f"{model_path}.gpu")
-    if gpu is not None and gpu_count is not None and gpu >= gpu_count:
-        errors.append(_error(f"{model_path}.gpu", f"must be below requires.gpu.count ({gpu_count})"))
-
     serve = _check_mapping(model, "serve", errors, error_path=f"{model_path}.serve")
     serve_baseline: ServeBaseline | None = None
     if serve is not None:
@@ -496,16 +505,62 @@ def _validate_model(
     if "files" not in model:
         errors.append(_error(f"{model_path}.files", "missing required key"))
     if (
-        role_valid
-        and repo is not None
+        repo is not None
         and HF_REPO.fullmatch(repo) is not None
         and revision is not None
         and REVISION.fullmatch(revision) is not None
-        and gpu is not None
         and serve_baseline is not None
         and files
     ):
-        return ModelPin(cast(str, role), repo, revision, gpu, serve_baseline, tuple(files.values()))
+        return repo, revision, serve_baseline, tuple(files.values())
+    return None
+
+
+def _validate_model(
+    profile_path: str,
+    role: object,
+    value: object,
+    gpu_count: int | None,
+    errors: list[ModelsLockError],
+) -> ModelPin | None:
+    model_path = _path(f"{profile_path}.models", role)
+    role_valid = isinstance(role, str) and ROLE_NAME.fullmatch(role) is not None
+    if not role_valid:
+        errors.append(_error(model_path, "expected a lowercase hyphenated role name"))
+    if not isinstance(value, Mapping):
+        errors.append(_mapping_error(model_path, value))
+        return None
+    model = cast(Mapping[str, object], value)
+    _walk_unknown(model, _MODEL_KEYS, model_path, errors)
+    body = _validate_model_body(model_path, model, errors)
+    gpu = _int(model, "gpu", errors, positive=False, error_path=f"{model_path}.gpu")
+    if gpu is not None and gpu_count is not None and gpu >= gpu_count:
+        errors.append(_error(f"{model_path}.gpu", f"must be below requires.gpu.count ({gpu_count})"))
+    if role_valid and body is not None and gpu is not None:
+        return ModelPin(cast(str, role), body[0], body[1], gpu, body[2], body[3])
+    return None
+
+
+def _validate_candidate(
+    name: object,
+    value: object,
+    errors: list[ModelsLockError],
+) -> CandidatePin | None:
+    path = _path("candidates", name)
+    name_valid = isinstance(name, str) and ROLE_NAME.fullmatch(name) is not None
+    if not name_valid:
+        errors.append(_error(path, "expected a lowercase hyphenated candidate name"))
+    if not isinstance(value, Mapping):
+        errors.append(_mapping_error(path, value))
+        return None
+    candidate = cast(Mapping[str, object], value)
+    _walk_unknown(candidate, _CANDIDATE_KEYS, path, errors)
+    role = _string(candidate, "role", errors, error_path=f"{path}.role")
+    if role is not None and ROLE_NAME.fullmatch(role) is None:
+        errors.append(_error(f"{path}.role", "expected a lowercase hyphenated role name"))
+    body = _validate_model_body(path, candidate, errors)
+    if name_valid and role is not None and ROLE_NAME.fullmatch(role) is not None and body is not None:
+        return CandidatePin(cast(str, name), role, *body)
     return None
 
 
@@ -679,6 +734,30 @@ def validate_models_lock(document: Mapping[str, object]) -> list[ModelsLockError
             else:
                 _validate_memory(profile_path, profile["memory"], roles, errors)
 
+    if "candidates" in document:
+        candidates_value = document["candidates"]
+        if not isinstance(candidates_value, Mapping):
+            errors.append(_mapping_error("candidates", candidates_value))
+        else:
+            profile_roles: dict[str, object] = {}
+            for profile_name, profile_value in (profiles_value or {}).items():
+                if isinstance(profile_value, Mapping):
+                    models_value = profile_value.get("models")
+                    if isinstance(models_value, Mapping):
+                        for role in models_value:
+                            if isinstance(role, str):
+                                profile_roles.setdefault(role, profile_name)
+            for name, value in candidates_value.items():
+                _validate_candidate(name, value, errors)
+                if isinstance(name, str) and name in profile_roles:
+                    errors.append(
+                        _error(
+                            _path("candidates", name),
+                            f"the name is a model role of profile {profile_roles[name]!r}",
+                            fix=_CANDIDATE_CLASH_FIX,
+                        )
+                    )
+
     if reference is not None and profiles_value is not None and reference not in profiles_value:
         errors.append(_error("reference", f"must name a profile held by models.lock (got {reference!r})"))
     return errors
@@ -727,23 +806,40 @@ def _construct(document: Mapping[str, object]) -> ModelsLock:
                 cast(int, space["dimensions"]),
             )
         profiles.append(HardwareProfile(cast(str, name), requirements, memory, models, embedding_space))
-    return ModelsLock(cast(int, document["version"]), cast(str, document["reference"]), tuple(profiles))
+    candidates_value = cast(Mapping[str, object], document.get("candidates", {}))
+    candidates = tuple(
+        _construct_candidate(cast(str, name), cast(Mapping[str, object], value))
+        for name, value in candidates_value.items()
+    )
+    return ModelsLock(
+        cast(int, document["version"]), cast(str, document["reference"]), tuple(profiles), candidates
+    )
 
 
 def _construct_model(role: str, document: Mapping[str, object]) -> ModelPin:
+    repo, revision, serve, files = _construct_model_body(document)
+    return ModelPin(role, repo, revision, cast(int, document["gpu"]), serve, files)
+
+
+def _construct_candidate(name: str, document: Mapping[str, object]) -> CandidatePin:
+    repo, revision, serve, files = _construct_model_body(document)
+    return CandidatePin(name, cast(str, document["role"]), repo, revision, serve, files)
+
+
+def _construct_model_body(
+    document: Mapping[str, object],
+) -> tuple[str, str, ServeBaseline, tuple[PinnedFile, ...]]:
     serve = cast(Mapping[str, object], document["serve"])
     files = cast(Mapping[str, object], document["files"])
-    return ModelPin(
-        role=role,
-        repo=cast(str, document["repo"]),
-        revision=cast(str, document["revision"]),
-        gpu=cast(int, document["gpu"]),
-        serve=ServeBaseline(
+    return (
+        cast(str, document["repo"]),
+        cast(str, document["revision"]),
+        ServeBaseline(
             served_name=cast(str, serve["served_name"]),
             env=cast(Mapping[str, str], serve["env"]),
             flags=cast(Mapping[str, str | int | float | bool], serve["flags"]),
         ),
-        files=tuple(
+        tuple(
             PinnedFile(
                 path=cast(str, path),
                 sha256=cast(str, cast(Mapping[str, object], value)["sha256"]),

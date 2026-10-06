@@ -4,10 +4,13 @@
 # engine baseline each model is served with. The site file's
 # `hardware_profile` selects one; an unknown name refuses, a non-reference one
 # warns. Model facts live here and nowhere else. The pin watch proposes a
-# newer revision as a pull request; a person merges and tags. Not here: site
-# facts, corpus membership, product behaviour constants, host facts read at
-# install (GPU UUIDs); OS and driver pins are host.lock's, image digests
-# images.lock's.
+# newer revision as a pull request; a person merges and tags. A `candidates:`
+# map may name A/B weights for the build box, each in the model grammar
+# without `gpu` plus the `role` it stands in for: `models pull <candidate>`
+# pulls one, the bare pull retires it once its block is gone, the pin watch
+# never moves it, and a shipped lock has no map. Not here: site facts, corpus
+# membership, product behaviour constants, host facts read at install (GPU
+# UUIDs); OS and driver pins are host.lock's, image digests images.lock's.
 version: 1
 # The reference build: the one profile TNMD runs and evaluates against.
 reference: 2x96v-256d

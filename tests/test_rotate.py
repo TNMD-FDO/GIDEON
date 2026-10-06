@@ -26,7 +26,7 @@ from gideon.host import backuplock, grafana, nogpu, owui, pgbackrest, rotate, we
 from gideon.host.apply import run_apply
 from gideon.host.egress import EgressAllowlist
 from gideon.host.images import load_image_lock
-from gideon.host.models import HardwareProfile
+from gideon.host.models import CandidatePin, HardwareProfile
 from gideon.host.owui import Response
 from gideon.host.render import ARTIFACTS, RenderInputs
 from gideon.host.render.api import API_SERVICE_NAME
@@ -642,7 +642,11 @@ def fake_pull(
     _site: SiteConfig,
     profile: HardwareProfile,
     _allowlist: EgressAllowlist,
+    *,
+    candidates: tuple[CandidatePin, ...],
+    candidate: CandidatePin | None = None,
 ) -> weights.PullOutcome:
+    del candidates, candidate
     outcomes = tuple(
         weights.ModelOutcome(
             model.role,
