@@ -178,8 +178,9 @@ SUPPLIED_REGISTRY: Final[tuple[SuppliedSecret, ...]] = (
     SuppliedSecret("smtp_password", _grafana_mounted_replacement("smtp_password")),
     SuppliedSecret(
         "proxy_auth",
-        f"Replace {SECRETS_DIR / 'proxy_auth'}, then run {_APPLY_COMMAND} (both env "
-        "files re-render and their owners are recreated through the recreate rule).",
+        f"Replace {SECRETS_DIR / 'proxy_auth'}, then run {_APPLY_COMMAND} "
+        "(the frontend, SearXNG, and egress env files re-render and their owners "
+        "are recreated through the recreate rule).",
     ),
 )
 SUPPLIED_NAMES: Final[frozenset[str]] = frozenset(

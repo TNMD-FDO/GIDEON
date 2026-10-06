@@ -44,6 +44,7 @@ from gideon.host.render.compose import (
     service_names,
 )
 from gideon.host.render.consumers import secret_consumers
+from gideon.host.render.egress import EGRESS_SERVICE_NAME
 from gideon.host.render.engine import (
     EMBED,
     EMBED_SECRET_NAME,
@@ -82,6 +83,7 @@ class Registry(unittest.TestCase):
             {
                 API_SERVICE_NAME: ("gideon/api", "gideon/guardrail"),
                 WORKER_SERVICE_NAME: ("gideon/worker",),
+                EGRESS_SERVICE_NAME: ("gideon/egress",),
             },
         )
 
@@ -188,6 +190,7 @@ class Registry(unittest.TestCase):
                     site_text="site",
                     lock_text="host lock",
                     models_lock_text="models lock",
+                    egress_text="fictitious egress allowlist",
                 )
             )
             self.assertEqual(manifest["inputs"]["source_digests"], gathered)

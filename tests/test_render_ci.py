@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 
 import yaml  # type: ignore[import-untyped]
 
+from gideon.host.egress import load_egress_allowlist
 from gideon.host.images import load_image_lock, parse_registry, reference
 from gideon.host.lock import load_host_lock
 from gideon.host.models import (
@@ -91,11 +92,12 @@ TEMPLATE_PATHS = tuple(
 
 
 def inputs(**overrides: object) -> RenderInputs:
+    egress = load_egress_allowlist(ROOT / "config/egress.yaml").allowlist
     site = load_site(EXAMPLE).config
     lock = load_host_lock(ROOT / "host.lock").lock
     images = load_image_lock(ROOT / "images.lock").lock
     models = load_models_lock(ROOT / "models.lock").lock
-    assert site is not None and lock is not None and images is not None and models is not None
+    assert site is not None and lock is not None and images is not None and models is not None and egress is not None
     profile = select_profile(models, site.hardware_profile)
     assert isinstance(profile, HardwareProfile)
     base = RenderInputs(
@@ -117,6 +119,7 @@ def inputs(**overrides: object) -> RenderInputs:
         },
         checkout="/opt/gideon",
         source_digests=dict.fromkeys(declared_sources(), "sha256:" + "0" * 64),
+        egress=egress,
     )
     return replace(base, **overrides)  # type: ignore[arg-type]
 
@@ -187,7 +190,7 @@ class Compose(unittest.TestCase):
         assert target is not None
         services = mapping(ci_compose_document(render_inputs)["services"])
         cases = (
-            (PostgresService(), {"volumes", "command"}),
+            (PostgresService(), {"volumes", "command", "networks"}),
             (OpenWebuiService(), {"env_file", "environment", "volumes", "ports"}),
             (QdrantService(), {"volumes"}),
             (OpensearchService(), {"volumes", "environment"}),
@@ -204,6 +207,7 @@ class Compose(unittest.TestCase):
 
         postgres = mapping(services[PostgresService.name])
         self.assertEqual(postgres["volumes"], [f"{CI_ROOT}/postgres:/var/lib/postgresql"])
+        self.assertEqual(postgres["networks"], [NETWORK_NAME])
         self.assertNotIn("command", postgres)
 
         frontend = mapping(services[OpenWebuiService.name])

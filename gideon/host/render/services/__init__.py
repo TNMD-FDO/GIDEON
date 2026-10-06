@@ -101,6 +101,7 @@ def _registered_services() -> tuple[ServiceDefinition, ...]:
     from gideon.host.render.services.caddy import CaddyService
     from gideon.host.render.services.cadvisor import CadvisorService
     from gideon.host.render.services.dcgm_exporter import DcgmExporterService
+    from gideon.host.render.services.egress import EgressService
     from gideon.host.render.services.embed import EmbedService
     from gideon.host.render.services.generator import GeneratorService
     from gideon.host.render.services.grafana import GrafanaService
@@ -127,6 +128,7 @@ def _registered_services() -> tuple[ServiceDefinition, ...]:
         EmbedService(),
         ApiService(),
         WorkerService(),
+        EgressService(),
         SearxngService(),
         DcgmExporterService(),
         PostgresExporterService(),

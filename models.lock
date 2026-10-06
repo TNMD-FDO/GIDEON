@@ -62,7 +62,9 @@ profiles:
     # counts the page cache a container is first to touch and its weights are
     # about 31 GB of file pages. The embedding server's 16 is a ruled
     # starting value on the same basis: its weights are about 15.1 GB of file
-    # pages, and E9 corrects the row from its measured cold start. A row's
+    # pages, and E9 corrects the row from its measured cold start. The egress
+    # service's 1 GB is the reserve rule's floor, held until its working set
+    # is first read after a transfer through it. A row's
     # `role` names the model the service loads, which is the subject of the
     # size-change rule. Every scalar is a value-only patch for the pin watch.
     memory:
@@ -102,6 +104,8 @@ profiles:
         gb: 1
       gideon-worker:
         gb: 12
+      gideon-egress:
+        gb: 1
     # The embedding space: the one vector space every stored chunk and every
     # query is embedded into. Its id names the model, the dimension, and the
     # precision together, and is the third part of a generation's name and

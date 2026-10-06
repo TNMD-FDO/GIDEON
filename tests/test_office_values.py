@@ -64,6 +64,7 @@ _CURATED_ALLOWLIST: tuple[str, ...] = (
     "damiencharlotin.com",
     "dingduff.com",
     "doi.org",
+    "federalregister.gov",
     "free.law",
     "freedesktop.org",
     "gcr.io",

@@ -165,6 +165,7 @@ class LayoutAndLabels(unittest.TestCase):
                 "secrets/",
                 "rendered/open-webui/env",
                 "rendered/searxng/env",
+                "rendered/gideon-egress/env",
                 "no-gpu",
                 "build-box",
                 "backup_age_identity",

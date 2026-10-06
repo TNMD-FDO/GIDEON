@@ -36,7 +36,7 @@ The allowlist groups destinations by the work that needs them:
 
 - `host-provisioning` serves `host provision`: the operating-system, driver, and Docker packages, the CI runner, the registry image and the images mirrored from Docker Hub and NVIDIA's registry, and the acceptance-machine image.
 - `install-upgrade` serves installation and upgrade: model downloads and the images published on GitHub's registry. `models pull` prints any host a download traverses that this group does not cover.
-- `corpus` serves corpus acquisition.
+- `corpus` serves corpus acquisition: the hosts the worker may reach, through GIDEON's egress service on port 443 alone, so every corpus `base_url` and `mirror_url` host is in it and every corpus URL is HTTPS. A redirect to a host outside the group is refused, and the egress service's log names that host.
 - `image-build` serves the package downloads made while building GIDEON's own images on the build box; an office never builds.
 
 `preflight` probes the `host-provisioning` and `install-upgrade` groups. Allow the listed destinations through the office proxy or firewall.

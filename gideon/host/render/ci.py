@@ -160,6 +160,7 @@ def ci_compose_document(inputs: RenderInputs) -> Mapping[str, object]:
 
     postgres = dict(PostgresService().block(inputs, target))
     postgres["volumes"] = [f"{CI_ROOT}/postgres:/var/lib/postgresql"]
+    postgres["networks"] = [NETWORK_NAME]
     del postgres["command"]
 
     open_webui = dict(OpenWebuiService().block(inputs, target))

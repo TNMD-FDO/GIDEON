@@ -144,6 +144,7 @@ services:
       start_period: "30s"
     networks:
       - "gideon"
+      - "internal"
     mem_limit: 20000000000
   qdrant:
     image: "127.0.0.1:5000/qdrant@sha256:12364fe851b9f17356fc88189fc06d1b521262e04659ec7345975b00c9246a10"
@@ -577,6 +578,9 @@ services:
       GIDEON_WORKER_DB_ROLE: "gideon_worker"
       GIDEON_WORKER_PASSWORD_FILE: "/run/secrets/postgres_gideon_worker_password"
       GIDEON_WORKER_CONCURRENCY: "4"
+      HTTPS_PROXY: "http://gideon-egress:3128"
+      HTTP_PROXY: "http://gideon-egress:3128"
+      NO_PROXY: "postgres,gideon-egress"
       TZ: "America/Denver"
     labels:
       org.gideon.worker-sources-digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
@@ -592,8 +596,42 @@ services:
       retries: 3
       start_period: "30s"
     networks:
-      - "gideon"
+      - "internal"
     mem_limit: 12000000000
+  gideon-egress:
+    image: "127.0.0.1:5000/gideon@sha256:979cbdacad5820e2b3c98fcfaf19f473edb657faa8a543c3fb5622ad0f0226f9"
+    restart: "unless-stopped"
+    command:
+      - "python"
+      - "-m"
+      - "gideon.egress"
+    working_dir: "/opt/gideon-src"
+    volumes:
+      - "/opt/gideon/gideon:/opt/gideon-src/gideon:ro"
+    read_only: true
+    environment:
+      GIDEON_EGRESS_HOSTS: "com-courtlistener-storage.s3-us-west-2.amazonaws.com,uscode.house.gov,www.ussc.gov,www.uscourts.gov,www.govinfo.gov,www.ecfr.gov,www.congress.gov,www.supremecourt.gov"
+      GIDEON_EGRESS_PORT: "3128"
+      TZ: "America/Denver"
+    labels:
+      org.gideon.egress-sources-digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    healthcheck:
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3128/healthz', timeout=4).read()"
+      interval: "30s"
+      timeout: "5s"
+      retries: 3
+      start_period: "30s"
+    networks:
+      - "gideon"
+      - "internal"
+    env_file:
+      - path: "/etc/gideon/rendered/gideon-egress/env"
+        format: "raw"
+    mem_limit: 1000000000
   dcgm-exporter:
     image: "127.0.0.1:5000/dcgm-exporter@sha256:148b0c025e5f2850256816fa33754fbf4733b7a086697a95613fc0ba3db5b003"
     restart: "unless-stopped"
@@ -663,6 +701,8 @@ services:
     mem_limit: 1000000000
 networks:
   gideon: {}
+  internal:
+    internal: true
 volumes:
   caddy_data: {}
   caddy_config: {}

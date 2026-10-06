@@ -65,8 +65,9 @@ refuses an image whose default user is root, and refuses unless
 the driver loads on the binary libpq implementation and its two distributions
 report the same version — one build argument installs both wheels; `--check`
 repeats that smoke against the recorded built digest. The image is the
-interpreter and dependency set of both `gideon-api` and `gideon-worker`, while
-the applying checkout is mounted into the running containers. A Procrastinate
+interpreter and dependency set of `gideon-api`, `gideon-worker`, and
+`gideon-egress`, while the applying checkout is mounted into the running
+containers. A Procrastinate
 bump carries more than the rebuild: §6.
 
 The Dockerfile builds `fast-diff-match-patch` from its pinned source in a builder

@@ -4,6 +4,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from string import Template
 
+from gideon.host.egress import EgressAllowlist
 from gideon.host.images import ImageLock
 from gideon.host.lock import HostLock
 from gideon.host.models import HardwareProfile
@@ -25,6 +26,7 @@ class RenderInputs:
     secrets: Mapping[str, str] = field(default_factory=dict)
     checkout: str = ""
     source_digests: Mapping[str, str] = field(default_factory=dict)
+    egress: EgressAllowlist | None = None
     no_gpu: bool = False
     build_box: bool = False
 
@@ -154,6 +156,7 @@ def render_all(inputs: RenderInputs) -> RenderedSet:
 def _registered_artifacts() -> tuple[Artifact, ...]:
     from gideon.host.render.caddy import CaddyfileArtifact
     from gideon.host.render.compose import ComposeArtifact
+    from gideon.host.render.egress import EgressEnvArtifact
     from gideon.host.render.grafana import (
         GrafanaBackupArtifact,
         GrafanaContactPointsArtifact,
@@ -231,6 +234,7 @@ def _registered_artifacts() -> tuple[Artifact, ...]:
         ApiInstructionArtifact(),
         SearxngSettingsArtifact(),
         SearxngEnvArtifact(),
+        EgressEnvArtifact(),
         SearxngLoggingArtifact(),
         OpensearchSettingsArtifact(),
         OpensearchConfigArtifact(),

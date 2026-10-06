@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 import yaml  # type: ignore[import-untyped]
 
 from gideon.host import nogpu, secrets, weights
+from gideon.host.egress import load_egress_allowlist
 from gideon.host.images import (
     ImageLock,
     MirroredImagePin,
@@ -115,6 +116,7 @@ from gideon.host.sysio import Command, PathLike
 
 ROOT = Path(__file__).resolve().parent.parent
 EXAMPLE = ROOT / "config/site.example.yaml"
+EGRESS = ROOT / "config/egress.yaml"
 SECOND = ROOT / "tests/fixtures/site/second-office.yaml"
 TEMPLATE = "caddy/Caddyfile.tmpl"
 PROMETHEUS_TEMPLATE = "prometheus/prometheus.yml.tmpl"
@@ -196,11 +198,12 @@ def site(path: Path = EXAMPLE) -> SiteConfig:
 
 
 def inputs(site_path: Path = EXAMPLE, **overrides: object) -> RenderInputs:
+    egress = load_egress_allowlist(ROOT / "config/egress.yaml").allowlist
     lock = load_host_lock(ROOT / "host.lock").lock
     images = load_image_lock(ROOT / "images.lock").lock
     models = load_models_lock(ROOT / "models.lock").lock
     site_config = site(site_path)
-    assert lock is not None and images is not None and models is not None
+    assert lock is not None and images is not None and models is not None and egress is not None
     profile = select_profile(models, site_config.hardware_profile)
     assert isinstance(profile, HardwareProfile)
     base = RenderInputs(
@@ -231,6 +234,7 @@ def inputs(site_path: Path = EXAMPLE, **overrides: object) -> RenderInputs:
         },
         checkout="/opt/gideon",
         source_digests=dict.fromkeys(declared_sources(), "sha256:" + "0" * 64),
+        egress=egress,
     )
     return replace(base, **overrides)  # type: ignore[arg-type]
 
@@ -315,6 +319,7 @@ class Registry(unittest.TestCase):
                 "gideon-api/instruction.txt",
                 "searxng/settings.yml",
                 "searxng/env",
+                "gideon-egress/env",
                 "searxng/logging.json",
                 "opensearch/opensearch.yml",
                 "opensearch/security/config.yml",
@@ -370,10 +375,14 @@ class Registry(unittest.TestCase):
         self.assertEqual(ARTIFACTS[21].owners, ("searxng",))
         self.assertTrue(ARTIFACTS[21].secret)
         self.assertEqual(ARTIFACTS[21].mode, 0o600)
-        self.assertEqual(ARTIFACTS[22].relative_path, "searxng/logging.json")
-        self.assertEqual(ARTIFACTS[22].owners, ("searxng",))
-        self.assertFalse(ARTIFACTS[22].secret)
-        self.assertEqual(ARTIFACTS[22].mode, 0o644)
+        self.assertEqual(ARTIFACTS[22].relative_path, "gideon-egress/env")
+        self.assertEqual(ARTIFACTS[22].owners, ("gideon-egress",))
+        self.assertTrue(ARTIFACTS[22].secret)
+        self.assertEqual(ARTIFACTS[22].mode, 0o600)
+        self.assertEqual(ARTIFACTS[23].relative_path, "searxng/logging.json")
+        self.assertEqual(ARTIFACTS[23].owners, ("searxng",))
+        self.assertFalse(ARTIFACTS[23].secret)
+        self.assertEqual(ARTIFACTS[23].mode, 0o644)
         self.assertEqual(ARTIFACTS[-1].owners, ("dcgm-exporter",))
         self.assertEqual(ARTIFACTS[-1].mode, 0o644)
         self.assertTrue(
@@ -381,12 +390,16 @@ class Registry(unittest.TestCase):
                 artifact.mode == 0o644
                 for artifact in ARTIFACTS
                 if artifact.relative_path
-                not in {"grafana/ldap.toml", "open-webui/env", "searxng/env"}
+                not in {"grafana/ldap.toml", "open-webui/env", "searxng/env", "gideon-egress/env"}
             )
         )
 
 
 class Compose(unittest.TestCase):
+    def test_internal_network_is_declared_after_the_project_network(self) -> None:
+        networks = compose_top_level(inputs())["networks"]
+        self.assertEqual(networks, {"gideon": {}, "internal": {"internal": True}})
+
     def test_frontend_command_is_explicit_in_production_and_drill_documents(self) -> None:
         documents = (
             yaml.safe_load(ComposeArtifact().emit(inputs())),
@@ -1019,13 +1032,16 @@ class BlackboxConfig(unittest.TestCase):
 
 
 class Core(unittest.TestCase):
-    def test_artifacts_apply_on_gpu_hosts_except_the_gpu_board(self) -> None:
+    def test_artifact_applicability_for_host_kinds_without_a_parent_proxy(self) -> None:
         gpu = inputs()
         no_gpu = inputs(no_gpu=True)
-        self.assertTrue(all(artifact.applies(gpu) for artifact in ARTIFACTS))
+        self.assertEqual(
+            [artifact.name for artifact in ARTIFACTS if not artifact.applies(gpu)],
+            ["gideon-egress-env"],
+        )
         self.assertEqual(
             [artifact.name for artifact in ARTIFACTS if not artifact.applies(no_gpu)],
-            ["grafana-gpu", "grafana-eval", "api-instruction", "gideon-eval-nightly-service", "gideon-eval-nightly-timer", "dcgm-counters"],
+            ["grafana-gpu", "grafana-eval", "api-instruction", "gideon-egress-env", "gideon-eval-nightly-service", "gideon-eval-nightly-timer", "dcgm-counters"],
         )
 
     def test_nightly_units_are_zoned_bounded_and_carry_no_secrets(self) -> None:
@@ -1111,6 +1127,7 @@ class Core(unittest.TestCase):
                         site_text=EXAMPLE.read_text(),
                         lock_text=(ROOT / "host.lock").read_text(),
                         models_lock_text=(ROOT / "models.lock").read_text(),
+                        egress_text=EGRESS.read_text(),
                     )
                 )
                 self.assertEqual(document["inputs"]["no_gpu"], no_gpu)
@@ -1118,6 +1135,10 @@ class Core(unittest.TestCase):
                 self.assertEqual(
                     document["inputs"]["models_lock_sha256"],
                     hashlib.sha256((ROOT / "models.lock").read_bytes()).hexdigest(),
+                )
+                self.assertEqual(
+                    document["inputs"]["egress_sha256"],
+                    hashlib.sha256(EGRESS.read_bytes()).hexdigest(),
                 )
                 self.assertEqual(
                     document["inputs"]["hardware_profile"],
@@ -1288,6 +1309,7 @@ def checkout_files() -> dict[str, str]:
         str(ROOT / "host.lock"): (ROOT / "host.lock").read_text(),
         str(ROOT / "images.lock"): (ROOT / "images.lock").read_text(),
         str(ROOT / "models.lock"): (ROOT / "models.lock").read_text(),
+        str(ROOT / "config/egress.yaml"): (ROOT / "config/egress.yaml").read_text(),
         **{
             str(ROOT / "compose" / path): (ROOT / "compose" / path).read_text()
             for path in TEMPLATE_PATHS
@@ -1907,6 +1929,7 @@ class RecreateRule(unittest.TestCase):
                 site_text=EXAMPLE.read_text(),
                 lock_text=(ROOT / "host.lock").read_text(),
                 models_lock_text=(ROOT / "models.lock").read_text(),
+                egress_text=EGRESS.read_text(),
             )
         )
         top_level = compose_top_level(rendered_inputs)
@@ -1942,6 +1965,7 @@ class RecreateRule(unittest.TestCase):
             site_text=EXAMPLE.read_text(),
             lock_text=(ROOT / "host.lock").read_text(),
             models_lock_text=(ROOT / "models.lock").read_text(),
+            egress_text=EGRESS.read_text(),
         )
         path = Path(f"{RENDERED}/applied.yaml")
         applied = read_applied_manifest(DirHost({str(path): document}), path)
@@ -2024,5 +2048,6 @@ class ByteStableFixtures(unittest.TestCase):
                     site_text=site_path.read_text(),
                     lock_text=lock_text,
                     models_lock_text=(ROOT / "models.lock").read_text(),
+                    egress_text=EGRESS.read_text(),
                 )
                 self.assertEqual(manifest, (expected_dir / "manifest.yaml").read_text(), f"{name}/manifest.yaml drifted; run {self.REGENERATE}")

@@ -10,6 +10,11 @@ from gideon.host.render.api import (
     API_MOUNT_TARGET,
     API_WORKING_DIRECTORY,
 )
+from gideon.host.render.egress import (
+    INTERNAL_NETWORK_NAME,
+    INTERNAL_NO_PROXY_HOSTS,
+    egress_proxy_url,
+)
 from gideon.host.render.services import ServiceDefinition, image_pin, source_digest
 from gideon.host.render.worker import (
     CONCURRENCY_ENV,
@@ -69,6 +74,9 @@ class WorkerService(ServiceDefinition):
                 DATABASE_ROLE_ENV: WORKER_ROLE,
                 PASSWORD_FILE_ENV: f"/run/secrets/{WORKER_SECRET_NAME}",
                 CONCURRENCY_ENV: str(WORKER_CONCURRENCY),
+                "HTTPS_PROXY": egress_proxy_url(),
+                "HTTP_PROXY": egress_proxy_url(),
+                "NO_PROXY": ",".join(INTERNAL_NO_PROXY_HOSTS),
                 "TZ": inputs.site.office.timezone,
             },
             "labels": {
@@ -79,5 +87,5 @@ class WorkerService(ServiceDefinition):
             # process before another worker could read its silence as a stall.
             "stop_grace_period": "20s",
             "healthcheck": dict(WORKER_HEALTHCHECK),
-            "networks": ["gideon"],
+            "networks": [INTERNAL_NETWORK_NAME],
         }

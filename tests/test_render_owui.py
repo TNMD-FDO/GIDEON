@@ -11,6 +11,7 @@ from typing import cast
 import yaml  # type: ignore[import-untyped]
 from test_render import declared_source_files
 
+from gideon.host.egress import load_egress_allowlist
 from gideon.host.images import load_image_lock
 from gideon.host.lock import load_host_lock
 from gideon.host.models import (
@@ -109,11 +110,12 @@ SECRETS = {
 
 
 def inputs(site_path: Path = EXAMPLE, **overrides: object) -> RenderInputs:
+    egress = load_egress_allowlist(ROOT / "config/egress.yaml").allowlist
     site = load_site(site_path).config
     lock = load_host_lock(ROOT / "host.lock").lock
     images = load_image_lock(ROOT / "images.lock").lock
     models = load_models_lock(ROOT / "models.lock").lock
-    assert site is not None and lock is not None and images is not None and models is not None
+    assert site is not None and lock is not None and images is not None and models is not None and egress is not None
     profile = select_profile(models, site.hardware_profile)
     assert isinstance(profile, HardwareProfile)
     base = RenderInputs(
@@ -127,6 +129,7 @@ def inputs(site_path: Path = EXAMPLE, **overrides: object) -> RenderInputs:
         secrets=dict(SECRETS),
         checkout="/opt/gideon",
         source_digests=dict.fromkeys(declared_sources(), "sha256:" + "0" * 64),
+        egress=egress,
     )
     return replace(base, **overrides)  # type: ignore[arg-type]
 
@@ -1019,6 +1022,7 @@ class CommandSecrets(unittest.TestCase):
             str(ROOT / "host.lock"): (ROOT / "host.lock").read_text(),
             str(ROOT / "images.lock"): (ROOT / "images.lock").read_text(),
             str(ROOT / "models.lock"): (ROOT / "models.lock").read_text(),
+            str(ROOT / "config/egress.yaml"): (ROOT / "config/egress.yaml").read_text(),
             "/etc/gideon/site.yaml": EXAMPLE.read_text(),
             **declared_source_files(),
         }

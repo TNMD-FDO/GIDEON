@@ -62,6 +62,8 @@ SELF_UPDATE_SWITCHES: Mapping[str, Mapping[str, str]] = {
     "gideon-api": {},
     # The worker image has no update check or telemetry.
     "gideon-worker": {},
+    # The egress service checks for nothing of its own and reaches only its allowlist.
+    "gideon-egress": {},
     # No update check or telemetry at the pinned commit; no checker module,
     # and the two user-triggered outbound resolvers are off in its settings.
     "searxng": {},

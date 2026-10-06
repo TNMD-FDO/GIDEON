@@ -6,11 +6,13 @@ from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
+from gideon.host.egress import load_egress_allowlist
 from gideon.host.images import load_image_lock
 from gideon.host.lock import load_host_lock
 from gideon.host.models import HardwareProfile, load_models_lock, select_profile
 from gideon.host.render import ARTIFACTS, RenderInputs
 from gideon.host.render.consumers import SecretConsumers, consumers_of, secret_consumers
+from gideon.host.render.egress import EGRESS_SERVICE_NAME
 from gideon.host.render.facts import HostFacts
 from gideon.host.render.owui import OwuiEnvArtifact
 from gideon.host.render.searxng import SearxngEnvArtifact
@@ -59,11 +61,12 @@ class RecordingSecrets(Mapping[str, str]):
 
 
 def inputs(site_path: Path = EXAMPLE, **overrides: object) -> RenderInputs:
+    egress = load_egress_allowlist(ROOT / "config/egress.yaml").allowlist
     site = load_site(site_path).config
     lock = load_host_lock(ROOT / "host.lock").lock
     images = load_image_lock(ROOT / "images.lock").lock
     models = load_models_lock(ROOT / "models.lock").lock
-    assert site is not None and lock is not None and images is not None and models is not None
+    assert site is not None and lock is not None and images is not None and models is not None and egress is not None
     profile = select_profile(models, site.hardware_profile)
     assert isinstance(profile, HardwareProfile)
     base = RenderInputs(
@@ -80,6 +83,7 @@ def inputs(site_path: Path = EXAMPLE, **overrides: object) -> RenderInputs:
         },
         checkout="/opt/gideon",
         source_digests=dict.fromkeys(declared_sources(), "sha256:" + "0" * 64),
+        egress=egress,
     )
     return replace(base, **overrides)  # type: ignore[arg-type]
 
@@ -123,7 +127,7 @@ class ConsumerMap(unittest.TestCase):
         self.assertEqual(consumers_of(inputs(), "gideon_eval_api_key"), SecretConsumers((), ()))
 
         self.assertEqual(second["smtp_password"], SecretConsumers(("grafana",), ()))
-        self.assertEqual(second["proxy_auth"], SecretConsumers((), ("open-webui",)))
+        self.assertEqual(second["proxy_auth"], SecretConsumers((), ("open-webui", EGRESS_SERVICE_NAME)))
         self.assertEqual(consumers_of(inputs(SECOND), "searxng_secret_key"), SecretConsumers((), ()))
 
         # A leftover credential file with the proxy off is carried by nothing:

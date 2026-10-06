@@ -4,6 +4,7 @@ from collections.abc import Mapping
 
 from gideon.host.images import RegistryTarget, reference
 from gideon.host.render import RenderInputs
+from gideon.host.render.egress import INTERNAL_NETWORK_NAME
 from gideon.host.render.pgbackrest import (
     PG_BACKREST_CONF_PATH,
     PGDATA,
@@ -56,5 +57,5 @@ class PostgresService(ServiceDefinition):
             ],
             "secrets": ["postgres_superuser_password"],
             "healthcheck": dict(POSTGRES_HEALTHCHECK),
-            "networks": ["gideon"],
+            "networks": ["gideon", INTERNAL_NETWORK_NAME],
         }

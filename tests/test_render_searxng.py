@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 
+from gideon.host.egress import load_egress_allowlist
 from gideon.host.images import load_image_lock
 from gideon.host.lock import load_host_lock
 from gideon.host.models import HardwareProfile, load_models_lock, select_profile
@@ -28,6 +29,7 @@ from gideon.host.render.compose import (
     service_images,
     service_names,
 )
+from gideon.host.render.egress import EGRESS_SERVICE_NAME
 from gideon.host.render.engine import ENGINE_SERVICE_NAME, MODEL_SERVERS
 from gideon.host.render.facts import HostFacts
 from gideon.host.render.searxng import (
@@ -70,11 +72,12 @@ SECRETS = {
 
 
 def inputs(site_path: Path = EXAMPLE, **overrides: object) -> RenderInputs:
+    egress = load_egress_allowlist(ROOT / "config/egress.yaml").allowlist
     site = load_site(site_path).config
     lock = load_host_lock(ROOT / "host.lock").lock
     images = load_image_lock(ROOT / "images.lock").lock
     models = load_models_lock(ROOT / "models.lock").lock
-    assert site is not None and lock is not None and images is not None and models is not None
+    assert site is not None and lock is not None and images is not None and models is not None and egress is not None
     profile = select_profile(models, site.hardware_profile)
     assert isinstance(profile, HardwareProfile)
     base = RenderInputs(
@@ -88,6 +91,7 @@ def inputs(site_path: Path = EXAMPLE, **overrides: object) -> RenderInputs:
         secrets=dict(SECRETS),
         checkout="/opt/gideon",
         source_digests=dict.fromkeys(declared_sources(), "sha256:" + "0" * 64),
+        egress=egress,
     )
     return replace(base, **overrides)  # type: ignore[arg-type]
 
@@ -259,11 +263,11 @@ class Service(unittest.TestCase):
         gpu = service_names(inputs())
         self.assertEqual(gpu.index(API_SERVICE_NAME), gpu.index(MODEL_SERVERS[-1].service_name) + 1)
         self.assertEqual(gpu.index(WORKER_SERVICE_NAME), gpu.index(API_SERVICE_NAME) + 1)
-        self.assertEqual(gpu.index(SEARXNG_SERVICE_NAME), gpu.index(WORKER_SERVICE_NAME) + 1)
+        self.assertEqual(gpu.index(SEARXNG_SERVICE_NAME), gpu.index(EGRESS_SERVICE_NAME) + 1)
         self.assertEqual(gpu.index(ENGINE_SERVICE_NAME), gpu.index("open-webui") + 1)
         no_gpu = service_names(inputs(no_gpu=True))
         self.assertEqual(no_gpu.index(WORKER_SERVICE_NAME), no_gpu.index("open-webui") + 1)
-        self.assertEqual(no_gpu.index(SEARXNG_SERVICE_NAME), no_gpu.index(WORKER_SERVICE_NAME) + 1)
+        self.assertEqual(no_gpu.index(SEARXNG_SERVICE_NAME), no_gpu.index(EGRESS_SERVICE_NAME) + 1)
         self.assertNotIn(SEARXNG_SERVICE_NAME, service_names(inputs(SECOND)))
         self.assertNotIn(SEARXNG_SERVICE_NAME, service_names(inputs(SECOND, no_gpu=True)))
         for base in (inputs(), inputs(no_gpu=True), inputs(SECOND)):

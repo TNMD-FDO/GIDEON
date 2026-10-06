@@ -62,6 +62,7 @@ from gideon.host.render.yamlout import dump
 
 PROJECT_NAME: Final = "gideon"
 NETWORK_NAME: Final = "gideon"
+INTERNAL_NETWORK_NAME: Final = "internal"
 # The swap a service that may not be swapped is still allowed: one 4 KiB page.
 # A ceiling equal to the memory limit asks for none, but under the systemd
 # cgroup driver runc writes that zero to the cgroup file alone and systemd
@@ -223,7 +224,7 @@ def _compose_document(inputs: RenderInputs) -> Mapping[str, object]:
     return {
         "name": PROJECT_NAME,
         "services": services,
-        "networks": {NETWORK_NAME: {}},
+        "networks": {NETWORK_NAME: {}, INTERNAL_NETWORK_NAME: {"internal": True}},
         "volumes": {"caddy_data": {}, "caddy_config": {}},
         "secrets": secrets,
     }

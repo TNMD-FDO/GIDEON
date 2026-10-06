@@ -1008,18 +1008,21 @@ def _record_stage(
     site_path: PathLike,
     lock_path: PathLike,
     models_path: PathLike,
+    root: Path,
     context: _ApplyContext,
 ) -> StageResult:
     try:
         site_text = io.read_text(site_path)
         lock_text = io.read_text(lock_path)
         models_lock_text = io.read_text(models_path)
+        egress_text = io.read_text(root / "config/egress.yaml")
         manifest = manifest_document(
             context.rendered,
             context.inputs,
             site_text=site_text,
             lock_text=lock_text,
             models_lock_text=models_lock_text,
+            egress_text=egress_text,
         )
         io.write_text(Path(rendered_dir) / "applied.yaml", manifest, mode=0o644)
     except (OSError, UnicodeError, ValueError) as exc:
@@ -1134,7 +1137,7 @@ def converge(
         return 1
 
     record_result = _record_stage(
-        io, rendered_dir, site_path, lock_path, models_path, context
+        io, rendered_dir, site_path, lock_path, models_path, root, context
     )
     print_stage(record_result)
     return int(not record_result.ok)

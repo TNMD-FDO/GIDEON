@@ -22,6 +22,11 @@ from gideon.host.render.command import (
     recreate_judgment,
 )
 from gideon.host.render.compose import service_blocks, service_names
+from gideon.host.render.egress import (
+    INTERNAL_NETWORK_NAME,
+    INTERNAL_NO_PROXY_HOSTS,
+    egress_proxy_url,
+)
 from gideon.host.render.services import SERVICES, image_pin
 from gideon.host.render.services.worker import (
     WORKER_HEALTHCHECK,
@@ -162,6 +167,9 @@ class WorkerBlock(unittest.TestCase):
                                 f"/run/secrets/{worker.WORKER_SECRET_NAME}"
                             ),
                             worker.CONCURRENCY_ENV: str(worker.WORKER_CONCURRENCY),
+                            "HTTPS_PROXY": egress_proxy_url(),
+                            "HTTP_PROXY": egress_proxy_url(),
+                            "NO_PROXY": ",".join(INTERNAL_NO_PROXY_HOSTS),
                             "TZ": rendered_inputs.site.office.timezone,
                         },
                         "labels": {
@@ -171,11 +179,21 @@ class WorkerBlock(unittest.TestCase):
                         },
                         "stop_grace_period": "20s",
                         "healthcheck": dict(WORKER_HEALTHCHECK),
-                        "networks": ["gideon"],
+                        "networks": [INTERNAL_NETWORK_NAME],
                         "mem_limit": row.gb * GIGABYTE,
                     },
                     "Fix: restore the worker's reviewed Compose block.",
                 )
+                internal_peers = tuple(
+                    name
+                    for name, candidate in service_blocks(rendered_inputs).items()
+                    if name != worker.WORKER_SERVICE_NAME
+                    and isinstance(candidate, Mapping)
+                    and INTERNAL_NETWORK_NAME in candidate.get("networks", ())
+                )
+                environment = block["environment"]
+                assert isinstance(environment, Mapping)
+                self.assertEqual(environment["NO_PROXY"], ",".join(internal_peers))
                 self.assertEqual(
                     block["healthcheck"],
                     {

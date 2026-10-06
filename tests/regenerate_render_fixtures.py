@@ -30,6 +30,7 @@ def _loaded[T](value: T | None, errors: object) -> T:
 
 
 def main() -> None:
+    from gideon.host.egress import load_egress_allowlist
     from gideon.host.images import load_image_lock
     from gideon.host.lock import load_host_lock
     from gideon.host.models import HardwareProfile, load_models_lock, select_profile
@@ -58,6 +59,9 @@ def main() -> None:
     templates = load_templates(host, ROOT)
     lock_text = host.read_text(ROOT / "host.lock")
     models_lock_text = host.read_text(ROOT / "models.lock")
+    egress_text = host.read_text(ROOT / "config/egress.yaml")
+    egress_result = load_egress_allowlist(ROOT / "config/egress.yaml", host=host)
+    egress = _loaded(egress_result.allowlist, egress_result.errors)
 
     sites = (
         ("example", ROOT / "config/site.example.yaml", False, True),
@@ -89,6 +93,7 @@ def main() -> None:
             },
             checkout="/opt/gideon",
             source_digests=dict.fromkeys(declared_sources(), FIXED_SOURCES_DIGEST),
+            egress=egress,
             no_gpu=no_gpu,
             build_box=build_box,
         )
@@ -99,6 +104,7 @@ def main() -> None:
             site_text=site_text,
             lock_text=lock_text,
             models_lock_text=models_lock_text,
+            egress_text=egress_text,
         )
         output = ROOT / "tests/fixtures/render" / name
         for rendered_file in rendered.files:

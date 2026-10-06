@@ -15,6 +15,8 @@ import yaml  # type: ignore[import-untyped]
 
 import gideon
 from gideon.host import nogpu
+from gideon.host.egress import load_egress_allowlist
+from gideon.host.egress import render_errors as render_egress_errors
 from gideon.host.images import load_image_lock
 from gideon.host.images import render_errors as render_image_errors
 from gideon.host.lock import load_host_lock
@@ -292,6 +294,7 @@ def _manifest_mapping(
     site_text: str,
     lock_text: str,
     models_lock_text: str,
+    egress_text: str,
 ) -> Mapping[str, object]:
     """Build the manifest value model without host access."""
 
@@ -309,6 +312,7 @@ def _manifest_mapping(
             "site_sha256": _sha256(site_text),
             "host_lock_sha256": _sha256(lock_text),
             "models_lock_sha256": _sha256(models_lock_text),
+            "egress_sha256": _sha256(egress_text),
             "hardware_profile": inputs.profile.name,
             "images_lock_version": inputs.images.version,
             "source_digests": dict(inputs.source_digests),
@@ -335,8 +339,9 @@ def manifest_document(
     site_text: str,
     lock_text: str,
     models_lock_text: str,
+    egress_text: str,
 ) -> str:
-    """Serialize the deterministic render manifest (the site and lock texts are hashed)."""
+    """Serialize the deterministic render manifest with its input digests."""
 
     return dump(
         _manifest_mapping(
@@ -345,6 +350,7 @@ def manifest_document(
             site_text=site_text,
             lock_text=lock_text,
             models_lock_text=models_lock_text,
+            egress_text=egress_text,
         )
     )
 
@@ -663,7 +669,7 @@ def load_render_inputs(
     root: Path,
     command: str,
     secret_names: Sequence[str] | None = None,
-) -> tuple[RenderInputs, str, str, str] | None:
+) -> tuple[RenderInputs, str, str, str, str] | None:
     """Load and validate every render input, or print the refusals and return None.
 
     ``secret_names`` replaces the production artifacts' declared set with an
@@ -675,6 +681,8 @@ def load_render_inputs(
     lock_result = load_host_lock(lock_path, host=io)
     images_result = load_image_lock(images_path, host=io)
     models_result = load_models_lock(models_path, host=io)
+    egress_path = root / "config/egress.yaml"
+    egress_result = load_egress_allowlist(egress_path, host=io)
     if site_result.errors:
         print(render_site_errors(site_result.errors), file=sys.stderr)
     if lock_result.errors:
@@ -683,15 +691,19 @@ def load_render_inputs(
         print(render_image_errors(images_result.errors), file=sys.stderr)
     if models_result.errors:
         print(render_models_errors(models_result.errors), file=sys.stderr)
+    if egress_result.errors:
+        print(render_egress_errors(egress_result.errors), file=sys.stderr)
     if (
         site_result.config is None
         or lock_result.lock is None
         or images_result.lock is None
         or models_result.lock is None
+        or egress_result.allowlist is None
         or site_result.errors
         or lock_result.errors
         or images_result.errors
         or models_result.errors
+        or egress_result.errors
     ):
         return None
     profile = select_profile(models_result.lock, site_result.config.hardware_profile)
@@ -733,6 +745,7 @@ def load_render_inputs(
         site_text = io.read_text(site_path)
         lock_text = io.read_text(lock_path)
         models_lock_text = io.read_text(models_path)
+        egress_text = io.read_text(egress_path)
     except (OSError, UnicodeError) as exc:
         print(
             _refusal(f"render input is unreadable: {exc}", _RENDER_FIX, command),
@@ -762,12 +775,14 @@ def load_render_inputs(
             secrets=secrets,
             checkout=os.fspath(root),
             source_digests=source_digests,
+            egress=egress_result.allowlist,
             no_gpu=no_gpu,
             build_box=build_box,
         ),
         site_text,
         lock_text,
         models_lock_text,
+        egress_text,
     )
 
 
@@ -797,7 +812,7 @@ def render_to_disk(
     )
     if loaded is None:
         return RenderOutcome()
-    inputs, site_text, lock_text, models_lock_text = loaded
+    inputs, site_text, lock_text, models_lock_text, egress_text = loaded
     try:
         rendered = render_all(inputs)
     except Exception as exc:  # noqa: BLE001  # command boundary must not traceback
@@ -885,6 +900,7 @@ def render_to_disk(
             site_text=site_text,
             lock_text=lock_text,
             models_lock_text=models_lock_text,
+            egress_text=egress_text,
         )
         io.write_text(output / _MANIFEST_NAME, manifest, mode=0o644)
     except (OSError, UnicodeError, ValueError) as exc:

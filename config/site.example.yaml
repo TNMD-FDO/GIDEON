@@ -54,7 +54,7 @@ alerts:
 
 # hardware_profile: 2x96v-256d      profile section of models.lock; unknown refuses, non-reference warns
 # registry: ghcr.io/tnmd-fdo       image-reference prefix for every image in images.lock (the two plain-HTTP registries: loopback 127.0.0.1:5000 pre-1.0, and the box's bridge address 192.168.122.1:5000 for the acceptance VM)
-# egress_proxy: ""                 optional; applied to apt, Docker pulls, the CLI, SearXNG, Open WebUI; credentials in secrets/proxy_auth
+# egress_proxy: ""                 optional; applied to apt, Docker pulls, the CLI, SearXNG, Open WebUI, gideon-egress; credentials in secrets/proxy_auth
 
 # web:                             General branch search policy
 #   search: on                     off = no web search anywhere; SearXNG not started

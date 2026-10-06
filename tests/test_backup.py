@@ -595,6 +595,7 @@ class BackupRun(unittest.TestCase):
                 "--exclude=secrets/",
                 "--exclude=rendered/open-webui/env",
                 "--exclude=rendered/searxng/env",
+                "--exclude=rendered/gideon-egress/env",
                 "--exclude=no-gpu",
                 "--exclude=build-box",
                 "--exclude=backup_age_identity",

@@ -10,6 +10,8 @@ from gideon.cli import build_parser
 
 ROOT = Path(__file__).resolve().parent.parent
 ENTRIES = {
+    "gideon/egress/__main__.py": "slice-3 ticket 80: egress service start fixes",
+    "gideon/egress/settings.py": "slice-3 ticket 80: egress service settings fixes",
     "gideon/evaluation/command.py": "front-door ticket 20: eval command fixes and retries",
     "gideon/evaluation/record.py": "front-door ticket 20: eval record fixes",
     "gideon/evaluation/turns/access.py": "front-door ticket 20: turn access checks",
