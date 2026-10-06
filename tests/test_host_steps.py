@@ -170,6 +170,8 @@ class FakeHost:
     def listdir(self, path: PathLike) -> list[str]:
         key = os.fspath(path)
         self.calls.append(("listdir", key))
+        if key in self.files:
+            raise NotADirectoryError(f"{key} is not a directory")
         return [Path(name).name for name in self.files if Path(name).parent == Path(key)]
 
     def unlink(self, path: PathLike, *, missing_ok: bool = False) -> None:
@@ -528,7 +530,190 @@ def disk_command_output(
     return tuple(command), completed(command, output)
 
 
+def add_data_directory(host: FakeHost, names: Sequence[str] = ()) -> None:
+    host.stats["/data"] = directory_stat(0o755)
+    host.files.update({f"/data/{name}": "" for name in names})
+
+
 class DiskLayoutStepTests(unittest.TestCase):
+    def test_occupied_unmounted_data_refuses_with_sorted_top_level_names(self) -> None:
+        names = ("omega", ".local", "alpha")
+        host = disk_host(disk_devices())
+        add_data_directory(host, names)
+
+        result = DiskLayoutStep().check(context(host))
+
+        self.assertEqual(result.disposition, Disposition.UNFIXABLE)
+        self.assertEqual(
+            result.detail,
+            f"/data is not a mount point and holds 3 entries: {', '.join(sorted(names))}",
+        )
+        self.assertIn("docs/runbooks/install-upgrade.md §8", result.fix)
+        self.assertIn("re-run provision", result.fix)
+
+    def test_occupied_data_caps_reported_names_but_keeps_total(self) -> None:
+        names = tuple(f"entry-{index:02d}" for index in reversed(range(12)))
+        host = disk_host(disk_devices())
+        add_data_directory(host, names)
+
+        result = DiskLayoutStep().check(context(host))
+
+        self.assertEqual(result.disposition, Disposition.UNFIXABLE)
+        self.assertEqual(
+            result.detail,
+            "/data is not a mount point and holds 12 entries: "
+            f"{', '.join(sorted(names)[:10])}, and 2 more",
+        )
+        self.assertNotIn(sorted(names)[10], result.detail)
+        self.assertNotIn(sorted(names)[11], result.detail)
+
+    def test_one_occupied_data_entry_uses_singular(self) -> None:
+        host = disk_host(disk_devices())
+        add_data_directory(host, ("only-entry",))
+
+        result = DiskLayoutStep().check(context(host))
+
+        self.assertEqual(result.disposition, Disposition.UNFIXABLE)
+        self.assertEqual(
+            result.detail,
+            "/data is not a mount point and holds 1 entry: only-entry",
+        )
+
+    def test_occupied_data_apply_refuses_before_any_disk_mutation(self) -> None:
+        host = disk_host(disk_devices())
+        add_data_directory(host, ("client-data",))
+        step = DiskLayoutStep()
+        check = step.check(context(host))
+
+        with self.assertRaises(StepFailure) as raised:
+            step.apply(context(host))
+
+        self.assertEqual(raised.exception.detail, check.detail)
+        self.assertEqual(raised.exception.fix, check.fix)
+        self.assertEqual(
+            [
+                call
+                for call in host.calls
+                if call[0] == "run"
+                and isinstance(call[1], tuple)
+                and isinstance(call[1][0], tuple)
+                and call[1][0][0]
+                in {"pvcreate", "vgcreate", "lvcreate", "mkfs.xfs", "mount"}
+            ],
+            [],
+        )
+        self.assertEqual(
+            [call for call in host.calls if call[0] in {"write_text", "mkdir"}],
+            [],
+        )
+
+    def test_absent_and_empty_data_keep_pv_missing_drift(self) -> None:
+        for present in (False, True):
+            with self.subTest(data_directory_present=present):
+                host = disk_host(disk_devices())
+                if present:
+                    add_data_directory(host)
+
+                result = DiskLayoutStep().check(context(host))
+
+                self.assertEqual(result.disposition, Disposition.DRIFT)
+                self.assertEqual(result.detail, "the data disk PV is missing")
+
+    def test_complete_unmounted_volume_with_occupied_data_refuses(self) -> None:
+        devices = disk_devices(
+            data_children=[
+                {
+                    "name": "sdb1",
+                    "type": "part",
+                    "size": 8730000000000,
+                    "wwn": None,
+                    "fstype": "LVM2_member",
+                    "mountpoint": None,
+                    "pkname": "sdb",
+                }
+            ]
+        )
+        uuid = "fictitious-data-uuid"
+        commands = dict(
+            [
+                disk_command_output(
+                    ("pvs", "--reportformat", "json", "-o", "pv_name,vg_name"),
+                    '{"report":[{"pv":[{"pv_name":"/dev/sdb","vg_name":"vg_data"}]}]}',
+                ),
+                disk_command_output(
+                    ("vgs", "--reportformat", "json", "--units", "b", "-o", "vg_name,vg_size"),
+                    '{"report":[{"vg":[{"vg_name":"vg_data","vg_size":"8730000000000B"}]}]}',
+                ),
+                disk_command_output(
+                    ("lvs", "--reportformat", "json", "-o", "lv_name,vg_name,lv_path"),
+                    '{"report":[{"lv":[{"lv_name":"data","vg_name":"vg_data","lv_path":"/dev/vg_data/data"}]}]}',
+                ),
+                disk_command_output(
+                    ("blkid", "-o", "value", "-s", "TYPE", "/dev/vg_data/data"),
+                    "xfs\n",
+                ),
+                disk_command_output(
+                    ("blkid", "-o", "value", "-s", "UUID", "/dev/vg_data/data"),
+                    f"{uuid}\n",
+                ),
+            ]
+        )
+        host = disk_host(
+            devices,
+            commands=commands,
+            files={
+                "/etc/fstab": (
+                    "# GIDEON BEGIN provision:disk-layout\n"
+                    f"UUID={uuid} /data xfs defaults,nofail 0 2\n"
+                    "# GIDEON END provision:disk-layout\n"
+                )
+            },
+        )
+        step = DiskLayoutStep()
+        unoccupied = step.check(context(host))
+        self.assertEqual(unoccupied.disposition, Disposition.DRIFT)
+        self.assertEqual(unoccupied.detail, "/data is not mounted")
+
+        add_data_directory(host, ("client-data",))
+        occupied = step.check(context(host))
+        self.assertEqual(occupied.disposition, Disposition.UNFIXABLE)
+        self.assertIn("client-data", occupied.detail)
+
+    def test_unlistable_data_refuses_in_check_and_apply(self) -> None:
+        permitted_commands = disk_host(disk_devices()).commands
+        permission_denied = PermissionErrorHost("/data", commands=permitted_commands)
+        add_data_directory(permission_denied, ("client-data",))
+        data_file = disk_host(disk_devices(), files={"/data": "regular file"})
+
+        for host in (permission_denied, data_file):
+            with self.subTest(host=type(host).__name__):
+                step = DiskLayoutStep()
+                result = step.check(context(host))
+                self.assertEqual(result.disposition, Disposition.UNFIXABLE)
+                self.assertIn("cannot list /data", result.detail)
+                self.assertIn("Make /data a directory", result.fix)
+
+                with self.assertRaises(StepFailure) as raised:
+                    step.apply(context(host))
+                self.assertEqual(raised.exception.detail, result.detail)
+                self.assertEqual(raised.exception.fix, result.fix)
+                self.assertNotIn("pvcreate", [run[0][0] for run in host.runs])
+
+    def test_mounted_data_does_not_list_its_entries(self) -> None:
+        findmnt = ("findmnt", "-rn", "-o", "TARGET", "--mountpoint", "/data")
+        host = disk_host(
+            disk_devices(),
+            commands={findmnt: completed(findmnt, "/data\n")},
+        )
+        add_data_directory(host, ("client-data",))
+
+        result = DiskLayoutStep().check(context(host))
+
+        self.assertEqual(result.disposition, Disposition.DRIFT)
+        self.assertEqual(result.detail, "the data disk PV is missing")
+        self.assertNotIn(("listdir", "/data"), host.calls)
+        self.assertEqual([run[0] for run in host.runs].count(findmnt), 1)
+
     def test_blank_and_partial_gideon_disks_report_first_missing_state(self) -> None:
         blank = disk_host(disk_devices())
         blank_result = DiskLayoutStep().check(context(blank))

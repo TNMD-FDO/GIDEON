@@ -1,4 +1,7 @@
-"""Safe identification and convergence of the host data volume."""
+"""Safe identification and convergence of the host data volume.
+
+The step refuses to mount over an unmounted /data holding entries.
+"""
 
 import json
 import stat
@@ -21,6 +24,7 @@ from gideon.host.steps import (
     Disposition,
     ProvisionContext,
     Step,
+    StepFailure,
     apt_install,
     passwd_entry,
 )
@@ -98,6 +102,9 @@ _REINSTALL_FIX = "Reinstall the host's operating system, then re-run provision."
 _DISK_FIX = (
     "Resolve the data disk manually without wiping foreign data, then re-run provision."
 )
+_DATA_MOVE_FIX = "Move the entries onto the data volume by the procedure in docs/runbooks/install-upgrade.md §8, then re-run provision."
+_DATA_DIR_FIX = "Make /data a directory or remove it, then re-run provision."
+_DATA_NAMES_CAP = 10
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +132,8 @@ class _Inspection:
     gid: int | None = None
     error: str | None = None
     error_fix: str = _DISK_FIX
+    data_names: tuple[str, ...] = ()
+    data_list_error: str | None = None
 
 
 def _text(value: object) -> str:
@@ -317,6 +326,16 @@ def _mounted(host: Host) -> bool:
     return result.returncode == 0 and str(_DATA_MOUNT) in result.stdout.split()
 
 
+def _occupied_data_detail(names: tuple[str, ...]) -> str:
+    count = len(names)
+    entry = "entry" if count == 1 else "entries"
+    shown = ", ".join(names[:_DATA_NAMES_CAP])
+    remaining = count - _DATA_NAMES_CAP
+    if remaining > 0:
+        shown += f", and {remaining} more"
+    return f"{_DATA_MOUNT} is not a mount point and holds {count} {entry}: {shown}"
+
+
 def _read_fstab(host: Host) -> str | None:
     if not host.exists(_FSTAB):
         return ""
@@ -489,6 +508,17 @@ def _inspect(context: ProvisionContext) -> _Inspection:
             error_fix=_REINSTALL_FIX,
         )
 
+    mounted = _mounted(context.host)
+    data_names: tuple[str, ...] = ()
+    data_list_error: str | None = None
+    if not mounted and context.host.exists(_DATA_MOUNT):
+        try:
+            data_names = tuple(sorted(context.host.listdir(_DATA_MOUNT)))
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            data_list_error = f"cannot list {_DATA_MOUNT}: {exc}"
+
     pv_exists, vg_exists, lv_exists, foreign_pv, vg_size = _lvm_state(
         context.host, data_disk
     )
@@ -523,8 +553,6 @@ def _inspect(context: ProvisionContext) -> _Inspection:
     uuid = _blkid(context.host, "UUID") if filesystem == "xfs" else None
     fstab = _read_fstab(context.host) if uuid is not None else None
     entry = passwd_entry(context, "gideon")
-    credentials = (entry.uid, entry.gid) if entry is not None else None
-    mounted = _mounted(context.host) if fstab is not None else False
     return _Inspection(
         os_disk,
         data_disk,
@@ -537,7 +565,10 @@ def _inspect(context: ProvisionContext) -> _Inspection:
         vg_size,
         mounted,
         fstab,
-        *(credentials or (None, None)),
+        uid=entry.uid if entry is not None else None,
+        gid=entry.gid if entry is not None else None,
+        data_names=data_names,
+        data_list_error=data_list_error,
     )
 
 
@@ -546,7 +577,10 @@ def _failure(detail: str, fix: str = _DISK_FIX) -> CheckResult:
 
 
 class DiskLayoutStep(Step):
-    """Converge only a positively identified blank or GIDEON data disk."""
+    """Converge only a positively identified blank or GIDEON data disk.
+
+    The step refuses to mount over an unmounted /data holding entries.
+    """
 
     name = "disk-layout"
     summary = "identify disks and converge the data filesystem safely"
@@ -556,6 +590,15 @@ class DiskLayoutStep(Step):
         inspection = _inspect(context)
         if inspection.error is not None:
             return _failure(inspection.error, inspection.error_fix)
+        if inspection.data_list_error is not None:
+            return _failure(
+                inspection.data_list_error,
+                _DATA_DIR_FIX,
+            )
+        if inspection.data_names:
+            return _failure(
+                _occupied_data_detail(inspection.data_names), _DATA_MOVE_FIX
+            )
         if inspection.data_disk is None or inspection.data_kind is None:
             return _failure("the data disk was not positively identified")
         if inspection.data_kind == "foreign":
@@ -656,6 +699,15 @@ class DiskLayoutStep(Step):
         if inspection.vg_exists and not inspection.pv_exists:
             raise RuntimeError(
                 "vg_data exists but has no PV on the identified data disk"
+            )
+        if inspection.data_list_error is not None:
+            raise StepFailure(
+                inspection.data_list_error,
+                _DATA_DIR_FIX,
+            )
+        if inspection.data_names:
+            raise StepFailure(
+                _occupied_data_detail(inspection.data_names), _DATA_MOVE_FIX
             )
         # Mutate through the stable identity, never the enumeration name: the
         # by-id symlink re-validates the WWN at the moment of use ([36]).

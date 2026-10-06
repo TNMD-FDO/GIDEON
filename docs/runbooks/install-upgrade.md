@@ -640,3 +640,181 @@ sudo systemctl start gideon-registry.service
 ```
 
 Wait for the surveyed projects to return. Save fresh image and container lists, compare them with the saved lists in `/var/lib/gideon-store-move`, and confirm the old root is active before removing the copied `/var/lib/docker/containerd` root. Keep both roots until those checks pass.
+
+## 8. Moving an occupied `/data` onto the data volume
+
+Use this procedure when `host provision` reports `disk-layout: unfixable` and names entries held by an unmounted `/data`. The directory is on the root filesystem: another application's data may have been written there before GIDEON provisioned its volume, and mounting the volume would hide that data. Announce the move to the owning operator and use a maintenance window. The owning application stays down from **Stop** until **Start and accept**.
+
+Keep a root-owned record in `/var/lib/gideon-data-move` until acceptance. Each completed stage writes a stamp there; `copy.started` is written *before* copying. On an interrupted run, inspect the stamps and continue at the unfinished stage. Never repeat the volume inventory after `copy.started` exists: it would count the move's own copies as preexisting data. Stop if a command fails or a required tool is unavailable; repair that condition before continuing.
+
+### Survey
+
+Confirm `/data` is a directory and not a mount point. Start a new record only when `/var/lib/gideon-data-move` is absent. If a survey was interrupted before its stamp, inspect the record and repeat the survey only while the original `/data` is still in place; skip the new-record absence check on that repeat. Record the sorted top-level names as NUL-delimited data, and record each entry's owner, group, mode, and apparent size. Check root filesystem free space and the data's apparent size. Check that `lsof` and `rsync` are available before the stop:
+
+```sh
+sudo test -d /data
+sudo findmnt --mountpoint /data             # expect no mount and status 1
+sudo test ! -e /var/lib/gideon-data-move
+sudo test ! -L /var/lib/gideon-data-move
+sudo install -d -m 0700 /var/lib/gideon-data-move
+sudo bash -o pipefail -c 'find /data -mindepth 1 -maxdepth 1 -printf "%f\0" | sort -z > /var/lib/gideon-data-move/entries.nul'
+sudo bash -c 'find /data -mindepth 1 -maxdepth 1 -printf "%f\t%u:%g\t%m\t%s\0" > /var/lib/gideon-data-move/entries.details.nul'
+set -o pipefail
+sudo cat /var/lib/gideon-data-move/entries.details.nul | tr '\0' '\n'
+sudo df -h /
+sudo du -sh /data
+command -v lsof
+command -v rsync
+```
+
+The NUL-delimited record keeps names containing spaces or newlines intact. The following check must succeed and print nothing. GIDEON owns these top-level names and will re-own them; a co-tenant keeps its data outside them. If one is present, stop and have its operator rename it on their side, then repeat the survey before stamping it:
+
+```sh
+sudo test -s /var/lib/gideon-data-move/entries.nul
+sudo bash -euo pipefail -c '
+while IFS= read -r -d "" name; do
+    case "$name" in
+        fast|bulk|work|models|registry|drill|ci|backup-staging|acceptance|observability)
+            printf "managed /data name: %s\n" "$name" >&2
+            exit 1 ;;
+    esac
+done < /var/lib/gideon-data-move/entries.nul'
+```
+
+Use Docker's listing to record running containers with a bind mount sourced from `/data` or a path below it. With `pipefail` enabled, a failed Docker listing or inspection stops the survey. The record may be empty:
+
+```sh
+set -o pipefail
+sudo docker ps -q --no-trunc |
+    xargs -r sudo docker inspect --format '{{range .Mounts}}{{printf "%s\t%s\n" $.Name .Source}}{{end}}' |
+    awk -F '\t' '$2 == "/data" || index($2, "/data/") == 1' |
+    sudo tee /var/lib/gideon-data-move/containers.before
+sudo touch /var/lib/gideon-data-move/survey.done
+```
+
+### Stop
+
+The owning operator stops their application by its own commands. Confirm no process holds a path under `/data` open, no running container mounts it, and no nested mount remains. `lsof` should print nothing and return status 1; output, a diagnostic, or any other status stops the move. The Docker and mount listings must succeed and be empty. Do not set the stamp until all checks have passed:
+
+```sh
+sudo lsof +D /data                         # expect no output and status 1
+set -o pipefail
+sudo findmnt -rn -o TARGET |
+    awk '$0 == "/data" || index($0, "/data/") == 1' |
+    sudo tee /var/lib/gideon-data-move/mounts.after-stop
+sudo test ! -s /var/lib/gideon-data-move/mounts.after-stop
+sudo docker ps -q --no-trunc |
+    xargs -r sudo docker inspect --format '{{range .Mounts}}{{printf "%s\t%s\n" $.Name .Source}}{{end}}' |
+    awk -F '\t' '$2 == "/data" || index($2, "/data/") == 1' |
+    sudo tee /var/lib/gideon-data-move/containers.after-stop
+sudo test ! -s /var/lib/gideon-data-move/containers.after-stop
+sudo touch /var/lib/gideon-data-move/stop.done
+```
+
+### Set aside
+
+Rename `/data` on the same filesystem; this is an immediate rename, not a copy. The set-aside path must be absent. Leave `/data` absent for provision to create; do not pre-create it:
+
+```sh
+sudo test ! -e /data.before-gideon-move
+sudo test ! -L /data.before-gideon-move
+sudo mv -T /data /data.before-gideon-move
+sudo test ! -e /data
+sudo touch /var/lib/gideon-data-move/aside.done
+```
+
+### Provision
+
+From `/opt/gideon`, converge the volume and mount it. On a box that has not finished its first provision, `--only` refuses because its prerequisite has not converged; run the whole provision there instead. Proceed only when `findmnt` shows `/data` as an XFS mount point on the data LV and its size is as expected:
+
+```sh
+cd /opt/gideon
+sudo python3 -m gideon host provision --only disk-layout
+# On a first-provision box, use instead: sudo python3 -m gideon host provision
+sudo findmnt -rn -o TARGET,SOURCE,FSTYPE,SIZE --mountpoint /data
+sudo lvs -o lv_name,lv_size vg_data
+sudo touch /var/lib/gideon-data-move/provision.done
+```
+
+### Inventory the volume
+
+Before the first copy, record the mounted volume's own sorted top-level names. A volume previously built and left unmounted may already contain the owning application's data. Any name shared with the original survey stops the move: do not merge the trees. The owning operator reconciles the two copies by hand, keeping, renaming, or removing one, before inventory is repeated and the copy starts. Once the inventory is stamped, keep it; after `copy.started`, never re-inventory on a resume:
+
+```sh
+sudo bash -o pipefail -c 'find /data -mindepth 1 -maxdepth 1 -printf "%f\0" | sort -z > /var/lib/gideon-data-move/volume.before.nul'
+set -o pipefail
+sudo cat /var/lib/gideon-data-move/volume.before.nul | tr '\0' '\n'
+sudo comm -z -12 /var/lib/gideon-data-move/entries.nul /var/lib/gideon-data-move/volume.before.nul |
+    sudo tee /var/lib/gideon-data-move/shared-names.nul |
+    tr '\0' '\n'
+sudo test ! -s /var/lib/gideon-data-move/shared-names.nul
+sudo touch /var/lib/gideon-data-move/inventory.done
+```
+
+### Copy
+
+Stamp the start **before** the transfer. One `rsync` invocation copies the whole recorded entry list under the same names, preserving hard links even between different top-level entries, ACLs, extended attributes, sparse files, and numeric owners. `--files-from` needs explicit recursion. If interrupted, rerun this same `rsync` command; keep the original survey and volume inventory:
+
+```sh
+sudo test -f /var/lib/gideon-data-move/inventory.done
+sudo touch /var/lib/gideon-data-move/copy.started
+sudo rsync -aHAXxSr --numeric-ids --from0 --files-from=/var/lib/gideon-data-move/entries.nul /data.before-gideon-move/ /data/
+sudo touch /var/lib/gideon-data-move/copy.done
+```
+
+### Verify
+
+With the application still stopped, make a second dry pass over **only the surveyed entries**. `rsync` must exit successfully and the itemized difference file must be empty. Then compare each entry's regular-file count and the sum of those files' sizes on both sides. Do not compare whole roots: provision's directories sit beside the copies, and ext4 and XFS can report different directory sizes:
+
+```sh
+sudo test -f /var/lib/gideon-data-move/copy.done
+sudo bash -c 'rsync -aHAXxSr --numeric-ids --from0 --files-from=/var/lib/gideon-data-move/entries.nul -n -i /data.before-gideon-move/ /data/ > /var/lib/gideon-data-move/verify.differences'
+sudo test ! -s /var/lib/gideon-data-move/verify.differences
+sudo bash -euo pipefail -c '
+while IFS= read -r -d "" name; do
+    before=$(find "/data.before-gideon-move/$name" -xdev -type f -printf "%s\n" | awk "{count++; bytes+=\$1} END {printf \"%d %.0f\", count, bytes}")
+    after=$(find "/data/$name" -xdev -type f -printf "%s\n" | awk "{count++; bytes+=\$1} END {printf \"%d %.0f\", count, bytes}")
+    printf "%q: before %s; after %s\n" "$name" "$before" "$after"
+    test "$before" = "$after"
+done < /var/lib/gideon-data-move/entries.nul'
+sudo touch /var/lib/gideon-data-move/verify.done
+```
+
+### Start and accept
+
+The owning operator starts their application and confirms it works on the moved data. Record that operator's confirmation and time in the move record. From this start onward, the application writes to the volume alone; the rollback below is no longer safe:
+
+```sh
+printf '%s\n' '<operator confirmation and time>' | sudo tee /var/lib/gideon-data-move/accept.txt >/dev/null
+sudo touch /var/lib/gideon-data-move/start.accepted
+```
+
+### Remove
+
+Only after acceptance, confirm the data volume is still mounted, then remove the set-aside tree and the move record. A closing provision from `/opt/gideon` should report every step converged:
+
+```sh
+sudo test -f /var/lib/gideon-data-move/start.accepted
+sudo findmnt -rn -o TARGET,SOURCE,FSTYPE --mountpoint /data
+sudo rm -rf /data.before-gideon-move /var/lib/gideon-data-move
+cd /opt/gideon
+sudo python3 -m gideon host provision
+```
+
+### Roll back before the start
+
+Rollback is available from the stop until the owning application starts on the moved data. Before **Set aside**, `/data` is still the original directory: the owning operator can restart after confirming it is untouched. Once the application starts on the moved data, new writes exist only on the volume; moving back would require its operator to stop it and perform and verify a reverse `rsync`, outside this rollback.
+
+After **Set aside**, keep the application down. If `/data` is mounted, unmount it; if provision has not yet mounted it, confirm it is not a mount point and skip only `umount`. In `/etc/fstab`, manually remove the complete managed block if present: `# GIDEON BEGIN provision:disk-layout`, the UUID line between, and `# GIDEON END provision:disk-layout`. Provision will write the block again on the next successful move. Leaving it in place would mount the volume over the restored directory at reboot:
+
+```sh
+sudo umount /data                            # only when mounted
+sudo findmnt --mountpoint /data             # expect no mount and status 1
+sudoedit /etc/fstab
+sudo sed -n '/# GIDEON BEGIN provision:disk-layout/,/# GIDEON END provision:disk-layout/p' /etc/fstab
+sudo rmdir /data                            # only when the empty mount-point directory exists
+sudo mv -T /data.before-gideon-move /data
+sudo touch /var/lib/gideon-data-move/rollback.done
+```
+
+The `sed` command must print nothing before restoring `/data`. The owning operator then starts their application on the restored directory. Keep the rolled-back record for review, but archive it under a new name before a fresh attempt so its `copy.started` stamp cannot be mistaken for the new move's state. Provision will report the occupied-`/data` refusal again until the move is completed. Any copies already on the volume remain there and will appear as shared names at the next attempt's inventory; reconcile them before copying.
