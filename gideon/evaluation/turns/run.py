@@ -17,6 +17,7 @@ from gideon.evaluation.turns.cases import CASE_KINDS, Case
 from gideon.host import engine, owui, owuiturn
 from gideon.host.owui import Client
 from gideon.host.render.ci import PRODUCTION_STACK
+from gideon.host.render.engine import GENERATOR
 from gideon.host.render.owui import EVAL_IDENTITY, GENERAL_MODEL_ID
 from gideon.host.report import Problem, StageResult, Timeout, print_stage
 from gideon.host.sysio import Host, PathLike, RealHost
@@ -353,7 +354,7 @@ class UnfilteredTurnDriver:
     def signin(self) -> str:
         """State the door: the engine's models route is not callable from here.
 
-        ``call_engine``'s script posts, so there is no listing to probe the
+        ``call_model_server``'s script posts, so there is no listing to probe the
         served name against; the first case's failure carries the fix instead.
         """
 
@@ -377,9 +378,10 @@ class UnfilteredTurnDriver:
             instruction=self._instruction,
             stream=False,
         )
-        response = engine.call_engine(
+        response = engine.call_model_server(
             self._io,
             self._rendered_dir,
+            GENERATOR,
             path="/v1/chat/completions",
             body=body,
             max_time=int(TURN_TIMEOUT_SECONDS),

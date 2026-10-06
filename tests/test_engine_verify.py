@@ -1,7 +1,9 @@
 """Contracts for the direct engine verification command."""
 
 import argparse
+import ast
 import contextlib
+import inspect
 import io
 import json
 import os
@@ -15,13 +17,26 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
+import yaml  # type: ignore[import-untyped]
+
 from gideon import guardrail
-from gideon.host import audit, backuplock, engine, enginesample, owui, owuiturn, secrets
+from gideon.host import (
+    audit,
+    backuplock,
+    engine,
+    enginesample,
+    models,
+    owui,
+    owuiturn,
+    secrets,
+)
 from gideon.host.owui import OwuiError
 from gideon.host.render.engine import (
+    EMBED,
     ENGINE_PORT,
     ENGINE_SECRET_NAME,
     ENGINE_SERVICE_NAME,
+    GENERATOR,
 )
 from gideon.host.render.owui import EVAL_IDENTITY, EVAL_PASSWORD_SECRET
 from gideon.host.report import Problem
@@ -51,7 +66,7 @@ def site_text(profile: str = "1x1v-1d") -> str:
     return ROOT.joinpath("config/site.example.yaml").read_text() + f"\nhardware_profile: {profile}\n"
 
 
-def models_text(max_model_len: int = 4096) -> str:
+def models_text(max_model_len: int = 4096, embed_width: int = 7) -> str:
     return f'''version: 1
 reference: 1x1v-1d
 profiles:
@@ -70,6 +85,13 @@ profiles:
       {ENGINE_SERVICE_NAME}:
         gb: 1
         role: generator
+      {EMBED.service_name}:
+        gb: 1
+        role: embed
+    embedding_space:
+      id: fixture-embed-space
+      role: embed
+      dimensions: {embed_width}
     models:
       generator:
         repo: example/fixture
@@ -85,12 +107,31 @@ profiles:
           config.json:
             sha256: sha256:{'b' * 64}
             size: 1
+      embed:
+        repo: example/fixture-embed
+        revision: "{'c' * 40}"
+        gpu: 0
+        serve:
+          served_name: {EMBED.service_name}
+          env:
+            HF_HOME: /data/models
+          flags: {{}}
+        files:
+          config.json:
+            sha256: sha256:{'d' * 64}
+            size: 1
 '''
 
 
-def ps_output(*, health: str = "healthy", state: str = "running") -> str:
+def ps_output(
+    *, health: str = "healthy", state: str = "running",
+    embed_health: str = "healthy", embed_state: str = "running",
+) -> str:
     return json.dumps(
-        [{"Service": ENGINE_SERVICE_NAME, "State": state, "Health": health}]
+        [
+            {"Service": ENGINE_SERVICE_NAME, "State": state, "Health": health},
+            {"Service": EMBED.service_name, "State": embed_state, "Health": embed_health},
+        ]
     )
 
 
@@ -151,6 +192,18 @@ class FakeHost:
         structured_finish: str | None = "stop",
         structured_status: int = 200,
         structured_error: str = "",
+        embed_returncode: int = 0,
+        embed_status: int = 200,
+        embed_error: str = "fixture embed failure",
+        embed_count_offset: int = 0,
+        embed_width_offset: int = 0,
+        embed_non_numeric: bool = False,
+        embed_norm: float = 1.0,
+        throughput_returncode: int = 0,
+        throughput_status: int = 200,
+        throughput_count_offset: int = 0,
+        throughput_missing_tokens: bool = False,
+        throughput_elapsed: float = 1.25,
         lock_holder: str | None = None,
         lock_error: OSError | None = None,
     ) -> None:
@@ -170,6 +223,18 @@ class FakeHost:
         self.structured_finish = structured_finish
         self.structured_status = structured_status
         self.structured_error = structured_error
+        self.embed_returncode = embed_returncode
+        self.embed_status = embed_status
+        self.embed_error = embed_error
+        self.embed_count_offset = embed_count_offset
+        self.embed_width_offset = embed_width_offset
+        self.embed_non_numeric = embed_non_numeric
+        self.embed_norm = embed_norm
+        self.throughput_returncode = throughput_returncode
+        self.throughput_status = throughput_status
+        self.throughput_count_offset = throughput_count_offset
+        self.throughput_missing_tokens = throughput_missing_tokens
+        self.throughput_elapsed = throughput_elapsed
         self.runs: list[tuple[tuple[str, ...], str | None, float | None]] = []
         self.lock_holder = lock_holder
         self.lock_error = lock_error
@@ -239,6 +304,52 @@ class FakeHost:
             + " time_starttransfer=0.20 time_total=2.50\n"
         )
 
+    def _embed_reply(self, body: Mapping[str, object], *, throughput: bool) -> str:
+        status = self.throughput_status if throughput else self.embed_status
+        if status != 200:
+            response: Mapping[str, object] = {"error": {"message": self.embed_error}}
+        else:
+            loaded = models.load_models_lock(MODELS_PATH, host=self)
+            assert loaded.lock is not None
+            profile = loaded.lock.profile(loaded.lock.reference)
+            assert profile is not None and profile.embedding_space is not None
+            width = profile.embedding_space.dimensions + self.embed_width_offset
+            texts = body["input"]
+            assert isinstance(texts, list)
+            count_offset = self.throughput_count_offset if throughput else self.embed_count_offset
+            count = max(0, len(texts) + count_offset)
+            vectors: list[object] = []
+            for index in range(count):
+                embedding: list[object] = [self.embed_norm]
+                embedding.extend([0.0] * (width - 1))
+                if self.embed_non_numeric:
+                    embedding[-1] = "bad coordinate"
+                vectors.append({"embedding": embedding, "index": index, "object": "embedding"})
+            tokens = sum(len(text.split()) for text in texts if isinstance(text, str))
+            response = {
+                "created": 1,
+                "data": vectors,
+                "id": "fixture-embedding-response",
+                "model": body["model"],
+                "object": "list",
+                "usage": {
+                    "completion_tokens": 0,
+                    "prompt_tokens": tokens,
+                    "prompt_tokens_details": None,
+                    "total_tokens": tokens,
+                },
+            }
+            if throughput and self.throughput_missing_tokens:
+                usage = response["usage"]
+                assert isinstance(usage, dict)
+                del usage["prompt_tokens"]
+        elapsed = self.throughput_elapsed if throughput else 1.25
+        return (
+            json.dumps(response)
+            + f"\n@gideon-engine-verify http_code={status} "
+            f"time_starttransfer=0.20 time_total={elapsed:.2f}\n"
+        )
+
     def run(
         self,
         argv: Command,
@@ -257,8 +368,21 @@ class FakeHost:
             raise self.exec_error
         if tuple(command[-4:]) == ("ps", "--all", "--format", "json"):
             return completed(command, stdout=self.ps)
+        if "exec" in command and EMBED.service_name in command and command[-3].endswith("/v1/embeddings"):
+            assert input is not None
+            body = json.loads(input)
+            assert isinstance(body, dict)
+            texts = body["input"]
+            assert isinstance(texts, list)
+            sample = enginesample.load_sample(SAMPLE_PATH, host=self).sample
+            assert sample is not None
+            throughput = len(texts) == sample.supporting.embed.throughput.inputs
+            returncode = self.throughput_returncode if throughput else self.embed_returncode
+            if returncode != 0:
+                return completed(command, returncode=returncode, stderr="fixture embed exec failed")
+            return completed(command, stdout=self._embed_reply(body, throughput=throughput))
         if "exec" in command and ENGINE_SERVICE_NAME in command:
-            if input is not None and command[-2].endswith("/tokenize"):
+            if input is not None and command[-3].endswith("/tokenize"):
                 if self.tokenize_failure:
                     return completed(command, returncode=7, stderr="tokenizer unavailable")
                 body = json.loads(input)
@@ -572,10 +696,50 @@ class FakeFrontend:
 
 
 class CommandTests(unittest.TestCase):
+    def test_model_server_call_requires_a_member(self) -> None:
+        parameters = list(inspect.signature(engine.call_model_server).parameters.values())
+        self.assertEqual(parameters[2].name, "member")
+        self.assertEqual(parameters[2].kind, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        self.assertIs(parameters[2].default, inspect.Parameter.empty)
+
+    def test_engine_module_imports_no_bare_model_server_identity(self) -> None:
+        tree = ast.parse(Path(engine.__file__).read_text())
+        imported = {
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.Import, ast.ImportFrom))
+            for alias in node.names
+        }
+        self.assertFalse(imported & {
+            "ENGINE_SERVICE_NAME", "ENGINE_SECRET_NAME", "ENGINE_PORT",
+            "EMBED_SERVICE_NAME", "EMBED_SECRET_NAME", "EMBED_PORT",
+        })
+
+    def test_embedding_member_controls_exec_and_failure(self) -> None:
+        host = self.make_host(embed_returncode=7)
+        reply = engine.call_model_server(
+            host, RENDERED, EMBED, path="/v1/embeddings", body={"input": ["fixture"]}, max_time=7
+        )
+        argv = host.runs[-1][0]
+        self.assertEqual(
+            argv,
+            tuple(exec_argv(
+                RENDERED, EMBED.service_name, "sh", "-c", engine.ENGINE_CURL_SCRIPT,
+                "gideon-engine-verify", f"/run/secrets/{EMBED.secret_name}",
+                f"http://{EMBED.service_name}:{EMBED.port}/v1/embeddings", "7",
+                EMBED.key_file_words,
+            )),
+        )
+        assert reply.problem is not None
+        self.assertTrue(reply.problem.problem.startswith("embedding server request failed"))
+        self.assertIn("logs gideon-embed", reply.problem.fix)
+
     def make_host(self, **kwargs: Any) -> FakeHost:
         files = {
             SITE_PATH: site_text(),
-            str(Path(RENDERED) / "compose.yaml"): "services:\n  gideon-generator: {}\n",
+            str(Path(RENDERED) / "compose.yaml"): (
+                f"services:\n  {GENERATOR.service_name}: {{}}\n  {EMBED.service_name}: {{}}\n"
+            ),
             MODELS_PATH: models_text(),
             SAMPLE_PATH: ROOT.joinpath("eval/engine-verify/sample.yaml").read_text(),
             str(secrets.secret_path(EVAL_PASSWORD_SECRET)): SECRET_VALUE,
@@ -649,6 +813,8 @@ class CommandTests(unittest.TestCase):
                     f"{engine.FRONTEND_ROW_PREFIX}{case.id}"
                     for case in (*loaded.frontend.positives, loaded.frontend.trip)
                 ),
+                "embed-vectors",
+                "embed-throughput",
                 "audit",
             ],
         )
@@ -671,7 +837,7 @@ class CommandTests(unittest.TestCase):
             ],
         )
         self.assertEqual(len(frontend.positives), 2)
-        exec_runs = [run for run in host.runs if "exec" in run[0]]
+        exec_runs = [run for run in host.runs if "exec" in run[0] and ENGINE_SERVICE_NAME in run[0]]
         self.assertGreater(len(exec_runs), 3)
         argv, request_text, timeout = exec_runs[-1]
         self.assertEqual(
@@ -687,6 +853,7 @@ class CommandTests(unittest.TestCase):
                     f"/run/secrets/{ENGINE_SECRET_NAME}",
                     f"http://{ENGINE_SERVICE_NAME}:{ENGINE_PORT}/v1/chat/completions",
                     str(engine.SMOKE_TIMEOUT_SECONDS),
+                    GENERATOR.key_file_words,
                 )
             ),
         )
@@ -723,6 +890,262 @@ class CommandTests(unittest.TestCase):
         }
         self.assertEqual(len(frontend_checks), 3)
         self.assertTrue(all(isinstance(value, Mapping) for value in frontend_checks.values()))
+
+    def test_embed_vectors_request_and_figures_follow_the_fixture_lock(self) -> None:
+        host = self.make_host(files={MODELS_PATH: models_text(embed_width=9)})
+        code, output, backend = self.run_command(host)
+        self.assertEqual(code, 0, output)
+
+        loaded = models.load_models_lock(MODELS_PATH, host=host)
+        assert loaded.lock is not None
+        profile = loaded.lock.profile(loaded.lock.reference)
+        assert profile is not None and profile.embedding_space is not None
+        pin = profile.model(EMBED.role)
+        assert pin is not None
+        sample = enginesample.load_sample(SAMPLE_PATH, host=host).sample
+        assert sample is not None
+        case = sample.supporting.embed.vectors
+
+        embed_runs = [
+            run for run in host.runs
+            if "exec" in run[0] and EMBED.service_name in run[0]
+            and run[1] is not None and len(json.loads(run[1])["input"]) == len(case.texts)
+        ]
+        self.assertEqual(len(embed_runs), 1)
+        argv, request_text, timeout = embed_runs[0]
+        self.assertEqual(argv, tuple(exec_argv(
+            RENDERED, EMBED.service_name, "sh", "-c", engine.ENGINE_CURL_SCRIPT,
+            "gideon-engine-verify", f"/run/secrets/{EMBED.secret_name}",
+            f"http://{EMBED.service_name}:{EMBED.port}/v1/embeddings",
+            str(engine.EMBED_VECTORS_TIMEOUT_SECONDS), EMBED.key_file_words,
+        )))
+        self.assertEqual(timeout, engine.EMBED_VECTORS_TIMEOUT_SECONDS + engine.RUN_TIMEOUT_MARGIN_SECONDS)
+        assert request_text is not None
+        self.assertEqual(json.loads(request_text), {
+            "model": pin.serve.served_name, "input": list(case.texts),
+        })
+        self.assertNotIn("dimensions", json.loads(request_text))
+        self.assertNotIn(SECRET_VALUE, " ".join(argv) + request_text)
+
+        checks = backend.rows[0].detail["checks"]
+        assert isinstance(checks, Mapping)
+        figures = checks["embed-vectors"]
+        assert isinstance(figures, Mapping)
+        self.assertEqual(set(figures), {
+            "ok", "http_status", "inputs", "vectors", "dimensions", "width_min", "width_max",
+            "norm_min", "norm_max", "prompt_tokens", "elapsed_seconds", "space",
+        })
+        self.assertTrue(figures["ok"])
+        self.assertEqual(figures["http_status"], 200)
+        self.assertEqual(figures["inputs"], len(case.texts))
+        self.assertEqual(figures["vectors"], len(case.texts))
+        self.assertEqual(figures["dimensions"], profile.embedding_space.dimensions)
+        self.assertEqual(figures["width_min"], profile.embedding_space.dimensions)
+        self.assertEqual(figures["width_max"], profile.embedding_space.dimensions)
+        self.assertEqual(figures["norm_min"], 1.0)
+        self.assertEqual(figures["norm_max"], 1.0)
+        self.assertEqual(figures["prompt_tokens"], sum(len(text.split()) for text in case.texts))
+        self.assertEqual(figures["space"], profile.embedding_space.id)
+        self.assertEqual(figures["elapsed_seconds"], 1.25)
+        self.assertLess(output.index(f"{engine.FRONTEND_ROW_PREFIX}{sample.frontend.trip.id}"), output.index("embed-vectors:"))
+        self.assertLess(output.index("embed-vectors:"), output.index("audit:"))
+        for text in case.texts:
+            self.assertNotIn(text, output)
+            self.assertNotIn(text, repr(backend.rows[0].detail))
+
+    def test_embed_throughput_request_and_rates_follow_the_reply(self) -> None:
+        host = self.make_host()
+        code, output, backend = self.run_command(host)
+        self.assertEqual(code, 0, output)
+        sample = enginesample.load_sample(SAMPLE_PATH, host=host).sample
+        assert sample is not None
+        case = sample.supporting.embed.throughput
+        texts = enginesample.build_throughput_texts(case)
+        loaded = models.load_models_lock(MODELS_PATH, host=host)
+        assert loaded.lock is not None
+        profile = loaded.lock.profile(loaded.lock.reference)
+        assert profile is not None
+        pin = profile.model(EMBED.role)
+        assert pin is not None
+
+        runs = [
+            run for run in host.runs
+            if "exec" in run[0] and EMBED.service_name in run[0]
+            and run[1] is not None and len(json.loads(run[1])["input"]) == case.inputs
+        ]
+        self.assertEqual(len(runs), 1)
+        argv, request_text, timeout = runs[0]
+        self.assertEqual(argv, tuple(exec_argv(
+            RENDERED, EMBED.service_name, "sh", "-c", engine.ENGINE_CURL_SCRIPT,
+            "gideon-engine-verify", f"/run/secrets/{EMBED.secret_name}",
+            f"http://{EMBED.service_name}:{EMBED.port}/v1/embeddings",
+            str(engine.EMBED_THROUGHPUT_TIMEOUT_SECONDS), EMBED.key_file_words,
+        )))
+        self.assertEqual(timeout, engine.EMBED_THROUGHPUT_TIMEOUT_SECONDS + engine.RUN_TIMEOUT_MARGIN_SECONDS)
+        assert request_text is not None
+        self.assertEqual(json.loads(request_text), {
+            "model": pin.serve.served_name, "input": list(texts),
+        })
+        self.assertNotIn("dimensions", json.loads(request_text))
+        self.assertNotIn(SECRET_VALUE, " ".join(argv) + request_text)
+
+        checks = backend.rows[0].detail["checks"]
+        assert isinstance(checks, Mapping)
+        figures = checks["embed-throughput"]
+        assert isinstance(figures, Mapping)
+        self.assertEqual(set(figures), {
+            "ok", "http_status", "inputs", "prompt_tokens", "elapsed_seconds",
+            "tokens_per_second", "inputs_per_second",
+        })
+        tokens = sum(len(text.split()) for text in texts)
+        self.assertTrue(figures["ok"])
+        self.assertEqual(figures["http_status"], 200)
+        self.assertEqual(figures["inputs"], len(texts))
+        self.assertEqual(figures["prompt_tokens"], tokens)
+        self.assertEqual(figures["elapsed_seconds"], host.throughput_elapsed)
+        self.assertEqual(figures["tokens_per_second"], round(tokens / host.throughput_elapsed, 1))
+        self.assertEqual(figures["inputs_per_second"], round(len(texts) / host.throughput_elapsed, 1))
+        detail = (
+            f"{len(texts)} texts, {tokens} tokens in {host.throughput_elapsed:.3f} s: "
+            f"{tokens / host.throughput_elapsed:.1f} tok/s, "
+            f"{len(texts) / host.throughput_elapsed:.1f} texts/s"
+        )
+        self.assertIn(f"embed-throughput: ok — {detail}", output)
+        self.assertLess(output.index("embed-vectors:"), output.index("embed-throughput:"))
+        self.assertLess(output.index("embed-throughput:"), output.index("audit:"))
+        self.assertNotIn("None", next(line for line in output.splitlines() if line.startswith("embed-throughput:")))
+        for text in (*sample.supporting.embed.vectors.texts, case.filler, *texts):
+            self.assertNotIn(text, output)
+            self.assertNotIn(text, repr(backend.rows[0].detail))
+
+    def test_embed_throughput_failures_leave_every_other_row_running(self) -> None:
+        sample = enginesample.load_sample(SAMPLE_PATH, host=self.make_host()).sample
+        assert sample is not None
+        inputs = sample.supporting.embed.throughput.inputs
+        cases: tuple[tuple[str, dict[str, Any], str, bool], ...] = (
+            ("exec", {"throughput_returncode": 7}, "embedding server request failed", False),
+            ("status", {"throughput_status": 503}, "embedding server returned HTTP 503", False),
+            ("sample", {"throughput_status": 400}, "embedding server returned HTTP 400", True),
+            ("count", {"throughput_count_offset": -1}, f"returned {inputs - 1} vectors for {inputs} inputs", False),
+            ("tokens", {"throughput_missing_tokens": True}, "no prompt token count", False),
+            ("time", {"throughput_elapsed": 0.0}, "no elapsed time", False),
+        )
+        for name, options, detail, sample_fix in cases:
+            with self.subTest(name=name):
+                host = self.make_host(**options)
+                code, output, backend = self.run_command(host)
+                self.assertEqual(code, 1, output)
+                self.assertIn("embed-vectors: ok", output)
+                self.assertIn("embed-throughput: refuse", output)
+                self.assertIn(detail, output)
+                self.assertIn("audit: ok", output)
+                checks = backend.rows[0].detail["checks"]
+                assert isinstance(checks, Mapping)
+                self.assertEqual(backend.rows[0].detail["outcome"], "failed")
+                self.assertFalse(checks["embed-throughput"]["ok"])
+                self.assertTrue(all(
+                    check["ok"] for row, check in checks.items() if row != "embed-throughput"
+                ))
+                figures = checks["embed-throughput"]
+                assert isinstance(figures, Mapping)
+                self.assertIsNone(figures["tokens_per_second"])
+                self.assertIsNone(figures["inputs_per_second"])
+                for text in (*sample.supporting.embed.vectors.texts, sample.supporting.embed.throughput.filler):
+                    self.assertNotIn(text, output)
+                    self.assertNotIn(text, repr(backend.rows[0].detail))
+                if sample_fix:
+                    self.assertIn(engine._SAMPLE_FIX, output)
+                else:
+                    self.assertIn("logs gideon-embed", output)
+
+    def test_embed_vectors_failures_leave_other_rows_and_audit_running(self) -> None:
+        sample = enginesample.load_sample(SAMPLE_PATH, host=self.make_host()).sample
+        assert sample is not None
+        inputs = len(sample.supporting.embed.vectors.texts)
+        cases: tuple[tuple[str, dict[str, Any], str, bool], ...] = (
+            ("exec", {"embed_returncode": 7}, "embedding server request failed", False),
+            ("status", {"embed_status": 503}, "embedding server returned HTTP 503", False),
+            ("sample", {"embed_status": 400}, "embedding server returned HTTP 400", True),
+            ("count", {"embed_count_offset": -1}, f"returned {inputs - 1} vectors for {inputs} inputs", False),
+            ("width", {"embed_width_offset": 1}, "has width", False),
+            ("number", {"embed_non_numeric": True}, "not a list of numbers", False),
+            ("norm", {"embed_norm": 0.5}, "has norm 0.500000", False),
+        )
+        for name, options, detail, sample_fix in cases:
+            with self.subTest(name=name):
+                host = self.make_host(**options)
+                code, output, backend = self.run_command(host)
+                self.assertEqual(code, 1, output)
+                self.assertIn("embed-vectors: refuse", output)
+                self.assertIn(detail, output)
+                self.assertIn("audit: ok", output)
+                checks = backend.rows[0].detail["checks"]
+                assert isinstance(checks, Mapping)
+                self.assertEqual(backend.rows[0].detail["outcome"], "failed")
+                self.assertFalse(checks["embed-vectors"]["ok"])
+                self.assertTrue(all(
+                    check["ok"] for row, check in checks.items() if row != "embed-vectors"
+                ))
+                for text in sample.supporting.embed.vectors.texts:
+                    self.assertNotIn(text, output)
+                    self.assertNotIn(text, repr(backend.rows[0].detail))
+                if sample_fix:
+                    self.assertIn(engine._SAMPLE_FIX, output)
+                else:
+                    self.assertIn("logs gideon-embed", output)
+
+    def test_embed_target_refusals_fail_its_row_after_generator(self) -> None:
+        without_pin = yaml.safe_load(models_text())
+        pin_profile = without_pin["profiles"][without_pin["reference"]]
+        del pin_profile["models"][EMBED.role]
+        del pin_profile["memory"][EMBED.service_name]
+        del pin_profile["embedding_space"]
+        without_space = yaml.safe_load(models_text())
+        del without_space["profiles"][without_space["reference"]]["embedding_space"]
+        wrong_role = yaml.safe_load(models_text())
+        wrong_role["profiles"][wrong_role["reference"]]["embedding_space"]["role"] = GENERATOR.role
+        compose = f"services:\n  {GENERATOR.service_name}: {{}}\n"
+        cases = (
+            ("compose", {"files": {str(Path(RENDERED) / "compose.yaml"): compose}},
+             "no embedding server service", "sudo python3 -m gideon apply"),
+            ("pin", {"files": {MODELS_PATH: yaml.safe_dump(without_pin)}}, "no embed pin", "Edit models.lock"),
+            ("space", {"files": {MODELS_PATH: yaml.safe_dump(without_space)}}, "no embedding_space", "Edit models.lock"),
+            ("role", {"files": {MODELS_PATH: yaml.safe_dump(wrong_role)}}, "embedding_space names generator", "Edit models.lock"),
+            ("unhealthy", {"ps": ps_output(embed_health="starting")}, EMBED.service_name, "sudo python3 -m gideon apply"),
+            ("stopped", {"ps": ps_output(embed_state="exited", embed_health="")}, EMBED.service_name, "sudo python3 -m gideon apply"),
+        )
+        for name, options, detail, fix in cases:
+            with self.subTest(name=name):
+                host = self.make_host(**options)
+                code, output, backend = self.run_command(host)
+                self.assertEqual(code, 1, output)
+                self.assertIn("embed-vectors: refuse", output)
+                self.assertIn("embed-throughput: refuse", output)
+                self.assertIn(detail, output)
+                self.assertIn(fix, output)
+                self.assertIn("audit: ok", output)
+                checks = backend.rows[0].detail["checks"]
+                assert isinstance(checks, Mapping)
+                figures = checks["embed-vectors"]
+                assert isinstance(figures, Mapping)
+                self.assertEqual(set(figures), {
+                    "ok", "http_status", "inputs", "vectors", "dimensions", "width_min", "width_max",
+                    "norm_min", "norm_max", "prompt_tokens", "elapsed_seconds", "space",
+                })
+                self.assertFalse(figures["ok"])
+                self.assertTrue(all(value is None for key, value in figures.items() if key != "ok"))
+                throughput_figures = checks["embed-throughput"]
+                assert isinstance(throughput_figures, Mapping)
+                self.assertEqual(set(throughput_figures), {
+                    "ok", "http_status", "inputs", "prompt_tokens", "elapsed_seconds",
+                    "tokens_per_second", "inputs_per_second",
+                })
+                self.assertFalse(throughput_figures["ok"])
+                self.assertTrue(all(value is None for key, value in throughput_figures.items() if key != "ok"))
+                self.assertTrue(all(check["ok"] for row, check in checks.items() if row not in {"embed-vectors", "embed-throughput"}))
+                self.assertFalse(any("exec" in argv and EMBED.service_name in argv for argv, _, _ in host.runs))
+                if name in {"unhealthy", "stopped"}:
+                    self.assertIn("logs gideon-embed", output)
 
     def test_engine_lock_is_claimed_and_released_after_the_verify_run(self) -> None:
         host = self.make_host()
@@ -934,7 +1357,7 @@ class CommandTests(unittest.TestCase):
                 self.assertIn("audit: ok", output)
                 checks = backend.rows[0].detail["checks"]
                 assert isinstance(checks, Mapping)
-                self.assertEqual(list(checks)[-3:], expected_names)
+                self.assertEqual(list(checks)[-5:-2], expected_names)
                 delete_paths = [
                     path for method, path, _ in frontend.requests if method == "DELETE"
                 ]
@@ -1022,7 +1445,7 @@ class CommandTests(unittest.TestCase):
             self.assertTrue(detail["recalled"])
 
         exec_runs = [run for run in host.runs if "exec" in run[0]]
-        requests = [(run[0][-2], json.loads(run[1])) for run in exec_runs if run[1] is not None]
+        requests = [(run[0][-3], json.loads(run[1])) for run in exec_runs if run[1] is not None]
         tokenize_requests = [body for url, body in requests if url.endswith("/tokenize")]
         needle_requests = [
             body
@@ -1120,7 +1543,7 @@ class CommandTests(unittest.TestCase):
 
     def test_structured_verdict_variants(self) -> None:
         variants = (
-            ({"structured_content": "not json"}, "not one JSON document", engine._engine_fix(RENDERED)),
+            ({"structured_content": "not json"}, "not one JSON document", engine._engine_fix(RENDERED, GENERATOR)),
             (
                 {
                     "structured_content": json.dumps(
@@ -1134,9 +1557,9 @@ class CommandTests(unittest.TestCase):
                     )
                 },
                 "violates the schema at /confidence, /<additional-property>",
-                engine._engine_fix(RENDERED),
+                engine._engine_fix(RENDERED, GENERATOR),
             ),
-            ({"structured_finish": "length"}, "finish reason 'length'", engine._engine_fix(RENDERED)),
+            ({"structured_finish": "length"}, "finish reason 'length'", engine._engine_fix(RENDERED, GENERATOR)),
             (
                 {"structured_status": 400, "structured_error": "schema rejected"},
                 "schema rejected",
@@ -1157,8 +1580,8 @@ class CommandTests(unittest.TestCase):
 
     def test_needle_failure_variants_keep_running_smoke_and_audit(self) -> None:
         variants = (
-            ({"needle_content": ""}, "not recalled", engine._engine_fix(RENDERED)),
-            ({"needle_usage_offset": 1}, "usage.prompt_tokens", engine._engine_fix(RENDERED)),
+            ({"needle_content": ""}, "not recalled", engine._engine_fix(RENDERED, GENERATOR)),
+            ({"needle_usage_offset": 1}, "usage.prompt_tokens", engine._engine_fix(RENDERED, GENERATOR)),
             (
                 {"needle_status": 400, "needle_error": "request rejected"},
                 "request rejected",
@@ -1195,7 +1618,7 @@ class CommandTests(unittest.TestCase):
         ]
         self.assertEqual(
             list(checks),
-            ["needle-32k", "needle-128k", "needle-256k", "structured", "smoke", *expected_frontend],
+            ["needle-32k", "needle-128k", "needle-256k", "structured", "smoke", *expected_frontend, "embed-vectors", "embed-throughput"],
         )
 
     def test_needle_rows_and_audit_never_keep_sample_text(self) -> None:
@@ -1220,6 +1643,8 @@ class CommandTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertEqual(output, "engine: ok — skipped — no-GPU host\n")
+        self.assertNotIn("embed-vectors", output)
+        self.assertNotIn("embed-throughput", output)
         self.assertEqual(host.runs, [])
         self.assertEqual(backend.rows, [])
 
@@ -1318,9 +1743,10 @@ class CommandTests(unittest.TestCase):
                 "time_starttransfer=0.25 time_total=0.50\n"
             )
         )
-        reply = engine.call_engine(
+        reply = engine.call_model_server(
             host,
             RENDERED,
+            GENERATOR,
             path="/v1/fixture",
             body={"fixture": True},
             max_time=7,
@@ -1338,9 +1764,10 @@ class CommandTests(unittest.TestCase):
         ):
             with self.subTest(fragment=fragment):
                 invalid_host = self.make_host(exec_stdout=output)
-                invalid = engine.call_engine(
+                invalid = engine.call_model_server(
                     invalid_host,
                     RENDERED,
+                    GENERATOR,
                     path="/v1/fixture",
                     body={},
                     max_time=7,
@@ -1350,9 +1777,10 @@ class CommandTests(unittest.TestCase):
                 self.assertIn(fragment, invalid.problem.problem)
 
         failed_host = self.make_host(exec_returncode=7)
-        failed = engine.call_engine(
+        failed = engine.call_model_server(
             failed_host,
             RENDERED,
+            GENERATOR,
             path="/v1/fixture",
             body={},
             max_time=7,
@@ -1362,9 +1790,10 @@ class CommandTests(unittest.TestCase):
         self.assertIn("non-zero exit", failed.problem.problem)
 
         unavailable_host = self.make_host(exec_error=OSError("unavailable"))
-        unavailable = engine.call_engine(
+        unavailable = engine.call_model_server(
             unavailable_host,
             RENDERED,
+            GENERATOR,
             path="/v1/fixture",
             body={},
             max_time=7,
@@ -1424,6 +1853,7 @@ printf '%s\n' '{"choices": []}'
                 str(secret),
                 "http://engine.invalid/v1/chat/completions",
                 "7",
+                GENERATOR.key_file_words,
             ]
             result = subprocess.run(
                 command,
@@ -1460,4 +1890,5 @@ printf '%s\n' '{"choices": []}'
                 check=False,
             )
             self.assertEqual(failed.returncode, 99)
+            self.assertIn(GENERATOR.key_file_words, failed.stderr)
             self.assertIn("secret", failed.stderr)

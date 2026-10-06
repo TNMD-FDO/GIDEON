@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Final
 
 from gideon.host import engine, enginesample
+from gideon.host.render.engine import GENERATOR
 from gideon.host.sysio import Host, PathLike
 
 FAILURE_MODES: Final[tuple[str, ...]] = (
@@ -330,9 +331,10 @@ def grade(
         extra = sorted(set(slots) - set(prompt.slots))
         raise ValueError(f"judge slots do not match prompt (missing={missing}, extra={extra})")
 
-    reply = engine.call_engine(
+    reply = engine.call_model_server(
         io,
         rendered_dir,
+        GENERATOR,
         path="/v1/chat/completions",
         body=_request_body(
             served_model_name,

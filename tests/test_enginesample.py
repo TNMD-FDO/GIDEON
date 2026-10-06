@@ -10,6 +10,9 @@ from pathlib import Path
 import yaml  # type: ignore[import-untyped]
 
 from gideon.host.enginesample import (
+    EmbedSection,
+    EmbedThroughputCase,
+    EmbedVectorsCase,
     FrontendCase,
     FrontendSection,
     NeedleCase,
@@ -18,8 +21,10 @@ from gideon.host.enginesample import (
     SampleLoadResult,
     SmokeCase,
     StructuredCase,
+    SupportingSection,
     blocks_for,
     build_needle_prompt,
+    build_throughput_texts,
     check_schema,
     load_sample,
     render_errors,
@@ -200,6 +205,26 @@ class SampleTests(unittest.TestCase):
             ),
         )
         self.assertEqual(result.sample.frontend, expected_frontend)
+        supporting = document["supporting"]
+        assert isinstance(supporting, Mapping)
+        embed = supporting["embed"]
+        assert isinstance(embed, Mapping)
+        vectors = embed["vectors"]
+        assert isinstance(vectors, Mapping)
+        throughput = embed["throughput"]
+        assert isinstance(throughput, Mapping)
+        self.assertEqual(
+            result.sample.supporting,
+            SupportingSection(EmbedSection(
+                vectors=EmbedVectorsCase(id=vectors["id"], texts=tuple(vectors["texts"])),
+                throughput=EmbedThroughputCase(
+                    id=throughput["id"], filler=throughput["filler"],
+                    paragraphs=throughput["paragraphs"], inputs=throughput["inputs"],
+                ),
+            )),
+        )
+        self.assertEqual(len(result.sample.supporting.embed.vectors.texts), 3)
+        self.assertEqual(result.sample.supporting.embed.throughput.inputs, throughput["inputs"])
 
 
 class RefusalTests(unittest.TestCase):
@@ -249,6 +274,15 @@ class RefusalTests(unittest.TestCase):
             "frontend": {
                 "positives": [{"id": "fixture-positive", "prompt": "A fixture prompt."}],
                 "trip": {"id": "fixture-trip", "prompt": "Another fixture prompt."},
+            },
+            "supporting": {
+                "embed": {
+                    "vectors": {"id": "fixture-vectors", "texts": ["Invented text."]},
+                    "throughput": {
+                        "id": "fixture-throughput", "filler": "Invented filler.",
+                        "paragraphs": 2, "inputs": 3,
+                    },
+                },
             },
         }
 
@@ -310,6 +344,98 @@ class RefusalTests(unittest.TestCase):
         assert isinstance(frontend, dict)
         del frontend["trip"]
         self.assert_refuses(self.dump(document), "frontend.trip")
+
+    def test_supporting_refuses_malformed_shapes_with_fixes(self) -> None:
+        def changed(path: tuple[str, ...], value: object, *, remove: bool = False) -> str:
+            document = self.valid_document()
+            node: object = document
+            for key in path[:-1]:
+                assert isinstance(node, dict)
+                node = node[key]
+            assert isinstance(node, dict)
+            if remove:
+                del node[path[-1]]
+            else:
+                node[path[-1]] = value
+            return self.dump(document)
+
+        cases = (
+            (changed(("supporting",), None, remove=True), "supporting"),
+            (changed(("supporting",), []), "supporting"),
+            (changed(("supporting", "embed"), None, remove=True), "supporting.embed"),
+            (changed(("supporting", "embed"), []), "supporting.embed"),
+            (changed(("supporting", "embed", "vectors"), None, remove=True), "supporting.embed.vectors"),
+            (changed(("supporting", "embed", "vectors"), []), "supporting.embed.vectors"),
+            (changed(("supporting", "embed", "vectors", "texts"), []), "supporting.embed.vectors.texts"),
+            (changed(("supporting", "embed", "vectors", "texts"), ["okay", 7]), "supporting.embed.vectors.texts[1]"),
+            (changed(("supporting", "embed", "vectors", "texts"), [""]), "supporting.embed.vectors.texts[0]"),
+            (changed(("supporting", "embed", "vectors", "id"), None, remove=True), "supporting.embed.vectors.id"),
+            (changed(("supporting", "embed", "vectors", "id"), "Bad Id"), "supporting.embed.vectors.id"),
+            (changed(("supporting", "embed", "throughput"), None, remove=True), "supporting.embed.throughput"),
+            (changed(("supporting", "embed", "throughput"), []), "supporting.embed.throughput"),
+            (changed(("supporting", "embed", "throughput", "id"), None, remove=True), "supporting.embed.throughput.id"),
+            (changed(("supporting", "embed", "throughput", "id"), "Bad Id"), "supporting.embed.throughput.id"),
+            (changed(("supporting", "embed", "throughput", "filler"), ""), "supporting.embed.throughput.filler"),
+            (changed(("supporting", "embed", "throughput", "filler"), None, remove=True), "supporting.embed.throughput.filler"),
+        )
+        for text, path in cases:
+            with self.subTest(path=path):
+                self.assert_refuses(text, path)
+
+    def test_supporting_unknown_keys_name_the_nearest_valid_key(self) -> None:
+        for parent, typo, expected in (
+            (("supporting",), "embd", "embed"),
+            (("supporting", "embed"), "vector", "vectors"),
+            (("supporting", "embed", "vectors"), "text", "texts"),
+            (("supporting", "embed", "throughput"), "paragraph", "paragraphs"),
+        ):
+            with self.subTest(parent=parent):
+                document = self.valid_document()
+                node: object = document
+                for key in parent:
+                    assert isinstance(node, dict)
+                    node = node[key]
+                assert isinstance(node, dict)
+                node[typo] = node.pop(expected)
+                self.assert_refuses(self.dump(document), f"nearest valid key is '{expected}'")
+
+    def test_throughput_counts_refuse_non_positive_or_non_integer_values(self) -> None:
+        for key in ("paragraphs", "inputs"):
+            for value in (0, -1, 1.5, True, "3"):
+                with self.subTest(key=key, value=value):
+                    document = self.valid_document()
+                    supporting = document["supporting"]
+                    assert isinstance(supporting, dict)
+                    embed = supporting["embed"]
+                    assert isinstance(embed, dict)
+                    throughput = embed["throughput"]
+                    assert isinstance(throughput, dict)
+                    throughput[key] = value
+                    self.assert_refuses(self.dump(document), f"supporting.embed.throughput.{key}")
+
+        for key in ("paragraphs", "inputs"):
+            with self.subTest(missing=key):
+                document = self.valid_document()
+                supporting = document["supporting"]
+                assert isinstance(supporting, dict)
+                embed = supporting["embed"]
+                assert isinstance(embed, dict)
+                throughput = embed["throughput"]
+                assert isinstance(throughput, dict)
+                del throughput[key]
+                self.assert_refuses(self.dump(document), f"supporting.embed.throughput.{key}")
+
+    def test_throughput_builder_numbers_distinct_texts_across_the_batch(self) -> None:
+        case = EmbedThroughputCase("fixture-throughput", "Fictitious filler.", 2, 3)
+        texts = build_throughput_texts(case)
+        self.assertEqual(len(texts), case.inputs)
+        self.assertEqual(len(set(texts)), case.inputs)
+        lines = [line for text in texts for line in text.splitlines()]
+        self.assertEqual(len(lines), case.inputs * case.paragraphs)
+        self.assertEqual(
+            lines,
+            [f"Paragraph {number}. {case.filler}" for number in range(1, len(lines) + 1)],
+        )
 
     def test_frontend_unknown_keys_name_the_nearest_valid_key(self) -> None:
         document = self.valid_document()

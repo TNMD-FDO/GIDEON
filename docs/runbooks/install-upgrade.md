@@ -93,7 +93,7 @@ same command is run again after the fix.
    | `preflight` | the preflight above | the office services are reachable and correct before anything is built |
    | `apply` | `apply` (thirteen stages) | the stack is up and verified; the first run prints each break-glass password **once** and fetches the profile's models into `/data/models` (about 31 GB, 10–30 minutes of office bandwidth; later runs verify them in about a minute). If an evaluation holds the engine lock, apply refuses naming its holder; wait for it to finish, then re-run install; its earlier steps are safe to repeat |
    | `reconcile` | `users reconcile --now` | directory membership is the frontend's role truth; audit rows written |
-   | `engine-verify` | `engine verify` | the engine answers at length and in structured form, and the guardrail's refusal arrives inside a real chat turn (three turns as the eval identity, two to eight minutes); a failure stops install here with `Do not go live…` and the failing check's name; a no-GPU host prints one skipped row (`v0.1.22`). If an evaluation holds the engine lock, verify refuses naming its holder; wait for it to finish, then re-run install; its earlier steps are safe to repeat |
+   | `engine-verify` | `engine verify` | the engine answers at length and in structured form, the guardrail's refusal arrives inside a real chat turn (three turns as the eval identity, two to eight minutes), and the embedding server returns unit vectors at the lock's width and records a batch's throughput; a failure stops install here with `Do not go live…`, the failing check's name, and that server's logs; a no-GPU host prints one skipped row (`v0.1.22`). If an evaluation holds the engine lock, verify refuses naming its holder; wait for it to finish, then re-run install; its earlier steps are safe to repeat |
    | `backup` | `backup run` | the first set exists (full on a fresh box, incremental on a re-run) |
    | `drill` | `backup drill` | that set restores into the throwaway project and the frontend comes up on it |
    | `audit` | — | one `install` row (phase `applied`) with the phase durations and the set label |
@@ -355,7 +355,7 @@ A model upgrade's proof window precedes its tag: announce it under
 | `preflight` | the new tree's preflight: the gate for apply and the new release's own readiness checks. An unconverged or `reboot-required` step, or a new office-services requirement, refuses here — nothing of the product has changed yet | **reboot if asked, then re-run `upgrade <tag>`**: the checkout is already made and the set is reused, so the re-run resumes here |
 | `apply` | the new tree's `apply` (thirteen stages, streamed; a pin bump in `models.lock` fetches the new revision here, before the engine restarts) | `upgrade --rollback`; but when the row names the engine lock's holder, nothing was changed: wait for that evaluation to finish and re-run `upgrade <tag>`, which the version stage accepts as a re-run |
 | `verify` | the new tree answers `--version` with the tag's version, the applied record names it, every service the rendered project declares has a container that is running and healthy on a fresh read | `upgrade --rollback` |
-| `engine-verify` | the new tree's `engine verify` as a passthrough child; its rows carry the failing check | `upgrade --rollback`; but when the row names the engine lock's holder, nothing was changed: wait for that evaluation to finish and re-run `upgrade <tag>`, which the version stage accepts as a re-run |
+| `engine-verify` | the new tree's `engine verify` as a passthrough child; its failing row names its own server's logs | `upgrade --rollback`; but when the row names the engine lock's holder, nothing was changed: wait for that evaluation to finish and re-run `upgrade <tag>`, which the version stage accepts as a re-run |
 | `audit-applied` | the `upgrade` row with the durations | — |
 
 The standing next step after a failure depends on where it happened: before the
@@ -390,7 +390,7 @@ which exists only while one is in progress (the `plan` row below).
 | `restore` | when needed, the previous tree's `restore --from staging --set <label>`: verified whole before anything is replaced, Postgres back to the set's archive boundary |
 | `apply` | the previous tree's `apply` — restore leaves the frontend and ingress down and names apply as the next command; here the command runs it |
 | `verify` | as the forward path, against the set's release |
-| `engine-verify` | the previous tree's `engine verify`; if it refuses, read the engine's logs and run `engine verify` by hand, never going live |
+| `engine-verify` | the previous tree's `engine verify`; if it refuses, read the failing row's own server logs and run `engine verify` by hand, never going live |
 | `audit-applied` | the `rollback` row |
 
 **What is preserved and what is not.** The database, `/etc/gideon`, the

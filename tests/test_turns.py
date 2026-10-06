@@ -36,6 +36,7 @@ from gideon.evaluation.turns import (
 from gideon.host import backuplock, models, owuiturn, secrets, site
 from gideon.host.owui import Client, OwuiError, OwuiTimeout, Response
 from gideon.host.render.ci import CI_PORT, CI_ROOT, CI_SECRETS_DIR
+from gideon.host.render.engine import GENERATOR
 from gideon.host.render.owui import EVAL_IDENTITY, GENERAL_MODEL_ID
 from gideon.host.report import Problem, StageResult
 from gideon.host.secrets import secret_path
@@ -2188,7 +2189,7 @@ class TurnHarness(TestCase):
             model="fixture-model",
             instruction=None,
         )
-        with patch.object(run.engine, "call_engine", return_value=response) as call_engine:
+        with patch.object(run.engine, "call_model_server", return_value=response) as call:
             driver.turn(
                 cases.Case("fixture", "prompt", "answered"),
                 "prompt",
@@ -2197,7 +2198,8 @@ class TurnHarness(TestCase):
                 ids_before=frozenset(),
                 row_name="fixture",
             )
-        self.assertEqual(call_engine.call_args.kwargs["max_time"], run.TURN_TIMEOUT_SECONDS)
+        self.assertIs(call.call_args.args[2], GENERATOR)
+        self.assertEqual(call.call_args.kwargs["max_time"], run.TURN_TIMEOUT_SECONDS)
 
         with TemporaryDirectory() as directory:
             setup = run.BrowserSetup(

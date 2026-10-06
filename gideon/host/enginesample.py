@@ -61,6 +61,39 @@ class FrontendSection:
 
 
 @dataclass(frozen=True, slots=True)
+class EmbedVectorsCase:
+    """Texts sent together to the embedding server for a vector check."""
+
+    id: str
+    texts: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class EmbedThroughputCase:
+    """One numbered batch of embedding texts for a throughput reading."""
+
+    id: str
+    filler: str
+    paragraphs: int
+    inputs: int
+
+
+@dataclass(frozen=True, slots=True)
+class EmbedSection:
+    """The embedding server's cases in the supporting sample."""
+
+    vectors: EmbedVectorsCase
+    throughput: EmbedThroughputCase
+
+
+@dataclass(frozen=True, slots=True)
+class SupportingSection:
+    """Supporting model cases keyed by their model role."""
+
+    embed: EmbedSection
+
+
+@dataclass(frozen=True, slots=True)
 class Sample:
     """The validated engine-verification sample and its source fingerprint."""
 
@@ -68,6 +101,7 @@ class Sample:
     needle: NeedleCase
     structured: StructuredCase
     frontend: FrontendSection
+    supporting: SupportingSection
     sha256: str
 
 
@@ -128,13 +162,17 @@ SampleLoader.add_constructor(
 _FIX: Final = (
     "Edit eval/engine-verify/sample.yaml, then re-run sudo python3 -m gideon engine verify."
 )
-_ROOT_KEYS: Final = ("version", "needle", "structured", "smoke", "frontend")
+_ROOT_KEYS: Final = ("version", "needle", "structured", "smoke", "frontend", "supporting")
 _SMOKE_KEYS: Final = ("id", "prompt", "max_tokens")
 _NEEDLE_KEYS: Final = ("id", "filler", "planted", "question", "expected", "depth")
 _STRUCTURED_KEYS: Final = ("id", "prompt", "schema_name", "schema")
 _FRONTEND_KEYS: Final = ("positives", "trip")
 _FRONTEND_CASE_KEYS: Final = ("id", "prompt")
-_FRONTEND_ID: Final[re.Pattern[str]] = re.compile(r"[a-z0-9-]+")
+_SUPPORTING_KEYS: Final = ("embed",)
+_EMBED_KEYS: Final = ("vectors", "throughput")
+_EMBED_VECTORS_KEYS: Final = ("id", "texts")
+_EMBED_THROUGHPUT_KEYS: Final = ("id", "filler", "paragraphs", "inputs")
+_CASE_ID: Final[re.Pattern[str]] = re.compile(r"[a-z0-9-]+")
 _SCHEMA_KEYS: Final = (
     "type",
     "properties",
@@ -268,7 +306,7 @@ def _validate_frontend_case(
     start = len(errors)
     case_id = _required_string(case, path, "id", errors)
     prompt = _required_string(case, path, "prompt", errors)
-    if case_id is not None and _FRONTEND_ID.fullmatch(case_id) is None:
+    if case_id is not None and _CASE_ID.fullmatch(case_id) is None:
         errors.append(
             _error(path + ".id", "expected lowercase letters, digits, and hyphens")
         )
@@ -337,6 +375,106 @@ def _validate_frontend(
         positives=tuple(case for _case_path, case in positive_cases),
         trip=trip,
     )
+
+
+def _validate_embed_vectors(
+    value: object, errors: list[SampleError], prefix: str
+) -> EmbedVectorsCase | None:
+    """Validate one embedding request's identifier and input texts."""
+
+    if not isinstance(value, Mapping):
+        errors.append(_error(prefix, f"expected a mapping (got {_kind(value)})"))
+        return None
+    _walk_unknown(value, _EMBED_VECTORS_KEYS, prefix, errors)
+    vectors = cast(Mapping[object, object], value)
+    start = len(errors)
+    case_id = _required_string(vectors, prefix, "id", errors)
+    if case_id is not None and _CASE_ID.fullmatch(case_id) is None:
+        errors.append(_error(_path(prefix, "id"), "expected lowercase letters, digits, and hyphens"))
+
+    texts_path = _path(prefix, "texts")
+    texts: list[str] = []
+    if "texts" not in vectors:
+        errors.append(_error(texts_path, "missing required key"))
+    elif not isinstance(vectors["texts"], list) or not vectors["texts"]:
+        errors.append(_error(texts_path, "expected a non-empty list"))
+    else:
+        for index, text in enumerate(vectors["texts"]):
+            if not isinstance(text, str) or not text:
+                errors.append(_error(f"{texts_path}[{index}]", f"expected a non-empty string (got {_kind(text)})"))
+            else:
+                texts.append(text)
+    if len(errors) != start or case_id is None:
+        return None
+    return EmbedVectorsCase(case_id, tuple(texts))
+
+
+def _validate_embed_throughput(
+    value: object, errors: list[SampleError], prefix: str
+) -> EmbedThroughputCase | None:
+    """Validate one throughput case's filler and positive batch sizes."""
+
+    if not isinstance(value, Mapping):
+        errors.append(_error(prefix, f"expected a mapping (got {_kind(value)})"))
+        return None
+    _walk_unknown(value, _EMBED_THROUGHPUT_KEYS, prefix, errors)
+    throughput = cast(Mapping[object, object], value)
+    start = len(errors)
+    case_id = _required_string(throughput, prefix, "id", errors)
+    filler = _required_string(throughput, prefix, "filler", errors)
+    paragraphs = _required_positive_int(throughput, prefix, "paragraphs", errors)
+    inputs = _required_positive_int(throughput, prefix, "inputs", errors)
+    if case_id is not None and _CASE_ID.fullmatch(case_id) is None:
+        errors.append(_error(_path(prefix, "id"), "expected lowercase letters, digits, and hyphens"))
+    if (
+        len(errors) != start
+        or case_id is None
+        or filler is None
+        or paragraphs is None
+        or inputs is None
+    ):
+        return None
+    return EmbedThroughputCase(case_id, filler, paragraphs, inputs)
+
+
+def _validate_embed(
+    value: object, errors: list[SampleError], prefix: str
+) -> EmbedSection | None:
+    """Validate the embedding server's cases."""
+
+    if not isinstance(value, Mapping):
+        errors.append(_error(prefix, f"expected a mapping (got {_kind(value)})"))
+        return None
+    _walk_unknown(value, _EMBED_KEYS, prefix, errors)
+    if "vectors" not in value:
+        errors.append(_error(_path(prefix, "vectors"), "missing required key"))
+        vectors = None
+    else:
+        vectors = _validate_embed_vectors(value["vectors"], errors, _path(prefix, "vectors"))
+    if "throughput" not in value:
+        errors.append(_error(_path(prefix, "throughput"), "missing required key"))
+        throughput = None
+    else:
+        throughput = _validate_embed_throughput(value["throughput"], errors, _path(prefix, "throughput"))
+    if vectors is None or throughput is None:
+        return None
+    return EmbedSection(vectors, throughput)
+
+
+def _validate_supporting(
+    value: object, errors: list[SampleError], prefix: str = "supporting"
+) -> SupportingSection | None:
+    """Validate the sample's cases by supporting model role."""
+
+    if not isinstance(value, Mapping):
+        errors.append(_error(prefix, f"expected a mapping (got {_kind(value)})"))
+        return None
+    _walk_unknown(value, _SUPPORTING_KEYS, prefix, errors)
+    if "embed" not in value:
+        errors.append(_error(_path(prefix, "embed"), "missing required key"))
+        return None
+    embed = _validate_embed(value["embed"], errors, _path(prefix, "embed"))
+    return SupportingSection(embed) if embed is not None else None
 
 
 def _validate_needle(
@@ -625,10 +763,11 @@ def _validate_document(
     StructuredCase | None,
     SmokeCase | None,
     FrontendSection | None,
+    SupportingSection | None,
     tuple[SampleError, ...],
 ]:
     if not isinstance(document, Mapping):
-        return None, None, None, None, (
+        return None, None, None, None, None, (
             _error("document", f"expected a mapping (got {_kind(document)})"),
         )
 
@@ -665,15 +804,22 @@ def _validate_document(
     else:
         frontend = _validate_frontend(root["frontend"], errors, "frontend")
 
+    if "supporting" not in root:
+        errors.append(_error("supporting", "missing required key"))
+        supporting = None
+    else:
+        supporting = _validate_supporting(root["supporting"], errors)
+
     if (
         errors
         or needle is None
         or structured is None
         or smoke is None
         or frontend is None
+        or supporting is None
     ):
-        return None, None, None, None, tuple(errors)
-    return needle, structured, smoke, frontend, ()
+        return None, None, None, None, None, tuple(errors)
+    return needle, structured, smoke, frontend, supporting, ()
 
 
 def render_errors(errors: Sequence[SampleError]) -> str:
@@ -720,7 +866,7 @@ def load_sample(path: PathLike, *, host: Host) -> SampleLoadResult:
             )
         )
 
-    needle, structured, smoke, frontend, errors = _validate_document(document)
+    needle, structured, smoke, frontend, supporting, errors = _validate_document(document)
     if errors:
         return SampleLoadResult(errors=errors)
     assert (
@@ -728,6 +874,7 @@ def load_sample(path: PathLike, *, host: Host) -> SampleLoadResult:
         and structured is not None
         and smoke is not None
         and frontend is not None
+        and supporting is not None
     )
     return SampleLoadResult(
         sample=Sample(
@@ -735,6 +882,7 @@ def load_sample(path: PathLike, *, host: Host) -> SampleLoadResult:
             needle=needle,
             structured=structured,
             frontend=frontend,
+            supporting=supporting,
             sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
         )
     )
@@ -759,3 +907,15 @@ def build_needle_prompt(case: NeedleCase, blocks: int) -> list[dict[str, str]]:
     paragraphs.insert(planted_after, case.planted)
     paragraphs.append(case.question)
     return [{"role": "user", "content": "\n".join(paragraphs)}]
+
+
+def build_throughput_texts(case: EmbedThroughputCase) -> tuple[str, ...]:
+    """Build distinct texts with paragraph numbers running across the batch."""
+
+    return tuple(
+        "\n".join(
+            f"Paragraph {number}. {case.filler}"
+            for number in range(index * case.paragraphs + 1, (index + 1) * case.paragraphs + 1)
+        )
+        for index in range(case.inputs)
+    )

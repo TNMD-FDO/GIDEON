@@ -30,11 +30,7 @@ from gideon.host import (
     tls,
 )
 from gideon.host import audit as audit_module
-from gideon.host.render.engine import (
-    ENGINE_PORT,
-    ENGINE_SECRET_NAME,
-    ENGINE_SERVICE_NAME,
-)
+from gideon.host.render.engine import EMBED, GENERATOR, ModelServerMember
 from gideon.host.render.owui import (
     EVAL_IDENTITY,
     EVAL_PASSWORD_SECRET,
@@ -80,6 +76,12 @@ NEEDLE_MIN_FILL: Final[float] = 0.97
 NEEDLE_SIZING_ROUNDS: Final[int] = 6
 # exempt: acceptance bounds.  Tokenization request bound.
 TOKENIZE_TIMEOUT_SECONDS: Final[int] = 60
+# exempt: acceptance bounds. The embedding vectors request bound.
+EMBED_VECTORS_TIMEOUT_SECONDS: Final[int] = 60
+# exempt: acceptance bounds. The embedding throughput request bound.
+EMBED_THROUGHPUT_TIMEOUT_SECONDS: Final[int] = 120
+# exempt: acceptance bounds. The unit-vector norm tolerance.
+EMBED_NORM_TOLERANCE: Final[float] = 1e-3
 # exempt: acceptance bounds.  Per-needle request bound.
 NEEDLE_TIMEOUT_SECONDS: Final[int] = 600
 # exempt: acceptance bounds.  The structured-output request bound.
@@ -99,7 +101,7 @@ FRONTEND_ROW_PREFIX: Final[str] = "frontend-"
 # the smoke's small request measures its first byte as the stream's first chunk.
 ENGINE_CURL_SCRIPT: Final[str] = r'''set -eu
 if [ -z "${1:-}" ] || [ ! -s "$1" ]; then
-    echo "engine API key secret file is missing or empty" >&2
+    echo "$4 secret file is missing or empty" >&2
     exit 99
 fi
 umask 077
@@ -171,6 +173,15 @@ class EngineTarget:
     window: int
 
 
+@dataclass(frozen=True, slots=True)
+class _EmbedTarget:
+    """The embedding pin's served name and its selected vector space."""
+
+    served_name: str
+    dimensions: int
+    space_id: str
+
+
 def _failed(name: str, detail: str, fix: str) -> StageResult:
     return StageResult(name, False, detail, fix)
 
@@ -181,10 +192,11 @@ def _failed_reply(problem: Problem) -> EngineReply:
     return EngineReply(None, "", None, (), False, None, None, problem)
 
 
-def _engine_fix(rendered_dir: PathLike) -> str:
+def _engine_fix(rendered_dir: PathLike, member: ModelServerMember) -> str:
     return (
-        f"Do not go live on this engine. Run {stack.logs_fix(rendered_dir, ENGINE_SERVICE_NAME)}, "
-        "revert the driver or engine change, then re-run sudo python3 -m gideon engine verify."
+        f"Do not go live on this {member.words}. "
+        f"Run {stack.logs_fix(rendered_dir, member.service_name)}, "
+        f"revert the driver or {member.words} change, then re-run sudo python3 -m gideon engine verify."
     )
 
 
@@ -197,7 +209,9 @@ def _frontend_fix(rendered_dir: PathLike) -> str:
     )
 
 
-def _rendered_has_engine(io: Host, rendered_dir: PathLike) -> bool | str:
+def _rendered_has_model_server(
+    io: Host, rendered_dir: PathLike, member: ModelServerMember
+) -> bool | str:
     compose_path = Path(rendered_dir) / "compose.yaml"
     try:
         document = yaml.safe_load(io.read_text(compose_path))
@@ -210,15 +224,17 @@ def _rendered_has_engine(io: Host, rendered_dir: PathLike) -> bool | str:
     services = document.get("services")
     if not isinstance(services, Mapping):
         return "rendered Compose file has no services map"
-    return ENGINE_SERVICE_NAME in services
+    return member.service_name in services
 
 
-def _response_problem(rendered_dir: PathLike, detail: str) -> Problem:
-    return Problem(detail, _engine_fix(rendered_dir))
+def _response_problem(
+    rendered_dir: PathLike, member: ModelServerMember, detail: str
+) -> Problem:
+    return Problem(detail, _engine_fix(rendered_dir, member))
 
 
 def _body_from_response(
-    body_text: str, rendered_dir: PathLike
+    body_text: str, rendered_dir: PathLike, member: ModelServerMember
 ) -> tuple[object | None, tuple[Mapping[str, object], ...], bool, Problem | None]:
     lines = body_text.splitlines()
     is_sse = any(line.startswith("data:") for line in lines)
@@ -239,14 +255,14 @@ def _body_from_response(
                     None,
                     (),
                     done,
-                    _response_problem(rendered_dir, "engine response SSE payload is invalid"),
+                    _response_problem(rendered_dir, member, f"{member.words} response SSE payload is invalid"),
                 )
             if not isinstance(parsed, Mapping):
                 return (
                     None,
                     (),
                     done,
-                    _response_problem(rendered_dir, "engine response SSE payload is not a mapping"),
+                    _response_problem(rendered_dir, member, f"{member.words} response SSE payload is not a mapping"),
                 )
             events.append(parsed)
         return None, tuple(events), done, None
@@ -260,26 +276,26 @@ def _body_from_response(
             None,
             (),
             False,
-            _response_problem(rendered_dir, "engine response body is not valid JSON"),
+            _response_problem(rendered_dir, member, f"{member.words} response body is not valid JSON"),
         )
     return parsed_body, (), False, None
 
 
 def _reply_from_output(
-    stdout: str, rendered_dir: PathLike
+    stdout: str, rendered_dir: PathLike, member: ModelServerMember
 ) -> EngineReply:
     marker_lines = tuple(_MARKER_LINE_RE.finditer(stdout))
     if not marker_lines:
-        return _failed_reply(_response_problem(rendered_dir, "engine response is missing its timing marker"))
+        return _failed_reply(_response_problem(rendered_dir, member, f"{member.words} response is missing its timing marker"))
     marker_line = marker_lines[-1]
     marker = _MARKER_RE.fullmatch(marker_line.group(0))
     if marker is None:
-        return _failed_reply(_response_problem(rendered_dir, "engine response has an unparsable timing marker"))
+        return _failed_reply(_response_problem(rendered_dir, member, f"{member.words} response has an unparsable timing marker"))
     status = int(marker.group("status"))
     first_byte = float(marker.group("first"))
     elapsed = float(marker.group("elapsed"))
     body_text = stdout[: marker_line.start()].rstrip("\r\n")
-    parsed_body, events, done, problem = _body_from_response(body_text, rendered_dir)
+    parsed_body, events, done, problem = _body_from_response(body_text, rendered_dir, member)
     return EngineReply(
         status,
         body_text,
@@ -292,26 +308,28 @@ def _reply_from_output(
     )
 
 
-def call_engine(
+def call_model_server(
     io: Host,
     rendered_dir: PathLike,
+    member: ModelServerMember,
     *,
     path: str,
     body: Mapping[str, object],
     max_time: int,
 ) -> EngineReply:
-    """Call one engine endpoint from inside the engine's Compose network."""
+    """Call one model server endpoint from inside its Compose network."""
 
     argv = stack.exec_argv(
         rendered_dir,
-        ENGINE_SERVICE_NAME,
+        member.service_name,
         "sh",
         "-c",
         ENGINE_CURL_SCRIPT,
         "gideon-engine-verify",
-        f"/run/secrets/{ENGINE_SECRET_NAME}",
-        f"http://{ENGINE_SERVICE_NAME}:{ENGINE_PORT}{path}",
+        f"/run/secrets/{member.secret_name}",
+        f"http://{member.service_name}:{member.port}{path}",
         str(max_time),
+        member.key_file_words,
     )
     try:
         result = io.run(
@@ -320,16 +338,16 @@ def call_engine(
             timeout=max_time + RUN_TIMEOUT_MARGIN_SECONDS,
         )
     except subprocess.TimeoutExpired:
-        return _failed_reply(_response_problem(rendered_dir, "engine request failed: TimeoutExpired"))
+        return _failed_reply(_response_problem(rendered_dir, member, f"{member.words} request failed: TimeoutExpired"))
     except OSError:
-        return _failed_reply(_response_problem(rendered_dir, "engine request failed: OSError"))
+        return _failed_reply(_response_problem(rendered_dir, member, f"{member.words} request failed: OSError"))
     if result.returncode != 0:
-        detail = f"engine request failed: non-zero exit {result.returncode}"
+        detail = f"{member.words} request failed: non-zero exit {result.returncode}"
         diagnostic = _last_stderr_line(result.stderr)
         if diagnostic:
             detail += f" ({diagnostic})"
-        return _failed_reply(_response_problem(rendered_dir, detail))
-    return _reply_from_output(result.stdout, rendered_dir)
+        return _failed_reply(_response_problem(rendered_dir, member, detail))
+    return _reply_from_output(result.stdout, rendered_dir, member)
 
 
 def _last_stderr_line(stderr: str) -> str:
@@ -351,10 +369,12 @@ def _error_message(reply: EngineReply) -> str:
     return " ".join(str(message).split())[:_STDERR_LIMIT] if isinstance(message, str) else ""
 
 
-def _status_failure(reply: EngineReply, engine_fix: str) -> tuple[str, str]:
+def _status_failure(
+    reply: EngineReply, engine_fix: str, member: ModelServerMember
+) -> tuple[str, str]:
     """A non-200 reply: a 400 is the request's fault and names the sample."""
 
-    detail = f"engine returned HTTP {reply.status}"
+    detail = f"{member.words} returned HTTP {reply.status}"
     message = _error_message(reply)
     if message:
         detail += f": {message}"
@@ -377,9 +397,10 @@ def _tokenize(
         "add_generation_prompt": True,
         "chat_template_kwargs": {"enable_thinking": False},
     }
-    reply = call_engine(
+    reply = call_model_server(
         io,
         rendered_dir,
+        GENERATOR,
         path="/tokenize",
         body=body,
         max_time=TOKENIZE_TIMEOUT_SECONDS,
@@ -387,7 +408,7 @@ def _tokenize(
     if reply.problem is not None:
         return None, reply.problem
     if reply.status != 200:
-        detail, _ = _status_failure(reply, engine_fix)
+        detail, _ = _status_failure(reply, engine_fix, GENERATOR)
         return None, Problem(detail, engine_fix)
     if not isinstance(reply.json, Mapping) or type(reply.json.get("count")) is not int:
         return None, Problem("tokenize response has no integer count", engine_fix)
@@ -568,14 +589,14 @@ def _needle_check(
         "chat_template_kwargs": {"enable_thinking": False},
         "stream": False,
     }
-    reply = call_engine(
-        io, rendered_dir, path="/v1/chat/completions", body=request, max_time=NEEDLE_TIMEOUT_SECONDS
+    reply = call_model_server(
+        io, rendered_dir, GENERATOR, path="/v1/chat/completions", body=request, max_time=NEEDLE_TIMEOUT_SECONDS
     )
     figures["http_status"] = reply.status
     if reply.problem is not None:
         return CheckOutcome(name, False, reply.problem.problem, engine_fix, figures)
     if reply.status != 200:
-        detail, fix = _status_failure(reply, engine_fix)
+        detail, fix = _status_failure(reply, engine_fix, GENERATOR)
         return CheckOutcome(name, False, detail, fix, figures)
 
     content, finish_reason, usage_prompt_tokens, completion_tokens = completion_values(reply)
@@ -669,9 +690,10 @@ def _structured_check(
         },
         "stream": False,
     }
-    reply = call_engine(
+    reply = call_model_server(
         io,
         rendered_dir,
+        GENERATOR,
         path="/v1/chat/completions",
         body=body,
         max_time=STRUCTURED_TIMEOUT_SECONDS,
@@ -680,7 +702,7 @@ def _structured_check(
     if reply.problem is not None:
         return CheckOutcome("structured", False, reply.problem.problem, engine_fix, figures)
     if reply.status != 200:
-        detail, fix = _status_failure(reply, engine_fix)
+        detail, fix = _status_failure(reply, engine_fix, GENERATOR)
         return CheckOutcome("structured", False, detail, fix, figures)
 
     content, finish_reason, prompt_tokens, completion_tokens = completion_values(reply)
@@ -789,9 +811,10 @@ def _smoke_check(
         "stream": True,
         "stream_options": {"include_usage": True},
     }
-    reply = call_engine(
+    reply = call_model_server(
         io,
         rendered_dir,
+        GENERATOR,
         path="/v1/chat/completions",
         body=body,
         max_time=SMOKE_TIMEOUT_SECONDS,
@@ -800,7 +823,7 @@ def _smoke_check(
     if reply.problem is not None:
         return CheckOutcome("smoke", False, reply.problem.problem, engine_fix, figures)
     if reply.status != 200:
-        detail, fix = _status_failure(reply, engine_fix)
+        detail, fix = _status_failure(reply, engine_fix, GENERATOR)
         return CheckOutcome("smoke", False, detail, fix, figures)
 
     text, prompt_tokens, completion_tokens, finish_reason = _stream_values(reply)
@@ -1092,6 +1115,18 @@ def _audit_detail(
     }
 
 
+def _selected_profile(
+    io: Host, hardware_profile: str, models_path: PathLike
+) -> models.HardwareProfile | Problem:
+    """Load the model lock and select the requested hardware profile."""
+
+    models_result = models.load_models_lock(models_path, host=io)
+    if models_result.errors or models_result.lock is None:
+        fix = models_result.errors[0].fix if models_result.errors else _MODELS_FIX
+        return Problem(models.render_errors(models_result.errors), fix)
+    return models.select_profile(models_result.lock, hardware_profile)
+
+
 def resolve_engine_target(
     io: Host,
     rendered_dir: PathLike,
@@ -1102,19 +1137,15 @@ def resolve_engine_target(
 ) -> EngineTarget | Problem:
     """Resolve the rendered, pinned, and currently healthy engine target."""
 
-    rendered = _rendered_has_engine(io, rendered_dir)
+    rendered = _rendered_has_model_server(io, rendered_dir, GENERATOR)
     if rendered is not True:
         detail = rendered if isinstance(rendered, str) else "rendered Compose has no engine service"
         return Problem(detail, _APPLY_FIX)
 
-    models_result = models.load_models_lock(models_path, host=io)
-    if models_result.errors or models_result.lock is None:
-        fix = models_result.errors[0].fix if models_result.errors else _MODELS_FIX
-        return Problem(models.render_errors(models_result.errors), fix)
-    selected = models.select_profile(models_result.lock, hardware_profile)
+    selected = _selected_profile(io, hardware_profile, models_path)
     if isinstance(selected, Problem):
         return selected
-    generator = selected.model("generator")
+    generator = selected.model(GENERATOR.role)
     if generator is None:
         return Problem(
             f"models.lock profile '{selected.name}' has no generator pin",
@@ -1130,7 +1161,7 @@ def resolve_engine_target(
     ready, detail, service = apply.wait_for_services(
         io,
         rendered_dir,
-        (ENGINE_SERVICE_NAME,),
+        (GENERATOR.service_name,),
         sleep,
         exact=False,
         require_healthy=True,
@@ -1139,6 +1170,226 @@ def resolve_engine_target(
     if not ready:
         return Problem(detail, stack.logs_fix(rendered_dir, service))
     return EngineTarget(selected.name, generator.serve.served_name, window)
+
+
+def _resolve_embed_target(
+    io: Host,
+    rendered_dir: PathLike,
+    *,
+    hardware_profile: str,
+    models_path: PathLike,
+    sleep: Callable[[float], None],
+) -> _EmbedTarget | Problem:
+    """Resolve the rendered, pinned, and currently healthy embedding server."""
+
+    rendered = _rendered_has_model_server(io, rendered_dir, EMBED)
+    if rendered is not True:
+        detail = rendered if isinstance(rendered, str) else "rendered Compose has no embedding server service"
+        return Problem(detail, _APPLY_FIX)
+
+    selected = _selected_profile(io, hardware_profile, models_path)
+    if isinstance(selected, Problem):
+        return selected
+    pin = selected.model(EMBED.role)
+    if pin is None:
+        return Problem(f"models.lock profile '{selected.name}' has no embed pin", _MODELS_FIX)
+    space = selected.embedding_space
+    if space is None:
+        return Problem(f"models.lock profile '{selected.name}' has no embedding_space", _MODELS_FIX)
+    if space.role != EMBED.role:
+        return Problem(
+            f"models.lock profile '{selected.name}' embedding_space names {space.role}, expected {EMBED.role}",
+            _MODELS_FIX,
+        )
+
+    ready, detail, _service = apply.wait_for_services(
+        io,
+        rendered_dir,
+        (EMBED.service_name,),
+        sleep,
+        exact=False,
+        require_healthy=True,
+        attempts=1,
+    )
+    if not ready:
+        return Problem(
+            detail,
+            "Run sudo python3 -m gideon apply (which starts the embedding server and waits for its health); "
+            f"then read its logs with {stack.logs_fix(rendered_dir, EMBED.service_name)}; "
+            "then re-run sudo python3 -m gideon engine verify.",
+        )
+    return _EmbedTarget(pin.serve.served_name, space.dimensions, space.id)
+
+
+def _embed_vectors_figures(
+    *, inputs: int | None = None, dimensions: int | None = None, space: str | None = None
+) -> dict[str, object]:
+    """The fixed figure shape for a vector check, including a resolver refusal."""
+
+    return {
+        "http_status": None,
+        "inputs": inputs,
+        "vectors": None,
+        "dimensions": dimensions,
+        "width_min": None,
+        "width_max": None,
+        "norm_min": None,
+        "norm_max": None,
+        "prompt_tokens": None,
+        "elapsed_seconds": None,
+        "space": space,
+    }
+
+
+def _embed_vectors_check(
+    io: Host,
+    rendered_dir: PathLike,
+    *,
+    case: enginesample.EmbedVectorsCase,
+    target: _EmbedTarget,
+) -> CheckOutcome:
+    """Prove the server returns one unit vector per input at the lock's width."""
+
+    figures = _embed_vectors_figures(
+        inputs=len(case.texts), dimensions=target.dimensions, space=target.space_id
+    )
+    reply = call_model_server(
+        io,
+        rendered_dir,
+        EMBED,
+        path="/v1/embeddings",
+        body={"model": target.served_name, "input": list(case.texts)},
+        max_time=EMBED_VECTORS_TIMEOUT_SECONDS,
+    )
+    figures["http_status"] = reply.status
+    figures["elapsed_seconds"] = reply.elapsed
+    server_fix = _engine_fix(rendered_dir, EMBED)
+    if reply.problem is not None:
+        return CheckOutcome("embed-vectors", False, reply.problem.problem, reply.problem.fix, figures)
+    if reply.status != 200:
+        detail, fix = _status_failure(reply, server_fix, EMBED)
+        return CheckOutcome("embed-vectors", False, detail, fix, figures)
+
+    data = reply.json.get("data") if isinstance(reply.json, Mapping) else None
+    usage = reply.json.get("usage") if isinstance(reply.json, Mapping) else None
+    if isinstance(usage, Mapping) and type(usage.get("prompt_tokens")) is int:
+        figures["prompt_tokens"] = usage["prompt_tokens"]
+    if not isinstance(data, list):
+        return CheckOutcome("embed-vectors", False, "embedding server response data is not a list", server_fix, figures)
+    figures["vectors"] = len(data)
+    if len(data) != len(case.texts):
+        detail = f"embedding server returned {len(data)} vectors for {len(case.texts)} inputs"
+        return CheckOutcome("embed-vectors", False, detail, server_fix, figures)
+
+    widths: list[int] = []
+    norms: list[float] = []
+    for index, item in enumerate(data):
+        vector = item.get("embedding") if isinstance(item, Mapping) else None
+        if not isinstance(vector, list) or any(
+            isinstance(value, bool) or not isinstance(value, (int, float)) for value in vector
+        ):
+            detail = f"embedding server vector {index} is not a list of numbers"
+            return CheckOutcome("embed-vectors", False, detail, server_fix, figures)
+        width = len(vector)
+        widths.append(width)
+        figures["width_min"] = min(widths)
+        figures["width_max"] = max(widths)
+        if width != target.dimensions:
+            detail = f"embedding server vector {index} has width {width}, expected {target.dimensions}"
+            return CheckOutcome("embed-vectors", False, detail, server_fix, figures)
+        norm = math.sqrt(sum(value * value for value in vector))
+        if math.isfinite(norm):
+            norms.append(norm)
+            figures["norm_min"] = round(min(norms), 6)
+            figures["norm_max"] = round(max(norms), 6)
+        if not math.isfinite(norm) or abs(norm - 1) > EMBED_NORM_TOLERANCE:
+            detail = (
+                f"embedding server vector {index} has norm {norm:.6f} "
+                f"outside 1 ± {EMBED_NORM_TOLERANCE}"
+            )
+            return CheckOutcome("embed-vectors", False, detail, server_fix, figures)
+
+    tokens = figures["prompt_tokens"]
+    timing = f"{reply.elapsed:.3f} s" if reply.elapsed is not None else "timing unavailable"
+    detail = (
+        f"{len(data)} vectors of width {target.dimensions}, norms within 1 ± {EMBED_NORM_TOLERANCE}, "
+        + (f"{tokens} prompt tokens in {timing}" if tokens is not None else timing)
+    )
+    return CheckOutcome("embed-vectors", True, detail, "", figures)
+
+
+def _embed_throughput_figures(*, inputs: int | None = None) -> dict[str, object]:
+    """The fixed figures for a batch's throughput reading."""
+
+    return {
+        "http_status": None,
+        "inputs": inputs,
+        "prompt_tokens": None,
+        "elapsed_seconds": None,
+        "tokens_per_second": None,
+        "inputs_per_second": None,
+    }
+
+
+def _embed_throughput_check(
+    io: Host,
+    rendered_dir: PathLike,
+    *,
+    case: enginesample.EmbedThroughputCase,
+    target: _EmbedTarget,
+) -> CheckOutcome:
+    """Record one embedding batch's token and text rates without a rate floor."""
+
+    texts = enginesample.build_throughput_texts(case)
+    figures = _embed_throughput_figures(inputs=len(texts))
+    reply = call_model_server(
+        io,
+        rendered_dir,
+        EMBED,
+        path="/v1/embeddings",
+        body={"model": target.served_name, "input": list(texts)},
+        max_time=EMBED_THROUGHPUT_TIMEOUT_SECONDS,
+    )
+    figures["http_status"] = reply.status
+    figures["elapsed_seconds"] = reply.elapsed
+    server_fix = _engine_fix(rendered_dir, EMBED)
+    if reply.problem is not None:
+        return CheckOutcome("embed-throughput", False, reply.problem.problem, reply.problem.fix, figures)
+    if reply.status != 200:
+        detail, fix = _status_failure(reply, server_fix, EMBED)
+        return CheckOutcome("embed-throughput", False, detail, fix, figures)
+
+    data = reply.json.get("data") if isinstance(reply.json, Mapping) else None
+    if not isinstance(data, list):
+        return CheckOutcome(
+            "embed-throughput", False, "embedding server response data is not a list", server_fix, figures
+        )
+    if len(data) != len(texts):
+        detail = f"embedding server returned {len(data)} vectors for {len(texts)} inputs"
+        return CheckOutcome("embed-throughput", False, detail, server_fix, figures)
+
+    usage = reply.json.get("usage") if isinstance(reply.json, Mapping) else None
+    tokens = usage.get("prompt_tokens") if isinstance(usage, Mapping) else None
+    if type(tokens) is not int or tokens <= 0:
+        return CheckOutcome(
+            "embed-throughput", False, "embedding server reply has no prompt token count", server_fix, figures
+        )
+    figures["prompt_tokens"] = tokens
+    elapsed = reply.elapsed
+    if elapsed is None or elapsed <= 0:
+        return CheckOutcome(
+            "embed-throughput", False, "embedding server reply has no elapsed time", server_fix, figures
+        )
+
+    tokens_per_second = tokens / elapsed
+    inputs_per_second = len(texts) / elapsed
+    figures["tokens_per_second"] = round(tokens_per_second, 1)
+    figures["inputs_per_second"] = round(inputs_per_second, 1)
+    detail = (
+        f"{len(texts)} texts, {tokens} tokens in {elapsed:.3f} s: "
+        f"{tokens_per_second:.1f} tok/s, {inputs_per_second:.1f} texts/s"
+    )
+    return CheckOutcome("embed-throughput", True, detail, "", figures)
 
 
 def run_engine_verify(
@@ -1253,7 +1504,7 @@ def run_engine_verify(
             )
         )
 
-        engine_fix = _engine_fix(rendered_dir)
+        engine_fix = _engine_fix(rendered_dir, GENERATOR)
         served_name = engine_target.served_model_name
         window = engine_target.window
         checks: list[CheckOutcome] = []
@@ -1264,6 +1515,7 @@ def run_engine_verify(
             show(StageResult(outcome.name, outcome.ok, outcome.detail, outcome.fix))
             checks.append(outcome)
 
+        # The generator's sequence.
         estimates = _needle_estimates(
             io, rendered_dir, sample=sample, served_name=served_name, engine_fix=engine_fix
         )
@@ -1325,6 +1577,31 @@ def run_engine_verify(
             frontend_fix=_frontend_fix(rendered_dir),
         ):
             record(outcome)
+
+        # The supporting models' sequence.
+        embed_target = _resolve_embed_target(
+            io,
+            rendered_dir,
+            hardware_profile=config.hardware_profile,
+            models_path=actual_models,
+            sleep=sleep,
+        )
+        if isinstance(embed_target, Problem):
+            record(CheckOutcome(
+                "embed-vectors", False, embed_target.problem, embed_target.fix,
+                _embed_vectors_figures(),
+            ))
+            record(CheckOutcome(
+                "embed-throughput", False, embed_target.problem, embed_target.fix,
+                _embed_throughput_figures(),
+            ))
+        else:
+            record(_embed_vectors_check(
+                io, rendered_dir, case=sample.supporting.embed.vectors, target=embed_target
+            ))
+            record(_embed_throughput_check(
+                io, rendered_dir, case=sample.supporting.embed.throughput, target=embed_target
+            ))
 
         row = audit_module.AuditRow(
             run_id=str(run_id),

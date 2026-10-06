@@ -23,6 +23,14 @@ The smoke case is a short open prompt streamed with a bounded answer; its rows
 report the single-stream rate and the guardrail lags it implies, never a
 threshold.
 
+The `supporting` section is keyed by model role, with `embed` its one key now.
+Its `vectors` case sends the served model and its texts in one request and
+passes when each input returns a unit vector at the width declared by the
+lock's `embedding_space`; the width comes from the lock, never the sample.
+Its `throughput` case sends one batch of numbered filler texts and reports
+tokens per second and texts per second without a threshold. Every text stays
+far under the server's 8,191-token input bound.
+
 The work lands in sequence. Slice 4 adds the eight `research-qa` cases with
 frozen evidence carried by `/turn`'s `evidence:` field and the harness that
 grades them. The `frontend` section holds a non-empty `positives` list and one
@@ -43,7 +51,9 @@ during its on-box proof: `due` is one of the family's short leads, matched only
 when the date follows within eight characters, and one of five runs was not
 refused; `no later than` is a long lead matched through the family's
 80-character gap, so a weekday or any other word between the lead and the date
-still trips. Slice 3 adds the supporting-model checks with their containers.
+still trips. Slice 3 added the embedding server's two checks under
+`supporting`; slice 4 adds the rerankers' checks beside them, under the same
+key.
 
 Cases are immutable. When a case needs to change, supersede it with a new id;
 never edit the existing case in place.

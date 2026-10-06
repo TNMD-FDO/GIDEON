@@ -3,7 +3,7 @@
 A model server serves one pinned model on the engine image; the family is one
 member per model role of the lock, the generator first. A member holds its
 service name (the stable alias), container port, secret name, scrape job name,
-slow-start allowance, and the words its start refusal uses for the key file.
+slow-start allowance, and the words its clients use for the server.
 Its served name and GPU are its pin's, the served name held equal to the
 service name by a test. The generator's identity is shared by its Compose
 definition (``render/services/generator.py``), the frontend's connection
@@ -43,7 +43,13 @@ class ModelServerMember:
     secret_name: str
     job_name: str
     ready_seconds: int
-    key_file_words: str
+    words: str
+
+    @property
+    def key_file_words(self) -> str:
+        """The member's words for a missing key file."""
+
+        return f"{self.words} API key"
 
 
 GENERATOR: Final = ModelServerMember(
@@ -53,7 +59,7 @@ GENERATOR: Final = ModelServerMember(
     ENGINE_SECRET_NAME,
     ENGINE_JOB_NAME,
     ENGINE_READY_SECONDS,
-    "engine API key",
+    "engine",
 )
 EMBED: Final = ModelServerMember(
     "embed",
@@ -62,7 +68,7 @@ EMBED: Final = ModelServerMember(
     EMBED_SECRET_NAME,
     EMBED_JOB_NAME,
     EMBED_READY_SECONDS,
-    "embedding server API key",
+    "embedding server",
 )
 MODEL_SERVERS: Final = (GENERATOR, EMBED)
 

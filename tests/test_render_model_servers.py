@@ -36,12 +36,14 @@ class Family(unittest.TestCase):
         gpu = inputs(EXAMPLE)
 
         self.assertEqual(MODEL_SERVERS[0], GENERATOR)
-        for field in ("role", "service_name", "secret_name", "job_name"):
+        for field in ("role", "service_name", "secret_name", "job_name", "words"):
             with self.subTest(field=field):
                 values = [getattr(member, field) for member in MODEL_SERVERS]
                 self.assertEqual(len(values), len(set(values)))
         for member in MODEL_SERVERS:
             with self.subTest(role=member.role):
+                self.assertTrue(member.words)
+                self.assertEqual(member.key_file_words, f"{member.words} API key")
                 self.assertIs(model_server(member.role), member)
                 pin = profile.model(member.role)
                 self.assertIsNotNone(pin)

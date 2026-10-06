@@ -58,3 +58,22 @@ frontend:
   trip:
     id: library-return-date
     prompt: 'Complete this sentence with an invented calendar date (month, day, and four-digit year) and reply with the completed sentence only: The library book must be returned no later than'
+
+supporting:
+  embed:
+    vectors:
+      id: workshop-drawers-tabletop
+      texts:
+        - A quiet workshop has a shelf of painted wooden boxes.
+        - Three drawers hold buttons, ribbons, and paper shapes.
+        - A small tabletop game uses the shapes as playful pieces.
+    throughput:
+      id: workshop-tabletop-batch
+      filler: >-
+        A quiet workshop opens its drawers each morning to sort wooden shapes,
+        bright buttons, and folded paper. The caretaker lays the pieces across
+        a broad tabletop and invents small games for visiting friends. By
+        evening the pieces return to labeled trays, ready for a new arrangement
+        the next day. Nothing in this workshop belongs to a real place or person.
+      paragraphs: 7
+      inputs: 32

@@ -10,6 +10,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
+from unittest.mock import patch
 
 from gideon.evaluation import challenger, judge, record, results
 from gideon.host import engine, stack
@@ -17,6 +18,7 @@ from gideon.host.render.engine import (
     ENGINE_PORT,
     ENGINE_SECRET_NAME,
     ENGINE_SERVICE_NAME,
+    GENERATOR,
 )
 from gideon.host.sysio import Command, PathLike
 
@@ -133,6 +135,12 @@ def run_grade(
 class Request(unittest.TestCase):
     """The request preserves the prompt contract and the secret boundary."""
 
+    def test_grade_names_the_generator_member(self) -> None:
+        host = StubHost(engine_output(valid_content()))
+        with patch.object(engine, "call_model_server", wraps=engine.call_model_server) as call:
+            run_grade(host)
+        self.assertIs(call.call_args.args[2], GENERATOR)
+
     def test_challenger_prompt_uses_shared_document_and_its_own_rubric(self) -> None:
         loaded = challenger.load_challenger(Path(__file__).resolve().parents[1] / challenger.CHALLENGER_PATH)
         assert loaded.config is not None and loaded.config.challenger is not None
@@ -239,6 +247,7 @@ class Request(unittest.TestCase):
                 f"/run/secrets/{ENGINE_SECRET_NAME}",
                 f"http://{ENGINE_SERVICE_NAME}:{ENGINE_PORT}/v1/chat/completions",
                 str(judge.JUDGE_TIMEOUT_SECONDS),
+                GENERATOR.key_file_words,
             )
         )
         self.assertEqual(host.argv, expected_argv)
@@ -257,6 +266,7 @@ class Request(unittest.TestCase):
                 f"/run/secrets/{ENGINE_SECRET_NAME}",
                 f"http://{ENGINE_SERVICE_NAME}:{ENGINE_PORT}/v1/chat/completions",
                 str(judge.JUDGE_TIMEOUT_SECONDS),
+                GENERATOR.key_file_words,
             )
         )
         # The whole argv is pinned, so the secret's path is the only thing about
