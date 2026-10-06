@@ -13,7 +13,7 @@ from pathlib import PurePosixPath
 from typing import Final, Literal, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from gideon.host import cas, nogpu
+from gideon.host import cas, nogpu, report
 from gideon.host.render import ARTIFACTS
 from gideon.host.render.pgbackrest import REPOSITORY_PATH
 from gideon.host.report import Problem
@@ -353,7 +353,8 @@ def parse_sha256sum(text: str) -> Mapping[str, str]:
     return hashes
 
 
-_REHASH_FIX: Final = "Re-run sudo python3 -m gideon backup run to regenerate the inventory hashes."
+def _rehash_fix() -> str:
+    return f"Re-run {report.command('backup run')} to regenerate the inventory hashes."
 
 
 def merge_hashes(
@@ -375,12 +376,12 @@ def merge_hashes(
         if _SHA256.fullmatch(digest) is None:
             return Problem(
                 f"Hash for file entry {entry.path} is not 64-character hexadecimal.",
-                _REHASH_FIX,
+                _rehash_fix(),
             )
         merged.append(replace(entry, sha256=digest.lower()))
     if missing:
         paths = ", ".join(missing)
-        return Problem(f"File entries are missing sha256 hashes: {paths}.", _REHASH_FIX)
+        return Problem(f"File entries are missing sha256 hashes: {paths}.", _rehash_fix())
     return tuple(merged)
 
 
@@ -975,7 +976,7 @@ def select_set(
     if not complete:
         return Problem(
             "No complete backup set is available.",
-            "Run sudo python3 -m gideon backup run, then retry.",
+            f"Run {report.command('backup run')}, then retry.",
         )
     if at is None:
         return complete[0]
@@ -1005,7 +1006,7 @@ def select_set_by_label(sets: Sequence[SetRef], label: str) -> SetRef | Problem:
     labels = ", ".join(sorted(ref.label for ref in complete)) or "none"
     return Problem(
         f"No complete backup set is named {label}; the complete sets are: {labels}.",
-        "Choose one of them, then retry sudo python3 -m gideon restore --from staging --set <label>.",
+        f"Choose one of them, then retry {report.command('restore --from staging --set <label>')}.",
     )
 
 

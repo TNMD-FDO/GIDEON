@@ -13,7 +13,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Final
 
-from gideon.host import backupset, cas, pgbackrest, sshtarget
+from gideon.host import backupset, cas, pgbackrest, report, sshtarget
 from gideon.host.report import Problem, command_detail
 from gideon.host.stages import run_stage
 from gideon.host.sysio import CompletedText, Host, PathLike
@@ -31,6 +31,14 @@ NOTHING_LEFT_OUT_DETAIL: Final = "0 left out"
 # and memory bounds, not thresholds.
 _HASH_BATCH: Final = 1000
 _LEFT_OUT_NAMED: Final = 10
+
+
+def _physical_fix() -> str:
+    return (
+        "The fetched or restored tree does not match its manifest; re-run "
+        f"{report.command('backup push --verify-all')} on the source box, "
+        "then retry restore."
+    )
 
 
 def _object_relative(name: str) -> str:
@@ -549,11 +557,6 @@ def pushed(
     return tuple(bound)
 
 
-_PHYSICAL_FIX: Final = (
-    "The fetched or restored tree does not match its manifest; re-run "
-    "sudo python3 -m gideon backup push --verify-all on the source box, "
-    "then retry restore."
-)
 # Owner groups are keyed by (uid, gid, is_link): a symlink is re-owned with
 # ``chown -h`` so its referent — possibly outside the tree — is never touched,
 # and it is never chmod-ed (a link has no mode of its own).
@@ -579,19 +582,19 @@ def _validate_physical(
     try:
         listed = io.run(["find", base, "-printf", backupset.FIND_FORMAT])
     except (OSError, subprocess.SubprocessError) as exc:
-        return Problem(f"cannot list {base}: {exc}", _PHYSICAL_FIX)
+        return Problem(f"cannot list {base}: {exc}", _physical_fix())
     if listed.returncode != 0:
-        return Problem(f"cannot list {base}: {command_detail(listed)}", _PHYSICAL_FIX)
+        return Problem(f"cannot list {base}: {command_detail(listed)}", _physical_fix())
     try:
         kinds = {entry.path: entry.kind for entry in backupset.parse_find_listing(listed.stdout)}
     except ValueError as exc:
-        return Problem(f"listing of {base} is malformed: {exc}", _PHYSICAL_FIX)
+        return Problem(f"listing of {base} is malformed: {exc}", _physical_fix())
     mismatched = sum(1 for entry in entries if kinds.get(entry.path) != entry.kind)
     if mismatched:
         return Problem(
             f"{mismatched} inventoried path(s) under {base} are not what the manifest "
             "declares (a link in place of a file or directory, or a path beneath a link)",
-            _PHYSICAL_FIX,
+            _physical_fix(),
         )
     if exact:
         # A snapshotted root is the manifest's set and nothing else: a path the
@@ -606,7 +609,7 @@ def _validate_physical(
         if extraneous:
             return Problem(
                 f"{len(extraneous)} path(s) under {base} are not in the manifest: {extraneous[0]}",
-                _PHYSICAL_FIX,
+                _physical_fix(),
             )
     return None
 
@@ -1042,16 +1045,16 @@ class _HeldStore(HeldRoot):
         try:
             size = self.io.stat(listing).st_size
         except OSError as exc:
-            return Problem(f"store listing for {self.name} cannot be read: {exc}", _PHYSICAL_FIX)
+            return Problem(f"store listing for {self.name} cannot be read: {exc}", _physical_fix())
         hashed = _checked(self.io, ["sha256sum", listing], f"store listing hash for {self.name}")
         if isinstance(hashed, Problem):
-            return Problem(hashed.problem, _PHYSICAL_FIX)
+            return Problem(hashed.problem, _physical_fix())
         try:
             digest = backupset.parse_sha256sum(hashed.stdout)[listing]
         except (KeyError, ValueError) as exc:
-            return Problem(f"store listing hash for {self.name} is malformed: {exc}", _PHYSICAL_FIX)
+            return Problem(f"store listing hash for {self.name} is malformed: {exc}", _physical_fix())
         if size != pin.size or digest != pin.sha256:
-            return Problem(f"store listing for {self.name} does not match its manifest pin", _PHYSICAL_FIX)
+            return Problem(f"store listing for {self.name} does not match its manifest pin", _physical_fix())
         return None
 
     def prove(self, rendered_dir: PathLike) -> Problem | None:

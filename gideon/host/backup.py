@@ -27,6 +27,7 @@ from gideon.host import (
     backuproots,
     backupset,
     pgbackrest,
+    report,
     secrets,
     site,
     sshtarget,
@@ -52,19 +53,6 @@ from gideon.host.sysio import Host, LockingHost, PathLike, RealHost
 
 _SITE_PATH: Final = "/etc/gideon/site.yaml"
 _RENDERED_DIR: Final = "/etc/gideon/rendered"
-_ROOT_FIX: Final = "Run sudo python3 -m gideon backup run as root, then retry."
-_APPLY_FIX: Final = "Run sudo python3 -m gideon apply, then retry."
-_TOOLS_FIX: Final = (
-    "Run sudo python3 -m gideon host provision --only host-tools, then retry."
-)
-_RECIPIENT_FIX: Final = (
-    "Run sudo python3 -m gideon host provision --only age-recipient, then retry."
-)
-_IDENTITY_FIX: Final = (
-    "Run sudo python3 -m gideon host provision --only age-identity, then retry."
-)
-_ACCOUNT_FIX: Final = "Run sudo python3 -m gideon host provision, then retry."
-_STAGE_FIX: Final = "Run sudo python3 -m gideon apply, then retry."
 _PRUNE_FIX: Final = "Repair the staging directory, then re-run backup run."
 _SECRET_STAGE_FIX: Final = (
     "Correct /etc/gideon/secrets, /etc/gideon/backup_age_recipient, and "
@@ -73,28 +61,69 @@ _SECRET_STAGE_FIX: Final = (
 # Exempt operational constant: the bound on one pgBackRest backup, within the
 # timer unit's six-hour window for the run and the push together.
 _COMMAND_TIMEOUT: Final = 18000.0
-_PUSH_ROOT_FIX: Final = "Run sudo python3 -m gideon backup push as root, then retry."
-_PUSH_SET_FIX: Final = "Run sudo python3 -m gideon backup run, then retry."
-_PUSH_TOOLS_FIX: Final = (
-    "Run sudo python3 -m gideon host provision --only host-tools, then retry."
-)
 _PUSH_TARGET_FIX: Final = (
     "Authorize the backup key and check the target per "
     "docs/runbooks/office-services-setup.md §3, then re-run backup push."
 )
-_PUSH_STAGE_FIX: Final = "Run sudo python3 -m gideon backup push, then retry."
 _PUSH_FULL_COPY_FIX: Final = (
     "Keep every snapshot under one path on one filesystem on the target "
     "(docs/runbooks/office-services-setup.md §3), then re-run backup push."
 )
-_PUSH_CHECK_FIX: Final = (
-    "Re-run sudo python3 -m gideon backup push --verify-all; if it fails again, "
-    "the target's copy is corrupt — check the target's disk per "
-    "docs/runbooks/office-services-setup.md §3."
-)
 _RSYNC_STAT_PATTERN = re.compile(
     r"^\s*Total (file size|transferred file size):\s*([0-9][0-9,]*) bytes\s*$"
 )
+
+
+def _root_fix() -> str:
+    return f"Run {report.command('backup run')} as root, then retry."
+
+
+def _apply_fix() -> str:
+    return f"Run {report.command('apply')}, then retry."
+
+
+def _tools_fix() -> str:
+    return f"Run {report.command('host provision --only host-tools')}, then retry."
+
+
+def _recipient_fix() -> str:
+    return f"Run {report.command('host provision --only age-recipient')}, then retry."
+
+
+def _identity_fix() -> str:
+    return f"Run {report.command('host provision --only age-identity')}, then retry."
+
+
+def _account_fix() -> str:
+    return f"Run {report.command('host provision')}, then retry."
+
+
+def _stage_fix() -> str:
+    return f"Run {report.command('apply')}, then retry."
+
+
+def _push_root_fix() -> str:
+    return f"Run {report.command('backup push')} as root, then retry."
+
+
+def _push_set_fix() -> str:
+    return f"Run {report.command('backup run')}, then retry."
+
+
+def _push_tools_fix() -> str:
+    return f"Run {report.command('host provision --only host-tools')}, then retry."
+
+
+def _push_stage_fix() -> str:
+    return f"Run {report.command('backup push')}, then retry."
+
+
+def _push_check_fix() -> str:
+    return (
+        f"Re-run {report.command('backup push --verify-all')}; if it fails again, "
+        "the target's copy is corrupt — check the target's disk per "
+        "docs/runbooks/office-services-setup.md §3."
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,7 +168,7 @@ def _preconditions(
         compose_path = Path(rendered_dir) / "compose.yaml"
         if not io.exists(compose_path):
             _refuse(
-                f"rendered Compose file is missing: {compose_path}.", _APPLY_FIX
+                f"rendered Compose file is missing: {compose_path}.", _apply_fix()
             )
             return None
         missing_tools = tuple(
@@ -153,12 +182,12 @@ def _preconditions(
             if not io.exists(path)
         )
     except OSError as exc:
-        _refuse(f"cannot inspect backup prerequisites: {exc}.", _APPLY_FIX)
+        _refuse(f"cannot inspect backup prerequisites: {exc}.", _apply_fix())
         return None
     if missing_tools:
         _refuse(
             "backup tool(s) are missing: " + ", ".join(missing_tools) + ".",
-            _TOOLS_FIX,
+            _tools_fix(),
         )
         return None
 
@@ -166,18 +195,18 @@ def _preconditions(
         recipient = io.read_text(AGE_RECIPIENT_PATH).strip()
     except FileNotFoundError:
         _refuse(
-            f"age recipient is missing: {AGE_RECIPIENT_PATH}.", _RECIPIENT_FIX
+            f"age recipient is missing: {AGE_RECIPIENT_PATH}.", _recipient_fix()
         )
         return None
     except (OSError, UnicodeError) as exc:
         _refuse(
             f"age recipient is unreadable: {AGE_RECIPIENT_PATH} ({exc}).",
-            _RECIPIENT_FIX,
+            _recipient_fix(),
         )
         return None
     if AGE_RECIPIENT.fullmatch(recipient) is None:
         _refuse(
-            f"age recipient is malformed: {AGE_RECIPIENT_PATH}.", _RECIPIENT_FIX
+            f"age recipient is malformed: {AGE_RECIPIENT_PATH}.", _recipient_fix()
         )
         return None
 
@@ -185,21 +214,21 @@ def _preconditions(
     if gideon_ids is None:
         _refuse(
             f"the {backupset.SERVICE_ACCOUNT} service account is missing or malformed.",
-            _ACCOUNT_FIX,
+            _account_fix(),
         )
         return None
 
     try:
         if not io.exists(AGE_IDENTITY_PATH):
             _refuse(
-                f"box identity is missing: {AGE_IDENTITY_PATH}.", _IDENTITY_FIX
+                f"box identity is missing: {AGE_IDENTITY_PATH}.", _identity_fix()
             )
             return None
         identity_stat = io.stat(AGE_IDENTITY_PATH)
     except OSError as exc:
         _refuse(
             f"box identity cannot be inspected: {AGE_IDENTITY_PATH} ({exc}).",
-            _IDENTITY_FIX,
+            _identity_fix(),
         )
         return None
     identity_mode = stat.S_IMODE(identity_stat.st_mode)
@@ -207,7 +236,7 @@ def _preconditions(
         _refuse(
             f"box identity is not root-only: {AGE_IDENTITY_PATH} "
             f"(mode {identity_mode:04o}, owner {identity_stat.st_uid}:{identity_stat.st_gid}).",
-            _IDENTITY_FIX,
+            _identity_fix(),
         )
         return None
 
@@ -240,17 +269,17 @@ def _preconditions(
     try:
         ready = io.run(ready_argv)
     except (OSError, subprocess.SubprocessError) as exc:
-        _refuse(f"Postgres readiness probe failed: {exc}.", _APPLY_FIX)
+        _refuse(f"Postgres readiness probe failed: {exc}.", _apply_fix())
         return None
     if ready.returncode != 0:
         _refuse(
-            f"Postgres is not ready: {command_detail(ready)}.", _APPLY_FIX
+            f"Postgres is not ready: {command_detail(ready)}.", _apply_fix()
         )
         return None
 
     info = pgbackrest.info(io, rendered_dir)
     if not info.ok:
-        _refuse(info.problem or "pgBackRest info failed.", _APPLY_FIX)
+        _refuse(info.problem or "pgBackRest info failed.", _apply_fix())
         return None
 
     audit_problem = audit.probe(io, rendered_dir)
@@ -402,7 +431,7 @@ def _files_stage(
     for root in roots:
         outcome = root.take()
         if isinstance(outcome, Problem):
-            return StageResult("files", False, outcome.problem, outcome.fix or _STAGE_FIX), backupset.LinkVerdict(0, 0)
+            return StageResult("files", False, outcome.problem, outcome.fix or _stage_fix()), backupset.LinkVerdict(0, 0)
         copies += outcome.copied
         pairs.update(outcome.link_pairs)
 
@@ -446,7 +475,7 @@ def _complete_stage(roots: tuple[backuproots.TakingRoot, ...]) -> StageResult:
     for root in roots:
         outcome = root.complete()
         if isinstance(outcome, Problem):
-            return StageResult("complete", False, outcome.problem, outcome.fix or _STAGE_FIX)
+            return StageResult("complete", False, outcome.problem, outcome.fix or _stage_fix())
         acted += outcome.acted
         objects += outcome.objects
     return StageResult(
@@ -523,7 +552,7 @@ def _secrets_stage(
                 "secrets",
                 False,
                 "the secrets directory has no webui_secret_key to fingerprint",
-                _APPLY_FIX,
+                _apply_fix(),
             ),
             None,
         )
@@ -575,12 +604,12 @@ def _postgres_stage(
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return (
-            StageResult("postgres", False, f"pgBackRest backup failed: {exc}", _STAGE_FIX),
+            StageResult("postgres", False, f"pgBackRest backup failed: {exc}", _stage_fix()),
             None,
         )
     if backup_result.returncode != 0:
         return (
-            _run_failure("postgres", "pgBackRest backup failed", backup_result, _STAGE_FIX),
+            _run_failure("postgres", "pgBackRest backup failed", backup_result, _stage_fix()),
             None,
         )
 
@@ -598,13 +627,13 @@ def _postgres_stage(
                 "postgres",
                 False,
                 f"Postgres boundary commit failed: {exc}",
-                _STAGE_FIX,
+                _stage_fix(),
             ),
             None,
         )
     if boundary.returncode != 0:
         return (
-            _run_failure("postgres", "Postgres boundary commit failed", boundary, _STAGE_FIX),
+            _run_failure("postgres", "Postgres boundary commit failed", boundary, _stage_fix()),
             None,
         )
     checked = pgbackrest.check(io, rendered_dir)
@@ -614,7 +643,7 @@ def _postgres_stage(
                 "postgres",
                 False,
                 checked.problem or "pgBackRest archive check failed.",
-                checked.fix or _STAGE_FIX,
+                checked.fix or _stage_fix(),
             ),
             None,
         )
@@ -625,7 +654,7 @@ def _postgres_stage(
                 "postgres",
                 False,
                 fresh.problem or "pgBackRest info returned no backup after backup.",
-                fresh.fix or _STAGE_FIX,
+                fresh.fix or _stage_fix(),
             ),
             None,
         )
@@ -656,12 +685,12 @@ def _counts_stage(
             listing = io.run(argv, input=listing_sql)
         except (OSError, subprocess.SubprocessError) as exc:
             return (
-                StageResult("counts", False, f"table listing failed for {database}: {exc}", _STAGE_FIX),
+                StageResult("counts", False, f"table listing failed for {database}: {exc}", _stage_fix()),
                 None,
             )
         if listing.returncode != 0:
             return (
-                _run_failure("counts", f"table listing failed for {database}", listing, _STAGE_FIX),
+                _run_failure("counts", f"table listing failed for {database}", listing, _stage_fix()),
                 None,
             )
         tables = tuple(
@@ -676,12 +705,12 @@ def _counts_stage(
             counted = io.run(argv, input=count_sql)
         except (OSError, subprocess.SubprocessError) as exc:
             return (
-                StageResult("counts", False, f"table counts failed for {database}: {exc}", _STAGE_FIX),
+                StageResult("counts", False, f"table counts failed for {database}: {exc}", _stage_fix()),
                 None,
             )
         if counted.returncode != 0:
             return (
-                _run_failure("counts", f"table counts failed for {database}", counted, _STAGE_FIX),
+                _run_failure("counts", f"table counts failed for {database}", counted, _stage_fix()),
                 None,
             )
         wanted = set(tables)
@@ -698,12 +727,12 @@ def _counts_stage(
                 number = int(value, 10)
             except ValueError:
                 return (
-                    StageResult("counts", False, f"invalid row count for {database}.{name}", _STAGE_FIX),
+                    StageResult("counts", False, f"invalid row count for {database}.{name}", _stage_fix()),
                     None,
                 )
             if number < 0:
                 return (
-                    StageResult("counts", False, f"invalid row count for {database}.{name}", _STAGE_FIX),
+                    StageResult("counts", False, f"invalid row count for {database}.{name}", _stage_fix()),
                     None,
                 )
             parsed[name] = number
@@ -714,7 +743,7 @@ def _counts_stage(
                     "counts",
                     False,
                     f"row counts were missing for {database}: {', '.join(missing)}",
-                    _STAGE_FIX,
+                    _stage_fix(),
                 ),
                 None,
             )
@@ -763,7 +792,7 @@ def _manifest_stage(
     for root in roots:
         outcome = root.inventory()
         if isinstance(outcome, Problem):
-            return StageResult("manifest", False, outcome.problem, outcome.fix or _STAGE_FIX), None, 0
+            return StageResult("manifest", False, outcome.problem, outcome.fix or _stage_fix()), None, 0
         if outcome.pin is None or outcome.entries:
             inventory[root.name] = outcome.entries
         if outcome.pin is not None:
@@ -799,9 +828,9 @@ def _manifest_stage(
         io.write_text(manifest_path, manifest.to_json())
         moved = io.run(["mv", partial, final])
     except (OSError, subprocess.SubprocessError) as exc:
-        return StageResult("manifest", False, f"manifest finalization failed: {exc}", _STAGE_FIX), None, 0
+        return StageResult("manifest", False, f"manifest finalization failed: {exc}", _stage_fix()), None, 0
     if moved.returncode != 0:
-        return _run_failure("manifest", "manifest finalization failed", moved, _STAGE_FIX), None, 0
+        return _run_failure("manifest", "manifest finalization failed", moved, _stage_fix()), None, 0
     return StageResult("manifest", True, f"manifest written and set renamed to {label}", ""), manifest, set_bytes
 
 
@@ -932,7 +961,7 @@ def run_backup_run(
 
     io = host or RealHost()
     if io.geteuid() != 0:
-        return _refuse("root is required.", _ROOT_FIX)
+        return _refuse("root is required.", _root_fix())
     started = aware_now(now)
     if started is None:
         return _refuse(
@@ -983,7 +1012,7 @@ def _backup_run_body(
     try:
         sets = backupset.list_sets(io)
     except OSError as exc:
-        return _refuse(f"cannot list backup sets: {exc}.", _STAGE_FIX)
+        return _refuse(f"cannot list backup sets: {exc}.", _stage_fix())
     chosen = _choose_label(
         args=args, now=started, sets=sets, pre_restore=pre_restore
     )
@@ -1159,14 +1188,14 @@ def _push_preconditions(
     except OSError as exc:
         _refuse(
             f"cannot inspect /usr/bin/rsync: {exc}.",
-            _PUSH_TOOLS_FIX,
+            _push_tools_fix(),
             command="backup push",
         )
         return None
     if not has_rsync:
         _refuse(
             "backup tool is missing: /usr/bin/rsync.",
-            _PUSH_TOOLS_FIX,
+            _push_tools_fix(),
             command="backup push",
         )
         return None
@@ -1176,7 +1205,7 @@ def _push_preconditions(
     except OSError as exc:
         _refuse(
             f"cannot list local backup sets: {exc}.",
-            _PUSH_SET_FIX,
+            _push_set_fix(),
             command="backup push",
         )
         return None
@@ -1186,7 +1215,7 @@ def _push_preconditions(
     if newest is None:
         _refuse(
             "no complete local backup set is available.",
-            _PUSH_SET_FIX,
+            _push_set_fix(),
             command="backup push",
         )
         return None
@@ -1233,7 +1262,7 @@ def _push_record_stage(
                 "record",
                 False,
                 f"local set {local_set.label} has no parsed manifest",
-                _PUSH_SET_FIX,
+                _push_set_fix(),
             ),
             None,
             None,
@@ -1255,7 +1284,7 @@ def _push_record_stage(
                 "record",
                 False,
                 f"push record could not be written: {exc}",
-                _PUSH_STAGE_FIX,
+                _push_stage_fix(),
             ),
             None,
             None,
@@ -1298,7 +1327,7 @@ def _parse_remote_listing(
                 "list",
                 False,
                 f"remote snapshot listing line {line_number} is malformed",
-                _PUSH_STAGE_FIX,
+                _push_stage_fix(),
             )
         complete = (
             flag == "1"
@@ -1326,14 +1355,14 @@ def list_remote_snapshots(
             "list",
             False,
             f"remote snapshot listing failed: {exc}",
-            _PUSH_STAGE_FIX,
+            _push_stage_fix(),
         )
     if result.returncode != 0:
         return _run_failure(
             "list",
             "remote snapshot listing failed",
             result,
-            _PUSH_STAGE_FIX,
+            _push_stage_fix(),
         )
     return _parse_remote_listing(result.stdout)
 
@@ -1353,13 +1382,13 @@ def read_push_record(
     except (OSError, subprocess.SubprocessError) as exc:
         return Problem(
             f"Remote push record read failed for {snapshot_name}: {exc}.",
-            _PUSH_STAGE_FIX,
+            _push_stage_fix(),
         )
     if result.returncode != 0:
         return Problem(
             f"Remote push record read failed for {snapshot_name}: "
             f"{command_detail(result)}.",
-            _PUSH_STAGE_FIX,
+            _push_stage_fix(),
         )
     return backupset.parse_push_record(result.stdout)
 
@@ -1462,11 +1491,11 @@ def _push_stage(
         result = io.run(argv)
     except (OSError, subprocess.SubprocessError) as exc:
         return (
-            StageResult("push", False, f"rsync push failed: {exc}", _PUSH_STAGE_FIX),
+            StageResult("push", False, f"rsync push failed: {exc}", _push_stage_fix()),
             None,
         )
     if result.returncode != 0:
-        return _run_failure("push", "rsync push failed", result, _PUSH_STAGE_FIX), None
+        return _run_failure("push", "rsync push failed", result, _push_stage_fix()), None
     stats = parse_rsync_stats(result.stdout)
     if stats is None:
         return (
@@ -1474,7 +1503,7 @@ def _push_stage(
                 "push",
                 False,
                 "rsync --stats output was missing total or transferred file size",
-                _PUSH_STAGE_FIX,
+                _push_stage_fix(),
             ),
             None,
         )
@@ -1506,14 +1535,15 @@ def _remote_command_stage(
     name: str,
     detail: str,
     script: str,
-    fix: str = _PUSH_STAGE_FIX,
+    fix: str | None = None,
 ) -> StageResult:
+    resolved_fix = _push_stage_fix() if fix is None else fix
     try:
         result = io.run(sshtarget.ssh_argv(config, sshtarget.remote_script(script)))
     except (OSError, subprocess.SubprocessError) as exc:
-        return StageResult(name, False, f"{detail}: {exc}", fix)
+        return StageResult(name, False, f"{detail}: {exc}", resolved_fix)
     if result.returncode != 0:
-        return _run_failure(name, detail, result, fix)
+        return _run_failure(name, detail, result, resolved_fix)
     return StageResult(name, True, detail, "")
 
 
@@ -1592,7 +1622,7 @@ def _push_prune_stage(
                     "prune",
                     False,
                     f"refusing to remove an unsafe target snapshot: {name}",
-                    _PUSH_STAGE_FIX,
+                    _push_stage_fix(),
                 ),
                 removed,
             )
@@ -1636,7 +1666,7 @@ def _push_check_input(
             "check",
             False,
             f"local manifest could not be read: {exc}",
-            _PUSH_CHECK_FIX,
+            _push_check_fix(),
         )
 
     lines: list[str] = []
@@ -1666,7 +1696,7 @@ def _push_check_input(
     ):
         outcome = root.check(verify_all=verify_all)
         if isinstance(outcome, Problem):
-            return StageResult("check", False, outcome.problem, outcome.fix or _PUSH_SET_FIX)
+            return StageResult("check", False, outcome.problem, outcome.fix or _push_set_fix())
         for relative, digest in outcome.mandatory:
             _add_check_hash(lines, seen, relative, digest)
         sampled.extend(outcome.sampled)
@@ -1694,12 +1724,12 @@ def _push_check_stage(
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return (
-            StageResult("check", False, f"remote manifest read failed: {exc}", _PUSH_CHECK_FIX),
+            StageResult("check", False, f"remote manifest read failed: {exc}", _push_check_fix()),
             _PushCheck(0, 0),
         )
     if fetched.returncode != 0:
         return (
-            _run_failure("check", "remote manifest read failed", fetched, _PUSH_CHECK_FIX),
+            _run_failure("check", "remote manifest read failed", fetched, _push_check_fix()),
             _PushCheck(0, 0),
         )
     try:
@@ -1710,13 +1740,13 @@ def _push_check_stage(
                 "check",
                 False,
                 f"remote manifest could not be parsed: {exc}",
-                _PUSH_CHECK_FIX,
+                _push_check_fix(),
             ),
             _PushCheck(0, 0),
         )
     if isinstance(parsed, backupset.Problem):
         return (
-            StageResult("check", False, parsed.problem, _PUSH_CHECK_FIX),
+            StageResult("check", False, parsed.problem, _push_check_fix()),
             _PushCheck(0, 0),
         )
     expected = _push_check_input(
@@ -1737,7 +1767,7 @@ def _push_check_stage(
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return (
-            StageResult("check", False, f"remote checksum check failed: {exc}", _PUSH_CHECK_FIX),
+            StageResult("check", False, f"remote checksum check failed: {exc}", _push_check_fix()),
             _PushCheck(0, 0),
         )
     okay, failed = sshtarget.parse_check_output(checked.stdout)
@@ -1748,13 +1778,13 @@ def _push_check_stage(
                 "check",
                 False,
                 f"remote checksum verification failed for {len(failed)} path(s)",
-                _PUSH_CHECK_FIX,
+                _push_check_fix(),
             ),
             report,
         )
     if checked.returncode != 0:
         return (
-            _run_failure("check", "remote checksum check failed", checked, _PUSH_CHECK_FIX),
+            _run_failure("check", "remote checksum check failed", checked, _push_check_fix()),
             report,
         )
     return (
@@ -1824,7 +1854,7 @@ def run_backup_push(
 
     io = host or RealHost()
     if io.geteuid() != 0:
-        return _refuse("root is required.", _PUSH_ROOT_FIX, command="backup push")
+        return _refuse("root is required.", _push_root_fix(), command="backup push")
     started = aware_now(now)
     if started is None:
         return _refuse(

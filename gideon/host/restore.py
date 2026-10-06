@@ -25,6 +25,7 @@ from gideon.host import (
     backupset,
     nogpu,
     pgbackrest,
+    report,
     secrets,
     site,
     sshtarget,
@@ -50,17 +51,11 @@ FRESH_STACK_SKIPPED_DETAIL: Final = "skipped (fresh stack has no backup set in s
 # harness requires the mapped one on the files row.
 REOWN_MAPPED_DETAIL: Final = "mapped to gideon"
 REOWN_NO_RECORD_DETAIL: Final = "no gideon ids recorded"
-_ROOT_FIX: Final = "Run sudo python3 -m gideon restore --from <staging|target>, then retry."
-_APPLY_FIX: Final = "Run sudo python3 -m gideon apply, then retry."
 _TARGET_FIX: Final = (
     "Authorize the backup key and check the target per "
     "docs/runbooks/office-services-setup.md §3, then re-run restore."
 )
-_SET_FIX: Final = "Run sudo python3 -m gideon backup run, then retry."
-_ACCOUNT_FIX: Final = "Run sudo python3 -m gideon host provision, then retry."
-_PUSH_FIX: Final = "Run sudo python3 -m gideon backup push, then retry."
 _SELECT_FIX: Final = "Choose an earlier --at, or omit it for the latest state."
-_STAGE_FIX: Final = "Run sudo python3 -m gideon apply, then retry."
 _VERIFY_FIX: Final = "Repair the backup set, then retry restore."
 _REOWN_FIX: Final = "Repair ownership of the backup staging directory, then retry restore."
 _REGISTRY_FIX: Final = "Repair the host registry service, then retry restore."
@@ -72,6 +67,31 @@ _UNDECLARED_REGISTRY_FIX: Final = (
     "removed by hand), or declare this host with host provision --build-box, then retry."
 )
 _RESTORE_TIMEOUT: Final = 18000.0
+
+
+
+def _root_fix() -> str:
+    return f"Run {report.command('restore --from <staging|target>')}, then retry."
+
+
+def _apply_fix() -> str:
+    return f"Run {report.command('apply')}, then retry."
+
+
+def _set_fix() -> str:
+    return f"Run {report.command('backup run')}, then retry."
+
+
+def _account_fix() -> str:
+    return f"Run {report.command('host provision')}, then retry."
+
+
+def _push_fix() -> str:
+    return f"Run {report.command('backup push')}, then retry."
+
+
+def _stage_fix() -> str:
+    return f"Run {report.command('apply')}, then retry."
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,7 +153,7 @@ def _preconditions(
     if gideon_ids is None:
         _refuse(
             f"the {backupset.SERVICE_ACCOUNT} service account is missing or malformed.",
-            _ACCOUNT_FIX,
+            _account_fix(),
         )
         return None
 
@@ -142,11 +162,11 @@ def _preconditions(
         if not io.exists(compose_path):
             _refuse(
                 f"rendered Compose file is missing: {compose_path}.",
-                _APPLY_FIX,
+                _apply_fix(),
             )
             return None
     except OSError as exc:
-        _refuse(f"cannot inspect restore prerequisites: {exc}.", _APPLY_FIX)
+        _refuse(f"cannot inspect restore prerequisites: {exc}.", _apply_fix())
         return None
 
     at: datetime | None = None
@@ -203,7 +223,7 @@ def _select_staging(
         sets = backupset.list_sets(io)
     except OSError as exc:
         return (
-            StageResult("select", False, f"cannot list backup sets: {exc}", _SET_FIX),
+            StageResult("select", False, f"cannot list backup sets: {exc}", _set_fix()),
             None,
         )
     selected = (
@@ -219,7 +239,7 @@ def _select_staging(
     # A set named by label is restored to its own archive boundary: the proven
     # bound, so the cluster comes back as exactly the state the set describes.
     if selected.manifest is None:
-        return StageResult("select", False, "selected set has no manifest", _SET_FIX), None
+        return StageResult("select", False, "selected set has no manifest", _set_fix()), None
     boundary = selected.manifest.archive_through
     choice = _Selection("staging", boundary, None, None, selected)
     detail = f"source=staging; set={selected.label}; archive_through={boundary.isoformat()}"
@@ -241,7 +261,7 @@ def _select_target(
                 "select",
                 False,
                 "no complete remote backup snapshot is available",
-                _PUSH_FIX,
+                _push_fix(),
             ),
             None,
         )
@@ -295,15 +315,19 @@ def _postgres_answers(io: Host, rendered_dir: PathLike) -> bool:
     return result.returncode == 0
 
 
-_PARTIAL_FIX: Final = (
-    "Start the whole stack with sudo python3 -m gideon apply, or stop it with "
-    "docker compose -f /etc/gideon/rendered/compose.yaml down, then retry restore."
-)
-_INCOMPLETE_STAGING_FIX: Final = (
-    "Run sudo python3 -m gideon backup run to complete a set, or on a rebuilt box "
-    "stop the stack with docker compose -f /etc/gideon/rendered/compose.yaml down, "
-    "then retry restore."
-)
+def _partial_fix() -> str:
+    return (
+        f"Start the whole stack with {report.command('apply')}, or stop it with "
+        "docker compose -f /etc/gideon/rendered/compose.yaml down, then retry restore."
+    )
+
+
+def _incomplete_staging_fix() -> str:
+    return (
+        f"Run {report.command('backup run')} to complete a set, or on a rebuilt box "
+        "stop the stack with docker compose -f /etc/gideon/rendered/compose.yaml down, "
+        "then retry restore."
+    )
 
 
 def _pre_restore_stage(
@@ -341,7 +365,7 @@ def _pre_restore_stage(
         sets = backupset.list_sets(io)
     except OSError as exc:
         return (
-            StageResult("pre-restore", False, f"cannot list backup sets: {exc}", _SET_FIX),
+            StageResult("pre-restore", False, f"cannot list backup sets: {exc}", _set_fix()),
             None,
         )
     if not sets:
@@ -353,7 +377,7 @@ def _pre_restore_stage(
                 False,
                 f"the stack is partially running ({', '.join(sorted(running))}) and "
                 "Postgres does not answer, so the pre-restore set cannot be taken",
-                _PARTIAL_FIX,
+                _partial_fix(),
             ),
             None,
         )
@@ -368,7 +392,7 @@ def _pre_restore_stage(
                 False,
                 "no complete backup set in staging, only "
                 f"{count} incomplete {entry_word}: {', '.join(incomplete)}",
-                _INCOMPLETE_STAGING_FIX,
+                _incomplete_staging_fix(),
             ),
             None,
         )
@@ -389,7 +413,7 @@ def _pre_restore_stage(
                 "pre-restore",
                 False,
                 f"pre-restore backup failed for {pre_label}",
-                _STAGE_FIX,
+                _stage_fix(),
             ),
             pre_label,
         )
@@ -407,7 +431,7 @@ def _pre_restore_stage(
                     "pre-restore",
                     False,
                     f"pre-restore push failed for {pre_label}",
-                    _STAGE_FIX,
+                    _stage_fix(),
                 ),
                 pre_label,
             )
@@ -425,10 +449,10 @@ def _staging_bound(
     try:
         sets = backupset.list_sets(io)
     except OSError as exc:
-        return StageResult("pre-restore", False, f"cannot refresh backup sets: {exc}", _SET_FIX)
+        return StageResult("pre-restore", False, f"cannot refresh backup sets: {exc}", _set_fix())
     newest = next((ref for ref in sets if ref.complete and ref.manifest is not None), None)
     if newest is None or newest.manifest is None:
-        return StageResult("pre-restore", False, "no complete backup set remains", _SET_FIX)
+        return StageResult("pre-restore", False, "no complete backup set remains", _set_fix())
     if at > newest.manifest.archive_through:
         return StageResult(
             "pre-restore",
@@ -463,7 +487,7 @@ def _later_store_set(
     try:
         sets = backupset.list_sets(io, staging=staging)
     except OSError as exc:
-        return StageResult("verify", False, f"cannot list backup sets: {exc}", _SET_FIX)
+        return StageResult("verify", False, f"cannot list backup sets: {exc}", _set_fix())
     return next(
         (
             ref for ref in sets
@@ -505,7 +529,7 @@ def _fetch_stage(
             side.rstrip("/") + "/",
         ],
         f"fetched remote snapshot {snapshot.label} into {side}",
-        _STAGE_FIX,
+        _stage_fix(),
     )
     if not rsync.ok:
         return rsync, None
@@ -518,10 +542,10 @@ def _fetch_stage(
     try:
         sets = backupset.list_sets(io, staging=side)
     except OSError as exc:
-        return StageResult("fetch", False, f"cannot list fetched sets: {exc}", _SET_FIX), None
+        return StageResult("fetch", False, f"cannot list fetched sets: {exc}", _set_fix()), None
     newest = next((ref for ref in sets if ref.complete and ref.manifest is not None), None)
     if newest is None:
-        return StageResult("fetch", False, "fetched snapshot has no complete backup set", _SET_FIX), None
+        return StageResult("fetch", False, "fetched snapshot has no complete backup set", _set_fix()), None
     claims = backuproots.Claims()
     for fetched_root in backuproots.fetched(io, roots, side, sets):
         outcome = fetched_root.reown(gideon_ids)
@@ -614,7 +638,7 @@ def _verify_stage(
     later: backupset.SetRef | None = None,
 ) -> StageResult:
     if selected.manifest is None:
-        return StageResult("verify", False, "selected set has no manifest", _SET_FIX)
+        return StageResult("verify", False, "selected set has no manifest", _set_fix())
     manifest = selected.manifest
     roots = backuproots.held(
         io,
@@ -669,7 +693,7 @@ def _stop_stage(io: Host, rendered_dir: PathLike, *, build_box: bool) -> StageRe
         "stop",
         stack.compose_argv(rendered_dir, "down"),
         "stopped the GIDEON Compose project",
-        _STAGE_FIX,
+        _stage_fix(),
     )
     if not stopped.ok:
         return stopped
@@ -691,13 +715,13 @@ def _stop_stage(io: Host, rendered_dir: PathLike, *, build_box: bool) -> StageRe
 
 def _swap_stage(io: Host, side: str, replaced: str) -> StageResult:
     if not replaced.startswith(backupset.STAGING + ".replaced-"):
-        return StageResult("swap", False, f"unsafe replacement path: {replaced}", _STAGE_FIX)
+        return StageResult("swap", False, f"unsafe replacement path: {replaced}", _stage_fix())
     first = run_stage(
         io,
         "swap",
         ["mv", backupset.STAGING, replaced],
         f"moved live staging to {replaced}",
-        _STAGE_FIX,
+        _stage_fix(),
     )
     if not first.ok:
         return first
@@ -706,7 +730,7 @@ def _swap_stage(io: Host, side: str, replaced: str) -> StageResult:
         "swap",
         ["mv", side, backupset.STAGING],
         "installed the fetched staging directory",
-        _STAGE_FIX,
+        _stage_fix(),
     )
     if second.ok:
         return second
@@ -716,7 +740,7 @@ def _swap_stage(io: Host, side: str, replaced: str) -> StageResult:
         "swap",
         ["mv", replaced, backupset.STAGING],
         "moved the live staging directory back",
-        _STAGE_FIX,
+        _stage_fix(),
     )
     if rollback.ok:
         return StageResult(
@@ -724,7 +748,7 @@ def _swap_stage(io: Host, side: str, replaced: str) -> StageResult:
             False,
             f"{second.detail}; the live staging directory was moved back and the "
             f"fetched copy stays in {side}",
-            _STAGE_FIX,
+            _stage_fix(),
         )
     return StageResult(
         "swap",
@@ -743,7 +767,7 @@ def _restore_files_stage(
     later: backupset.SetRef | None = None,
 ) -> tuple[StageResult, tuple[str, ...], int, Mapping[str, backuproots.StoreCounts], tuple[str, ...]]:
     if selected.manifest is None:
-        return StageResult("files", False, "selected set has no manifest", _SET_FIX), (), 0, {}, ()
+        return StageResult("files", False, "selected set has no manifest", _set_fix()), (), 0, {}, ()
     roots = backuproots.held(
         io,
         backupset.inventory_roots(selected.manifest.checkout),
@@ -763,7 +787,7 @@ def _restore_files_stage(
                     "files",
                     False,
                     outcome.problem,
-                    outcome.fix or _STAGE_FIX,
+                    outcome.fix or _stage_fix(),
                 ),
                 tuple(restored),
                 0,
@@ -821,14 +845,14 @@ def _backup_timeline(io: Host, rendered_dir: PathLike, label: str) -> int | Stag
         if record.label == label:
             if record.timeline is None:
                 return StageResult(
-                    "postgres", False, f"backup {label} records no archive start", _SET_FIX
+                    "postgres", False, f"backup {label} records no archive start", _set_fix()
                 )
             return record.timeline
     return StageResult(
         "postgres",
         False,
         f"the repository holds no backup {label} for the selected set",
-        _SET_FIX,
+        _set_fix(),
     )
 
 
@@ -871,7 +895,7 @@ def _postgres_stage(
         "postgres",
         pgbackrest.run_argv(rendered_dir, *args),
         "restored Postgres from pgBackRest",
-        _STAGE_FIX,
+        _stage_fix(),
         timeout=_RESTORE_TIMEOUT,
     )
 
@@ -909,7 +933,7 @@ def _stores_stage(
         "stores",
         stack.compose_argv(rendered_dir, "up", "-d", *STORE_SERVICES),
         "started the store tier",
-        _STAGE_FIX,
+        _stage_fix(),
     )
     if not up.ok:
         return up
@@ -932,13 +956,13 @@ def _stores_stage(
     replaced_removed = False
     if replaced is not None:
         if not replaced.startswith(backupset.STAGING + ".replaced-"):
-            return StageResult("stores", False, f"unsafe replacement path: {replaced}", _STAGE_FIX)
+            return StageResult("stores", False, f"unsafe replacement path: {replaced}", _stage_fix())
         removed = run_stage(
             io,
             "stores",
             ["rm", "-rf", replaced],
             f"removed replaced staging directory {replaced}",
-            _STAGE_FIX,
+            _stage_fix(),
         )
         if not removed.ok:
             return removed
@@ -1025,17 +1049,17 @@ def _next_stage(
     lines += closing_lines
     if has_gideon_ids:
         lines += (
-            "Next: sudo python3 -m gideon apply, then "
-            "sudo python3 -m gideon backup run --full",
+            f"Next: {report.command('apply')}, then "
+            f"{report.command('backup run --full')}",
         )
     else:
         # This set was re-owned by the ids it records, so the managed /data
         # directories still need provision's own re-own before the apply.
         lines += (
-            "Next: sudo python3 -m gideon host provision (the first provision's "
+            f"Next: {report.command('host provision')} (the first provision's "
             "mode flags), because this set records no gideon ids, then "
-            "sudo python3 -m gideon apply, then "
-            "sudo python3 -m gideon backup run --full",
+            f"{report.command('apply')}, then "
+            f"{report.command('backup run --full')}",
         )
     return (
         StageResult(
@@ -1067,7 +1091,7 @@ def run_restore(
 
     io = host or RealHost()
     if io.geteuid() != 0:
-        return _refuse("root is required.", _ROOT_FIX)
+        return _refuse("root is required.", _root_fix())
     effective_now = aware_now(now)
     if effective_now is None:
         return _refuse(
@@ -1225,7 +1249,7 @@ def _restore_body(
 
     reowned = file_reowned + (fetched.reowned if fetched is not None else 0)
     if selected.manifest is None:
-        print_stage(StageResult("postgres", False, "selected set has no manifest", _SET_FIX))
+        print_stage(StageResult("postgres", False, "selected set has no manifest", _set_fix()))
         return 1
     postgres_result = _postgres_stage(
         io,

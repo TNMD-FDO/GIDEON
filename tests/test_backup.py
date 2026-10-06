@@ -857,7 +857,7 @@ class BackupRun(unittest.TestCase):
         )
         self.assertFalse(stage.ok)
         self.assertEqual(stage.name, "postgres")
-        self.assertEqual(stage.fix, backup._STAGE_FIX)
+        self.assertEqual(stage.fix, backup._stage_fix())
         self.assertIn("SQL error", stage.detail)
         self.assertIsNone(backup_stage)
         self.assertNotIn(tuple(pgbackrest.exec_argv(RENDERED, "check")), [call[0] for call in host.calls])

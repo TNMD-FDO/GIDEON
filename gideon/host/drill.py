@@ -22,6 +22,7 @@ from gideon.host import (
     backupset,
     owui,
     pgbackrest,
+    report,
     site,
     stack,
 )
@@ -46,20 +47,33 @@ from gideon.host.sysio import Host, PathLike, RealHost
 
 _SITE_PATH: Final = "/etc/gideon/site.yaml"
 _RENDERED_DIR: Final = "/etc/gideon/rendered"
-_ROOT_FIX: Final = "Run sudo python3 -m gideon backup drill as root, then retry."
-_APPLY_FIX: Final = "Run sudo python3 -m gideon apply, then retry."
-_TOOLS_FIX: Final = (
-    "Run sudo python3 -m gideon host provision --only host-tools, then retry."
-)
-_SET_FIX: Final = "Run sudo python3 -m gideon backup run, then retry."
 _PREPARE_FIX: Final = "Repair the drill directory and render inputs, then retry."
 _TARBALL_FIX: Final = "Repair the backup set's secrets tarball, then retry."
 _VERIFY_FIX: Final = "Repair the pgBackRest repository, then retry."
 _COUNTS_FIX: Final = "Repair the restored database, then retry."
 _DRILL_TIMEOUT: Final = 18000.0
 _AGE_MAGIC: Final = b"age-encryption.org/v1"
-_AGE_FIX: Final = "Run sudo python3 -m gideon backup run, then retry."
 _CLEANUP_NAMES: Final = ("postgres", "openwebui", "compose.yaml")
+
+
+def _root_fix() -> str:
+    return f"Run {report.command('backup drill')} as root, then retry."
+
+
+def _apply_fix() -> str:
+    return f"Run {report.command('apply')}, then retry."
+
+
+def _tools_fix() -> str:
+    return f"Run {report.command('host provision --only host-tools')}, then retry."
+
+
+def _set_fix() -> str:
+    return f"Run {report.command('backup run')}, then retry."
+
+
+def _age_fix() -> str:
+    return f"Run {report.command('backup run')}, then retry."
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,32 +111,32 @@ def _context(
     try:
         has_bash = io.exists("/usr/bin/bash")
     except OSError as exc:
-        _refuse(f"cannot inspect drill prerequisites: {exc}.", _TOOLS_FIX)
+        _refuse(f"cannot inspect drill prerequisites: {exc}.", _tools_fix())
         return None
     if not has_bash:
-        _refuse("backup drill tool is missing: /usr/bin/bash.", _TOOLS_FIX)
+        _refuse("backup drill tool is missing: /usr/bin/bash.", _tools_fix())
         return None
 
     compose_path = Path(rendered_dir) / "compose.yaml"
     try:
         has_compose = io.exists(compose_path)
     except OSError as exc:
-        _refuse(f"cannot inspect rendered Compose state: {exc}.", _APPLY_FIX)
+        _refuse(f"cannot inspect rendered Compose state: {exc}.", _apply_fix())
         return None
     if not has_compose:
-        _refuse(f"rendered Compose file is missing: {compose_path}.", _APPLY_FIX)
+        _refuse(f"rendered Compose file is missing: {compose_path}.", _apply_fix())
         return None
 
     try:
         sets = backupset.list_sets(io)
     except OSError as exc:
-        _refuse(f"cannot list local backup sets: {exc}.", _SET_FIX)
+        _refuse(f"cannot list local backup sets: {exc}.", _set_fix())
         return None
     local_set = next(
         (ref for ref in sets if ref.complete and ref.manifest is not None), None
     )
     if local_set is None:
-        _refuse("no complete local backup set is available.", _SET_FIX)
+        _refuse("no complete local backup set is available.", _set_fix())
         return None
 
     lock_result = load_host_lock(checkout / "host.lock", host=io)
@@ -306,24 +320,24 @@ def parse_age_header(data: bytes, recipients: int) -> Problem | None:
     """Validate the structural age header without inspecting its ciphertext."""
 
     if not isinstance(data, bytes):
-        return Problem("Age ciphertext is not bytes.", _AGE_FIX)
+        return Problem("Age ciphertext is not bytes.", _age_fix())
     lines = data.splitlines()
     if not lines or lines[0] != _AGE_MAGIC:
-        return Problem("Age ciphertext has the wrong header.", _AGE_FIX)
+        return Problem("Age ciphertext has the wrong header.", _age_fix())
     mac = next(
         (index for index, line in enumerate(lines[1:], start=1) if line.startswith(b"---")),
         None,
     )
     if mac is None:
-        return Problem("Age ciphertext has no header MAC line.", _AGE_FIX)
+        return Problem("Age ciphertext has no header MAC line.", _age_fix())
     stanza_count = sum(line.startswith(b"-> X25519 ") for line in lines[1:mac])
     if stanza_count == 0:
-        return Problem("Age ciphertext has no X25519 recipient stanza.", _AGE_FIX)
+        return Problem("Age ciphertext has no X25519 recipient stanza.", _age_fix())
     if stanza_count != recipients:
         return Problem(
             f"Age ciphertext has {stanza_count} X25519 recipient stanza(s); "
             f"the manifest names {recipients}.",
-            _AGE_FIX,
+            _age_fix(),
         )
     return None
 
@@ -586,7 +600,7 @@ def run_backup_drill(
     del args
     io = host or RealHost()
     if io.geteuid() != 0:
-        return _refuse("root is required.", _ROOT_FIX)
+        return _refuse("root is required.", _root_fix())
     effective_now = aware_now(now)
     if effective_now is None:
         return _refuse(

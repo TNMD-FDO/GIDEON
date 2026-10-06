@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final
 
-from gideon.host import stack
+from gideon.host import report, stack
 from gideon.host.render.pgbackrest import REPOSITORY_PATH, STANZA
 from gideon.host.report import command_detail
 from gideon.host.sysio import CompletedText, Host, PathLike
@@ -17,6 +17,14 @@ _POSTGRES_USER: Final = "postgres"
 _REPOSITORY_MODE: Final = 0o750
 _COMMAND_TIMEOUT: Final = 3600.0
 _INFO_TIMEOUT: Final = 60.0
+
+
+def _stanza_mismatch_fix() -> str:
+    return (
+        f"Run {report.command('restore --from staging')} to restore the cluster "
+        "this repository belongs to, or move /data/backup-staging/pgbackrest aside, "
+        "then re-run apply."
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,13 +250,6 @@ def ensure_repository(host: Host, rendered_dir: PathLike) -> PgBackRestResult:
     return PgBackRestResult()
 
 
-_STANZA_MISMATCH_FIX: Final = (
-    "Run sudo python3 -m gideon restore --from staging to restore the cluster "
-    "this repository belongs to, or move /data/backup-staging/pgbackrest aside, "
-    "then re-run apply."
-)
-
-
 def ensure_stanza(host: Host, rendered_dir: PathLike) -> PgBackRestResult:
     """Create the stanza, refusing a repository belonging to another cluster."""
 
@@ -263,7 +264,7 @@ def ensure_stanza(host: Host, rendered_dir: PathLike) -> PgBackRestResult:
         if "already exists" in detail or "already present" in detail:
             return PgBackRestResult()
         if "do not match" in detail:
-            return PgBackRestResult(result.problem, _STANZA_MISMATCH_FIX)
+            return PgBackRestResult(result.problem, _stanza_mismatch_fix())
     return result if isinstance(result, PgBackRestResult) else PgBackRestResult()
 
 
