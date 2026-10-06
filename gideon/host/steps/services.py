@@ -38,6 +38,7 @@ _RUNNER_SERVICE = _RUNNER_DIR / ".service"
 _RUNNER_TOKEN = Path("/etc/gideon/secrets/gh_runner_token")
 _RUNNER_SUDOERS = Path("/etc/sudoers.d/gideon-acceptance")
 _RUNNER_SUDOERS_CANDIDATE = Path("/etc/sudoers.d/gideon-acceptance.candidate")
+_RUNNER_PACKAGE = "python3-venv"
 # The runner matches the ACTIONS_RUNNER_INPUT_ prefix case-insensitively and
 # looks the remainder up verbatim as the argument name; the lower-case suffix
 # is therefore the exact form.
@@ -81,6 +82,7 @@ _RUNNER_USER_FIX = (
     "Repair gh-runner as a system user with a home directory, then re-run provision."
 )
 _RUNNER_GROUP_FIX = "Add gh-runner to the docker group, then re-run provision."
+_RUNNER_PACKAGE_FIX = "Run apt-get install -y python3-venv, then re-run provision."
 _RUNNER_DIR_FIX = "Create /opt/gh-runner for gh-runner, then re-run provision."
 _RUNNER_OWNERSHIP_FIX = (
     "Set /opt/gh-runner ownership to gh-runner, then re-run provision."
@@ -500,10 +502,11 @@ class GhRunnerStep(Step):
 
     The runner is already root-equivalent through the docker group and never
     runs pull-request code; hardening waits for the public repository flip.
-    Each sudoers line names one command a box workflow runs as root from the
-    checkout: the acceptance harness, and the push smoke exactly, whose ``-B``
-    is part of the line because root's bytecode written into the runner's
-    checkout could not be removed by its next clean.
+    The sudoers file admits the acceptance harness and the push smoke, whose
+    ``-B`` keeps root's bytecode out of the checkout. Its third line admits the
+    mask's root stage, which is shell text rather than a checkout module.
+    ``sudo-rs`` accepts only a trailing ``*`` here, so that line admits any
+    root shell text; the docker group already makes this runner root-equivalent.
     """
 
     name = "gh-runner"
@@ -518,6 +521,8 @@ class GhRunnerStep(Step):
             "/usr/bin/python3 -m tools.acceptance *\n"
             f"{_RUNNER_USER} ALL=(root) NOPASSWD: "
             "/usr/bin/python3 -B -m tools.cistack smoke\n"
+            f"{_RUNNER_USER} ALL=(root) NOPASSWD: "
+            "/usr/bin/unshare --mount --net -- sh -c *\n"
         )
 
     def _sudoers_check(self, context: ProvisionContext) -> CheckResult | None:
@@ -573,6 +578,12 @@ class GhRunnerStep(Step):
             return CheckResult(Disposition.UNFIXABLE, "gh-runner is not a system user with a home", _RUNNER_USER_FIX)
         if not _runner_in_docker_group(context):
             return CheckResult(Disposition.DRIFT, "gh-runner is not in the docker group", _RUNNER_GROUP_FIX)
+        if not package_installed(context, _RUNNER_PACKAGE):
+            return CheckResult(
+                Disposition.DRIFT,
+                f"{_RUNNER_PACKAGE} is not installed",
+                _RUNNER_PACKAGE_FIX,
+            )
         ready = _runner_ready(context, uid, gid)
         if ready is not None:
             return ready
@@ -672,6 +683,8 @@ class GhRunnerStep(Step):
             )
         if not _runner_in_docker_group(context):
             context.host.run(["usermod", "-aG", "docker", _RUNNER_USER], check=True)
+        if not package_installed(context, _RUNNER_PACKAGE):
+            apt_install(context, [_RUNNER_PACKAGE])
         context.host.mkdir(_RUNNER_DIR, mode=0o755, parents=True, exist_ok=True)
         archive = _runner_archive(context)
         archive_changed = False

@@ -7,27 +7,51 @@ on:
 
 jobs:
   checks:
-    # Hosted runner by design: the cheap checks never need the box.
-    runs-on: ubuntu-latest
+    # A push to main in the private repository runs on the box's runner, so the
+    # hosted minutes go to pull requests. A pull request stays hosted, since its
+    # code never runs on the persistent runner, and the public export stays
+    # hosted because its repository is not private. Each step carries an if on
+    # the runner's kind, so no step can run on the wrong one.
+    runs-on: ${{ github.event_name == 'push' && github.event.repository.private && fromJSON('["self-hosted", "linux", "x64", "gpu", "dl385-gen11"]') || 'ubuntu-latest' }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
+        if: runner.environment == 'github-hosted'
         with:
           python-version: "3.14" # the box's Ubuntu 26.04 system Python
       - name: Install dev tools
+        if: runner.environment == 'github-hosted'
         # The development and CI toolchain is pinned in requirements-dev.txt.
         run: python -m pip install -r requirements-dev.txt
       - name: Host import boundary (stdlib + yaml only)
+        if: runner.environment == 'github-hosted'
         run: pytest tests/test_host_import_boundary.py
       - name: Gate
+        if: runner.environment == 'github-hosted'
         # Environment comparison, then ruff, mypy, and pytest, stopping at the first failure (tools/gate.py);
         # --all runs the cases marked slow that the local default skips.
         run: python -m tools.gate --all
+      - name: Build dev environment on the box
+        if: runner.environment == 'self-hosted'
+        # A fresh venv in the clean checkout from the pushed pin file, with no
+        # pip cache left in the runner's home; the gate's first child compares it.
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install --no-cache-dir -r requirements-dev.txt
+      - name: Host import boundary on the box
+        if: runner.environment == 'self-hosted'
+        run: .venv/bin/python -m tools.mask -- .venv/bin/pytest tests/test_host_import_boundary.py
+      - name: Gate on the box
+        if: runner.environment == 'self-hosted'
+        # --masked runs pytest where the box's own paths read as empty and only
+        # loopback is reachable, so the run sees what a hosted runner sees.
+        run: .venv/bin/python -m tools.gate --all --masked
 
   mirror-images:
     # The one CI step only the box can perform: copy every images.lock pin into
     # the loopback release registry by digest. Runs only for code already on
-    # main, after the hosted checks — never pull-request code:
+    # main, after checks — never pull-request code:
     # the runner is persistent and holds Docker access, and untrusted PR code
     # could compromise it (runner hardening is deferred to the public flip; the
     # private flag keeps the box jobs off the public export).
@@ -65,7 +89,7 @@ jobs:
   search-sentinel:
     # The search sentinel proves the query marker is absent from every log the
     # throwaway stack writes. It shares the frontend contract's loopback port
-    # and concurrency group; the hosted pytest never collects this module.
+    # and concurrency group; pytest never collects this module on either runner.
     if: github.event_name == 'push' && github.event.repository.private
     needs: frontend-contract
     runs-on: [self-hosted, linux, x64, gpu, dl385-gen11]

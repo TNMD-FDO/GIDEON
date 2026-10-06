@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import pwd
 import re
 import stat
 import subprocess
@@ -88,6 +89,7 @@ from gideon.host.steps.timezone import TimezoneStep
 from gideon.host.steps.tools import HostToolsStep
 from gideon.host.sysio import Command, PathLike
 from tools.exportboundary import absent_from_export
+from tools.mask import Facts, wrap
 
 ROOT = Path(__file__).resolve().parent.parent
 LOCK = ROOT / "host.lock"
@@ -2000,7 +2002,10 @@ RUNNER_SUDOERS_CANDIDATE = "/etc/sudoers.d/gideon-acceptance.candidate"
 RUNNER_SUDOERS_TEXT = (
     "gh-runner ALL=(root) NOPASSWD: /usr/bin/python3 -m tools.acceptance *\n"
     "gh-runner ALL=(root) NOPASSWD: /usr/bin/python3 -B -m tools.cistack smoke\n"
+    "gh-runner ALL=(root) NOPASSWD: /usr/bin/unshare --mount --net -- sh -c *\n"
 )
+RUNNER_VENV_QUERY = ("dpkg-query", "-W", "-f=${Status} ${Version}\\n", "python3-venv")
+RUNNER_VENV_INSTALL = ("apt-get", "install", "-y", "python3-venv")
 RUNNER_CONFIG_ARGV = (
     "runuser", "-u", "gh-runner", "--", "./config.sh", "--unattended", "--replace",
     "--disableupdate", "--url", "https://github.com/TNMD-FDO", "--labels",
@@ -2038,6 +2043,10 @@ class RunnerFakeHost(FakeHost):
         elif command == ("mv", "-f", RUNNER_SUDOERS_CANDIDATE, RUNNER_SUDOERS):
             self.files[RUNNER_SUDOERS] = self.files.pop(RUNNER_SUDOERS_CANDIDATE)
             self.stats[RUNNER_SUDOERS] = file_stat(0o440, 0, 0)
+        elif command == RUNNER_VENV_INSTALL:
+            self.commands[RUNNER_VENV_QUERY] = completed(
+                RUNNER_VENV_QUERY, "install ok installed 1\n"
+            )
         return result
 
 
@@ -2140,6 +2149,9 @@ class ServiceStepTests(unittest.TestCase):
         commands = {
             ("getent", "passwd", "gh-runner"): completed(("getent", "passwd", "gh-runner"), "gh-runner:x:997:997::/home/gh-runner:/usr/sbin/nologin\n"),
             ("getent", "group", "docker"): completed(("getent", "group", "docker"), "docker:x:999:gh-runner\n"),
+            RUNNER_VENV_QUERY: completed(RUNNER_VENV_QUERY, "install ok installed 1\n"),
+            ("apt-get", "update"): completed(("apt-get", "update")),
+            RUNNER_VENV_INSTALL: completed(RUNNER_VENV_INSTALL),
             ("sha256sum", image): completed(
                 ("sha256sum", image), HOST_LOCK.gh_runner.sha256 + "  " + image + "\n"
             ),
@@ -2374,6 +2386,35 @@ class ServiceStepTests(unittest.TestCase):
             host.runs,
         )
 
+    def test_runner_without_python_venv_drifts_with_install_fix(self) -> None:
+        for registered in (False, "off"):
+            with self.subTest(registered=registered):
+                host = self._runner_host(registered=registered, service=bool(registered))
+                host.commands.pop(RUNNER_VENV_QUERY)
+
+                result = GhRunnerStep().check(context(host))
+
+                self.assertEqual(result.disposition, Disposition.DRIFT)
+                self.assertIn("python3-venv", result.detail)
+                self.assertIn("apt-get install -y python3-venv", result.fix)
+                self.assertIn("re-run provision", result.fix)
+
+    def test_runner_installs_python_venv_before_sudoers(self) -> None:
+        host = self._runner_host(registered="off", service=True)
+        host.commands.pop(RUNNER_VENV_QUERY)
+        host.files[RUNNER_SUDOERS] = "old rules\n"
+
+        self.assertIsNone(GhRunnerStep().apply(context(host)))
+
+        commands = [command for command, _, _ in host.runs]
+        self.assertLess(commands.index(("apt-get", "update")), commands.index(RUNNER_VENV_INSTALL))
+        self.assertLess(
+            commands.index(RUNNER_VENV_INSTALL),
+            commands.index(("visudo", "-c", "-f", RUNNER_SUDOERS_CANDIDATE)),
+        )
+        self.assertEqual(host.files[RUNNER_SUDOERS], RUNNER_SUDOERS_TEXT)
+        self.assertEqual(GhRunnerStep().check(context(host)).disposition, Disposition.CONVERGED)
+
     def test_runner_sudoers_truth_table_reports_each_kind_of_drift(self) -> None:
         cases = ("absent", "content", "mode", "owner")
         for case in cases:
@@ -2396,15 +2437,19 @@ class ServiceStepTests(unittest.TestCase):
                 self.assertEqual(result.disposition, Disposition.DRIFT)
                 self.assertIn(RUNNER_SUDOERS, result.detail)
 
-    def test_runner_sudoers_names_the_acceptance_and_smoke_commands(self) -> None:
+    def test_runner_sudoers_names_the_acceptance_smoke_and_mask_commands(self) -> None:
         rules = RUNNER_SUDOERS_TEXT.splitlines()
-        self.assertEqual(len(rules), 2)
+        self.assertEqual(len(rules), 3)
         self.assertEqual(
             rules[1],
             "gh-runner ALL=(root) NOPASSWD: /usr/bin/python3 -B -m tools.cistack smoke",
         )
+        self.assertEqual(
+            rules[2],
+            "gh-runner ALL=(root) NOPASSWD: /usr/bin/unshare --mount --net -- sh -c *",
+        )
 
-    def test_runner_sudoers_detects_drift_on_either_command_line(self) -> None:
+    def test_runner_sudoers_detects_drift_on_each_command_line(self) -> None:
         expected = RUNNER_SUDOERS_TEXT.splitlines()
         step = GhRunnerStep()
         for index in range(len(expected)):
@@ -2447,6 +2492,38 @@ class ServiceStepTests(unittest.TestCase):
                     f"{relative} command has no sudoers rule: {command}",
                 )
         self.assertGreaterEqual(seen, 1)
+
+    def test_mask_root_stage_is_admitted_by_runner_sudoers(self) -> None:
+        facts = Facts(
+            effective_uid=lambda: 997,
+            effective_gid=lambda: 997,
+            supplementary_groups=lambda: (997, 999),
+            # Injected: uid 997 has no account on a hosted runner.
+            password_entry=lambda uid: pwd.struct_passwd(
+                ("gh-runner", "x", uid, 997, "", "/home/gh-runner", "/bin/bash")
+            ),
+            environment=lambda: {"HOME": "/home/gh-runner", "PATH": "/usr/bin"},
+        )
+        argv = wrap(
+            (".venv/bin/pytest", "tests/test_host_import_boundary.py"),
+            paths=("/etc/gideon",),
+            facts=facts,
+        )
+        self.assertEqual(argv[:3], ("sudo", "-n", "unshare"))
+        # sudo resolves the command to its absolute path and matches the rest
+        # word by word; the box's sudo-rs takes a wildcard only as a final "*".
+        command = ("/usr/bin/unshare", *argv[3:])
+
+        def admitted(rule: str) -> bool:
+            words = tuple(rule.split(" "))
+            if "*" not in rule:
+                return command == words
+            if words[-1] != "*" or rule.count("*") != 1:
+                return False
+            return command[: len(words) - 1] == words[:-1]
+
+        rules = [line.split("NOPASSWD: ", 1)[1] for line in RUNNER_SUDOERS_TEXT.splitlines()]
+        self.assertTrue(any(admitted(rule) for rule in rules))
 
     def test_runner_sudoers_apply_validates_and_promotes_last(self) -> None:
         host = self._runner_host(
