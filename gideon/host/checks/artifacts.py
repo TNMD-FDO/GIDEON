@@ -15,13 +15,12 @@ from gideon.host.checks import (
 from gideon.host.courts import CourtMap
 from gideon.host.models import GIGABYTE, select_profile
 from gideon.host.report import Problem
-from gideon.host.steps import ProvisionContext, package_version
+from gideon.host.steps.nvidia import loaded_driver_version
 
 _JURISDICTION_FIX = (
     "Correct the jurisdiction key in /etc/gideon/site.yaml; courts.yaml lists "
     "every court id with its level; re-run preflight."
 )
-_DRIVER_FIX = "Install the lock-pinned NVIDIA driver, then re-run preflight."
 _KERNEL_FIX = "Reconcile the running kernel with the release evidence, then re-run preflight."
 _PROFILE_FIX = (
     "Provide the hardware the profile requires, or set hardware_profile in "
@@ -369,10 +368,10 @@ def _version_key(value: str) -> tuple[int, ...]:
 
 
 class DriverTestedCheck(PreflightCheck):
-    """Compare the installed driver version with release evidence."""
+    """Compare the loaded driver version with release evidence."""
 
     name = "driver-tested"
-    summary = "compare the installed driver with the tested lock pin"
+    summary = "compare the loaded driver with the tested lock pin"
 
     def run(self, context: PreflightContext) -> CheckReport:
         if context.no_gpu:
@@ -380,12 +379,13 @@ class DriverTestedCheck(PreflightCheck):
         tested = context.lock.driver.tested
         if tested is None:
             return CheckReport(Severity.PASS, "no tested driver version recorded")
-        actual = package_version(
-            ProvisionContext(context.host, context.lock, context.site),
-            context.lock.driver.package,
-        )
+        actual = loaded_driver_version(context.host)
         if actual is None:
-            return CheckReport(Severity.REFUSE, "the locked NVIDIA driver is not installed", _DRIVER_FIX)
+            return CheckReport(
+                Severity.REFUSE,
+                "no NVIDIA driver is loaded",
+                nogpu.GPU_DRIVER_FIX,
+            )
         if _version_key(actual) > _version_key(tested):
             return CheckReport(
                 Severity.WARN,

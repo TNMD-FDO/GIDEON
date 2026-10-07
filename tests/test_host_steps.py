@@ -84,7 +84,21 @@ from gideon.host.steps.network import (
     TimeSyncStep,
     WaitOnlineStep,
 )
-from gideon.host.steps.nvidia import NvidiaDriverStep, NvidiaToolkitStep
+from gideon.host.steps.nvidia import (
+    _DEB_TMP,
+    _DRIVER_PACKAGES,
+    _KERNEL_RELEASE,
+    _KEYRING_FILE,
+    _LEGACY_KEYRING,
+    _LEGACY_SOURCE,
+    _LOADED_TAINT,
+    _LOADED_VERSION,
+    _MODINFO_LICENSE,
+    _MODINFO_VERSION,
+    _TOOLKIT_POLICY,
+    NvidiaDriverStep,
+    NvidiaToolkitStep,
+)
 from gideon.host.steps.platform import PlatformStep
 from gideon.host.steps.proxy import EgressProxyStep
 from gideon.host.steps.services import (
@@ -288,6 +302,118 @@ def context(host: FakeHost, *, site: SiteConfig | None = None) -> ProvisionConte
 # The committed pins every fake below must agree with: derived once from the
 # loaded lock, never typed.
 HOST_LOCK = context(FakeHost()).lock
+
+CUDA_REPOSITORY = (
+    "https://developer.download.nvidia.com/compute/cuda/repos/"
+    f"{HOST_LOCK.driver.repo}"
+)
+CUDA_SOURCE = (
+    "/etc/apt/sources.list.d/"
+    f"cuda-{HOST_LOCK.driver.repo.replace('/', '-')}.list"
+)
+CUDA_ENTRY = (
+    f"deb [signed-by={_KEYRING_FILE}] {CUDA_REPOSITORY}/ /\n"
+)
+TOOLKIT_PACKAGE = "nvidia-container-toolkit"
+
+
+def nvidia_driver_host(
+    *,
+    loaded_version: str | None = None,
+    disk_version: str | None = None,
+    loaded_closed: bool = False,
+    disk_open: bool = True,
+    packages: Mapping[str, str] | None = None,
+    held: bool = False,
+    files: Mapping[str, str] | None = None,
+    commands: Mapping[tuple[str, ...], subprocess.CompletedProcess[str]] | None = None,
+) -> FakeHost:
+    """Build module, package, and apt readings through one fake Host."""
+
+    installed = dict(packages or {})
+    module_files = {_KERNEL_RELEASE.as_posix(): "0.0.0-fictitious\n", **(files or {})}
+    lsmod = ("lsmod",)
+    version_probe = _MODINFO_VERSION
+    license_probe = _MODINFO_LICENSE
+    package_names = sorted(name for name in installed if name.startswith("nvidia-"))
+    listing = "".join(
+        f"{name} install ok installed {installed[name]}\n" for name in package_names
+    )
+    responses: dict[tuple[str, ...], subprocess.CompletedProcess[str]] = {
+        lsmod: completed(lsmod, "nvidia 1 0\n" if loaded_version else ""),
+        version_probe: subprocess.CompletedProcess(
+            list(version_probe), 0 if disk_version else 1,
+            f"{disk_version}\n" if disk_version else "", "" if disk_version else "not found",
+        ),
+        license_probe: subprocess.CompletedProcess(
+            list(license_probe), 0 if disk_version else 1,
+            "Dual MIT/GPL\n" if disk_version and disk_open else "NVIDIA\n" if disk_version else "",
+            "" if disk_version else "not found",
+        ),
+        _DRIVER_PACKAGES: subprocess.CompletedProcess(
+            list(_DRIVER_PACKAGES), 0 if package_names else 1,
+            listing, "" if package_names else "no packages found matching nvidia-*",
+        ),
+        ("apt-mark", "showhold"): completed(
+            ("apt-mark", "showhold"),
+            f"{HOST_LOCK.driver.package}\n" if held else "",
+        ),
+    }
+    if loaded_version is not None:
+        module_files.update(
+            {
+                "/proc/driver/nvidia": "",
+                _LOADED_VERSION.as_posix(): f"{loaded_version}\n",
+                _LOADED_TAINT.as_posix(): "P\n" if loaded_closed else "G\n",
+            }
+        )
+    for name, version in installed.items():
+        query, response = package_result(name, version)
+        responses[query] = response
+    responses.update(commands or {})
+    return FakeHost(files=module_files, commands=responses)
+
+
+def nvidia_install_commands(*packages: str) -> dict[tuple[str, ...], subprocess.CompletedProcess[str]]:
+    """The keyring deb and absent-package apt commands the recipe invokes."""
+
+    deb = str(_DEB_TMP)
+    url = f"{CUDA_REPOSITORY}/{HOST_LOCK.driver.keyring_deb}"
+    wget = ("wget", "-qO", f"{deb}.partial", url)
+    move = ("mv", "-f", f"{deb}.partial", deb)
+    sha = ("sha256sum", deb)
+    dpkg = ("dpkg", "-i", "--force-confmiss", deb)
+    commands = {
+        wget: completed(wget),
+        move: completed(move),
+        sha: completed(sha, f"{HOST_LOCK.driver.keyring_sha256}  {deb}\n"),
+        dpkg: completed(dpkg),
+        ("apt-mark", "hold", HOST_LOCK.driver.package): completed(
+            ("apt-mark", "hold", HOST_LOCK.driver.package)
+        ),
+    }
+    for package in packages:
+        commands.update(dict(apt_command_results([package])))
+    return commands
+
+
+def assert_nvidia_read_only(test: unittest.TestCase, host: FakeHost) -> None:
+    """Assert a refusal made no filesystem or install-side mutation."""
+
+    writes = [
+        call for call in host.calls
+        if call[0] in {"write_text", "unlink", "mkdir", "chmod", "chown"}
+    ]
+    test.assertEqual(writes, [])
+    installs = [
+        argv for argv, _, _ in host.runs
+        if argv[0] in {"apt-get", "dpkg", "wget", "mv", "nvidia-ctk"}
+        or argv[:2] in {
+            ("apt-mark", "hold"),
+            ("systemctl", "enable"),
+        }
+    ]
+    test.assertEqual(installs, [])
 
 
 def baseline_host() -> FakeHost:
@@ -1348,290 +1474,508 @@ class DockerKeyringOrderTests(unittest.TestCase):
 
 
 class NvidiaStepTests(unittest.TestCase):
-    def test_driver_disposition_ladder(self) -> None:
-        step = NvidiaDriverStep()
-        missing = FakeHost()
+    """Driver and toolkit outcomes over package, module, and apt-source readings."""
+
+    def test_open_driver_from_other_packaging_at_or_above_floor_is_accepted(self) -> None:
         branch = HOST_LOCK.driver.branch
-        self.assertEqual(step.check(context(missing)).disposition, Disposition.DRIFT)
+        package = "nvidia-driver-fictitious-open"
+        for version in (f"{branch}.0.0-fictitious", f"{int(branch) + 1}.0.0-fictitious"):
+            with self.subTest(version=version):
+                host = nvidia_driver_host(
+                    loaded_version=version,
+                    disk_version=version,
+                    packages={package: version},
+                )
+                result = NvidiaDriverStep().check(context(host))
+                self.assertEqual(result.disposition, Disposition.CONVERGED, result.detail)
+                self.assertIn(version, result.detail)
+                self.assertIn(package, result.detail)
+                self.assertIn("not the recipe's", result.detail)
+                assert_nvidia_read_only(self, host)
 
-        legacy = FakeHost(files={"/etc/apt/sources.list.d/gideon-nvidia.list": "dead\n"})
-        legacy_result = step.check(context(legacy))
-        self.assertEqual(legacy_result.disposition, Disposition.DRIFT)
-        self.assertIn("legacy gideon-nvidia", legacy_result.detail)
+    def test_loaded_module_without_modinfo_is_accepted_and_reported(self) -> None:
+        version = f"{HOST_LOCK.driver.branch}.0.0-fictitious"
+        host = nvidia_driver_host(loaded_version=version)
+        result = NvidiaDriverStep().check(context(host))
+        self.assertEqual(result.disposition, Disposition.CONVERGED, result.detail)
+        self.assertIn("no package", result.detail)
+        self.assertIn("installed module's version could not be read", result.detail)
+        assert_nvidia_read_only(self, host)
 
-        files = {"/usr/share/keyrings/cuda-archive-keyring.gpg": "keyring"}
+    def test_short_driver_refuses_before_any_write_in_check_and_apply(self) -> None:
+        branch = HOST_LOCK.driver.branch
+        version = f"{int(branch) - 1}.0.0-fictitious"
+        package = "nvidia-driver-fictitious-open"
+        host = nvidia_driver_host(
+            loaded_version=version,
+            disk_version=version,
+            packages={package: version},
+            files={str(_LEGACY_SOURCE): f"deb [signed-by={_LEGACY_KEYRING}] {CUDA_REPOSITORY}/ /\n"},
+        )
+        step = NvidiaDriverStep()
+        checked = step.check(context(host))
+        self.assertEqual(checked.disposition, Disposition.UNFIXABLE)
+        self.assertIn(version, checked.detail)
+        self.assertIn(branch, checked.detail)
+        self.assertIn(package, checked.detail)
+        self.assertIn("announced maintenance window", checked.fix)
+        with self.assertRaises(StepFailure) as raised:
+            step.apply(context(host))
+        self.assertEqual((raised.exception.detail, raised.exception.fix), (checked.detail, checked.fix))
+        assert_nvidia_read_only(self, host)
+        self.assertIn(str(_LEGACY_SOURCE), host.files)
+
+    def test_closed_loaded_or_installed_module_refuses(self) -> None:
+        version = f"{HOST_LOCK.driver.branch}.0.0-fictitious"
+        package = "nvidia-driver-fictitious-open"
+        for loaded, disk, loaded_closed, disk_open in (
+            (version, None, True, True),
+            (None, version, False, False),
+        ):
+            with self.subTest(loaded=loaded, disk=disk):
+                host = nvidia_driver_host(
+                    loaded_version=loaded,
+                    disk_version=disk,
+                    loaded_closed=loaded_closed,
+                    disk_open=disk_open,
+                    packages={package: version},
+                )
+                step = NvidiaDriverStep()
+                checked = step.check(context(host))
+                self.assertEqual(checked.disposition, Disposition.UNFIXABLE)
+                self.assertIn("closed kernel modules", checked.detail)
+                self.assertIn(package, checked.detail)
+                self.assertIn("open kernel modules", checked.fix)
+                with self.assertRaises(StepFailure) as raised:
+                    step.apply(context(host))
+                self.assertEqual(raised.exception.detail, checked.detail)
+                assert_nvidia_read_only(self, host)
+
+    def test_loaded_installed_module_mismatch_requires_window_reboot(self) -> None:
+        branch = HOST_LOCK.driver.branch
+        floor = f"{branch}.0.0-fictitious"
+        older = f"{int(branch) - 1}.0.0-fictitious"
+        newer = f"{int(branch) + 1}.0.0-fictitious"
+        for loaded, disk, loaded_closed in (
+            (floor, newer, False),
+            (older, floor, False),
+            (floor, floor, True),
+        ):
+            with self.subTest(loaded=loaded, disk=disk, loaded_closed=loaded_closed):
+                host = nvidia_driver_host(
+                    loaded_version=loaded,
+                    disk_version=disk,
+                    loaded_closed=loaded_closed,
+                    packages={"nvidia-driver-fictitious-open": disk},
+                )
+                result = NvidiaDriverStep().check(context(host))
+                self.assertEqual(result.disposition, Disposition.REBOOT_REQUIRED, result.detail)
+                self.assertIn(loaded, result.detail)
+                self.assertIn(disk, result.detail)
+                self.assertIn("announced maintenance window", result.fix)
+                if loaded_closed:
+                    self.assertIn("loaded module is closed", result.detail)
+                    self.assertIn("installed module is open", result.detail)
+                assert_nvidia_read_only(self, host)
+
+    def test_installed_short_module_refuses_despite_sufficient_loaded_one(self) -> None:
+        branch = HOST_LOCK.driver.branch
+        loaded = f"{branch}.0.0-fictitious"
+        disk = f"{int(branch) - 1}.0.0-fictitious"
+        host = nvidia_driver_host(loaded_version=loaded, disk_version=disk)
+        step = NvidiaDriverStep()
+        checked = step.check(context(host))
+        self.assertEqual(checked.disposition, Disposition.UNFIXABLE)
+        self.assertIn(disk, checked.detail)
+        self.assertIn(branch, checked.detail)
+        with self.assertRaises(StepFailure) as raised:
+            step.apply(context(host))
+        self.assertEqual(raised.exception.detail, checked.detail)
+        assert_nvidia_read_only(self, host)
+
+    def test_driver_package_without_module_refuses_and_names_kernel(self) -> None:
+        package = "nvidia-driver-fictitious-open"
+        version = f"{HOST_LOCK.driver.branch}.0.0-fictitious"
+        host = nvidia_driver_host(packages={package: version})
+        step = NvidiaDriverStep()
+        checked = step.check(context(host))
+        self.assertEqual(checked.disposition, Disposition.UNFIXABLE)
+        self.assertIn(package, checked.detail)
+        self.assertIn("0.0.0-fictitious", checked.detail)
+        self.assertIn("dkms autoinstall", checked.fix)
+        with self.assertRaises(StepFailure) as raised:
+            step.apply(context(host))
+        self.assertEqual(raised.exception.detail, checked.detail)
+        assert_nvidia_read_only(self, host)
+
+    def test_pinning_package_alone_resumes_driver_install(self) -> None:
+        branch = HOST_LOCK.driver.branch
+        pinning = f"nvidia-driver-pinning-{branch}"
         driver = HOST_LOCK.driver.package
-        keyring, keyring_output = package_result("cuda-keyring", "1.1-1")
-        package, package_output = package_result(
-            driver, f"{branch}.71.05-1ubuntu1", status="hold ok"
+        host = nvidia_driver_host(
+            packages={pinning: "1.0-fictitious"},
+            commands=nvidia_install_commands(driver),
         )
-        pinning, pinning_output = package_result(
-            f"nvidia-driver-pinning-{branch}", f"{branch}-1ubuntu1"
-        )
-        hold = ("apt-mark", "showhold")
-        lsmod = ("lsmod",)
-        commands = {
-            keyring: keyring_output,
-            package: package_output,
-            pinning: pinning_output,
-            hold: completed(hold, f"{driver}\n"),
-            lsmod: completed(lsmod, "nouveau 12345 0\n"),
-        }
-        reboot = FakeHost(files=files, commands=commands)
-        self.assertEqual(step.check(context(reboot)).disposition, Disposition.REBOOT_REQUIRED)
-
-        commands[lsmod] = completed(lsmod, "nvidia 12345 0\n")
-        live = FakeHost(files={**files, "/proc/driver/nvidia": ""}, commands=commands)
-        self.assertEqual(step.check(context(live)).disposition, Disposition.CONVERGED)
-
-    def test_driver_apply_installs_keyring_deb_and_heals_legacy_source(self) -> None:
-        host = FakeHost(
-            files={"/etc/apt/sources.list.d/gideon-nvidia.list": "dead\n"},
-        )
-        ctx = context(host)
-        deb = "/var/tmp/gideon-cuda-keyring.deb"
-        url = (
-            "https://developer.download.nvidia.com/compute/cuda/repos/"
-            f"{ctx.lock.driver.repo}/{ctx.lock.driver.keyring_deb}"
-        )
-        wget = ("wget", "-qO", f"{deb}.partial", url)
-        move = ("mv", "-f", f"{deb}.partial", deb)
-        sha = ("sha256sum", deb)
-        dpkg = ("dpkg", "-i", deb)
-        pinning_package = f"nvidia-driver-pinning-{ctx.lock.driver.branch}"
-        driver = ctx.lock.driver.package
-        pinning = ("apt-get", "install", "-y", pinning_package)
-        install = ("apt-get", "install", "-y", driver)
-        showhold = ("apt-mark", "showhold")
-        hold = ("apt-mark", "hold", driver)
-        host.commands.update(
-            {
-                wget: completed(wget),
-                move: completed(move),
-                sha: completed(sha, f"{ctx.lock.driver.keyring_sha256}  {deb}\n"),
-                dpkg: completed(dpkg),
-                showhold: completed(showhold),
-                hold: completed(hold),
-            }
-        )
-        host.commands.update(dict(apt_command_results([pinning_package])))
-        host.commands.update(dict(apt_command_results([driver])))
-        NvidiaDriverStep().apply(ctx)
-        self.assertIn(("unlink", "/etc/apt/sources.list.d/gideon-nvidia.list"), host.calls)
-        self.assertIn(("run", (dpkg, True)), host.calls)
-        self.assertIn(("run", (install, True)), host.calls)
+        step = NvidiaDriverStep()
+        checked = step.check(context(host))
+        self.assertEqual(checked.disposition, Disposition.DRIFT)
+        self.assertIn("driver is not installed", checked.detail)
+        step.apply(context(host))
         runs = [argv for argv, _, _ in host.runs]
-        self.assertLess(runs.index(pinning), runs.index(install))
-        self.assertEqual(runs.count(("apt-get", "update")), 2)
-        self.assertLess(runs.index(("apt-get", "-s", "install", "-y", pinning_package)), runs.index(pinning))
-        self.assertLess(runs.index(("apt-get", "-s", "install", "-y", driver)), runs.index(install))
-        self.assertLess(runs.index(showhold), runs.index(hold))
-        writes = [call for call in host.calls if call[0] == "write_text"]
-        self.assertEqual(writes, [])
+        self.assertNotIn(("apt-get", "install", "-y", pinning), runs)
+        self.assertIn(("apt-get", "install", "-y", driver), runs)
+        self.assertIn(("apt-mark", "hold", driver), runs)
 
-    def test_toolkit_is_blocked_until_driver_is_loaded(self) -> None:
-        result = NvidiaToolkitStep().check(context(FakeHost()))
+    def test_absent_driver_installs_keyring_before_packages_and_heals_legacy(self) -> None:
+        branch = HOST_LOCK.driver.branch
+        pinning = f"nvidia-driver-pinning-{branch}"
+        driver = HOST_LOCK.driver.package
+        version = f"{branch}.0.0-fictitious"
+        legacy_entry = f"deb [signed-by={_LEGACY_KEYRING}] {CUDA_REPOSITORY}/ /\n"
+        host = nvidia_driver_host(
+            files={str(_LEGACY_SOURCE): legacy_entry},
+            commands=nvidia_install_commands(pinning, driver),
+        )
+        step = NvidiaDriverStep()
+        checked = step.check(context(host))
+        self.assertEqual(checked.disposition, Disposition.DRIFT)
+        self.assertIn("legacy", checked.detail)
+        step.apply(context(host))
+        runs = [argv for argv, _, _ in host.runs]
+        deb_install = ("dpkg", "-i", "--force-confmiss", str(_DEB_TMP))
+        pinning_install = ("apt-get", "install", "-y", pinning)
+        driver_install = ("apt-get", "install", "-y", driver)
+        self.assertNotIn(str(_LEGACY_SOURCE), host.files)
+        self.assertLess(host.calls.index(("unlink", str(_LEGACY_SOURCE))), host.calls.index(("run", (deb_install, True))))
+        self.assertLess(runs.index(deb_install), runs.index(pinning_install))
+        self.assertLess(runs.index(pinning_install), runs.index(driver_install))
+        self.assertIn(("apt-mark", "hold", driver), runs)
+        self.assertEqual([call for call in host.calls if call[0] == "write_text"], [])
+
+        converged = nvidia_driver_host(
+            loaded_version=version,
+            disk_version=version,
+            packages={pinning: "1.0-fictitious", driver: version, "cuda-keyring": "1.0-fictitious"},
+            held=True,
+            files={CUDA_SOURCE: CUDA_ENTRY, str(_KEYRING_FILE): "keyring"},
+        )
+        host.files.update(converged.files)
+        host.commands.update(converged.commands)
+        self.assertEqual(step.check(context(host)).disposition, Disposition.CONVERGED)
+        prior = len(host.runs)
+        step.apply(context(host))
+        self.assertFalse(any(argv[0] in {"apt-get", "dpkg", "wget", "mv"} for argv, _, _ in host.runs[prior:]))
+
+    def test_installed_keyring_without_its_source_is_reinstalled_with_the_source(self) -> None:
+        driver = HOST_LOCK.driver.package
+        pinning = f"nvidia-driver-pinning-{HOST_LOCK.driver.branch}"
+        host = nvidia_driver_host(
+            packages={"cuda-keyring": "1.0-fictitious"},
+            files={str(_KEYRING_FILE): "keyring"},
+            commands=nvidia_install_commands(pinning, driver),
+        )
+        NvidiaDriverStep().apply(context(host))
+        runs = [argv for argv, _, _ in host.runs]
+        deb_install = ("dpkg", "-i", "--force-confmiss", str(_DEB_TMP))
+        self.assertLess(runs.index(deb_install), runs.index(("apt-get", "install", "-y", driver)))
+
+    def test_recipe_driver_repairs_hold_only_and_then_converges(self) -> None:
+        driver = HOST_LOCK.driver.package
+        version = f"{HOST_LOCK.driver.branch}.0.0-fictitious"
+        hold = ("apt-mark", "hold", driver)
+        host = nvidia_driver_host(
+            loaded_version=version,
+            disk_version=version,
+            packages={driver: version},
+            commands={hold: completed(hold)},
+        )
+        step = NvidiaDriverStep()
+        checked = step.check(context(host))
+        self.assertEqual(checked.disposition, Disposition.DRIFT)
+        self.assertIn("not held", checked.detail)
+        self.assertIn("apt-mark", checked.fix)
+        step.apply(context(host))
+        self.assertIn(("run", (hold, True)), host.calls)
+        self.assertFalse(any(argv[0] in {"apt-get", "dpkg", "wget"} for argv, _, _ in host.runs))
+        host.commands[("apt-mark", "showhold")] = completed(("apt-mark", "showhold"), f"{driver}\n")
+        self.assertEqual(step.check(context(host)).disposition, Disposition.CONVERGED)
+        prior = len(host.runs)
+        step.apply(context(host))
+        self.assertNotIn(hold, [argv for argv, _, _ in host.runs[prior:]])
+
+    def test_two_cuda_entries_refuse_both_steps_before_any_write(self) -> None:
+        branch = HOST_LOCK.driver.branch
+        version = f"{branch}.0.0-fictitious"
+        other_path = "/etc/apt/sources.list.d/fictitious-second-cuda.list"
+        sources = {
+            CUDA_SOURCE: CUDA_ENTRY,
+            other_path: f"deb [signed-by=/keys/fictitious.gpg] {CUDA_REPOSITORY}/ /\n",
+        }
+        for loaded in (None, version):
+            for step in (NvidiaDriverStep(), NvidiaToolkitStep()):
+                with self.subTest(loaded=loaded, step=step.name):
+                    host = nvidia_driver_host(
+                        loaded_version=loaded,
+                        disk_version=loaded,
+                        files=sources,
+                    )
+                    checked = step.check(context(host))
+                    self.assertEqual(checked.disposition, Disposition.UNFIXABLE)
+                    self.assertIn("2 apt sources", checked.detail)
+                    self.assertIn(CUDA_SOURCE, checked.detail)
+                    self.assertIn(other_path, checked.detail)
+                    self.assertIn("Keep one apt source", checked.fix)
+                    with self.assertRaises(StepFailure) as raised:
+                        step.apply(context(host))
+                    self.assertEqual(raised.exception.detail, checked.detail)
+                    assert_nvidia_read_only(self, host)
+
+    def test_unreadable_cuda_sources_refuse_both_steps_before_drift(self) -> None:
+        source_dir = "/etc/apt/sources.list.d"
+        for step in (NvidiaDriverStep(), NvidiaToolkitStep()):
+            with self.subTest(step=step.name):
+                host = PermissionErrorHost(source_dir)
+                checked = step.check(context(host))
+                self.assertEqual(checked.disposition, Disposition.UNFIXABLE)
+                self.assertIn(source_dir, checked.detail)
+                self.assertIn("Repair", checked.fix)
+                with self.assertRaises(StepFailure) as raised:
+                    step.apply(context(host))
+                self.assertEqual(raised.exception.detail, checked.detail)
+                assert_nvidia_read_only(self, host)
+
+    def test_foreign_source_refuses_only_when_recipe_must_install(self) -> None:
+        version = f"{HOST_LOCK.driver.branch}.0.0-fictitious"
+        foreign_path = "/etc/apt/sources.list.d/fictitious-cuda.list"
+        sources = {foreign_path: f"deb [signed-by=/keys/fictitious.gpg] {CUDA_REPOSITORY}/ /\n"}
+        for step, loaded, packages, named_package in (
+            (NvidiaDriverStep(), None, {}, HOST_LOCK.driver.package),
+            (NvidiaToolkitStep(), version, {}, TOOLKIT_PACKAGE),
+        ):
+            with self.subTest(absent=step.name):
+                host = nvidia_driver_host(loaded_version=loaded, disk_version=loaded, packages=packages, files=sources)
+                checked = step.check(context(host))
+                self.assertEqual(checked.disposition, Disposition.UNFIXABLE)
+                self.assertIn(foreign_path, checked.detail)
+                self.assertIn(named_package, checked.fix)
+                with self.assertRaises(StepFailure) as raised:
+                    step.apply(context(host))
+                self.assertEqual(raised.exception.detail, checked.detail)
+                assert_nvidia_read_only(self, host)
+
+        driver = nvidia_driver_host(loaded_version=version, disk_version=version, files=sources)
+        driver_result = NvidiaDriverStep().check(context(driver))
+        self.assertEqual(driver_result.disposition, Disposition.CONVERGED)
+        self.assertIn(foreign_path, driver_result.detail)
+        assert_nvidia_read_only(self, driver)
+
+        enabled = ("systemctl", "is-enabled", "nvidia-persistenced")
+        policy = _TOOLKIT_POLICY
+        toolkit = nvidia_driver_host(
+            loaded_version=version,
+            disk_version=version,
+            packages={TOOLKIT_PACKAGE: HOST_LOCK.minimums.toolkit},
+            files={**sources, "/etc/cdi/nvidia.yaml": "spec"},
+            commands={enabled: completed(enabled, "enabled\n"), policy: completed(policy)},
+        )
+        toolkit_result = NvidiaToolkitStep().check(context(toolkit))
+        self.assertEqual(toolkit_result.disposition, Disposition.CONVERGED)
+        self.assertIn(foreign_path, toolkit_result.detail)
+        assert_nvidia_read_only(self, toolkit)
+
+    def test_recipe_path_with_foreign_entry_is_reported_or_refused(self) -> None:
+        version = f"{HOST_LOCK.driver.branch}.0.0-fictitious"
+        foreign = f"deb [signed-by=/keys/fictitious.gpg] {CUDA_REPOSITORY}/ /\n"
+        present = nvidia_driver_host(loaded_version=version, disk_version=version, files={CUDA_SOURCE: foreign})
+        result = NvidiaDriverStep().check(context(present))
+        self.assertEqual(result.disposition, Disposition.CONVERGED)
+        self.assertIn(f"source {CUDA_SOURCE} is not the recipe's entry", result.detail)
+        absent = nvidia_driver_host(files={CUDA_SOURCE: foreign})
+        checked = NvidiaDriverStep().check(context(absent))
+        self.assertEqual(checked.disposition, Disposition.UNFIXABLE)
+        self.assertIn(CUDA_SOURCE, checked.detail)
+        with self.assertRaises(StepFailure):
+            NvidiaDriverStep().apply(context(absent))
+        assert_nvidia_read_only(self, absent)
+
+    def test_legacy_entry_beside_recipe_is_healed_without_install(self) -> None:
+        version = f"{HOST_LOCK.driver.branch}.0.0-fictitious"
+        legacy = f"deb [signed-by={_LEGACY_KEYRING}] {CUDA_REPOSITORY}/ /\n"
+        host = nvidia_driver_host(
+            loaded_version=version,
+            disk_version=version,
+            packages={HOST_LOCK.driver.package: version},
+            held=True,
+            files={CUDA_SOURCE: CUDA_ENTRY, str(_LEGACY_SOURCE): legacy},
+        )
+        step = NvidiaDriverStep()
+        checked = step.check(context(host))
+        self.assertEqual(checked.disposition, Disposition.DRIFT)
+        self.assertIn("legacy", checked.detail)
+        step.apply(context(host))
+        self.assertNotIn(str(_LEGACY_SOURCE), host.files)
+        self.assertEqual(step.check(context(host)).disposition, Disposition.CONVERGED)
+        self.assertFalse(any(argv[0] in {"apt-get", "dpkg", "wget"} for argv, _, _ in host.runs))
+
+    def test_occupied_recipe_path_refuses_only_an_install(self) -> None:
+        version = f"{HOST_LOCK.driver.branch}.0.0-fictitious"
+        occupied = {CUDA_SOURCE: "deb https://other.example.test/ubuntu stable main\n"}
+        for step, loaded in ((NvidiaDriverStep(), None), (NvidiaToolkitStep(), version)):
+            with self.subTest(step=step.name):
+                host = nvidia_driver_host(loaded_version=loaded, disk_version=loaded, files=occupied)
+                checked = step.check(context(host))
+                self.assertEqual(checked.disposition, Disposition.UNFIXABLE)
+                self.assertIn(CUDA_SOURCE, checked.detail)
+                self.assertIn("no enabled entry", checked.detail)
+                with self.assertRaises(StepFailure) as raised:
+                    step.apply(context(host))
+                self.assertEqual(raised.exception.detail, checked.detail)
+                assert_nvidia_read_only(self, host)
+        present = nvidia_driver_host(loaded_version=version, disk_version=version, files=occupied)
+        self.assertEqual(NvidiaDriverStep().check(context(present)).disposition, Disposition.CONVERGED)
+
+    def test_toolkit_waits_for_a_loaded_driver(self) -> None:
+        host = nvidia_driver_host()
+        result = NvidiaToolkitStep().check(context(host))
         self.assertEqual(result.disposition, Disposition.PENDING_INPUT)
+        self.assertIn("driver must be loaded", result.detail)
         self.assertIn("docs/runbooks/install-upgrade.md §1", result.fix)
+        assert_nvidia_read_only(self, host)
 
-    def test_toolkit_absent_installs_through_the_helper(self) -> None:
-        package = "nvidia-container-toolkit"
-        lsmod = ("lsmod",)
+    def test_absent_toolkit_installs_keyring_before_package(self) -> None:
+        version = f"{HOST_LOCK.driver.branch}.0.0-fictitious"
         enable = ("systemctl", "enable", "--now", "nvidia-persistenced")
         generate = ("nvidia-ctk", "cdi", "generate", "--output=/etc/cdi/nvidia.yaml")
-        commands = dict(apt_command_results([package]))
-        commands.update({
-            lsmod: completed(lsmod, "nvidia 12345 0\n"),
-            enable: completed(enable),
-            generate: completed(generate),
-        })
-        host = FakeHost(files={"/proc/driver/nvidia": ""}, commands=commands)
+        commands = nvidia_install_commands(TOOLKIT_PACKAGE)
+        commands.update({enable: completed(enable), generate: completed(generate)})
+        host = nvidia_driver_host(loaded_version=version, disk_version=version, commands=commands)
         step = NvidiaToolkitStep()
-
         checked = step.check(context(host))
         self.assertEqual(checked.disposition, Disposition.DRIFT)
-        self.assertEqual(checked.detail, f"{package} is not installed")
+        self.assertIn(TOOLKIT_PACKAGE, checked.detail)
         step.apply(context(host))
-
         runs = [argv for argv, _, _ in host.runs]
-        self.assertLess(
-            runs.index(("apt-get", "-s", "install", "-y", package)),
-            runs.index(("apt-get", "install", "-y", package)),
-        )
+        deb_install = ("dpkg", "-i", "--force-confmiss", str(_DEB_TMP))
+        toolkit_install = ("apt-get", "install", "-y", TOOLKIT_PACKAGE)
+        self.assertLess(runs.index(deb_install), runs.index(("apt-get", "update")))
+        self.assertLess(runs.index(("apt-get", "-s", "install", "-y", TOOLKIT_PACKAGE)), runs.index(toolkit_install))
+        self.assertLess(runs.index(deb_install), runs.index(toolkit_install))
         self.assertIn(("run", (generate, True)), host.calls)
 
-    def test_present_short_toolkit_refuses_in_check_and_apply(self) -> None:
-        package = "nvidia-container-toolkit"
+    def test_short_toolkit_refuses_before_any_write(self) -> None:
         floor = HOST_LOCK.minimums.toolkit
         version = f"{int(floor.split('.')[0]) - 1}.0.0-fictitious"
-        probe, result = package_result(package, version)
-        lsmod = ("lsmod",)
-        host = FakeHost(
-            files={"/proc/driver/nvidia": ""},
-            commands={probe: result, lsmod: completed(lsmod, "nvidia 12345 0\n")},
+        loaded = f"{HOST_LOCK.driver.branch}.0.0-fictitious"
+        host = nvidia_driver_host(
+            loaded_version=loaded,
+            disk_version=loaded,
+            packages={TOOLKIT_PACKAGE: version},
         )
         step = NvidiaToolkitStep()
-
         checked = step.check(context(host))
         self.assertEqual(checked.disposition, Disposition.UNFIXABLE)
-        self.assertEqual(checked.detail, f"{package} is at {version}, below the floor {floor}")
-        self.assertIn(f"Upgrade {package} to at least {floor}", checked.fix)
-
-        before_apply = len(host.calls)
+        self.assertIn(version, checked.detail)
+        self.assertIn(floor, checked.detail)
+        self.assertIn(f"Upgrade {TOOLKIT_PACKAGE} to at least {floor}", checked.fix)
         with self.assertRaises(StepFailure) as raised:
             step.apply(context(host))
-        self.assertEqual(raised.exception.detail, checked.detail)
-        self.assertEqual(raised.exception.fix, checked.fix)
-        self.assertEqual(host.calls[before_apply:], [("run", (probe, False))])
+        self.assertEqual((raised.exception.detail, raised.exception.fix), (checked.detail, checked.fix))
+        assert_nvidia_read_only(self, host)
+
+    def test_toolkit_service_and_cdi_drift_then_converge(self) -> None:
+        version = f"{HOST_LOCK.driver.branch}.0.0-fictitious"
+        enabled = ("systemctl", "is-enabled", "nvidia-persistenced")
+        host = nvidia_driver_host(
+            loaded_version=version,
+            disk_version=version,
+            packages={TOOLKIT_PACKAGE: HOST_LOCK.minimums.toolkit},
+        )
+        step = NvidiaToolkitStep()
+        service = step.check(context(host))
+        self.assertEqual(service.disposition, Disposition.DRIFT)
+        self.assertIn("not enabled", service.detail)
+        host.commands[enabled] = completed(enabled, "enabled\n")
+        cdi = step.check(context(host))
+        self.assertEqual(cdi.disposition, Disposition.DRIFT)
+        self.assertIn("CDI specification is missing", cdi.detail)
+        host.files["/etc/cdi/nvidia.yaml"] = "fictitious spec"
+        host.commands[_TOOLKIT_POLICY] = completed(_TOOLKIT_POLICY)
+        converged = step.check(context(host))
+        self.assertEqual(converged.disposition, Disposition.CONVERGED)
+        self.assertIn("toolkit and CDI are current", converged.detail)
+        assert_nvidia_read_only(self, host)
+
+    def test_toolkit_reports_distinct_other_policy_repositories(self) -> None:
+        version = f"{HOST_LOCK.driver.branch}.0.0-fictitious"
+        floor = HOST_LOCK.minimums.toolkit
+        first = "https://a.example.test/cuda"
+        second = "https://b.example.test/cuda"
+        policy_text = (
+            f"{TOOLKIT_PACKAGE}:\n  Installed: {floor}\n  Candidate: {floor}\n"
+            f"  Version table:\n *** {floor} 600\n"
+            f"        600 {CUDA_REPOSITORY}/  Packages\n"
+            "        100 /var/lib/dpkg/status\n"
+            f"        500 {second} stable/main amd64 Packages\n"
+            f"        500 {first} stable/main amd64 Packages\n"
+            f"        500 {second} stable/main amd64 Packages\n"
+        )
+        enabled = ("systemctl", "is-enabled", "nvidia-persistenced")
+        host = nvidia_driver_host(
+            loaded_version=version,
+            disk_version=version,
+            packages={TOOLKIT_PACKAGE: floor},
+            files={"/etc/cdi/nvidia.yaml": "fictitious spec", CUDA_SOURCE: CUDA_ENTRY},
+            commands={enabled: completed(enabled, "enabled\n"), _TOOLKIT_POLICY: completed(_TOOLKIT_POLICY, policy_text)},
+        )
+        result = NvidiaToolkitStep().check(context(host))
+        self.assertEqual(result.disposition, Disposition.CONVERGED)
+        self.assertIn(f"2 other apt repositories: {first}, {second}", result.detail)
+        self.assertNotIn("/var/lib/dpkg/status", result.detail)
+        self.assertNotIn(CUDA_REPOSITORY, result.detail)
+        assert_nvidia_read_only(self, host)
+
+    def test_toolkit_policy_failure_is_reported_without_refusal(self) -> None:
+        version = f"{HOST_LOCK.driver.branch}.0.0-fictitious"
+        enabled = ("systemctl", "is-enabled", "nvidia-persistenced")
+        failed = subprocess.CompletedProcess(list(_TOOLKIT_POLICY), 1, "", "fictitious policy failure\nsecond line\n")
+        host = nvidia_driver_host(
+            loaded_version=version,
+            disk_version=version,
+            packages={TOOLKIT_PACKAGE: HOST_LOCK.minimums.toolkit},
+            files={"/etc/cdi/nvidia.yaml": "fictitious spec"},
+            commands={enabled: completed(enabled, "enabled\n"), _TOOLKIT_POLICY: failed},
+        )
+        result = NvidiaToolkitStep().check(context(host))
+        self.assertEqual(result.disposition, Disposition.CONVERGED)
+        self.assertIn("apt-cache policy could not be read: fictitious policy failure", result.detail)
+        self.assertNotIn("second line", result.detail)
+        assert_nvidia_read_only(self, host)
 
     def test_toolkit_rehearsal_refuses_upgrade_of_present_base(self) -> None:
-        package = "nvidia-container-toolkit"
+        loaded = f"{HOST_LOCK.driver.branch}.0.0-fictitious"
         base = "nvidia-container-toolkit-base"
-        base_probe, base_result = package_result(base, "1.0-fictitious")
-        commands = dict(apt_command_results([package]))
-        commands[base_probe] = base_result
-        rehearsal = ("apt-get", "-s", "install", "-y", package)
+        base_version = "1.0-fictitious"
+        base_query, base_result = package_result(base, base_version)
+        rehearsal = ("apt-get", "-s", "install", "-y", TOOLKIT_PACKAGE)
+        commands = nvidia_install_commands(TOOLKIT_PACKAGE)
+        commands[base_query] = base_result
         commands[rehearsal] = completed(
             rehearsal,
-            f"Inst {base} [1.0-fictitious] (2.0-fictitious local)\n",
+            f"Inst {base} [{base_version}] (2.0-fictitious local)\n",
         )
-        host = FakeHost(commands=commands)
-
+        host = nvidia_driver_host(
+            loaded_version=loaded,
+            disk_version=loaded,
+            packages={"cuda-keyring": "1.0-fictitious", base: base_version},
+            files={CUDA_SOURCE: CUDA_ENTRY, str(_KEYRING_FILE): "keyring"},
+            commands=commands,
+        )
         with self.assertRaises(StepFailure) as raised:
             NvidiaToolkitStep().apply(context(host))
-
         self.assertIn(base, raised.exception.detail)
-        self.assertIn("1.0-fictitious", raised.exception.detail)
-        self.assertIn("2.0-fictitious", raised.exception.detail)
+        self.assertIn(base_version, raised.exception.detail)
         self.assertIn("docs/runbooks/install-upgrade.md §9", raised.exception.fix)
-        self.assertNotIn(
-            ("run", (("apt-get", "install", "-y", package), True)), host.calls
-        )
-
-    def test_driver_present_at_branch_only_repairs_missing_hold(self) -> None:
-        branch = HOST_LOCK.driver.branch
-        driver = HOST_LOCK.driver.package
-        pinning = f"nvidia-driver-pinning-{branch}"
-        keyring_probe, keyring_result = package_result("cuda-keyring", "1.0-fictitious")
-        pinning_probe, pinning_result = package_result(pinning, "1.0-fictitious")
-        driver_probe, driver_result = package_result(
-            driver, f"{branch}.99.0-fictitious"
-        )
-        showhold = ("apt-mark", "showhold")
-        hold = ("apt-mark", "hold", driver)
-        host = FakeHost(
-            files={"/usr/share/keyrings/cuda-archive-keyring.gpg": "keyring"},
-            commands={
-                keyring_probe: keyring_result,
-                pinning_probe: pinning_result,
-                driver_probe: driver_result,
-                showhold: completed(showhold),
-                hold: completed(hold),
-            },
-        )
-
-        NvidiaDriverStep().apply(context(host))
-
-        runs = [argv for argv, _, _ in host.runs]
-        self.assertFalse(any(argv[0] == "apt-get" for argv in runs))
-        self.assertTrue(all(
-            argv[0] in {"dpkg-query", "apt-mark"}
-            for argv in runs if driver in argv or pinning in argv
-        ))
-        self.assertIn(("run", (hold, True)), host.calls)
-
-    def test_driver_already_held_runs_no_hold_or_install(self) -> None:
-        branch = HOST_LOCK.driver.branch
-        driver = HOST_LOCK.driver.package
-        keyring_probe, keyring_result = package_result("cuda-keyring", "1.0-fictitious")
-        pinning_probe, pinning_result = package_result(
-            f"nvidia-driver-pinning-{branch}", "1.0-fictitious"
-        )
-        driver_probe, driver_result = package_result(driver, f"{branch}.99.0-fictitious")
-        showhold = ("apt-mark", "showhold")
-        host = FakeHost(
-            files={"/usr/share/keyrings/cuda-archive-keyring.gpg": "keyring"},
-            commands={
-                keyring_probe: keyring_result,
-                pinning_probe: pinning_result,
-                driver_probe: driver_result,
-                showhold: completed(showhold, f"{driver}\n"),
-            },
-        )
-
-        NvidiaDriverStep().apply(context(host))
-
-        self.assertIn(("run", (showhold, True)), host.calls)
-        self.assertNotIn(("run", (("apt-mark", "hold", driver), True)), host.calls)
-        self.assertFalse(any(argv[0] == "apt-get" for argv, _, _ in host.runs))
-
-    def test_driver_off_branch_refuses_before_pinning_or_mutation(self) -> None:
-        branch = HOST_LOCK.driver.branch
-        old_branch = str(int(branch) - 1)
-        driver = HOST_LOCK.driver.package
-        version = f"{old_branch}.99.0-fictitious"
-        keyring_probe, keyring_result = package_result("cuda-keyring", "1.0-fictitious")
-        driver_probe, driver_result = package_result(driver, version)
-        old_pinning_probe, old_pinning_result = package_result(
-            f"nvidia-driver-pinning-{old_branch}", "1.0-fictitious"
-        )
-        locked_pinning_probe = (
-            "dpkg-query", "-W", "-f=${Status} ${Version}\\n",
-            f"nvidia-driver-pinning-{branch}",
-        )
-        host = FakeHost(
-            files={"/usr/share/keyrings/cuda-archive-keyring.gpg": "keyring"},
-            commands={
-                keyring_probe: keyring_result,
-                driver_probe: driver_result,
-                old_pinning_probe: old_pinning_result,
-            },
-        )
-        step = NvidiaDriverStep()
-
-        checked = step.check(context(host))
-        self.assertEqual(checked.disposition, Disposition.UNFIXABLE)
-        self.assertEqual(
-            checked.detail,
-            f"{driver} is at {version}, off the pinned branch {branch}",
-        )
-        self.assertIn(f"Upgrade {driver} to at least {branch}", checked.fix)
-        self.assertNotIn(("run", (locked_pinning_probe, False)), host.calls)
-
-        host.files["/etc/apt/sources.list.d/gideon-nvidia.list"] = "legacy\n"
-        self.assertEqual(step.check(context(host)), checked)
-        before_apply = len(host.calls)
-        with self.assertRaises(StepFailure) as raised:
-            step.apply(context(host))
-        self.assertEqual(raised.exception.detail, checked.detail)
-        self.assertEqual(raised.exception.fix, checked.fix)
-        apply_calls = host.calls[before_apply:]
-        self.assertFalse(any(
-            method in {"unlink", "write_text", "mkdir"} for method, _ in apply_calls
-        ))
-        self.assertEqual(
-            [arguments for method, arguments in apply_calls if method == "run"],
-            [(driver_probe, False)],
-        )
-
-    def test_driver_absent_is_drift_before_pinning_check(self) -> None:
-        branch = HOST_LOCK.driver.branch
-        driver = HOST_LOCK.driver.package
-        keyring_probe, keyring_result = package_result("cuda-keyring", "1.0-fictitious")
-        host = FakeHost(
-            files={"/usr/share/keyrings/cuda-archive-keyring.gpg": "keyring"},
-            commands={keyring_probe: keyring_result},
-        )
-
-        checked = NvidiaDriverStep().check(context(host))
-
-        self.assertEqual(checked.disposition, Disposition.DRIFT)
-        self.assertEqual(checked.detail, f"{driver} is not installed")
-        self.assertNotIn(
-            ("run", (("dpkg-query", "-W", "-f=${Status} ${Version}\\n",
-                      f"nvidia-driver-pinning-{branch}"), False)),
-            host.calls,
-        )
+        self.assertNotIn(("apt-get", "install", "-y", TOOLKIT_PACKAGE), [argv for argv, _, _ in host.runs])
 
 
 def containerd_dump(root: object) -> subprocess.CompletedProcess[str]:

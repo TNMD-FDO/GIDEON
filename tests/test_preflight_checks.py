@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import ClassVar, Self, cast
 from unittest import mock
 
+from gideon.host import nogpu
 from gideon.host.checks import CHECKS, PreflightContext, Severity, format_gb, services
 from gideon.host.checks.artifacts import (
     DriverTestedCheck,
@@ -44,6 +45,7 @@ from gideon.host.lock import load_host_lock
 from gideon.host.models import GIGABYTE, load_models_lock
 from gideon.host.site import load_site, render_errors
 from gideon.host.sshtarget import BACKUP_PROBE_SHA256
+from gideon.host.steps.nvidia import _LOADED_VERSION
 from gideon.host.sysio import Command, PathLike
 
 _LOCK = load_host_lock("host.lock").lock
@@ -1469,55 +1471,71 @@ class HardwareProfile(unittest.TestCase):
         self.assertEqual(report.severity, Severity.REFUSE)
 
 
-DPKG_DRIVER = ("dpkg-query", "-W", "-f=${Status} ${Version}\\n", "nvidia-open")
-
-
 class DriverTested(unittest.TestCase):
     def lock_with(self, tested: str | None):
         return dataclasses.replace(LOCK, driver=dataclasses.replace(LOCK.driver, tested=tested))
 
     def driver_host(self, version: str | None) -> FakeHost:
-        if version is None:
-            return FakeHost()
-        return FakeHost(
-            commands={DPKG_DRIVER: completed(DPKG_DRIVER, f"hold ok installed {version}\n")}
-        )
+        return FakeHost(files={str(_LOADED_VERSION): f"{version}\n"} if version else {})
+
+    def driver_tested_version(self) -> str:
+        return LOCK.driver.tested or f"{LOCK.driver.branch}.0.0-fictitious"
 
     def test_null_tested_passes(self) -> None:
-        tested = LOCK.driver.tested or "1000.0.0"
+        tested = self.driver_tested_version()
+        host = self.driver_host(f"{tested}-1")
         report = DriverTestedCheck().run(
-            context(self.driver_host(f"{tested}-1"), lock=self.lock_with(None))
+            context(host, lock=self.lock_with(None))
         )
         self.assertEqual(report.severity, Severity.PASS)
+        self.assertNotIn(("read_text", str(_LOADED_VERSION)), host.calls)
 
     def test_matching_driver_passes(self) -> None:
-        tested = LOCK.driver.tested or "1000.0.0"
+        tested = self.driver_tested_version()
         report = DriverTestedCheck().run(
-            context(self.driver_host(f"{tested}-0ubuntu1"))
+            context(self.driver_host(f"{tested}-0ubuntu1"), lock=self.lock_with(tested))
         )
         self.assertEqual(report.severity, Severity.PASS, report.detail)
+        self.assertIn(f"matches tested {tested}", report.detail)
 
     def test_driver_above_tested_warns(self) -> None:
         """A driver above the tested version produces a warning."""
 
-        tested = LOCK.driver.tested or "1000.0.0"
+        tested = self.driver_tested_version()
         next_major = int(tested.split(".", 1)[0]) + 1
         report = DriverTestedCheck().run(
-            context(self.driver_host(f"{next_major}.0.0-0ubuntu1"))
+            context(
+                self.driver_host(f"{next_major}.0.0-fictitious"),
+                lock=self.lock_with(tested),
+            )
         )
         self.assertEqual(report.severity, Severity.WARN)
         self.assertIn("above tested", report.detail)
 
-    def test_missing_driver_refuses(self) -> None:
-        report = DriverTestedCheck().run(context(self.driver_host(None)))
+    def test_driver_below_tested_warns(self) -> None:
+        tested = self.driver_tested_version()
+        previous_major = int(tested.split(".", 1)[0]) - 1
+        actual = f"{previous_major}.0.0-fictitious"
+        report = DriverTestedCheck().run(
+            context(self.driver_host(actual), lock=self.lock_with(tested))
+        )
+        self.assertEqual(report.severity, Severity.WARN)
+        self.assertIn(f"installed driver {actual} is below tested {tested}", report.detail)
+
+    def test_no_loaded_module_refuses_with_gpu_fix(self) -> None:
+        report = DriverTestedCheck().run(
+            context(self.driver_host(None), lock=self.lock_with(self.driver_tested_version()))
+        )
         self.assertEqual(report.severity, Severity.REFUSE)
+        self.assertEqual(report.detail, "no NVIDIA driver is loaded")
+        self.assertEqual(report.fix, nogpu.GPU_DRIVER_FIX)
 
     def test_no_gpu_host_skips_driver_probe(self) -> None:
-        host = self.driver_host(None)
+        host = self.driver_host(self.driver_tested_version())
         report = DriverTestedCheck().run(context(host, no_gpu=True))
         self.assertEqual(report.severity, Severity.PASS)
         self.assertIn("skipped", report.detail)
-        self.assertNotIn(("run", DPKG_DRIVER), host.calls)
+        self.assertNotIn(("read_text", str(_LOADED_VERSION)), host.calls)
 
 
 UNAME = ("uname", "-r")

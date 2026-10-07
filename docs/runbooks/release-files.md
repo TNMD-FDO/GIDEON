@@ -12,7 +12,7 @@ A refusal naming one of these files at `host provision`, `preflight`, `apply`, `
 
 This file records the operating-system release, the kernel tested, the NVIDIA driver package and branch, and the driver version reached on the reference box. It also sets minimum versions for Docker, Compose, and the GPU toolkit. The remaining records identify the release registry image, the self-hosted CI runner's release and its checksum, the dated acceptance-machine image and its checksum, and the reference box's storage-controller and virtual-disk facts.
 
-`host provision` converges the host to these records, and `preflight` refuses when the lock is missing or invalid. Provision installs an absent package; a present one below a minimum or off the pinned branch is a refusal. A person upgrades it by `docs/runbooks/install-upgrade.md §9`. A driver proposal does not mark a version tested: move that record only after the reference box has converged on the version.
+`host provision` converges the host to these records, and `preflight` refuses when the lock is missing or invalid. Provision installs an absent package; a present one below a minimum, or a driver below the branch's floor or with closed kernel modules, is a refusal. A person upgrades it by `docs/runbooks/install-upgrade.md §9`. A driver proposal does not mark a version tested: move that record only after the reference box has converged on the version.
 
 ## 3. `images.lock`
 

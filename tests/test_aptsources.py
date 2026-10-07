@@ -50,6 +50,30 @@ class FakeHost:
 
 
 class ListParserTests(unittest.TestCase):
+    def test_flat_repository_requires_trailing_slash_without_components(self) -> None:
+        path = f"{_DIR}/flat.list"
+        entries = parse_list(
+            f"deb [signed-by=/keys/example.gpg] {_REPOSITORY}/ /\n"
+            f"deb {_REPOSITORY} stable\n",
+            path,
+        )
+        self.assertEqual(
+            entries,
+            (
+                Entry(
+                    path,
+                    "list",
+                    ("deb",),
+                    (_REPOSITORY + "/",),
+                    ("/",),
+                    (),
+                    (),
+                    "/keys/example.gpg",
+                    True,
+                ),
+            ),
+        )
+
     def test_options_and_source_types(self) -> None:
         path = f"{_DIR}/example.list"
         entries = parse_list(
@@ -89,7 +113,7 @@ class ListParserTests(unittest.TestCase):
         path = f"{_DIR}/example.list"
         entries = parse_list(
             "\n  # disabled\n"
-            f"deb {_REPOSITORY} stable main\n"
+            f"deb {_REPOSITORY} stable main # trailing comment\n"
             f"deb [arch] {_REPOSITORY} stable main\n"
             f"deb [arch=amd64 {_REPOSITORY} stable main\n"
             f"deb {_REPOSITORY} stable\n",
@@ -97,6 +121,7 @@ class ListParserTests(unittest.TestCase):
         )
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0].uris, (_REPOSITORY,))
+        self.assertEqual(entries[0].components, ("main",))
 
 
 class Deb822ParserTests(unittest.TestCase):

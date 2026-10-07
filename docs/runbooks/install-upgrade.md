@@ -821,7 +821,9 @@ The `sed` command must print nothing before restoring `/data`. The owning operat
 
 ## 9. Upgrading a shared prerequisite
 
-Use this procedure when provision or preflight reports a present Docker Engine, Compose plugin, NVIDIA container toolkit, or driver below the lock's floor or off its pinned branch, or when an apt rehearsal names packages it would upgrade or remove. Read `host.lock` for the required floor and driver branch. Provision installs absent packages but does not upgrade a present prerequisite.
+Use this procedure when provision or preflight reports a present Docker Engine, Compose plugin, NVIDIA container toolkit, or driver below the lock's floor or with closed kernel modules, or when an apt rehearsal names packages it would upgrade or remove. Read `host.lock` for the required floor and driver branch. Provision installs absent packages but does not upgrade a present prerequisite; a driver at or above the branch with open kernel modules is accepted whatever its packaging.
+
+A `reboot-required` row naming a loaded NVIDIA driver that differs from the installed module means the driver was upgraded without its reboot: reboot in an announced window, then re-run provision.
 
 ### Survey
 

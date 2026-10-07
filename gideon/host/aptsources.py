@@ -1,4 +1,4 @@
-"""Read apt sources before a provision step writes a repository entry.
+"""Read apt sources, including flat repositories, before writing an entry.
 
 Two entries for one repository under different keys can break apt for the
 whole host, so callers can inspect existing entries and unreadable files.
@@ -13,7 +13,7 @@ from gideon.host.sysio import Host
 
 _SOURCES_LIST = "/etc/apt/sources.list"
 _SOURCES_DIR = "/etc/apt/sources.list.d"
-_LIST_LINE = re.compile(r"^(deb(?:-src)?)\s+(?:\[([^\]]*)\]\s+)?(\S+)\s+(\S+)\s+(.+)$")
+_LIST_LINE = re.compile(r"^(deb(?:-src)?)\s+(?:\[([^\]]*)\]\s+)?(\S+)\s+(\S+)(?:\s+(.+))?$")
 _FIELD = re.compile(r"^([^\s:]+):\s*(.*)$")
 # The words apt's boolean option parser reads as false.
 _FALSE = frozenset({"no", "false", "without", "off", "disable", "0"})
@@ -47,8 +47,9 @@ def parse_list(text: str, file: str) -> tuple[Entry, ...]:
 
     entries: list[Entry] = []
     for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
+        # apt ends a one-line entry at its first "#".
+        line = raw_line.partition("#")[0].strip()
+        if not line:
             continue
         match = _LIST_LINE.fullmatch(line)
         if match is None:
@@ -56,8 +57,8 @@ def parse_list(text: str, file: str) -> tuple[Entry, ...]:
         kind, option_text, uri, suite, component_text = match.groups()
         if uri.startswith("["):
             continue
-        components = tuple(component_text.split())
-        if not components:
+        components = tuple(component_text.split()) if component_text else ()
+        if not components and not suite.endswith("/"):
             continue
         options: dict[str, str] = {}
         if option_text is not None:
