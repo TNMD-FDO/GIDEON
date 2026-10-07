@@ -1,0 +1,22 @@
+# Written by the corpus cut command; edit mirror_url alone.
+schema: 1
+label: corpus-2026-10-07
+pipeline: 0.0.0
+cut_at: '2026-10-07T00:10:48Z'
+reason: tranche
+sources:
+  caselaw:
+    snapshot_date: '2026-09-30'
+    base_url: https://com-courtlistener-storage.s3-us-west-2.amazonaws.com/bulk-data/
+    mirror_url: null
+    sidecar_sha256: 53812f85ca1cfbe6c7b604d2b1c63c8caf87f0472039f40e6ecbf33dd9dcf42d
+    files: 8
+    bytes: 63525502503
+    index:
+    - name: listing.xml
+      url: https://com-courtlistener-storage.s3-us-west-2.amazonaws.com/?list-type=2&prefix=bulk-data/opinions-
+      sha256: b847a671868a0769df522c9b59822c6b5dc78066cd673711b4b4a465c6033eba
+      size: 12880
+    courts:
+    - ca6
+    - scotus

@@ -1,0 +1,22 @@
+# Written by the corpus cut command; edit mirror_url alone.
+schema: 1
+schema: 2
+label: corpus-2099-01-04
+pipeline: 0.0.0
+cut_at: '2099-01-03T04:05:06Z'
+reason: tranche
+sources:
+  example:
+    snapshot_date: '2099-01-02'
+    base_url: https://example.invalid/archive/
+    mirror_url: null
+    sidecar_sha256: 7eae47fcdbf3885c5ed252be410c902824e2148df65c64fdbd5336961268c28a
+    files: 1
+    bytes: 7
+    index:
+    - name: listing.xml
+      url: https://example.invalid/listing
+      sha256: f8377e6e8b6cda7d0d245ea7f13b14ac7874cfba10ead0b0a5f9a942eca5129d
+      size: 38
+    courts:
+    - ca6

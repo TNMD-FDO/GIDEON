@@ -97,3 +97,19 @@ gh workflow run pin-watch.yml -f dry_run=false
 Merge the next PR when its checks are green again.
 
 **A watch run costs hosted minutes.** It rebases every open watch branch, and each rebase reruns that PR's `checks` job. With many PRs open, extra dispatches can exhaust the organisation's Actions minutes and stop CI. Merge one conflicting PR a week after Monday's scheduled rebase; dispatch between merges only for an urgent green PR. A PR GitHub shows without a conflict can be merged at once, because CI on `main` checks it again.
+
+## 10. `corpus/lockfiles/`
+
+A corpus lockfile pins every byte of the legal corpus a release installs. `corpus-YYYY-MM-DD.yaml` names, for each source, the upstream snapshot's date, its base URL and optional `mirror_url`, the digest of its sidecar, and for case law the courts the corpus covers. The directory beside it holds one `<source>.sha256` sidecar, one `path  sha256  size` line per file, and the index documents the cut read to choose those files. The directory's `README.md` states the rules.
+
+A maintainer writes a lockfile with `sudo python3 -m gideon corpus cut` on the box, then commits the new files in a release. The command fetches through the worker anything the box does not already hold, hashes every file itself, writes the lockfile, and records the cut. A second run against the same upstream state writes nothing and names the lockfile that already pins it. Nobody edits a lockfile or a sidecar by hand. The one exception is `mirror_url`, set when the same pinned files are served from a mirror in the egress allowlist's `corpus` group; every digest and size must still match.
+
+The command's refusals and their fixes:
+
+- **Another cut is running**: wait for it to finish, then run the command again.
+- **A source's host is outside the corpus allowlist**: add the host to the `corpus` group in `config/egress.yaml` in a release, then run the command again.
+- **A file disagrees with its fetch record or with its pinned sidecar**: remove the named file and its `.fetch.json` record from the snapshot directory, then run the command again, which fetches it anew.
+- **The label already has a lockfile, or is already recorded**: a label is used once. Run the command on a later UTC date; never delete a lockfile or its record.
+- **A committed lockfile does not load**: restore the named files from the release checkout, then run the command again.
+
+Stopping the command with Ctrl-C is safe. Downloads already started continue in the worker, and the same command joins them.

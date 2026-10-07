@@ -27,7 +27,6 @@ ENTRIES = {
     "gideon/host/steps/site_dirs.py": "front-door ticket 29: provision step fixes",
     "gideon/host/tls.py": "front-door ticket 29: TLS reload fixes",
     "gideon/host/users.py": "front-door ticket 29: users reconcile fixes",
-    "gideon/host/worker.py": "front-door ticket 29: worker verify fixes",
     "gideon/worker/settings.py": "front-door ticket 29: worker settings fixes",
 }
 

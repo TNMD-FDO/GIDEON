@@ -10,7 +10,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final, cast
 
-from gideon.host import stack
+from gideon.host import report, stack
 from gideon.host.render.worker import (
     WORKER_DATABASE_NAME,
     WORKER_ROLE,
@@ -23,8 +23,6 @@ from gideon.host.stages import run_stage
 from gideon.host.sysio import Host, PathLike, RealHost
 
 _RENDERED_DIR: Final[str] = "/etc/gideon/rendered"
-_ROOT_FIX: Final[str] = "Run sudo python3 -m gideon worker verify."
-_APPLY_FIX: Final[str] = "Run sudo python3 -m gideon apply, then retry."
 # exempt: a free worker polls within five seconds; one minute allows queue work.
 POLL_TIMEOUT_SECONDS: Final[int] = 60
 
@@ -79,7 +77,8 @@ def _logs_fix(rendered_dir: PathLike) -> str:
     return f"Run {stack.logs_fix(rendered_dir, WORKER_SERVICE_NAME)}, then retry."
 
 
-def _psql_argv(rendered_dir: PathLike) -> list[str]:
+def psql_argv(rendered_dir: PathLike) -> list[str]:
+    """Build the worker role's stdin-fed psql command."""
     return stack.exec_argv(
         rendered_dir,
         "postgres",
@@ -98,7 +97,8 @@ def _psql_argv(rendered_dir: PathLike) -> list[str]:
     )
 
 
-def _bind(name: str, value: str) -> str:
+def bind(name: str, value: str) -> str:
+    """Bind one text value for psql's stdin script."""
     escaped = value.replace("\\", "\\\\").replace("'", "''")
     return f"\\set {name} '{escaped}'"
 
@@ -121,10 +121,10 @@ def defer(
     )
     sql = "\n".join(
         (
-            _bind("v_queue", queue),
-            _bind("v_task", task),
-            _bind("v_args", json.dumps(args, separators=(",", ":"))),
-            *((_bind("v_lock", lock),) if lock is not None else ()),
+            bind("v_queue", queue),
+            bind("v_task", task),
+            bind("v_args", json.dumps(args, separators=(",", ":"))),
+            *((bind("v_lock", lock),) if lock is not None else ()),
             "SELECT (procrastinate_defer_jobs_v1(ARRAY[",
             row,
             "]::procrastinate_job_to_defer_v1[]))[1];",
@@ -134,7 +134,7 @@ def defer(
     stage, result = _command_stage(
         host,
         "enqueue",
-        _psql_argv(rendered_dir),
+        psql_argv(rendered_dir),
         "could not enqueue a worker job",
         _logs_fix(rendered_dir),
         input=sql,
@@ -168,14 +168,14 @@ def read_job(host: Host, rendered_dir: PathLike, job_id: int) -> JobRow | Proble
     """Read the status and attempt count of one queued job."""
 
     sql = (
-        _bind("v_job_id", str(job_id))
+        bind("v_job_id", str(job_id))
         + "\nSELECT id, status, attempts FROM procrastinate_jobs "
         "WHERE id = :'v_job_id'::bigint;\n"
     )
     stage, result = _command_stage(
         host,
         "run",
-        _psql_argv(rendered_dir),
+        psql_argv(rendered_dir),
         "could not read the worker job row",
         _logs_fix(rendered_dir),
         input=sql,
@@ -197,15 +197,22 @@ def read_job(host: Host, rendered_dir: PathLike, job_id: int) -> JobRow | Proble
     return JobRow(job_id, status, int(attempts))
 
 
-def _preconditions(host: Host, rendered_dir: PathLike) -> StageResult:
+def worker_preconditions(
+    host: Host, rendered_dir: PathLike, *, command_path: str = "worker verify"
+) -> StageResult:
+    """Check root and a running, healthy worker for a host command."""
     if host.geteuid() != 0:
-        return StageResult("preconditions", False, "root privileges are required", _ROOT_FIX)
+        return StageResult(
+            "preconditions", False, "root privileges are required",
+            f"Run {report.command(command_path)}, then retry.",
+        )
     declared = stack.declared_services(host, rendered_dir)
     if isinstance(declared, Problem):
         return StageResult("preconditions", False, declared.problem, declared.fix)
     if WORKER_SERVICE_NAME not in declared:
         return StageResult(
-            "preconditions", False, "rendered stack has no worker", _APPLY_FIX
+            "preconditions", False, "rendered stack has no worker",
+            f"Run {report.command('apply')}, then retry.",
         )
     stage, result = _command_stage(
         host,
@@ -273,7 +280,7 @@ def run_worker_verify(
 
     del args
     io = host if host is not None else RealHost()
-    preconditions = _preconditions(io, rendered_dir)
+    preconditions = worker_preconditions(io, rendered_dir)
     if not preconditions.ok:
         print(stage_line(preconditions), file=sys.stderr)
         return 1

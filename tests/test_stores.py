@@ -29,7 +29,8 @@ MIGRATIONS = {
     f"{ROOT}/migrations/0005_eval_runs_decision.sql": (ROOT / "migrations/0005_eval_runs_decision.sql").read_text(),
     f"{ROOT}/migrations/0006_guardrail_trips_chat_id.sql": (ROOT / "migrations/0006_guardrail_trips_chat_id.sql").read_text(),
     f"{ROOT}/migrations/0007_procrastinate_queue.sql": (ROOT / "migrations/0007_procrastinate_queue.sql").read_text(),
-    f"{ROOT}/migrations/0008_second.sql": "CREATE TABLE second (id int);\n",
+    f"{ROOT}/migrations/0008_corpus_lockfiles.sql": (ROOT / "migrations/0008_corpus_lockfiles.sql").read_text(),
+    f"{ROOT}/migrations/0009_second.sql": "CREATE TABLE second (id int);\n",
     f"{ROOT}/migrations/README.md": "not a migration",
 }
 
@@ -149,7 +150,8 @@ class Converge(unittest.TestCase):
                 "0005_eval_runs_decision",
                 "0006_guardrail_trips_chat_id",
                 "0007_procrastinate_queue",
-                "0008_second",
+                "0008_corpus_lockfiles",
+                "0009_second",
             ),
         )
 
@@ -174,7 +176,7 @@ class Converge(unittest.TestCase):
         self.assertIn(psql("gideon", "gideon", *STATEMENT), argvs)
         self.assertIn(psql("gideon", "gideon", *QUERY), argvs)
         migration_runs = [call for call in host.calls if call[0] == psql("gideon", "gideon", *MIGRATION)]
-        self.assertEqual(len(migration_runs), 8)
+        self.assertEqual(len(migration_runs), 9)
         first_migration = MIGRATIONS[f"{ROOT}/migrations/0001_audit_log.sql"]
         self.assertTrue((migration_runs[0][1] or "").startswith(first_migration))
         self.assertTrue((migration_runs[0][1] or "").endswith("INSERT INTO schema_migrations (version) VALUES ('0001_audit_log');\n"))
@@ -262,8 +264,8 @@ class Converge(unittest.TestCase):
 
         report = converge(FakeHost(respond, {**SECRETS, **MIGRATIONS}), RENDERED, root=ROOT)
         self.assertFalse(report.ok)
-        self.assertIn("0008_second.sql", report.problem or "")
-        self.assertIn("0008_second.sql", report.fix)
+        self.assertIn("0009_second.sql", report.problem or "")
+        self.assertIn("0009_second.sql", report.fix)
         self.assertEqual(
             report.applied_migrations,
             (
@@ -274,6 +276,7 @@ class Converge(unittest.TestCase):
                 "0005_eval_runs_decision",
                 "0006_guardrail_trips_chat_id",
                 "0007_procrastinate_queue",
+                "0008_corpus_lockfiles",
             ),
         )
         self.assertEqual(
@@ -286,6 +289,7 @@ class Converge(unittest.TestCase):
                 "0005_eval_runs_decision",
                 "0006_guardrail_trips_chat_id",
                 "0007_procrastinate_queue",
+                "0008_corpus_lockfiles",
             ],
         )
 
@@ -303,7 +307,8 @@ class Converge(unittest.TestCase):
                 "0005_eval_runs_decision",
                 "0006_guardrail_trips_chat_id",
                 "0007_procrastinate_queue",
-                "0008_second",
+                "0008_corpus_lockfiles",
+                "0009_second",
             ),
         )
 

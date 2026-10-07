@@ -23,7 +23,6 @@ TOP_LEVEL = [
 # lands in, or the command's own words.
 STUBS = [
     (["host", "gpu"], "escape hatch"),
-    (["corpus", "cut"], "slice 3"),
     (["corpus", "install", "corpus-2026-08-31"], "slice 3"),
     (["index", "build"], "slice 3"),
     (["index", "promote", "1"], "slice 3"),

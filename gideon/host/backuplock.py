@@ -7,7 +7,7 @@ lock dying with its process. The paths stay under ``/run`` because it is a
 root-only tmpfs that needs no cleanup after a reboot, and outside the backup
 staging directory because restore's swap moves that directory as a whole.
 
-``claim`` and ``release_claim`` are the shape a command holding the engine
+``claim`` and ``release_claim`` are the shape a command holding a named
 lock uses: the claim carries its passing row's fragment or its failed
 ``preconditions`` row, and the release lets go only of a lock this claim took.
 """
@@ -41,6 +41,11 @@ ENGINE_LOCK = Lock(
     f"{LOCK_DIR}/engine.lock",
     "engine",
     "Wait for the running evaluation to finish, then retry.",
+)
+CORPUS_LOCK = Lock(
+    f"{LOCK_DIR}/corpus.lock",
+    "corpus cut",
+    "Wait for the running corpus cut to finish, then retry.",
 )
 
 

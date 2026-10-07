@@ -1,4 +1,4 @@
-"""Contracts for the lock shared by backup and restore."""
+"""Contracts for the named host command locks."""
 
 import json
 import os
@@ -236,6 +236,14 @@ class LockContracts(unittest.TestCase):
                 "Wait for the running evaluation to finish, then retry.",
             ),
         )
+        self.assertEqual(
+            backuplock.CORPUS_LOCK,
+            backuplock.Lock(
+                "/run/gideon/corpus.lock",
+                "corpus cut",
+                "Wait for the running corpus cut to finish, then retry.",
+            ),
+        )
         io = LockFake()
         io.locks[backuplock.ENGINE_LOCK.path] = backuplock.Record(
             "eval run smoke", os.getpid() + 1, NOW
@@ -256,6 +264,28 @@ class LockContracts(unittest.TestCase):
                 "— then retry.",
             ),
         )
+
+    def test_corpus_claim_names_holder_and_releases(self) -> None:
+        io = LockFake()
+        host = cast(LockingHost, io)
+        taken = backuplock.claim(
+            host, command="gideon corpus cut", now=NOW, lock=backuplock.CORPUS_LOCK,
+        )
+        self.assertTrue(taken.taken)
+        self.assertIn(backuplock.CORPUS_LOCK.path, io.locks)
+        backuplock.release_claim(host, taken, lock=backuplock.CORPUS_LOCK)
+        self.assertNotIn(backuplock.CORPUS_LOCK.path, io.locks)
+
+        holder = backuplock.Record("gideon corpus cut", os.getpid() + 1, NOW)
+        io.locks[backuplock.CORPUS_LOCK.path] = holder.to_json()
+        refused = backuplock.claim(
+            host, command="gideon corpus cut", now=NOW, lock=backuplock.CORPUS_LOCK,
+        )
+        self.assertFalse(refused.taken)
+        self.assertEqual(refused.holder, holder)
+        assert refused.refusal is not None
+        self.assertIn("corpus cut lock", refused.refusal.detail)
+        self.assertIn(holder.command, refused.refusal.detail)
 
 
 class RealLockContracts(unittest.TestCase):

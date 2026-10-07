@@ -11,6 +11,7 @@ content-addressed store is built on.
 import contextlib
 import fcntl
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -95,6 +96,12 @@ class BytesHost(Host, Protocol):
         """Flush a directory's entries to disk."""
 
 
+class WritableBytesHost(BytesHost, Protocol):
+    """The host operations for writing arbitrary bytes by rename."""
+
+    def write_bytes(self, path: PathLike, data: bytes, *, mode: int = 0o644) -> None: ...
+
+
 class RealHost:
     """The production host operations, advisory lock, and byte-object I/O."""
 
@@ -156,6 +163,29 @@ class RealHost:
 
     def read_bytes(self, path: PathLike) -> bytes:
         return Path(path).read_bytes()
+
+    def write_bytes(self, path: PathLike, data: bytes, *, mode: int = 0o644) -> None:
+        """Write bytes through a same-directory temporary and rename."""
+
+        target = Path(path)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{target.name}.", dir=target.parent
+        )
+        temporary = Path(temporary_name)
+        try:
+            os.fchmod(descriptor, mode)
+            with os.fdopen(descriptor, "wb") as handle:
+                descriptor = -1
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, target)
+        except BaseException:
+            if descriptor != -1:
+                os.close(descriptor)
+            with contextlib.suppress(FileNotFoundError):
+                temporary.unlink()
+            raise
 
     def write_text(
         self,
@@ -235,6 +265,9 @@ class RealHost:
 
     def unlink(self, path: PathLike, *, missing_ok: bool = False) -> None:
         Path(path).unlink(missing_ok=missing_ok)
+
+    def rmtree(self, path: PathLike) -> None:
+        shutil.rmtree(path)
 
     def stat(self, path: PathLike) -> os.stat_result:
         return os.stat(path)

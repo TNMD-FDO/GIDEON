@@ -72,7 +72,6 @@ def start_screen() -> str:
 
 _LANDING: Final = {
     "host gpu": "the escape hatch, pulled only on eval evidence of reranker latency during bulk embedding",
-    "corpus cut": "lands in slice 3 (v0.4.0)",
     "corpus install": "lands in slice 3 (v0.4.0)",
     "index build": "lands in slice 3 (v0.4.0)",
     "index promote": "lands in slice 3 (v0.4.0)",
@@ -294,9 +293,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     corpus = commands.add_parser("corpus", help="corpus lockfile cuts and installs")
     corpus_sub = corpus.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)
-    cut = _stub_parser(corpus_sub, "cut", "corpus cut", "cut a corpus lockfile")
-    cut.add_argument("--base", metavar="<lockfile>", help="lockfile to derive from")
-    cut.add_argument("--add-courts", metavar="<ids>", help="court ids to add to the base")
+    cut = corpus_sub.add_parser("cut", help="fetch and verify a corpus snapshot, then write its lockfile")
+    cut.add_argument("--base", metavar="<lockfile>", help="derived cuts arrive later")
+    cut.add_argument("--add-courts", metavar="<ids>", help="derived cuts arrive later")
+    cut.set_defaults(handler=host_cli.run_corpus_cut, command_path="corpus cut")
     corpus_install = _stub_parser(
         corpus_sub, "install", "corpus install", "install a corpus lockfile"
     )
