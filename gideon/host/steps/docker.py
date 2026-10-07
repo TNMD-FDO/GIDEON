@@ -3,16 +3,19 @@
 The step installs Docker by the recipe's two apt files when it is absent,
 accepts it when present and sufficient whatever file installed it, and refuses
 a second apt source for its repository before writing anything, since two
-entries under different keys break apt for the whole box.
+entries under different keys break apt for the whole box. It owns the keys
+`dockerdaemon.OWNED_KEYS` names, sets each only at its default, and keeps every
+other daemon key.
 """
 
 import json
 import re
+import stat
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from gideon.host import aptsources
+from gideon.host import aptsources, dockerdaemon
 from gideon.host.images import is_loopback_registry, is_plain_registry, parse_registry
 from gideon.host.steps import (
     PREREQUISITE_FLOOR_FIX,
@@ -76,6 +79,9 @@ _CONTAINERD_STORE_PATHS = (
 )
 _CONTAINERD_STORE_FIX = "Follow the containerd store move procedure in docs/runbooks/install-upgrade.md §7, then re-run provision."
 _CONTAINERD_LIST_FIX = "Repair the containerd store directory named above, then re-run provision."
+_DAEMON_OBJECT_FIX = f"Repair {_DAEMON} by hand as one JSON object, then re-run provision."
+_DAEMON_CONTAINER_FIX = f"Repair the named key in {_DAEMON} by hand, then re-run provision."
+_DAEMON_SHORT_FIX = f"Agree the value of the named key with the box's other operators, set it in {_DAEMON} and restart Docker in an announced maintenance window, since the restart reaches every container, then re-run provision."
 # Read the binaries' reports, not dpkg's epoch-prefixed versions (such as
 # 5:29...). docker --version comes from docker-ce-cli, shipped at the engine version.
 _VERSION = re.compile(r"(?:^|\s)v?(\d+)(?:\.(\d+))?")
@@ -228,17 +234,9 @@ def _source_refusal(
     return None
 
 
-def _daemon(context: ProvisionContext) -> dict[str, object]:
-    desired: dict[str, object] = {
-        "data-root": "/var/lib/docker",
-        "features": {"cdi": True},
-        "log-driver": "journald",
-    }
-    if context.site is not None and context.site.egress_proxy:
-        desired["proxies"] = {
-            "http-proxy": context.site.egress_proxy,
-            "https-proxy": context.site.egress_proxy,
-        }
+def _daemon_needs(context: ProvisionContext) -> tuple[dockerdaemon.Need, ...]:
+    egress_proxy = context.site.egress_proxy if context.site is not None else None
+    insecure_registry = None
     if context.site is not None:
         target = parse_registry(context.site.registry)
         if (
@@ -246,12 +244,55 @@ def _daemon(context: ProvisionContext) -> dict[str, object]:
             and is_plain_registry(target.authority)
             and not is_loopback_registry(target.authority)
         ):
-            desired["insecure-registries"] = [target.authority]
-    return desired
+            insecure_registry = target.authority
+    return dockerdaemon.needs(egress_proxy, insecure_registry)
 
 
-def _daemon_text(value: dict[str, object]) -> str:
-    return json.dumps(value, indent=2, sort_keys=True) + "\n"
+def _daemon_read(
+    context: ProvisionContext, wanted: tuple[dockerdaemon.Need, ...]
+) -> CheckResult | tuple[dict[str, object], dockerdaemon.Reading] | None:
+    if not context.host.exists(_DAEMON):
+        return None
+    try:
+        current = json.loads(context.host.read_text(_DAEMON))
+    except (ValueError, OSError, UnicodeError) as exc:
+        return CheckResult(
+            Disposition.UNFIXABLE,
+            f"{_DAEMON} is not a JSON object: {exc}",
+            _DAEMON_OBJECT_FIX,
+        )
+    if not isinstance(current, dict):
+        return CheckResult(
+            Disposition.UNFIXABLE,
+            f"{_DAEMON} is not a JSON object: {dockerdaemon.render(current)}",
+            _DAEMON_OBJECT_FIX,
+        )
+    return current, dockerdaemon.read(current, wanted)
+
+
+def _daemon_mode(context: ProvisionContext) -> int:
+    # Another key may hold a credential, so a rewrite keeps the file's own
+    # permissions rather than widening them to the default.
+    try:
+        return stat.S_IMODE(context.host.stat(_DAEMON).st_mode)
+    except FileNotFoundError:
+        return 0o644
+
+
+def _daemon_refusal(reading: dockerdaemon.Reading) -> CheckResult | None:
+    if reading.malformed:
+        detail = "; ".join(
+            f"{name} is {found}, not {'a list' if name == 'insecure-registries' else 'an object'}"
+            for name, found in reading.malformed
+        )
+        return CheckResult(Disposition.UNFIXABLE, detail, _DAEMON_CONTAINER_FIX)
+    if reading.short:
+        detail = "; ".join(
+            f"{name} is {found}, GIDEON needs {needed}"
+            for name, found, needed in reading.short
+        )
+        return CheckResult(Disposition.UNFIXABLE, detail, _DAEMON_SHORT_FIX)
+    return None
 
 
 def _store_populated(context: ProvisionContext, root: Path) -> bool:
@@ -304,18 +345,23 @@ class DockerEngineStep(Step):
         )
         if refusal is not None:
             return CheckResult(Disposition.UNFIXABLE, *refusal)
+        wanted = _daemon_needs(context)
+        daemon = _daemon_read(context, wanted)
+        if isinstance(daemon, CheckResult):
+            return daemon
+        if daemon is not None:
+            refusal_result = _daemon_refusal(daemon[1])
+            if refusal_result is not None:
+                return refusal_result
         if version.result is not None:
             return version.result
 
-        desired = _daemon(context)
-        if not context.host.exists(_DAEMON):
-            return CheckResult(Disposition.DRIFT, f"{_DAEMON} is missing", f"Write the provision-owned {_DAEMON}, then re-run provision.")
-        try:
-            current = json.loads(context.host.read_text(_DAEMON))
-        except (OSError, UnicodeError, ValueError) as exc:
-            return CheckResult(Disposition.DRIFT, f"{_DAEMON} is not valid JSON: {exc}", f"Rewrite the provision-owned {_DAEMON}, then re-run provision.")
-        if current != desired:
-            return CheckResult(Disposition.DRIFT, f"{_DAEMON} differs from the desired Docker policy", f"Rewrite the provision-owned {_DAEMON}, then re-run provision.")
+        if daemon is None:
+            return CheckResult(Disposition.DRIFT, f"{_DAEMON} is missing", "Write GIDEON's daemon.json keys, then re-run provision.")
+        reading = daemon[1]
+        if reading.to_set:
+            keys = ", ".join(reading.to_set)
+            return CheckResult(Disposition.DRIFT, f"{_DAEMON} lacks GIDEON's keys: {keys}", "Set GIDEON's daemon.json keys, then re-run provision.")
         try:
             default_populated = _store_populated(context, _CONTAINERD_DEFAULT_ROOT)
             desired_populated = _store_populated(context, _CONTAINERD_ROOT)
@@ -363,6 +409,9 @@ class DockerEngineStep(Step):
             detail += f"; Docker's apt source {_SOURCE} is not the recipe's entry"
         elif source.kind is _SourceKind.FOREIGN:
             detail += f"; Docker's apt source is {source.files[0]}, not the recipe's {_SOURCE}"
+        if reading.foreign:
+            keys = ", ".join(reading.foreign)
+            detail += f"; daemon.json also holds keys GIDEON does not own: {keys}"
         return CheckResult(Disposition.CONVERGED, detail, "")
 
     def apply(self, context: ProvisionContext) -> None:
@@ -397,6 +446,14 @@ class DockerEngineStep(Step):
         )
         if refusal is not None:
             raise StepFailure(*refusal)
+        wanted = _daemon_needs(context)
+        daemon = _daemon_read(context, wanted)
+        if isinstance(daemon, CheckResult):
+            raise StepFailure(daemon.detail, daemon.fix)
+        if daemon is not None:
+            refusal_result = _daemon_refusal(daemon[1])
+            if refusal_result is not None:
+                raise StepFailure(refusal_result.detail, refusal_result.fix)
         if version.docker_absent:
             context.host.mkdir(_KEYRING.parent, mode=0o755, parents=True, exist_ok=True)
             # Keyring strictly before the source entry: a failed fetch must never
@@ -408,17 +465,11 @@ class DockerEngineStep(Step):
                 context.host.write_text(_SOURCE, _REPO)
         apt_install(context, _PACKAGES)
 
-        desired = _daemon(context)
-        daemon_changed = True
-        if context.host.exists(_DAEMON):
-            try:
-                daemon_changed = (
-                    json.loads(context.host.read_text(_DAEMON)) != desired
-                )
-            except (OSError, UnicodeError, ValueError):
-                daemon_changed = True
-        context.host.mkdir(_DAEMON.parent, mode=0o755, parents=True, exist_ok=True)
-        context.host.write_text(_DAEMON, _daemon_text(desired))
+        current = daemon[0] if daemon is not None else {}
+        merged, daemon_changed = dockerdaemon.merge(current, wanted)
+        if daemon_changed:
+            context.host.mkdir(_DAEMON.parent, mode=0o755, parents=True, exist_ok=True)
+            context.host.write_text(_DAEMON, dockerdaemon.text(merged), mode=_daemon_mode(context))
 
         containerd_changed = _containerd_changed(context)
         context.host.mkdir(_CONTAINERD_CONFIG.parent, mode=0o755, parents=True, exist_ok=True)
@@ -440,6 +491,7 @@ class DockerEngineStep(Step):
         context.host.run(["systemctl", "enable", "--now", "docker"], check=True)
         if daemon_changed or containerd_changed:
             # enable --now does not re-read daemon.json on an already-running
-            # engine; a changed policy takes effect only across a restart.  A
-            # containerd root change likewise needs Docker to reconnect.
+            # engine; only an owned key's change earns that restart. It reaches
+            # every container on the box. A containerd root change likewise
+            # needs Docker to reconnect.
             context.host.run(["systemctl", "restart", "docker"], check=True)

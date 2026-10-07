@@ -19,6 +19,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 
+from gideon.host import dockerdaemon
 from gideon.host.lock import load_host_lock
 from gideon.host.provision import run_provision
 from gideon.host.render import worker
@@ -59,6 +60,7 @@ from gideon.host.steps.docker import (
     _CONTAINERD_ROOT,
     _CONTAINERD_STORE_PATHS,
     _CONTAINERD_TEXT,
+    _DAEMON,
     _KEY_URL,
     _KEYRING,
     _PACKAGES,
@@ -1667,7 +1669,10 @@ class DockerStepTests(unittest.TestCase):
                     without = FakeHost(files=docker_files(base_daemon), commands=docker_commands())
                     result = DockerEngineStep().check(context(without, site=site))
                     self.assertEqual(result.disposition, Disposition.DRIFT)
-                    self.assertIn("daemon.json differs", result.detail)
+                    self.assertEqual(
+                        result.detail,
+                        f"{_DAEMON} lacks GIDEON's keys: insecure-registries",
+                    )
 
     def test_present_packages_and_daemon_drift_run_no_apt_command(self) -> None:
         packages = (
@@ -1695,7 +1700,10 @@ class DockerStepTests(unittest.TestCase):
 
         checked = step.check(context(host))
         self.assertEqual(checked.disposition, Disposition.DRIFT)
-        self.assertIn("daemon.json differs", checked.detail)
+        self.assertEqual(
+            checked.detail,
+            f"{_DAEMON} lacks GIDEON's keys: log-driver",
+        )
         step.apply(context(host))
 
         runs = [argv for argv, _, _ in host.runs]
@@ -2003,7 +2011,10 @@ class DockerStepTests(unittest.TestCase):
         proxied = replace(site, egress_proxy="http://proxy.example:3128")
         result = DockerEngineStep().check(context(host, site=proxied))
         self.assertEqual(result.disposition, Disposition.DRIFT)
-        self.assertIn("daemon.json", result.detail)
+        self.assertEqual(
+            result.detail,
+            f"{_DAEMON} lacks GIDEON's keys: proxies.http-proxy, proxies.https-proxy",
+        )
 
     def test_journald_change_restarts_journald(self) -> None:
         daemon = {
@@ -2320,6 +2331,323 @@ class DockerSourceTests(unittest.TestCase):
                     for argv, _, _ in host.runs
                 )
                 self.assertEqual(fetched, fetches_key)
+
+
+class DockerOwnedKeyTests(unittest.TestCase):
+    """The shared daemon file through the provision step's Host seam: GIDEON's keys alone."""
+
+    def setUp(self) -> None:
+        self.step = DockerEngineStep()
+        self.daemon: dict[str, object] = {
+            "data-root": "/var/lib/docker",
+            "features": {"cdi": True},
+            "log-driver": "journald",
+        }
+        self.commands = docker_commands(
+            docker_version=f"{HOST_LOCK.minimums.docker}.0.0",
+            compose_version=f"{HOST_LOCK.minimums.compose}.0.0",
+        )
+        for package in (
+            "docker-ce", "docker-ce-cli", "containerd.io", "docker-buildx-plugin",
+            "docker-compose-plugin",
+        ):
+            probe, result = package_result(package, "99.0-fictitious")
+            self.commands[probe] = result
+        site = context(FakeHost()).site
+        if site is None:
+            self.fail("the example site did not load")
+        self.site = site
+
+    def _host(self, daemon: Mapping[str, object]) -> FakeHost:
+        return FakeHost(files=docker_recipe_files(daemon), commands=self.commands)
+
+    def _daemon_writes(self, host: FakeHost) -> list[str]:
+        return [
+            arguments[1]
+            for method, arguments in host.calls
+            if method == "write_text"
+            and isinstance(arguments, tuple)
+            and arguments[0] == os.fspath(_DAEMON)
+        ]
+
+    def _docker_restarts(self, host: FakeHost) -> int:
+        return host.calls.count(("run", (("systemctl", "restart", "docker"), True)))
+
+    def test_foreign_runtime_is_reported_without_daemon_write_or_restart(self) -> None:
+        """A foreign key on a converged file is kept, reported, and costs no restart."""
+
+        daemon = {**self.daemon, "runtimes": {"custom": {"path": "/usr/bin/custom"}}}
+        host = self._host(daemon)
+        checked = self.step.check(context(host))
+        self.assertEqual(checked.disposition, Disposition.CONVERGED)
+        self.assertEqual(
+            checked.detail,
+            "Docker, containerd, and their host policies are current; "
+            "daemon.json also holds keys GIDEON does not own: runtimes",
+        )
+
+        self.step.apply(context(host))
+        self.assertEqual(self._daemon_writes(host), [])
+        self.assertEqual(self._docker_restarts(host), 0)
+        self.assertEqual(json.loads(host.files[os.fspath(_DAEMON)]), daemon)
+
+    def test_absent_and_default_log_driver_set_once_and_keep_runtime(self) -> None:
+        """An absent or package-default key is set, Docker restarts once, and the recheck converges."""
+
+        for value in (None, "json-file"):
+            with self.subTest(value=value):
+                daemon = {**self.daemon, "runtimes": {"custom": {}}}
+                if value is None:
+                    del daemon["log-driver"]
+                else:
+                    daemon["log-driver"] = value
+                host = self._host(daemon)
+                checked = self.step.check(context(host))
+                self.assertEqual(checked.disposition, Disposition.DRIFT)
+                self.assertEqual(checked.detail, f"{_DAEMON} lacks GIDEON's keys: log-driver")
+
+                self.step.apply(context(host))
+                self.assertEqual(len(self._daemon_writes(host)), 1)
+                self.assertEqual(self._docker_restarts(host), 1)
+                written = json.loads(host.files[os.fspath(_DAEMON)])
+                self.assertEqual(written["runtimes"], daemon["runtimes"])
+                self.assertEqual(written["log-driver"], self.daemon["log-driver"])
+                self.assertEqual(written["data-root"], self.daemon["data-root"])
+                self.assertEqual(written["features"], self.daemon["features"])
+                self.assertEqual(
+                    self.step.check(context(host)).disposition,
+                    Disposition.CONVERGED,
+                )
+
+    def test_moved_data_root_refuses_before_any_mutation(self) -> None:
+        """A moved owned key short of its need refuses before the host changes."""
+
+        host = self._host({**self.daemon, "data-root": "/srv/docker"})
+        checked = self.step.check(context(host))
+        self.assertEqual(checked.disposition, Disposition.UNFIXABLE)
+        self.assertEqual(
+            checked.detail,
+            'data-root is "/srv/docker", GIDEON needs "/var/lib/docker"',
+        )
+        self.assertIn(os.fspath(_DAEMON), checked.fix)
+        self.assertIn("restart Docker", checked.fix)
+
+        before_calls = len(host.calls)
+        before_runs = len(host.runs)
+        with self.assertRaises(StepFailure) as raised:
+            self.step.apply(context(host))
+        self.assertEqual(raised.exception.detail, checked.detail)
+        self.assertEqual(raised.exception.fix, checked.fix)
+        self.assertEqual(
+            [call for call in host.calls[before_calls:] if call[0] in {"write_text", "mkdir"}],
+            [],
+        )
+        self.assertEqual(
+            [argv for argv, _, _ in host.runs[before_runs:]],
+            [("docker", "--version"), ("docker", "compose", "version")],
+        )
+
+    def test_registry_list_meets_by_membership_and_refuses_when_short(self) -> None:
+        """The registry list is met by membership and short without GIDEON's authority."""
+
+        authority = "192.168.122.1:5000"
+        site = replace(self.site, registry=authority)
+        with_authority = {**self.daemon, "insecure-registries": ["other.example:5000", authority]}
+        met = self.step.check(context(self._host(with_authority), site=site))
+        self.assertEqual(met.disposition, Disposition.CONVERGED)
+        short = self.step.check(context(
+            self._host({**self.daemon, "insecure-registries": ["other.example:5000"]}),
+            site=site,
+        ))
+        self.assertEqual(short.disposition, Disposition.UNFIXABLE)
+        self.assertIn("insecure-registries is", short.detail)
+        self.assertIn('"other.example:5000"', short.detail)
+        self.assertIn(f'GIDEON needs "{authority}"', short.detail)
+
+    def test_feature_sibling_survives_a_write_and_false_cdi_refuses(self) -> None:
+        """features.cdi is owned while its sibling is kept through a write."""
+
+        features = {"cdi": True, "containerd-snapshotter": True}
+        daemon = {**self.daemon, "features": features}
+        met = self.step.check(context(self._host(daemon)))
+        self.assertEqual(met.disposition, Disposition.CONVERGED)
+        self.assertIn("features.containerd-snapshotter", met.detail)
+
+        drifting = dict(daemon)
+        del drifting["log-driver"]
+        host = self._host(drifting)
+        self.step.apply(context(host))
+        written = json.loads(host.files[os.fspath(_DAEMON)])
+        self.assertEqual(written["features"], features)
+        self.assertEqual(len(self._daemon_writes(host)), 1)
+
+        short = self.step.check(context(self._host({**self.daemon, "features": {"cdi": False}})))
+        self.assertEqual(short.disposition, Disposition.UNFIXABLE)
+        self.assertEqual(short.detail, "features.cdi is false, GIDEON needs true")
+
+    def test_proxy_sibling_is_foreign_and_userinfo_is_redacted(self) -> None:
+        """A proxy sibling is kept and a refusal never prints URL userinfo."""
+
+        proxy = "http://proxy.example:3128"
+        site = replace(self.site, egress_proxy=proxy)
+        proxies = {"http-proxy": proxy, "https-proxy": proxy, "no-proxy": "localhost"}
+        met = self.step.check(context(self._host({**self.daemon, "proxies": proxies}), site=site))
+        self.assertEqual(met.disposition, Disposition.CONVERGED)
+        self.assertIn("proxies.no-proxy", met.detail)
+
+        moved = {**proxies, "http-proxy": "http://user:pass@other.example:3128"}
+        short = self.step.check(context(self._host({**self.daemon, "proxies": moved}), site=site))
+        self.assertEqual(short.disposition, Disposition.UNFIXABLE)
+        self.assertIn("proxies.http-proxy is", short.detail)
+        self.assertIn("…@other.example:3128", short.detail)
+        self.assertIn(f'GIDEON needs "{proxy}"', short.detail)
+        self.assertNotIn("user:pass", short.detail)
+
+    def test_lapsed_proxy_is_reported_and_unwritten(self) -> None:
+        """A conditional key the site no longer sets is kept and reported, never removed."""
+
+        daemon = {**self.daemon, "proxies": {
+            "http-proxy": "http://proxy.example:3128",
+            "https-proxy": "http://proxy.example:3128",
+        }}
+        host = self._host(daemon)
+        checked = self.step.check(context(host))
+        self.assertEqual(checked.disposition, Disposition.CONVERGED)
+        self.assertTrue(checked.detail.endswith(
+            "keys GIDEON does not own: proxies.http-proxy, proxies.https-proxy"
+        ))
+        self.step.apply(context(host))
+        self.assertEqual(self._daemon_writes(host), [])
+        self.assertEqual(self._docker_restarts(host), 0)
+        self.assertEqual(json.loads(host.files[os.fspath(_DAEMON)]), daemon)
+
+    def test_invalid_json_array_and_malformed_feature_refuse_before_writes(self) -> None:
+        """Broken daemon JSON and a malformed owned container refuse before any write."""
+
+        cases = (
+            ("{invalid", "not a JSON object", "one JSON object"),
+            ("[]", "not a JSON object", "one JSON object"),
+            (json.dumps({**self.daemon, "features": "on"}), 'features is "on", not an object', "named key"),
+        )
+        for daemon_text, detail, fix in cases:
+            with self.subTest(daemon_text=daemon_text):
+                files = docker_files(self.daemon)
+                files[os.fspath(_DAEMON)] = daemon_text
+                host = FakeHost(files=files, commands=self.commands)
+                checked = self.step.check(context(host))
+                self.assertEqual(checked.disposition, Disposition.UNFIXABLE)
+                self.assertIn(detail, checked.detail)
+                self.assertIn(os.fspath(_DAEMON), checked.fix)
+                self.assertIn(fix, checked.fix)
+
+                before_calls = len(host.calls)
+                with self.assertRaises(StepFailure) as raised:
+                    self.step.apply(context(host))
+                self.assertEqual(raised.exception.detail, checked.detail)
+                self.assertEqual(raised.exception.fix, checked.fix)
+                self.assertEqual(
+                    [call for call in host.calls[before_calls:] if call[0] in {"write_text", "mkdir"}],
+                    [],
+                )
+
+    def test_rewrite_keeps_a_restrictive_mode_and_refusals_hide_nested_userinfo(self) -> None:
+        """A rewrite never widens the file's mode, and no refusal prints a nested credential."""
+
+        daemon = {key: value for key, value in self.daemon.items() if key != "log-driver"}
+        daemon["proxies"] = {"no-proxy": "localhost", "http-proxy": "http://user:pass@other.example:3128"}
+        host = FakeHost(
+            files=docker_files(daemon),
+            commands=self.commands,
+            stats={os.fspath(_DAEMON): os.stat_result((stat.S_IFREG | 0o600, 0, 0, 1, 0, 0, 0, 0, 0, 0))},
+        )
+        self.step.apply(context(host))
+        self.assertEqual(
+            [mode for path, mode in host.write_modes if path == os.fspath(_DAEMON)],
+            [0o600],
+        )
+
+        proxy = "http://proxy.example:3128"
+        site = replace(self.site, egress_proxy=proxy)
+        cases = (
+            {**self.daemon, "proxies": ["http://user:pass@other.example:3128"]},
+            [{"proxies": {"http-proxy": "http://user:pass@other.example:3128"}}],
+        )
+        for value in cases:
+            with self.subTest(value=value):
+                files = docker_files(self.daemon)
+                files[os.fspath(_DAEMON)] = json.dumps(value)
+                checked = self.step.check(context(FakeHost(files=files, commands=self.commands), site=site))
+                self.assertEqual(checked.disposition, Disposition.UNFIXABLE)
+                self.assertIn("…@other.example:3128", checked.detail)
+                self.assertNotIn("user:pass", checked.detail)
+
+    def test_reordered_json_is_converged_and_unwritten(self) -> None:
+        """Daemon content is judged, never key order or indentation."""
+
+        reordered: dict[str, object] = {
+            "log-driver": "journald",
+            "features": {"cdi": True},
+            "data-root": "/var/lib/docker",
+        }
+        host = self._host(reordered)
+        original = host.files[os.fspath(_DAEMON)]
+        self.assertNotEqual(original, json.dumps(reordered, indent=2, sort_keys=True) + "\n")
+        self.assertEqual(self.step.check(context(host)).disposition, Disposition.CONVERGED)
+        self.step.apply(context(host))
+        self.assertEqual(self._daemon_writes(host), [])
+        self.assertEqual(host.files[os.fspath(_DAEMON)], original)
+
+    def test_empty_object_writes_fresh_box_bytes(self) -> None:
+        """An empty daemon object takes every unconditional key in the fresh box's bytes."""
+
+        host = self._host({})
+        checked = self.step.check(context(host))
+        self.assertEqual(checked.disposition, Disposition.DRIFT)
+        self.assertEqual(
+            checked.detail,
+            f"{_DAEMON} lacks GIDEON's keys: data-root, log-driver, features.cdi",
+        )
+        self.step.apply(context(host))
+        self.assertEqual(len(self._daemon_writes(host)), 1)
+        self.assertEqual(self._docker_restarts(host), 1)
+        self.assertEqual(
+            host.files[os.fspath(_DAEMON)],
+            json.dumps(self.daemon, indent=2, sort_keys=True) + "\n",
+        )
+
+
+class DockerDaemonLeafTests(unittest.TestCase):
+    """The leaf's table of owned keys is held to the model."""
+
+    @staticmethod
+    def _header_index(lines: Sequence[str]) -> int:
+        return next(
+            index for index, line in enumerate(lines)
+            if line.startswith("|") and line.split("|")[1].strip() == "GIDEON's `daemon.json` key"
+        )
+
+    def _table_names(self, text: str) -> set[str]:
+        lines = text.splitlines()
+        names: set[str] = set()
+        for line in lines[self._header_index(lines) + 2:]:
+            if not line.startswith("|"):
+                break
+            names.update(re.findall(r"`([^`]+)`", line.split("|")[1]))
+        return names
+
+    def test_leaf_table_names_exactly_the_owned_keys(self) -> None:
+        """The leaf table and OWNED_KEYS move together, and the parse bites."""
+
+        if absent_from_export("docs/archi/host.md", ROOT):
+            self.skipTest("the architecture leaf is absent from this exported tree")
+        leaf = (ROOT / "docs/archi/host.md").read_text()
+        names = {key.name for key in dockerdaemon.OWNED_KEYS}
+        self.assertEqual(self._table_names(leaf), names)
+
+        lines = leaf.splitlines()
+        first_row = self._header_index(lines) + 2
+        without_one_row = "\n".join(lines[:first_row] + lines[first_row + 1:])
+        self.assertNotEqual(self._table_names(without_one_row), names)
 
 
 def directory_stat(mode: int, uid: int = 0, gid: int = 0) -> os.stat_result:
