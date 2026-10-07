@@ -11,7 +11,7 @@ from typing import Final
 from gideon.host import audit, nogpu, owui, report, stack
 from gideon.host.report import Problem, one_line, refusal
 from gideon.host.sysio import Host, PathLike, RealHost
-from gideon.improvement import owuifeedback, pairs, ratings, triggers, trips
+from gideon.improvement import owuifeedback, pairs, ratings, triggers, trips, upstream
 from gideon.improvement.sections import (
     Context,
     Row,
@@ -27,6 +27,7 @@ SECTIONS: Final[tuple[Section, ...]] = (
     TRIGGERS_SECTION,
     ratings.FEEDBACK_SECTION,
     trips.TRIPS_SECTION,
+    upstream.UPSTREAM_SECTION,
     pairs.CHALLENGER_SECTION,
 )
 ROW_STATES: Final[tuple[RowState, ...]] = (

@@ -91,4 +91,4 @@ class Caselaw(unittest.TestCase):
                 assert isinstance(result, Problem)
                 self.assertIn("caselaw listing.xml", result.problem)
                 self.assertIn(detail, result.problem)
-                self.assertIn("corpus cut", result.fix)
+                self.assertEqual(result.fix, "Check the upstream listing, then retry.")

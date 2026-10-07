@@ -22,3 +22,11 @@ policies:
         active_time_intervals:
           - monday-morning
         continue: false
+      - receiver: upstream
+        object_matchers:
+          - [upstream, "=", "true"]
+        group_by:
+          - alertname
+          - source
+        repeat_interval: $upstream_repeat
+        continue: false

@@ -112,6 +112,9 @@ SYSTEMCTL_ACTIVE_NIGHTLY = ("systemctl", "is-active", "gideon-eval-nightly.timer
 SYSTEMCTL_LINK_PROPOSALS = ("systemctl", "link", f"{RENDERED}/systemd/gideon-proposals-tally.service")
 SYSTEMCTL_ENABLE_PROPOSALS = ("systemctl", "enable", "--now", f"{RENDERED}/systemd/gideon-proposals-tally.timer")
 SYSTEMCTL_ACTIVE_PROPOSALS = ("systemctl", "is-active", "gideon-proposals-tally.timer")
+SYSTEMCTL_LINK_UPSTREAM_WATCH = ("systemctl", "link", f"{RENDERED}/systemd/gideon-upstream-watch.service")
+SYSTEMCTL_ENABLE_UPSTREAM_WATCH = ("systemctl", "enable", "--now", f"{RENDERED}/systemd/gideon-upstream-watch.timer")
+SYSTEMCTL_ACTIVE_UPSTREAM_WATCH = ("systemctl", "is-active", "gideon-upstream-watch.timer")
 CERT = CERT_PATH
 HANDSHAKE = ("openssl", "s_client", "-connect", "127.0.0.1:443", "-servername", "gideon.example.org", "-verify_hostname", "gideon.example.org", "-CAfile", CA_PATH, "-verify_return_error")
 SERVED_FP = ("openssl", "x509", "-noout", "-fingerprint", "-sha256")
@@ -513,6 +516,9 @@ def healthy_commands(
         SYSTEMCTL_LINK_PROPOSALS: done(SYSTEMCTL_LINK_PROPOSALS),
         SYSTEMCTL_ENABLE_PROPOSALS: done(SYSTEMCTL_ENABLE_PROPOSALS),
         SYSTEMCTL_ACTIVE_PROPOSALS: done(SYSTEMCTL_ACTIVE_PROPOSALS, stdout="active\n"),
+        SYSTEMCTL_LINK_UPSTREAM_WATCH: done(SYSTEMCTL_LINK_UPSTREAM_WATCH),
+        SYSTEMCTL_ENABLE_UPSTREAM_WATCH: done(SYSTEMCTL_ENABLE_UPSTREAM_WATCH),
+        SYSTEMCTL_ACTIVE_UPSTREAM_WATCH: done(SYSTEMCTL_ACTIVE_UPSTREAM_WATCH, stdout="active\n"),
         PS: done(PS, stdout=running_rows(render_inputs=render_inputs)),
         **healthy_ingress(),
     }
@@ -712,6 +718,9 @@ class HappyPath(unittest.TestCase):
         self.assertIn(SYSTEMCTL_LINK_PROPOSALS, argv_calls(host))
         self.assertIn(SYSTEMCTL_ENABLE_PROPOSALS, argv_calls(host))
         self.assertIn(SYSTEMCTL_ACTIVE_PROPOSALS, argv_calls(host))
+        self.assertIn(SYSTEMCTL_LINK_UPSTREAM_WATCH, argv_calls(host))
+        self.assertIn(SYSTEMCTL_ENABLE_UPSTREAM_WATCH, argv_calls(host))
+        self.assertIn(SYSTEMCTL_ACTIVE_UPSTREAM_WATCH, argv_calls(host))
         started = ", ".join(
             service for service in service_names(_EXAMPLE_INPUTS)
             if service not in store_services()

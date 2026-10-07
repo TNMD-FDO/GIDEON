@@ -21,7 +21,7 @@ from gideon.host.nogpu import BUILD_BOX_PATH, NO_GPU_PATH
 from gideon.host.render.owui import FEEDBACK_LIST_ROUTE
 from gideon.host.report import Problem
 from gideon.host.sysio import Command, PathLike
-from gideon.improvement import proposals, tally, triggers, watch
+from gideon.improvement import proposals, tally, triggers, upstream, watch
 from gideon.improvement.feedback import FeedbackReading, FeedbackRecord
 from gideon.improvement.sections import (
     Context,
@@ -75,6 +75,7 @@ class ReadOnlyHost:
         directories: Sequence[str] = (),
         run_rc: int = 0,
         run_stdout: str = "",
+        run_stdout_by_sql: Mapping[str, str] | None = None,
         run_stderr: str = "",
         run_error: BaseException | None = None,
     ) -> None:
@@ -84,6 +85,7 @@ class ReadOnlyHost:
             self.directories.update(parent.as_posix() for parent in Path(path).parents)
         self.run_rc = run_rc
         self.run_stdout = run_stdout
+        self.run_stdout_by_sql = dict(run_stdout_by_sql or {})
         self.run_stderr = run_stderr
         self.run_error = run_error
         self.calls: list[tuple[tuple[str, ...], str | None]] = []
@@ -107,9 +109,11 @@ class ReadOnlyHost:
             raise AssertionError(f"unexpected command: {command}")
         if self.run_error is not None:
             raise self.run_error
-        return subprocess.CompletedProcess(
-            list(command), self.run_rc, self.run_stdout, self.run_stderr
+        stdout = next(
+            (value for marker, value in self.run_stdout_by_sql.items() if marker in (input or "")),
+            self.run_stdout,
         )
+        return subprocess.CompletedProcess(list(command), self.run_rc, stdout, self.run_stderr)
 
     def read_text(self, path: PathLike, *, encoding: str = "utf-8") -> str:
         del encoding
@@ -245,6 +249,7 @@ def _base_host(
     directories: Sequence[str] = (),
     run_rc: int = 0,
     run_stdout: str = "",
+    run_stdout_by_sql: Mapping[str, str] | None = None,
     run_stderr: str = "",
     run_error: BaseException | None = None,
 ) -> ReadOnlyHost:
@@ -261,6 +266,7 @@ def _base_host(
         directories=directories,
         run_rc=run_rc,
         run_stdout=run_stdout,
+        run_stdout_by_sql=run_stdout_by_sql,
         run_stderr=run_stderr,
         run_error=run_error,
     )
@@ -288,6 +294,7 @@ class ReportCase(unittest.TestCase):
         directories: Sequence[str] = (),
         run_rc: int = 0,
         run_stdout: str = "",
+        run_stdout_by_sql: Mapping[str, str] | None = None,
         run_stderr: str = "",
         run_error: BaseException | None = None,
     ) -> ReadOnlyHost:
@@ -298,6 +305,7 @@ class ReportCase(unittest.TestCase):
             directories=directories,
             run_rc=run_rc,
             run_stdout=run_stdout,
+            run_stdout_by_sql=run_stdout_by_sql,
             run_stderr=run_stderr,
             run_error=run_error,
         )
@@ -411,7 +419,7 @@ class ReportCase(unittest.TestCase):
         self.assertEqual(len(lines), len(loaded.errors) + 1)
 
     def test_order_gate_refusal_row_and_walk_continuation(self) -> None:
-        host = self._host(build_box=True)
+        host = self._host(build_box=True, run_rc=7)
         order: list[str] = []
         sections = (
             FakeSection(
@@ -426,6 +434,7 @@ class ReportCase(unittest.TestCase):
                 order,
                 Problem("fictional read failed", "Fix the fictional reader."),
             ),
+            upstream.UPSTREAM_SECTION,
             FakeSection(
                 "office-last",
                 "office",
@@ -447,6 +456,10 @@ class ReportCase(unittest.TestCase):
         )
         self.assertLess(
             rendered.index("section product-refuse"),
+            rendered.index("section upstream"),
+        )
+        self.assertLess(
+            rendered.index("section upstream"),
             rendered.index("section office-last"),
         )
         self.assertIn(
@@ -454,7 +467,8 @@ class ReportCase(unittest.TestCase):
             rendered,
         )
         self.assertIn("  last-row: not fired — 0", rendered)
-        self.assertTrue(rendered.rstrip().endswith("proposals: 1 fired, 3 sections, 0 skipped"))
+        self.assertIn("upstream: refuse — metrics reader failed with exit code 7", rendered)
+        self.assertTrue(rendered.rstrip().endswith("proposals: 1 fired, 4 sections, 0 skipped"))
 
     def test_off_the_build_box_a_product_section_is_never_rendered(self) -> None:
         host = self._host()
@@ -606,7 +620,7 @@ triggers:
     def test_feedback_section_follows_triggers_and_rated_is_not_fired(self) -> None:
         self.assertEqual(
             tuple(section.name for section in proposals.SECTIONS),
-            ("triggers", "feedback", "guardrail", "challenger"),
+            ("triggers", "feedback", "guardrail", "upstream", "challenger"),
         )
         self.assertIn("rated", proposals.ROW_STATES)
         host = self._host(build_box=True)
@@ -637,6 +651,9 @@ triggers:
         self.assertEqual(code, 0)
         self.assertLess(rendered.index("section triggers"), rendered.index("section feedback"))
         self.assertLess(rendered.index("section guardrail"), rendered.index("section challenger"))
+        self.assertLess(rendered.index("section guardrail"), rendered.index("section upstream"))
+        self.assertLess(rendered.index("section upstream"), rendered.index("section challenger"))
+        self.assertIn("section upstream (office): 0 sources observed", rendered)
         self.assertIn("section challenger (product): none set", rendered)
         self.assertIn("  newest: skipped — none set", rendered)
         self.assertIn("fictional-rated-model: rated", rendered)
@@ -646,6 +663,9 @@ triggers:
             f"proposals: {fired} fired, {len(proposals.SECTIONS)} sections, 0 skipped"
         ))
         self.assertEqual(calls, [("GET", f"{FEEDBACK_LIST_ROUTE}?page=1")])
+        self.assertEqual(
+            sum((sql or "") == upstream.STATEMENT for _argv, sql in host.calls), 1
+        )
         self.assertFalse(host.write_attempted)
 
     def test_guardrail_section_follows_feedback_and_reuses_its_read(self) -> None:
@@ -663,7 +683,10 @@ triggers:
             0,
         )
         trip_lines = "fictional-family|fictional-pattern-a|fictional-chat-a|2\n"
-        host = self._host(run_stdout=trip_lines)
+        host = self._host(
+            run_stdout=trip_lines,
+            run_stdout_by_sql={"FROM public.upstream_observations": ""},
+        )
 
         class CountingFeedback:
             def __init__(self) -> None:
@@ -694,10 +717,11 @@ triggers:
         self.assertIn("fictional-pattern-a: rated — 2 trips, 1 rated down", rendered)
         self.assertIn("fictional-chat-a: rated — message fictional-message-a", rendered)
         self.assertIn("section challenger (product): skipped — ", rendered)
-        self.assertTrue(rendered.rstrip().endswith("proposals: 0 fired, 4 sections, 2 skipped"))
+        self.assertTrue(rendered.rstrip().endswith("proposals: 0 fired, 5 sections, 2 skipped"))
         self.assertEqual(fake.calls, 1)
-        self.assertEqual(len(host.calls), 1)
+        self.assertEqual(len(host.calls), 2)
         self.assertIn("FROM guardrail_trips", host.calls[0][1] or "")
+        self.assertEqual(host.calls[1][1], upstream.STATEMENT)
         self.assertFalse(host.write_attempted)
 
     def test_refused_feedback_read_is_one_refuse_and_exits_one_without_writes(self) -> None:

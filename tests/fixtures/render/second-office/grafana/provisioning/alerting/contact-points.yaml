@@ -26,3 +26,17 @@ contactPoints:
           message: |
             Proposals waiting on this box: {{ (index .Alerts 0).Values.B }}
             Read them with gideon proposals.
+  - orgId: 1
+    name: upstream
+    receivers:
+      - uid: upstream-email
+        type: email
+        disableResolveMessage: true
+        settings:
+          addresses: "ops@exd.example.org"
+          singleEmail: true
+          subject: "[GIDEON EXD-FDO] {{ .Status | toUpper }}: {{ .CommonLabels.alertname }}"
+          message: |
+            {{ range .Alerts }}{{ .Status | toUpper }}: {{ .Labels.alertname }}: {{ .Annotations.summary }}{{ with .Annotations.runbook }} (runbook: {{ . }}){{ end }}
+            {{ end }}
+            What to do: on the box, run gideon status; the full steps are in the runbook named above.

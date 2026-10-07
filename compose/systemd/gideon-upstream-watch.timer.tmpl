@@ -1,0 +1,9 @@
+[Unit]
+Description=Weekly GIDEON upstream watch
+
+[Timer]
+OnCalendar=$calendar
+Persistent=true
+
+[Install]
+WantedBy=timers.target

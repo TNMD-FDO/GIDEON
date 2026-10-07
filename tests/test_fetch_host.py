@@ -229,8 +229,8 @@ class FetchHost(unittest.TestCase):
         )
         self.assertIsInstance(waiting, fetch.FetchRead)
         assert isinstance(waiting, fetch.FetchRead)
-        self.assertEqual((waiting.job.status, waiting.record, waiting.failure),
-                         ("doing", None, None))
+        self.assertEqual((waiting.job.status, waiting.record, waiting.failure, waiting.reason),
+                         ("doing", None, None, None))
         host.status = "succeeded"
         expected = record_for()
         record_path = f"{SNAPSHOTS}/{DESTINATION}{worker.RECORD_SUFFIX}"
@@ -243,6 +243,7 @@ class FetchHost(unittest.TestCase):
         self.assertIsInstance(outcome, fetch.FetchRead)
         assert isinstance(outcome, fetch.FetchRead)
         self.assertIsNone(outcome.failure)
+        self.assertIsNone(outcome.reason)
         self.assertIsNotNone(outcome.record)
         assert outcome.record is not None
         self.assertEqual(asdict(outcome.record), expected)
@@ -274,6 +275,7 @@ class FetchHost(unittest.TestCase):
                     self.assertIsNone(outcome.record)
                     self.assertIsNotNone(outcome.failure)
                     assert outcome.failure is not None
+                    self.assertEqual(outcome.reason, "refused-host")
                     self.assertIn("archive.example.test", outcome.failure.problem)
                     self.assertIn("corpus", outcome.failure.problem)
                     self.assertIn("config/egress.yaml", outcome.failure.fix)
@@ -285,6 +287,7 @@ class FetchHost(unittest.TestCase):
             host, RENDERED, JOB_ID, destination=DESTINATION, snapshots_root=SNAPSHOTS
         )
         assert isinstance(changed, fetch.FetchRead) and changed.failure is not None
+        self.assertEqual(changed.reason, "changed")
         self.assertIn("changed", changed.failure.problem)
         self.assertIn("Fetch this destination again", changed.failure.fix)
         host.files[path] = json.dumps(failure_for("upstream-status"))
@@ -292,6 +295,7 @@ class FetchHost(unittest.TestCase):
             host, RENDERED, JOB_ID, destination=DESTINATION, snapshots_root=SNAPSHOTS
         )
         assert isinstance(upstream, fetch.FetchRead) and upstream.failure is not None
+        self.assertEqual(upstream.reason, "upstream-status")
         self.assertIn("status 403", upstream.failure.problem)
         self.assertIn("logs", upstream.failure.fix)
         for reason in worker.FAILURE_REASONS - {
@@ -304,6 +308,7 @@ class FetchHost(unittest.TestCase):
                     snapshots_root=SNAPSHOTS,
                 )
                 assert isinstance(outcome, fetch.FetchRead) and outcome.failure is not None
+                self.assertEqual(outcome.reason, reason)
                 self.assertIn(reason, outcome.failure.problem)
                 self.assertIn("logs", outcome.failure.fix)
         host.files[path] = json.dumps({"job": JOB_ID + 1, "stale": "different job"})
@@ -311,8 +316,15 @@ class FetchHost(unittest.TestCase):
             host, RENDERED, JOB_ID, destination=DESTINATION, snapshots_root=SNAPSHOTS
         )
         assert isinstance(stale, fetch.FetchRead) and stale.failure is not None
+        self.assertEqual(stale.reason, "local")
         self.assertNotIn("outside the corpus", stale.failure.problem)
         self.assertIn("logs", stale.failure.fix)
+        del host.files[path]
+        missing = fetch.read_fetch(
+            host, RENDERED, JOB_ID, destination=DESTINATION, snapshots_root=SNAPSHOTS
+        )
+        assert isinstance(missing, fetch.FetchRead) and missing.failure is not None
+        self.assertEqual(missing.reason, "local")
 
     def test_invalid_record_and_failure_file_are_problems(self) -> None:
         host = FakeHost(status="succeeded")

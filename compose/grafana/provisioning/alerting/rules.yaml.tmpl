@@ -230,6 +230,75 @@ groups:
         annotations: {summary: Proposals are waiting for review, runbook: docs/runbooks/observability.md §10}
         labels: {class: dashboard, nudge: 'true'}
         isPaused: false
+      - uid: gideon-upstream-watch-notice
+        title: Upstream watch notice
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 60, to: 0}
+            datasourceUid: gideon-rows
+            model:
+              datasource: {type: postgres, uid: gideon-rows}
+              format: table
+              rawQuery: true
+              rawSql: |
+                WITH newest AS (
+                    SELECT DISTINCT ON (source) *
+                    FROM public.upstream_observations
+                    ORDER BY source, observed_at DESC
+                ), answered AS (
+                    SELECT DISTINCT ON (source) *
+                    FROM public.upstream_observations
+                    WHERE outcome = 'observed'
+                    ORDER BY source, observed_at DESC
+                )
+                SELECT n.source AS source,
+                    CASE WHEN a.latest_label IS NOT NULL
+                        AND (binding.snapshot_date IS NULL OR binding.snapshot_date < a.latest_label)
+                        AND first_seen.observed_at >= now() - interval '$upstream_notice_days days'
+                    THEN 1 ELSE 0 END AS value
+                FROM newest AS n
+                LEFT JOIN answered AS a ON a.source = n.source
+                LEFT JOIN LATERAL (
+                    SELECT MIN(seen.observed_at) AS observed_at
+                    FROM public.upstream_observations AS seen
+                    WHERE seen.source = a.source AND seen.outcome = 'observed'
+                      AND seen.latest_label = a.latest_label
+                ) AS first_seen ON true
+                LEFT JOIN LATERAL (
+                    SELECT b.label, b.snapshot_date
+                    FROM public.lockfile_sources AS b
+                    JOIN public.corpus_lockfiles AS c ON c.label = b.label
+                    WHERE b.source = n.source
+                    ORDER BY b.snapshot_date DESC, c.cut_at DESC, b.label DESC
+                    LIMIT 1
+                ) AS binding ON true
+                ORDER BY n.source
+              refId: A
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model: {datasource: {type: __expr__, uid: __expr__}, expression: A, reducer: last, refId: B, type: reduce}
+          - refId: C
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - {evaluator: {params: [0], type: gt}, operator: {type: and}, query: {params: [B, 5m, now]}, reducer: {params: [], type: avg}, type: query}
+              datasource: {type: __expr__, uid: __expr__}
+              expression: B
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: threshold
+        for: 0s
+        noDataState: OK
+        execErrState: KeepLast
+        annotations:
+          summary: A new upstream snapshot for {{ $$labels.source }} is unpinned
+          runbook: docs/runbooks/observability.md §4
+        labels: {class: page, upstream: 'true'}
+        isPaused: false
 $nightly_rules
   - orgId: 1
     name: metrics

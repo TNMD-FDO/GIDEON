@@ -62,6 +62,12 @@ class FetchRead:
     job: worker.JobRow
     record: FetchRecord | None
     failure: Problem | None
+    reason: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class MissingFetchRecord(Problem):
+    """A succeeded job without a whole file and its record."""
 
 
 def _destination_problem(destination: str, form: str) -> Problem | None:
@@ -364,14 +370,16 @@ def read_fetch(
     if isinstance(row, Problem):
         return row
     if row.status in {"todo", "doing"}:
-        return FetchRead(row, None, None)
+        return FetchRead(row, None, None, None)
     if row.status == "succeeded":
         record = read_record(host, destination, snapshots_root=snapshots_root)
         if isinstance(record, Problem):
             return Problem(record.problem, _logs_fix(rendered_dir))
         if record is None:
-            return Problem("fetch job succeeded without a whole file and record", _logs_fix(rendered_dir))
-        return FetchRead(row, record, None)
+            return MissingFetchRecord(
+                "fetch job succeeded without a whole file and record", _logs_fix(rendered_dir)
+            )
+        return FetchRead(row, record, None, None)
     if row.status in {"failed", "aborted", "cancelled"}:
         path = _record_path(snapshots_root, destination, FAILURE_SUFFIX)
         value = _read_json(host, path, "failure")
@@ -382,9 +390,12 @@ def read_fetch(
             failure = _failure_from_json(value)
             if failure is None:
                 return Problem("fetch failure file is invalid", _logs_fix(rendered_dir))
-            return FetchRead(row, None, _failure_problem(failure, rendered_dir))
+            return FetchRead(
+                row, None, _failure_problem(failure, rendered_dir), str(failure["reason"])
+            )
         return FetchRead(
             row, None,
             Problem(f"fetch job {job_id} {row.status} without its failure file", _logs_fix(rendered_dir)),
+            "local",
         )
     return Problem("fetch job has an unknown status", _logs_fix(rendered_dir))

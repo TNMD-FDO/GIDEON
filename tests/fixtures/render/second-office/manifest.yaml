@@ -15,7 +15,7 @@ inputs:
   build_box: false
 files:
   compose.yaml:
-    sha256: "d76ad1eaeba233135da931dbea7e0ac129de05964a5828c6be853ac1de33fc08"
+    sha256: "b7a9e87b60071091ef6efc6c30dfb268ccd5508658a17e8c6408243f07d6b2b9"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
@@ -44,12 +44,12 @@ files:
     owners:
       - "grafana"
   "grafana/provisioning/alerting/contact-points.yaml":
-    sha256: "8a32f700f4f6306f281ed3598fd8e8fd25b5d3d9a27782151884cefc8938a953"
+    sha256: "763e8175de17f4ca302aa08a7f59d64ffc2a485527014688171d64b112f00bb6"
     mode: "0644"
     owners:
       - "grafana"
   "grafana/provisioning/alerting/policies.yaml":
-    sha256: "5409debf513dcd2ce2ba9ac39f114a50dde8d28e338b2d157d209fbd0064302d"
+    sha256: "bc488490ca61f04a6d38ee865c82e9002dccbc789f851321b66370ced1fff776"
     mode: "0644"
     owners:
       - "grafana"
@@ -59,7 +59,7 @@ files:
     owners:
       - "grafana"
   "grafana/provisioning/alerting/rules.yaml":
-    sha256: "663d2f96c54d472782df50de7dac073b644b83af9db62a68bd31e7a5752ddbf6"
+    sha256: "6ecba24ed04653ec3dad4f022bf5a7b3ef34fa1523e40d4dc0c163d992f56015"
     mode: "0644"
     owners:
       - "grafana"
@@ -200,6 +200,14 @@ files:
     sha256: "4ce40b17f8e07247d185012d6754c07fd7aa588fdf814ec13df6b3bdbe5afbf6"
     mode: "0644"
     owners: []
+  "systemd/gideon-upstream-watch.service":
+    sha256: "24ec95fbad1d0c37a09e0b63e4cf58b6ae2670e78f418cfa240956eaee2dbe4d"
+    mode: "0644"
+    owners: []
+  "systemd/gideon-upstream-watch.timer":
+    sha256: "78b9c28d0cc5c755844abe1a54f6ffec5f6c200d35352240f30055dc081a00eb"
+    mode: "0644"
+    owners: []
   "dcgm-exporter/counters.csv":
     sha256: "6a1829a36a3f1a9846400c59f42be5568d030212086aa6e126e5af6366c4d1ff"
     mode: "0644"
@@ -209,7 +217,7 @@ services:
   caddy: "6ab86c4b4080e9f36a8a33ac2c17068802e1161844d10a4474b8285c69c1650f"
   prometheus: "1aa6707da47bf62b663164feee412a28b366df50abd2d41dd32dfd956ebc0147"
   node-exporter: "a581b1f8a717fdaab3b3e0ffa46114516da01f2c51c85838380c168d506632df"
-  grafana: "8cf471d68cd28c115f629b1a03da4ff28bde059925895e6bbcc4a932939f3eba"
+  grafana: "e989e41db628460bdae25dfc5bb12bb155d4fa2572680907dabae30a8086578a"
   postgres: "2148d7061855b0cc304400c260a9da53b7a1e9eb251fcb9a4947e8c15de03c52"
   qdrant: "b5e29333bb138a6ee121685c8055c888a7764c148983c7d5388333add92c1dc4"
   opensearch: "08e7f7f187f8096b0ffe685762cecb8eef93910df4a9e3167147e1c189bc4478"

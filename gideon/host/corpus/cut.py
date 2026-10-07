@@ -11,11 +11,10 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
 from urllib.parse import urlsplit
 
 from gideon.host import backuplock, fetch, report, stack, worker
-from gideon.host.corpus import record
+from gideon.host.corpus import record, resolve
 from gideon.host.corpus.lockfile import (
     PIPELINE_VERSION,
     SCHEMA_VERSION,
@@ -32,50 +31,19 @@ from gideon.host.corpus.lockfile import (
     render_sidecar,
     same_state,
 )
-from gideon.host.corpus.sources import SOURCES, SourceDefinition, SourceResolution
+from gideon.host.corpus.sources import SOURCES, SourceDefinition
 from gideon.host.courts import CourtsError, load_court_map
 from gideon.host.egress import EgressError, load_egress_allowlist
 from gideon.host.render.worker import (
-    FRESH_FORM,
     KEPT_FORM,
     RECORD_SUFFIX,
-    RESOLVE_DIR,
     SNAPSHOTS_ROOT,
-    WORKER_SERVICE_NAME,
 )
 from gideon.host.report import Problem, StageResult
-from gideon.host.sysio import LockingHost, PathLike, RealHost, WritableBytesHost
+from gideon.host.sysio import PathLike, RealHost, WritableBytesHost
 
-# exempt: mechanics — fresh index reads have a short bound, unlike snapshot transfers.
-RESOLVE_TIMEOUT_SECONDS = 60
 # exempt: mechanics — progress while snapshot transfers continue without a bound.
 HEARTBEAT_SECONDS = 60
-
-
-class CorpusHost(WritableBytesHost, LockingHost, Protocol):
-    """The host operations needed to clean fresh index directories."""
-
-    def rmtree(self, path: PathLike) -> None: ...
-
-
-@dataclass(frozen=True, slots=True)
-class ResolvedSource:
-    """A source resolution and the index bytes that selected it."""
-
-    snapshot: SourceResolution
-    index_bytes: Mapping[str, bytes]
-
-    @classmethod
-    def from_index(
-        cls, source: SourceDefinition, index_bytes: Mapping[str, bytes]
-    ) -> "ResolvedSource | Problem":
-        """Interpret fetched index bytes through their source definition."""
-
-        snapshot = source.read_index(index_bytes)
-        if isinstance(snapshot, Problem):
-            return snapshot
-        return cls(snapshot, index_bytes)
-
 
 @dataclass(frozen=True, slots=True)
 class FetchedSource:
@@ -86,10 +54,7 @@ class FetchedSource:
 
 
 def _retry_fix(fix: str) -> str:
-    clean = fix.removesuffix("then retry.").rstrip(" ,—")
-    if clean != fix:
-        clean += "."
-    return f"{clean} Then run {report.command('corpus cut')} again."
+    return resolve.retry_fix(fix, "corpus cut")
 
 
 def _refetch_fix(path: Path) -> str:
@@ -213,7 +178,7 @@ def _artifact_preconditions(
 
 def _preconditions(
     args: argparse.Namespace,
-    host: CorpusHost,
+    host: resolve.CorpusHost,
     rendered_dir: PathLike,
     checkout: Path,
     registry: Sequence[SourceDefinition],
@@ -252,109 +217,12 @@ def _preconditions(
     return stage, newest, claim
 
 
-def _wait_for_fetch(
-    host: WritableBytesHost,
-    rendered_dir: PathLike,
-    snapshots_root: PathLike,
-    job_id: int,
-    destination: str,
-    *,
-    sleep: Callable[[float], None],
-    monotonic: Callable[[], float],
-) -> fetch.FetchRecord | Problem:
-    started = monotonic()
-    while True:
-        outcome = fetch.read_fetch(
-            host, rendered_dir, job_id, destination=destination,
-            snapshots_root=snapshots_root,
-        )
-        if isinstance(outcome, Problem):
-            return outcome
-        if outcome.failure is not None:
-            return outcome.failure
-        if outcome.record is not None:
-            return outcome.record
-        if monotonic() - started >= RESOLVE_TIMEOUT_SECONDS:
-            return Problem(
-                f"index fetch job {job_id} did not finish before the bound",
-                f"Run {stack.logs_fix(rendered_dir, WORKER_SERVICE_NAME)}.",
-            )
-        sleep(1.0)
-
-
-def _read_source_index(
-    host: WritableBytesHost,
-    rendered_dir: PathLike,
-    snapshots_root: PathLike,
-    source: SourceDefinition,
-    *,
-    sleep: Callable[[float], None],
-    monotonic: Callable[[], float],
-) -> ResolvedSource | Problem:
-    documents: dict[str, bytes] = {}
-    for request in source.index_documents():
-        try:
-            destination = fetch.resolve_destination(f"{source.name}/{request.name}")
-        except ValueError:
-            return Problem(
-                f"source {source.name} index path {request.name!r} is invalid",
-                _retry_fix("Correct the source's index document name in the release."),
-            )
-        job = fetch.defer_fetch(
-            host, rendered_dir, destination=destination, url=request.url, form=FRESH_FORM,
-        )
-        if isinstance(job, Problem):
-            return Problem(f"{request.name}: {job.problem}", _retry_fix(job.fix))
-        outcome = _wait_for_fetch(
-            host, rendered_dir, snapshots_root, job, destination,
-            sleep=sleep, monotonic=monotonic,
-        )
-        if isinstance(outcome, Problem):
-            return Problem(f"{request.name}: {outcome.problem}", _retry_fix(outcome.fix))
-        documents[request.name] = host.read_bytes(Path(snapshots_root) / destination)
-    return ResolvedSource.from_index(source, documents)
-
-
-def _resolve_source(
-    host: CorpusHost,
-    rendered_dir: PathLike,
-    snapshots_root: PathLike,
-    source: SourceDefinition,
-    *,
-    sleep: Callable[[float], None],
-    monotonic: Callable[[], float],
-) -> ResolvedSource | Problem:
-    directory = Path(snapshots_root) / RESOLVE_DIR / source.name
-    cleanup_issue: Problem | None = None
-    try:
-        try:
-            result = _read_source_index(
-                host, rendered_dir, snapshots_root, source,
-                sleep=sleep, monotonic=monotonic,
-            )
-        except OSError as exc:
-            result = Problem(
-                f"source {source.name} index file could not be read ({type(exc).__name__})",
-                _retry_fix(f"Restore access to {directory}."),
-            )
-    finally:
-        try:
-            if host.exists(directory):
-                host.rmtree(directory)
-        except OSError as exc:
-            cleanup_issue = Problem(
-                f"source {source.name} resolve files could not be removed ({type(exc).__name__})",
-                _retry_fix(f"Restore access to {directory}."),
-            )
-    return cleanup_issue if cleanup_issue is not None else result
-
-
 def _fetch_source(
     host: WritableBytesHost,
     rendered_dir: PathLike,
     snapshots_root: PathLike,
     source: SourceDefinition,
-    resolved: ResolvedSource,
+    resolved: resolve.ResolvedSource,
     *,
     sleep: Callable[[float], None],
     monotonic: Callable[[], float],
@@ -426,7 +294,7 @@ def _verify(
     host: WritableBytesHost,
     snapshots_root: PathLike,
     source: SourceDefinition,
-    resolved: ResolvedSource,
+    resolved: resolve.ResolvedSource,
     newest: Lockfile | None,
 ) -> tuple[tuple[SidecarEntry, ...] | None, StageResult | None]:
     snapshot = resolved.snapshot
@@ -520,11 +388,11 @@ def _lockfile_owner(host: WritableBytesHost, checkout: Path, directory: Path) ->
 
 
 def _lockfile(
-    host: CorpusHost,
+    host: resolve.CorpusHost,
     rendered_dir: PathLike,
     checkout: Path,
     registry: Sequence[SourceDefinition],
-    resolved: Mapping[str, ResolvedSource],
+    resolved: Mapping[str, resolve.ResolvedSource],
     verified: Mapping[str, tuple[SidecarEntry, ...]],
     newest: Lockfile | None,
     now: datetime,
@@ -637,7 +505,7 @@ def _lockfile(
 
 
 def _run_cut_stages(
-    io: CorpusHost,
+    io: resolve.CorpusHost,
     rendered_dir: PathLike,
     root: Path,
     snapshots_root: PathLike,
@@ -649,13 +517,16 @@ def _run_cut_stages(
     active_stage: list[str],
 ) -> int:
     active_stage[0] = "resolve"
-    resolved: dict[str, ResolvedSource] = {}
+    resolved: dict[str, resolve.ResolvedSource] = {}
     for source in sources:
-        result = _resolve_source(
-            io, rendered_dir, snapshots_root, source, sleep=sleep, monotonic=monotonic,
+        result = resolve.resolve_source(
+            io, rendered_dir, snapshots_root, source, command_path="corpus cut",
+            sleep=sleep, monotonic=monotonic,
         )
-        if isinstance(result, Problem):
-            return _refuse("resolve", f"{source.name}: {result.problem}", result.fix)
+        if isinstance(result, resolve.ResolveFailure):
+            return _refuse(
+                "resolve", f"{source.name}: {result.problem.problem}", result.problem.fix
+            )
         resolved[source.name] = result
         report.print_stage(StageResult(
             "resolve", True,
@@ -743,7 +614,7 @@ def _run_cut_stages(
 def run_corpus_cut(
     args: argparse.Namespace,
     *,
-    host: CorpusHost | None = None,
+    host: resolve.CorpusHost | None = None,
     rendered_dir: PathLike = "/etc/gideon/rendered",
     checkout: PathLike | None = None,
     snapshots_root: PathLike = SNAPSHOTS_ROOT,

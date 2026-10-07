@@ -106,6 +106,8 @@ A corpus lockfile pins every byte of the legal corpus a release installs. `corpu
 
 A maintainer writes a lockfile with `sudo python3 -m gideon corpus cut` on the box, then commits the new files in a release. The command fetches through the worker anything the box does not already hold, hashes every file itself, writes the lockfile, and records the cut. A second run against the same upstream state writes nothing and names the lockfile that already pins it. Nobody edits a lockfile or a sidecar by hand. The one exception is `mirror_url`, set when the same pinned files are served from a mirror in the egress allowlist's `corpus` group; every digest and size must still match.
 
+A weekly timer, `gideon-upstream-watch.timer` on Monday at 06:30 office time, runs `sudo python3 -m gideon corpus watch`, which a maintainer may also run by hand. It reads each corpus source's index through the worker, as the cut does, and records one `upstream_observations` row per source per run: `observed` with the newest snapshot date upstream publishes, or `unanswered` with a reason when the source, the fetch, or the worker did not answer. Its exit is 1 when any source went unanswered. A newest date that no recorded lockfile pins is an upstream notice: the run prints the cut to run, the notice pages once, and `gideon proposals` lists it in its `upstream` section until a cut or an install records a lockfile that pins it. The watch fetches no corpus file and never cuts; a person runs `corpus cut` in a window they choose. It holds the same corpus lock as the cut, so one waits for the other.
+
 The command's refusals and their fixes:
 
 - **Another cut is running**: wait for it to finish, then run the command again.

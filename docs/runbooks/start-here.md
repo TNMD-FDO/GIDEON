@@ -4,11 +4,12 @@ This is one page by situation: each item gives a command, when there is one, and
 
 ## 1. Every day
 
-- Nothing to start unless an email arrives. The timers handle nightly backup and push, Saturday drill, quarterly off-box re-hash, reconcile, and nightly eval; `systemctl list-timers 'gideon-*'` shows them. [docs/runbooks/backup-restore.md §1](backup-restore.md)
+- Nothing to start unless an email arrives. The timers handle nightly backup and push, Saturday drill, quarterly off-box re-hash, reconcile, nightly eval, and Monday's upstream watch; `systemctl list-timers 'gideon-*'` shows them. [docs/runbooks/backup-restore.md §1](backup-restore.md)
 
 ## 2. An email arrived
 
 - A page with subject `[GIDEON <office>] FIRING: <rule>`: run `gideon status`, then follow the rule's row. [docs/runbooks/observability.md §4](observability.md)
+- An `Upstream watch notice` page: a cut is due. Run `gideon proposals`; its upstream section names the source. [docs/runbooks/release-files.md §10](release-files.md)
 - Planned restore, NAS window, or driver move: silence the affected rule before work begins. [docs/runbooks/observability.md §5](observability.md)
 - Monday's `Proposals waiting` nudge: run `gideon proposals`; bring any fired row to the developer for a ruling. [docs/runbooks/observability.md §10](observability.md); [docs/runbooks/release-files.md §7](release-files.md)
 

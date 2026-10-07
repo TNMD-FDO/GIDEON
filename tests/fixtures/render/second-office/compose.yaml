@@ -71,6 +71,7 @@ services:
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_SECURITY_COOKIE_SECURE: "true"
       GF_DATE_FORMATS_DEFAULT_TIMEZONE: "America/Denver"
+      GF_UNIFIED_ALERTING_NOTIFICATION_LOG_RETENTION: "8d"
       GF_SMTP_ENABLED: "true"
       GF_SMTP_HOST: "relay.exd.example.internal:587"
       GF_SMTP_FROM_ADDRESS: "gideon@exd.example.org"

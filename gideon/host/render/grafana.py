@@ -109,6 +109,13 @@ ENGINE_PENDING_PERIOD: Final = "5m"
 # Consecutive starts can be 33 hours apart; 36 hours leaves room for that
 # wait and pages a missed night at about 09:00. This is a starting value.
 NIGHTLY_OVERDUE_SECONDS: Final = 36 * 3600
+# exempt: schedule — a new upstream notice pages for one full weekly interval.
+UPSTREAM_NOTICE_DAYS: Final = 7
+# exempt: schedule — longer than the notice's window, so its email is sent once.
+UPSTREAM_REPEAT: Final = "8d"
+# exempt: schedule — Grafana's five-day default would forget a sent notice before
+# the repeat ends and send it again.
+NOTIFICATION_LOG_RETENTION: Final = "8d"
 # The page lines below are each one figure, read by its rule and by the
 # Overview card that mirrors it, so a card turns red where its page fires.
 # "Backup set overdue" and "Push overdue": a nightly set or push with two
@@ -182,7 +189,7 @@ class GrafanaDashboardsProviderArtifact(Artifact):
 
 
 class GrafanaContactPointsArtifact(Artifact):
-    """Provision the page and weekly nudge email contact points."""
+    """Provision the page, nudge, and upstream email contact points."""
 
     name = "grafana-contact-points"
     relative_path = "grafana/provisioning/alerting/contact-points.yaml"
@@ -201,7 +208,7 @@ class GrafanaContactPointsArtifact(Artifact):
 
 
 class GrafanaPoliciesArtifact(Artifact):
-    """Provision the page policy, heartbeat route, and weekly nudge route."""
+    """Provision the page policy and its heartbeat, nudge, and upstream routes."""
 
     name = "grafana-policies"
     relative_path = "grafana/provisioning/alerting/policies.yaml"
@@ -209,7 +216,9 @@ class GrafanaPoliciesArtifact(Artifact):
     template_paths = (POLICIES_TEMPLATE,)
 
     def emit(self, inputs: RenderInputs) -> str:
-        return substitute_template(inputs, POLICIES_TEMPLATE, {})
+        return substitute_template(
+            inputs, POLICIES_TEMPLATE, {"upstream_repeat": UPSTREAM_REPEAT}
+        )
 
 
 class GrafanaTimeIntervalsArtifact(Artifact):
@@ -315,6 +324,7 @@ class GrafanaRulesArtifact(Artifact):
                 "nightly_rules": nightly_rules,
                 "engine_job": ENGINE_JOB_NAME,
                 "opensearch_job": OPENSEARCH_JOB_NAME,
+                "upstream_notice_days": UPSTREAM_NOTICE_DAYS,
             },
         )
 

@@ -19,8 +19,8 @@ from unittest import mock
 from urllib.parse import urlsplit
 
 from gideon.cli import main
-from gideon.host import backuplock, fetch, stack, worker
-from gideon.host.corpus import cut
+from gideon.host import backuplock, fetch, report, stack, worker
+from gideon.host.corpus import cut, resolve
 from gideon.host.corpus.lockfile import load_lockfile, render_errors
 from gideon.host.corpus.sources import (
     IndexRequest,
@@ -534,10 +534,27 @@ class Cut(unittest.TestCase):
         self.assertIn("1 fetch deferred", out)
         self.assertEqual((self.snapshots / destinations[1]).read_bytes(), FILE_BYTES)
 
+    def run_cut_capturing_resolve(
+        self, **kwargs: object
+    ) -> tuple[int, str, list[resolve.ResolvedSource | resolve.ResolveFailure]]:
+        results: list[resolve.ResolvedSource | resolve.ResolveFailure] = []
+        original = resolve.resolve_source
+
+        def capture(*args: object, **inner: object) -> resolve.ResolvedSource | resolve.ResolveFailure:
+            result = original(*args, **inner)  # type: ignore[arg-type]
+            results.append(result)
+            return result
+
+        with mock.patch.object(resolve, "resolve_source", side_effect=capture):
+            code, out, _err = self.run_cut(**kwargs)  # type: ignore[arg-type]
+        return code, out, results
+
     def test_failed_resolve_names_index_and_cleans_its_directory(self) -> None:
         self.host.failed_destination = fetch.resolve_destination("example/listing.xml")
-        code, out, _err = self.run_cut()
+        code, out, results = self.run_cut_capturing_resolve()
         self.assertEqual(code, 1)
+        assert isinstance(results[0], resolve.ResolveFailure)
+        self.assertEqual(results[0].reason, "refused-host")
         self.assertIn("resolve: refuse", out)
         self.assertIn("listing.xml", out)
         self.assertIn("blocked.example.test", out)
@@ -546,13 +563,33 @@ class Cut(unittest.TestCase):
         self.assertEqual(self.host.record_writes, 0)
 
     def test_resolve_wait_has_a_bound(self) -> None:
-        self.host.resolve_wait_polls = cut.RESOLVE_TIMEOUT_SECONDS + 2
+        self.host.resolve_wait_polls = resolve.RESOLVE_TIMEOUT_SECONDS + 2
         now = [0.0]
-        code, out, _err = self.run_cut(now=now)
+        code, out, results = self.run_cut_capturing_resolve(now=now)
         self.assertEqual(code, 1)
+        assert isinstance(results[0], resolve.ResolveFailure)
+        self.assertEqual(results[0].reason, "timeout")
         self.assertIn("did not finish before the bound", out)
-        self.assertGreaterEqual(now[0], cut.RESOLVE_TIMEOUT_SECONDS)
+        self.assertGreaterEqual(now[0], resolve.RESOLVE_TIMEOUT_SECONDS)
         self.assertFalse((self.snapshots / "resolve/example").exists())
+
+    def test_reader_refusal_names_the_calling_command(self) -> None:
+        source = replace(
+            self.source,
+            read_index=lambda _documents: report.Problem(
+                "fictitious listing is unreadable",
+                "Check the listing, then retry.",
+            ),
+        )
+        result = resolve.ResolvedSource.from_index(
+            source, {}, command_path="corpus watch"
+        )
+        assert isinstance(result, resolve.ResolveFailure)
+        self.assertEqual(result.reason, "unreadable-index")
+        self.assertEqual(
+            result.problem.fix,
+            f"Check the listing. Then run {report.command('corpus watch')} again.",
+        )
 
     def test_refused_host_fetch_names_file_and_allowlist_group(self) -> None:
         self.file.unlink()

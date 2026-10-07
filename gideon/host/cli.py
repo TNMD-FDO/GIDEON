@@ -22,7 +22,7 @@ from gideon.host import (
     weights,
     worker,
 )
-from gideon.host.corpus import cut
+from gideon.host.corpus import cut, watch
 from gideon.host.render import command as render_command
 from gideon.host.report import refusal
 
@@ -118,3 +118,7 @@ def run_worker_verify(args: argparse.Namespace) -> int:
 
 def run_corpus_cut(args: argparse.Namespace) -> int:
     return _guarded("corpus cut", cut.run_corpus_cut, args)
+
+
+def run_corpus_watch(args: argparse.Namespace) -> int:
+    return _guarded("corpus watch", watch.run_corpus_watch, args)

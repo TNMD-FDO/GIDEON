@@ -208,6 +208,8 @@ class ReadOnlyHost:
                     return self._completed(
                         command_argv, self.guardrail_rc, self.guardrail_stdout
                     )
+                if input is not None and "FROM public.upstream_observations" in input:
+                    return self._completed(command_argv, self.psql_rc)
                 return self._completed(command_argv, self.psql_rc, self.psql_stdout)
             if "ps" in command_argv:
                 project = command_argv[command_argv.index("--project-directory") + 1]

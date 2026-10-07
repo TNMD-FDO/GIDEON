@@ -30,7 +30,8 @@ MIGRATIONS = {
     f"{ROOT}/migrations/0006_guardrail_trips_chat_id.sql": (ROOT / "migrations/0006_guardrail_trips_chat_id.sql").read_text(),
     f"{ROOT}/migrations/0007_procrastinate_queue.sql": (ROOT / "migrations/0007_procrastinate_queue.sql").read_text(),
     f"{ROOT}/migrations/0008_corpus_lockfiles.sql": (ROOT / "migrations/0008_corpus_lockfiles.sql").read_text(),
-    f"{ROOT}/migrations/0009_second.sql": "CREATE TABLE second (id int);\n",
+    f"{ROOT}/migrations/0009_upstream_observations.sql": (ROOT / "migrations/0009_upstream_observations.sql").read_text(),
+    f"{ROOT}/migrations/0010_second.sql": "CREATE TABLE second (id int);\n",
     f"{ROOT}/migrations/README.md": "not a migration",
 }
 
@@ -151,7 +152,8 @@ class Converge(unittest.TestCase):
                 "0006_guardrail_trips_chat_id",
                 "0007_procrastinate_queue",
                 "0008_corpus_lockfiles",
-                "0009_second",
+                "0009_upstream_observations",
+                "0010_second",
             ),
         )
 
@@ -176,7 +178,7 @@ class Converge(unittest.TestCase):
         self.assertIn(psql("gideon", "gideon", *STATEMENT), argvs)
         self.assertIn(psql("gideon", "gideon", *QUERY), argvs)
         migration_runs = [call for call in host.calls if call[0] == psql("gideon", "gideon", *MIGRATION)]
-        self.assertEqual(len(migration_runs), 9)
+        self.assertEqual(len(migration_runs), 10)
         first_migration = MIGRATIONS[f"{ROOT}/migrations/0001_audit_log.sql"]
         self.assertTrue((migration_runs[0][1] or "").startswith(first_migration))
         self.assertTrue((migration_runs[0][1] or "").endswith("INSERT INTO schema_migrations (version) VALUES ('0001_audit_log');\n"))
@@ -264,8 +266,8 @@ class Converge(unittest.TestCase):
 
         report = converge(FakeHost(respond, {**SECRETS, **MIGRATIONS}), RENDERED, root=ROOT)
         self.assertFalse(report.ok)
-        self.assertIn("0009_second.sql", report.problem or "")
-        self.assertIn("0009_second.sql", report.fix)
+        self.assertIn("0010_second.sql", report.problem or "")
+        self.assertIn("0010_second.sql", report.fix)
         self.assertEqual(
             report.applied_migrations,
             (
@@ -277,6 +279,7 @@ class Converge(unittest.TestCase):
                 "0006_guardrail_trips_chat_id",
                 "0007_procrastinate_queue",
                 "0008_corpus_lockfiles",
+                "0009_upstream_observations",
             ),
         )
         self.assertEqual(
@@ -290,6 +293,7 @@ class Converge(unittest.TestCase):
                 "0006_guardrail_trips_chat_id",
                 "0007_procrastinate_queue",
                 "0008_corpus_lockfiles",
+                "0009_upstream_observations",
             ],
         )
 
@@ -308,7 +312,8 @@ class Converge(unittest.TestCase):
                 "0006_guardrail_trips_chat_id",
                 "0007_procrastinate_queue",
                 "0008_corpus_lockfiles",
-                "0009_second",
+                "0009_upstream_observations",
+                "0010_second",
             ),
         )
 
@@ -438,3 +443,21 @@ class Migration0007(unittest.TestCase):
             "schema_migrations", text,
             "Fix: leave version bookkeeping to the migration runner.",
         )
+
+
+class Migration0009(unittest.TestCase):
+    def test_observations_are_append_only_and_metrics_can_read_bindings(self) -> None:
+        text = MIGRATIONS[f"{ROOT}/migrations/0009_upstream_observations.sql"]
+        self.assertIn("PRIMARY KEY (source, observed_at)", text)
+        self.assertIn("CHECK (outcome IN ('observed', 'unanswered'))", text)
+        self.assertIn("(outcome = 'observed') = (latest_label IS NOT NULL)", text)
+        self.assertIn("(outcome = 'unanswered') = (detail IS NOT NULL)", text)
+        grants = tuple(line for line in text.splitlines() if line.startswith("GRANT "))
+        self.assertEqual(grants, (
+            "GRANT SELECT, INSERT ON TABLE upstream_observations TO gideon_worker;",
+            "GRANT SELECT ON TABLE upstream_observations TO gideon_ro_metrics;",
+            "GRANT SELECT ON TABLE corpus_lockfiles TO gideon_ro_metrics;",
+            "GRANT SELECT ON TABLE source_snapshots TO gideon_ro_metrics;",
+            "GRANT SELECT ON TABLE lockfile_sources TO gideon_ro_metrics;",
+        ))
+        self.assertNotIn("schema_migrations", text)

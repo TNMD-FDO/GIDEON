@@ -15,7 +15,7 @@ inputs:
   build_box: true
 files:
   compose.yaml:
-    sha256: "6ffb884ce7bb7597ca2b62c486eb24e37c4d0ec2fe629f4cfc6eddcd576eddff"
+    sha256: "b3bff72d6abea063579fc5124b4dff2c004b5b6f0235f9c07aa2b7ab01294a35"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
@@ -44,12 +44,12 @@ files:
     owners:
       - "grafana"
   "grafana/provisioning/alerting/contact-points.yaml":
-    sha256: "420fb7cb390ca0da455904f3b99c995b54a7ec3ef734926e75b26958331ed681"
+    sha256: "651465d97589cfd74fa95f373fd8cd349ef9de62f7e03f59de8044bb3939a95c"
     mode: "0644"
     owners:
       - "grafana"
   "grafana/provisioning/alerting/policies.yaml":
-    sha256: "5409debf513dcd2ce2ba9ac39f114a50dde8d28e338b2d157d209fbd0064302d"
+    sha256: "bc488490ca61f04a6d38ee865c82e9002dccbc789f851321b66370ced1fff776"
     mode: "0644"
     owners:
       - "grafana"
@@ -59,7 +59,7 @@ files:
     owners:
       - "grafana"
   "grafana/provisioning/alerting/rules.yaml":
-    sha256: "0394db144c28290f44c9cde8aadef0e4563608bb67a6208289d2f6e1186e2a1e"
+    sha256: "444ec3aabb727eaa3e2181bfcf6a98964d64e782d5db52af49d3837506f77a32"
     mode: "0644"
     owners:
       - "grafana"
@@ -210,6 +210,14 @@ files:
     sha256: "146f6d4265909219848cf81833e9a839fa54e1fb111014bb838a7883aaf76bc4"
     mode: "0644"
     owners: []
+  "systemd/gideon-upstream-watch.service":
+    sha256: "24ec95fbad1d0c37a09e0b63e4cf58b6ae2670e78f418cfa240956eaee2dbe4d"
+    mode: "0644"
+    owners: []
+  "systemd/gideon-upstream-watch.timer":
+    sha256: "0db0a8ee6fb0840167a07e04773b4180507b67e99392442d0269e8e5c4068b67"
+    mode: "0644"
+    owners: []
   "dcgm-exporter/counters.csv":
     sha256: "6a1829a36a3f1a9846400c59f42be5568d030212086aa6e126e5af6366c4d1ff"
     mode: "0644"
@@ -219,7 +227,7 @@ services:
   caddy: "86b607a02fc284aad98149418e2c5dca70fb57282377143a35ceb8ad09ae3cc8"
   prometheus: "d66085a797b61c5760588120af1cf73dd6ca1a03112c437f09ad1e9cb65e160c"
   node-exporter: "372e640d7a5bc260c18cbd0a7cb48c5fd16fea5fc2f76ff1c0fa7b8eeb531134"
-  grafana: "e49f2699c24321394c1be54c7c63172929cfbe2bcdb44be1e82dfe292e914882"
+  grafana: "d960c1ceaa6a77defd2669c758bfc3e67f1be3b94a959adf04daaa72985c0cb2"
   postgres: "3a9087c68e7c534f00aeec7b032e8dbcb5bad751cc1ff72e9a97629e1da47306"
   qdrant: "aa46e367fc2d427547c9c7e04b245528def906e17d6f5c3b62727d6505116d63"
   opensearch: "546120b5ecaaecd955427b35ef0213ed0f132f92884b587e926d8c969033d961"

@@ -1,0 +1,13 @@
+[Unit]
+Description=Observe GIDEON corpus upstream snapshots
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=$checkout
+ExecStart=/usr/bin/python3 -m gideon corpus watch
+TimeoutStartSec=900
+StandardOutput=journal
+StandardError=journal

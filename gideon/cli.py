@@ -291,12 +291,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pull.set_defaults(handler=host_cli.run_models_pull, command_path="models pull")
 
-    corpus = commands.add_parser("corpus", help="corpus lockfile cuts and installs")
+    corpus = commands.add_parser(
+        "corpus",
+        help="corpus lockfile cuts, upstream watch, and installs",
+        description="Cut corpus lockfiles, run the upstream watch, and install lockfiles.",
+    )
     corpus_sub = corpus.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)
     cut = corpus_sub.add_parser("cut", help="fetch and verify a corpus snapshot, then write its lockfile")
     cut.add_argument("--base", metavar="<lockfile>", help="derived cuts arrive later")
     cut.add_argument("--add-courts", metavar="<ids>", help="derived cuts arrive later")
     cut.set_defaults(handler=host_cli.run_corpus_cut, command_path="corpus cut")
+    watch = corpus_sub.add_parser(
+        "watch",
+        help="read each corpus source's index and record whether a cut is due",
+        description=(
+            "Read each corpus source's index and record what is newest and whether a cut is due. "
+            "It fetches no corpus file. The weekly timer runs it, and a person may run it too."
+        ),
+    )
+    watch.set_defaults(handler=host_cli.run_corpus_watch, command_path="corpus watch")
     corpus_install = _stub_parser(
         corpus_sub, "install", "corpus install", "install a corpus lockfile"
     )

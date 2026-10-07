@@ -10,6 +10,7 @@ from typing import Any
 
 import yaml  # type: ignore[import-untyped]
 
+from gideon.host.corpus import record
 from gideon.host.egress import load_egress_allowlist
 from gideon.host.images import load_image_lock
 from gideon.host.lock import load_host_lock, load_host_lock_text
@@ -32,12 +33,15 @@ from gideon.host.render.grafana import (
     GRAFANA_SILENCES_ROUTE,
     GRAFANA_SUB_PATH,
     NIGHTLY_OVERDUE_SECONDS,
+    NOTIFICATION_LOG_RETENTION,
     OVERVIEW_TEMPLATE,
     PASSING_DRILL_AGE_TITLE,
     PLUGINS_TEMPLATE,
     PUBLIC_REPOSITORY_URL,
     START_HERE_CARD,
     START_HERE_TITLE,
+    UPSTREAM_NOTICE_DAYS,
+    UPSTREAM_REPEAT,
     GrafanaContactPointsArtifact,
     GrafanaDashboardsProviderArtifact,
     GrafanaDatasourcesArtifact,
@@ -764,7 +768,7 @@ class Alerting(unittest.TestCase):
                 document = yaml.safe_load(text)
                 contact = document["contactPoints"][0]
                 receiver = contact["receivers"][0]
-                self.assertEqual([item["name"] for item in document["contactPoints"]], ["page", "nudge"])
+                self.assertEqual([item["name"] for item in document["contactPoints"]], ["page", "nudge", "upstream"])
                 self.assertEqual(contact["name"], "page")
                 self.assertEqual(receiver["uid"], "page-email")
                 self.assertEqual(receiver["type"], "email")
@@ -843,12 +847,22 @@ class Alerting(unittest.TestCase):
                 self.assertNotIn(".Labels", message)
                 self.assertNotIn(".Annotations", message)
 
+                upstream = document["contactPoints"][2]
+                self.assertEqual(upstream["orgId"], 1)
+                self.assertEqual(upstream["name"], "upstream")
+                self.assertEqual(len(upstream["receivers"]), 1)
+                upstream_receiver = upstream["receivers"][0]
+                self.assertEqual(upstream_receiver["uid"], "upstream-email")
+                self.assertEqual(upstream_receiver["type"], "email")
+                self.assertTrue(upstream_receiver["disableResolveMessage"])
+                self.assertEqual(upstream_receiver["settings"], receiver["settings"])
+
     def test_policy_and_time_interval_use_the_site_timezone(self) -> None:
         for site_path in (EXAMPLE, SECOND):
             with self.subTest(site=site_path.name):
                 site_inputs = inputs(site_path)
                 policy = yaml.safe_load(GrafanaPoliciesArtifact().emit(site_inputs))["policies"][0]
-                self.assertEqual(len(policy["routes"]), 2)
+                self.assertEqual(len(policy["routes"]), 3)
                 child = policy["routes"][0]
                 self.assertEqual(policy["receiver"], "page")
                 self.assertEqual(policy["group_by"], ["alertname"])
@@ -861,6 +875,13 @@ class Alerting(unittest.TestCase):
                 self.assertEqual(nudge_route["repeat_interval"], "6d")
                 self.assertEqual(nudge_route["active_time_intervals"], ["monday-morning"])
                 self.assertFalse(nudge_route["continue"])
+                upstream_route = policy["routes"][2]
+                self.assertEqual(upstream_route["receiver"], "upstream")
+                self.assertEqual(upstream_route["object_matchers"], [["upstream", "=", "true"]])
+                self.assertEqual(upstream_route["group_by"], ["alertname", "source"])
+                self.assertEqual(upstream_route["repeat_interval"], UPSTREAM_REPEAT)
+                self.assertNotIn("active_time_intervals", upstream_route)
+                self.assertFalse(upstream_route["continue"])
                 # `muteTimes` is the provisioning key for time intervals; a
                 # route uses one as an active window, not only as a mute.
                 intervals = yaml.safe_load(GrafanaTimeIntervalsArtifact().emit(site_inputs))["muteTimes"]
@@ -895,6 +916,7 @@ class Alerting(unittest.TestCase):
             "gideon-engine-down",
             "gideon-heartbeat",
             "gideon-proposals-waiting",
+            "gideon-upstream-watch-notice",
             "gideon-api-probe-failing",
             "gideon-nightly-run-failed",
             "gideon-nightly-run-aborted",
@@ -1065,6 +1087,79 @@ class Alerting(unittest.TestCase):
                     threshold["model"]["conditions"][0]["evaluator"],
                     {"params": [0], "type": "gt"},
                 )
+
+    def test_upstream_rule_uses_the_record_open_and_first_sighting_sql(self) -> None:
+        def normalized(sql: str) -> str:
+            return " ".join(sql.split())
+
+        # Copy only the record's two CTEs, its open predicate, and its joins.
+        state_ctes = record.WATCH_STATE_SQL.split("\nSELECT\n", 1)[0]
+        state_joins = "FROM newest AS n\n" + record.WATCH_STATE_SQL.split(
+            "\nFROM newest AS n\n", 1
+        )[1]
+        open_predicate = "a.latest_label IS NOT NULL\n" + record.WATCH_STATE_SQL.split(
+            "    a.latest_label IS NOT NULL\n", 1
+        )[1].split(" AS open,", 1)[0]
+        for site_path, no_gpu in ((EXAMPLE, False), (SECOND, False), (EXAMPLE, True)):
+            with self.subTest(site=site_path.name, no_gpu=no_gpu):
+                groups = yaml.safe_load(
+                    GrafanaRulesArtifact().emit(inputs(site_path, no_gpu=no_gpu))
+                )["groups"]
+                rows = next(group for group in groups if group["name"] == "rows")
+                rules = rows["rules"]
+                index = next(
+                    position for position, item in enumerate(rules)
+                    if item["uid"] == "gideon-proposals-waiting"
+                )
+                rule = rules[index + 1]
+                self.assertEqual(rule["uid"], "gideon-upstream-watch-notice")
+                self.assertEqual(rule["condition"], "C")
+                self.assertEqual(rule["for"], "0s")
+                self.assertEqual(rule["noDataState"], "OK")
+                # A read error that resolved the notice would clear Alertmanager's
+                # record of the sent email, so recovery would send it again.
+                self.assertEqual(rule["execErrState"], "KeepLast")
+                self.assertEqual(rule["labels"], {"class": "page", "upstream": "true"})
+                self.assertEqual(
+                    rule["annotations"],
+                    {
+                        "summary": "A new upstream snapshot for {{ $labels.source }} is unpinned",
+                        "runbook": "docs/runbooks/observability.md §4",
+                    },
+                )
+                query, reduce, threshold = rule["data"]
+                self.assertEqual(query["datasourceUid"], "gideon-rows")
+                self.assertEqual(query["model"]["datasource"], {
+                    "type": "postgres", "uid": "gideon-rows",
+                })
+                self.assertEqual(query["model"]["format"], "table")
+                sql = query["model"]["rawSql"]
+                self.assertIn(normalized(state_ctes), normalized(sql))
+                self.assertIn(normalized(state_joins), normalized(sql))
+                self.assertIn(normalized(open_predicate), normalized(sql))
+                self.assertIn(f"interval '{UPSTREAM_NOTICE_DAYS} days'", sql)
+                self.assertIn("SELECT n.source AS source", sql)
+                self.assertIn("THEN 1 ELSE 0 END AS value", sql)
+                self.assertNotIn("source_snapshots", sql)
+                self.assertEqual(reduce["model"]["expression"], "A")
+                self.assertEqual(reduce["model"]["reducer"], "last")
+                self.assertEqual(threshold["model"]["conditions"][0]["evaluator"], {
+                    "params": [0], "type": "gt",
+                })
+
+    def test_upstream_repeat_and_notification_log_outlast_the_notice(self) -> None:
+        def seconds(duration: str) -> float:
+            match = re.fullmatch(r"([0-9]+)(ms|s|m|h|d)", duration)
+            self.assertIsNotNone(match)
+            assert match is not None
+            return int(match.group(1)) * {
+                "ms": 0.001, "s": 1, "m": 60, "h": 3600, "d": 86400,
+            }[match.group(2)]
+
+        self.assertGreaterEqual(
+            seconds(NOTIFICATION_LOG_RETENTION), seconds(UPSTREAM_REPEAT)
+        )
+        self.assertGreater(seconds(UPSTREAM_REPEAT), UPSTREAM_NOTICE_DAYS * 86400)
 
     def test_nightly_rules_cover_each_suite_and_only_gpu_hosts(self) -> None:
         nightly_uids = {

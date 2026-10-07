@@ -195,6 +195,13 @@ SYSTEMCTL_ENABLE_PROPOSALS = (
     "systemctl", "enable", "--now", f"{RENDERED}/systemd/gideon-proposals-tally.timer",
 )
 SYSTEMCTL_ACTIVE_PROPOSALS = ("systemctl", "is-active", "gideon-proposals-tally.timer")
+SYSTEMCTL_LINK_UPSTREAM_WATCH = (
+    "systemctl", "link", f"{RENDERED}/systemd/gideon-upstream-watch.service",
+)
+SYSTEMCTL_ENABLE_UPSTREAM_WATCH = (
+    "systemctl", "enable", "--now", f"{RENDERED}/systemd/gideon-upstream-watch.timer",
+)
+SYSTEMCTL_ACTIVE_UPSTREAM_WATCH = ("systemctl", "is-active", "gideon-upstream-watch.timer")
 CERT = CERT_PATH
 HANDSHAKE = (
     "openssl",
@@ -627,6 +634,9 @@ def healthy_commands(
         SYSTEMCTL_LINK_PROPOSALS: done(SYSTEMCTL_LINK_PROPOSALS),
         SYSTEMCTL_ENABLE_PROPOSALS: done(SYSTEMCTL_ENABLE_PROPOSALS),
         SYSTEMCTL_ACTIVE_PROPOSALS: done(SYSTEMCTL_ACTIVE_PROPOSALS, stdout="active\n"),
+        SYSTEMCTL_LINK_UPSTREAM_WATCH: done(SYSTEMCTL_LINK_UPSTREAM_WATCH),
+        SYSTEMCTL_ENABLE_UPSTREAM_WATCH: done(SYSTEMCTL_ENABLE_UPSTREAM_WATCH),
+        SYSTEMCTL_ACTIVE_UPSTREAM_WATCH: done(SYSTEMCTL_ACTIVE_UPSTREAM_WATCH, stdout="active\n"),
         PS: done(PS, stdout=running_rows(render_inputs=render_inputs)),
         **healthy_ingress(),
     }
@@ -841,6 +851,9 @@ class EngineRotation(RealStack):
         self.assertEqual(host.write_modes[path], 0o440)
         self.assertIn((path, 0, 4242), host.chown_calls)
         calls = argv_calls(host)[baseline_calls:]
+        self.assertIn(SYSTEMCTL_LINK_UPSTREAM_WATCH, calls)
+        self.assertIn(SYSTEMCTL_ENABLE_UPSTREAM_WATCH, calls)
+        self.assertIn(SYSTEMCTL_ACTIVE_UPSTREAM_WATCH, calls)
         self.assertEqual(calls.count(force_recreate(ENGINE_SERVICE_NAME)), 1)
         self.assertEqual(calls.count(force_recreate(API_SERVICE_NAME)), 1)
         self.assertEqual(calls.count(force_recreate("open-webui")), 0)

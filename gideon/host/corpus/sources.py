@@ -6,7 +6,6 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 
-from gideon.host import report
 from gideon.host.report import Problem
 
 CASELAW_BASE_URL = "https://com-courtlistener-storage.s3-us-west-2.amazonaws.com/bulk-data/"
@@ -61,7 +60,7 @@ class SourceDefinition:
 def _listing_problem(detail: str) -> Problem:
     return Problem(
         f"caselaw listing.xml {detail}",
-        f"Check the upstream listing, then run {report.command('corpus cut')} again.",
+        "Check the upstream listing, then retry.",
     )
 
 

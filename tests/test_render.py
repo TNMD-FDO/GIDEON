@@ -85,6 +85,7 @@ from gideon.host.render.grafana import (
     DASHBOARDS_MOUNT,
     GRAFANA_ADMIN_USER,
     GRAFANA_SUB_PATH,
+    NOTIFICATION_LOG_RETENTION,
     GrafanaOverviewArtifact,
 )
 from gideon.host.render.opensearch import (
@@ -340,6 +341,8 @@ class Registry(unittest.TestCase):
                 "systemd/gideon-eval-nightly.timer",
                 "systemd/gideon-proposals-tally.service",
                 "systemd/gideon-proposals-tally.timer",
+                "systemd/gideon-upstream-watch.service",
+                "systemd/gideon-upstream-watch.timer",
                 DCGM_COUNTERS_PATH,
             ],
         )
@@ -719,6 +722,10 @@ class Engine(unittest.TestCase):
         self.assertIn('GF_SECURITY_ADMIN_USER: "grafana-admin"', text)
         self.assertIn('GF_SECURITY_ADMIN_PASSWORD__FILE: "/run/secrets/grafana_admin_password"', text)
         self.assertIn('GF_SMTP_STARTTLS_POLICY: "OpportunisticStartTLS"', text)
+        self.assertIn(
+            f'GF_UNIFIED_ALERTING_NOTIFICATION_LOG_RETENTION: "{NOTIFICATION_LOG_RETENTION}"',
+            text,
+        )
         self.assertIn('group_add:\n      - "4242"', text)
         self.assertIn('/data/observability/grafana:/var/lib/grafana', text)
         self.assertIn('/etc/gideon/rendered/grafana/provisioning:/etc/grafana/provisioning:ro', text)
@@ -728,6 +735,10 @@ class Engine(unittest.TestCase):
         self.assertIn('  grafana_admin_password:\n    file: "/etc/gideon/secrets/grafana_admin_password"', text)
         self.assertNotIn('  smtp_password:\n', text)
         self.assertEqual(grafana_environment(inputs())["GF_SECURITY_ADMIN_USER"], GRAFANA_ADMIN_USER)
+        self.assertEqual(
+            grafana_environment(inputs())["GF_UNIFIED_ALERTING_NOTIFICATION_LOG_RETENTION"],
+            NOTIFICATION_LOG_RETENTION,
+        )
         self.assertEqual(
             grafana_environment(inputs())["GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH"],
             DASHBOARDS_MOUNT + "/" + Path(GrafanaOverviewArtifact.relative_path).name,
@@ -1116,6 +1127,45 @@ class Core(unittest.TestCase):
                 )
                 self.assertIn("Persistent=true", timer)
 
+    def test_upstream_watch_units_run_weekly_on_every_host_kind(self) -> None:
+        self.assertEqual(systemd.UPSTREAM_WATCH_CALENDAR, "Mon *-*-* 06:30:00")
+        for name, site_path, no_gpu, build_box in FIXTURE_CASES:
+            with self.subTest(host=name):
+                rendered_inputs = inputs(site_path, no_gpu=no_gpu, build_box=build_box)
+                rendered = render_all(rendered_inputs)
+                service = rendered.by_path["systemd/gideon-upstream-watch.service"].content
+                timer = rendered.by_path["systemd/gideon-upstream-watch.timer"].content
+                self.assertIn("Requires=docker.service", service)
+                self.assertIn("After=docker.service network-online.target", service)
+                self.assertIn("Type=oneshot", service)
+                self.assertIn(f"WorkingDirectory={rendered_inputs.checkout}", service)
+                self.assertEqual(
+                    [line for line in service.splitlines() if line.startswith("ExecStart=")],
+                    ["ExecStart=/usr/bin/python3 -m gideon corpus watch"],
+                )
+                self.assertIn("TimeoutStartSec=900", service)
+                self.assertIn("StandardOutput=journal", service)
+                self.assertIn("StandardError=journal", service)
+                self.assertIn(
+                    f"OnCalendar={systemd.UPSTREAM_WATCH_CALENDAR} "
+                    f"{rendered_inputs.site.office.timezone}", timer,
+                )
+                self.assertIn("Persistent=true", timer)
+                self.assertIn("WantedBy=timers.target", timer)
+
+    def test_no_rendered_unit_starts_a_corpus_act(self) -> None:
+        forbidden = ("corpus cut", "corpus install", "index build", "index promote")
+        for name, site_path, no_gpu, build_box in FIXTURE_CASES:
+            with self.subTest(host=name):
+                rendered = render_all(inputs(site_path, no_gpu=no_gpu, build_box=build_box))
+                for path, unit in rendered.by_path.items():
+                    if not path.startswith("systemd/"):
+                        continue
+                    for line in unit.content.splitlines():
+                        if line.startswith("ExecStart="):
+                            for command in forbidden:
+                                self.assertNotIn(command, line, path)
+
     def test_manifest_records_the_host_modes(self) -> None:
         for no_gpu, build_box in ((False, False), (False, True), (True, False)):
             with self.subTest(no_gpu=no_gpu, build_box=build_box):
@@ -1194,6 +1244,8 @@ class Core(unittest.TestCase):
                 "systemd/gideon-eval-nightly.timer",
                 "systemd/gideon-proposals-tally.service",
                 "systemd/gideon-proposals-tally.timer",
+                "systemd/gideon-upstream-watch.service",
+                "systemd/gideon-upstream-watch.timer",
                 DCGM_COUNTERS_PATH,
             },
         )

@@ -9,6 +9,7 @@ from gideon.host.render.grafana import (
     GRAFANA_ADMIN_USER,
     GRAFANA_SUB_PATH,
     HOME_DASHBOARD_PATH,
+    NOTIFICATION_LOG_RETENTION,
 )
 from gideon.host.render.services import ServiceDefinition, image_pin
 
@@ -30,6 +31,7 @@ def grafana_environment(inputs: RenderInputs) -> Mapping[str, str]:
         "GF_USERS_ALLOW_SIGN_UP": "false",
         "GF_SECURITY_COOKIE_SECURE": "true",
         "GF_DATE_FORMATS_DEFAULT_TIMEZONE": inputs.site.office.timezone,
+        "GF_UNIFIED_ALERTING_NOTIFICATION_LOG_RETENTION": NOTIFICATION_LOG_RETENTION,
         "GF_SMTP_ENABLED": "true",
         "GF_SMTP_HOST": f"{smtp.host}:{smtp.port}",
         "GF_SMTP_FROM_ADDRESS": smtp.from_,

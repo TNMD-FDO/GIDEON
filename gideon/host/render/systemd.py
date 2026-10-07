@@ -18,6 +18,8 @@ _NIGHTLY_SERVICE_TEMPLATE = "systemd/gideon-eval-nightly.service.tmpl"
 _NIGHTLY_TIMER_TEMPLATE = "systemd/gideon-eval-nightly.timer.tmpl"
 _PROPOSALS_TALLY_SERVICE_TEMPLATE = "systemd/gideon-proposals-tally.service.tmpl"
 _PROPOSALS_TALLY_TIMER_TEMPLATE = "systemd/gideon-proposals-tally.timer.tmpl"
+_UPSTREAM_WATCH_SERVICE_TEMPLATE = "systemd/gideon-upstream-watch.service.tmpl"
+_UPSTREAM_WATCH_TIMER_TEMPLATE = "systemd/gideon-upstream-watch.timer.tmpl"
 
 RECONCILE_CALENDAR: Final = "*-*-* 03:00:00"
 BACKUP_CALENDAR: Final = "*-*-* 01:00:00"
@@ -28,6 +30,8 @@ VERIFY_ALL_CALENDAR: Final = "Sat *-01,04,07,10-8..14 04:00:00"
 NIGHTLY_CALENDAR: Final = "*-*-* 21:00:00"
 # After the quiet window's 06:00 close, so Monday's message reads that morning's count.
 PROPOSALS_TALLY_CALENDAR: Final = "*-*-* 07:00:00"
+# Before the 07:00 tally, so a dump seen Monday morning reaches that morning's nudge.
+UPSTREAM_WATCH_CALENDAR: Final = "Mon *-*-* 06:30:00"
 NIGHTLY_SUITES: Final = ("general-smoke", "guardrails")
 # The build box alone runs this line with `-`, so a failed pair never fails the unit.
 NIGHTLY_CHALLENGER_COMMAND: Final = "eval run --challenger --stack ci --kind nightly"
@@ -227,4 +231,25 @@ class ProposalsTallyTimerArtifact(_SystemdArtifact):
     def _substitutions(self, inputs: RenderInputs) -> Mapping[str, str]:
         substitutions = dict(super()._substitutions(inputs))
         substitutions["calendar"] = _calendar_with_zone(PROPOSALS_TALLY_CALENDAR, inputs)
+        return substitutions
+
+
+class UpstreamWatchServiceArtifact(_SystemdArtifact):
+    """Render the weekly upstream observation service on every host."""
+
+    name = "gideon-upstream-watch-service"
+    relative_path = "systemd/gideon-upstream-watch.service"
+    template_paths = (_UPSTREAM_WATCH_SERVICE_TEMPLATE,)
+
+
+class UpstreamWatchTimerArtifact(_SystemdArtifact):
+    """Render the persistent office-zoned upstream watch timer."""
+
+    name = "gideon-upstream-watch-timer"
+    relative_path = "systemd/gideon-upstream-watch.timer"
+    template_paths = (_UPSTREAM_WATCH_TIMER_TEMPLATE,)
+
+    def _substitutions(self, inputs: RenderInputs) -> Mapping[str, str]:
+        substitutions = dict(super()._substitutions(inputs))
+        substitutions["calendar"] = _calendar_with_zone(UPSTREAM_WATCH_CALENDAR, inputs)
         return substitutions

@@ -90,6 +90,21 @@ class Help(unittest.TestCase):
         for name in TOP_LEVEL:
             self.assertIn(name, out.getvalue())
 
+    def test_corpus_help_names_the_watch(self) -> None:
+        group = io.StringIO()
+        with contextlib.redirect_stdout(group), self.assertRaises(SystemExit) as ctx:
+            main(["corpus", "--help"])
+        self.assertEqual(ctx.exception.code, 0)
+        self.assertIn("upstream watch", group.getvalue())
+        self.assertIn("watch", help_entries(group.getvalue()))
+
+        command = io.StringIO()
+        with contextlib.redirect_stdout(command), self.assertRaises(SystemExit) as ctx:
+            main(["corpus", "watch", "--help"])
+        self.assertEqual(ctx.exception.code, 0)
+        self.assertIn("fetches no corpus file", command.getvalue().lower())
+        self.assertIn("weekly timer", command.getvalue())
+
     def test_eval_help_names_the_set_and_slice_contract(self) -> None:
         group = io.StringIO()
         with contextlib.redirect_stdout(group), self.assertRaises(SystemExit) as ctx:
