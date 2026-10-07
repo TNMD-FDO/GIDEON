@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.64](docs/release-notes/v0.3.64.md) — 2026-10-06 — the shared box's rules, agreed
 - [v0.3.63](docs/release-notes/v0.3.63.md) — 2026-10-06 — the worker's queue depth, scraped by Prometheus and tiled on the Overview
 - [v0.3.62](docs/release-notes/v0.3.62.md) — 2026-10-06 — disk-layout refuses an occupied /data
 - [v0.3.61](docs/release-notes/v0.3.61.md) — 2026-10-06 — main's push gated on the box's runner
