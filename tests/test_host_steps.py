@@ -77,12 +77,17 @@ from gideon.host.steps.docker import (
 )
 from gideon.host.steps.maintenance import _DROP_IN, _PERIODIC, UnattendedUpgradesStep
 from gideon.host.steps.network import (
+    _DOCKER_USER_UNIT,
+    _DOCKER_USER_UNIT_TEXT,
+    _JUMP,
     _WAIT_ONLINE_DROPIN,
     _WAIT_ONLINE_FIX,
     _WAIT_ONLINE_TEXT,
     FirewallStep,
     TimeSyncStep,
     WaitOnlineStep,
+    _docker_user_block,
+    _docker_user_rules,
 )
 from gideon.host.steps.nvidia import (
     _DEB_TMP,
@@ -3483,25 +3488,58 @@ class NetworkStepTests(unittest.TestCase):
             "[ 3] 22/tcp                    ALLOW IN    192.0.2.0/24 # gideon-provision\n"
             "[ 8] 443/tcp                   ALLOW IN    198.51.100.0/24 # gideon-provision\n"
         )
-        commands = {
-            ("ufw", "status", "numbered"): completed(("ufw", "status", "numbered"), status),
-            ("ufw", "--force", "delete", "8"): completed(("ufw", "--force", "delete", "8")),
-            ("ufw", "allow", "proto", "tcp", "from", "192.0.2.0/24", "to", "any", "port", "443", "comment", "gideon-provision"): completed(("ufw", "allow")),
-            ("ufw", "default", "deny", "incoming"): completed(("ufw", "default", "deny", "incoming")),
-            ("ufw", "--force", "enable"): completed(("ufw", "--force", "enable")),
-            ("ufw", "reload"): completed(("ufw", "reload")),
-        }
-        host = FakeHost(commands=commands, files={"/etc/ufw/after.rules": UFW_AFTER_RULES})
+        host = self.firewall_converged_host()
+        host.commands[self.UFW_STATUS] = completed(self.UFW_STATUS, status)
+        host.files["/etc/ufw/after.rules"] = UFW_AFTER_RULES
+        host.files.pop(os.fspath(_DOCKER_USER_UNIT))
+        for command in (
+            ("ufw", "--force", "delete", "8"),
+            ("ufw", "allow", "proto", "tcp", "from", "192.0.2.0/24", "to", "any", "port", "443", "comment", "gideon-provision"),
+            ("ufw", "default", "deny", "incoming"),
+            ("ufw", "--force", "enable"),
+            ("systemctl", "daemon-reload"),
+        ):
+            host.commands[command] = completed(command)
         step = FirewallStep()
         reading = step.check(context(host))
         self.assertEqual(reading.disposition, Disposition.DRIFT)
         self.assertIn("ufw is inactive, the installed default", reading.detail)
         step.apply(context(host))
         self.assertNotIn(("run", (self.UFW_VERBOSE, False)), host.calls)
-        self.assertTrue(host.files["/etc/ufw/after.rules"].startswith(UFW_AFTER_RULES.rstrip("\n")))
-        self.assertIn("# BEGIN gideon-provision docker-user\n*filter\n:DOCKER-USER - [0:0]\n", host.files["/etc/ufw/after.rules"])
-        self.assertIn("-s 192.0.2.0/24 -p tcp -m conntrack --ctorigdstport 443 --ctdir ORIGINAL", host.files["/etc/ufw/after.rules"])
-        self.assertIn(("run", (("ufw", "reload"), True)), host.calls)
+        expected_block = (
+            "# GIDEON BEGIN provision:firewall\n"
+            "*filter\n"
+            ":gideon-docker-user - [0:0]\n"
+            "-A gideon-docker-user -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment gideon-provision -j RETURN\n"
+            "-A gideon-docker-user -i docker0 -m comment --comment gideon-provision -j RETURN\n"
+            "-A gideon-docker-user -i br-+ -m comment --comment gideon-provision -j RETURN\n"
+            "-A gideon-docker-user -s 192.0.2.0/24 -p tcp -m conntrack --ctorigdstport 443 --ctdir ORIGINAL -m comment --comment gideon-provision -j RETURN\n"
+            "-A gideon-docker-user -s 192.168.122.0/24 -p tcp -m conntrack --ctorigdstport 5000 --ctdir ORIGINAL -m comment --comment gideon-provision -j RETURN\n"
+            "-A gideon-docker-user -o docker0 -p tcp -m conntrack --ctorigdstport 443 --ctdir ORIGINAL -m comment --comment gideon-provision -j DROP\n"
+            "-A gideon-docker-user -o br-+ -p tcp -m conntrack --ctorigdstport 443 --ctdir ORIGINAL -m comment --comment gideon-provision -j DROP\n"
+            "-A gideon-docker-user -o docker0 -p tcp -m conntrack --ctorigdstport 5000 --ctdir ORIGINAL -m comment --comment gideon-provision -j DROP\n"
+            "-A gideon-docker-user -o br-+ -p tcp -m conntrack --ctorigdstport 5000 --ctdir ORIGINAL -m comment --comment gideon-provision -j DROP\n"
+            "-A gideon-docker-user -m comment --comment gideon-provision -j RETURN\n"
+            "COMMIT\n"
+            "# GIDEON END provision:firewall\n"
+        )
+        self.assertEqual(
+            host.files["/etc/ufw/after.rules"],
+            UFW_AFTER_RULES.rstrip("\n") + "\n\n" + expected_block,
+        )
+        self.assertEqual(host.files[os.fspath(_DOCKER_USER_UNIT)], _DOCKER_USER_UNIT_TEXT)
+        self.assertIn((os.fspath(_DOCKER_USER_UNIT), 0o644), host.write_modes)
+        ordered = [
+            ("write_text", ("/etc/ufw/after.rules", host.files["/etc/ufw/after.rules"])),
+            ("run", (("ufw", "reload"), True)),
+            ("write_text", (os.fspath(_DOCKER_USER_UNIT), _DOCKER_USER_UNIT_TEXT)),
+            ("run", (("systemctl", "daemon-reload"), True)),
+            ("run", (("systemctl", "enable", "gideon-docker-user"), True)),
+            ("run", (("systemctl", "start", "gideon-docker-user"), True)),
+            ("run", (("iptables", "-w", "-S", "DOCKER-USER"), True)),
+        ]
+        positions = [host.calls.index(call) for call in ordered]
+        self.assertEqual(positions, sorted(positions))
         mutations: list[tuple[str, ...]] = []
         for method, arguments in host.calls:
             if (
@@ -3525,22 +3563,29 @@ class NetworkStepTests(unittest.TestCase):
         )
 
     def firewall_converged_host(self) -> FakeHost:
-        from gideon.host.steps.network import _docker_user_block, _docker_user_rules
-
         status = (
             "Status: active\n"
             "[ 1] 22/tcp                    ALLOW IN    192.0.2.0/24 # gideon-provision\n"
             "[ 2] 443/tcp                   ALLOW IN    192.0.2.0/24 # gideon-provision\n"
         )
-        chain = "-N DOCKER-USER\n" + "\n".join(_docker_user_rules(["192.0.2.0/24"])) + "\n"
+        chain = "-N gideon-docker-user\n" + "\n".join(_docker_user_rules(["192.0.2.0/24"])) + "\n"
+        owned_chain = ("iptables", "-w", "-S", "gideon-docker-user")
+        shared_chain = ("iptables", "-w", "-S", "DOCKER-USER")
         return FakeHost(
             commands={
                 ("ufw", "status", "numbered"): completed(("ufw", "status", "numbered"), status),
                 ("ufw", "status", "verbose"): completed(("ufw", "status", "verbose"), "Status: active\nDefault: deny (incoming), allow (outgoing)\n"),
-                ("iptables", "-S", "DOCKER-USER"): completed(("iptables", "-S", "DOCKER-USER"), chain),
+                owned_chain: completed(owned_chain, chain),
+                shared_chain: completed(shared_chain, "-N DOCKER-USER\n" + _JUMP + "\n"),
+                ("systemctl", "is-enabled", "gideon-docker-user"): completed(("systemctl", "is-enabled", "gideon-docker-user"), "enabled\n"),
+                ("systemctl", "enable", "gideon-docker-user"): completed(("systemctl", "enable", "gideon-docker-user")),
+                ("systemctl", "start", "gideon-docker-user"): completed(("systemctl", "start", "gideon-docker-user")),
                 ("ufw", "reload"): completed(("ufw", "reload")),
             },
-            files={"/etc/ufw/after.rules": UFW_AFTER_RULES + "\n" + _docker_user_block(["192.0.2.0/24"])},
+            files={
+                "/etc/ufw/after.rules": UFW_AFTER_RULES + "\n" + _docker_user_block(["192.0.2.0/24"]),
+                os.fspath(_DOCKER_USER_UNIT): _DOCKER_USER_UNIT_TEXT,
+            },
         )
 
     def test_firewall_converges_with_the_docker_user_block_loaded(self) -> None:
@@ -3588,26 +3633,104 @@ class NetworkStepTests(unittest.TestCase):
         host.files["/etc/ufw/after.rules"] = UFW_AFTER_RULES
         result = FirewallStep().check(context(host))
         self.assertEqual(result.disposition, Disposition.DRIFT)
-        self.assertIn("after.rules", result.detail)
+        self.assertIn("firewall block in /etc/ufw/after.rules is missing", result.detail)
         host = self.firewall_converged_host()
         host.files["/etc/ufw/after.rules"] = host.files["/etc/ufw/after.rules"].replace("192.0.2.0/24 -p tcp", "198.51.100.0/24 -p tcp")
-        self.assertEqual(FirewallStep().check(context(host)).disposition, Disposition.DRIFT)
-
-    def test_firewall_block_present_but_chain_unloaded_is_drift(self) -> None:
-        host = self.firewall_converged_host()
-        host.commands[("iptables", "-S", "DOCKER-USER")] = completed(("iptables", "-S", "DOCKER-USER"), "-N DOCKER-USER\n")
         result = FirewallStep().check(context(host))
         self.assertEqual(result.disposition, Disposition.DRIFT)
-        self.assertIn("DOCKER-USER chain", result.detail)
+        self.assertIn("differs from site.lan_cidrs", result.detail)
+
+    def test_firewall_previous_markers_are_replaced_by_one_current_block(self) -> None:
+        host = self.firewall_converged_host()
+        host.files["/etc/ufw/after.rules"] = (
+            UFW_AFTER_RULES
+            + "\n# BEGIN gideon-provision docker-user\n"
+            + "*filter\n:DOCKER-USER - [0:0]\nCOMMIT\n"
+            + "# END gideon-provision docker-user\n"
+        )
+        reading = FirewallStep().check(context(host))
+        self.assertEqual(reading.disposition, Disposition.DRIFT)
+        self.assertIn("previous markers", reading.detail)
+        FirewallStep().apply(context(host))
+        after_rules = host.files["/etc/ufw/after.rules"]
+        self.assertEqual(after_rules.count("# GIDEON BEGIN provision:firewall"), 1)
+        self.assertEqual(after_rules.count("# GIDEON END provision:firewall"), 1)
+        self.assertNotIn("# BEGIN gideon-provision docker-user", after_rules)
+        self.assertNotIn("# END gideon-provision docker-user", after_rules)
+        self.assertNotIn(":DOCKER-USER - [0:0]", after_rules)
+        self.assertEqual(after_rules.count(":gideon-docker-user - [0:0]"), 1)
+        self.assertEqual(FirewallStep().check(context(host)).disposition, Disposition.CONVERGED)
+        host.write_modes.clear()
+        FirewallStep().apply(context(host))
+        self.assertEqual(host.write_modes, [])
+
+    def test_firewall_chain_absent_or_inexact_is_drift(self) -> None:
+        command = ("iptables", "-w", "-S", "gideon-docker-user")
+        responses = (
+            subprocess.CompletedProcess(list(command), 1, "", "fictitious absent chain"),
+            completed(command, "-N gideon-docker-user\n-A gideon-docker-user -j RETURN\n"),
+        )
+        for response in responses:
+            with self.subTest(returncode=response.returncode, stdout=response.stdout):
+                host = self.firewall_converged_host()
+                host.commands[command] = response
+                result = FirewallStep().check(context(host))
+                self.assertEqual(result.disposition, Disposition.DRIFT)
+                self.assertIn("firewall chain gideon-docker-user does not carry its rules", result.detail)
+
+    def test_firewall_unreadable_chain_or_unit_is_unfixable(self) -> None:
+        class UnreadableCommandHost(FakeHost):
+            unreadable_command: tuple[str, ...]
+
+            def run(
+                self,
+                argv: Command,
+                *,
+                check: bool = False,
+                input: str | None = None,
+                cwd: PathLike | None = None,
+                env: Mapping[str, str] | None = None,
+                timeout: float | None = None,
+                passthrough: bool = False,
+            ) -> subprocess.CompletedProcess[str]:
+                if tuple(argv) == self.unreadable_command:
+                    raise OSError("fictitious command refusal")
+                return super().run(
+                    argv, check=check, input=input, cwd=cwd, env=env,
+                    timeout=timeout, passthrough=passthrough,
+                )
+
+        class UnreadableUnitHost(FakeHost):
+            def read_text(self, path: PathLike, *, encoding: str = "utf-8") -> str:
+                if os.fspath(path) == os.fspath(_DOCKER_USER_UNIT):
+                    raise PermissionError("fictitious unit refusal")
+                return super().read_text(path, encoding=encoding)
+
+        base = self.firewall_converged_host()
+        for command in (
+            ("iptables", "-w", "-S", "gideon-docker-user"),
+            ("iptables", "-w", "-S", "DOCKER-USER"),
+            ("systemctl", "is-enabled", "gideon-docker-user"),
+        ):
+            with self.subTest(command=command):
+                command_host = UnreadableCommandHost(commands=base.commands, files=base.files)
+                command_host.unreadable_command = command
+                reading = FirewallStep().check(context(command_host))
+                self.assertEqual(reading.disposition, Disposition.UNFIXABLE)
+                self.assertIn("cannot read", reading.detail)
+                self.assertIn("Rewrite GIDEON's firewall block", reading.fix)
+        unit_host = UnreadableUnitHost(commands=base.commands, files=base.files)
+        reading = FirewallStep().check(context(unit_host))
+        self.assertEqual(reading.disposition, Disposition.UNFIXABLE)
+        self.assertIn(os.fspath(_DOCKER_USER_UNIT), reading.detail)
+        self.assertIn("Rewrite GIDEON's firewall block", reading.fix)
 
     def test_docker_user_rules_never_touch_container_egress_or_established_flows(self) -> None:
-        from gideon.host.steps.network import _docker_user_rules
-
         rules = _docker_user_rules(["192.0.2.0/24", "198.51.100.0/24"])
-        self.assertTrue(rules[0].startswith("-A DOCKER-USER -m conntrack --ctstate RELATED,ESTABLISHED"))
+        self.assertTrue(rules[0].startswith("-A gideon-docker-user -m conntrack --ctstate RELATED,ESTABLISHED"))
         self.assertEqual(rules[1:3], [
-            "-A DOCKER-USER -i docker0 -m comment --comment gideon-provision -j RETURN",
-            "-A DOCKER-USER -i br-+ -m comment --comment gideon-provision -j RETURN",
+            "-A gideon-docker-user -i docker0 -m comment --comment gideon-provision -j RETURN",
+            "-A gideon-docker-user -i br-+ -m comment --comment gideon-provision -j RETURN",
         ])
         self.assertTrue(rules[-1].endswith("-j RETURN"))
         drops = [rule for rule in rules if rule.endswith("-j DROP")]
@@ -3619,20 +3742,137 @@ class NetworkStepTests(unittest.TestCase):
         self.assertTrue(all("-s " not in rule for rule in drops), "drops never judge by source address")
         self.assertEqual(
             sorted(rule.split(" -p ")[0] for rule in drops),
-            sorted(f"-A DOCKER-USER -o {bridge}" for bridge in ("docker0", "br-+") for _ in (443, 5000)),
+            sorted(f"-A gideon-docker-user -o {bridge}" for bridge in ("docker0", "br-+") for _ in (443, 5000)),
         )
         self.assertTrue(all("-o docker0" in rule or "-o br-+" in rule for rule in drops))
         self.assertEqual(sum("-s 198.51.100.0/24" in rule for rule in rules), 1)
         self.assertEqual(sum("192.168.122.0/24" in rule and "5000" in rule for rule in rules), 1)
         self.assertLess(max(index for index, rule in enumerate(rules) if "-j RETURN" in rule and "-s " in rule), rules.index(drops[0]))
 
-    def test_firewall_foreign_rule_ahead_of_the_owned_ones_is_drift(self) -> None:
-        from gideon.host.steps.network import _docker_user_rules
-
+    def test_firewall_foreign_rules_before_and_after_jump_are_preserved(self) -> None:
         host = self.firewall_converged_host()
-        chain = "-N DOCKER-USER\n-A DOCKER-USER -j RETURN\n" + "\n".join(_docker_user_rules(["192.0.2.0/24"])) + "\n"
-        host.commands[("iptables", "-S", "DOCKER-USER")] = completed(("iptables", "-S", "DOCKER-USER"), chain)
-        self.assertEqual(FirewallStep().check(context(host)).disposition, Disposition.DRIFT)
+        command = ("iptables", "-w", "-S", "DOCKER-USER")
+        foreign_before = "-A DOCKER-USER -j RETURN"
+        foreign_after = "-A DOCKER-USER -m comment --comment other-application -j RETURN"
+        host.commands[command] = completed(
+            command,
+            "-N DOCKER-USER\n" + foreign_before + "\n" + _JUMP + "\n" + foreign_after + "\n",
+        )
+        self.assertEqual(FirewallStep().check(context(host)).disposition, Disposition.CONVERGED)
+        host.calls.clear()
+        FirewallStep().apply(context(host))
+        self.assertFalse(any(
+            command[:3] == ("iptables", "-w", "-D") for command, _, _ in host.runs
+        ))
+
+    def test_firewall_missing_jump_is_restored_by_start(self) -> None:
+        host = self.firewall_converged_host()
+        command = ("iptables", "-w", "-S", "DOCKER-USER")
+        host.commands[command] = completed(command, "-N DOCKER-USER\n")
+        reading = FirewallStep().check(context(host))
+        self.assertEqual(reading.disposition, Disposition.DRIFT)
+        self.assertIn("jump from DOCKER-USER into gideon-docker-user is missing", reading.detail)
+        host.calls.clear()
+        FirewallStep().apply(context(host))
+        self.assertIn(("run", (("systemctl", "start", "gideon-docker-user"), True)), host.calls)
+        self.assertLess(
+            host.calls.index(("run", (("systemctl", "start", "gideon-docker-user"), True))),
+            host.calls.index(("run", (command, True))),
+        )
+
+    def test_firewall_duplicate_jump_is_pruned_by_position(self) -> None:
+        host = self.firewall_converged_host()
+        command = ("iptables", "-w", "-S", "DOCKER-USER")
+        foreign = "-A DOCKER-USER -j RETURN"
+        host.commands[command] = completed(
+            command, "-N DOCKER-USER\n" + _JUMP + "\n" + foreign + "\n" + _JUMP + "\n",
+        )
+        delete = ("iptables", "-w", "-D", "DOCKER-USER", "3")
+        host.commands[delete] = completed(delete)
+        reading = FirewallStep().check(context(host))
+        self.assertEqual(reading.disposition, Disposition.DRIFT)
+        self.assertIn("present more than once", reading.detail)
+        host.calls.clear()
+        FirewallStep().apply(context(host))
+        self.assertEqual(
+            [run for run, _, _ in host.runs if run[:3] == ("iptables", "-w", "-D")],
+            [delete],
+        )
+        self.assertIn(("run", (delete, True)), host.calls)
+
+    def test_firewall_previous_shared_rules_are_pruned_from_highest_position(self) -> None:
+        host = self.firewall_converged_host()
+        command = ("iptables", "-w", "-S", "DOCKER-USER")
+        previous = [
+            rule.replace("-A gideon-docker-user", "-A DOCKER-USER", 1)
+            for rule in _docker_user_rules(["192.0.2.0/24"])
+        ]
+        self.assertEqual(len(previous), 10)
+        host.commands[command] = completed(
+            command, "-N DOCKER-USER\n" + _JUMP + "\n" + "\n".join(previous) + "\n",
+        )
+        expected_deletes = [
+            ("iptables", "-w", "-D", "DOCKER-USER", str(position))
+            for position in range(11, 1, -1)
+        ]
+        for delete in expected_deletes:
+            host.commands[delete] = completed(delete)
+        reading = FirewallStep().check(context(host))
+        self.assertEqual(reading.disposition, Disposition.DRIFT)
+        self.assertIn("previous rules remain in DOCKER-USER", reading.detail)
+        host.calls.clear()
+        FirewallStep().apply(context(host))
+        deletes = [
+            run for run, _, _ in host.runs if run[:3] == ("iptables", "-w", "-D")
+        ]
+        self.assertEqual(deletes, expected_deletes)
+        self.assertNotIn(("iptables", "-w", "-D", "DOCKER-USER", "1"), deletes)
+
+    def test_firewall_comment_prefix_is_foreign(self) -> None:
+        host = self.firewall_converged_host()
+        command = ("iptables", "-w", "-S", "DOCKER-USER")
+        foreign = "-A DOCKER-USER -m comment --comment gideon-provision-x -j RETURN"
+        host.commands[command] = completed(
+            command, "-N DOCKER-USER\n" + _JUMP + "\n" + foreign + "\n",
+        )
+        self.assertEqual(FirewallStep().check(context(host)).disposition, Disposition.CONVERGED)
+        host.calls.clear()
+        FirewallStep().apply(context(host))
+        self.assertFalse(any(
+            run[:3] == ("iptables", "-w", "-D") for run, _, _ in host.runs
+        ))
+
+    def test_firewall_unit_missing_different_or_disabled(self) -> None:
+        for state in ("missing", "different", "disabled"):
+            with self.subTest(state=state):
+                host = self.firewall_converged_host()
+                unit = os.fspath(_DOCKER_USER_UNIT)
+                if state == "missing":
+                    host.files.pop(unit)
+                elif state == "different":
+                    host.files[unit] = "[Unit]\nDescription=fictitious old unit\n"
+                else:
+                    command = ("systemctl", "is-enabled", "gideon-docker-user")
+                    host.commands[command] = subprocess.CompletedProcess(
+                        list(command), 1, "disabled\n", ""
+                    )
+                daemon_reload = ("systemctl", "daemon-reload")
+                host.commands[daemon_reload] = completed(daemon_reload)
+                reading = FirewallStep().check(context(host))
+                self.assertEqual(reading.disposition, Disposition.DRIFT)
+                self.assertIn("gideon-docker-user.service", reading.detail)
+                host.calls.clear()
+                FirewallStep().apply(context(host))
+                wrote_unit = any(path == unit for path, _ in host.write_modes)
+                self.assertEqual(wrote_unit, state != "disabled")
+                self.assertEqual(
+                    ("run", (daemon_reload, True)) in host.calls,
+                    state != "disabled",
+                )
+                self.assertIn(("run", (("systemctl", "enable", "gideon-docker-user"), True)), host.calls)
+                self.assertEqual(host.files[unit], _DOCKER_USER_UNIT_TEXT)
+                if wrote_unit:
+                    self.assertIn((unit, 0o644), host.write_modes)
 
     def test_time_sync_source_change_reloads_chrony(self) -> None:
         package = ("dpkg-query", "-W", "-f=${Status} ${Version}\\n", "chrony")

@@ -402,6 +402,15 @@ rollback restores the product from its set, not the host's drivers or packages.
 A driver or package rollback is a `host provision` decision a person takes,
 never something rollback does.
 
+A rollback by `upgrade --rollback` or `restore` to a tag before the release
+that moved GIDEON's firewall rules into their own chain restores a firewall
+writer that declares and flushes the shared `DOCKER-USER` chain. Its first ufw
+reload erases a co-tenant application's rules there, and every later provision
+run on that older tree erases them again until GIDEON upgrades back. GIDEON's
+own published ports stay protected by the older rules. Announce the firewall
+consequence and the hour with the rollback; tell the co-tenant to re-add its
+rules after the old tree has run, and announce the return the same way.
+
 ## 4. Re-runs and refusals
 
 - `install` again on a live box: a no-op apply, an incremental set, a drill,
