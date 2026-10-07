@@ -95,6 +95,20 @@ def manifest_with(inventory: Mapping[str, tuple[backupset.Entry, ...]]) -> backu
     return replace(ref.manifest, inventory=inventory)
 
 
+def later_ref(
+    label: str,
+    inventory: Mapping[str, tuple[backupset.Entry, ...]],
+    *,
+    ids: backupset.AccountIds | None = None,
+    listings: Mapping[str, backupset.ListingPin] | None = None,
+) -> backupset.SetRef:
+    value = replace(
+        manifest_with(inventory), label=label, gideon_ids=ids,
+        listings={} if listings is None else listings,
+    )
+    return backupset.SetRef(label, f"/example/staging/sets/{label}", NOW, True, value)
+
+
 class FakeHost:
     """Return scripted command results and record calls in their actual order."""
 
@@ -330,9 +344,9 @@ class StoreTaking(unittest.TestCase):
                 self.assertEqual(host.calls, expected)
                 self.assertEqual(host.responses, [])
 
-    def test_store_complete_reports_second_pass_count_and_other_kinds_do_not_act(self) -> None:
+    def test_complete_reports_counts_and_only_user_written_snapshots_act(self) -> None:
         host = FakeHost((completed(self.copy_argv, stdout="Number of regular files transferred: 1,234\n"),), existing=(SOURCE,))
-        self.assertEqual(bound(host, backupset.RootKind.STORE).complete(), backuproots.Completed(True, 1234))
+        self.assertEqual(bound(host, backupset.RootKind.STORE).complete(), backuproots.Completed(True, 1234, f"{ROOT}: 1234 object(s)"))
         self.assertEqual(host.calls, [
             ("exists", SOURCE, {}),
             ("mkdir", self.copy, {"mode": 0o750, "parents": True, "exist_ok": True}),
@@ -341,8 +355,37 @@ class StoreTaking(unittest.TestCase):
         for kind in (backupset.RootKind.SNAPSHOT, backupset.RootKind.REPOSITORY):
             with self.subTest(kind=kind):
                 idle = FakeHost()
-                self.assertEqual(bound(idle, kind).complete(), backuproots.Completed(False, 0))
+                self.assertEqual(bound(idle, kind).complete(), backuproots.Completed(False, 0, ""))
                 self.assertEqual(idle.calls, [])
+        for prior in (None, previous()):
+            with self.subTest(previous=prior):
+                link_dest = (
+                    (f"--link-dest={backupset.files_dir(PREVIOUS)}/{ROOT}/",)
+                    if prior is not None else ()
+                )
+                argv = (
+                    "rsync", "-a", "--exclude=cache/", *link_dest, "--stats",
+                    SOURCE + "/", self.copy + "/",
+                )
+                row = backupset.InventoryRoot(
+                    ROOT, SOURCE, ("cache/",), backupset.RootKind.SNAPSHOT, True, True
+                )
+                copied = FakeHost((completed(argv, stdout="Number of regular files transferred: 3\n"),))
+                (snapshot,) = backuproots.taking(cast(Host, copied), (row,), PARTIAL, prior)
+                self.assertEqual(snapshot.complete(), backuproots.Completed(True, 3, f"{ROOT}: 3 file(s)"))
+                self.assertEqual(copied.calls, [("run", argv, {"cwd": None})])
+                self.assertEqual(copied.responses, [])
+
+                for response in (completed(argv, returncode=23, stderr="disk full"), OSError("rsync unavailable")):
+                    with self.subTest(response=response):
+                        failed_snapshot = FakeHost((response,))
+                        (snapshot,) = backuproots.taking(cast(Host, failed_snapshot), (row,), PARTIAL, prior)
+                        outcome = snapshot.complete()
+                        self.assertIsInstance(outcome, Problem)
+                        assert isinstance(outcome, Problem)
+                        self.assertIn("file snapshot", outcome.problem)
+                        self.assertEqual(outcome.fix, "")
+                        self.assertEqual(failed_snapshot.calls, [("run", argv, {"cwd": None})])
         failed = FakeHost((completed(self.copy_argv, returncode=23, stderr="disk full"),), existing=(SOURCE,))
         self.assertEqual(
             bound(failed, backupset.RootKind.STORE).complete(),
@@ -452,7 +495,86 @@ class StoreTaking(unittest.TestCase):
 
 
 class StoreRealTools(unittest.TestCase):
-    """The same argv over the real tools makes both passes and pins the final copy."""
+    """Real tools take and complete snapshot and store roots."""
+
+    @unittest.skipUnless(shutil.which("rsync"), "rsync is required for the real snapshot case")
+    def test_user_written_snapshot_second_pass_adds_and_rewrites_without_deleting(self) -> None:
+        """A second pass keeps the first copy's files and counts changed files."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source = base / "source"
+            source.mkdir()
+            partial = base / "sets" / "current.partial"
+            row = backupset.InventoryRoot(ROOT, str(source), (), backupset.RootKind.SNAPSHOT, True, True)
+            (root,) = backuproots.taking(RealHost(), (row,), str(partial), None)
+            changed = source / "changed.txt"
+            removed = source / "removed.txt"
+            changed.write_bytes(b"first")
+            removed.write_bytes(b"keep in the set")
+            self.assertEqual(root.take(), backuproots.Taken(True, {}))
+
+            changed.write_bytes(b"rewritten after the first pass")
+            (source / "arrived.txt").write_bytes(b"new after the first pass")
+            removed.unlink()
+            self.assertEqual(root.complete(), backuproots.Completed(True, 2, f"{ROOT}: 2 file(s)"))
+
+            copy = Path(backupset.files_dir(partial)) / ROOT
+            self.assertEqual((copy / changed.name).read_bytes(), changed.read_bytes())
+            self.assertEqual((copy / "arrived.txt").read_bytes(), b"new after the first pass")
+            self.assertEqual((copy / removed.name).read_bytes(), b"keep in the set")
+
+    @unittest.skipUnless(shutil.which("rsync"), "rsync is required for the real snapshot overlay case")
+    def test_snapshot_overlay_keeps_selected_only_and_recovers_intermediate_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            live = base / "live"
+            live.mkdir()
+            selected_path = base / "staging" / "sets" / "selected"
+            middle_path = base / "staging" / "sets" / "middle"
+            newest_path = base / "staging" / "sets" / "newest"
+
+            def copy_with(path: Path, files: Mapping[str, bytes]) -> tuple[backupset.Entry, ...]:
+                copy = Path(backupset.files_dir(path)) / ROOT
+                copy.mkdir(parents=True)
+                entries: list[backupset.Entry] = []
+                for name, data in files.items():
+                    file = copy / name
+                    file.write_bytes(data)
+                    details = file.stat()
+                    entries.append(backupset.Entry(
+                        name, "f", len(data), details.st_uid, details.st_gid,
+                        stat.S_IMODE(details.st_mode), details.st_mtime,
+                        hashlib.sha256(data).hexdigest(),
+                    ))
+                return tuple(entries)
+
+            selected_entries = copy_with(selected_path, {
+                "shared": b"partial", "selected-only": b"selected bytes",
+            })
+            middle_entries = copy_with(middle_path, {
+                "shared": b"whole uploaded file", "middle-only": b"intermediate bytes",
+            })
+            newest_entries = copy_with(newest_path, {"newest-only": b"newest bytes"})
+            selected = replace(
+                previous(), path=str(selected_path),
+                manifest=manifest_with({ROOT: selected_entries}),
+            )
+            middle = replace(later_ref("middle", {ROOT: middle_entries}), path=str(middle_path))
+            newest = replace(later_ref("newest", {ROOT: newest_entries}), path=str(newest_path))
+            row = backupset.InventoryRoot(ROOT, str(live), (), backupset.RootKind.SNAPSHOT, True, True)
+            (root,) = backuproots.held(RealHost(), (row,), selected, (middle, newest))
+
+            self.assertIsNone(root.verify())
+            outcome = root.put_back(backupset.AccountIds(os.getuid(), os.getgid()))
+            self.assertIsInstance(outcome, backuproots.PutBack)
+            assert isinstance(outcome, backuproots.PutBack)
+            self.assertEqual(outcome.clauses, (f"{ROOT}: added or rewrote 3 file(s) (with middle, newest)",))
+            self.assertEqual(outcome.added, {ROOT: 3})
+            self.assertEqual((live / "shared").read_bytes(), b"whole uploaded file")
+            self.assertEqual((live / "selected-only").read_bytes(), b"selected bytes")
+            self.assertEqual((live / "middle-only").read_bytes(), b"intermediate bytes")
+            self.assertEqual((live / "newest-only").read_bytes(), b"newest bytes")
 
     @unittest.skipUnless(shutil.which("rsync"), "rsync is required for the real store-copy case")
     def test_two_passes_include_a_later_object_and_pin_the_listing(self) -> None:
@@ -475,7 +597,7 @@ class StoreRealTools(unittest.TestCase):
             writer_temporary.write_bytes(b"uncommitted")
             self.assertEqual(root.take(), backuproots.Taken(True, {}))
             second = put(b"second object")
-            self.assertEqual(root.complete(), backuproots.Completed(True, 1))
+            self.assertEqual(root.complete(), backuproots.Completed(True, 1, f"{ROOT}: 1 object(s)"))
             outcome = root.inventory()
             self.assertIsInstance(outcome, backuproots.Inventoried)
             assert isinstance(outcome, backuproots.Inventoried)
@@ -591,7 +713,7 @@ class StoreRealTools(unittest.TestCase):
             )
             row = backupset.InventoryRoot(ROOT, str(source), (), backupset.RootKind.STORE, False)
             with mock.patch.object(backupset, "STAGING", str(base / "staging")):
-                (root,) = backuproots.held(RealHost(), (row,), selected, later)
+                (root,) = backuproots.held(RealHost(), (row,), selected, (later,))
                 self.assertIsNone(root.verify())
                 outcome = root.put_back(backupset.AccountIds(2000, 2000))
             self.assertIsInstance(outcome, backuproots.PutBack)
@@ -1123,6 +1245,41 @@ class Fetch(unittest.TestCase):
 
 
 class HeldRoots(unittest.TestCase):
+    def test_supplies_requires_a_store_pin_or_user_written_in_place_inventory(self) -> None:
+        store = backupset.InventoryRoot("store", SOURCE, (), backupset.RootKind.STORE, False)
+        snapshot = backupset.InventoryRoot(ROOT, SOURCE, (), backupset.RootKind.SNAPSHOT, True, True)
+        pin = backupset.ListingPin("store.listing", 0, "a" * 64, 0, 0)
+        empty = manifest_with({})
+
+        self.assertTrue(backuproots.supplies(replace(empty, listings={store.name: pin}), (store, snapshot)))
+        self.assertTrue(backuproots.supplies(manifest_with({ROOT: ()}), (store, snapshot)))
+        self.assertFalse(backuproots.supplies(empty, (store, snapshot)))
+        self.assertFalse(backuproots.supplies(manifest_with({ROOT: ()}), (store, replace(snapshot, user_written=False))))
+        self.assertFalse(backuproots.supplies(manifest_with({ROOT: ()}), (store, replace(snapshot, restore_in_place=False))))
+
+    def test_held_binds_all_later_sets_to_snapshot_and_newest_listing_to_store(self) -> None:
+        snapshot = backupset.InventoryRoot(ROOT, SOURCE, (), backupset.RootKind.SNAPSHOT, True, True)
+        store = backupset.InventoryRoot("store", SOURCE, (), backupset.RootKind.STORE, False)
+        pin = backupset.ListingPin("store.listing", 0, "a" * 64, 0, 0)
+        selected = replace(previous(), manifest=manifest_with({ROOT: ()}))
+        first = later_ref("later-one", {ROOT: ()}, listings={store.name: pin})
+        second = later_ref("later-two", {ROOT: ()}, listings={store.name: pin})
+        uploads_only = later_ref("later-three", {ROOT: ()})
+
+        snapshot_root, store_root = backuproots.held(
+            cast(Host, FakeHost()), (snapshot, store), selected, (first, second, uploads_only)
+        )
+        self.assertIsInstance(snapshot_root, backuproots._HeldSnapshot)
+        self.assertIsInstance(store_root, backuproots._HeldStore)
+        assert isinstance(snapshot_root, backuproots._HeldSnapshot)
+        assert isinstance(store_root, backuproots._HeldStore)
+        self.assertEqual(snapshot_root.later, (first, second, uploads_only))
+        self.assertIs(store_root.later, second)
+
+        (store_root,) = backuproots.held(cast(Host, FakeHost()), (store,), selected, (uploads_only,))
+        assert isinstance(store_root, backuproots._HeldStore)
+        self.assertIsNone(store_root.later)
+
     def test_snapshot_verify_walks_exact_copy_then_checks_hashes(self) -> None:
         file = entry("nested/file", sha256="a" * 64)
         row = backupset.InventoryRoot(ROOT, SOURCE, (), backupset.RootKind.SNAPSHOT, True)
@@ -1144,6 +1301,44 @@ class HeldRoots(unittest.TestCase):
         )
         self.assertIsNone(root.prove("/example/rendered"))
         self.assertEqual(len(host.calls), 2)
+
+    def test_snapshot_verify_walks_and_hashes_each_later_copy(self) -> None:
+        row = backupset.InventoryRoot(ROOT, SOURCE, (), backupset.RootKind.SNAPSHOT, True, True)
+        selected_file = entry("selected", sha256="a" * 64)
+        first_file = entry("first", sha256="b" * 64)
+        second_file = entry("second", sha256="c" * 64)
+        selected = replace(previous(), manifest=manifest_with({ROOT: (selected_file,)}))
+        first = later_ref("later-one", {ROOT: (first_file,)})
+        second = later_ref("later-two", {ROOT: (second_file,)})
+        hash_argv = ("sha256sum", "-c", "-")
+        copies = (
+            (selected, selected_file), (first, first_file), (second, second_file),
+        )
+        responses: list[subprocess.CompletedProcess[str]] = []
+        calls: list[tuple[str, object, object]] = []
+        for ref, file in copies:
+            copy = os.path.join(backupset.files_dir(ref.path), ROOT)
+            find_argv = ("find", copy, "-printf", backupset.FIND_FORMAT)
+            responses.extend((
+                completed(find_argv, stdout=listing(file)),
+                completed(hash_argv, stdout=f"{file.path}: OK\n"),
+            ))
+            calls.extend((
+                ("run", find_argv, {}),
+                ("run", hash_argv, {"input": f"{file.sha256}  {file.path}\n", "cwd": copy}),
+            ))
+        host = FakeHost(responses)
+        (root,) = backuproots.held(cast(Host, host), (row,), selected, (first, second))
+        self.assertIsNone(root.verify())
+        self.assertEqual(host.calls, calls)
+        self.assertEqual(host.responses, [])
+
+        failed = FakeHost((*responses[:-1], completed(hash_argv, returncode=1, stdout="second: FAILED\n")))
+        (root,) = backuproots.held(cast(Host, failed), (row,), selected, (first, second))
+        self.assertEqual(
+            root.verify(), Problem(f"checksum verification failed for 1 path(s) in {ROOT}", "")
+        )
+        self.assertEqual(failed.calls, calls)
 
     def test_snapshot_verify_refuses_a_stray_path_with_walk_fix(self) -> None:
         row = backupset.InventoryRoot(ROOT, SOURCE, (), backupset.RootKind.SNAPSHOT, True)
@@ -1311,6 +1506,106 @@ class HeldRoots(unittest.TestCase):
                 ("run", rsync_argv, {"input": None, "timeout": None}),
                 ("run", find_argv, {}),
             ],
+        )
+
+    def test_snapshot_put_back_overlays_applying_later_sets_in_order(self) -> None:
+        row = backupset.InventoryRoot(ROOT, SOURCE, ("cache/",), backupset.RootKind.SNAPSHOT, True, True)
+        selected_file = replace(entry("same"), uid=1001, gid=1001)
+        first_file = replace(entry("same"), uid=3001, gid=3001)
+        middle_file = replace(entry("middle"), uid=3000, gid=3000)
+        newest_file = replace(entry("same"), uid=4001, gid=4001)
+        root_entry = backupset.Entry(backupset.ROOT_ENTRY, "d", 4096, 4000, 4000, 0o750, 100.0, None)
+        selected = replace(
+            previous(), manifest=replace(
+                manifest_with({ROOT: (selected_file,)}), gideon_ids=backupset.AccountIds(1000, 1000),
+            ),
+        )
+        first = later_ref(
+            "later-one", {ROOT: (first_file, middle_file)}, ids=backupset.AccountIds(3000, 3000),
+        )
+        skipped = later_ref("later-empty", {})
+        newest = later_ref(
+            "later-two", {ROOT: (root_entry, newest_file)}, ids=backupset.AccountIds(4000, 4000),
+        )
+        selected_copy = os.path.join(backupset.files_dir(selected.path), ROOT)
+        first_copy = os.path.join(backupset.files_dir(first.path), ROOT)
+        newest_copy = os.path.join(backupset.files_dir(newest.path), ROOT)
+        put_back_argv = (
+            "rsync", "-a", "--delete", "--exclude=cache/", selected_copy + "/", SOURCE + "/",
+        )
+        first_argv = ("rsync", "-a", "--stats", "--exclude=cache/", first_copy + "/", SOURCE + "/")
+        newest_argv = ("rsync", "-a", "--stats", "--exclude=cache/", newest_copy + "/", SOURCE + "/")
+        find_argv = ("find", SOURCE, "-printf", backupset.FIND_FORMAT)
+        details = os.stat_result((stat.S_IFDIR | 0o755, 0, 0, 0, 5000, 5001, 0, 0, 0, 0))
+        host = FakeHost((
+            completed(put_back_argv),
+            completed(find_argv, stdout=listing(selected_file)),
+            completed(first_argv, stdout="Number of regular files transferred: 1\n"),
+            completed(newest_argv, stdout="Number of regular files transferred: 2\n"),
+        ), {SOURCE: details})
+        (root,) = backuproots.held(cast(Host, host), (row,), selected, (first, skipped, newest))
+
+        outcome = root.put_back(backupset.AccountIds(2000, 2000))
+
+        self.assertIsInstance(outcome, backuproots.PutBack)
+        assert isinstance(outcome, backuproots.PutBack)
+        self.assertEqual(outcome.restored, (ROOT,))
+        self.assertEqual(outcome.clauses, (f"{ROOT}: added or rewrote 3 file(s) (with later-one, later-two)",))
+        self.assertEqual(outcome.added, {ROOT: 3})
+        self.assertEqual(outcome.claims.owners, {
+            (4001, 4001, False): [os.path.join(SOURCE, "same")],
+            (2000, 2000, False): [os.path.join(SOURCE, "middle"), os.path.join(SOURCE, ".")],
+        })
+        self.assertEqual(outcome.claims.modes, {
+            0o644: [os.path.join(SOURCE, "same"), os.path.join(SOURCE, "middle")],
+            0o750: [os.path.join(SOURCE, ".")],
+        })
+        self.assertEqual((outcome.claims.entries_claimed, outcome.claims.gideon_owned), (3, 2))
+        self.assertEqual(host.calls, [
+            ("stat", SOURCE, {}),
+            ("run", put_back_argv, {"input": None, "timeout": None}),
+            ("run", find_argv, {}),
+            ("run", first_argv, {"cwd": None}),
+            ("run", newest_argv, {"cwd": None}),
+        ])
+        self.assertEqual(host.responses, [])
+
+    def test_snapshot_overlay_reports_zero_and_non_user_written_skips_it(self) -> None:
+        later = later_ref("later-one", {ROOT: ()})
+        selected = replace(previous(), manifest=manifest_with({ROOT: ()}))
+        copy = os.path.join(backupset.files_dir(selected.path), ROOT)
+        later_copy = os.path.join(backupset.files_dir(later.path), ROOT)
+        put_back_argv = ("rsync", "-a", "--delete", copy + "/", SOURCE + "/")
+        overlay_argv = ("rsync", "-a", "--stats", later_copy + "/", SOURCE + "/")
+        find_argv = ("find", SOURCE, "-printf", backupset.FIND_FORMAT)
+        row = backupset.InventoryRoot(ROOT, SOURCE, (), backupset.RootKind.SNAPSHOT, True, True)
+        host = FakeHost((
+            completed(put_back_argv), completed(find_argv, stdout=listing()),
+            completed(overlay_argv, stdout="Number of regular files transferred: 0\n"),
+        ))
+        (root,) = backuproots.held(cast(Host, host), (row,), selected, (later,))
+        outcome = root.put_back(backupset.AccountIds(2000, 2000))
+        self.assertIsInstance(outcome, backuproots.PutBack)
+        assert isinstance(outcome, backuproots.PutBack)
+        self.assertEqual(outcome.clauses, (f"{ROOT}: added or rewrote 0 file(s) (with later-one)",))
+        self.assertEqual(outcome.added, {ROOT: 0})
+        self.assertEqual([call[1] for call in host.calls if call[0] == "run"], [put_back_argv, find_argv, overlay_argv])
+
+        copy_find_argv = ("find", copy, "-printf", backupset.FIND_FORMAT)
+        idle = FakeHost((
+            completed(copy_find_argv, stdout=listing()),
+            completed(put_back_argv),
+            completed(find_argv, stdout=listing()),
+        ))
+        (root,) = backuproots.held(cast(Host, idle), (replace(row, user_written=False),), selected, (later,))
+        self.assertIsNone(root.verify())
+        outcome = root.put_back(backupset.AccountIds(2000, 2000))
+        self.assertIsInstance(outcome, backuproots.PutBack)
+        assert isinstance(outcome, backuproots.PutBack)
+        self.assertEqual((outcome.clauses, outcome.added), ((), {}))
+        self.assertEqual(
+            [call[1] for call in idle.calls if call[0] == "run"],
+            [copy_find_argv, put_back_argv, find_argv],
         )
 
     def test_snapshot_put_back_refuses_rsync_and_walk(self) -> None:
@@ -1628,7 +1923,7 @@ class StoreRestore(unittest.TestCase):
             completed(hash_argv, stdout=f"bb/bb/{repaired}: OK\ncc/cc/{later_only}: OK\n"),
             completed(transfer_argv(later_copy), stdout="Number of regular files transferred: 2\n"),
         ), existing=(SOURCE,))
-        (root,) = backuproots.held(cast(Host, host), (row,), selected, later)
+        (root,) = backuproots.held(cast(Host, host), (row,), selected, (later,))
         outcome = root.put_back(backupset.AccountIds(2000, 2000))
         self.assertIsInstance(outcome, backuproots.PutBack)
         assert isinstance(outcome, backuproots.PutBack)

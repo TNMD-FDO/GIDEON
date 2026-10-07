@@ -470,18 +470,17 @@ def _timed(seconds: dict[str, float], stage: str, *, measured: bool) -> Iterator
 
 
 def _complete_stage(roots: tuple[backuproots.TakingRoot, ...]) -> StageResult:
-    acted = 0
-    objects = 0
+    clauses: list[str] = []
     for root in roots:
         outcome = root.complete()
         if isinstance(outcome, Problem):
             return StageResult("complete", False, outcome.problem, outcome.fix or _stage_fix())
-        acted += outcome.acted
-        objects += outcome.objects
+        if outcome.acted:
+            clauses.append(outcome.clause)
     return StageResult(
         "complete",
         True,
-        f"completed {acted} root(s); {objects} object(s) arrived since the first pass",
+        f"completed {len(clauses)} root(s); {', '.join(clauses)} arrived since the first pass",
         "",
     )
 

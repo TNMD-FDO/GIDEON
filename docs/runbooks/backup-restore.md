@@ -96,8 +96,8 @@ nothing older is recoverable, and there is no monthly tier.
   failure, because a full copy would hide a retention overrun), `secrets`,
   `postgres` (`full` or `incr`, then the archive boundary and one commit past
   it before the WAL segment is archived), `complete` (a second copy of the
-  content-addressed store, reporting objects that arrived since the first
-  pass), `counts`, `manifest`, `prune`, `applied`.
+  content-addressed store and of the frontend's uploads root, reporting what
+  arrived in each since the first pass), `counts`, `manifest`, `prune`, `applied`.
   A set is complete only once `manifest.json` exists; an interrupted run leaves
   a `.partial` directory that the next run prunes after a day.
 - **`backup push`** — `record` (`push.json`, the snapshot's coverage record),
@@ -124,7 +124,12 @@ directory, verified and re-owned before anything live is touched).
 `--at <ISO time>` restores Postgres to that instant and the files to the newest
 set finished by then; a naive time is office-local. Every point-in-time bound
 is a recorded archive boundary, never a clock: a time the sets cannot reach
-refuses and names the bound.
+refuses and names the bound. The frontend's uploads root is then also overlaid
+from every complete set in the same source finished after the restored one,
+oldest first: the files the live root lacks are added and the newer version
+of any it holds is written, nothing is deleted, and the frontend's audit log
+is the newest copy's. The `files:` row reports it as
+`data-bulk-openwebui: added or rewrote N file(s) (with <label>, ...)`.
 
 While the `gideon-ci` sibling stands, run `sudo python3 -m tools.cistack down`
 first: its relay holds production's Compose network, which the restore's stop

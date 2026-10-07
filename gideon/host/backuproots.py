@@ -74,7 +74,7 @@ def _checked(
 
 
 def _transferred(io: Host, argv: Sequence[str], what: str, *, input: str | None = None) -> int | Problem:
-    """Run a store transfer and return the regular files its own report says it wrote."""
+    """Run a transfer and return the regular files its own report says it wrote."""
 
     result = _checked(io, argv, what, input=input)
     if isinstance(result, Problem):
@@ -144,10 +144,11 @@ class Taken:
 
 @dataclass(frozen=True, slots=True)
 class Completed:
-    """Whether a root completed a second copy and how many objects arrived."""
+    """Whether a root completed a second copy, its arrivals, and its row clause."""
 
     acted: bool
-    objects: int
+    arrived: int
+    clause: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,22 +272,25 @@ class TakingRoot:
 
 @dataclass(frozen=True, slots=True)
 class _TakingSnapshot(TakingRoot):
+    user_written: bool = False
+
+    def _copy_argv(self, *extra: str) -> list[str]:
+        argv = ["rsync", "-a", *(f"--exclude={pattern}" for pattern in self.exclusions)]
+        if self.previous is not None:
+            link_dest = os.path.join(backupset.files_dir(self.previous.path), self.name)
+            argv.append(f"--link-dest={link_dest}/")
+        return [
+            *argv,
+            *extra,
+            self.source.rstrip("/") + "/",
+            self._copy().rstrip("/") + "/",
+        ]
+
     def take(self) -> Taken | Problem:
         destination = self._copy()
         try:
             self.io.mkdir(destination, mode=0o750, parents=True, exist_ok=True)
-            argv = ["rsync", "-a"]
-            argv.extend(f"--exclude={pattern}" for pattern in self.exclusions)
-            if self.previous is not None:
-                link_dest = os.path.join(backupset.files_dir(self.previous.path), self.name)
-                argv.append(f"--link-dest={link_dest}/")
-            argv.extend(
-                [
-                    self.source.rstrip("/") + "/",
-                    destination.rstrip("/") + "/",
-                ]
-            )
-            result = self.io.run(argv)
+            result = self.io.run(self._copy_argv())
             if result.returncode != 0:
                 return Problem(f"rsync failed for {self.name}: {command_detail(result)}", "")
         except (OSError, subprocess.SubprocessError) as exc:
@@ -316,7 +320,14 @@ class _TakingSnapshot(TakingRoot):
         return Inventoried(hashed, sum(entry.size for entry in hashed if entry.kind == "f"))
 
     def complete(self) -> Completed | Problem:
-        return Completed(False, 0)
+        if not self.user_written:
+            return Completed(False, 0, "")
+        transferred = _transferred(
+            self.io, self._copy_argv("--stats"), f"file snapshot for {self.name}"
+        )
+        if isinstance(transferred, Problem):
+            return transferred
+        return Completed(True, transferred, f"{self.name}: {transferred} file(s)")
 
 
 @dataclass(frozen=True, slots=True)
@@ -337,7 +348,7 @@ class _TakingRepository(TakingRoot):
         return Inventoried(hashed, 0)
 
     def complete(self) -> Completed | Problem:
-        return Completed(False, 0)
+        return Completed(False, 0, "")
 
 
 @dataclass(frozen=True, slots=True)
@@ -384,7 +395,7 @@ class _TakingStore(TakingRoot):
         transferred = self._transfer(first=False)
         if isinstance(transferred, Problem):
             return transferred
-        return Completed(True, transferred)
+        return Completed(True, transferred, f"{self.name}: {transferred} object(s)")
 
     def inventory(self) -> Inventoried | Problem:
         copy = self._copy()
@@ -418,11 +429,17 @@ def taking(
     """Bind the registry rows to an in-flight set and its previous set, in registry order."""
 
     kinds = {
-        backupset.RootKind.SNAPSHOT: _TakingSnapshot,
         backupset.RootKind.REPOSITORY: _TakingRepository,
         backupset.RootKind.STORE: _TakingStore,
     }
-    return tuple(kinds[root.kind](io, root.name, root.source, root.exclusions, partial, previous) for root in roots)
+    bound: list[TakingRoot] = []
+    for root in roots:
+        args = (io, root.name, root.source, root.exclusions, partial, previous)
+        if root.kind is backupset.RootKind.SNAPSHOT:
+            bound.append(_TakingSnapshot(*args, user_written=root.user_written))
+        else:
+            bound.append(kinds[root.kind](*args))
+    return tuple(bound)
 
 
 @dataclass(frozen=True, slots=True)
@@ -904,6 +921,7 @@ class PutBack:
     claims: Claims
     counts: Mapping[str, "StoreCounts"] = field(default_factory=dict)
     closing_lines: tuple[str, ...] = ()
+    added: Mapping[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -937,16 +955,40 @@ class HeldRoot:
 
 @dataclass(frozen=True, slots=True)
 class _HeldSnapshot(HeldRoot):
-    """A snapshot verifies its copy and optionally restores its live directory."""
+    """A snapshot verifies its set copies and optionally restores its live directory."""
 
     exclusions: tuple[str, ...]
     restore_in_place: bool
+    user_written: bool
+    later: tuple[backupset.SetRef, ...]
+
+    def _later_copies(self) -> tuple[tuple[str, backupset.Manifest, str], ...]:
+        """The later sets' copies of this root an overlay applies, oldest first."""
+
+        if not self.user_written or not self.restore_in_place:
+            return ()
+        return tuple(
+            (ref.label, ref.manifest, os.path.join(backupset.files_dir(ref.path), self.name))
+            for ref in self.later
+            if ref.manifest is not None and self.name in ref.manifest.inventory
+        )
 
     def verify(self) -> Problem | None:
         walked = _validate_physical(self.io, base=self.copy, entries=self.entries, exact=True)
         if walked is not None:
             return walked
-        return _verify_file_root(self.io, self.name, self.entries, self.copy)
+        problem = _verify_file_root(self.io, self.name, self.entries, self.copy)
+        if problem is not None:
+            return problem
+        for _, manifest, copy in self._later_copies():
+            entries = manifest.inventory[self.name]
+            walked = _validate_physical(self.io, base=copy, entries=entries, exact=True)
+            if walked is not None:
+                return walked
+            problem = _verify_file_root(self.io, self.name, entries, copy)
+            if problem is not None:
+                return problem
+        return None
 
     def prove(self, rendered_dir: PathLike) -> Problem | None:
         return None
@@ -976,17 +1018,38 @@ class _HeldSnapshot(HeldRoot):
         result = run_stage(self.io, "files", argv, f"restored {self.name}", "")
         if not result.ok:
             return Problem(result.detail, "")
-        if keep is not None:
-            uid, gid, mode = keep
-            claims.add_owner(self.source, uid, gid)
-            claims.add_mode(self.source, mode)
         failure = _validate_physical(self.io, base=self.source, entries=self.entries)
         if failure is not None:
             return failure
         owner_map = backupset.OwnerMap(self.manifest.gideon_ids, host_ids)
+        final_claims: dict[str, tuple[backupset.Entry, backupset.OwnerMap]] = {}
         for entry in self.entries:
-            claims.claim(os.path.join(self.source, entry.path), entry, owner_map)
-        return PutBack((self.name,), (), claims)
+            final_claims[entry.path] = (entry, owner_map)
+        arrived = 0
+        labels: list[str] = []
+        for label, manifest, copy in self._later_copies():
+            argv = ["rsync", "-a", "--stats"]
+            argv.extend(f"--exclude={pattern}" for pattern in self.exclusions)
+            argv.extend([copy.rstrip("/") + "/", self.source.rstrip("/") + "/"])
+            transferred = _transferred(self.io, argv, f"snapshot overlay for {self.name}")
+            if isinstance(transferred, Problem):
+                return transferred
+            arrived += transferred
+            labels.append(label)
+            owner_map = backupset.OwnerMap(manifest.gideon_ids, host_ids)
+            for entry in manifest.inventory[self.name]:
+                final_claims[entry.path] = (entry, owner_map)
+        if keep is not None and backupset.ROOT_ENTRY not in final_claims:
+            uid, gid, mode = keep
+            claims.add_owner(self.source, uid, gid)
+            claims.add_mode(self.source, mode)
+        for path, (entry, owner_map) in final_claims.items():
+            claims.claim(os.path.join(self.source, path), entry, owner_map)
+        clause = (
+            (f"{self.name}: added or rewrote {arrived} file(s) (with {', '.join(labels)})",)
+            if labels else ()
+        )
+        return PutBack((self.name,), clause, claims, added={self.name: arrived} if labels else {})
 
 
 @dataclass(frozen=True, slots=True)
@@ -1171,11 +1234,28 @@ class _HeldStore(HeldRoot):
         return passing, failed
 
 
+def supplies(
+    manifest: backupset.Manifest, roots: Sequence[backupset.InventoryRoot]
+) -> bool:
+    """Whether this set carries a listing or snapshot a bound root can draw on."""
+
+    return any(
+        (root.kind is backupset.RootKind.STORE and root.name in manifest.listings)
+        or (
+            root.kind is backupset.RootKind.SNAPSHOT
+            and root.user_written
+            and root.restore_in_place
+            and root.name in manifest.inventory
+        )
+        for root in roots
+    )
+
+
 def held(
     io: Host,
     roots: Sequence[backupset.InventoryRoot],
     set_ref: backupset.SetRef,
-    later: backupset.SetRef | None = None,
+    later: tuple[backupset.SetRef, ...] = (),
 ) -> tuple[HeldRoot, ...]:
     """Bind registry roots in order to their places in a complete set."""
 
@@ -1196,6 +1276,8 @@ def held(
                     set_ref.manifest,
                     row.exclusions,
                     row.restore_in_place,
+                    row.user_written,
+                    later,
                 )
             )
         elif row.kind is backupset.RootKind.STORE:
@@ -1203,7 +1285,14 @@ def held(
                 _HeldStore(
                     io, row.name, row.source,
                     os.path.join(backupset.files_dir(set_ref.path), row.name), entries,
-                    set_ref.manifest, set_ref.manifest.listings.get(row.name), later,
+                    set_ref.manifest, set_ref.manifest.listings.get(row.name),
+                    next(
+                        (
+                            ref for ref in reversed(later)
+                            if ref.manifest is not None and row.name in ref.manifest.listings
+                        ),
+                        None,
+                    ),
                 )
             )
         else:

@@ -44,6 +44,7 @@ _fingerprint = secrets.secrets_fingerprint(SECRET_DIGESTS)
 assert _fingerprint is not None
 FINGERPRINT: str = _fingerprint
 STORE_ROOT = next(root for root in backupset.inventory_roots("/work/GIDEON") if root.kind is backupset.RootKind.STORE)
+UPLOADS_ROOT = next(root for root in backupset.inventory_roots("/work/GIDEON") if root.user_written)
 
 SITE = """\
 office:
@@ -297,6 +298,9 @@ class FakeHost:
                         self.store_live[name] = int(sizes[name])
                 count = len(paths)
                 return completed(command, stdout=f"Number of regular files transferred: {count}\n")
+            if command[:3] == ("rsync", "-a", "--stats"):
+                count = int(f"/sets/{LATER_SET}/files/{UPLOADS_ROOT.name}/" in command[-2])
+                return completed(command, stdout=f"Number of regular files transferred: {count}\n")
             return completed(command)
         if command[:2] == ("find", ".") and "-fprintf" in command:
             listing_path = command[command.index("-fprintf") + 1]
@@ -320,8 +324,15 @@ class FakeHost:
             # with their declared kinds, unless the tree has been made to escape.
             base = str(command[1])
             root_name = self._root_for(base)
+            value = self.manifest_value
+            if "/files/" in base:
+                set_path = base.split("/files/", 1)[0]
+                document = self.files[self._local_path(os.path.join(set_path, backupset.MANIFEST_NAME))]
+                parsed = backupset.parse_manifest(document)
+                assert isinstance(parsed, backupset.Manifest)
+                value = parsed
             records = "d\t4096\t0\t0\t755\t100.0\t\0"
-            for item in self.manifest_value.inventory.get(root_name, ()):
+            for item in value.inventory.get(root_name, ()):
                 if self.physical_escape and item.path.startswith("escape/"):
                     continue
                 records += f"{item.kind}\t{item.size}\t{item.uid}\t{item.gid}\t{item.mode:o}\t{item.mtime}\t{item.path}\0"
@@ -342,6 +353,19 @@ class FakeHost:
                 return completed(command, returncode=1, stderr="sha256sum: 'standard input': no properly formatted checksum lines found\n")
             if self.fail_checksum:
                 return completed(command, returncode=1, stdout="config.yaml: FAILED\n")
+            if cwd is not None and f"/sets/{LATER_SET}/files/{UPLOADS_ROOT.name}" in os.fspath(cwd):
+                base = self._local_path(os.fspath(cwd))
+                checks = []
+                for line in (input or "").splitlines():
+                    digest, path = line.split("  ", 1)
+                    content = self.files.get(os.path.join(base, path))
+                    okay = content is not None and hashlib.sha256(content.encode()).hexdigest() == digest
+                    checks.append((path, okay))
+                return completed(
+                    command,
+                    stdout="".join(f"{path}: {'OK' if okay else 'FAILED'}\n" for path, okay in checks),
+                    returncode=int(any(not okay for _, okay in checks)),
+                )
             if cwd is not None and os.fspath(cwd).endswith("/files/" + STORE_ROOT.name):
                 lines = (input or "").splitlines()
                 damaged_here = self.store_damaged if f"/sets/{LOCAL_SET}/" in os.fspath(cwd) else set()
@@ -1574,7 +1598,7 @@ class StoreRestoreCommands(unittest.TestCase):
                 self.assertFalse(any(call[0][-1] == "down" for call in fake.calls))
 
     def _with_later(
-        self, *, source: str, bad_later_pin: bool = False
+        self, *, source: str, bad_later_pin: bool = False, bad_later_hash: bool = False
     ) -> tuple[FakeHost, str, str]:
         repaired = hashlib.sha256(b"whole object").hexdigest()
         later_only = hashlib.sha256(b"later object").hexdigest()
@@ -1582,6 +1606,12 @@ class StoreRestoreCommands(unittest.TestCase):
         later, later_listing = manifest_with_store({
             repaired: len(b"whole object"), later_only: len(b"later object"),
         })
+        upload_content = "whole uploaded file"
+        upload_entry = replace(
+            entry("uploads/data.bin", digest=hashlib.sha256(upload_content.encode()).hexdigest()),
+            size=len(upload_content),
+        )
+        later = replace(later, inventory={**later.inventory, UPLOADS_ROOT.name: (upload_entry,)})
         later_finished = NOW - timedelta(minutes=10)
         later = replace(
             later, label=LATER_SET, started=later_finished - timedelta(minutes=10),
@@ -1601,6 +1631,8 @@ class StoreRestoreCommands(unittest.TestCase):
         later_path = backupset.set_dir(LATER_SET)
         fake.files[os.path.join(later_path, backupset.MANIFEST_NAME)] = later.to_json()
         fake.files[backupset.listing_path(later_path, STORE_ROOT.name)] = later_listing
+        later_copy = os.path.join(backupset.files_dir(later_path), UPLOADS_ROOT.name, upload_entry.path)
+        fake.files[later_copy] = "damaged upload" if bad_later_hash else upload_content
         return fake, repaired, later_only
 
     def test_point_in_time_restore_uses_later_set_but_latest_restore_does_not(self) -> None:
@@ -1613,6 +1645,9 @@ class StoreRestoreCommands(unittest.TestCase):
                 self.assertIn(
                     f"{STORE_ROOT.name}: added 2 object(s), 0 left out (with {LATER_SET})", output,
                 )
+                self.assertIn(
+                    f"{UPLOADS_ROOT.name}: added or rewrote 1 file(s) (with {LATER_SET})", output,
+                )
                 self.assertEqual(fake.store_live, {repaired: len(b"whole object"), later_only: len(b"later object")})
                 self.assertEqual(
                     len([call for call in fake.calls if call[0][:3] == ("env", "LC_ALL=C", "join")]), 2,
@@ -1621,14 +1656,53 @@ class StoreRestoreCommands(unittest.TestCase):
                     f'"store": {{"{STORE_ROOT.name}": {{"added": 2, "left_out": 0}}}}',
                     self._audit_text(fake),
                 )
+                self.assertIn(f'"later_labels": ["{LATER_SET}"]', self._audit_text(fake))
+                self.assertIn(f'"added": {{"{UPLOADS_ROOT.name}": 1}}', self._audit_text(fake))
+                overlays = [
+                    call for call in fake.calls if call[0][:3] == ("rsync", "-a", "--stats")
+                ]
+                self.assertEqual(len(overlays), 1)
+                self.assertIn(f"/sets/{LATER_SET}/files/{UPLOADS_ROOT.name}/", overlays[0][0][-2])
+                if source == "target":
+                    self.assertIn("swap: ok — installed the fetched staging directory", output)
 
                 latest, _, _ = self._with_later(source=source)
                 code, output = self._run(latest, source)
                 self.assertEqual(code, 0, output)
                 self.assertNotIn(f"(with {LATER_SET})", output)
+                self.assertNotIn(f"{UPLOADS_ROOT.name}: added or rewrote", output)
+                self.assertFalse(any(call[0][:3] == ("rsync", "-a", "--stats") for call in latest.calls))
+                self.assertIn('"later_labels": []', self._audit_text(latest))
+                self.assertIn('"added": {}', self._audit_text(latest))
                 self.assertEqual(
                     len([call for call in latest.calls if call[0][:3] == ("env", "LC_ALL=C", "join")]), 1,
                 )
+
+    def test_named_set_does_not_overlay_later_uploads(self) -> None:
+        fake, _, _ = self._with_later(source="staging")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = restore.run_restore(
+                argparse.Namespace(source="staging", at=None, set=LOCAL_SET), host=fake, now=NOW,
+            )
+        self.assertEqual(code, 0, output.getvalue())
+        self.assertNotIn(f"{UPLOADS_ROOT.name}: added or rewrote", output.getvalue())
+        self.assertFalse(any(call[0][:3] == ("rsync", "-a", "--stats") for call in fake.calls))
+        self.assertIn('"later_labels": []', self._audit_text(fake))
+        self.assertIn('"added": {}', self._audit_text(fake))
+
+    def test_later_upload_hash_failure_refuses_before_stop(self) -> None:
+        for source in ("staging", "target"):
+            with self.subTest(source=source):
+                fake, _, _ = self._with_later(source=source, bad_later_hash=True)
+                code, output = self._run(fake, source, at=NOW - timedelta(minutes=30))
+                self.assertEqual(code, 1)
+                self.assertIn("verify: refuse", output)
+                self.assertIn(
+                    f"checksum verification failed for 1 path(s) in {UPLOADS_ROOT.name}", output,
+                )
+                self.assertFalse(any(call[0][-1] == "down" for call in fake.calls))
+                self.assertFalse(any(call[0][:3] == ("rsync", "-a", "--stats") for call in fake.calls))
 
     def test_later_listing_mismatch_refuses_before_stop(self) -> None:
         at = NOW - timedelta(minutes=30)

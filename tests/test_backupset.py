@@ -189,8 +189,15 @@ class LayoutAndLabels(unittest.TestCase):
             ),
         )
         self.assertEqual(
-            [(root.snapshotted, root.restore_in_place) for root in roots],
-            [(True, True), (True, False), (True, True), (True, True), (False, False), (False, False)],
+            [(root.snapshotted, root.restore_in_place, root.user_written) for root in roots],
+            [
+                (True, True, False),
+                (True, False, False),
+                (True, True, False),
+                (True, True, True),
+                (False, False, False),
+                (False, False, False),
+            ],
         )
         self.assertEqual(
             backupset.listing_path(backupset.set_dir("label"), roots[-2].name),

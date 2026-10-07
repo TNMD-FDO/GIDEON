@@ -2,6 +2,7 @@
 
 import argparse
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -341,6 +342,21 @@ def _commands(*, old: backupset.Manifest | None = None) -> dict[tuple[str, ...],
         result(store_rsync, stdout="Number of regular files transferred: 1\n"),
         result(store_rsync, stdout="Number of regular files transferred: 0\n"),
     ]
+    uploads = next(root for root in backupset.inventory_roots(CHECKOUT) if root.user_written)
+    uploads_copy = os.path.join(backupset.files_dir(partial), uploads.name)
+    previous_copy = (
+        (f"--link-dest={backupset.files_dir(backupset.set_dir(old.label))}/{uploads.name}/",)
+        if old is not None else ()
+    )
+    uploads_rsync = (
+        "rsync", "-a",
+        *(f"--exclude={pattern}" for pattern in uploads.exclusions),
+        *previous_copy,
+        "--stats", uploads.source + "/", uploads_copy + "/",
+    )
+    commands[uploads_rsync] = [
+        result(uploads_rsync, stdout="Number of regular files transferred: 0\n")
+    ]
     commands[tuple(backuproots._store_stray_argv())] = [result((), stdout="")]
     commands[tuple(backuproots._store_listing_argv(listing_path))] = [result(())]
     commands[("env", "LC_ALL=C", "sort", "-o", listing_path, listing_path)] = [result(())]
@@ -553,7 +569,7 @@ class BackupRun(unittest.TestCase):
             [line.split(":", 1)[0] for line in out.getvalue().splitlines()],
             ["intent", "files", "secrets", "postgres", "complete", "counts", "manifest", "prune", "applied"],
         )
-        self.assertIn("complete: ok — completed 1 root(s); 0 object(s) arrived since the first pass", out.getvalue())
+        self.assertIn("complete: ok — completed 2 root(s); data-bulk-openwebui: 0 file(s), data-bulk-cas: 0 object(s) arrived since the first pass", out.getvalue())
         manifest_path = os.path.join(backupset.set_dir("20260902T120000Z"), backupset.MANIFEST_NAME)
         parsed = backupset.parse_manifest(host.files[manifest_path])
         self.assertIsInstance(parsed, backupset.Manifest)
@@ -578,7 +594,7 @@ class BackupRun(unittest.TestCase):
         )
         self.assertEqual(parsed.row_counts, {"gideon": {"public.users": 3}, "openwebui": {"main.chats": 4}})
         rsync = [call[0] for call in host.calls if call[0][0] == "rsync"]
-        self.assertEqual(len(rsync), 6)
+        self.assertEqual(len(rsync), 7)
         etc = next(argv for argv in rsync if any("/etc-gideon/" in value for value in argv))
         self.assertIn("--exclude=secrets/", etc)
         self.assertNotIn("--link-dest=/data/backup-staging/sets/", " ".join(etc))
@@ -622,6 +638,12 @@ class BackupRun(unittest.TestCase):
                 f"{backupset.partial_dir('20260902T120000Z')}/files/data-bulk-openwebui/",
             ),
             (
+                "rsync",
+                "-a", "--stats",
+                "/data/bulk/openwebui/",
+                f"{backupset.partial_dir('20260902T120000Z')}/files/data-bulk-openwebui/",
+            ),
+            (
                 "rsync", "-rtp", "--stats", "--exclude=.*", store.source + "/",
                 f"{backupset.partial_dir('20260902T120000Z')}/files/{store.name}/",
             ),
@@ -659,6 +681,81 @@ class BackupRun(unittest.TestCase):
             "SELECT 'public.users', count(*) FROM public.users;\n", psql_inputs
         )
         self.assertNotIn("invalid-name", "".join(psql_inputs))
+
+    def test_file_arriving_after_first_pass_is_copied_and_inventoried(self) -> None:
+        """The pass after the archive boundary includes a newly written upload."""
+
+        host = _host()
+        uploads = next(root for root in backupset.inventory_roots(CHECKOUT) if root.user_written)
+        partial = backupset.partial_dir("20260902T120000Z")
+        copy = os.path.join(backupset.files_dir(partial), uploads.name)
+        text = "upload written after the first pass"
+        name = "arrived.txt"
+        live_file = os.path.join(uploads.source, name)
+        copy_file = os.path.join(copy, name)
+        first_pass = ("rsync", "-a", uploads.source + "/", copy + "/")
+        second_pass = ("rsync", "-a", "--stats", uploads.source + "/", copy + "/")
+        boundary_check = tuple(pgbackrest.exec_argv(RENDERED, "check"))
+        find_argv = ("find", copy, "-printf", backupset.FIND_FORMAT)
+        hash_argv = ("find", copy, "-type", "f", "-exec", "sha256sum", "{}", "+")
+        digest = hashlib.sha256(text.encode()).hexdigest()
+        original_run = host.run
+
+        def run(
+            argv: Command,
+            *,
+            check: bool = False,
+            input: str | None = None,
+            cwd: PathLike | None = None,
+            env: Mapping[str, str] | None = None,
+            timeout: float | None = None,
+            passthrough: bool = False,
+        ) -> subprocess.CompletedProcess[str]:
+            command = tuple(argv)
+            if command == first_pass:
+                self.assertNotIn(live_file, host.files)
+            response = original_run(
+                argv, check=check, input=input, cwd=cwd, env=env,
+                timeout=timeout, passthrough=passthrough,
+            )
+            if command == boundary_check:
+                host.files[live_file] = text
+            elif command == second_pass:
+                self.assertIn(live_file, host.files)
+                host.files[copy_file] = host.files[live_file]
+                host.commands[find_argv] = [result(
+                    find_argv,
+                    stdout=(
+                        "d\t4096\t1000\t1000\t755\t100.0\t\0"
+                        "f\t5\t1000\t1000\t644\t101.0\tfile.txt\0"
+                        f"f\t{len(text)}\t1000\t1000\t644\t102.0\t{name}\0"
+                    ),
+                )]
+                host.commands[hash_argv] = [result(
+                    hash_argv,
+                    stdout=f"{'a' * 64}  {copy}/file.txt\n{digest}  {copy_file}\n",
+                )]
+                return result(second_pass, stdout="Number of regular files transferred: 1\n")
+            return response
+
+        out = io.StringIO()
+        with mock.patch.object(host, "run", side_effect=run), contextlib.redirect_stdout(out):
+            code = backup.run_backup_run(
+                argparse.Namespace(full=True, label=None), host=host, root=CHECKOUT, now=NOW
+            )
+        self.assertEqual(code, 0)
+        self.assertIn("data-bulk-openwebui: 1 file(s)", out.getvalue())
+        self.assertEqual(host.files[os.path.join(backupset.files_dir(backupset.set_dir("20260902T120000Z")), uploads.name, name)], text)
+        manifest_path = os.path.join(backupset.set_dir("20260902T120000Z"), backupset.MANIFEST_NAME)
+        manifest = backupset.parse_manifest(host.files[manifest_path])
+        self.assertIsInstance(manifest, backupset.Manifest)
+        assert isinstance(manifest, backupset.Manifest)
+        arrived = next(item for item in manifest.inventory[uploads.name] if item.path == name)
+        self.assertEqual((arrived.size, arrived.sha256), (len(text), digest))
+        calls = [call[0] for call in host.calls]
+        self.assertLess(calls.index(first_pass), calls.index(boundary_check))
+        self.assertLess(calls.index(boundary_check), calls.index(second_pass))
+        self.assertLess(calls.index(second_pass), calls.index(find_argv))
 
     def test_missing_or_malformed_gideon_account_refuses_before_intent(self) -> None:
         command = ("getent", "passwd", backupset.SERVICE_ACCOUNT)
@@ -723,6 +820,12 @@ class BackupRun(unittest.TestCase):
         """A failed second pass refuses before the inventory, leaving the set partial and unnamed."""
 
         host = _host()
+        uploads = next(root for root in backupset.inventory_roots(CHECKOUT) if root.user_written)
+        uploads_copy = os.path.join(backupset.files_dir(backupset.partial_dir("20260902T120000Z")), uploads.name)
+        uploads_argv = ("rsync", "-a", "--stats", uploads.source + "/", uploads_copy + "/")
+        host.commands[uploads_argv] = [
+            result(uploads_argv, stdout="Number of regular files transferred: 2\n")
+        ]
         store = next(root for root in backupset.inventory_roots(CHECKOUT) if root.kind is backupset.RootKind.STORE)
         copy = os.path.join(backupset.files_dir(backupset.partial_dir("20260902T120000Z")), store.name)
         argv = ("rsync", "-rtp", "--stats", "--exclude=.*", store.source + "/", copy + "/")
@@ -740,6 +843,9 @@ class BackupRun(unittest.TestCase):
         self.assertIn("complete: refuse", out.getvalue())
         self.assertIn("disk full", out.getvalue())
         self.assertIn("Fix: Run sudo python3 -m gideon apply, then retry.", out.getvalue())
+        rsync_calls = [call[0] for call in host.calls if call[0][0] == "rsync"]
+        self.assertLess(rsync_calls.index(uploads_argv), rsync_calls.index(argv, rsync_calls.index(argv) + 1))
+        self.assertEqual(host.commands[uploads_argv], [])
         self.assertNotIn(os.path.join(backupset.partial_dir("20260902T120000Z"), backupset.MANIFEST_NAME), host.files)
         self.assertNotIn(os.path.join(backupset.set_dir("20260902T120000Z"), backupset.MANIFEST_NAME), host.files)
         self.assertFalse(any(call[0][0] == "mv" for call in host.calls))

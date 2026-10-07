@@ -464,14 +464,14 @@ def _staging_bound(
     return None
 
 
-def _later_store_set(
+def _later_sets(
     io: Host,
     selected: backupset.SetRef,
     *,
     at: datetime | None,
     staging: PathLike,
-) -> backupset.SetRef | StageResult | None:
-    """Find the newest later copy that can supply objects for a point-in-time restore."""
+) -> tuple[backupset.SetRef, ...] | StageResult:
+    """Find the complete sets after the selected one a bound root can draw on, oldest first."""
 
     if (
         at is None
@@ -479,23 +479,17 @@ def _later_store_set(
         or at <= selected.manifest.archive_through
         or selected.finished is None
     ):
-        return None
-    store_names = {
-        root.name for root in backupset.inventory_roots(selected.manifest.checkout)
-        if root.kind is backupset.RootKind.STORE
-    }
+        return ()
+    roots = backupset.inventory_roots(selected.manifest.checkout)
     try:
         sets = backupset.list_sets(io, staging=staging)
     except OSError as exc:
         return StageResult("verify", False, f"cannot list backup sets: {exc}", _set_fix())
-    return next(
-        (
-            ref for ref in sets
-            if ref.complete and ref.manifest is not None
-            and ref.finished is not None and ref.finished > selected.finished
-            and store_names.intersection(ref.manifest.listings)
-        ),
-        None,
+    return tuple(
+        ref for ref in reversed(sets)
+        if ref.complete and ref.manifest is not None
+        and ref.finished is not None and ref.finished > selected.finished
+        and backuproots.supplies(ref.manifest, roots)
     )
 
 
@@ -635,7 +629,7 @@ def _verify_stage(
     rendered_dir: PathLike,
     *,
     selected: backupset.SetRef,
-    later: backupset.SetRef | None = None,
+    later: tuple[backupset.SetRef, ...] = (),
 ) -> StageResult:
     if selected.manifest is None:
         return StageResult("verify", False, "selected set has no manifest", _set_fix())
@@ -764,10 +758,10 @@ def _restore_files_stage(
     *,
     selected: backupset.SetRef,
     gideon_ids: backupset.AccountIds,
-    later: backupset.SetRef | None = None,
-) -> tuple[StageResult, tuple[str, ...], int, Mapping[str, backuproots.StoreCounts], tuple[str, ...]]:
+    later: tuple[backupset.SetRef, ...] = (),
+) -> tuple[StageResult, tuple[str, ...], int, Mapping[str, backuproots.StoreCounts], Mapping[str, int], tuple[str, ...]]:
     if selected.manifest is None:
-        return StageResult("files", False, "selected set has no manifest", _set_fix()), (), 0, {}, ()
+        return StageResult("files", False, "selected set has no manifest", _set_fix()), (), 0, {}, {}, ()
     roots = backuproots.held(
         io,
         backupset.inventory_roots(selected.manifest.checkout),
@@ -777,6 +771,7 @@ def _restore_files_stage(
     restored: list[str] = []
     clauses: list[str] = []
     counts: dict[str, backuproots.StoreCounts] = {}
+    added: dict[str, int] = {}
     closing_lines: list[str] = []
     claims = backuproots.Claims()
     for root in roots:
@@ -792,11 +787,13 @@ def _restore_files_stage(
                 tuple(restored),
                 0,
                 counts,
+                added,
                 tuple(closing_lines),
             )
         restored.extend(outcome.restored)
         clauses.extend(outcome.clauses)
         counts.update(outcome.counts)
+        added.update(outcome.added)
         closing_lines.extend(outcome.closing_lines)
         claims.merge(outcome.claims)
     problem = claims.apply(io, "files")
@@ -811,6 +808,7 @@ def _restore_files_stage(
             tuple(restored),
             0,
             counts,
+            added,
             tuple(closing_lines),
         )
     owner_map = backupset.OwnerMap(selected.manifest.gideon_ids, gideon_ids)
@@ -830,6 +828,7 @@ def _restore_files_stage(
         tuple(restored),
         claims.owner_paths,
         counts,
+        added,
         tuple(closing_lines),
     )
 
@@ -912,6 +911,8 @@ def _stores_stage(
     pre_restore_label: str | None,
     roots_restored: Sequence[str],
     store_counts: Mapping[str, backuproots.StoreCounts],
+    later_labels: Sequence[str],
+    added: Mapping[str, int],
     reowned: int,
     replaced: str | None,
     run_id: str,
@@ -976,6 +977,8 @@ def _stores_stage(
         "pre_restore_label": pre_restore_label,
         "roots_restored": tuple(roots_restored),
         "store": {name: {"added": value.added, "left_out": value.left_out} for name, value in store_counts.items()},
+        "later_labels": list(later_labels),
+        "added": dict(added),
         "reowned": reowned,
         "replaced_removed": replaced_removed,
     }
@@ -1190,7 +1193,7 @@ def _restore_body(
         print_stage(StageResult("fetch", True, "skipped (staging source)", ""))
     assert selected is not None
 
-    later = _later_store_set(
+    later = _later_sets(
         io, selected, at=at,
         staging=fetched.side if fetched is not None else backupset.STAGING,
     )
@@ -1226,18 +1229,20 @@ def _restore_body(
             selected.complete,
             selected.manifest,
         )
-        if later is not None:
-            later = backupset.SetRef(
-                later.label,
-                backupset.set_dir(later.label),
-                later.finished,
-                later.complete,
-                later.manifest,
+        later = tuple(
+            backupset.SetRef(
+                ref.label,
+                backupset.set_dir(ref.label),
+                ref.finished,
+                ref.complete,
+                ref.manifest,
             )
+            for ref in later
+        )
     else:
         print_stage(StageResult("swap", True, "skipped (staging source)", ""))
 
-    files_result, roots_restored, file_reowned, store_counts, closing_lines = _restore_files_stage(
+    files_result, roots_restored, file_reowned, store_counts, added, closing_lines = _restore_files_stage(
         io,
         selected=selected,
         gideon_ids=gideon_ids,
@@ -1273,6 +1278,8 @@ def _restore_body(
         pre_restore_label=pre_restore_label,
         roots_restored=roots_restored,
         store_counts=store_counts,
+        later_labels=tuple(ref.label for ref in later),
+        added=added,
         reowned=reowned,
         replaced=fetched.replaced if fetched is not None else None,
         run_id=str(uuid.uuid4()),

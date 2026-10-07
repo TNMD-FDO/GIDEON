@@ -59,13 +59,19 @@ class RootKind(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class InventoryRoot:
-    """One root included in a backup set's inventory."""
+    """One root included in a backup set's inventory.
+
+    ``user_written`` marks a root users write at any hour: the set completes
+    its copy after the archive boundary, and a point-in-time restore overlays
+    it from the sets after the selected one.
+    """
 
     name: str
     source: str
     exclusions: tuple[str, ...]
     kind: RootKind
     restore_in_place: bool
+    user_written: bool = False
 
     @property
     def snapshotted(self) -> bool:
@@ -109,16 +115,16 @@ def inventory_roots(checkout: str) -> tuple[InventoryRoot, ...]:
 
     # A root a container writes under an id of its image's own would carry
     # its ownership policy here, beside restore_in_place; none does today.
-    # restore_in_place is per-root policy read by the snapshot kind.
+    # restore_in_place and user_written are per-root policies read by the snapshot kind.
     return (
-        InventoryRoot("etc-gideon", "/etc/gideon", etc_gideon_exclusions(), RootKind.SNAPSHOT, True),
-        InventoryRoot("checkout", checkout, CHECKOUT_EXCLUSIONS, RootKind.SNAPSHOT, False),
-        InventoryRoot("data-registry", "/data/registry", (), RootKind.SNAPSHOT, True),
+        InventoryRoot("etc-gideon", "/etc/gideon", etc_gideon_exclusions(), RootKind.SNAPSHOT, True, False),
+        InventoryRoot("checkout", checkout, CHECKOUT_EXCLUSIONS, RootKind.SNAPSHOT, False, False),
+        InventoryRoot("data-registry", "/data/registry", (), RootKind.SNAPSHOT, True, False),
         InventoryRoot(
-            "data-bulk-openwebui", FRONTEND_UPLOADS, (), RootKind.SNAPSHOT, True
+            "data-bulk-openwebui", FRONTEND_UPLOADS, (), RootKind.SNAPSHOT, True, True
         ),
-        InventoryRoot("data-bulk-cas", os.fspath(cas.ROOT), (".*",), RootKind.STORE, False),
-        InventoryRoot("pgbackrest", REPOSITORY_PATH, (), RootKind.REPOSITORY, False),
+        InventoryRoot("data-bulk-cas", os.fspath(cas.ROOT), (".*",), RootKind.STORE, False, False),
+        InventoryRoot("pgbackrest", REPOSITORY_PATH, (), RootKind.REPOSITORY, False, False),
     )
 
 
