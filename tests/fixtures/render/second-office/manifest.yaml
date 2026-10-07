@@ -15,11 +15,11 @@ inputs:
   build_box: false
 files:
   compose.yaml:
-    sha256: "8f370b3bb3f32a624e52b1b930abd24cbdc6dfcce0389fae34ea446589a2af1c"
+    sha256: "d76ad1eaeba233135da931dbea7e0ac129de05964a5828c6be853ac1de33fc08"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
-    sha256: "b64bad3be89949eb8f7ce8806cbd260a5a6fdc72111e159d363c91a89b758564"
+    sha256: "812cb9c8aef88c2b5fad67af6b3f9a6952b5ee57089309989c75981084c868e8"
     mode: "0644"
     owners:
       - "prometheus"
@@ -207,7 +207,7 @@ files:
       - "dcgm-exporter"
 services:
   caddy: "6ab86c4b4080e9f36a8a33ac2c17068802e1161844d10a4474b8285c69c1650f"
-  prometheus: "7a73ab08985ed9765b04f35b0e78d36befc83b80e562755d063bef6565a7b96b"
+  prometheus: "1aa6707da47bf62b663164feee412a28b366df50abd2d41dd32dfd956ebc0147"
   node-exporter: "a581b1f8a717fdaab3b3e0ffa46114516da01f2c51c85838380c168d506632df"
   grafana: "8cf471d68cd28c115f629b1a03da4ff28bde059925895e6bbcc4a932939f3eba"
   postgres: "2148d7061855b0cc304400c260a9da53b7a1e9eb251fcb9a4947e8c15de03c52"
@@ -217,7 +217,7 @@ services:
   gideon-generator: "7e6fb8478dc880dc237408c62456aa742b2612de5c2bb1e2882ad65d8eaf800b"
   gideon-embed: "a1799c9ceff0b6159be9b8588da119879ef38280aaeb577c6a3542828eb20d8e"
   gideon-api: "8b3c7b753c431e1a7b2129827bbf649ed2ae44862a9de0d454b6418ea22f0f53"
-  gideon-worker: "e5331040254b6d97f976d1ff57773ed12b90030ebc286c5620986dcb7a1dbd30"
+  gideon-worker: "b5f460ef84feae2caaf4aec8fd1f2124d9408f584022722ee533c280970b9742"
   gideon-egress: "a424143f2db41ae9819ace634cf9a95d1f959483bb3c40836336d62e8fc81100"
   dcgm-exporter: "80440fa3a0466766fec774772d26eed3389e9f239c1e1c0d96d81a5f7cc62a85"
   postgres-exporter: "d36e03785dee0d52e65763c1d7f6dda2c4c09b17c129d7e8439fe5994338bfe7"

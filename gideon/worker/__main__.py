@@ -1,4 +1,4 @@
-"""Wait for the queue schema, then run the worker process."""
+"""Wait for the queue schema, serve metrics, and run the worker process."""
 
 import asyncio
 import logging
@@ -6,12 +6,14 @@ import signal
 import sys
 import threading
 from collections.abc import Callable, Mapping
+from http.server import HTTPServer
 from typing import Any, Final
 
 import psycopg
 
 from .app import build_app
 from .logs import install_handler
+from .metrics import start_metrics_server
 from .settings import Settings, WorkerSettingsError, connection_kwargs, load_settings
 
 # exempt: two seconds bounds schema discovery without a busy connection loop.
@@ -56,7 +58,11 @@ def wait_for_schema(
     return False
 
 
-def main(environ: Mapping[str, str] | None = None) -> int:
+def main(
+    environ: Mapping[str, str] | None = None,
+    *,
+    server_factory: Callable[[Settings], HTTPServer] = start_metrics_server,
+) -> int:
     """Start the worker after its role can query the queue schema."""
 
     install_handler()
@@ -66,13 +72,18 @@ def main(environ: Mapping[str, str] | None = None) -> int:
         install_stop_handlers(stop)
         if not wait_for_schema(settings, stop, psycopg.connect):
             return 0
-        app = build_app(settings)
+        server = server_factory(settings)
+        try:
+            app = build_app(settings)
 
-        async def run() -> None:
-            async with app.open_async():
-                await app.run_worker_async()
+            async def run() -> None:
+                async with app.open_async():
+                    await app.run_worker_async()
 
-        asyncio.run(run())
+            asyncio.run(run())
+        finally:
+            server.shutdown()
+            server.server_close()
     except WorkerSettingsError as exc:
         print(f"worker failed: {exc}", file=sys.stderr)
         return 1

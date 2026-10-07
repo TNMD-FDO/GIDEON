@@ -53,6 +53,7 @@ from gideon.host.render.prometheus import PrometheusConfigArtifact
 from gideon.host.render.searxng import search_enabled
 from gideon.host.render.services import declared_sources
 from gideon.host.render.systemd import NIGHTLY_SUITES
+from gideon.host.render.worker import WORKER_JOB_NAME
 from gideon.host.site import load_site
 from gideon.host.steps.command import INSTALL_HOME
 from gideon.improvement import tally
@@ -629,6 +630,7 @@ class Overview(unittest.TestCase):
                     "scrape_configs"
                 ]
                 scrape_jobs = {job["job_name"] for job in jobs}
+                self.assertIn(WORKER_JOB_NAME, scrape_jobs)
                 probe_jobs = {
                     job["job_name"] for job in jobs if job.get("metrics_path") == "/probe"
                 }

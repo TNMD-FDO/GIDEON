@@ -21,6 +21,7 @@ from gideon.host.render.searxng import (
     search_enabled,
     searxng_health_url,
 )
+from gideon.host.render.worker import WORKER_JOB_NAME, worker_metrics_target
 
 PROMETHEUS_TEMPLATE: Final = "prometheus/prometheus.yml.tmpl"
 BLACKBOX_TEMPLATE: Final = "blackbox/blackbox.yml.tmpl"
@@ -83,6 +84,13 @@ _SEARCH_JOBS: Final = _probe_job(SEARXNG_JOB_NAME, searxng_health_url())
 # The template's $api_jobs line: one blackbox probe of the API service's
 # health endpoint, rendered on every GPU host where the service renders.
 _API_JOBS: Final = _probe_job(API_JOB_NAME, api_health_url())
+# The worker target is on the internal network, which Prometheus joins to
+# scrape its metrics on every host.
+_WORKER_JOBS: Final = (
+    f"  - job_name: {WORKER_JOB_NAME}\n"
+    "    static_configs:\n"
+    f"      - targets: [{worker_metrics_target()}]"
+)
 
 
 class PrometheusConfigArtifact(Artifact):
@@ -102,6 +110,7 @@ class PrometheusConfigArtifact(Artifact):
                 "store_jobs": _STORE_JOBS,
                 "search_jobs": _SEARCH_JOBS if search_enabled(inputs) else "",
                 "api_jobs": _API_JOBS if api_enabled(inputs.no_gpu) else "",
+                "worker_jobs": _WORKER_JOBS,
             },
         )
 

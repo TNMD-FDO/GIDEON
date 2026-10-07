@@ -35,10 +35,18 @@ from gideon.host.render.services.worker import (
     WorkerService,
 )
 from gideon.host.stores import ROLE_SPECS
-from gideon.worker import fetch, settings, tasks
+from gideon.worker import fetch, metrics, settings, tasks
 
 
 class WorkerIdentity(unittest.TestCase):
+    def test_metrics_identity_matches_the_worker_listener(self) -> None:
+        self.assertEqual(worker.WORKER_METRICS_PORT, metrics.METRICS_PORT)
+        self.assertEqual(worker.WORKER_METRICS_PATH, metrics.METRICS_PATH)
+        self.assertEqual(
+            worker.worker_metrics_target(),
+            f"{worker.WORKER_SERVICE_NAME}:{worker.WORKER_METRICS_PORT}",
+        )
+
     def test_fetch_identity_and_grammars_match_the_worker(self) -> None:
         self.assertEqual(
             (
@@ -218,6 +226,8 @@ class WorkerBlock(unittest.TestCase):
                     and isinstance(candidate, Mapping)
                     and INTERNAL_NETWORK_NAME in candidate.get("networks", ())
                 )
+                self.assertEqual(len(internal_peers), 3)
+                self.assertIn("prometheus", internal_peers)
                 environment = block["environment"]
                 assert isinstance(environment, Mapping)
                 self.assertEqual(environment["NO_PROXY"], ",".join(internal_peers))

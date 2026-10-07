@@ -9,7 +9,9 @@ import threading
 import unittest
 from collections.abc import Iterator, Mapping
 from contextlib import redirect_stderr
+from http.server import HTTPServer
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 import procrastinate
 from procrastinate.testing import InMemoryConnector
@@ -67,6 +69,26 @@ class NoPauseEvent(threading.Event):
     def wait(self, timeout: float | None = None) -> bool:
         self.waits += 1
         return self.is_set()
+
+
+class FakeRunApp:
+    def __init__(self, events: list[str], failure: Exception | None = None) -> None:
+        self.events = events
+        self.failure = failure
+
+    def open_async(self) -> "FakeRunApp":
+        return self
+
+    async def __aenter__(self) -> "FakeRunApp":
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
+
+    async def run_worker_async(self) -> None:
+        self.events.append("run")
+        if self.failure is not None:
+            raise self.failure
 
 
 class BrokenEnvironment(Mapping[str, str]):
@@ -274,6 +296,73 @@ class WorkerSettings(unittest.TestCase):
         finally:
             root.handlers[:] = handlers
             root.setLevel(level)
+
+    def _run_main_case(self, failure: Exception | None) -> tuple[list[str], int, str]:
+        events: list[str] = []
+        server = Mock(spec=HTTPServer)
+        server.shutdown.side_effect = lambda: events.append("stop")
+        server.server_close.side_effect = lambda: events.append("close")
+
+        def wait(*_args: object) -> bool:
+            events.append("wait")
+            return True
+
+        def listen(_settings: settings.Settings) -> HTTPServer:
+            events.append("listen")
+            return server
+
+        def build(_settings: settings.Settings) -> FakeRunApp:
+            events.append("build")
+            return FakeRunApp(events, failure)
+
+        output = io.StringIO()
+        with (
+            patch("gideon.worker.__main__.install_handler"),
+            patch("gideon.worker.__main__.install_stop_handlers"),
+            patch("gideon.worker.__main__.wait_for_schema", side_effect=wait),
+            patch("gideon.worker.__main__.build_app", side_effect=build),
+            redirect_stderr(output),
+        ):
+            code = main(self.environ, server_factory=listen)
+        return events, code, output.getvalue()
+
+    def test_main_starts_listener_after_wait_and_stops_after_run(self) -> None:
+        for failure in (None, RuntimeError("private run detail")):
+            with self.subTest(failure=failure):
+                events, code, output = self._run_main_case(failure)
+                self.assertEqual(events, ["wait", "listen", "build", "run", "stop", "close"])
+                self.assertEqual(code, 0 if failure is None else 1)
+                if failure is None:
+                    self.assertEqual(output, "")
+                else:
+                    self.assertIn("RuntimeError", output)
+                    self.assertNotIn("private run detail", output)
+
+    def test_listener_bind_failure_refuses_before_building_app(self) -> None:
+        events: list[str] = []
+
+        def wait(*_args: object) -> bool:
+            events.append("wait")
+            return True
+
+        def listen(_settings: settings.Settings) -> HTTPServer:
+            events.append("listen")
+            raise OSError("private bind detail")
+
+        output = io.StringIO()
+        with (
+            patch("gideon.worker.__main__.install_handler"),
+            patch("gideon.worker.__main__.install_stop_handlers"),
+            patch("gideon.worker.__main__.wait_for_schema", side_effect=wait),
+            patch("gideon.worker.__main__.build_app") as build,
+            redirect_stderr(output),
+        ):
+            code = main(self.environ, server_factory=listen)
+        self.assertEqual(code, 1)
+        self.assertEqual(events, ["wait", "listen"])
+        build.assert_not_called()
+        self.assertIn("worker failed: OSError.", output.getvalue())
+        self.assertNotIn("private bind detail", output.getvalue())
 
     def test_log_handler_removes_values_and_retains_safe_fields(self) -> None:
         output = io.StringIO()

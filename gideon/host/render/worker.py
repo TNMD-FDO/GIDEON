@@ -1,9 +1,18 @@
-"""Names shared by the queue worker's render and host command."""
+"""Names shared by the queue worker's block, host command, and scrape job.
+
+The Compose block, `worker verify`, and the Prometheus configuration read them
+here; the worker package restates them, since it never imports the host.
+"""
 
 from pathlib import Path
 from typing import Final
 
+from gideon.host.render.engine import ENGINE_PORT
+
 WORKER_SERVICE_NAME: Final[str] = "gideon-worker"
+WORKER_JOB_NAME: Final[str] = "worker"
+WORKER_METRICS_PORT: Final[int] = ENGINE_PORT
+WORKER_METRICS_PATH: Final[str] = "/metrics"
 WORKER_ROLE: Final[str] = "gideon_worker"
 WORKER_SECRET_NAME: Final[str] = "postgres_gideon_worker_password"
 WORKER_DATABASE_HOST: Final[str] = "postgres"
@@ -46,3 +55,9 @@ DATABASE_NAME_ENV: Final[str] = "GIDEON_WORKER_DB_NAME"
 DATABASE_ROLE_ENV: Final[str] = "GIDEON_WORKER_DB_ROLE"
 PASSWORD_FILE_ENV: Final[str] = "GIDEON_WORKER_PASSWORD_FILE"
 CONCURRENCY_ENV: Final[str] = "GIDEON_WORKER_CONCURRENCY"
+
+
+def worker_metrics_target() -> str:
+    """Return the metrics listener as a Compose host and port."""
+
+    return f"{WORKER_SERVICE_NAME}:{WORKER_METRICS_PORT}"

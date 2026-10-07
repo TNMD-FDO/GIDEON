@@ -35,6 +35,7 @@ services:
       - "127.0.0.1:9090:9090"
     networks:
       - "gideon"
+      - "internal"
     mem_limit: 2000000000
   node-exporter:
     image: "ghcr.io/tnmd-fdo/node-exporter@sha256:1b4e4438faca4dd7e001dd445d161a4a2091b0fededa84093b3a8dfeae1f1be0"
@@ -416,7 +417,7 @@ services:
       GIDEON_WORKER_CONCURRENCY: "4"
       HTTPS_PROXY: "http://gideon-egress:3128"
       HTTP_PROXY: "http://gideon-egress:3128"
-      NO_PROXY: "postgres,gideon-egress"
+      NO_PROXY: "prometheus,postgres,gideon-egress"
       TZ: "America/Chicago"
     labels:
       org.gideon.worker-sources-digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"

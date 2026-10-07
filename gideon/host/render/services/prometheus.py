@@ -4,6 +4,7 @@ from collections.abc import Mapping
 
 from gideon.host.images import RegistryTarget, reference
 from gideon.host.render import RenderInputs
+from gideon.host.render.egress import INTERNAL_NETWORK_NAME
 from gideon.host.render.services import ServiceDefinition, image_pin
 
 
@@ -30,5 +31,8 @@ class PrometheusService(ServiceDefinition):
                 "/data/observability/prometheus:/data/observability/prometheus",
             ],
             "ports": ["127.0.0.1:9090:9090"],
-            "networks": ["gideon"],
+            # The internal network is for the worker's scrape alone; the
+            # worker gains reach to this port, a read-only query API with its
+            # admin and lifecycle switches off, and nothing else.
+            "networks": ["gideon", INTERNAL_NETWORK_NAME],
         }
