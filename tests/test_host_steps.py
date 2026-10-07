@@ -1,4 +1,10 @@
-"""Host-step truth tables, including the post-reinstall baseline."""
+"""Host-step truth tables, including the post-reinstall baseline.
+
+Beyond the leaf's entry: `gideon-command`'s text and mode, containerd
+restarted before Docker when its file changed, `age-identity` repairing
+custody in place, and the Docker, Compose, toolkit, and driver refusals
+each read before any write.
+"""
 
 import contextlib
 import io
@@ -46,11 +52,20 @@ from gideon.host.steps.command import (
 )
 from gideon.host.steps.disk import DiskLayoutStep
 from gideon.host.steps.docker import (
+    _ARCHITECTURE,
+    _COMPONENT,
     _CONTAINERD_CONFIG,
     _CONTAINERD_DEFAULT_ROOT,
     _CONTAINERD_ROOT,
     _CONTAINERD_STORE_PATHS,
     _CONTAINERD_TEXT,
+    _KEY_URL,
+    _KEYRING,
+    _PACKAGES,
+    _REPO,
+    _REPOSITORY,
+    _SOURCE,
+    _SUITE,
     DockerEngineStep,
 )
 from gideon.host.steps.maintenance import UnattendedUpgradesStep
@@ -1206,17 +1221,18 @@ class AptInstallTests(unittest.TestCase):
 
 class DockerKeyringOrderTests(unittest.TestCase):
     def test_apply_fetches_keyring_before_writing_the_source_entry(self) -> None:
-        gpg = "/etc/apt/keyrings/gideon-docker.asc"
-        wget = ("wget", "-qO", f"{gpg}.partial", "https://download.docker.com/linux/ubuntu/gpg")
+        gpg = os.fspath(_KEYRING)
+        wget = ("wget", "-qO", f"{gpg}.partial", _KEY_URL)
         move = ("mv", "-f", f"{gpg}.partial", gpg)
         commands: dict[tuple[str, ...], subprocess.CompletedProcess[str]] = {
             wget: completed(wget),
             move: completed(move),
         }
-        commands.update(dict(apt_command_results((
-            "docker-ce", "docker-ce-cli", "containerd.io", "docker-buildx-plugin",
-            "docker-compose-plugin",
-        ))))
+        docker_probe = ("docker", "--version")
+        commands[docker_probe] = subprocess.CompletedProcess(
+            list(docker_probe), 1, "", "not found"
+        )
+        commands.update(dict(apt_command_results(_PACKAGES)))
         for argv in (
             ("systemctl", "restart", "systemd-journald"),
             ("systemctl", "enable", "--now", "containerd"),
@@ -1233,7 +1249,7 @@ class DockerKeyringOrderTests(unittest.TestCase):
             for index, call in enumerate(host.calls)
             if call[0] == "write_text"
             and isinstance(call[1], tuple)
-            and call[1][0] == "/etc/apt/sources.list.d/gideon-docker.list"
+            and call[1][0] == os.fspath(_SOURCE)
         )
         self.assertLess(fetch_index, write_index)
 
@@ -1527,11 +1543,15 @@ class NvidiaStepTests(unittest.TestCase):
 
 def docker_commands(
     *,
-    docker_version: str = "29.0.0",
-    compose_version: str = "5.0.0",
+    docker_version: str | None = None,
+    compose_version: str | None = None,
     containerd_enabled: bool = True,
     containerd_active: bool = True,
 ) -> dict[tuple[str, ...], subprocess.CompletedProcess[str]]:
+    if docker_version is None:
+        docker_version = f"{HOST_LOCK.minimums.docker}.0.0"
+    if compose_version is None:
+        compose_version = f"{HOST_LOCK.minimums.compose}.0.0"
     containerd_enabled_command = ("systemctl", "is-enabled", "containerd")
     containerd_active_command = ("systemctl", "is-active", "containerd")
     commands = {
@@ -1559,14 +1579,60 @@ def docker_commands(
     return commands
 
 
+_OLD_DOCKER_KEYRING = "/etc/apt/keyrings/gideon-docker.asc"
+_OLD_DOCKER_SOURCE = "/etc/apt/sources.list.d/gideon-docker.list"
+
+
+def docker_policy() -> dict[str, object]:
+    return {
+        "data-root": "/var/lib/docker",
+        "features": {"cdi": True},
+        "log-driver": "journald",
+    }
+
+
 def docker_files(daemon: Mapping[str, object], *, journald: str = "[Journal]\nStorage=persistent\nSystemMaxUse=50G\nMaxRetentionSec=90day\n") -> dict[str, str]:
     return {
-        "/etc/apt/keyrings/gideon-docker.asc": "key",
-        "/etc/apt/sources.list.d/gideon-docker.list": "deb [arch=amd64 signed-by=/etc/apt/keyrings/gideon-docker.asc] https://download.docker.com/linux/ubuntu resolute stable\n",
+        _OLD_DOCKER_KEYRING: "key",
+        _OLD_DOCKER_SOURCE: (
+            f"deb [arch={_ARCHITECTURE} signed-by={_OLD_DOCKER_KEYRING}] "
+            f"{_REPOSITORY} {_SUITE} {_COMPONENT}\n"
+        ),
         "/etc/docker/daemon.json": json.dumps(daemon, indent=2),
         os.fspath(_CONTAINERD_CONFIG): _CONTAINERD_TEXT,
         "/etc/systemd/journald.conf.d/gideon.conf": journald,
     }
+
+
+def docker_recipe_files(daemon: Mapping[str, object]) -> dict[str, str]:
+    files = docker_files(daemon)
+    del files[_OLD_DOCKER_KEYRING]
+    del files[_OLD_DOCKER_SOURCE]
+    files[os.fspath(_KEYRING)] = "key"
+    files[os.fspath(_SOURCE)] = _REPO
+    return files
+
+
+def docker_package_commands(*, absent: Sequence[str] = ()) -> dict[tuple[str, ...], subprocess.CompletedProcess[str]]:
+    commands: dict[tuple[str, ...], subprocess.CompletedProcess[str]] = {}
+    for package in _PACKAGES:
+        if package not in absent:
+            probe, result = package_result(package, "99.0-fictitious")
+            commands[probe] = result
+    return commands
+
+
+def docker_absent_commands() -> dict[tuple[str, ...], subprocess.CompletedProcess[str]]:
+    commands = docker_commands()
+    probe = ("docker", "--version")
+    commands[probe] = subprocess.CompletedProcess(list(probe), 1, "", "not found")
+    commands.update(dict(apt_command_results(_PACKAGES)))
+    gpg = os.fspath(_KEYRING)
+    wget = ("wget", "-qO", f"{gpg}.partial", _KEY_URL)
+    move = ("mv", "-f", f"{gpg}.partial", gpg)
+    commands[wget] = completed(wget)
+    commands[move] = completed(move)
+    return commands
 
 
 class DockerStepTests(unittest.TestCase):
@@ -1591,9 +1657,11 @@ class DockerStepTests(unittest.TestCase):
                 assert base_site is not None
                 site = replace(base_site, registry=authority)
                 host = FakeHost(files=docker_files(desired), commands=docker_commands())
-                self.assertEqual(
-                    DockerEngineStep().check(context(host, site=site)).disposition,
-                    Disposition.CONVERGED,
+                checked = DockerEngineStep().check(context(host, site=site))
+                self.assertEqual(checked.disposition, Disposition.CONVERGED)
+                self.assertIn(
+                    f"Docker's apt source is {_OLD_DOCKER_SOURCE}, not the recipe's {_SOURCE}",
+                    checked.detail,
                 )
                 if desired is not base_daemon:
                     without = FakeHost(files=docker_files(base_daemon), commands=docker_commands())
@@ -1658,7 +1726,7 @@ class DockerStepTests(unittest.TestCase):
                 step = DockerEngineStep()
                 present_source = step.check(context(FakeHost(files=files, commands=commands)))
                 self.assertEqual(present_source.disposition, Disposition.UNFIXABLE)
-                del files["/etc/apt/sources.list.d/gideon-docker.list"]
+                del files[_OLD_DOCKER_SOURCE]
                 host = FakeHost(files=files, commands=commands)
                 expected = f"{package} is at {floor - 1}.0, below the floor {floor}"
 
@@ -1705,7 +1773,17 @@ class DockerStepTests(unittest.TestCase):
                         compose_version=f"{HOST_LOCK.minimums.compose}.0.0",
                     )
                     commands[probe] = output
-                    host = FakeHost(commands=commands)
+                    daemon = {
+                        "data-root": "/var/lib/docker",
+                        "features": {"cdi": True},
+                        "log-driver": "journald",
+                    }
+                    files = (
+                        docker_recipe_files(daemon)
+                        if probe == ("docker", "--version")
+                        else docker_files(daemon)
+                    )
+                    host = FakeHost(files=files, commands=commands)
 
                     checked = DockerEngineStep().check(context(host))
 
@@ -1781,6 +1859,10 @@ class DockerStepTests(unittest.TestCase):
         )
         result = DockerEngineStep().check(context(host))
         self.assertEqual(result.disposition, Disposition.CONVERGED)
+        self.assertIn(
+            f"Docker's apt source is {_OLD_DOCKER_SOURCE}, not the recipe's {_SOURCE}",
+            result.detail,
+        )
 
     def test_empty_store_is_converged_on_a_fresh_host(self) -> None:
         daemon = {
@@ -1791,6 +1873,10 @@ class DockerStepTests(unittest.TestCase):
         host = FakeHost(files=docker_files(daemon), commands=docker_commands())
         result = DockerEngineStep().check(context(host))
         self.assertEqual(result.disposition, Disposition.CONVERGED)
+        self.assertIn(
+            f"Docker's apt source is {_OLD_DOCKER_SOURCE}, not the recipe's {_SOURCE}",
+            result.detail,
+        )
 
     def test_unlistable_store_directory_is_unfixable_and_names_path(self) -> None:
         daemon = {
@@ -1905,7 +1991,12 @@ class DockerStepTests(unittest.TestCase):
             "data-root": "/var/lib/docker",
         }
         host = FakeHost(files=docker_files(daemon), commands=docker_commands())
-        self.assertEqual(DockerEngineStep().check(context(host)).disposition, Disposition.CONVERGED)
+        checked = DockerEngineStep().check(context(host))
+        self.assertEqual(checked.disposition, Disposition.CONVERGED)
+        self.assertIn(
+            f"Docker's apt source is {_OLD_DOCKER_SOURCE}, not the recipe's {_SOURCE}",
+            checked.detail,
+        )
 
         site = context(host).site
         assert site is not None
@@ -1937,6 +2028,298 @@ class DockerStepTests(unittest.TestCase):
         )
         DockerEngineStep().apply(context(host))
         self.assertIn(("run", (restart, True)), host.calls)
+
+
+class DockerSourceTests(unittest.TestCase):
+    def _assert_refusal(self, host: FakeHost, named: str) -> CheckResult:
+        step = DockerEngineStep()
+        checked = step.check(context(host))
+        self.assertEqual(checked.disposition, Disposition.UNFIXABLE)
+        self.assertIn(named, checked.detail)
+        before_apply = len(host.calls)
+        with self.assertRaises(StepFailure) as raised:
+            step.apply(context(host))
+        self.assertEqual(raised.exception.detail, checked.detail)
+        self.assertEqual(raised.exception.fix, checked.fix)
+        for method, arguments in host.calls[before_apply:]:
+            self.assertNotIn(method, {"write_text", "mkdir", "unlink"})
+            if method == "run":
+                assert isinstance(arguments, tuple)
+                argv = arguments[0]
+                assert isinstance(argv, tuple)
+                self.assertNotIn(argv[0], {"apt-get", "wget", "mv", "systemctl", "dpkg"})
+        return checked
+
+    def test_two_sources_refuse_before_any_mutation(self) -> None:
+        files = docker_files(docker_policy())
+        files[os.fspath(_SOURCE)] = _REPO
+        host = FakeHost(files=files, commands=docker_absent_commands())
+        checked = self._assert_refusal(host, _OLD_DOCKER_SOURCE)
+        self.assertIn(os.fspath(_SOURCE), checked.detail)
+        self.assertIn("2 apt sources", checked.detail)
+
+    def test_foreign_source_refuses_when_docker_is_absent(self) -> None:
+        foreign_files = docker_files(docker_policy())
+        recipe_path_files = docker_recipe_files(docker_policy())
+        recipe_path_files[os.fspath(_SOURCE)] = _REPO.replace(
+            os.fspath(_KEYRING), "/etc/apt/keyrings/other.asc"
+        )
+        for files, path in (
+            (foreign_files, _OLD_DOCKER_SOURCE),
+            (recipe_path_files, os.fspath(_SOURCE)),
+        ):
+            with self.subTest(path=path):
+                checked = self._assert_refusal(
+                    FakeHost(files=files, commands=docker_absent_commands()), path
+                )
+                self.assertIn("not the recipe's source", checked.detail)
+
+    def test_disabled_recipe_path_refuses_without_changing_its_bytes(self) -> None:
+        files = docker_recipe_files(docker_policy())
+        files[os.fspath(_SOURCE)] = _REPO + "Enabled: false\n"
+        host = FakeHost(files=files, commands=docker_absent_commands())
+        before = host.files[os.fspath(_SOURCE)]
+        checked = self._assert_refusal(host, os.fspath(_SOURCE))
+        self.assertIn("holds no enabled entry", checked.detail)
+        self.assertEqual(host.files[os.fspath(_SOURCE)], before)
+
+    def test_recipe_entry_drift_keeps_source_and_fetches_only_empty_keyring(self) -> None:
+        for key in (None, "", "key"):
+            with self.subTest(key=key):
+                files = docker_recipe_files(docker_policy())
+                if key is None:
+                    del files[os.fspath(_KEYRING)]
+                else:
+                    files[os.fspath(_KEYRING)] = key
+                host = FakeHost(files=files, commands=docker_absent_commands())
+                checked = DockerEngineStep().check(context(host))
+                self.assertEqual(checked.disposition, Disposition.DRIFT)
+                self.assertEqual(checked.detail, "Docker is not installed")
+
+                DockerEngineStep().apply(context(host))
+
+                self.assertEqual(host.files[os.fspath(_SOURCE)], _REPO)
+                self.assertFalse(
+                    any(method == "write_text" and arguments[0] == os.fspath(_SOURCE)
+                        for method, arguments in host.calls if isinstance(arguments, tuple))
+                )
+                wget = ("wget", "-qO", f"{_KEYRING}.partial", _KEY_URL)
+                self.assertEqual(("run", (wget, True)) in host.calls, key is None or key == "")
+
+    def test_recipe_entry_with_folded_or_padded_signed_by_is_the_recipe(self) -> None:
+        for text in (
+            _REPO.replace(f"Signed-By: {_KEYRING}\n", f"Signed-By: {_KEYRING}  \n"),
+            _REPO.replace(f"Signed-By: {_KEYRING}\n", f"Signed-By:\n {_KEYRING}\n"),
+        ):
+            with self.subTest(text=text):
+                files = docker_recipe_files(docker_policy())
+                files[os.fspath(_SOURCE)] = text
+                host = FakeHost(files=files, commands=docker_absent_commands())
+                checked = DockerEngineStep().check(context(host))
+                self.assertEqual(checked.disposition, Disposition.DRIFT)
+                self.assertEqual(checked.detail, "Docker is not installed")
+
+    def test_absent_docker_without_source_writes_recipe_before_install(self) -> None:
+        files = docker_recipe_files(docker_policy())
+        del files[os.fspath(_KEYRING)]
+        del files[os.fspath(_SOURCE)]
+        files["/etc/apt/sources.list.d/ubuntu.sources.curtin.orig"] = _REPO
+        host = FakeHost(files=files, commands=docker_absent_commands())
+        checked = DockerEngineStep().check(context(host))
+        self.assertEqual(checked.disposition, Disposition.DRIFT)
+        self.assertEqual(checked.detail, "Docker is not installed")
+
+        DockerEngineStep().apply(context(host))
+
+        move = ("mv", "-f", f"{_KEYRING}.partial", os.fspath(_KEYRING))
+        moved = host.calls.index(("run", (move, True)))
+        written = next(
+            index for index, call in enumerate(host.calls)
+            if call[0] == "write_text"
+            and isinstance(call[1], tuple)
+            and call[1][0] == os.fspath(_SOURCE)
+        )
+        installed = host.calls.index(("run", (("apt-get", "update"), True)))
+        self.assertLess(moved, written)
+        self.assertLess(written, installed)
+        self.assertIn(
+            ("run", (("apt-get", "install", "-y", *_PACKAGES), True)), host.calls
+        )
+        self.assertEqual(host.files[os.fspath(_SOURCE)], _REPO)
+
+    def test_present_docker_without_source_converges_when_packages_are_installed(self) -> None:
+        files = docker_files(docker_policy())
+        del files[_OLD_DOCKER_SOURCE]
+        commands = docker_commands()
+        commands.update(docker_package_commands())
+        host = FakeHost(files=files, commands=commands)
+
+        checked = DockerEngineStep().check(context(host))
+
+        self.assertEqual(checked.disposition, Disposition.CONVERGED)
+        self.assertNotIn("apt source is", checked.detail)
+        probes = [argv for argv, _, _ in host.runs if argv[0] == "dpkg-query"]
+        self.assertEqual(len(probes), len(_PACKAGES))
+
+    def test_old_source_text_is_accepted_and_reported(self) -> None:
+        files = docker_files(docker_policy())
+        host = FakeHost(files=files, commands=docker_commands())
+        checked = DockerEngineStep().check(context(host))
+        self.assertEqual(checked.disposition, Disposition.CONVERGED)
+        self.assertIn(
+            f"Docker's apt source is {_OLD_DOCKER_SOURCE}, not the recipe's {_SOURCE}",
+            checked.detail,
+        )
+
+    def test_foreign_source_at_recipe_path_is_reported_with_its_entry(self) -> None:
+        files = docker_recipe_files(docker_policy())
+        files[os.fspath(_SOURCE)] = _REPO.replace(
+            os.fspath(_KEYRING), "/etc/apt/keyrings/other.asc"
+        )
+        host = FakeHost(files=files, commands=docker_commands())
+        checked = DockerEngineStep().check(context(host))
+        self.assertEqual(checked.disposition, Disposition.CONVERGED)
+        self.assertIn(
+            f"Docker's apt source {_SOURCE} is not the recipe's entry",
+            checked.detail,
+        )
+
+    def test_present_docker_with_foreign_entry_writes_no_apt_source(self) -> None:
+        files = docker_files(docker_policy())
+        commands = docker_commands()
+        commands.update(docker_package_commands())
+        host = FakeHost(files=files, commands=commands)
+        before = dict(host.files)
+        checked = DockerEngineStep().check(context(host))
+        self.assertEqual(checked.disposition, Disposition.CONVERGED)
+        self.assertIn(_OLD_DOCKER_SOURCE, checked.detail)
+
+        DockerEngineStep().apply(context(host))
+
+        self.assertEqual(host.files[_OLD_DOCKER_SOURCE], before[_OLD_DOCKER_SOURCE])
+        self.assertEqual(host.files[_OLD_DOCKER_KEYRING], before[_OLD_DOCKER_KEYRING])
+        self.assertNotIn(os.fspath(_SOURCE), host.files)
+        self.assertFalse(any(argv[0] in {"wget", "mv"} for argv, _, _ in host.runs))
+
+    def test_missing_compose_with_an_entry_installs_without_writing_a_source(self) -> None:
+        files = docker_files(docker_policy())
+        commands = docker_commands()
+        compose = ("docker", "compose", "version")
+        commands[compose] = subprocess.CompletedProcess(list(compose), 1, "", "not found")
+        commands.update(docker_package_commands(absent=("docker-compose-plugin",)))
+        commands.update(dict(apt_command_results(("docker-compose-plugin",))))
+        host = FakeHost(files=files, commands=commands)
+        checked = DockerEngineStep().check(context(host))
+        self.assertEqual(checked.disposition, Disposition.DRIFT)
+        self.assertIn("Compose plugin", checked.detail)
+
+        DockerEngineStep().apply(context(host))
+
+        self.assertIn(
+            ("run", (("apt-get", "install", "-y", "docker-compose-plugin"), True)),
+            host.calls,
+        )
+        self.assertFalse(any(argv[0] in {"wget", "mv"} for argv, _, _ in host.runs))
+        self.assertNotIn(os.fspath(_SOURCE), host.files)
+
+    def test_present_docker_without_source_refuses_missing_buildx(self) -> None:
+        files = docker_files(docker_policy())
+        del files[_OLD_DOCKER_SOURCE]
+        commands = docker_commands()
+        commands.update(docker_package_commands(absent=("docker-buildx-plugin",)))
+        checked = self._assert_refusal(
+            FakeHost(files=files, commands=commands), "docker-buildx-plugin"
+        )
+        self.assertIn("no apt source serves", checked.detail)
+        self.assertIn(os.fspath(_SOURCE), checked.fix)
+
+    def test_unreadable_source_refuses_with_its_path(self) -> None:
+        class UnreadableSourceHost(FakeHost):
+            def read_text(self, path: PathLike, *, encoding: str = "utf-8") -> str:
+                if os.fspath(path) == os.fspath(_SOURCE):
+                    raise PermissionError("access denied")
+                return super().read_text(path, encoding=encoding)
+
+        host = UnreadableSourceHost(
+            files=docker_recipe_files(docker_policy()), commands=docker_commands()
+        )
+        checked = self._assert_refusal(host, os.fspath(_SOURCE))
+        self.assertIn("access denied", checked.detail)
+
+    def test_apply_write_set_follows_source_and_engine_state(self) -> None:
+        no_source = docker_recipe_files(docker_policy())
+        del no_source[os.fspath(_SOURCE)]
+        del no_source[os.fspath(_KEYRING)]
+        no_source_with_key = docker_recipe_files(docker_policy())
+        del no_source_with_key[os.fspath(_SOURCE)]
+        ignored_source = dict(no_source)
+        ignored_source["/etc/apt/sources.list.d/ubuntu.sources.curtin.orig"] = _REPO
+        recipe_without_key = docker_recipe_files(docker_policy())
+        del recipe_without_key[os.fspath(_KEYRING)]
+        empty_keyring = docker_recipe_files(docker_policy())
+        empty_keyring[os.fspath(_KEYRING)] = ""
+        foreign_recipe = docker_recipe_files(docker_policy())
+        foreign_recipe[os.fspath(_SOURCE)] = _REPO.replace(
+            os.fspath(_KEYRING), "/etc/apt/keyrings/other.asc"
+        )
+        disabled = docker_recipe_files(docker_policy())
+        disabled[os.fspath(_SOURCE)] += "Enabled: no\n"
+        two_sources = docker_files(docker_policy())
+        two_sources[os.fspath(_SOURCE)] = _REPO
+        present_no_source = docker_files(docker_policy())
+        del present_no_source[_OLD_DOCKER_SOURCE]
+        installed = docker_commands()
+        installed.update(docker_package_commands())
+        missing_buildx = docker_commands()
+        missing_buildx.update(docker_package_commands(absent=("docker-buildx-plugin",)))
+        missing_compose = docker_commands()
+        compose_probe = ("docker", "compose", "version")
+        missing_compose[compose_probe] = subprocess.CompletedProcess(
+            list(compose_probe), 1, "", "not found"
+        )
+        missing_compose.update(docker_package_commands(absent=("docker-compose-plugin",)))
+        missing_compose.update(dict(apt_command_results(("docker-compose-plugin",))))
+        cases = (
+            ("absent, no source", no_source, docker_absent_commands(), True, True, False),
+            ("absent, no source, present key", no_source_with_key, docker_absent_commands(), True, False, False),
+            ("absent, ignored extension", ignored_source, docker_absent_commands(), True, True, False),
+            ("absent, recipe, no key", recipe_without_key, docker_absent_commands(), False, True, False),
+            ("absent, recipe, empty key", empty_keyring, docker_absent_commands(), False, True, False),
+            ("absent, recipe, present key", docker_recipe_files(docker_policy()), docker_absent_commands(), False, False, False),
+            ("absent, foreign", docker_files(docker_policy()), docker_absent_commands(), False, False, True),
+            ("absent, foreign at recipe path", foreign_recipe, docker_absent_commands(), False, False, True),
+            ("absent, disabled", disabled, docker_absent_commands(), False, False, True),
+            ("absent, two sources", two_sources, docker_absent_commands(), False, False, True),
+            ("present, foreign", docker_files(docker_policy()), installed, False, False, False),
+            ("present, foreign at recipe path", foreign_recipe, installed, False, False, False),
+            ("present, recipe", docker_recipe_files(docker_policy()), installed, False, False, False),
+            ("present, compose missing", docker_files(docker_policy()), missing_compose, False, False, False),
+            ("present, no source", present_no_source, installed, False, False, False),
+            ("present, missing buildx", present_no_source, missing_buildx, False, False, True),
+        )
+        allowed = {
+            os.fspath(_KEYRING), os.fspath(_SOURCE), "/etc/docker/daemon.json",
+            os.fspath(_CONTAINERD_CONFIG), "/etc/systemd/journald.conf.d/gideon.conf",
+        }
+        for name, files, commands, writes_source, fetches_key, refuses in cases:
+            with self.subTest(name=name):
+                host = FakeHost(files=files, commands=commands)
+                if refuses:
+                    with self.assertRaises(StepFailure):
+                        DockerEngineStep().apply(context(host))
+                else:
+                    DockerEngineStep().apply(context(host))
+                writes = [arguments[0] for method, arguments in host.calls
+                          if method == "write_text" and isinstance(arguments, tuple)]
+                self.assertTrue(set(writes) <= allowed)
+                self.assertEqual(os.fspath(_SOURCE) in writes, writes_source)
+                if os.fspath(_KEYRING) in writes:
+                    self.assertTrue(fetches_key)
+                fetched = any(
+                    argv == ("mv", "-f", f"{_KEYRING}.partial", os.fspath(_KEYRING))
+                    for argv, _, _ in host.runs
+                )
+                self.assertEqual(fetched, fetches_key)
 
 
 def directory_stat(mode: int, uid: int = 0, gid: int = 0) -> os.stat_result:
@@ -3252,6 +3635,15 @@ class ServiceStepTests(unittest.TestCase):
 
 
 class BaselineCheckPass(unittest.TestCase):
+    def test_recorded_baseline_has_no_docker_source_and_engine_is_absent(self) -> None:
+        host = baseline_host()
+        self.assertFalse(
+            any(path.startswith("/etc/apt/sources.list") for path in host.files)
+        )
+        result = DockerEngineStep().check(context(host))
+        self.assertEqual(result.disposition, Disposition.DRIFT)
+        self.assertEqual(result.detail, "Docker is not installed")
+
     def test_recorded_baseline_has_expected_non_site_dispositions(self) -> None:
         # The recorded post-reinstall box still has no observability homes;
         # disk-layout's first pass therefore remains drift.

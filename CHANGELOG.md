@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.66](docs/release-notes/v0.3.66.md) — 2026-10-06 — a second Docker apt source refuses
 - [v0.3.65](docs/release-notes/v0.3.65.md) — 2026-10-06 — provision installs only what is absent
 - [v0.3.64](docs/release-notes/v0.3.64.md) — 2026-10-06 — the shared box's rules, agreed
 - [v0.3.63](docs/release-notes/v0.3.63.md) — 2026-10-06 — the worker's queue depth, scraped by Prometheus and tiled on the Overview
