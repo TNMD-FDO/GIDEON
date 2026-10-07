@@ -57,10 +57,15 @@ from gideon.host.steps.docker import (
     _COMPONENT,
     _CONTAINERD_CONFIG,
     _CONTAINERD_DEFAULT_ROOT,
+    _CONTAINERD_DUMP,
     _CONTAINERD_ROOT,
     _CONTAINERD_STORE_PATHS,
     _CONTAINERD_TEXT,
+    _CONTAINERD_VERIFY,
     _DAEMON,
+    _JOURNALD,
+    _JOURNALD_CAT,
+    _JOURNALD_TEXT,
     _KEY_URL,
     _KEYRING,
     _PACKAGES,
@@ -70,7 +75,7 @@ from gideon.host.steps.docker import (
     _SUITE,
     DockerEngineStep,
 )
-from gideon.host.steps.maintenance import UnattendedUpgradesStep
+from gideon.host.steps.maintenance import _DROP_IN, _PERIODIC, UnattendedUpgradesStep
 from gideon.host.steps.network import (
     _WAIT_ONLINE_DROPIN,
     _WAIT_ONLINE_FIX,
@@ -228,6 +233,22 @@ class FakeHost:
 
     def geteuid(self) -> int:
         return 0
+
+
+def assert_no_host_mutation(
+    test: unittest.TestCase, host: FakeHost, read_commands: set[tuple[str, ...]]
+) -> None:
+    mutations = [
+        call
+        for call in host.calls
+        if call[0] in {"write_text", "unlink", "mkdir"}
+        or (
+            call[0] == "run"
+            and isinstance(call[1], tuple)
+            and (call[1][0] not in read_commands or call[1][1] is True)
+        )
+    ]
+    test.assertEqual(mutations, [])
 
 
 class PermissionErrorHost(FakeHost):
@@ -390,6 +411,53 @@ class ProxyStepTests(unittest.TestCase):
 
 
 class AccountStepTests(unittest.TestCase):
+    SSHD = ("sshd", "-T")
+    POLICY = "/etc/ssh/sshd_config.d/00-gideon-key-only.conf"
+    RETIRED = "/etc/ssh/sshd_config.d/99-gideon-key-only.conf"
+    POLICY_TEXT = "PasswordAuthentication no\nKbdInteractiveAuthentication no\n"
+
+    def csa_host(self, *, password: str, keyboard: str, files: Mapping[str, str] | None = None) -> FakeHost:
+        commands = {
+            ("getent", "group", "sudo"): completed(
+                ("getent", "group", "sudo"), "sudo:x:27:alice,bob\n"
+            ),
+            ("getent", "passwd", "alice"): completed(
+                ("getent", "passwd", "alice"),
+                "alice:x:1001:27::/home/alice:/bin/bash\n",
+            ),
+            ("getent", "passwd", "bob"): completed(
+                ("getent", "passwd", "bob"),
+                "bob:x:1002:27::/home/bob:/bin/bash\n",
+            ),
+            self.SSHD: completed(
+                self.SSHD,
+                f"passwordauthentication {password}\nkbdinteractiveauthentication {keyboard}\n",
+            ),
+        }
+        keys = {
+            "/home/alice/.ssh/authorized_keys": "ssh-ed25519 AAAA\n",
+            "/home/bob/.ssh/authorized_keys": "ssh-ed25519 BBBB\n",
+        }
+        keys.update(files or {})
+        return FakeHost(commands=commands, files=keys)
+
+    def assert_csa_refusal(self, host: FakeHost, *details: str) -> None:
+        step = CsaAccountsStep()
+        reading = step.check(context(host))
+        self.assertEqual(reading.disposition, Disposition.UNFIXABLE)
+        for detail in details:
+            self.assertIn(detail, reading.detail)
+        host.calls.clear()
+        with self.assertRaises(StepFailure) as raised:
+            step.apply(context(host))
+        self.assertEqual((raised.exception.detail, raised.exception.fix), (reading.detail, reading.fix))
+        assert_no_host_mutation(
+            self,
+            host,
+            {self.SSHD, ("getent", "group", "sudo"),
+             ("getent", "passwd", "alice"), ("getent", "passwd", "bob")},
+        )
+
     def test_service_user_missing_drifts_and_useradd_applies(self) -> None:
         command = ("useradd", "--system", "--shell", "/usr/sbin/nologin", "gideon")
         host = FakeHost(commands={command: completed(command)})
@@ -433,42 +501,90 @@ class AccountStepTests(unittest.TestCase):
         self.assertEqual(result.disposition, Disposition.UNFIXABLE)
         self.assertIn("at least two CSA accounts", result.fix)
         self.assertNotIn("write_text", {call[0] for call in host.calls})
+        self.assertNotIn(("run", (self.SSHD, False)), host.calls)
+        host.calls.clear()
+        with self.assertRaises(StepFailure) as raised:
+            step.apply(context(host))
+        self.assertEqual((raised.exception.detail, raised.exception.fix), (result.detail, result.fix))
+        assert_no_host_mutation(
+            self, host, {("getent", "group", "sudo"), ("getent", "passwd", "alice")}
+        )
 
     def test_two_csa_keys_allow_policy_to_converge(self) -> None:
-        commands: dict[tuple[str, ...], subprocess.CompletedProcess[str]] = {
-            ("getent", "group", "sudo"): completed(
-                ("getent", "group", "sudo"), "sudo:x:27:alice,bob\n"
-            ),
-            ("getent", "passwd", "alice"): completed(
-                ("getent", "passwd", "alice"),
-                "alice:x:1001:27::/home/alice:/bin/bash\n",
-            ),
-            ("getent", "passwd", "bob"): completed(
-                ("getent", "passwd", "bob"),
-                "bob:x:1002:27::/home/bob:/bin/bash\n",
-            ),
-        }
-        files = {
-            "/home/alice/.ssh/authorized_keys": "ssh-ed25519 AAAA\n",
-            "/home/bob/.ssh/authorized_keys": "ssh-ed25519 BBBB\n",
-            "/etc/ssh/sshd_config.d/99-gideon-key-only.conf": "",
-        }
+        host = self.csa_host(password="yes", keyboard="no", files={self.RETIRED: self.POLICY_TEXT})
         reload_command = ("systemctl", "reload", "ssh")
-        commands[reload_command] = completed(reload_command)
-        host = FakeHost(commands=commands, files=files)
+        host.commands[reload_command] = completed(reload_command)
         step = CsaAccountsStep()
         self.assertEqual(step.check(context(host)).disposition, Disposition.DRIFT)
         step.apply(context(host))
+        self.assertEqual(host.files[self.POLICY], self.POLICY_TEXT)
+        self.assertNotIn(self.RETIRED, host.files)
+        mutations = [call for call in host.calls if call[0] in {"write_text", "unlink"} or call == ("run", (reload_command, True))]
         self.assertEqual(
-            host.files["/etc/ssh/sshd_config.d/99-gideon-key-only.conf"],
-            "PasswordAuthentication no\nKbdInteractiveAuthentication no\n",
+            mutations,
+            [("write_text", (self.POLICY, self.POLICY_TEXT)),
+             ("unlink", self.RETIRED), ("run", (reload_command, True))],
         )
-        self.assertIn(
-            ("run", (("systemctl", "reload", "ssh"), True)),
-            host.calls,
+        host.commands[self.SSHD] = completed(
+            self.SSHD, "passwordauthentication no\nkbdinteractiveauthentication no\n"
         )
         recheck = step.check(context(host))
         self.assertEqual(recheck.disposition, Disposition.CONVERGED, recheck)
+
+    def test_login_rule_truth_table(self) -> None:
+        cases: tuple[tuple[str, str, str, dict[str, str], Disposition, str], ...] = (
+            ("default", "yes", "no", {}, Disposition.DRIFT, "installed default"),
+            ("outside policy", "no", "no", {}, Disposition.CONVERGED, "outside GIDEON's drop-in"),
+            ("own policy", "no", "no", {self.POLICY: self.POLICY_TEXT}, Disposition.CONVERGED, "is current"),
+            ("retired file", "no", "no", {self.RETIRED: self.POLICY_TEXT}, Disposition.DRIFT, "retired name"),
+            ("current beside retired", "no", "no", {self.POLICY: self.POLICY_TEXT, self.RETIRED: self.POLICY_TEXT}, Disposition.DRIFT, "current beside its retired file"),
+        )
+        for name, password, keyboard, files, disposition, detail in cases:
+            with self.subTest(name=name):
+                host = self.csa_host(password=password, keyboard=keyboard, files=files)
+                reading = CsaAccountsStep().check(context(host))
+                self.assertEqual(reading.disposition, disposition)
+                self.assertIn(detail, reading.detail)
+                if disposition is Disposition.CONVERGED:
+                    host.calls.clear()
+                    CsaAccountsStep().apply(context(host))
+                    assert_no_host_mutation(
+                        self,
+                        host,
+                        {self.SSHD, ("getent", "group", "sudo"),
+                         ("getent", "passwd", "alice"), ("getent", "passwd", "bob")},
+                    )
+
+    def test_default_login_rule_writes_the_new_policy(self) -> None:
+        host = self.csa_host(password="yes", keyboard="no")
+        reload_command = ("systemctl", "reload", "ssh")
+        host.commands[reload_command] = completed(reload_command)
+        step = CsaAccountsStep()
+        self.assertEqual(step.check(context(host)).disposition, Disposition.DRIFT)
+        host.calls.clear()
+        step.apply(context(host))
+        self.assertEqual(host.files[self.POLICY], self.POLICY_TEXT)
+        self.assertNotIn(("unlink", self.RETIRED), host.calls)
+        self.assertIn(("run", (reload_command, True)), host.calls)
+
+    def test_moved_short_login_rule_refuses_before_mutation(self) -> None:
+        for password, keyboard, found in (
+            ("yes", "no", "PasswordAuthentication yes"),
+            ("no", "yes", "KbdInteractiveAuthentication yes"),
+        ):
+            with self.subTest(found=found):
+                host = self.csa_host(
+                    password=password, keyboard=keyboard,
+                    files={self.POLICY: self.POLICY_TEXT, self.RETIRED: self.POLICY_TEXT},
+                )
+                self.assert_csa_refusal(host, "SSH login rule", found, "no for both", self.POLICY)
+
+    def test_sshd_reader_failure_refuses_before_mutation(self) -> None:
+        host = self.csa_host(password="yes", keyboard="no")
+        host.commands[self.SSHD] = subprocess.CompletedProcess(
+            list(self.SSHD), 1, "", "fictitious sshd error\n"
+        )
+        self.assert_csa_refusal(host, "sshd -T", "fictitious sshd error")
 
 
 def disk_devices(*, data_children: list[dict[str, object]] | None = None) -> list[dict[str, object]]:
@@ -843,33 +959,6 @@ class DiskLayoutStepTests(unittest.TestCase):
         self.assertEqual(result.disposition, Disposition.UNFIXABLE)
         self.assertIn("stable identity", result.detail)
 
-    def test_firewall_default_allow_policy_is_drift(self) -> None:
-        current_site = context(disk_host(disk_devices())).site
-        assert current_site is not None
-        rules = "".join(
-            f"[ {index}] {port}/tcp                   ALLOW IN    {cidr}                  # gideon-provision\n"
-            for index, (cidr, port) in enumerate(
-                sorted((cidr, port) for cidr in current_site.lan_cidrs for port in (22, 443)),
-                start=1,
-            )
-        )
-        host = FakeHost(
-            commands={
-                ("ufw", "status", "numbered"): completed(
-                    ("ufw", "status", "numbered"), "Status: active\n" + rules
-                ),
-                ("ufw", "status", "verbose"): completed(
-                    ("ufw", "status", "verbose"),
-                    "Status: active\nDefault: allow (incoming), allow (outgoing)\n",
-                ),
-            }
-        )
-        from gideon.host.steps.network import FirewallStep
-
-        result = FirewallStep().check(context(host, site=current_site))
-        self.assertEqual(result.disposition, Disposition.DRIFT)
-        self.assertIn("default incoming policy", result.detail)
-
     def test_vg_data_on_another_device_refuses(self) -> None:
         host = disk_host(
             disk_devices(),
@@ -1234,6 +1323,8 @@ class DockerKeyringOrderTests(unittest.TestCase):
         commands[docker_probe] = subprocess.CompletedProcess(
             list(docker_probe), 1, "", "not found"
         )
+        commands[_JOURNALD_CAT] = docker_commands()[_JOURNALD_CAT]
+        commands[_CONTAINERD_DUMP] = containerd_dump(_CONTAINERD_DEFAULT_ROOT)
         commands.update(dict(apt_command_results(_PACKAGES)))
         for argv in (
             ("systemctl", "restart", "systemd-journald"),
@@ -1543,17 +1634,41 @@ class NvidiaStepTests(unittest.TestCase):
         )
 
 
+def containerd_dump(root: object) -> subprocess.CompletedProcess[str]:
+    """containerd's configuration dump, its first lines, reporting *root* in effect."""
+
+    return completed(
+        _CONTAINERD_DUMP,
+        f"version = 4\nroot = '{root}'\nimports = ['/etc/containerd/conf.d/*.toml']\n",
+    )
+
+
 def docker_commands(
     *,
     docker_version: str | None = None,
     compose_version: str | None = None,
     containerd_enabled: bool = True,
     containerd_active: bool = True,
+    containerd_verify_stdout: str | None = None,
+    containerd_verify_returncode: int = 0,
+    journald_cat_stdout: str | None = None,
+    journald_cat_returncode: int = 0,
+    containerd_root: object = _CONTAINERD_ROOT,
 ) -> dict[tuple[str, ...], subprocess.CompletedProcess[str]]:
     if docker_version is None:
         docker_version = f"{HOST_LOCK.minimums.docker}.0.0"
     if compose_version is None:
         compose_version = f"{HOST_LOCK.minimums.compose}.0.0"
+    if containerd_verify_stdout is None:
+        containerd_verify_stdout = f"??5?????? c {_CONTAINERD_CONFIG}\n"
+    if journald_cat_stdout is None:
+        journald_cat_stdout = (
+            "# /etc/systemd/journald.conf\n[Journal]\n"
+            "# Storage=auto\n# SystemMaxUse=\n# MaxRetentionSec=\n"
+            f"# {_JOURNALD}\n{_JOURNALD_TEXT}"
+            "# /usr/lib/systemd/journald.conf.d/syslog.conf\n[Journal]\n"
+            "ForwardToSyslog=no\n"
+        )
     containerd_enabled_command = ("systemctl", "is-enabled", "containerd")
     containerd_active_command = ("systemctl", "is-active", "containerd")
     commands = {
@@ -1577,6 +1692,14 @@ def docker_commands(
         ("systemctl", "restart", "containerd"): completed(("systemctl", "restart", "containerd")),
         ("systemctl", "enable", "--now", "docker"): completed(("systemctl", "enable", "--now", "docker")),
         ("systemctl", "restart", "docker"): completed(("systemctl", "restart", "docker")),
+        _CONTAINERD_VERIFY: subprocess.CompletedProcess(
+            list(_CONTAINERD_VERIFY), containerd_verify_returncode,
+            containerd_verify_stdout, "",
+        ),
+        _JOURNALD_CAT: subprocess.CompletedProcess(
+            list(_JOURNALD_CAT), journald_cat_returncode, journald_cat_stdout, "",
+        ),
+        _CONTAINERD_DUMP: containerd_dump(containerd_root),
     }
     return commands
 
@@ -1638,6 +1761,47 @@ def docker_absent_commands() -> dict[tuple[str, ...], subprocess.CompletedProces
 
 
 class DockerStepTests(unittest.TestCase):
+    def setting_host(
+        self,
+        *,
+        files: dict[str, str] | None = None,
+        commands: dict[tuple[str, ...], subprocess.CompletedProcess[str]] | None = None,
+    ) -> FakeHost:
+        return FakeHost(
+            files=docker_files(docker_policy()) if files is None else files,
+            commands={
+                **docker_commands(),
+                **docker_package_commands(),
+                ("systemctl", "restart", "systemd-journald"):
+                    completed(("systemctl", "restart", "systemd-journald")),
+                **(commands or {}),
+            },
+        )
+
+    def assert_setting_refusal(self, host: FakeHost, *details: str) -> CheckResult:
+        step = DockerEngineStep()
+        checked = step.check(context(host))
+        self.assertEqual(checked.disposition, Disposition.UNFIXABLE, checked)
+        for detail in details:
+            self.assertIn(detail, checked.detail)
+        host.calls.clear()
+        with self.assertRaises(StepFailure) as raised:
+            step.apply(context(host))
+        self.assertEqual(
+            (raised.exception.detail, raised.exception.fix),
+            (checked.detail, checked.fix),
+        )
+        assert_no_host_mutation(
+            self,
+            host,
+            {("docker", "--version"), ("docker", "compose", "version"),
+             _CONTAINERD_VERIFY, _CONTAINERD_DUMP, _JOURNALD_CAT},
+        )
+        return checked
+
+    def recorded_journald(self) -> str:
+        return baseline_host().commands[_JOURNALD_CAT].stdout
+
     def test_insecure_registries_follows_the_plain_registry_rule(self) -> None:
         """A plain, non-loopback site registry at the VM bridge address is listed
         under insecure-registries; loopback is implicit in Docker and a hostname
@@ -1817,20 +1981,28 @@ class DockerStepTests(unittest.TestCase):
         missing_files = docker_files(daemon)
         del missing_files[os.fspath(_CONTAINERD_CONFIG)]
         missing = DockerEngineStep().check(
-            context(FakeHost(files=missing_files, commands=docker_commands()))
+            context(FakeHost(
+                files=missing_files,
+                commands=docker_commands(containerd_root=_CONTAINERD_DEFAULT_ROOT),
+            ))
         )
         self.assertEqual(missing.disposition, Disposition.DRIFT)
-        self.assertIn("config.toml is missing", missing.detail)
-        self.assertIn("Write the provision-owned", missing.fix)
+        self.assertIn("config.toml is at the package default", missing.detail)
+        self.assertIn("Run provision", missing.fix)
 
         different_files = docker_files(daemon)
         different_files[os.fspath(_CONTAINERD_CONFIG)] = "wrong\n"
         different = DockerEngineStep().check(
-            context(FakeHost(files=different_files, commands=docker_commands()))
+            context(FakeHost(
+                files=different_files,
+                commands=docker_commands(
+                    containerd_verify_stdout="", containerd_root=_CONTAINERD_DEFAULT_ROOT
+                ),
+            ))
         )
         self.assertEqual(different.disposition, Disposition.DRIFT)
-        self.assertIn("config.toml differs", different.detail)
-        self.assertIn("Rewrite the provision-owned", different.fix)
+        self.assertIn("config.toml is at the package default", different.detail)
+        self.assertIn("Run provision", different.fix)
 
     def test_populated_default_store_with_empty_desired_store_is_unfixable(self) -> None:
         daemon = {
@@ -1936,7 +2108,9 @@ class DockerStepTests(unittest.TestCase):
             "features": {"cdi": True},
             "log-driver": "journald",
         }
-        commands = docker_commands()
+        commands = docker_commands(
+            containerd_verify_stdout="", containerd_root=_CONTAINERD_DEFAULT_ROOT
+        )
         commands.update(dict(apt_command_results((
             "docker-ce", "docker-ce-cli", "containerd.io", "docker-buildx-plugin",
             "docker-compose-plugin",
@@ -2024,7 +2198,12 @@ class DockerStepTests(unittest.TestCase):
         }
         restart = ("systemctl", "restart", "systemd-journald")
         enable = ("systemctl", "enable", "--now", "docker")
-        commands = docker_commands()
+        commands = docker_commands(
+            journald_cat_stdout=(
+                "# /etc/systemd/journald.conf\n[Journal]\n# Storage=auto\n"
+                f"# {_JOURNALD}\n[Journal]\nStorage=volatile\n"
+            )
+        )
         commands.update(dict(apt_command_results((
             "docker-ce", "docker-ce-cli", "containerd.io", "docker-buildx-plugin",
             "docker-compose-plugin",
@@ -2039,6 +2218,242 @@ class DockerStepTests(unittest.TestCase):
         )
         DockerEngineStep().apply(context(host))
         self.assertIn(("run", (restart, True)), host.calls)
+
+    def test_journald_later_volatile_storage_refuses_before_mutation(self) -> None:
+        later = "/etc/systemd/journald.conf.d/90-other.conf"
+        output = docker_commands()[_JOURNALD_CAT].stdout
+        output += f"# {later}\n[Journal]\nStorage=volatile\n"
+        host = self.setting_host(commands={_JOURNALD_CAT: completed(_JOURNALD_CAT, output)})
+        self.assert_setting_refusal(
+            host, "journald storage", "Storage=volatile", "persistent storage", later
+        )
+
+    def test_journald_outside_auto_depends_on_journal_directory(self) -> None:
+        later = "/etc/systemd/journald.conf.d/90-other.conf"
+        output = docker_commands()[_JOURNALD_CAT].stdout
+        output += f"# {later}\n[Journal]\nStorage=auto\n"
+        commands: dict[tuple[str, ...], subprocess.CompletedProcess[str]] = {
+            _JOURNALD_CAT: completed(_JOURNALD_CAT, output)
+        }
+        self.assert_setting_refusal(
+            self.setting_host(commands=commands),
+            "journald storage", "Storage=auto without /var/log/journal", later,
+        )
+
+        files = docker_files(docker_policy())
+        files["/var/log/journal"] = ""
+        host = self.setting_host(files=files, commands=commands)
+        checked = DockerEngineStep().check(context(host))
+        self.assertEqual(checked.disposition, Disposition.CONVERGED, checked)
+        self.assertIn(f"journald's Storage is set by {later}", checked.detail)
+        host.calls.clear()
+        DockerEngineStep().apply(context(host))
+        self.assertNotIn(("run", (("systemctl", "restart", "systemd-journald"), True)), host.calls)
+        self.assertFalse(any(call[0] == "write_text" for call in host.calls))
+
+    def test_journald_all_unset_without_directory_writes_own_default(self) -> None:
+        files = docker_files(docker_policy())
+        del files[os.fspath(_JOURNALD)]
+        output = self.recorded_journald()
+        host = self.setting_host(
+            files=files,
+            commands={_JOURNALD_CAT: completed(_JOURNALD_CAT, output)},
+        )
+        checked = DockerEngineStep().check(context(host))
+        self.assertEqual(checked.disposition, Disposition.DRIFT, checked)
+        self.assertIn(f"{_JOURNALD} is missing", checked.detail)
+        host.calls.clear()
+        DockerEngineStep().apply(context(host))
+        self.assertEqual(host.files[os.fspath(_JOURNALD)], _JOURNALD_TEXT)
+        self.assertEqual(
+            [call for call in host.calls if call[0] == "write_text"],
+            [("write_text", (os.fspath(_JOURNALD), _JOURNALD_TEXT))],
+        )
+        self.assertIn(("run", (("systemctl", "restart", "systemd-journald"), True)), host.calls)
+
+    def test_journald_outside_cap_keeps_absent_or_different_drop_in(self) -> None:
+        later = "/etc/systemd/journald.conf.d/90-other.conf"
+        for own in (None, "[Journal]\nSystemMaxUse=9G\n"):
+            with self.subTest(own=own):
+                files = docker_files(docker_policy())
+                if own is None:
+                    del files[os.fspath(_JOURNALD)]
+                else:
+                    files[os.fspath(_JOURNALD)] = own
+                files["/var/log/journal"] = ""
+                output = self.recorded_journald()
+                if own is not None:
+                    output += f"# {_JOURNALD}\n{own}"
+                output += f"# {later}\n[Journal]\nSystemMaxUse=7G\n"
+                host = self.setting_host(
+                    files=files, commands={_JOURNALD_CAT: completed(_JOURNALD_CAT, output)}
+                )
+                checked = DockerEngineStep().check(context(host))
+                self.assertEqual(checked.disposition, Disposition.CONVERGED, checked)
+                self.assertIn(f"journald's SystemMaxUse is set by {later}", checked.detail)
+                host.calls.clear()
+                DockerEngineStep().apply(context(host))
+                self.assertEqual(host.files.get(os.fspath(_JOURNALD)), own)
+                self.assertFalse(any(call[0] == "write_text" for call in host.calls))
+                self.assertNotIn(
+                    ("run", (("systemctl", "restart", "systemd-journald"), True)), host.calls
+                )
+
+    def test_recorded_journald_comments_do_not_open_a_file(self) -> None:
+        files = docker_files(docker_policy())
+        del files[os.fspath(_JOURNALD)]
+        output = self.recorded_journald()
+        self.assertIn("# /etc/ if the original file is shipped in /usr/)", output)
+        output = output.replace("[Journal]\n", "[Journal]\nStorage=persistent\n", 1)
+        host = self.setting_host(
+            files=files, commands={_JOURNALD_CAT: completed(_JOURNALD_CAT, output)}
+        )
+        checked = DockerEngineStep().check(context(host))
+        self.assertEqual(checked.disposition, Disposition.CONVERGED, checked)
+        self.assertIn("journald's Storage is set by /etc/systemd/journald.conf", checked.detail)
+
+    def test_failing_journald_reader_refuses_before_mutation(self) -> None:
+        host = self.setting_host(commands={
+            _JOURNALD_CAT: subprocess.CompletedProcess(
+                list(_JOURNALD_CAT), 2, "", "fictitious journald error\nsecond line\n"
+            )
+        })
+        self.assert_setting_refusal(host, "systemd-analyze", "fictitious journald error")
+
+    def test_package_default_containerd_writes_and_restarts_both(self) -> None:
+        files = docker_files(docker_policy())
+        files[os.fspath(_CONTAINERD_CONFIG)] = "version = 4\n"
+        host = self.setting_host(
+            files=files,
+            commands={
+                _CONTAINERD_VERIFY: completed(_CONTAINERD_VERIFY, ""),
+                _CONTAINERD_DUMP: containerd_dump(_CONTAINERD_DEFAULT_ROOT),
+            },
+        )
+        checked = DockerEngineStep().check(context(host))
+        self.assertEqual(checked.disposition, Disposition.DRIFT, checked)
+        self.assertIn("config.toml is at the package default", checked.detail)
+        host.calls.clear()
+        DockerEngineStep().apply(context(host))
+        self.assertEqual(host.files[os.fspath(_CONTAINERD_CONFIG)], _CONTAINERD_TEXT)
+        self.assertEqual(
+            [call for call in host.calls if call[0] == "write_text"],
+            [("write_text", (os.fspath(_CONTAINERD_CONFIG), _CONTAINERD_TEXT))],
+        )
+        restarts = [
+            call[1][0] for call in host.calls
+            if call[0] == "run" and isinstance(call[1], tuple)
+            and call[1][0] in {
+                ("systemctl", "restart", "containerd"),
+                ("systemctl", "restart", "docker"),
+            }
+        ]
+        self.assertEqual(restarts, [
+            ("systemctl", "restart", "containerd"),
+            ("systemctl", "restart", "docker"),
+        ])
+
+    def test_moved_containerd_root_is_met_without_writing_or_restarting(self) -> None:
+        files = docker_files(docker_policy())
+        moved = f"version = 3\nroot = '{_CONTAINERD_ROOT}'\n"
+        files[os.fspath(_CONTAINERD_CONFIG)] = moved
+        host = self.setting_host(files=files)
+        checked = DockerEngineStep().check(context(host))
+        self.assertEqual(checked.disposition, Disposition.CONVERGED, checked)
+        self.assertIn(
+            f"{_CONTAINERD_CONFIG} is not provision's text, its root is {_CONTAINERD_ROOT}",
+            checked.detail,
+        )
+        host.calls.clear()
+        DockerEngineStep().apply(context(host))
+        self.assertEqual(host.files[os.fspath(_CONTAINERD_CONFIG)], moved)
+        self.assertFalse(any(call[0] == "write_text" for call in host.calls))
+        self.assertNotIn(("run", (("systemctl", "restart", "containerd"), True)), host.calls)
+        self.assertNotIn(("run", (("systemctl", "restart", "docker"), True)), host.calls)
+
+    def test_modified_containerd_root_shortfalls_refuse_before_mutation(self) -> None:
+        # A modified file without root runs on the package's root.
+        for config, root in (
+            ("version = 4\n", _CONTAINERD_DEFAULT_ROOT),
+            ("root = '/srv/other-containerd'\n", "/srv/other-containerd"),
+        ):
+            with self.subTest(config=config):
+                files = docker_files(docker_policy())
+                files[os.fspath(_CONTAINERD_CONFIG)] = config
+                self.assert_setting_refusal(
+                    self.setting_host(
+                        files=files, commands={_CONTAINERD_DUMP: containerd_dump(root)}
+                    ),
+                    "containerd root", os.fspath(root), os.fspath(_CONTAINERD_ROOT),
+                    f"set by {_CONTAINERD_CONFIG}",
+                )
+
+    def test_an_import_moving_the_root_is_judged_by_the_root_in_effect(self) -> None:
+        own = docker_files(docker_policy())
+        package_default = docker_files(docker_policy())
+        package_default[os.fspath(_CONTAINERD_CONFIG)] = "version = 4\n"
+        absent = docker_files(docker_policy())
+        del absent[os.fspath(_CONTAINERD_CONFIG)]
+        for name, files in (("own", own), ("package default", package_default), ("absent", absent)):
+            with self.subTest(name=name, root="short"):
+                self.assert_setting_refusal(
+                    self.setting_host(files=files, commands={
+                        _CONTAINERD_VERIFY: completed(_CONTAINERD_VERIFY, ""),
+                        _CONTAINERD_DUMP: containerd_dump("/srv/shared-containerd"),
+                    }),
+                    "containerd root", "/srv/shared-containerd",
+                    f"set by a file {_CONTAINERD_CONFIG} imports",
+                )
+        with self.subTest(name="package default", root="met"):
+            host = self.setting_host(files=package_default, commands={
+                _CONTAINERD_VERIFY: completed(_CONTAINERD_VERIFY, ""),
+            })
+            checked = DockerEngineStep().check(context(host))
+            self.assertEqual(checked.disposition, Disposition.CONVERGED, checked)
+            self.assertIn("is not provision's text", checked.detail)
+            host.calls.clear()
+            DockerEngineStep().apply(context(host))
+            self.assertFalse(any(call[0] == "write_text" for call in host.calls))
+
+    def test_containerd_configuration_dump_failure_refuses_before_mutation(self) -> None:
+        files = docker_files(docker_policy())
+        files[os.fspath(_CONTAINERD_CONFIG)] = "root = [\n"
+        host = self.setting_host(files=files, commands={
+            _CONTAINERD_DUMP: subprocess.CompletedProcess(
+                list(_CONTAINERD_DUMP), 1, "",
+                'time="fictitious" level=error msg="Failure unmarshaling TOML"\n'
+                "containerd: failed to unmarshal TOML at row 1 column 8\n",
+            )
+        })
+        self.assert_setting_refusal(
+            host, "containerd could not report its configuration",
+            "failed to unmarshal TOML at row 1 column 8",
+        )
+
+    def test_failing_containerd_verification_refuses_before_mutation(self) -> None:
+        files = docker_files(docker_policy())
+        files[os.fspath(_CONTAINERD_CONFIG)] = "version = 4\n"
+        host = self.setting_host(files=files, commands={
+            _CONTAINERD_VERIFY: subprocess.CompletedProcess(
+                list(_CONTAINERD_VERIFY), 2, "", "fictitious dpkg error\nsecond line\n"
+            ),
+            _CONTAINERD_DUMP: containerd_dump(_CONTAINERD_DEFAULT_ROOT),
+        })
+        self.assert_setting_refusal(host, "dpkg could not verify", "fictitious dpkg error")
+
+    def test_populated_store_refuses_before_containerd_and_journald_readings(self) -> None:
+        snapshot = _CONTAINERD_DEFAULT_ROOT / _CONTAINERD_STORE_PATHS[0] / "snapshot-1"
+        files = docker_files(docker_policy())
+        files[os.fspath(snapshot)] = ""
+        host = self.setting_host(files=files)
+        DockerEngineStep().check(context(host))
+        self.assertNotIn(("run", (_CONTAINERD_VERIFY, False)), host.calls)
+        self.assertNotIn(("run", (_JOURNALD_CAT, False)), host.calls)
+        self.assert_setting_refusal(
+            host, os.fspath(_CONTAINERD_DEFAULT_ROOT), os.fspath(_CONTAINERD_ROOT)
+        )
+        self.assertNotIn(("run", (_CONTAINERD_VERIFY, False)), host.calls)
+        self.assertNotIn(("run", (_JOURNALD_CAT, False)), host.calls)
 
 
 class DockerSourceTests(unittest.TestCase):
@@ -2650,6 +3065,42 @@ class DockerDaemonLeafTests(unittest.TestCase):
         self.assertNotEqual(self._table_names(without_one_row), names)
 
 
+class BoxWideSettingsLeafTests(unittest.TestCase):
+    """The leaf's box-wide setting names and steps match the step registry."""
+
+    @staticmethod
+    def _header_index(lines: Sequence[str]) -> int:
+        return next(
+            index for index, line in enumerate(lines)
+            if line.startswith("|") and line.split("|")[1].strip() == "Box-wide setting"
+        )
+
+    def _table_pairs(self, text: str) -> set[tuple[str, str]]:
+        lines = text.splitlines()
+        pairs: set[tuple[str, str]] = set()
+        for line in lines[self._header_index(lines) + 2:]:
+            if not line.startswith("|"):
+                break
+            cells = [cell.strip() for cell in line.split("|")]
+            name = re.fullmatch(r"`([^`]+)`", cells[1])
+            step = re.fullmatch(r"`([^`]+)`", cells[2])
+            if name is not None and step is not None:
+                pairs.add((name.group(1), step.group(1)))
+        return pairs
+
+    def test_leaf_table_pairs_match_step_settings(self) -> None:
+        if absent_from_export("docs/archi/host.md", ROOT):
+            self.skipTest("the architecture leaf is absent from this exported tree")
+        leaf = (ROOT / "docs/archi/host.md").read_text()
+        pairs = {(setting.name, step.name) for step in STEPS for setting in step.settings}
+        self.assertEqual(self._table_pairs(leaf), pairs)
+
+        lines = leaf.splitlines()
+        first_row = self._header_index(lines) + 2
+        without_one_row = "\n".join(lines[:first_row] + lines[first_row + 1:])
+        self.assertNotEqual(self._table_pairs(without_one_row), pairs)
+
+
 def directory_stat(mode: int, uid: int = 0, gid: int = 0) -> os.stat_result:
     return os.stat_result((stat.S_IFDIR | mode, 0, 0, 1, uid, gid, 0, 0, 0, 0))
 
@@ -2665,9 +3116,24 @@ UFW_AFTER_RULES = (
 
 
 class NetworkStepTests(unittest.TestCase):
+    UFW_STATUS = ("ufw", "status", "numbered")
+    UFW_VERBOSE = ("ufw", "status", "verbose")
+
+    def assert_firewall_refusal(self, host: FakeHost, *details: str) -> None:
+        step = FirewallStep()
+        reading = step.check(context(host))
+        self.assertEqual(reading.disposition, Disposition.UNFIXABLE)
+        for detail in details:
+            self.assertIn(detail, reading.detail)
+        host.calls.clear()
+        with self.assertRaises(StepFailure) as raised:
+            step.apply(context(host))
+        self.assertEqual((raised.exception.detail, raised.exception.fix), (reading.detail, reading.fix))
+        assert_no_host_mutation(self, host, {self.UFW_STATUS, self.UFW_VERBOSE})
+
     def test_firewall_removes_only_stale_tagged_rules_and_preserves_order(self) -> None:
         status = (
-            "Status: active\n"
+            "Status: inactive\n"
             "     To                         Action      From\n"
             "     --                         ------      ----\n"
             "[ 3] 22/tcp                    ALLOW IN    192.0.2.0/24 # gideon-provision\n"
@@ -2683,8 +3149,11 @@ class NetworkStepTests(unittest.TestCase):
         }
         host = FakeHost(commands=commands, files={"/etc/ufw/after.rules": UFW_AFTER_RULES})
         step = FirewallStep()
-        self.assertEqual(step.check(context(host)).disposition, Disposition.DRIFT)
+        reading = step.check(context(host))
+        self.assertEqual(reading.disposition, Disposition.DRIFT)
+        self.assertIn("ufw is inactive, the installed default", reading.detail)
         step.apply(context(host))
+        self.assertNotIn(("run", (self.UFW_VERBOSE, False)), host.calls)
         self.assertTrue(host.files["/etc/ufw/after.rules"].startswith(UFW_AFTER_RULES.rstrip("\n")))
         self.assertIn("# BEGIN gideon-provision docker-user\n*filter\n:DOCKER-USER - [0:0]\n", host.files["/etc/ufw/after.rules"])
         self.assertIn("-s 192.0.2.0/24 -p tcp -m conntrack --ctorigdstport 443 --ctdir ORIGINAL", host.files["/etc/ufw/after.rules"])
@@ -2706,6 +3175,10 @@ class NetworkStepTests(unittest.TestCase):
             next(index for index, call in enumerate(mutations) if call[-1] == "gideon-provision"),
             next(index for index, call in enumerate(mutations) if call == ("ufw", "--force", "enable")),
         )
+        self.assertLess(
+            mutations.index(("ufw", "default", "deny", "incoming")),
+            mutations.index(("ufw", "--force", "enable")),
+        )
 
     def firewall_converged_host(self) -> FakeHost:
         from gideon.host.steps.network import _docker_user_block, _docker_user_rules
@@ -2721,6 +3194,7 @@ class NetworkStepTests(unittest.TestCase):
                 ("ufw", "status", "numbered"): completed(("ufw", "status", "numbered"), status),
                 ("ufw", "status", "verbose"): completed(("ufw", "status", "verbose"), "Status: active\nDefault: deny (incoming), allow (outgoing)\n"),
                 ("iptables", "-S", "DOCKER-USER"): completed(("iptables", "-S", "DOCKER-USER"), chain),
+                ("ufw", "reload"): completed(("ufw", "reload")),
             },
             files={"/etc/ufw/after.rules": UFW_AFTER_RULES + "\n" + _docker_user_block(["192.0.2.0/24"])},
         )
@@ -2728,6 +3202,42 @@ class NetworkStepTests(unittest.TestCase):
     def test_firewall_converges_with_the_docker_user_block_loaded(self) -> None:
         result = FirewallStep().check(context(self.firewall_converged_host()))
         self.assertEqual(result.disposition, Disposition.CONVERGED, result)
+
+    def test_active_deny_and_reject_are_met_without_resetting_policy(self) -> None:
+        for policy in ("deny", "reject"):
+            with self.subTest(policy=policy):
+                host = self.firewall_converged_host()
+                host.commands[self.UFW_VERBOSE] = completed(
+                    self.UFW_VERBOSE,
+                    f"Status: active\nDefault: {policy} (incoming), allow (outgoing)\n",
+                )
+                step = FirewallStep()
+                reading = step.check(context(host))
+                self.assertEqual(reading.disposition, Disposition.CONVERGED)
+                host.calls.clear()
+                step.apply(context(host))
+                self.assertEqual([call for call in host.calls if call[0] in {"write_text", "unlink", "mkdir"}], [])
+                self.assertNotIn(("run", (("ufw", "default", "deny", "incoming"), True)), host.calls)
+                self.assertNotIn(("run", (("ufw", "--force", "enable"), True)), host.calls)
+                self.assertIn(("run", (("ufw", "reload"), True)), host.calls)
+
+    def test_active_allow_refuses_before_rules_drift_or_mutation(self) -> None:
+        host = self.firewall_converged_host()
+        host.files.pop("/etc/ufw/after.rules")
+        host.commands[self.UFW_VERBOSE] = completed(
+            self.UFW_VERBOSE, "Status: active\nDefault: allow (incoming), allow (outgoing)\n"
+        )
+        self.assert_firewall_refusal(host, "firewall default policy", "allow (incoming)", "deny (incoming)")
+
+    def test_unreadable_default_policy_refuses_before_mutation(self) -> None:
+        for response in (
+            completed(("ufw", "status", "verbose"), "Status: active\n"),
+            subprocess.CompletedProcess(list(self.UFW_VERBOSE), 1, "", "fictitious ufw error"),
+        ):
+            with self.subTest(response=response.returncode, output=response.stdout):
+                host = self.firewall_converged_host()
+                host.commands[self.UFW_VERBOSE] = response
+                self.assert_firewall_refusal(host, "ufw status verbose", "default incoming policy")
 
     def test_firewall_block_missing_or_stale_is_drift(self) -> None:
         host = self.firewall_converged_host()
@@ -2958,9 +3468,45 @@ class TimezoneStepTests(unittest.TestCase):
             host.calls,
             [
                 ("run", (self.SHOW, False)),
+                ("run", (self.SHOW, False)),
                 ("run", (apply_command, True)),
             ],
         )
+
+    def test_utc_alias_is_also_the_installed_default(self) -> None:
+        host = FakeHost(commands={self.SHOW: completed(self.SHOW, "UTC\n")})
+        reading = TimezoneStep().check(context(host))
+        self.assertEqual(reading.disposition, Disposition.DRIFT)
+        self.assertIn("installed default", reading.detail)
+
+    def test_site_zone_is_met_without_a_write(self) -> None:
+        host = FakeHost()
+        site = context(host).site
+        assert site is not None
+        self.assertNotIn(site.office.timezone, ("Etc/UTC", "UTC"))
+        host.commands[self.SHOW] = completed(self.SHOW, f"{site.office.timezone}\n")
+        step = TimezoneStep()
+        self.assertEqual(step.check(context(host)).disposition, Disposition.CONVERGED)
+        host.calls.clear()
+        step.apply(context(host))
+        self.assertEqual(host.calls, [("run", (self.SHOW, False))])
+
+    def test_moved_short_zone_refuses_before_mutation(self) -> None:
+        host = FakeHost(commands={self.SHOW: completed(self.SHOW, "America/New_York\n")})
+        site = context(host).site
+        assert site is not None
+        self.assertNotEqual(site.office.timezone, "America/New_York")
+        step = TimezoneStep()
+        reading = step.check(context(host))
+        self.assertEqual(reading.disposition, Disposition.UNFIXABLE)
+        self.assertIn("time zone", reading.detail)
+        self.assertIn("America/New_York", reading.detail)
+        self.assertIn(site.office.timezone, reading.detail)
+        host.calls.clear()
+        with self.assertRaises(StepFailure) as raised:
+            step.apply(context(host))
+        self.assertEqual((raised.exception.detail, raised.exception.fix), (reading.detail, reading.fix))
+        assert_no_host_mutation(self, host, {self.SHOW})
 
     def test_timedatectl_failure_is_unfixable(self) -> None:
         host = FakeHost(
@@ -2976,20 +3522,131 @@ class TimezoneStepTests(unittest.TestCase):
         self.assertEqual(result.disposition, Disposition.UNFIXABLE)
         self.assertIn("systemd-timedated", result.fix)
         self.assertEqual(host.calls, [("run", (self.SHOW, False))])
+        host.calls.clear()
+        with self.assertRaises(StepFailure) as raised:
+            TimezoneStep().apply(context(host))
+        self.assertEqual((raised.exception.detail, raised.exception.fix), (result.detail, result.fix))
+        assert_no_host_mutation(self, host, {self.SHOW})
 
 
 class MaintenanceStepTests(unittest.TestCase):
+    PACKAGE = ("dpkg-query", "-W", "-f=${Status} ${Version}\\n", "unattended-upgrades")
+    DROP_IN = os.fspath(_DROP_IN)
+
+    def maintenance_host(
+        self, *, values: Mapping[str, str] | None = None, drop_in: str | None = None
+    ) -> FakeHost:
+        output = "APT::Periodic \"\";\n"
+        output += "".join(
+            f'APT::Periodic::{key} "{value}";\n'
+            for key, value in (values or {}).items()
+        )
+        files = {} if drop_in is None else {self.DROP_IN: drop_in}
+        return FakeHost(
+            files=files,
+            commands={
+                self.PACKAGE: completed(self.PACKAGE, "install ok installed 99.0-fictitious\n"),
+                _PERIODIC: completed(_PERIODIC, output),
+            },
+        )
+
+    def assert_periodic_refusal(self, host: FakeHost, *details: str) -> None:
+        step = UnattendedUpgradesStep()
+        reading = step.check(context(host))
+        self.assertEqual(reading.disposition, Disposition.UNFIXABLE)
+        for detail in details:
+            self.assertIn(detail, reading.detail)
+        host.calls.clear()
+        with self.assertRaises(StepFailure) as raised:
+            step.apply(context(host))
+        self.assertEqual((raised.exception.detail, raised.exception.fix), (reading.detail, reading.fix))
+        assert_no_host_mutation(self, host, {self.PACKAGE, _PERIODIC})
+
     def test_unattended_upgrades_installs_and_writes_only_its_dropin(self) -> None:
-        package = ("dpkg-query", "-W", "-f=${Status} ${Version}\\n", "unattended-upgrades")
         install = ("apt-get", "install", "-y", "unattended-upgrades")
         host = FakeHost(commands={
-            package: completed(package), **dict(apt_command_results(["unattended-upgrades"])),
+            self.PACKAGE: completed(self.PACKAGE),
+            _PERIODIC: completed(_PERIODIC, "APT::Periodic \"\";\n"),
+            **dict(apt_command_results(["unattended-upgrades"])),
         })
         step = UnattendedUpgradesStep()
         self.assertEqual(step.check(context(host)).disposition, Disposition.DRIFT)
         step.apply(context(host))
         self.assertIn(("run", (install, True)), host.calls)
-        self.assertIn('APT::Periodic::Unattended-Upgrade "1";', host.files["/etc/apt/apt.conf.d/52gideon-auto-upgrades"])
+        self.assertIn(("run", (_PERIODIC, False)), host.calls)
+        self.assertEqual(
+            host.files[self.DROP_IN],
+            'APT::Periodic::Update-Package-Lists "1";\n'
+            'APT::Periodic::Unattended-Upgrade "1";\n',
+        )
+
+    def test_zero_without_a_drop_in_refuses_before_mutation(self) -> None:
+        host = self.maintenance_host(values={
+            "Update-Package-Lists": "0", "Unattended-Upgrade": "1"
+        })
+        self.assert_periodic_refusal(host, "apt periodic triggers", "Update-Package-Lists 0", "a value other than 0")
+
+    def test_zero_with_a_clean_drop_in_refuses_before_mutation(self) -> None:
+        host = self.maintenance_host(
+            values={"Update-Package-Lists": "0", "Unattended-Upgrade": "1"},
+            drop_in='APT::Periodic::Update-Package-Lists "1";\n',
+        )
+        self.assert_periodic_refusal(host, "apt periodic triggers", "Update-Package-Lists 0", "a value other than 0")
+
+    def test_zero_in_a_stale_drop_in_rewrites_only_its_key(self) -> None:
+        host = self.maintenance_host(
+            values={"Update-Package-Lists": "0", "Unattended-Upgrade": "7"},
+            drop_in='APT::Periodic::Update-Package-Lists "0";\n',
+        )
+        step = UnattendedUpgradesStep()
+        reading = step.check(context(host))
+        self.assertEqual(reading.disposition, Disposition.DRIFT)
+        self.assertIn("holds a line GIDEON does not write", reading.detail)
+        host.calls.clear()
+        step.apply(context(host))
+        self.assertEqual(host.files[self.DROP_IN], 'APT::Periodic::Update-Package-Lists "1";\n')
+        self.assertEqual(
+            [call for call in host.calls if call[0] == "write_text"],
+            [("write_text", (self.DROP_IN, 'APT::Periodic::Update-Package-Lists "1";\n'))],
+        )
+
+    def test_weekly_lists_with_unset_upgrade_writes_only_the_unset_key(self) -> None:
+        host = self.maintenance_host(values={"Update-Package-Lists": "7"})
+        step = UnattendedUpgradesStep()
+        self.assertEqual(step.check(context(host)).disposition, Disposition.DRIFT)
+        step.apply(context(host))
+        self.assertEqual(host.files[self.DROP_IN], 'APT::Periodic::Unattended-Upgrade "1";\n')
+
+    def test_both_unset_write_both_lines(self) -> None:
+        host = self.maintenance_host()
+        step = UnattendedUpgradesStep()
+        self.assertEqual(step.check(context(host)).disposition, Disposition.DRIFT)
+        step.apply(context(host))
+        self.assertEqual(
+            host.files[self.DROP_IN],
+            'APT::Periodic::Update-Package-Lists "1";\n'
+            'APT::Periodic::Unattended-Upgrade "1";\n',
+        )
+
+    def test_both_on_without_a_drop_in_are_met_without_a_write(self) -> None:
+        host = self.maintenance_host(values={
+            "Update-Package-Lists": "7", "Unattended-Upgrade": "1"
+        })
+        step = UnattendedUpgradesStep()
+        reading = step.check(context(host))
+        self.assertEqual(reading.disposition, Disposition.CONVERGED)
+        self.assertIn("Update-Package-Lists 7", reading.detail)
+        host.calls.clear()
+        step.apply(context(host))
+        assert_no_host_mutation(self, host, {self.PACKAGE, _PERIODIC})
+        self.assertNotIn(self.DROP_IN, host.files)
+
+    def test_failing_apt_config_refuses_before_mutation(self) -> None:
+        host = self.maintenance_host()
+        host.commands[_PERIODIC] = subprocess.CompletedProcess(
+            list(_PERIODIC), 2, "", "fictitious apt error\nsecond line\n"
+        )
+        self.assert_periodic_refusal(host, "apt-config", "fictitious apt error")
 
 
 class HostToolsStepTests(unittest.TestCase):
@@ -3986,7 +4643,8 @@ class BaselineCheckPass(unittest.TestCase):
             "nvidia-driver": Disposition.DRIFT,
             "nvidia-toolkit": Disposition.PENDING_INPUT,
             "docker-engine": Disposition.DRIFT,
-            "unattended-upgrades": Disposition.DRIFT,
+            # The installer's periodic triggers already meet the need.
+            "unattended-upgrades": Disposition.CONVERGED,
             "secrets-dirs": Disposition.DRIFT,
             "backup-keypair": Disposition.DRIFT,
             "age-recipient": Disposition.DRIFT,

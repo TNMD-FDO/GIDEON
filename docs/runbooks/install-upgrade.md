@@ -886,3 +886,51 @@ sudo python3 -m gideon engine verify
 ```
 
 A merged `host.minimums.*` or `host.driver.branch` bump makes provision and preflight refuse until this procedure is followed (`docs/runbooks/release-files.md §9`). Provision never upgrades a present prerequisite itself.
+
+## 10. Changing a moved box-wide setting
+
+When provision, preflight, or `upgrade`'s provision stage reports a moved setting that falls short, its row names the setting, the value found, and the value needed. GIDEON does not change a moved setting. Agree the value with the box's other operators, make the applicable change below, then re-run provision from the release checkout.
+
+### Time zone
+
+If the host's zone should match `office.timezone` in `/etc/gideon/site.yaml`, change it with `sudo timedatectl set-timezone <zone>`. If the host's zone is right, correct `office.timezone` instead. Do this in an announced window: every timer on the box follows the zone, and a persistent timer can catch up once after the change.
+
+### SSH login rule
+
+Keep a working SSH session open. Read the effective `passwordauthentication` and `kbdinteractiveauthentication` values with `sudo sshd -T`; use `sudo grep -riE '^[[:space:]]*(PasswordAuthentication|KbdInteractiveAuthentication)' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/` to find the file setting either value ahead of `/etc/ssh/sshd_config.d/00-gideon-key-only.conf`. Agree the change with the other operator, since a password login may be theirs. Remove or correct the conflicting line, run `sudo systemctl reload ssh`, and confirm both effective values are `no` while keeping the session open.
+
+### Firewall default policy
+
+Agree an announced window because this changes who can reach the box. Set the incoming default with `sudo ufw default deny incoming`, then read `sudo ufw status verbose` to confirm the active incoming policy is `deny`.
+
+### Journald storage
+
+Set `Storage=persistent` in the file the refusal names, or, when `Storage=auto` or unset, create `/var/log/journal` with `sudo mkdir -p /var/log/journal`. Run `sudo systemctl restart systemd-journald` and read `sudo systemd-analyze cat-config systemd/journald.conf` to confirm the effective value. Containers keep running; the journal pauses briefly, so this change needs no maintenance window.
+
+### Apt periodic triggers
+
+Use `sudo grep -r 'Unattended-Upgrade\|Update-Package-Lists' /etc/apt/apt.conf.d/` to find the file setting the refused key to `"0"`; set that key to `"1"` there. Read `apt-config dump APT::Periodic` to confirm both triggers are on. No maintenance window is needed.
+
+### Containerd root
+
+Work in an announced window because restarting containerd and Docker reaches every container. Do not edit `root` first.
+
+Find the root file. The row's root is the one containerd runs with: `sudo containerd --config /etc/containerd/config.toml config dump | grep -E '^(root|imports)'` shows it and the files `config.toml` imports. The root file is `/etc/containerd/config.toml` when the row names it; when the row names a file `config.toml` imports, `sudo grep -l '^root' /etc/containerd/conf.d/*.toml` finds it. Every step below that names the root file means that one file.
+
+Measure the store under the named root with `sudo du -sb <named-root>` and check its snapshotter `snapshots` directory.
+
+If the store is populated, follow `docs/runbooks/install-upgrade.md §7` by hand, substituting the named root for `/var/lib/containerd` throughout:
+
+- At the survey, also save the root file beside the shipped copy, `sudo cp -p <root-file> /var/lib/gideon-store-move/root-file.saved`, before any change; when the root file is `config.toml`, the survey's own copy is that save.
+- At the provision stage, set `root = '/var/lib/docker/containerd'` in the root file by hand before `sudo python3 -m gideon host provision --only docker-engine` under the same `policy-rc.d` hold. Provision does not rewrite a moved file.
+- A rollback restores the root file from `/var/lib/gideon-store-move/root-file.saved` as well as `config.toml`, and continues only when `containerd config dump` reports the named root, not `/var/lib/containerd`.
+- Finish the check, accept, and remove stages over the named root.
+
+If the store is empty, `sudo cp -p <root-file> <backup-path>`, set `root = '/var/lib/docker/containerd'` in the root file, then run `sudo systemctl restart containerd` and `sudo systemctl restart docker`. To undo it, copy the backup back and run the same two restarts.
+
+From the release checkout, converge after the hand change:
+
+```sh
+cd /opt/gideon
+sudo python3 -m gideon host provision
+```

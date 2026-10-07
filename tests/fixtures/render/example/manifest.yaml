@@ -1,7 +1,7 @@
 # Rendered by gideon render — never hand-edit. Re-run gideon apply after editing /etc/gideon/site.yaml.
 release: "fixture"
 inputs:
-  site_sha256: "09eaf1e3a64afe0858beaa95837d1f19fcf08638cb77407b5616530aff38fc46"
+  site_sha256: "e6cc729fc35c6820f9a564235d0ded5086d78ba4a8ab3afd7fa2334b94565ab7"
   host_lock_sha256: "c487a5a60259c393ac20649336ff45b24747e8155aa0e4d5afe84e51e8424680"
   models_lock_sha256: "cb29a0c0d77cd04d871b4829c17c841a10c7dd33dc30fa2858f16b3eaa580400"
   egress_sha256: "dd0a3a046aa33ebbf1c2d740e6e7c254d0e15bc9fddb1ea886be90158aeb0c35"

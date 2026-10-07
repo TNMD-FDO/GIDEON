@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.70](docs/release-notes/v0.3.70.md) — 2026-10-07 — box-wide settings change only at the operating system's default
 - [v0.3.68](docs/release-notes/v0.3.68.md) — 2026-10-07 — corpus cut writes the tranche-1 lockfile
 - [v0.3.67](docs/release-notes/v0.3.67.md) — 2026-10-06 — GIDEON owns its daemon.json keys only
 - [v0.3.66](docs/release-notes/v0.3.66.md) — 2026-10-06 — a second Docker apt source refuses

@@ -13,7 +13,7 @@
 office:
   name: Office of the Federal Public Defender, Middle District of Tennessee   # General preset text, release notes
   short_name: TNMD-FDO                                                        # alert subjects, Grafana title
-  timezone: America/Chicago                                                   # IANA name; provision sets the host clock to it, every container gets it as TZ, every timer's OnCalendar carries it; the schedule uses office time
+  timezone: America/Chicago                                                   # IANA name; provision sets the host clock to it when the host is at the installed default, and refuses a zone another application set; every container gets it as TZ, every timer's OnCalendar carries it; the schedule uses office time
 
 hostname: gideon.example.org      # Caddy, WEBUI_URL, certificate subject
 lan_cidrs: [192.0.2.0/24]         # ufw allow-list for 443 (and 22); one or more CIDRs

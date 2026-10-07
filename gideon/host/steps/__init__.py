@@ -30,6 +30,35 @@ APT_REHEARSAL_FIX = (
     "window when containers are running (docs/runbooks/install-upgrade.md §9), "
     "then re-run provision."
 )
+BOX_WIDE_SHORTFALL_FIX = (
+    "Agree the named setting with the box's other operators and change it yourself "
+    "by docs/runbooks/install-upgrade.md §10, in an announced maintenance window "
+    "where that section says so, then re-run provision."
+)
+
+
+@dataclass(frozen=True, slots=True)
+class BoxWideSetting:
+    """A host setting shared by every application on the box."""
+
+    name: str
+
+
+def box_wide_shortfall(
+    setting: BoxWideSetting, found: str, needed: str, source: str | None = None
+) -> str:
+    """Describe a moved setting that falls short of the required value."""
+
+    detail = f"{setting.name} is {found!r}, GIDEON needs {needed!r}"
+    if source is not None:
+        detail += f", set by {source}"
+    return detail
+
+
+def stderr_first_line(stderr: str) -> str:
+    """The first line of a failed reader's diagnostic, for its refusal."""
+
+    return stderr.splitlines()[0] if stderr.strip() else "no diagnostic"
 
 
 def wget_argv_for_site(
@@ -322,6 +351,7 @@ class Step:
     # The kvm, registry, and gh-runner roles run only on the declared build box.
     build_box_only: bool = False
     requires: tuple[str, ...] = ()
+    settings: tuple[BoxWideSetting, ...] = ()
 
     def check(self, context: ProvisionContext) -> CheckResult:
         raise NotImplementedError

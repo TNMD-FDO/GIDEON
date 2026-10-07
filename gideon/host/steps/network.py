@@ -4,12 +4,16 @@ import re
 from pathlib import Path
 
 from gideon.host.steps import (
+    BOX_WIDE_SHORTFALL_FIX,
     LIBVIRT_BRIDGE_CIDR,
+    BoxWideSetting,
     CheckResult,
     Disposition,
     ProvisionContext,
     Step,
+    StepFailure,
     apt_install,
+    box_wide_shortfall,
     package_installed,
     site_required,
 )
@@ -49,12 +53,46 @@ _WAIT_ONLINE_FIX = (
     f"Create {_WAIT_ONLINE_DROPIN} with the any-link wait command, then re-run provision."
 )
 _UFW_FIX = "Configure the tagged firewall rules from site.lan_cidrs, then re-run provision."
+_INCOMING_POLICY = re.compile(r"Default:\s*(\w+)\s*\(incoming\)")
+_UFW_READ_FIX = "Repair ufw so its status can be read, then re-run provision."
+
+
+def _incoming_policy(context: ProvisionContext) -> str | None:
+    try:
+        result = context.host.run(["ufw", "status", "verbose"])
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    match = _INCOMING_POLICY.search(result.stdout)
+    return match.group(1).lower() if match is not None else None
+
+
+def _policy_refusal(context: ProvisionContext, setting: BoxWideSetting) -> CheckResult | None:
+    policy = _incoming_policy(context)
+    if policy is None:
+        return CheckResult(
+            Disposition.UNFIXABLE,
+            "ufw status verbose could not report the default incoming policy",
+            _UFW_READ_FIX,
+        )
+    if policy in {"deny", "reject"}:
+        return None
+    needed = "deny (incoming)" if policy == "allow" else "deny or reject (incoming)"
+    return CheckResult(
+        Disposition.UNFIXABLE,
+        box_wide_shortfall(setting, f"{policy} (incoming)", needed),
+        BOX_WIDE_SHORTFALL_FIX,
+    )
 
 
 def _ufw_rules(
     context: ProvisionContext,
 ) -> tuple[bool, list[tuple[int, str, int]]] | None:
-    result = context.host.run(["ufw", "status", "numbered"])
+    try:
+        result = context.host.run(["ufw", "status", "numbered"])
+    except OSError:
+        return None
     if result.returncode != 0:
         return None
     active = any(line.strip() == "Status: active" for line in result.stdout.splitlines())
@@ -147,11 +185,12 @@ def _desired_rules(context: ProvisionContext) -> list[tuple[str, int]]:
 
 
 class FirewallStep(Step):
-    """Converge only the provision-owned UFW rule set."""
+    """Provision tagged UFW rules and the default incoming policy."""
 
     name = "firewall"
     summary = "configure tagged UFW access for office LANs"
     needs_site = True
+    settings = (BoxWideSetting("firewall default policy"),)
 
     def check(self, context: ProvisionContext) -> CheckResult:
         if context.site is None:
@@ -164,19 +203,22 @@ class FirewallStep(Step):
                 _UFW_FIX,
             )
         active, rules = status
+        if active:
+            refusal = _policy_refusal(context, self.settings[0])
+            if refusal is not None:
+                return refusal
+        else:
+            return CheckResult(
+                Disposition.DRIFT,
+                "ufw is inactive, the installed default; GIDEON enables it with deny incoming and its tagged rules",
+                _UFW_FIX,
+            )
         actual = sorted((cidr, port) for _, cidr, port in rules)
         desired = _desired_rules(context)
-        if not active or actual != desired:
+        if actual != desired:
             return CheckResult(
                 Disposition.DRIFT,
                 f"tagged UFW rules are {actual!r}; desired {desired!r}",
-                _UFW_FIX,
-            )
-        verbose = context.host.run(["ufw", "status", "verbose"])
-        if verbose.returncode != 0 or "deny (incoming" not in verbose.stdout:
-            return CheckResult(
-                Disposition.DRIFT,
-                "the UFW default incoming policy is not deny",
                 _UFW_FIX,
             )
         block = _docker_user_block(context.site.lan_cidrs)
@@ -209,8 +251,12 @@ class FirewallStep(Step):
             raise RuntimeError("site file is required by firewall")
         status = _ufw_rules(context)
         if status is None:
-            raise RuntimeError("refusing to mutate an unparsed UFW rule set")
-        _, current = status
+            raise StepFailure("ufw status could not be parsed", _UFW_FIX)
+        active, current = status
+        if active:
+            refusal = _policy_refusal(context, self.settings[0])
+            if refusal is not None:
+                raise StepFailure(refusal.detail, refusal.fix)
         desired = _desired_rules(context)
         needed = list(desired)
         stale_numbers: list[int] = []
@@ -247,9 +293,10 @@ class FirewallStep(Step):
             after_rules = ""
         if _current_block(after_rules) != block:
             context.host.write_text(_AFTER_RULES, _with_block(after_rules, block), mode=0o640)
-        context.host.run(["ufw", "default", "deny", "incoming"], check=True)
-        # Allow-22 rules have been added before enabling UFW, preserving SSH.
-        context.host.run(["ufw", "--force", "enable"], check=True)
+        if not active:
+            context.host.run(["ufw", "default", "deny", "incoming"], check=True)
+            # Allow-22 rules have been added before enabling UFW, preserving SSH.
+            context.host.run(["ufw", "--force", "enable"], check=True)
         # enable loads after.rules on activation; reload re-reads it when already active.
         context.host.run(["ufw", "reload"], check=True)
 

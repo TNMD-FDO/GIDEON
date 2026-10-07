@@ -6,11 +6,14 @@ a second apt source for its repository before writing anything, since two
 entries under different keys break apt for the whole box. It owns the keys
 `dockerdaemon.OWNED_KEYS` names, sets each only at its default, and keeps every
 other daemon key.
+Containerd's root and journald's storage are box-wide settings: their effects
+are read, set at their defaults, accepted when met, and refused when short.
 """
 
 import json
 import re
 import stat
+import tomllib
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -18,24 +21,36 @@ from pathlib import Path
 from gideon.host import aptsources, dockerdaemon
 from gideon.host.images import is_loopback_registry, is_plain_registry, parse_registry
 from gideon.host.steps import (
+    BOX_WIDE_SHORTFALL_FIX,
     PREREQUISITE_FLOOR_FIX,
+    BoxWideSetting,
     CheckResult,
     Disposition,
     ProvisionContext,
     Step,
     StepFailure,
     apt_install,
+    box_wide_shortfall,
     fetch_file,
     package_version,
+    stderr_first_line,
 )
 
 _KEYRING = Path("/etc/apt/keyrings/docker.asc")
 _SOURCE = Path("/etc/apt/sources.list.d/docker.sources")
 _DAEMON = Path("/etc/docker/daemon.json")
 _CONTAINERD_CONFIG = Path("/etc/containerd/config.toml")
+_CONTAINERD_VERIFY = ("dpkg", "--verify", "containerd.io")
+_CONTAINERD_DUMP = ("containerd", "--config", str(_CONTAINERD_CONFIG), "config", "dump")
 _CONTAINERD_DEFAULT_ROOT = Path("/var/lib/containerd")
 _CONTAINERD_ROOT = Path("/var/lib/docker/containerd")
 _JOURNALD = Path("/etc/systemd/journald.conf.d/gideon.conf")
+_JOURNALD_CAT = ("systemd-analyze", "cat-config", "systemd/journald.conf")
+_JOURNALD_KEYS = ("Storage", "SystemMaxUse", "MaxRetentionSec")
+_JOURNAL_DIR = Path("/var/log/journal")
+# cat-config opens each file with a "# <path>" line; the shipped file's own
+# comments also start "# /", so a header is a whole line naming one path.
+_JOURNALD_HEADER = re.compile(r"^# (/\S+)$")
 _KEY_URL = "https://download.docker.com/linux/ubuntu/gpg"
 _REPOSITORY = "https://download.docker.com/linux/ubuntu"
 _SOURCE_TYPE = "deb"
@@ -79,6 +94,11 @@ _CONTAINERD_STORE_PATHS = (
 )
 _CONTAINERD_STORE_FIX = "Follow the containerd store move procedure in docs/runbooks/install-upgrade.md §7, then re-run provision."
 _CONTAINERD_LIST_FIX = "Repair the containerd store directory named above, then re-run provision."
+_CONTAINERD_VERIFY_FIX = "Repair dpkg's containerd.io verification, then re-run provision."
+_CONTAINERD_DUMP_FIX = f"Repair {_CONTAINERD_CONFIG} or the files it imports by hand (containerd config dump names the error), then re-run provision."
+_CONTAINERD_READ_FIX = f"Repair access to {_CONTAINERD_CONFIG}, then re-run provision."
+_JOURNALD_READ_FIX = "Repair journald's configuration so systemd-analyze can read it, then re-run provision."
+_JOURNALD_DROP_IN_FIX = f"Repair access to {_JOURNALD}, then re-run provision."
 _DAEMON_OBJECT_FIX = f"Repair {_DAEMON} by hand as one JSON object, then re-run provision."
 _DAEMON_CONTAINER_FIX = f"Repair the named key in {_DAEMON} by hand, then re-run provision."
 _DAEMON_SHORT_FIX = f"Agree the value of the named key with the box's other operators, set it in {_DAEMON} and restart Docker in an announced maintenance window, since the restart reaches every container, then re-run provision."
@@ -108,6 +128,28 @@ class _SourceReading:
     files: tuple[str, ...] = ()
     count: int = 0
     error: str = ""
+
+
+class _ContainerdKind(Enum):
+    """containerd's config.toml as read; a moved file short of the need is a refusal."""
+
+    ABSENT = "absent"
+    OWN = "own"
+    PACKAGE_DEFAULT = "package_default"
+    MOVED_MET = "moved_met"
+
+
+@dataclass(frozen=True)
+class _JournalKey:
+    name: str
+    value: str
+    file: str
+
+
+@dataclass(frozen=True)
+class _JournaldReading:
+    outside: tuple[_JournalKey, ...]
+    drop_in: str | None
 
 
 def _keyring_empty(context: ProvisionContext) -> bool:
@@ -295,6 +337,169 @@ def _daemon_refusal(reading: dockerdaemon.Reading) -> CheckResult | None:
     return None
 
 
+def _containerd_root(context: ProvisionContext) -> str | CheckResult:
+    """The root containerd runs with, its imports merged in, as containerd reports it."""
+
+    try:
+        result = context.host.run(_CONTAINERD_DUMP)
+    except OSError as exc:
+        return CheckResult(
+            Disposition.UNFIXABLE,
+            f"containerd could not report its configuration: {exc}",
+            _CONTAINERD_DUMP_FIX,
+        )
+    if result.returncode != 0:
+        # containerd logs a structured line before the error it exits with.
+        lines = result.stderr.strip().splitlines()
+        reason = lines[-1] if lines else "no diagnostic"
+        return CheckResult(
+            Disposition.UNFIXABLE,
+            f"containerd could not report its configuration: {reason}",
+            _CONTAINERD_DUMP_FIX,
+        )
+    try:
+        root = tomllib.loads(result.stdout).get("root")
+    except tomllib.TOMLDecodeError as exc:
+        return CheckResult(
+            Disposition.UNFIXABLE,
+            f"cannot parse containerd's configuration dump: {exc}",
+            _CONTAINERD_DUMP_FIX,
+        )
+    if not isinstance(root, str):
+        return CheckResult(
+            Disposition.UNFIXABLE,
+            "containerd's configuration dump names no root",
+            _CONTAINERD_DUMP_FIX,
+        )
+    return root
+
+
+def _containerd_package_default(context: ProvisionContext) -> bool | CheckResult:
+    """True when dpkg finds the package's config.toml unmodified."""
+
+    try:
+        verified = context.host.run(_CONTAINERD_VERIFY)
+    except OSError as exc:
+        return CheckResult(
+            Disposition.UNFIXABLE,
+            f"dpkg could not verify containerd.io: {exc}",
+            _CONTAINERD_VERIFY_FIX,
+        )
+    if verified.returncode not in (0, 1):
+        return CheckResult(
+            Disposition.UNFIXABLE,
+            f"dpkg could not verify containerd.io: {stderr_first_line(verified.stderr)}",
+            _CONTAINERD_VERIFY_FIX,
+        )
+    return not any(
+        line.split()[-1:] == [str(_CONTAINERD_CONFIG)]
+        for line in verified.stdout.splitlines()
+    )
+
+
+def _containerd_read(
+    context: ProvisionContext, setting: BoxWideSetting
+) -> _ContainerdKind | CheckResult:
+    """Classify config.toml: its text and dpkg say whether GIDEON may write it,
+    and the root in effect, imports included, says whether the need is met."""
+
+    text = None
+    if context.host.exists(_CONTAINERD_CONFIG):
+        try:
+            text = context.host.read_text(_CONTAINERD_CONFIG)
+        except (OSError, UnicodeError) as exc:
+            return CheckResult(
+                Disposition.UNFIXABLE,
+                f"cannot read {_CONTAINERD_CONFIG}: {exc}",
+                _CONTAINERD_READ_FIX,
+            )
+    root = _containerd_root(context)
+    if isinstance(root, CheckResult):
+        return root
+    if root == str(_CONTAINERD_ROOT):
+        return _ContainerdKind.OWN if text == _CONTAINERD_TEXT else _ContainerdKind.MOVED_MET
+    at_default = text is None
+    if text is not None and text != _CONTAINERD_TEXT:
+        verified = _containerd_package_default(context)
+        if isinstance(verified, CheckResult):
+            return verified
+        at_default = verified
+    if at_default and root == str(_CONTAINERD_DEFAULT_ROOT):
+        return _ContainerdKind.ABSENT if text is None else _ContainerdKind.PACKAGE_DEFAULT
+    # A file at the default, or provision's own, cannot set this root itself:
+    # a file it imports moved it.
+    moved_here = text is not None and text != _CONTAINERD_TEXT and not at_default
+    source = str(_CONTAINERD_CONFIG) if moved_here else f"a file {_CONTAINERD_CONFIG} imports"
+    return CheckResult(
+        Disposition.UNFIXABLE,
+        box_wide_shortfall(setting, root, str(_CONTAINERD_ROOT), source),
+        BOX_WIDE_SHORTFALL_FIX,
+    )
+
+
+def _journald_read(
+    context: ProvisionContext, setting: BoxWideSetting
+) -> _JournaldReading | CheckResult:
+    try:
+        result = context.host.run(_JOURNALD_CAT)
+    except OSError as exc:
+        return CheckResult(
+            Disposition.UNFIXABLE,
+            f"systemd-analyze could not report journald's configuration: {exc}",
+            _JOURNALD_READ_FIX,
+        )
+    if result.returncode != 0:
+        return CheckResult(
+            Disposition.UNFIXABLE,
+            f"systemd-analyze could not report journald's configuration: {stderr_first_line(result.stderr)}",
+            _JOURNALD_READ_FIX,
+        )
+    values: dict[str, _JournalKey | None] = dict.fromkeys(_JOURNALD_KEYS)
+    file = "/etc/systemd/journald.conf"
+    section = ""
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        header = _JOURNALD_HEADER.match(stripped)
+        if header is not None:
+            file = header.group(1)
+            section = ""
+        elif stripped.startswith("[") and stripped.endswith("]"):
+            section = stripped[1:-1]
+        elif section == "Journal" and not stripped.startswith(("#", ";")) and "=" in stripped:
+            name, value = (part.strip() for part in stripped.split("=", 1))
+            if name in values:
+                values[name] = _JournalKey(name, value, file) if value else None
+    outside = tuple(
+        key for key in values.values() if key is not None and key.file != str(_JOURNALD)
+    )
+    # Only a configuration another file moved is judged; at the default GIDEON sets it.
+    storage = values["Storage"]
+    value = storage.value if storage is not None else "auto"
+    if outside and not (
+        value == "persistent" or (value == "auto" and context.host.exists(_JOURNAL_DIR))
+    ):
+        found = f"Storage=auto without {_JOURNAL_DIR}" if value == "auto" else f"Storage={value}"
+        source = (
+            storage.file if storage is not None else "/etc/systemd/journald.conf's compiled default"
+        )
+        return CheckResult(
+            Disposition.UNFIXABLE,
+            box_wide_shortfall(setting, found, "persistent storage", source),
+            BOX_WIDE_SHORTFALL_FIX,
+        )
+    drop_in = None
+    if not outside and context.host.exists(_JOURNALD):
+        try:
+            drop_in = context.host.read_text(_JOURNALD)
+        except (OSError, UnicodeError) as exc:
+            return CheckResult(
+                Disposition.UNFIXABLE,
+                f"cannot read {_JOURNALD}: {exc}",
+                _JOURNALD_DROP_IN_FIX,
+            )
+    return _JournaldReading(outside, drop_in)
+
+
 def _store_populated(context: ProvisionContext, root: Path) -> bool:
     populated = False
     for relative_path in _CONTAINERD_STORE_PATHS:
@@ -309,11 +514,23 @@ def _store_populated(context: ProvisionContext, root: Path) -> bool:
     return populated
 
 
-def _containerd_changed(context: ProvisionContext) -> bool:
+def _store_refusal(context: ProvisionContext) -> CheckResult | None:
     try:
-        return context.host.read_text(_CONTAINERD_CONFIG) != _CONTAINERD_TEXT
-    except (OSError, UnicodeError):
-        return True
+        default_populated = _store_populated(context, _CONTAINERD_DEFAULT_ROOT)
+        desired_populated = _store_populated(context, _CONTAINERD_ROOT)
+    except OSError as exc:
+        return CheckResult(
+            Disposition.UNFIXABLE,
+            f"cannot list the containerd store: {exc}",
+            _CONTAINERD_LIST_FIX,
+        )
+    if default_populated and not desired_populated:
+        return CheckResult(
+            Disposition.UNFIXABLE,
+            f"containerd store is populated under {_CONTAINERD_DEFAULT_ROOT} but empty under {_CONTAINERD_ROOT}",
+            _CONTAINERD_STORE_FIX,
+        )
+    return None
 
 
 class DockerEngineStep(Step):
@@ -322,6 +539,7 @@ class DockerEngineStep(Step):
     name = "docker-engine"
     summary = "install Docker and converge its daemon, containerd, and journald policies"
     requires = ("disk-layout",)
+    settings = (BoxWideSetting("journald storage"), BoxWideSetting("containerd root"))
 
     def check(self, context: ProvisionContext) -> CheckResult:
         source = _source_reading(context)
@@ -353,45 +571,38 @@ class DockerEngineStep(Step):
             refusal_result = _daemon_refusal(daemon[1])
             if refusal_result is not None:
                 return refusal_result
+        containerd = None
+        journald = None
+        if not version.docker_absent:
+            store_refusal = _store_refusal(context)
+            if store_refusal is not None:
+                return store_refusal
+            containerd = _containerd_read(context, self.settings[1])
+            if isinstance(containerd, CheckResult):
+                return containerd
+            journald = _journald_read(context, self.settings[0])
+            if isinstance(journald, CheckResult):
+                return journald
         if version.result is not None:
             return version.result
 
+        assert isinstance(containerd, _ContainerdKind)
+        assert isinstance(journald, _JournaldReading)
         if daemon is None:
             return CheckResult(Disposition.DRIFT, f"{_DAEMON} is missing", "Write GIDEON's daemon.json keys, then re-run provision.")
         reading = daemon[1]
         if reading.to_set:
             keys = ", ".join(reading.to_set)
             return CheckResult(Disposition.DRIFT, f"{_DAEMON} lacks GIDEON's keys: {keys}", "Set GIDEON's daemon.json keys, then re-run provision.")
-        try:
-            default_populated = _store_populated(context, _CONTAINERD_DEFAULT_ROOT)
-            desired_populated = _store_populated(context, _CONTAINERD_ROOT)
-        except OSError as exc:
+        if containerd in (_ContainerdKind.ABSENT, _ContainerdKind.PACKAGE_DEFAULT):
             return CheckResult(
-                Disposition.UNFIXABLE,
-                f"cannot list the containerd store: {exc}",
-                _CONTAINERD_LIST_FIX,
+                Disposition.DRIFT,
+                f"{_CONTAINERD_CONFIG} is at the package default; GIDEON sets containerd's root",
+                f"Run provision, which writes {_CONTAINERD_CONFIG} and restarts containerd and Docker.",
             )
-        if default_populated and not desired_populated:
-            return CheckResult(
-                Disposition.UNFIXABLE,
-                f"containerd store is populated under {_CONTAINERD_DEFAULT_ROOT} but empty under {_CONTAINERD_ROOT}",
-                _CONTAINERD_STORE_FIX,
-            )
-        if not context.host.exists(_CONTAINERD_CONFIG):
-            return CheckResult(Disposition.DRIFT, f"{_CONTAINERD_CONFIG} is missing", f"Write the provision-owned {_CONTAINERD_CONFIG}, then re-run provision.")
-        try:
-            containerd = context.host.read_text(_CONTAINERD_CONFIG)
-        except (OSError, UnicodeError) as exc:
-            return CheckResult(Disposition.UNFIXABLE, f"cannot read {_CONTAINERD_CONFIG}: {exc}", f"Repair the provision-owned {_CONTAINERD_CONFIG}, then re-run provision.")
-        if containerd != _CONTAINERD_TEXT:
-            return CheckResult(Disposition.DRIFT, f"{_CONTAINERD_CONFIG} differs from the desired containerd policy", f"Rewrite the provision-owned {_CONTAINERD_CONFIG}, then re-run provision.")
-        if not context.host.exists(_JOURNALD):
-            return CheckResult(Disposition.DRIFT, f"{_JOURNALD} is missing", "Write the journald retention drop-in, then re-run provision.")
-        try:
-            journald = context.host.read_text(_JOURNALD)
-        except (OSError, UnicodeError) as exc:
-            return CheckResult(Disposition.UNFIXABLE, f"cannot read {_JOURNALD}: {exc}", "Repair the journald drop-in, then re-run provision.")
-        if journald != _JOURNALD_TEXT:
+        if not journald.outside and journald.drop_in != _JOURNALD_TEXT:
+            if journald.drop_in is None:
+                return CheckResult(Disposition.DRIFT, f"{_JOURNALD} is missing", "Write the journald retention drop-in, then re-run provision.")
             return CheckResult(Disposition.DRIFT, f"{_JOURNALD} differs from the desired retention policy", "Rewrite the journald retention drop-in, then re-run provision.")
         containerd_enabled = context.host.run(["systemctl", "is-enabled", "containerd"])
         containerd_active = context.host.run(["systemctl", "is-active", "containerd"])
@@ -412,22 +623,18 @@ class DockerEngineStep(Step):
         if reading.foreign:
             keys = ", ".join(reading.foreign)
             detail += f"; daemon.json also holds keys GIDEON does not own: {keys}"
+        if containerd is _ContainerdKind.MOVED_MET:
+            detail += f"; {_CONTAINERD_CONFIG} is not provision's text, its root is {_CONTAINERD_ROOT}"
+        if journald.outside:
+            detail += "; " + ", ".join(
+                f"journald's {key.name} is set by {key.file}" for key in journald.outside
+            )
         return CheckResult(Disposition.CONVERGED, detail, "")
 
     def apply(self, context: ProvisionContext) -> None:
-        try:
-            default_populated = _store_populated(context, _CONTAINERD_DEFAULT_ROOT)
-            desired_populated = _store_populated(context, _CONTAINERD_ROOT)
-        except OSError as exc:
-            raise StepFailure(
-                f"cannot list the containerd store: {exc}",
-                _CONTAINERD_LIST_FIX,
-            ) from exc
-        if default_populated and not desired_populated:
-            raise StepFailure(
-                f"containerd store is populated under {_CONTAINERD_DEFAULT_ROOT} but empty under {_CONTAINERD_ROOT}",
-                _CONTAINERD_STORE_FIX,
-            )
+        store_refusal = _store_refusal(context)
+        if store_refusal is not None:
+            raise StepFailure(store_refusal.detail, store_refusal.fix)
         version = _version_reading(context)
         if (
             version.result is not None
@@ -454,6 +661,14 @@ class DockerEngineStep(Step):
             refusal_result = _daemon_refusal(daemon[1])
             if refusal_result is not None:
                 raise StepFailure(refusal_result.detail, refusal_result.fix)
+        journald = _journald_read(context, self.settings[0])
+        if isinstance(journald, CheckResult):
+            raise StepFailure(journald.detail, journald.fix)
+        containerd = None
+        if not version.docker_absent:
+            containerd = _containerd_read(context, self.settings[1])
+            if isinstance(containerd, CheckResult):
+                raise StepFailure(containerd.detail, containerd.fix)
         if version.docker_absent:
             context.host.mkdir(_KEYRING.parent, mode=0o755, parents=True, exist_ok=True)
             # Keyring strictly before the source entry: a failed fetch must never
@@ -464,6 +679,11 @@ class DockerEngineStep(Step):
             if not context.host.exists(_SOURCE):
                 context.host.write_text(_SOURCE, _REPO)
         apt_install(context, _PACKAGES)
+        if version.docker_absent:
+            containerd = _containerd_read(context, self.settings[1])
+            if isinstance(containerd, CheckResult):
+                raise StepFailure(containerd.detail, containerd.fix)
+        assert isinstance(containerd, _ContainerdKind)
 
         current = daemon[0] if daemon is not None else {}
         merged, daemon_changed = dockerdaemon.merge(current, wanted)
@@ -471,25 +691,22 @@ class DockerEngineStep(Step):
             context.host.mkdir(_DAEMON.parent, mode=0o755, parents=True, exist_ok=True)
             context.host.write_text(_DAEMON, dockerdaemon.text(merged), mode=_daemon_mode(context))
 
-        containerd_changed = _containerd_changed(context)
-        context.host.mkdir(_CONTAINERD_CONFIG.parent, mode=0o755, parents=True, exist_ok=True)
-        context.host.write_text(_CONTAINERD_CONFIG, _CONTAINERD_TEXT)
+        containerd_written = containerd in (
+            _ContainerdKind.ABSENT, _ContainerdKind.PACKAGE_DEFAULT
+        )
+        if containerd_written:
+            context.host.mkdir(_CONTAINERD_CONFIG.parent, mode=0o755, parents=True, exist_ok=True)
+            context.host.write_text(_CONTAINERD_CONFIG, _CONTAINERD_TEXT)
         context.host.run(["systemctl", "enable", "--now", "containerd"], check=True)
-        if containerd_changed:
+        if containerd_written:
             context.host.run(["systemctl", "restart", "containerd"], check=True)
 
-        journald_changed = True
-        if context.host.exists(_JOURNALD):
-            try:
-                journald_changed = context.host.read_text(_JOURNALD) != _JOURNALD_TEXT
-            except (OSError, UnicodeError):
-                journald_changed = True
-        context.host.mkdir(_JOURNALD.parent, mode=0o755, parents=True, exist_ok=True)
-        context.host.write_text(_JOURNALD, _JOURNALD_TEXT)
-        if journald_changed:
+        if not journald.outside and journald.drop_in != _JOURNALD_TEXT:
+            context.host.mkdir(_JOURNALD.parent, mode=0o755, parents=True, exist_ok=True)
+            context.host.write_text(_JOURNALD, _JOURNALD_TEXT)
             context.host.run(["systemctl", "restart", "systemd-journald"], check=True)
         context.host.run(["systemctl", "enable", "--now", "docker"], check=True)
-        if daemon_changed or containerd_changed:
+        if daemon_changed or containerd_written:
             # enable --now does not re-read daemon.json on an already-running
             # engine; only an owned key's change earns that restart. It reaches
             # every container on the box. A containerd root change likewise
