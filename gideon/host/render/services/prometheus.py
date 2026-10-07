@@ -7,6 +7,8 @@ from gideon.host.render import RenderInputs
 from gideon.host.render.egress import INTERNAL_NETWORK_NAME
 from gideon.host.render.services import ServiceDefinition, image_pin
 
+PROMETHEUS_LOOPBACK_ADDRESS = "127.0.0.1:9090"
+
 
 class PrometheusService(ServiceDefinition):
     """The prometheus service in the Compose project."""
@@ -30,7 +32,7 @@ class PrometheusService(ServiceDefinition):
                 "/etc/gideon/rendered/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro",
                 "/data/observability/prometheus:/data/observability/prometheus",
             ],
-            "ports": ["127.0.0.1:9090:9090"],
+            "ports": [f"{PROMETHEUS_LOOPBACK_ADDRESS}:9090"],
             # The internal network is for the worker's scrape alone; the
             # worker gains reach to this port, a read-only query API with its
             # admin and lifecycle switches off, and nothing else.

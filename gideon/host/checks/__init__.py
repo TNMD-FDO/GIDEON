@@ -1,5 +1,6 @@
 """Contracts shared by the host preflight checks."""
 
+import re
 from dataclasses import dataclass
 from enum import Enum
 
@@ -20,6 +21,16 @@ def format_gb(byte_count: int) -> str:
     """Render a byte count as decimal gigabytes with one decimal place."""
 
     return f"{byte_count / GIGABYTE:.1f} GB"
+
+
+def meminfo_kb(output: str, field: str) -> int | None:
+    """Read a /proc/meminfo field in kB with the grammar shared by both checks."""
+
+    for line in output.splitlines():
+        match = re.fullmatch(rf"\s*{re.escape(field)}:\s*([0-9]+)\s+kB\s*", line)
+        if match is not None:
+            return int(match.group(1))
+    return None
 
 
 class Severity(Enum):
@@ -77,7 +88,7 @@ def _registered_checks() -> tuple[PreflightCheck, ...]:
         JurisdictionCheck,
         OsKernelCheck,
     )
-    from gideon.host.checks.capacity import DataVolumeCheck
+    from gideon.host.checks.capacity import DataVolumeCheck, HostMemoryCheck
     from gideon.host.checks.network import (
         EgressCheck,
         HostnameCheck,
@@ -95,6 +106,7 @@ def _registered_checks() -> tuple[PreflightCheck, ...]:
         BackupSshCheck(),
         SmtpCheck(),
         DataVolumeCheck(),
+        HostMemoryCheck(),
         JurisdictionCheck(),
         HardwareProfileCheck(),
         DriverTestedCheck(),

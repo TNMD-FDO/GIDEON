@@ -1,17 +1,29 @@
 """Truth tables for install-time preflight and egress checks."""
 
 import dataclasses
+import json
 import os
+import re
 import shlex
 import subprocess
 import unittest
 from collections.abc import Collection, Mapping
+from fractions import Fraction
 from pathlib import Path
 from typing import ClassVar, Self, cast
 from unittest import mock
+from urllib.parse import parse_qs, urlsplit
 
 from gideon.host import nogpu
-from gideon.host.checks import CHECKS, PreflightContext, Severity, format_gb, services
+from gideon.host.checks import (
+    CHECKS,
+    PreflightContext,
+    Severity,
+    capacity,
+    format_gb,
+    meminfo_kb,
+    services,
+)
 from gideon.host.checks.artifacts import (
     DriverTestedCheck,
     HardwareProfileCheck,
@@ -20,8 +32,16 @@ from gideon.host.checks.artifacts import (
 )
 from gideon.host.checks.capacity import (
     DATA_DF_ARGV,
+    HOST_MEMORY_FLOOR_FRACTION,
+    MEMORY_LOW_QUERY,
+    PROMETHEUS_QUERY_PATH,
+    PROMETHEUS_TIMEOUT_SECONDS,
     DataVolumeCheck,
+    HostMemoryCheck,
+    LowReader,
+    LowReading,
     parse_size_and_available,
+    read_prometheus_low,
 )
 from gideon.host.checks.network import (
     PROBE_TIMEOUT_SECONDS,
@@ -43,10 +63,15 @@ from gideon.host.egress import EgressAllowlist, EgressGroup, EgressHost
 from gideon.host.ldap import ldapsearch_argv
 from gideon.host.lock import load_host_lock
 from gideon.host.models import GIGABYTE, load_models_lock
+from gideon.host.render.services.prometheus import PROMETHEUS_LOOPBACK_ADDRESS
 from gideon.host.site import load_site, render_errors
 from gideon.host.sshtarget import BACKUP_PROBE_SHA256
 from gideon.host.steps.nvidia import _LOADED_VERSION
 from gideon.host.sysio import Command, PathLike
+from tools.exportboundary import absent_from_export
+
+ROOT = Path(__file__).resolve().parents[1]
+MEMINFO = "/proc/meminfo"
 
 _LOCK = load_host_lock("host.lock").lock
 assert _LOCK is not None
@@ -320,6 +345,7 @@ class Registry(unittest.TestCase):
                 "backup-ssh",
                 "smtp",
                 "data-volume",
+                "host-memory",
                 "jurisdiction",
                 "hardware-profile",
                 "driver-tested",
@@ -667,6 +693,252 @@ class DataVolume(unittest.TestCase):
         for output in ("", "Size Avail\n", "Size Avail\n1 two\n", "Size Avail\n-1 2\n"):
             with self.subTest(output=output):
                 self.assertIsNone(parse_size_and_available(output))
+
+
+class MeminfoParser(unittest.TestCase):
+    def test_reads_both_kilobyte_fields(self) -> None:
+        output = "  MemTotal:\t12345 kB\nMemAvailable: 6789 kB\n"
+        self.assertEqual(meminfo_kb(output, "MemTotal"), 12345)
+        self.assertEqual(meminfo_kb(output, "MemAvailable"), 6789)
+
+    def test_absent_or_malformed_field_is_unreadable(self) -> None:
+        for output in ("MemFree: 12 kB\n", "MemAvailable: unknown kB\n", "MemAvailable: 12 MB\n"):
+            with self.subTest(output=output):
+                self.assertIsNone(meminfo_kb(output, "MemAvailable"))
+
+
+def prepared_low(reading: LowReading) -> LowReader:
+    def read() -> LowReading:
+        return reading
+
+    return read
+
+
+class HostMemory(unittest.TestCase):
+    TOTAL_KB = 10_000_000
+    FLOOR_BYTES = int(TOTAL_KB * 1024 * HOST_MEMORY_FLOOR_FRACTION)
+
+    def host(self, available_kb: int) -> FakeHost:
+        return FakeHost(
+            files={MEMINFO: f"MemTotal: {self.TOTAL_KB} kB\nMemAvailable: {available_kb} kB\n"}
+        )
+
+    def test_current_reading_below_warns_and_above_passes_with_figures(self) -> None:
+        for available_kb, expected in ((1_000_000, Severity.WARN), (4_000_000, Severity.PASS)):
+            with self.subTest(available_kb=available_kb):
+                host = self.host(available_kb)
+                low = self.FLOOR_BYTES + 1
+                report = HostMemoryCheck(prepared_low(LowReading(low))).run(context(host))
+                self.assertEqual(report.severity, expected, report.detail)
+                self.assertIn(format_gb(available_kb * 1024), report.detail)
+                self.assertIn(format_gb(low), report.detail)
+                self.assertIn("at its fourteen-day low on Prometheus", report.detail)
+                self.assertIn(format_gb(self.FLOOR_BYTES), report.detail)
+                self.assertIn(format_gb(self.TOTAL_KB * 1024), report.detail)
+                self.assertEqual(host.calls, [("read_text", MEMINFO)])
+                if expected is Severity.WARN:
+                    self.assertIn("the current reading is below", report.detail)
+                    self.assertIn("container-memory panel", report.fix)
+                else:
+                    self.assertEqual(report.fix, "")
+
+    def test_fourteen_day_low_below_warns_while_current_is_above(self) -> None:
+        low = self.FLOOR_BYTES - 1
+        report = HostMemoryCheck(prepared_low(LowReading(low))).run(context(self.host(4_000_000)))
+        self.assertEqual(report.severity, Severity.WARN, report.detail)
+        self.assertIn("the fourteen-day low is below", report.detail)
+        self.assertIn("at its fourteen-day low on Prometheus", report.detail)
+        self.assertIn(format_gb(low), report.detail)
+        self.assertIn(format_gb(self.FLOOR_BYTES), report.detail)
+
+    def test_both_readings_below_name_both(self) -> None:
+        report = HostMemoryCheck(prepared_low(LowReading(self.FLOOR_BYTES - 1))).run(
+            context(self.host(1_000_000))
+        )
+        self.assertEqual(report.severity, Severity.WARN, report.detail)
+        self.assertIn("both readings are below", report.detail)
+
+    def test_low_one_byte_either_side_of_floor(self) -> None:
+        for low, expected in (
+            (self.FLOOR_BYTES - 1, Severity.WARN),
+            (self.FLOOR_BYTES, Severity.PASS),
+            (self.FLOOR_BYTES + 1, Severity.PASS),
+        ):
+            with self.subTest(low=low):
+                report = HostMemoryCheck(prepared_low(LowReading(low))).run(context(self.host(4_000_000)))
+                self.assertEqual(report.severity, expected, report.detail)
+
+    def test_each_missing_low_reason_follows_current_reading(self) -> None:
+        address = PROMETHEUS_LOOPBACK_ADDRESS
+        reasons = (
+            f"Prometheus did not answer at {address}",
+            f"Prometheus timed out at {address}",
+            f"Prometheus returned HTTP 503 at {address}",
+            f"Prometheus returned unreadable JSON at {address}",
+            f"Prometheus returned a non-success status at {address}",
+            f"no fourteen-day low on Prometheus at {address} yet",
+            f"Prometheus returned an unreadable value at {address}",
+        )
+        for reason in reasons:
+            for available_kb, expected in ((1_000_000, Severity.WARN), (4_000_000, Severity.PASS)):
+                with self.subTest(reason=reason, available_kb=available_kb):
+                    report = HostMemoryCheck(prepared_low(LowReading(None, reason))).run(
+                        context(self.host(available_kb))
+                    )
+                    self.assertEqual(report.severity, expected, report.detail)
+                    self.assertIn(f"fourteen-day low not read: {reason}", report.detail)
+                    self.assertIn(format_gb(self.FLOOR_BYTES), report.detail)
+                    self.assertNotEqual(report.severity, Severity.REFUSE)
+
+    def test_unreadable_or_missing_meminfo_warns_without_querying_low(self) -> None:
+        cases = (
+            (FakeHost(), "/proc/meminfo"),
+            (FakeHost(files={MEMINFO: "MemAvailable: 1 kB\n"}), "MemTotal"),
+            (FakeHost(files={MEMINFO: "MemTotal: 1 kB\n"}), "MemAvailable"),
+        )
+        for host, detail in cases:
+            with self.subTest(detail=detail):
+                reader = mock.Mock(return_value=LowReading(self.FLOOR_BYTES))
+                report = HostMemoryCheck(reader).run(context(host))
+                self.assertEqual(report.severity, Severity.WARN, report.detail)
+                self.assertIn(detail, report.detail)
+                self.assertIn("Restore /proc/meminfo", report.fix)
+                reader.assert_not_called()
+
+    def test_no_gpu_host_is_judged(self) -> None:
+        report = HostMemoryCheck(prepared_low(LowReading(self.FLOOR_BYTES + 1))).run(
+            context(self.host(1_000_000), no_gpu=True)
+        )
+        self.assertEqual(report.severity, Severity.WARN, report.detail)
+        self.assertNotIn("skipped", report.detail)
+
+    def test_fraction_matches_shared_host_ram_agreement(self) -> None:
+        if absent_from_export("docs/box-ledger.md", ROOT):
+            self.skipTest("shared host RAM record is absent from the exported tree")
+        text = (ROOT / "docs/box-ledger.md").read_text(encoding="utf-8")
+        paragraph = text.split("**Host RAM.**", 1)[1].split("\n\n", 1)[0]
+        host = re.search(r"The host has ([0-9]+(?:\.[0-9]+)?) GB", paragraph)
+        floor = re.search(r"a floor of ([0-9]+(?:\.[0-9]+)?) GB, a fifth of the host\b", paragraph)
+        self.assertIsNotNone(host)
+        self.assertIsNotNone(floor)
+        assert host is not None and floor is not None
+        host_gb = Fraction(host.group(1))
+        floor_gb = Fraction(floor.group(1))
+        self.assertEqual(HOST_MEMORY_FLOOR_FRACTION, Fraction(1, 5))
+        self.assertEqual(int(host_gb * HOST_MEMORY_FLOOR_FRACTION), floor_gb)
+        self.assertIn(f"`{MEMORY_LOW_QUERY}`", paragraph)
+
+    def test_floor_is_exact_at_the_reference_host(self) -> None:
+        total_kb = 259_277_344  # 265.5 GB, rounded up to a whole kB
+        host = FakeHost(files={MEMINFO: f"MemTotal: {total_kb} kB\nMemAvailable: {total_kb // 2} kB\n"})
+        report = HostMemoryCheck(prepared_low(LowReading(None, "not asked"))).run(context(host))
+        self.assertEqual(report.severity, Severity.PASS, report.detail)
+        self.assertIn("floor 53.1 GB (a fifth of 265.5 GB)", report.detail)
+
+
+class PrometheusReader(unittest.TestCase):
+    def read_reply(
+        self,
+        *,
+        body: bytes | None = None,
+        status: int = 200,
+        failure: OSError | None = None,
+    ) -> tuple[LowReading, dict[str, object]]:
+        if body is None:
+            body = json.dumps(
+                {"status": "success", "data": {"resultType": "vector", "result": [{"value": [0, "1000000000.5"]}]}}
+            ).encode()
+        observed: dict[str, object] = {}
+
+        class Response:
+            def __init__(self) -> None:
+                self.status = status
+
+            def read(self) -> bytes:
+                assert body is not None
+                return body
+
+        class Connection:
+            def __init__(self, host: str, *, timeout: float) -> None:
+                observed["host"] = host
+                observed["timeout"] = timeout
+
+            def request(self, method: str, target: str) -> None:
+                observed["request"] = (method, target)
+                if failure is not None:
+                    raise failure
+
+            def getresponse(self) -> Response:
+                return Response()
+
+            def close(self) -> None:
+                observed["closed"] = True
+
+        with mock.patch.object(capacity.http.client, "HTTPConnection", Connection):
+            reading = read_prometheus_low()
+        return reading, observed
+
+    def test_success_uses_loopback_query_and_integer_bytes(self) -> None:
+        reading, observed = self.read_reply()
+        self.assertEqual(reading, LowReading(1_000_000_000))
+        self.assertEqual(observed["host"], PROMETHEUS_LOOPBACK_ADDRESS)
+        self.assertEqual(observed["timeout"], PROMETHEUS_TIMEOUT_SECONDS)
+        method, target = cast(tuple[str, str], observed["request"])
+        self.assertEqual(method, "GET")
+        parsed = urlsplit(target)
+        self.assertEqual(parsed.path, PROMETHEUS_QUERY_PATH)
+        self.assertEqual(parse_qs(parsed.query), {"query": [MEMORY_LOW_QUERY]})
+        self.assertEqual(observed["closed"], True)
+
+    def test_connection_refusal_and_timeout_return_reasons(self) -> None:
+        for failure, phrase in (
+            (ConnectionRefusedError("down"), "did not answer"),
+            (OSError("network unavailable"), "did not answer"),
+            (TimeoutError("hung"), "timed out"),
+        ):
+            with self.subTest(failure=type(failure).__name__):
+                reading, observed = self.read_reply(failure=failure)
+                self.assertIsNone(reading.bytes)
+                self.assertIn(phrase, reading.reason)
+                self.assertIn(PROMETHEUS_LOOPBACK_ADDRESS, reading.reason)
+                self.assertEqual(observed["closed"], True)
+
+    def test_http_status_and_unreadable_body_return_reasons(self) -> None:
+        for status, body, phrase in (
+            (503, b"", "HTTP 503"),
+            (200, b"not json", "unreadable JSON"),
+            (200, b"[]", "unreadable result"),
+        ):
+            with self.subTest(status=status, body=body):
+                reading, observed = self.read_reply(status=status, body=body)
+                self.assertIsNone(reading.bytes)
+                self.assertIn(phrase, reading.reason)
+                self.assertIn(PROMETHEUS_LOOPBACK_ADDRESS, reading.reason)
+                self.assertEqual(observed["closed"], True)
+
+    def test_non_success_empty_vector_and_nonfinite_value_return_reasons(self) -> None:
+        for document, phrase in (
+            ({"status": "error"}, "non-success status"),
+            ({"status": "success", "data": {"resultType": "vector", "result": []}}, "no fourteen-day low"),
+            ({"status": "success", "data": {"resultType": "vector", "result": [{"value": [0, "NaN"]}]}}, "unreadable value"),
+            ({"status": "success", "data": {"resultType": "vector", "result": [{"value": [0, "Infinity"]}]}}, "unreadable value"),
+        ):
+            with self.subTest(document=document):
+                reading, _ = self.read_reply(body=json.dumps(document).encode())
+                self.assertIsNone(reading.bytes)
+                self.assertIn(phrase, reading.reason)
+                self.assertIn(PROMETHEUS_LOOPBACK_ADDRESS, reading.reason)
+
+    def test_proxy_environment_cannot_redirect_loopback_query(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"HTTP_PROXY": "http://proxy.example:3128", "http_proxy": "http://proxy.example:3128"},
+        ):
+            reading, observed = self.read_reply()
+        self.assertIsNotNone(reading.bytes)
+        self.assertEqual(observed["host"], PROMETHEUS_LOOPBACK_ADDRESS)
+        _, target = cast(tuple[str, str], observed["request"])
+        self.assertEqual(parse_qs(urlsplit(target).query), {"query": [MEMORY_LOW_QUERY]})
 
 
 class FormatGb(unittest.TestCase):
@@ -1223,7 +1495,6 @@ NVIDIA_SMI = (
     "--format=csv,noheader",
 )
 NVIDIA_SMI_Q = ("nvidia-smi", "-q")
-MEMINFO = "/proc/meminfo"
 
 
 def _ceil_div(value: int, divisor: int) -> int:

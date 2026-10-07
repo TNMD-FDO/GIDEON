@@ -11,6 +11,7 @@ from gideon.host.checks import (
     PreflightContext,
     Severity,
     format_gb,
+    meminfo_kb,
 )
 from gideon.host.courts import CourtMap
 from gideon.host.models import GIGABYTE, select_profile
@@ -194,14 +195,6 @@ def _architectures(output: str) -> list[str]:
     return architectures
 
 
-def _mem_total_kb(output: str) -> int | None:
-    for line in output.splitlines():
-        match = re.fullmatch(r"\s*MemTotal:\s*([0-9]+)\s+kB\s*", line)
-        if match is not None:
-            return int(match.group(1))
-    return None
-
-
 class HardwareProfileCheck(PreflightCheck):
     """Compare live host facts with the selected profile's requirements."""
 
@@ -268,7 +261,7 @@ class HardwareProfileCheck(PreflightCheck):
                 f"could not read /proc/meminfo: {exc}",
                 _FACT_FIX,
             )
-        dram_kb = _mem_total_kb(meminfo)
+        dram_kb = meminfo_kb(meminfo, "MemTotal")
         if dram_kb is None:
             return CheckReport(
                 Severity.REFUSE,

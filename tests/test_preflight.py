@@ -16,10 +16,12 @@ from gideon.host.checks import (
     Severity,
 )
 from gideon.host.checks.artifacts import JurisdictionCheck
+from gideon.host.checks.capacity import HostMemoryCheck, LowReading
 from gideon.host.corpus.lockfile import load_lockfile
 from gideon.host.courts import CourtMap
 from gideon.host.nogpu import BUILD_BOX_PATH, NO_GPU_PATH, NOT_BUILD_BOX_DETAIL
 from gideon.host.preflight import ObservedRow, run_preflight
+from gideon.host.render.services.prometheus import PROMETHEUS_LOOPBACK_ADDRESS
 from gideon.host.site import load_site
 from gideon.host.steps import CheckResult, Disposition, ProvisionContext, Step
 from gideon.host.sysio import Command, PathLike
@@ -459,6 +461,19 @@ class PhaseA(unittest.TestCase):
 
 
 class PhaseB(unittest.TestCase):
+    def test_host_memory_warning_prints_fix_and_does_not_block(self) -> None:
+        meminfo = "MemTotal: 10000000 kB\nMemAvailable: 1000000 kB\n"
+        check = HostMemoryCheck(
+            lambda: LowReading(None, f"Prometheus did not answer at {PROMETHEUS_LOOPBACK_ADDRESS}")
+        )
+        code, out, error = preflight(files={"/proc/meminfo": meminfo}, checks=[check])
+        self.assertEqual(code, 0, error)
+        self.assertIn("host-memory: warn — available memory is", out)
+        self.assertIn("the current reading is below the floor", out)
+        self.assertIn("fourteen-day low not read: Prometheus did not answer", out)
+        self.assertIn("Fix: Read each container's working set against its limit", out)
+        self.assertIn("Summary: 1 check(s); 1 warn.", out)
+
     def test_real_gpu_checks_skip_on_no_gpu_and_count_as_passes(self) -> None:
         data_volume = ("df", "-B1", "--output=size,avail", "/data")
         code, out, _ = preflight(
