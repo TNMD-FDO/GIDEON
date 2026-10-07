@@ -15,7 +15,7 @@ from unittest.mock import patch
 from gideon.host import audit, backuplock, backupset, install, nogpu, report
 from gideon.host.report import StageResult
 from gideon.host.site import load_site
-from gideon.host.sysio import LockingHost, PathLike
+from gideon.host.sysio import PathLike
 
 ROOT = Path(__file__).resolve().parent.parent
 EXAMPLE = ROOT / "config/site.example.yaml"
@@ -85,6 +85,9 @@ class FakeHost:
             return self.files[os.fspath(path)]
         except KeyError as exc:
             raise FileNotFoundError(os.fspath(path)) from exc
+
+    def read_bytes(self, path: PathLike) -> bytes:
+        return self.read_text(path).encode("utf-8")
 
     def listdir(self, path: PathLike) -> list[str]:
         if os.fspath(path) == backupset.SETS_DIR and self.sets:
@@ -228,7 +231,7 @@ class InstallTests(unittest.TestCase):
         child = argparse.Namespace(command_path="preflight")
         with patch.object(install.preflight, "run_preflight", return_value=0) as run:
             code = install._default_runners(
-                cast(LockingHost, host), site_path=EXAMPLE, rendered_dir=RENDERED
+                cast(install.InstallHost, host), site_path=EXAMPLE, rendered_dir=RENDERED
             )["preflight"](child)
         self.assertEqual(code, 0)
         run.assert_called_once_with(child, host=host, site_path=EXAMPLE)
@@ -292,7 +295,7 @@ class InstallTests(unittest.TestCase):
         def apply_standin(
             _args: object, *, host: FakeHost, **_kwargs: object
         ) -> int:
-            locking_host = cast(LockingHost, host)
+            locking_host = cast(install.InstallHost, host)
             claim = backuplock.claim(
                 locking_host, command="gideon apply", now=instant
             )
@@ -303,7 +306,7 @@ class InstallTests(unittest.TestCase):
         def engine_standin(
             _args: object, *, host: FakeHost, **_kwargs: object
         ) -> int:
-            locking_host = cast(LockingHost, host)
+            locking_host = cast(install.InstallHost, host)
             claim = backuplock.claim(
                 locking_host, command="gideon engine verify", now=instant
             )
@@ -332,7 +335,7 @@ class InstallTests(unittest.TestCase):
         ):
             code = install.run_install(
                 argparse.Namespace(command_path="install"),
-                host=cast(LockingHost, host),
+                host=cast(install.InstallHost, host),
                 site_path=EXAMPLE,
                 rendered_dir=RENDERED,
                 audit=backend,
@@ -364,7 +367,7 @@ class InstallTests(unittest.TestCase):
         def refused_apply(
             _args: object, *, host: FakeHost, **_kwargs: object
         ) -> int:
-            locking_host = cast(LockingHost, host)
+            locking_host = cast(install.InstallHost, host)
             claim = backuplock.claim(
                 locking_host, command="gideon apply", now=NOW
             )
@@ -379,7 +382,7 @@ class InstallTests(unittest.TestCase):
         ):
             code = install.run_install(
                 argparse.Namespace(command_path="install"),
-                host=cast(LockingHost, host),
+                host=cast(install.InstallHost, host),
                 site_path=EXAMPLE,
                 rendered_dir=RENDERED,
                 audit=backend,

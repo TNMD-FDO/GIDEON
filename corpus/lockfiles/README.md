@@ -31,3 +31,4 @@ a `mirror_url` that serves the pinned bytes, or a new cut.
 The `pipeline` value is `0.0.0` until a parser and chunker have a released
 version. A change to that version gets a new cut. `courts[]` lists the court
 map IDs in `courts.yaml` that belong to the cut; the IDs must resolve there.
+Preflight reads this list to check the site's home courts.

@@ -15,9 +15,12 @@ from gideon.host.checks import (
     PreflightContext,
     Severity,
 )
+from gideon.host.checks.artifacts import JurisdictionCheck
+from gideon.host.corpus.lockfile import load_lockfile
 from gideon.host.courts import CourtMap
 from gideon.host.nogpu import BUILD_BOX_PATH, NO_GPU_PATH, NOT_BUILD_BOX_DETAIL
 from gideon.host.preflight import ObservedRow, run_preflight
+from gideon.host.site import load_site
 from gideon.host.steps import CheckResult, Disposition, ProvisionContext, Step
 from gideon.host.sysio import Command, PathLike
 
@@ -27,11 +30,25 @@ HOST_LOCK_PATH = ROOT / "host.lock"
 EGRESS_PATH = ROOT / "config/egress.yaml"
 MODELS_LOCK_PATH = ROOT / "models.lock"
 COURTS_PATH = ROOT / "courts.yaml"
+LOCKFILES_PATH = ROOT / "tests/fixtures/preflight/lockfiles"
+BROKEN_LOCKFILES_PATH = ROOT / "tests/fixtures/preflight/broken-lockfiles"
 EXAMPLE_SITE = (ROOT / "config/site.example.yaml").read_text()
 HOST_LOCK_TEXT = HOST_LOCK_PATH.read_text()
 EGRESS_TEXT = EGRESS_PATH.read_text()
 MODELS_LOCK_TEXT = MODELS_LOCK_PATH.read_text()
 COURTS_TEXT = COURTS_PATH.read_text()
+
+
+def fixture_files(directory: Path) -> dict[str, str]:
+    """Serve a lockfile directory and its companions through FakeHost."""
+
+    files = {str(directory): ""}
+    files.update(
+        (str(path), path.read_text())
+        for path in directory.rglob("*")
+        if path.is_file()
+    )
+    return files
 
 
 class FakeHost:
@@ -74,6 +91,14 @@ class FakeHost:
         if key in self.files:
             return self.files[key]
         return Path(key).read_text()
+
+    def read_bytes(self, path: PathLike) -> bytes:
+        key = os.fspath(path)
+        if key in self.read_errors:
+            raise self.read_errors[key]
+        if key in self.files:
+            return self.files[key].encode("utf-8")
+        return Path(key).read_bytes()
 
     def write_text(
         self,
@@ -179,6 +204,7 @@ def preflight(
     commands: Mapping[tuple[str, ...], subprocess.CompletedProcess[str]] | None = None,
     read_errors: Mapping[str, OSError] | None = None,
     courts_path: PathLike | None = None,
+    lockfiles_path: PathLike | None = None,
     advisory_fix: str | None = None,
     observer: Callable[[ObservedRow], None] | None = None,
 ) -> tuple[int, str, str]:
@@ -204,10 +230,71 @@ def preflight(
             site_path=site_path,
             models_path=models_path,
             courts_path=courts_path,
+            lockfiles_path=lockfiles_path,
             advisory_fix=advisory_fix,
             observer=observer,
         )
     return code, stdout.getvalue(), stderr.getvalue()
+
+
+class LockfileReading(unittest.TestCase):
+    """The committed court map and a fictitious cut meet at the pre-run boundary."""
+
+    def test_valid_cut_reaches_jurisdiction_and_warns_on_unshipped_home_courts(self) -> None:
+        paths = list(LOCKFILES_PATH.glob("*.yaml"))
+        self.assertEqual(len(paths), 1)
+        loaded = load_lockfile(paths[0])
+        self.assertTrue(loaded.ok, loaded.errors)
+        assert loaded.lockfile is not None
+        site_result = load_site(Path(SITE_PATH), host=FakeHost(files={SITE_PATH: EXAMPLE_SITE}))
+        assert site_result.config is not None
+        home = site_result.config.jurisdiction
+
+        code, out, error = preflight(
+            files=fixture_files(LOCKFILES_PATH),
+            lockfiles_path=LOCKFILES_PATH,
+            checks=[JurisdictionCheck()],
+        )
+        self.assertEqual(code, 0, error)
+        self.assertEqual(error, "")
+        self.assertIn(f"jurisdiction: warn — lockfile {loaded.lockfile.label}", out)
+        for identifier in (*home.districts, *home.states):
+            self.assertIn(repr(identifier), out)
+        self.assertIn("district tier is not in the lockfile", out)
+        self.assertIn("no appellate court of the state", out)
+
+    def test_sidecar_off_its_pin_refuses_before_rows(self) -> None:
+        code, out, error = preflight(
+            files=fixture_files(BROKEN_LOCKFILES_PATH),
+            lockfiles_path=BROKEN_LOCKFILES_PATH,
+            checks=[JurisdictionCheck()],
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertIn("sidecar digest differs from its pin", error)
+        self.assertIn("Fix: Restore the lockfile and its companion files", error)
+
+    def test_unknown_lockfile_court_refuses_before_rows(self) -> None:
+        paths = list(LOCKFILES_PATH.glob("*.yaml"))
+        self.assertEqual(len(paths), 1)
+        loaded = load_lockfile(paths[0])
+        assert loaded.lockfile is not None
+        files = fixture_files(LOCKFILES_PATH)
+        original = f"    - {loaded.lockfile.courts[0]}\n"
+        self.assertIn(original, files[str(paths[0])])
+        files[str(paths[0])] = files[str(paths[0])].replace(
+            original, "    - fictional-court\n"
+        )
+
+        code, out, error = preflight(
+            files=files,
+            lockfiles_path=LOCKFILES_PATH,
+            checks=[JurisdictionCheck()],
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertIn("unknown court id 'fictional-court'", error)
+        self.assertIn("Fix: Restore the lockfile and its companion files", error)
 
 
 class Refusals(unittest.TestCase):

@@ -21,7 +21,7 @@ from gideon.host.checks import CheckReport, PreflightCheck, PreflightContext, Se
 from gideon.host.site import load_site
 from gideon.host.steps import CheckResult, Disposition, ProvisionContext, Step
 from gideon.host.steps.site_dirs import AGE_IDENTITY_PATH
-from gideon.host.sysio import Command, Host, LockingHost, PathLike
+from gideon.host.sysio import Command, PathLike
 
 ROOT = Path(__file__).resolve().parent.parent
 EXAMPLE = ROOT / "config/site.example.yaml"
@@ -297,6 +297,9 @@ class FakeHost:
         except KeyError as exc:
             raise FileNotFoundError(os.fspath(path)) from exc
 
+    def read_bytes(self, path: PathLike) -> bytes:
+        return self.read_text(path).encode("utf-8")
+
     def exists(self, path: PathLike) -> bool:
         return os.fspath(path) in self.files
 
@@ -433,7 +436,7 @@ def current_preflight_runner(
     def run(child: argparse.Namespace) -> int:
         return upgrade._run_current_preflight(
             child,
-            host=cast(Host, host),
+            host=cast(upgrade.UpgradeHost, host),
             site_path=EXAMPLE,
             lock_path=ROOT / "host.lock",
             models_path=ROOT / "models.lock",
@@ -553,7 +556,7 @@ class PrecheckoutPreflight(CommandRunner):
         child = argparse.Namespace(command_path="preflight", observe=observed.append)
         with patch.object(upgrade.preflight, "run_preflight", return_value=0) as run:
             code = upgrade._default_runners(
-                cast(LockingHost, host), site_path=EXAMPLE, rendered_dir=RENDERED
+                cast(upgrade.UpgradeHost, host), site_path=EXAMPLE, rendered_dir=RENDERED
             )["preflight"](child)
         self.assertEqual(code, 0)
         run.assert_called_once_with(

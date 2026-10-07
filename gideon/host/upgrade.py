@@ -17,7 +17,7 @@ from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta
 from functools import total_ordering
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Protocol
 
 import yaml  # type: ignore[import-untyped]
 
@@ -30,7 +30,12 @@ from gideon.host.report import StageResult, command_detail, print_stage, refusal
 from gideon.host.stages import aware_now, site_problem
 from gideon.host.steps import Step
 from gideon.host.steps.site_dirs import AGE_IDENTITY_PATH
-from gideon.host.sysio import Host, LockingHost, PathLike, RealHost
+from gideon.host.sysio import Host, LockingHost, PathLike, ReadBytesHost, RealHost
+
+
+class UpgradeHost(ReadBytesHost, LockingHost, Protocol):
+    """The locking host with byte reads needed by upgrade's preflight."""
+
 
 _SITE_PATH: Final = "/etc/gideon/site.yaml"
 _RENDERED_DIR: Final = "/etc/gideon/rendered"
@@ -658,7 +663,7 @@ def _version_stage(
 def _run_current_preflight(
     child: argparse.Namespace,
     *,
-    host: Host,
+    host: UpgradeHost,
     site_path: PathLike,
     lock_path: PathLike | None = None,
     models_path: PathLike | None = None,
@@ -685,7 +690,7 @@ def _run_current_preflight(
 
 
 def _default_runners(
-    io: LockingHost, *, site_path: PathLike, rendered_dir: PathLike
+    io: UpgradeHost, *, site_path: PathLike, rendered_dir: PathLike
 ) -> dict[str, Runner]:
     """The current tree's in-process commands with the keyword arguments they take."""
 
@@ -1333,7 +1338,7 @@ def _rollback_checkout_stage(io: Host, plan: _RollbackPlan) -> StageResult:
 def _run_rollback(
     args: argparse.Namespace,
     *,
-    io: LockingHost,
+    io: UpgradeHost,
     site_path: PathLike,
     rendered_dir: PathLike,
     checkout: Path,
@@ -1582,7 +1587,7 @@ def _run_rollback(
 def run_upgrade(
     args: argparse.Namespace,
     *,
-    host: LockingHost | None = None,
+    host: UpgradeHost | None = None,
     site_path: PathLike = _SITE_PATH,
     rendered_dir: PathLike = _RENDERED_DIR,
     checkout: PathLike | None = None,

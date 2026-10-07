@@ -15,7 +15,7 @@ import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Protocol
 
 from gideon.host import (
     apply,
@@ -31,7 +31,12 @@ from gideon.host import (
 from gideon.host import audit as audit_module
 from gideon.host.report import StageResult, print_stage, refusal
 from gideon.host.stages import site_problem
-from gideon.host.sysio import Host, LockingHost, PathLike, RealHost
+from gideon.host.sysio import Host, LockingHost, PathLike, ReadBytesHost, RealHost
+
+
+class InstallHost(ReadBytesHost, LockingHost, Protocol):
+    """The locking host with byte reads needed by install's preflight."""
+
 
 _SITE_PATH: Final = "/etc/gideon/site.yaml"
 _RENDERED_DIR: Final = "/etc/gideon/rendered"
@@ -88,7 +93,7 @@ _PHASES: Final[tuple[_Phase, ...]] = (
 
 
 def _default_runners(
-    io: LockingHost, *, site_path: PathLike, rendered_dir: PathLike
+    io: InstallHost, *, site_path: PathLike, rendered_dir: PathLike
 ) -> dict[str, Runner]:
     """The real commands, each given the keyword arguments its signature takes."""
 
@@ -190,7 +195,7 @@ def _refuse(problem: str, fix: str) -> int:
 def run_install(
     args: argparse.Namespace,
     *,
-    host: LockingHost | None = None,
+    host: InstallHost | None = None,
     site_path: PathLike = _SITE_PATH,
     rendered_dir: PathLike = _RENDERED_DIR,
     runners: Mapping[str, Runner] | None = None,

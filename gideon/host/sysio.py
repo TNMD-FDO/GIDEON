@@ -84,10 +84,14 @@ class LockingHost(Host, Protocol):
         """Release *path* by closing its descriptor; never unlink the file."""
 
 
-class BytesHost(Host, Protocol):
-    """The host operations for reading and durably creating byte objects."""
+class ReadBytesHost(Host, Protocol):
+    """The host operations including read-only byte access."""
 
     def read_bytes(self, path: PathLike) -> bytes: ...
+
+
+class BytesHost(ReadBytesHost, Protocol):
+    """The host operations for reading and durably creating byte objects."""
 
     def create_exclusive(self, path: PathLike, data: bytes, *, mode: int) -> bool:
         """Create *path* once; return whether this call created it."""

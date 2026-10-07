@@ -1,11 +1,10 @@
 """Checks judged against release artifacts, including the court map."""
 
 import re
-from collections.abc import Collection
 from dataclasses import dataclass
 from subprocess import CompletedProcess
 
-from gideon.host import nogpu
+from gideon.host import nogpu, report
 from gideon.host.checks import (
     CheckReport,
     PreflightCheck,
@@ -22,7 +21,6 @@ _JURISDICTION_FIX = (
     "Correct the jurisdiction key in /etc/gideon/site.yaml; courts.yaml lists "
     "every court id with its level; re-run preflight."
 )
-_LOCKFILE_FIX = "Add the missing court id to the corpus lockfile's courts[]; then re-run preflight."
 _DRIVER_FIX = "Install the lock-pinned NVIDIA driver, then re-run preflight."
 _KERNEL_FIX = "Reconcile the running kernel with the release evidence, then re-run preflight."
 _PROFILE_FIX = (
@@ -54,20 +52,29 @@ def _judge_leaf(court_map: CourtMap, leaf: str, identifier: str, level: str) -> 
     return problem
 
 
-class JurisdictionCheck(PreflightCheck):
-    """Validate each site jurisdiction leaf against the committed court map.
+def _derived_cut_fix(label: str, ids: list[str], states: list[str]) -> str:
+    """The derived cut adding *ids*, and each state's courts by lookup, to *label*."""
 
-    Every id must sit in courts.yaml at its leaf's level. The corpus lockfile's
-    ``courts[]`` rules judge ``lockfile_courts``, the one seam, which the
-    registry leaves ``None`` until slice 3 installs a lockfile; the pass row
-    then says those rules were not judged.
+    additions = sorted(set(ids)) + (["<state-court-ids>"] if states else [])
+    fix = f"{report.command('corpus cut')} --base {label} --add-courts {','.join(additions)}"
+    if states:
+        fix += (
+            "; a state's court ids are read from courts.yaml by its state code at the "
+            "state_supreme and state_appellate levels"
+        )
+    return fix + "; then re-run preflight."
+
+
+class JurisdictionCheck(PreflightCheck):
+    """Judge the site's home courts against the map and context lockfile.
+
+    Every id must resolve at its leaf's level. The registry constructs this
+    check without arguments; the runner supplies any committed lockfile in
+    the context. An absent lockfile leaves that judgment unmade.
     """
 
     name = "jurisdiction"
-    summary = "validate configured jurisdiction against the court map"
-
-    def __init__(self, lockfile_courts: Collection[str] | None = None) -> None:
-        self.lockfile_courts = lockfile_courts
+    summary = "validate configured jurisdiction against the court map and lockfile"
 
     def run(self, context: PreflightContext) -> CheckReport:
         jurisdiction = context.site.jurisdiction
@@ -87,43 +94,63 @@ class JurisdictionCheck(PreflightCheck):
                 "invalid jurisdiction: " + "; ".join(problems),
                 _JURISDICTION_FIX,
             )
-        if self.lockfile_courts is None:
+        if context.lockfile is None:
             return CheckReport(
                 Severity.PASS,
                 f"{len(leaves)} jurisdiction id(s) resolved in courts.yaml; the corpus "
                 "lockfile's courts[] rules are not judged until a lockfile is installed",
             )
 
-        installed = set(self.lockfile_courts)
-        absent = [
-            f"{leaf} {identifier!r}"
-            for leaf, identifier, _ in leaves
-            if leaf != "state" and identifier not in installed
-        ]
-        if absent:
+        lockfile = context.lockfile
+        installed = set(lockfile.courts)
+        carried_levels = {
+            court.level
+            for identifier in installed
+            if (court := context.courts.court(identifier)) is not None
+        }
+        refused: list[str] = []
+        refused_ids: list[str] = []
+        pending: list[str] = []
+        pending_ids: list[str] = []
+        pending_states: list[str] = []
+        for leaf, identifier, level in leaves:
+            if leaf == "state":
+                state = context.courts.courts[identifier].state or ""
+                if not installed.intersection(context.courts.appellate_courts(state)):
+                    pending.append(
+                        f"state {identifier!r} (no appellate court of the state is in the lockfile)"
+                    )
+                    pending_states.append(identifier)
+            elif identifier not in installed:
+                if level in carried_levels:
+                    refused.append(f"{leaf} {identifier!r} ({level} tier is present)")
+                    refused_ids.append(identifier)
+                else:
+                    pending.append(f"{leaf} {identifier!r} ({level} tier is not in the lockfile)")
+                    pending_ids.append(identifier)
+        if refused:
+            detail = (
+                f"lockfile {lockfile.label}: home courts absent from carried tiers: "
+                + ", ".join(refused)
+            )
+            if pending:
+                detail += "; pending: " + ", ".join(pending)
             return CheckReport(
                 Severity.REFUSE,
-                "not in the corpus lockfile's courts[]: " + ", ".join(absent),
-                _LOCKFILE_FIX,
+                detail,
+                "Correct jurisdiction in /etc/gideon/site.yaml, or add the courts with "
+                "a derived cut: " + _derived_cut_fix(lockfile.label, refused_ids + pending_ids, pending_states),
             )
-        pending = [
-            state
-            for state in jurisdiction.states
-            if not installed.intersection(
-                context.courts.appellate_courts(context.courts.courts[state].state or "")
-            )
-        ]
         if pending:
             return CheckReport(
                 Severity.WARN,
-                "no court of state " + ", ".join(map(repr, pending))
-                + " is in the corpus lockfile's courts[]; the state tier is inert "
-                "until a derived cut adds them",
-                "Add the state's courts with a derived corpus cut when they are wanted.",
+                f"lockfile {lockfile.label}: pending: " + ", ".join(pending),
+                "Add the courts with a derived cut when they are wanted: "
+                + _derived_cut_fix(lockfile.label, pending_ids, pending_states),
             )
         return CheckReport(
             Severity.PASS,
-            f"{len(leaves)} jurisdiction id(s) resolved in courts.yaml and the corpus lockfile",
+            f"{len(leaves)} jurisdiction id(s) resolved in courts.yaml and lockfile {lockfile.label}",
         )
 
 

@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from enum import Enum
 
+from gideon.host.corpus.lockfile import Lockfile
 from gideon.host.courts import CourtMap
 from gideon.host.egress import EgressAllowlist
 from gideon.host.lock import HostLock
@@ -51,6 +52,7 @@ class PreflightContext:
     courts: CourtMap
     no_gpu: bool = False
     build_box: bool = False
+    lockfile: Lockfile | None = None
 
 
 class PreflightCheck:

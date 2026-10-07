@@ -45,6 +45,8 @@ The allowlist groups destinations by the work that needs them:
 
 `courts.yaml` maps each CourtListener court identifier to its circuit, state, level, and name. The site's `jurisdiction` identifiers are looked up here. If an identifier is absent, `preflight` reports the nearest identifier at the required level.
 
+`preflight` also reads the newest committed lockfile's `courts[]`: it refuses a home circuit or district absent from a tier the lockfile carries, and warns when the tier has not shipped or none of a home state's appellate courts is in the lockfile.
+
 The generated map comes from CourtListener's bulk courts CSV and the hand table at `tools/courtmap/geography.yaml`. A maintainer runs `python3 -m tools.courtmap --csv <courts-YYYY-MM-DD.csv.bz2>` by hand; the generator does not fetch data and is never run on a box. The hand table has five parts: state-to-circuit assignments, federal-court assignments, state-court placements, deliberately unplaced codes, and reviewed corrections. A state-coded court not placed by the table is a deliberate generator failure that must be reviewed before the map is regenerated.
 
 If a box refuses `courts.yaml`, restore the file from the installed release tag; do not regenerate it there. If the generator refuses, update the hand table only after reviewing the court's placement, then regenerate and verify the map.

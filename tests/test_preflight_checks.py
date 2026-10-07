@@ -5,7 +5,7 @@ import os
 import shlex
 import subprocess
 import unittest
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from pathlib import Path
 from typing import ClassVar, Self, cast
 from unittest import mock
@@ -30,6 +30,13 @@ from gideon.host.checks.network import (
     PortsCheck,
 )
 from gideon.host.checks.services import BackupSshCheck, LdapCheck, SmtpCheck
+from gideon.host.corpus.lockfile import (
+    PIPELINE_VERSION,
+    SCHEMA_VERSION,
+    Lockfile,
+    SourcePin,
+    load_lockfile,
+)
 from gideon.host.courts import Court, CourtMap, CourtSource
 from gideon.host.egress import EgressAllowlist, EgressGroup, EgressHost
 from gideon.host.ldap import ldapsearch_argv
@@ -51,11 +58,11 @@ COURTS = CourtMap(
         file="courts-2099-01-02.csv.bz2",
         date="2099-01-02",
         sha256="f" * 64,
-        rows=5,
+        rows=7,
         levels={
             "scotus": 0,
-            "circuit": 1,
-            "district": 1,
+            "circuit": 2,
+            "district": 2,
             "state_supreme": 1,
             "state_appellate": 1,
             "other": 0,
@@ -63,12 +70,16 @@ COURTS = CourtMap(
     ),
     courts={
         "fx-circuit": Court("fx-circuit", "fx-circuit", None, "circuit", "Fictitious Circuit"),
+        "fx-circuit-alt": Court("fx-circuit-alt", "fx-circuit-alt", None, "circuit", "Fictitious Alternate Circuit"),
         "fx-district": Court("fx-district", "fx-circuit", "TN", "district", "Fictitious District"),
+        "fx-district-alt": Court("fx-district-alt", "fx-circuit", "TN", "district", "Fictitious Alternate District"),
         "fx-state": Court("fx-state", "fx-circuit", "TN", "state_supreme", "Fictitious Supreme Court"),
         "fx-app": Court("fx-app", "fx-circuit", "TN", "state_appellate", "Fictitious Appellate Court"),
         "fx-other": Court("fx-other", None, None, "other", "Fictitious Other Court"),
     },
 )
+LOCKFILE_LABEL = "corpus-2099-01-02"
+PREFLIGHT_LOCKFILES = Path(__file__).parent / "fixtures/preflight/lockfiles"
 
 SITE_TEMPLATE = """\
 office:
@@ -242,8 +253,31 @@ def context(
     models=None,
     courts=None,
     *,
+    lockfile: Collection[str] | None = None,
     no_gpu: bool = False,
 ) -> PreflightContext:
+    corpus_lockfile = None
+    if lockfile is not None:
+        corpus_lockfile = Lockfile(
+            schema=SCHEMA_VERSION,
+            label=LOCKFILE_LABEL,
+            pipeline=PIPELINE_VERSION,
+            cut_at="2099-01-02T00:00:00Z",
+            reason="tranche",
+            sources={
+                "caselaw": SourcePin(
+                    snapshot_date="2099-01-02",
+                    base_url="https://example.test/",
+                    mirror_url=None,
+                    sidecar_sha256="f" * 64,
+                    files=0,
+                    bytes=0,
+                    index=(),
+                    entries=(),
+                    courts=tuple(sorted(lockfile)),
+                )
+            },
+        )
     return PreflightContext(
         host=host,
         lock=lock or LOCK,
@@ -251,6 +285,7 @@ def context(
         site=site or make_site(),
         egress=ALLOWLIST,
         courts=courts or COURTS,
+        lockfile=corpus_lockfile,
         no_gpu=no_gpu,
     )
 
@@ -1012,6 +1047,30 @@ class Smtp(unittest.TestCase):
 
 
 class Jurisdiction(unittest.TestCase):
+    def test_lockfile_courts_join_sources_in_sorted_order(self) -> None:
+        paths = list(PREFLIGHT_LOCKFILES.glob("*.yaml"))
+        self.assertEqual(len(paths), 1)
+        loaded = load_lockfile(paths[0])
+        self.assertTrue(loaded.ok, loaded.errors)
+        assert loaded.lockfile is not None
+        lockfile = loaded.lockfile
+        pin = lockfile.sources["caselaw"]
+        self.assertEqual(lockfile.courts, pin.courts)
+
+        other = COURTS.ids_at_level("state_supreme")[0]
+        joined = dataclasses.replace(
+            lockfile,
+            sources={
+                "caselaw": dataclasses.replace(pin, courts=(other,)),
+                "second": dataclasses.replace(pin, courts=(*lockfile.courts, other)),
+            },
+        )
+        self.assertEqual(joined.courts, tuple(sorted({*lockfile.courts, other})))
+        empty = dataclasses.replace(
+            lockfile, sources={"caselaw": dataclasses.replace(pin, courts=None)}
+        )
+        self.assertEqual(empty.courts, ())
+
     def test_known_ids_pass(self) -> None:
         report = JurisdictionCheck().run(
             context(FakeHost(), site=make_jurisdiction_site(), courts=COURTS)
@@ -1077,39 +1136,82 @@ class Jurisdiction(unittest.TestCase):
         self.assertIn("courts.yaml lists every court id with its level", report.fix)
         self.assertTrue(report.fix.endswith("re-run preflight."))
 
-    def test_state_without_installed_courts_warns_naming_the_runbook(self) -> None:
-        """A known state absent from the installed courts list produces a warning."""
+    def test_state_without_lockfile_courts_warns_naming_the_derived_cut(self) -> None:
+        """A known state absent from the lockfile produces a warning."""
 
         site = make_jurisdiction_site(states="fx-state")
-        report = JurisdictionCheck({"fx-circuit", "fx-district"}).run(
-            context(FakeHost(), site=site)
+        report = JurisdictionCheck().run(
+            context(FakeHost(), site=site, lockfile={"fx-circuit", "fx-district"})
         )
         self.assertEqual(report.severity, Severity.WARN)
-        self.assertIn("fx-state", report.detail)
-        self.assertIn("derived corpus cut", report.fix)
+        self.assertIn(f"lockfile {LOCKFILE_LABEL}", report.detail)
+        self.assertIn("state 'fx-state' (no appellate court", report.detail)
+        self.assertIn(f"corpus cut --base {LOCKFILE_LABEL} --add-courts", report.fix)
+        self.assertIn("state_supreme and state_appellate levels", report.fix)
+        self.assertTrue(report.fix.endswith("re-run preflight."))
 
-    def test_state_with_installed_courts_passes(self) -> None:
+    def test_state_with_lockfile_courts_passes(self) -> None:
         site = make_jurisdiction_site(states="fx-state")
-        report = JurisdictionCheck(
-            {"fx-circuit", "fx-district", "fx-app"}
-        ).run(context(FakeHost(), site=site))
+        report = JurisdictionCheck().run(
+            context(
+                FakeHost(), site=site,
+                lockfile={"fx-circuit", "fx-district", "fx-app"},
+            )
+        )
         self.assertEqual(report.severity, Severity.PASS)
+        self.assertIn(f"lockfile {LOCKFILE_LABEL}", report.detail)
 
-    def test_missing_circuit_in_lockfile_refuses(self) -> None:
+    def test_missing_circuit_in_lockfile_warns_without_circuit_tier(self) -> None:
         site = make_jurisdiction_site(states="fx-state")
-        report = JurisdictionCheck({"fx-district", "fx-app"}).run(
-            context(FakeHost(), site=site)
+        report = JurisdictionCheck().run(
+            context(FakeHost(), site=site, lockfile={"fx-district", "fx-app"})
+        )
+        self.assertEqual(report.severity, Severity.WARN)
+        self.assertIn("circuit 'fx-circuit' (circuit tier is not in the lockfile)", report.detail)
+        self.assertIn(f"--base {LOCKFILE_LABEL} --add-courts fx-circuit", report.fix)
+
+    def test_missing_circuit_refuses_when_circuit_tier_is_carried(self) -> None:
+        site = make_jurisdiction_site()
+        report = JurisdictionCheck().run(
+            context(FakeHost(), site=site, lockfile={"fx-circuit-alt", "fx-district"})
         )
         self.assertEqual(report.severity, Severity.REFUSE)
-        self.assertIn("not in the corpus lockfile's courts[]: circuit 'fx-circuit'", report.detail)
+        self.assertIn(f"lockfile {LOCKFILE_LABEL}", report.detail)
+        self.assertIn("circuit 'fx-circuit' (circuit tier is present)", report.detail)
+        self.assertIn("Correct jurisdiction in /etc/gideon/site.yaml", report.fix)
+        self.assertIn(f"corpus cut --base {LOCKFILE_LABEL} --add-courts fx-circuit", report.fix)
+        self.assertIn("then re-run preflight", report.fix)
 
-    def test_missing_district_in_lockfile_refuses(self) -> None:
+    def test_missing_district_in_lockfile_warns_without_district_tier(self) -> None:
         site = make_jurisdiction_site(states="fx-state")
-        report = JurisdictionCheck({"fx-circuit", "fx-app"}).run(
-            context(FakeHost(), site=site)
+        report = JurisdictionCheck().run(
+            context(FakeHost(), site=site, lockfile={"fx-circuit", "fx-app"})
+        )
+        self.assertEqual(report.severity, Severity.WARN)
+        self.assertIn("district 'fx-district' (district tier is not in the lockfile)", report.detail)
+        self.assertIn(f"--base {LOCKFILE_LABEL} --add-courts fx-district", report.fix)
+
+    def test_missing_district_refuses_when_district_tier_is_carried(self) -> None:
+        site = make_jurisdiction_site()
+        report = JurisdictionCheck().run(
+            context(FakeHost(), site=site, lockfile={"fx-circuit", "fx-district-alt"})
         )
         self.assertEqual(report.severity, Severity.REFUSE)
-        self.assertIn("not in the corpus lockfile's courts[]: district 'fx-district'", report.detail)
+        self.assertIn("district 'fx-district' (district tier is present)", report.detail)
+        self.assertIn(f"corpus cut --base {LOCKFILE_LABEL} --add-courts fx-district", report.fix)
+
+    def test_refusal_and_pending_courts_share_one_row(self) -> None:
+        site = make_jurisdiction_site(states="fx-state")
+        report = JurisdictionCheck().run(
+            context(FakeHost(), site=site, lockfile={"fx-circuit-alt"})
+        )
+        self.assertEqual(report.severity, Severity.REFUSE)
+        self.assertIn(f"lockfile {LOCKFILE_LABEL}", report.detail)
+        self.assertIn("circuit 'fx-circuit' (circuit tier is present)", report.detail)
+        self.assertIn("district 'fx-district' (district tier is not in the lockfile)", report.detail)
+        self.assertIn("state 'fx-state' (no appellate court", report.detail)
+        self.assertIn("<state-court-ids>", report.fix)
+        self.assertIn("state_supreme and state_appellate levels", report.fix)
 
 
 UNAME = ("uname", "-m")

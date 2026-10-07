@@ -15,7 +15,7 @@ import yaml  # type: ignore[import-untyped]
 from gideon.host.corpus.sources import SOURCES
 from gideon.host.courts import CourtMap
 from gideon.host.egress import EgressAllowlist
-from gideon.host.sysio import BytesHost, PathLike, RealHost
+from gideon.host.sysio import PathLike, ReadBytesHost, RealHost
 
 SCHEMA_VERSION: Final = 1
 READABLE_SCHEMAS: Final = (SCHEMA_VERSION,)
@@ -82,6 +82,11 @@ class Lockfile:
     reason: str
     sources: Mapping[str, SourcePin]
     base: str | None = None
+
+    @property
+    def courts(self) -> tuple[str, ...]:
+        """Sorted court ids carried by all source pins."""
+        return tuple(sorted({court for pin in self.sources.values() for court in pin.courts or ()}))
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,7 +235,7 @@ def _relative_path(value: str) -> bool:
             and all(ord(ch) >= 33 for ch in value))
 
 
-def _read_bytes(path: Path, host: BytesHost, errors: list[LockfileError]) -> bytes | None:
+def _read_bytes(path: Path, host: ReadBytesHost, errors: list[LockfileError]) -> bytes | None:
     try:
         return host.read_bytes(path)
     except (FileNotFoundError, PermissionError, OSError) as exc:
@@ -267,7 +272,7 @@ def _sidecar(data: bytes, path: str, errors: list[LockfileError]) -> tuple[Sidec
 
 
 def _index(value: object, prefix: str, source_dir: Path, source: str,
-           host: BytesHost, errors: list[LockfileError]) -> tuple[IndexDocument, ...]:
+           host: ReadBytesHost, errors: list[LockfileError]) -> tuple[IndexDocument, ...]:
     if not isinstance(value, list) or not value:
         errors.append(_error(prefix, "expected a non-empty list"))
         return ()
@@ -304,7 +309,7 @@ def _index(value: object, prefix: str, source_dir: Path, source: str,
 
 
 def _source(raw: object, name: str, carries_courts: bool, directory: Path,
-            host: BytesHost, errors: list[LockfileError]) -> SourcePin | None:
+            host: ReadBytesHost, errors: list[LockfileError]) -> SourcePin | None:
     prefix = f"sources.{name}"
     if not isinstance(raw, Mapping):
         errors.append(_error(prefix, "expected a mapping"))
@@ -357,7 +362,7 @@ def _source(raw: object, name: str, carries_courts: bool, directory: Path,
 
 
 def load_lockfile(path: PathLike, *, known_sources: Mapping[str, bool] | None = None,
-                  host: BytesHost | None = None) -> LockfileLoadResult:
+                  host: ReadBytesHost | None = None) -> LockfileLoadResult:
     """Read a lockfile and all its companion files, collecting refusals."""
     if known_sources is None:
         known_sources = {source.name: source.carries_courts for source in SOURCES}
@@ -523,7 +528,7 @@ def check_egress_hosts(lockfile: Lockfile, allowlist: EgressAllowlist) -> tuple[
 
 
 def read_lockfile_directory(path: PathLike, *, known_sources: Mapping[str, bool] | None = None,
-                            host: BytesHost | None = None) -> LockfileDirectoryResult:
+                            host: ReadBytesHost | None = None) -> LockfileDirectoryResult:
     """Load every YAML lockfile; unfinished companion directories are ignored."""
     io = host or RealHost()
     directory = Path(path)

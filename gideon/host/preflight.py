@@ -1,7 +1,7 @@
 """The two-phase host preflight runner and its release-artifact refusals.
 
 Preflight refuses before running checks when the host lock, models lock, egress
-allowlist, court map, or site cannot be read and validated.
+allowlist, court map, corpus lockfile, or site cannot be read and validated.
 Under the advisory reading, which upgrade's pre-checkout stage alone passes, an
 unconverged provision step warns with the caller's fix instead of refusing.
 """
@@ -20,6 +20,8 @@ from gideon.host.checks import (
     PreflightContext,
     Severity,
 )
+from gideon.host.corpus.lockfile import check_courts, read_lockfile_directory
+from gideon.host.corpus.lockfile import render_errors as render_lockfile_errors
 from gideon.host.courts import default_courts_path, load_court_map
 from gideon.host.courts import render_errors as render_courts_errors
 from gideon.host.egress import load_egress_allowlist
@@ -40,7 +42,7 @@ from gideon.host.steps import (
     ProvisionContext,
     Step,
 )
-from gideon.host.sysio import Host, PathLike, RealHost
+from gideon.host.sysio import PathLike, ReadBytesHost, RealHost
 
 _SITE_PATH: Final = "/etc/gideon/site.yaml"
 _ROOT_FIX: Final = "Run gideon preflight as root, for example with sudo."
@@ -137,7 +139,7 @@ def _run_preflight_checks(
 def run_preflight(
     args: object,
     *,
-    host: Host | None = None,
+    host: ReadBytesHost | None = None,
     lock_path: PathLike | None = None,
     models_path: PathLike | None = None,
     site_path: PathLike = _SITE_PATH,
@@ -145,6 +147,7 @@ def run_preflight(
     checks: Sequence[PreflightCheck] | None = None,
     egress_path: PathLike | None = None,
     courts_path: PathLike | None = None,
+    lockfiles_path: PathLike | None = None,
     advisory_fix: str | None = None,
     observer: Callable[[ObservedRow], None] | None = None,
 ) -> int:
@@ -166,11 +169,17 @@ def run_preflight(
         root / "config/egress.yaml" if egress_path is None else egress_path
     )
     actual_courts_path = default_courts_path() if courts_path is None else courts_path
+    actual_lockfiles_path = root / "corpus/lockfiles" if lockfiles_path is None else lockfiles_path
 
     lock_result = load_host_lock(actual_lock_path, host=io)
     models_result = load_models_lock(actual_models_path, host=io)
     egress_result = load_egress_allowlist(actual_egress_path, host=io)
     courts_result = load_court_map(actual_courts_path, host=io)
+    lockfiles_result = read_lockfile_directory(actual_lockfiles_path, host=io)
+    lockfile = lockfiles_result.newest
+    lockfile_errors = lockfiles_result.errors
+    if lockfile is not None and courts_result.court_map is not None:
+        lockfile_errors += check_courts(lockfile, courts_result.court_map)
     if lock_result.errors:
         print(render_lock_errors(lock_result.errors), file=sys.stderr)
     if models_result.errors:
@@ -179,6 +188,8 @@ def run_preflight(
         print(render_egress_errors(egress_result.errors), file=sys.stderr)
     if courts_result.errors:
         print(render_courts_errors(courts_result.errors), file=sys.stderr)
+    if lockfile_errors:
+        print(render_lockfile_errors(lockfile_errors), file=sys.stderr)
     if (
         lock_result.errors
         or lock_result.lock is None
@@ -188,6 +199,7 @@ def run_preflight(
         or egress_result.allowlist is None
         or courts_result.errors
         or courts_result.court_map is None
+        or lockfile_errors
     ):
         return 1
 
@@ -217,6 +229,7 @@ def run_preflight(
         courts=courts_result.court_map,
         no_gpu=nogpu.is_no_gpu_host(io),
         build_box=nogpu.is_build_box(io),
+        lockfile=lockfile,
     )
 
     step_reports = _run_step_checks(
