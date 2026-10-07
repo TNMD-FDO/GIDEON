@@ -6,6 +6,7 @@ from pathlib import Path
 
 from gideon.host.images import is_loopback_registry, is_plain_registry, parse_registry
 from gideon.host.steps import (
+    PREREQUISITE_FLOOR_FIX,
     CheckResult,
     Disposition,
     ProvisionContext,
@@ -35,6 +36,8 @@ _CONTAINERD_STORE_PATHS = (
 )
 _CONTAINERD_STORE_FIX = "Follow the containerd store move procedure in docs/runbooks/install-upgrade.md §7, then re-run provision."
 _CONTAINERD_LIST_FIX = "Repair the containerd store directory named above, then re-run provision."
+# Read the binaries' reports, not dpkg's epoch-prefixed versions (such as
+# 5:29...). docker --version comes from docker-ce-cli, shipped at the engine version.
 _VERSION = re.compile(r"(?:^|\s)v?(\d+)(?:\.(\d+))?")
 
 
@@ -50,6 +53,39 @@ def _version(text: str) -> tuple[int, int] | None:
     if match is None:
         return None
     return int(match.group(1)), int(match.group(2) or 0)
+
+
+def _version_result(context: ProvisionContext) -> CheckResult | None:
+    """Return the first missing binary or present package below its floor."""
+
+    requirements = (
+        (
+            ("docker", "--version"),
+            "docker-ce",
+            context.lock.minimums.docker,
+            "Docker is not installed",
+            "Install the locked Docker engine packages, then re-run provision.",
+        ),
+        (
+            ("docker", "compose", "version"),
+            "docker-compose-plugin",
+            context.lock.minimums.compose,
+            "the Docker Compose plugin is not installed",
+            "Install the locked Docker Compose plugin, then re-run provision.",
+        ),
+    )
+    for argv, package, floor, absent_detail, absent_fix in requirements:
+        probe = context.host.run(argv)
+        version = _version(probe.stdout) if probe.returncode == 0 else None
+        if version is None:
+            return CheckResult(Disposition.DRIFT, absent_detail, absent_fix)
+        if version[0] < floor:
+            return CheckResult(
+                Disposition.UNFIXABLE,
+                f"{package} is at {version[0]}.{version[1]}, below the floor {floor}",
+                PREREQUISITE_FLOOR_FIX.format(package=package, floor=floor),
+            )
+    return None
 
 
 def _daemon(context: ProvisionContext) -> dict[str, object]:
@@ -107,6 +143,9 @@ class DockerEngineStep(Step):
     requires = ("disk-layout",)
 
     def check(self, context: ProvisionContext) -> CheckResult:
+        version_result = _version_result(context)
+        if version_result is not None:
+            return version_result
         if not context.host.exists(_KEYRING) or not context.host.exists(_SOURCE):
             return CheckResult(Disposition.DRIFT, "the Docker APT repository is missing", "Configure the Docker APT repository, then re-run provision.")
         if _keyring_empty(context):
@@ -117,15 +156,6 @@ class DockerEngineStep(Step):
             return CheckResult(Disposition.UNFIXABLE, f"cannot read {_SOURCE}: {exc}", "Repair the Docker APT repository, then re-run provision.")
         if source != _REPO:
             return CheckResult(Disposition.DRIFT, f"{_SOURCE} does not match the Docker repository", "Rewrite the Docker APT repository, then re-run provision.")
-
-        docker = context.host.run(["docker", "--version"])
-        docker_version = _version(docker.stdout) if docker.returncode == 0 else None
-        if docker_version is None or docker_version[0] < context.lock.minimums.docker:
-            return CheckResult(Disposition.DRIFT, "Docker is below the locked minimum version", "Install the locked Docker engine packages, then re-run provision.")
-        compose = context.host.run(["docker", "compose", "version"])
-        compose_version = _version(compose.stdout) if compose.returncode == 0 else None
-        if compose_version is None or compose_version[0] < context.lock.minimums.compose:
-            return CheckResult(Disposition.DRIFT, "Docker Compose is below the locked minimum version", "Install the locked Docker Compose plugin, then re-run provision.")
 
         desired = _daemon(context)
         if not context.host.exists(_DAEMON):
@@ -194,6 +224,9 @@ class DockerEngineStep(Step):
                 f"containerd store is populated under {_CONTAINERD_DEFAULT_ROOT} but empty under {_CONTAINERD_ROOT}",
                 _CONTAINERD_STORE_FIX,
             )
+        version_result = _version_result(context)
+        if version_result is not None and version_result.disposition is Disposition.UNFIXABLE:
+            raise StepFailure(version_result.detail, version_result.fix)
         context.host.mkdir(_KEYRING.parent, mode=0o755, parents=True, exist_ok=True)
         # Keyring strictly before the source entry: a failed fetch must never
         # leave a source line referencing a keyring that is not there, or every

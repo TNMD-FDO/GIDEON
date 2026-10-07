@@ -4,10 +4,12 @@ import re
 from pathlib import Path
 
 from gideon.host.steps import (
+    PREREQUISITE_FLOOR_FIX,
     CheckResult,
     Disposition,
     ProvisionContext,
     Step,
+    StepFailure,
     apt_install,
     checksum_matches,
     fetch_file,
@@ -35,6 +37,7 @@ _DRIVER_HOLD_FIX = "Hold the pinned NVIDIA driver package with apt-mark, then re
 _TOOLKIT_FIX = "Install the pinned NVIDIA container toolkit, then re-run provision."
 _PERSISTENCE_FIX = "Enable nvidia-persistenced, then re-run provision."
 _CDI_FIX = "Generate the NVIDIA CDI specification, then re-run provision."
+_TOOLKIT_PACKAGE = "nvidia-container-toolkit"
 _PACKAGE_VERSION = re.compile(r"(?:^|\s)v?(\d+(?:\.\d+){0,3})(?=$|[\s\-+~:])")
 
 
@@ -65,6 +68,41 @@ def _pinning_package(context: ProvisionContext) -> str:
     return f"nvidia-driver-pinning-{context.lock.driver.branch}"
 
 
+def _driver_branch_shortfall(
+    context: ProvisionContext, version: str | None
+) -> CheckResult | None:
+    """Refuse a present driver outside the pinned branch."""
+
+    if version is None:
+        return None
+    branch = context.lock.driver.branch
+    if version == branch or version.startswith(
+        (f"{branch}.", f"{branch}-", f"{branch}+", f"{branch}~")
+    ):
+        return None
+    driver = context.lock.driver.package
+    return CheckResult(
+        Disposition.UNFIXABLE,
+        f"{driver} is at {version}, off the pinned branch {branch}",
+        PREREQUISITE_FLOOR_FIX.format(package=driver, floor=branch),
+    )
+
+
+def _toolkit_shortfall(
+    context: ProvisionContext, version: str | None
+) -> CheckResult | None:
+    """Refuse a present toolkit below the locked floor."""
+
+    if version is None or _at_least(version, context.lock.minimums.toolkit):
+        return None
+    floor = context.lock.minimums.toolkit
+    return CheckResult(
+        Disposition.UNFIXABLE,
+        f"{_TOOLKIT_PACKAGE} is at {version}, below the floor {floor}",
+        PREREQUISITE_FLOOR_FIX.format(package=_TOOLKIT_PACKAGE, floor=floor),
+    )
+
+
 def _driver_loaded(context: ProvisionContext) -> bool:
     if not context.host.exists("/proc/driver/nvidia"):
         return False
@@ -80,6 +118,13 @@ class NvidiaDriverStep(Step):
     gpu_host_only = True
 
     def check(self, context: ProvisionContext) -> CheckResult:
+        # The branch guard comes first, as in apply, so a dry run and the
+        # apply refuse the same box whatever else has drifted.
+        driver = context.lock.driver.package
+        version = package_version(context, driver)
+        shortfall = _driver_branch_shortfall(context, version)
+        if shortfall is not None:
+            return shortfall
         if context.host.exists(_LEGACY_SOURCE) or context.host.exists(_LEGACY_KEYRING):
             return CheckResult(
                 Disposition.DRIFT,
@@ -90,24 +135,17 @@ class NvidiaDriverStep(Step):
             _KEYRING_FILE
         ):
             return CheckResult(Disposition.DRIFT, "the NVIDIA CUDA APT repository is missing", _DRIVER_REPO_FIX)
-
+        if version is None:
+            return CheckResult(
+                Disposition.DRIFT,
+                f"{driver} is not installed",
+                _DRIVER_PACKAGE_FIX,
+            )
         pinning = _pinning_package(context)
         if package_version(context, pinning) is None:
             return CheckResult(
                 Disposition.DRIFT,
                 f"{pinning} is not installed",
-                _DRIVER_PACKAGE_FIX,
-            )
-        driver = context.lock.driver.package
-        version = package_version(context, driver)
-        branch = context.lock.driver.branch
-        if version is None or not (
-            version == branch
-            or version.startswith((f"{branch}.", f"{branch}-", f"{branch}+", f"{branch}~"))
-        ):
-            return CheckResult(
-                Disposition.DRIFT,
-                f"{driver} is not installed at branch {branch}",
                 _DRIVER_PACKAGE_FIX,
             )
         held = context.host.run(["apt-mark", "showhold"])
@@ -126,6 +164,10 @@ class NvidiaDriverStep(Step):
         return CheckResult(Disposition.CONVERGED, "NVIDIA driver is current and loaded", "")
 
     def apply(self, context: ProvisionContext) -> None:
+        driver = context.lock.driver.package
+        shortfall = _driver_branch_shortfall(context, package_version(context, driver))
+        if shortfall is not None:
+            raise StepFailure(shortfall.detail, shortfall.fix)
         # Self-heal first: the pre-0.0.6 source entry references a keyring that
         # never downloaded and poisons every apt-get update until removed.
         context.host.unlink(_LEGACY_SOURCE, missing_ok=True)
@@ -146,16 +188,13 @@ class NvidiaDriverStep(Step):
             # one step — a source line never exists without its keyring.
             context.host.run(["dpkg", "-i", str(_DEB_TMP)], check=True)
             context.host.unlink(_DEB_TMP, missing_ok=True)
-        context.host.run(["apt-get", "update"], check=True)
-        context.host.run(
-            ["apt-get", "install", "-y", _pinning_package(context)], check=True
-        )
-        context.host.run(
-            ["apt-get", "install", "-y", context.lock.driver.package], check=True
-        )
-        context.host.run(
-            ["apt-mark", "hold", context.lock.driver.package], check=True
-        )
+        # The pinning package's apt preference must be on disk before the
+        # driver metapackage resolves.
+        apt_install(context, [_pinning_package(context)])
+        apt_install(context, [driver])
+        held = context.host.run(["apt-mark", "showhold"], check=True)
+        if driver not in held.stdout.splitlines():
+            context.host.run(["apt-mark", "hold", driver], check=True)
 
 
 class NvidiaToolkitStep(Step):
@@ -173,13 +212,16 @@ class NvidiaToolkitStep(Step):
                 "the NVIDIA driver must be loaded before CDI generation",
                 _DRIVER_REBOOT_FIX,
             )
-        version = package_version(context, "nvidia-container-toolkit")
-        if not _at_least(version, context.lock.minimums.toolkit):
+        version = package_version(context, _TOOLKIT_PACKAGE)
+        if version is None:
             return CheckResult(
                 Disposition.DRIFT,
-                f"nvidia-container-toolkit is below {context.lock.minimums.toolkit}",
+                f"{_TOOLKIT_PACKAGE} is not installed",
                 _TOOLKIT_FIX,
             )
+        shortfall = _toolkit_shortfall(context, version)
+        if shortfall is not None:
+            return shortfall
         enabled = context.host.run(["systemctl", "is-enabled", "nvidia-persistenced"])
         if enabled.returncode != 0:
             return CheckResult(
@@ -196,7 +238,12 @@ class NvidiaToolkitStep(Step):
         return CheckResult(Disposition.CONVERGED, "NVIDIA toolkit and CDI are current", "")
 
     def apply(self, context: ProvisionContext) -> None:
-        apt_install(context, ["nvidia-container-toolkit"])
+        shortfall = _toolkit_shortfall(
+            context, package_version(context, _TOOLKIT_PACKAGE)
+        )
+        if shortfall is not None:
+            raise StepFailure(shortfall.detail, shortfall.fix)
+        apt_install(context, [_TOOLKIT_PACKAGE])
         context.host.run(
             ["systemctl", "enable", "--now", "nvidia-persistenced"], check=True
         )

@@ -818,3 +818,71 @@ sudo touch /var/lib/gideon-data-move/rollback.done
 ```
 
 The `sed` command must print nothing before restoring `/data`. The owning operator then starts their application on the restored directory. Keep the rolled-back record for review, but archive it under a new name before a fresh attempt so its `copy.started` stamp cannot be mistaken for the new move's state. Provision will report the occupied-`/data` refusal again until the move is completed. Any copies already on the volume remain there and will appear as shared names at the next attempt's inventory; reconcile them before copying.
+
+## 9. Upgrading a shared prerequisite
+
+Use this procedure when provision or preflight reports a present Docker Engine, Compose plugin, NVIDIA container toolkit, or driver below the lock's floor or off its pinned branch, or when an apt rehearsal names packages it would upgrade or remove. Read `host.lock` for the required floor and driver branch. Provision installs absent packages but does not upgrade a present prerequisite.
+
+### Survey
+
+Refresh apt's lists and rehearse the appropriate install before changing packages. Read every `Inst` and `Remv` line, including dependencies and other packages on the box. If apt cannot run, fix its refusal before proceeding.
+
+```sh
+sudo apt-get update -q
+sudo apt-get -s install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo apt-get -s install -y nvidia-container-toolkit
+sudo apt-get -s install -y nvidia-driver-pinning-<branch> nvidia-open
+```
+
+Run only the rehearsal for the prerequisite being upgraded; replace `<branch>` with `host.driver.branch` from `host.lock` for a driver upgrade. Resolve any other proposed change with its owner before the window.
+
+### Announce
+
+Announce a maintenance window at least one working day ahead to users and every project sharing the daemon. A Docker upgrade restarts every container on the box. A driver upgrade needs a reboot. Agree on the timing with the other projects' operators before starting.
+
+### Upgrade
+
+During the window, choose the applicable sequence below. Stop if any command fails; do not continue to provision until the package change succeeds. Upgrade Docker's five packages together:
+
+```sh
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+```
+
+Upgrade the toolkit as one package:
+
+```sh
+sudo apt-get install -y nvidia-container-toolkit
+```
+
+For a driver, release the hold, install the branch pinning package before the driver, restore the hold, and reboot:
+
+```sh
+sudo apt-mark unhold nvidia-open
+sudo apt-get install -y nvidia-driver-pinning-<branch>
+sudo apt-get install -y nvidia-open
+sudo apt-mark hold nvidia-open
+sudo reboot
+```
+
+After a driver reboot, regenerate the CDI specification as the toolkit step does:
+
+```sh
+sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+```
+
+### Converge
+
+From the release checkout, re-run provision:
+
+```sh
+cd /opt/gideon
+sudo python3 -m gideon host provision
+```
+
+After a driver or Docker change, verify the engine once services are running again:
+
+```sh
+sudo python3 -m gideon engine verify
+```
+
+A merged `host.minimums.*` or `host.driver.branch` bump makes provision and preflight refuse until this procedure is followed (`docs/runbooks/release-files.md §9`). Provision never upgrades a present prerequisite itself.

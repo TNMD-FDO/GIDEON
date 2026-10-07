@@ -12,7 +12,7 @@ A refusal naming one of these files at `host provision`, `preflight`, `apply`, `
 
 This file records the operating-system release, the kernel tested, the NVIDIA driver package and branch, and the driver version reached on the reference box. It also sets minimum versions for Docker, Compose, and the GPU toolkit. The remaining records identify the release registry image, the self-hosted CI runner's release and its checksum, the dated acceptance-machine image and its checksum, and the reference box's storage-controller and virtual-disk facts.
 
-`host provision` converges the host to these records, and `preflight` refuses when the lock is missing or invalid. A driver proposal does not mark a version tested: move that record only after the reference box has converged on the version.
+`host provision` converges the host to these records, and `preflight` refuses when the lock is missing or invalid. Provision installs an absent package; a present one below a minimum or off the pinned branch is a refusal. A person upgrades it by `docs/runbooks/install-upgrade.md §9`. A driver proposal does not mark a version tested: move that record only after the reference box has converged on the version.
 
 ## 3. `images.lock`
 
@@ -75,7 +75,7 @@ The maintaining office reviews the open pin-watch and Dependabot pull requests o
 | `images.opensearch` | A new digest under the same tag (upstream refreshes a version's operating-system packages): merge when green. A new version: leave open for a release cycle. |
 | `host.registry_image`, `host.acceptance_vm_image` | Merge when green. The registry moves at the next provision; the VM image at the next acceptance run. |
 | `host.gh_runner` | Merge when green, then provision the box within thirty days to update its runner. |
-| `host.driver.branch`, `host.minimums.*` proposals | Leave open until the box runs the new version. Merging first makes preflight refuse. Close a version you decide to skip. |
+| `host.driver.branch`, `host.minimums.*` proposals | Leave open until the box runs the new version. Merging first makes preflight and provision refuse until the box is upgraded by `docs/runbooks/install-upgrade.md §9`. Close a version you decide to skip. |
 | `skills.matt-pocock` proposal | A maintainer completes the skill refresh on the proposal branch, then merges when green. Nothing on the box moves. |
 
 **Closing declines.** Closing a PR unmerged tells the watch that bump was declined; it proposes nothing else for that pin until upstream moves again. Say why in a closing comment.

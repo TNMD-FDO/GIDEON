@@ -31,6 +31,7 @@ from gideon.host.steps import (
     ProvisionContext,
     Step,
     StepFailure,
+    apt_install,
     package_version,
 )
 from gideon.host.steps.accounts import CsaAccountsStep, ServiceUserStep
@@ -1088,6 +1089,22 @@ def package_result(
     return command, completed(command, f"{status} installed {version}\n")
 
 
+def apt_command_results(
+    packages: Sequence[str],
+) -> tuple[tuple[tuple[str, ...], subprocess.CompletedProcess[str]], ...]:
+    """Record a successful absent-package install and its apt rehearsal."""
+
+    update = ("apt-get", "update")
+    rehearsal = ("apt-get", "-s", "install", "-y", *packages)
+    install = ("apt-get", "install", "-y", *packages)
+    stdout = "".join(f"Inst {package} (99.0-fictitious local)\n" for package in packages)
+    return (
+        (update, completed(update)),
+        (rehearsal, completed(rehearsal, stdout)),
+        (install, completed(install)),
+    )
+
+
 class PackageVersionTests(unittest.TestCase):
     def test_held_installed_and_removed_states(self) -> None:
         version = "1000.0.0-1ubuntu1"
@@ -1105,6 +1122,88 @@ class PackageVersionTests(unittest.TestCase):
         self.assertIsNone(package_version(context(FakeHost()), "nvidia-open"))
 
 
+class AptInstallTests(unittest.TestCase):
+    def test_all_present_runs_no_apt_command(self) -> None:
+        packages = ("installed-package", "held-package")
+        installed, installed_result = package_result(packages[0], "1.0")
+        held, held_result = package_result(packages[1], "2.0", status="hold ok")
+        host = FakeHost(commands={installed: installed_result, held: held_result})
+
+        apt_install(context(host), packages)
+
+        self.assertEqual([argv for argv, _, _ in host.runs], [installed, held])
+
+    def test_mixed_set_installs_absent_alone_after_rehearsal(self) -> None:
+        present, present_result = package_result("present-package", "1.0")
+        packages = ("present-package", "absent-package")
+        apt_commands = apt_command_results([packages[1]])
+        host = FakeHost(commands={present: present_result, **dict(apt_commands)})
+
+        apt_install(context(host), packages)
+
+        absent_probe = ("dpkg-query", "-W", "-f=${Status} ${Version}\\n", packages[1])
+        self.assertEqual(
+            [argv for argv, _, _ in host.runs],
+            [present, absent_probe, *(argv for argv, _ in apt_commands)],
+        )
+        for argv, _ in apt_commands:
+            self.assertIn(("run", (argv, True)), host.calls)
+
+    def test_bracketed_inst_refuses_listed_or_unlisted_package(self) -> None:
+        absent = "absent-package"
+        for moved in (absent, "other-package"):
+            with self.subTest(moved=moved):
+                commands = dict(apt_command_results([absent]))
+                rehearsal = ("apt-get", "-s", "install", "-y", absent)
+                commands[rehearsal] = completed(
+                    rehearsal,
+                    f"Inst {moved} [1.0-fictitious] (2.0-fictitious local)\n",
+                )
+                host = FakeHost(commands=commands)
+
+                with self.assertRaises(StepFailure) as raised:
+                    apt_install(context(host), [absent])
+
+                self.assertIn(moved, raised.exception.detail)
+                self.assertIn("1.0-fictitious", raised.exception.detail)
+                self.assertIn("2.0-fictitious", raised.exception.detail)
+                self.assertIn("docs/runbooks/install-upgrade.md §9", raised.exception.fix)
+                self.assertNotIn(("run", (("apt-get", "install", "-y", absent), True)), host.calls)
+
+    def test_removal_refuses_and_names_each_package(self) -> None:
+        absent = "absent-package"
+        commands = dict(apt_command_results([absent]))
+        rehearsal = ("apt-get", "-s", "install", "-y", absent)
+        commands[rehearsal] = completed(
+            rehearsal,
+            "Remv first-package [1.0-fictitious]\nRemv second-package [2.0-fictitious]\n",
+        )
+        host = FakeHost(commands=commands)
+
+        with self.assertRaises(StepFailure) as raised:
+            apt_install(context(host), [absent])
+
+        self.assertIn("first-package", raised.exception.detail)
+        self.assertIn("second-package", raised.exception.detail)
+        self.assertNotIn(("run", (("apt-get", "install", "-y", absent), True)), host.calls)
+
+    def test_new_install_lines_pass(self) -> None:
+        absent = "absent-package"
+        commands = dict(apt_command_results([absent]))
+        rehearsal = ("apt-get", "-s", "install", "-y", absent)
+        commands[rehearsal] = completed(
+            rehearsal,
+            "Inst absent-package (99.0-fictitious local)\n"
+            "Inst new-dependency (99.0-fictitious local)\n"
+            "Conf absent-package (99.0-fictitious local)\n",
+        )
+        host = FakeHost(commands=commands)
+
+        apt_install(context(host), [absent])
+
+        self.assertIn(("run", (("apt-get", "install", "-y", absent), True)), host.calls)
+
+
 class DockerKeyringOrderTests(unittest.TestCase):
     def test_apply_fetches_keyring_before_writing_the_source_entry(self) -> None:
         gpg = "/etc/apt/keyrings/gideon-docker.asc"
@@ -1114,9 +1213,11 @@ class DockerKeyringOrderTests(unittest.TestCase):
             wget: completed(wget),
             move: completed(move),
         }
+        commands.update(dict(apt_command_results((
+            "docker-ce", "docker-ce-cli", "containerd.io", "docker-buildx-plugin",
+            "docker-compose-plugin",
+        ))))
         for argv in (
-            ("apt-get", "update"),
-            ("apt-get", "install", "-y", "docker-ce", "docker-ce-cli", "containerd.io", "docker-buildx-plugin", "docker-compose-plugin"),
             ("systemctl", "restart", "systemd-journald"),
             ("systemctl", "enable", "--now", "containerd"),
             ("systemctl", "restart", "containerd"),
@@ -1150,9 +1251,10 @@ class NvidiaStepTests(unittest.TestCase):
         self.assertIn("legacy gideon-nvidia", legacy_result.detail)
 
         files = {"/usr/share/keyrings/cuda-archive-keyring.gpg": "keyring"}
+        driver = HOST_LOCK.driver.package
         keyring, keyring_output = package_result("cuda-keyring", "1.1-1")
         package, package_output = package_result(
-            "nvidia-open", f"{branch}.71.05-1ubuntu1", status="hold ok"
+            driver, f"{branch}.71.05-1ubuntu1", status="hold ok"
         )
         pinning, pinning_output = package_result(
             f"nvidia-driver-pinning-{branch}", f"{branch}-1ubuntu1"
@@ -1163,7 +1265,7 @@ class NvidiaStepTests(unittest.TestCase):
             keyring: keyring_output,
             package: package_output,
             pinning: pinning_output,
-            hold: completed(hold, "nvidia-open\n"),
+            hold: completed(hold, f"{driver}\n"),
             lsmod: completed(lsmod, "nouveau 12345 0\n"),
         }
         reboot = FakeHost(files=files, commands=commands)
@@ -1187,26 +1289,34 @@ class NvidiaStepTests(unittest.TestCase):
         move = ("mv", "-f", f"{deb}.partial", deb)
         sha = ("sha256sum", deb)
         dpkg = ("dpkg", "-i", deb)
-        update = ("apt-get", "update")
-        pinning = ("apt-get", "install", "-y", f"nvidia-driver-pinning-{ctx.lock.driver.branch}")
-        install = ("apt-get", "install", "-y", "nvidia-open")
-        hold = ("apt-mark", "hold", "nvidia-open")
+        pinning_package = f"nvidia-driver-pinning-{ctx.lock.driver.branch}"
+        driver = ctx.lock.driver.package
+        pinning = ("apt-get", "install", "-y", pinning_package)
+        install = ("apt-get", "install", "-y", driver)
+        showhold = ("apt-mark", "showhold")
+        hold = ("apt-mark", "hold", driver)
         host.commands.update(
             {
                 wget: completed(wget),
                 move: completed(move),
                 sha: completed(sha, f"{ctx.lock.driver.keyring_sha256}  {deb}\n"),
                 dpkg: completed(dpkg),
-                update: completed(update),
-                pinning: completed(pinning),
-                install: completed(install),
+                showhold: completed(showhold),
                 hold: completed(hold),
             }
         )
+        host.commands.update(dict(apt_command_results([pinning_package])))
+        host.commands.update(dict(apt_command_results([driver])))
         NvidiaDriverStep().apply(ctx)
         self.assertIn(("unlink", "/etc/apt/sources.list.d/gideon-nvidia.list"), host.calls)
         self.assertIn(("run", (dpkg, True)), host.calls)
         self.assertIn(("run", (install, True)), host.calls)
+        runs = [argv for argv, _, _ in host.runs]
+        self.assertLess(runs.index(pinning), runs.index(install))
+        self.assertEqual(runs.count(("apt-get", "update")), 2)
+        self.assertLess(runs.index(("apt-get", "-s", "install", "-y", pinning_package)), runs.index(pinning))
+        self.assertLess(runs.index(("apt-get", "-s", "install", "-y", driver)), runs.index(install))
+        self.assertLess(runs.index(showhold), runs.index(hold))
         writes = [call for call in host.calls if call[0] == "write_text"]
         self.assertEqual(writes, [])
 
@@ -1214,6 +1324,205 @@ class NvidiaStepTests(unittest.TestCase):
         result = NvidiaToolkitStep().check(context(FakeHost()))
         self.assertEqual(result.disposition, Disposition.PENDING_INPUT)
         self.assertIn("docs/runbooks/install-upgrade.md §1", result.fix)
+
+    def test_toolkit_absent_installs_through_the_helper(self) -> None:
+        package = "nvidia-container-toolkit"
+        lsmod = ("lsmod",)
+        enable = ("systemctl", "enable", "--now", "nvidia-persistenced")
+        generate = ("nvidia-ctk", "cdi", "generate", "--output=/etc/cdi/nvidia.yaml")
+        commands = dict(apt_command_results([package]))
+        commands.update({
+            lsmod: completed(lsmod, "nvidia 12345 0\n"),
+            enable: completed(enable),
+            generate: completed(generate),
+        })
+        host = FakeHost(files={"/proc/driver/nvidia": ""}, commands=commands)
+        step = NvidiaToolkitStep()
+
+        checked = step.check(context(host))
+        self.assertEqual(checked.disposition, Disposition.DRIFT)
+        self.assertEqual(checked.detail, f"{package} is not installed")
+        step.apply(context(host))
+
+        runs = [argv for argv, _, _ in host.runs]
+        self.assertLess(
+            runs.index(("apt-get", "-s", "install", "-y", package)),
+            runs.index(("apt-get", "install", "-y", package)),
+        )
+        self.assertIn(("run", (generate, True)), host.calls)
+
+    def test_present_short_toolkit_refuses_in_check_and_apply(self) -> None:
+        package = "nvidia-container-toolkit"
+        floor = HOST_LOCK.minimums.toolkit
+        version = f"{int(floor.split('.')[0]) - 1}.0.0-fictitious"
+        probe, result = package_result(package, version)
+        lsmod = ("lsmod",)
+        host = FakeHost(
+            files={"/proc/driver/nvidia": ""},
+            commands={probe: result, lsmod: completed(lsmod, "nvidia 12345 0\n")},
+        )
+        step = NvidiaToolkitStep()
+
+        checked = step.check(context(host))
+        self.assertEqual(checked.disposition, Disposition.UNFIXABLE)
+        self.assertEqual(checked.detail, f"{package} is at {version}, below the floor {floor}")
+        self.assertIn(f"Upgrade {package} to at least {floor}", checked.fix)
+
+        before_apply = len(host.calls)
+        with self.assertRaises(StepFailure) as raised:
+            step.apply(context(host))
+        self.assertEqual(raised.exception.detail, checked.detail)
+        self.assertEqual(raised.exception.fix, checked.fix)
+        self.assertEqual(host.calls[before_apply:], [("run", (probe, False))])
+
+    def test_toolkit_rehearsal_refuses_upgrade_of_present_base(self) -> None:
+        package = "nvidia-container-toolkit"
+        base = "nvidia-container-toolkit-base"
+        base_probe, base_result = package_result(base, "1.0-fictitious")
+        commands = dict(apt_command_results([package]))
+        commands[base_probe] = base_result
+        rehearsal = ("apt-get", "-s", "install", "-y", package)
+        commands[rehearsal] = completed(
+            rehearsal,
+            f"Inst {base} [1.0-fictitious] (2.0-fictitious local)\n",
+        )
+        host = FakeHost(commands=commands)
+
+        with self.assertRaises(StepFailure) as raised:
+            NvidiaToolkitStep().apply(context(host))
+
+        self.assertIn(base, raised.exception.detail)
+        self.assertIn("1.0-fictitious", raised.exception.detail)
+        self.assertIn("2.0-fictitious", raised.exception.detail)
+        self.assertIn("docs/runbooks/install-upgrade.md §9", raised.exception.fix)
+        self.assertNotIn(
+            ("run", (("apt-get", "install", "-y", package), True)), host.calls
+        )
+
+    def test_driver_present_at_branch_only_repairs_missing_hold(self) -> None:
+        branch = HOST_LOCK.driver.branch
+        driver = HOST_LOCK.driver.package
+        pinning = f"nvidia-driver-pinning-{branch}"
+        keyring_probe, keyring_result = package_result("cuda-keyring", "1.0-fictitious")
+        pinning_probe, pinning_result = package_result(pinning, "1.0-fictitious")
+        driver_probe, driver_result = package_result(
+            driver, f"{branch}.99.0-fictitious"
+        )
+        showhold = ("apt-mark", "showhold")
+        hold = ("apt-mark", "hold", driver)
+        host = FakeHost(
+            files={"/usr/share/keyrings/cuda-archive-keyring.gpg": "keyring"},
+            commands={
+                keyring_probe: keyring_result,
+                pinning_probe: pinning_result,
+                driver_probe: driver_result,
+                showhold: completed(showhold),
+                hold: completed(hold),
+            },
+        )
+
+        NvidiaDriverStep().apply(context(host))
+
+        runs = [argv for argv, _, _ in host.runs]
+        self.assertFalse(any(argv[0] == "apt-get" for argv in runs))
+        self.assertTrue(all(
+            argv[0] in {"dpkg-query", "apt-mark"}
+            for argv in runs if driver in argv or pinning in argv
+        ))
+        self.assertIn(("run", (hold, True)), host.calls)
+
+    def test_driver_already_held_runs_no_hold_or_install(self) -> None:
+        branch = HOST_LOCK.driver.branch
+        driver = HOST_LOCK.driver.package
+        keyring_probe, keyring_result = package_result("cuda-keyring", "1.0-fictitious")
+        pinning_probe, pinning_result = package_result(
+            f"nvidia-driver-pinning-{branch}", "1.0-fictitious"
+        )
+        driver_probe, driver_result = package_result(driver, f"{branch}.99.0-fictitious")
+        showhold = ("apt-mark", "showhold")
+        host = FakeHost(
+            files={"/usr/share/keyrings/cuda-archive-keyring.gpg": "keyring"},
+            commands={
+                keyring_probe: keyring_result,
+                pinning_probe: pinning_result,
+                driver_probe: driver_result,
+                showhold: completed(showhold, f"{driver}\n"),
+            },
+        )
+
+        NvidiaDriverStep().apply(context(host))
+
+        self.assertIn(("run", (showhold, True)), host.calls)
+        self.assertNotIn(("run", (("apt-mark", "hold", driver), True)), host.calls)
+        self.assertFalse(any(argv[0] == "apt-get" for argv, _, _ in host.runs))
+
+    def test_driver_off_branch_refuses_before_pinning_or_mutation(self) -> None:
+        branch = HOST_LOCK.driver.branch
+        old_branch = str(int(branch) - 1)
+        driver = HOST_LOCK.driver.package
+        version = f"{old_branch}.99.0-fictitious"
+        keyring_probe, keyring_result = package_result("cuda-keyring", "1.0-fictitious")
+        driver_probe, driver_result = package_result(driver, version)
+        old_pinning_probe, old_pinning_result = package_result(
+            f"nvidia-driver-pinning-{old_branch}", "1.0-fictitious"
+        )
+        locked_pinning_probe = (
+            "dpkg-query", "-W", "-f=${Status} ${Version}\\n",
+            f"nvidia-driver-pinning-{branch}",
+        )
+        host = FakeHost(
+            files={"/usr/share/keyrings/cuda-archive-keyring.gpg": "keyring"},
+            commands={
+                keyring_probe: keyring_result,
+                driver_probe: driver_result,
+                old_pinning_probe: old_pinning_result,
+            },
+        )
+        step = NvidiaDriverStep()
+
+        checked = step.check(context(host))
+        self.assertEqual(checked.disposition, Disposition.UNFIXABLE)
+        self.assertEqual(
+            checked.detail,
+            f"{driver} is at {version}, off the pinned branch {branch}",
+        )
+        self.assertIn(f"Upgrade {driver} to at least {branch}", checked.fix)
+        self.assertNotIn(("run", (locked_pinning_probe, False)), host.calls)
+
+        host.files["/etc/apt/sources.list.d/gideon-nvidia.list"] = "legacy\n"
+        self.assertEqual(step.check(context(host)), checked)
+        before_apply = len(host.calls)
+        with self.assertRaises(StepFailure) as raised:
+            step.apply(context(host))
+        self.assertEqual(raised.exception.detail, checked.detail)
+        self.assertEqual(raised.exception.fix, checked.fix)
+        apply_calls = host.calls[before_apply:]
+        self.assertFalse(any(
+            method in {"unlink", "write_text", "mkdir"} for method, _ in apply_calls
+        ))
+        self.assertEqual(
+            [arguments for method, arguments in apply_calls if method == "run"],
+            [(driver_probe, False)],
+        )
+
+    def test_driver_absent_is_drift_before_pinning_check(self) -> None:
+        branch = HOST_LOCK.driver.branch
+        driver = HOST_LOCK.driver.package
+        keyring_probe, keyring_result = package_result("cuda-keyring", "1.0-fictitious")
+        host = FakeHost(
+            files={"/usr/share/keyrings/cuda-archive-keyring.gpg": "keyring"},
+            commands={keyring_probe: keyring_result},
+        )
+
+        checked = NvidiaDriverStep().check(context(host))
+
+        self.assertEqual(checked.disposition, Disposition.DRIFT)
+        self.assertEqual(checked.detail, f"{driver} is not installed")
+        self.assertNotIn(
+            ("run", (("dpkg-query", "-W", "-f=${Status} ${Version}\\n",
+                      f"nvidia-driver-pinning-{branch}"), False)),
+            host.calls,
+        )
 
 
 def docker_commands(
@@ -1292,14 +1601,118 @@ class DockerStepTests(unittest.TestCase):
                     self.assertEqual(result.disposition, Disposition.DRIFT)
                     self.assertIn("daemon.json differs", result.detail)
 
-    def test_docker_version_minimum_drift(self) -> None:
-        host = FakeHost(
-            files=docker_files({"data-root": "/var/lib/docker"}),
-            commands=docker_commands(docker_version="28.0.0"),
+    def test_present_packages_and_daemon_drift_run_no_apt_command(self) -> None:
+        packages = (
+            "docker-ce", "docker-ce-cli", "containerd.io", "docker-buildx-plugin",
+            "docker-compose-plugin",
         )
-        result = DockerEngineStep().check(context(host))
-        self.assertEqual(result.disposition, Disposition.DRIFT)
-        self.assertIn("minimum", result.detail)
+        commands = docker_commands(
+            docker_version=f"{HOST_LOCK.minimums.docker}.0.0",
+            compose_version=f"{HOST_LOCK.minimums.compose}.0.0",
+        )
+        probes = []
+        for package in packages:
+            probe, result = package_result(package, "99.0-fictitious")
+            commands[probe] = result
+            probes.append(probe)
+        host = FakeHost(
+            files=docker_files({
+                "data-root": "/var/lib/docker",
+                "features": {"cdi": True},
+                "log-driver": "json-file",
+            }),
+            commands=commands,
+        )
+        step = DockerEngineStep()
+
+        checked = step.check(context(host))
+        self.assertEqual(checked.disposition, Disposition.DRIFT)
+        self.assertIn("daemon.json differs", checked.detail)
+        step.apply(context(host))
+
+        runs = [argv for argv, _, _ in host.runs]
+        self.assertEqual([argv for argv in runs if argv[0] == "dpkg-query"], probes)
+        self.assertFalse(any(argv[0] == "apt-get" for argv in runs))
+
+    def test_below_floor_docker_and_compose_refuse_before_any_write(self) -> None:
+        for package, short_version in (
+            ("docker-ce", f"{HOST_LOCK.minimums.docker - 1}.0.0"),
+            ("docker-compose-plugin", f"{HOST_LOCK.minimums.compose - 1}.0.0"),
+        ):
+            with self.subTest(package=package):
+                floor = (
+                    HOST_LOCK.minimums.docker if package == "docker-ce"
+                    else HOST_LOCK.minimums.compose
+                )
+                commands = docker_commands(
+                    docker_version=(
+                        short_version if package == "docker-ce"
+                        else f"{HOST_LOCK.minimums.docker}.0.0"
+                    ),
+                    compose_version=(
+                        short_version if package == "docker-compose-plugin"
+                        else f"{HOST_LOCK.minimums.compose}.0.0"
+                    ),
+                )
+                files = docker_files({"data-root": "/var/lib/docker"})
+                step = DockerEngineStep()
+                present_source = step.check(context(FakeHost(files=files, commands=commands)))
+                self.assertEqual(present_source.disposition, Disposition.UNFIXABLE)
+                del files["/etc/apt/sources.list.d/gideon-docker.list"]
+                host = FakeHost(files=files, commands=commands)
+                expected = f"{package} is at {floor - 1}.0, below the floor {floor}"
+
+                checked = step.check(context(host))
+                self.assertEqual(checked.disposition, Disposition.UNFIXABLE)
+                self.assertEqual(checked.detail, expected)
+                self.assertEqual(present_source.detail, expected)
+                self.assertIn(f"Upgrade {package} to at least {floor}", checked.fix)
+                self.assertIn("docs/runbooks/install-upgrade.md §9", checked.fix)
+
+                before_apply = len(host.calls)
+                with self.assertRaises(StepFailure) as raised:
+                    step.apply(context(host))
+                self.assertEqual(raised.exception.detail, checked.detail)
+                self.assertEqual(raised.exception.fix, checked.fix)
+                apply_calls = host.calls[before_apply:]
+                self.assertFalse(any(
+                    method in {"write_text", "mkdir", "unlink"}
+                    for method, _ in apply_calls
+                ))
+                for method, arguments in apply_calls:
+                    if method == "run":
+                        assert isinstance(arguments, tuple)
+                        self.assertIn(arguments[0], {
+                            ("docker", "--version"), ("docker", "compose", "version"),
+                        })
+
+    def test_absent_or_unparsed_docker_or_compose_version_is_drift(self) -> None:
+        for probe, detail, fix_text in (
+            (("docker", "--version"), "Docker is not installed", "Docker engine"),
+            (
+                ("docker", "compose", "version"),
+                "the Docker Compose plugin is not installed",
+                "Docker Compose plugin",
+            ),
+        ):
+            for output in (
+                subprocess.CompletedProcess(list(probe), 1, "", "not found"),
+                completed(probe, "version unavailable\n"),
+            ):
+                with self.subTest(probe=probe, output=output):
+                    commands = docker_commands(
+                        docker_version=f"{HOST_LOCK.minimums.docker}.0.0",
+                        compose_version=f"{HOST_LOCK.minimums.compose}.0.0",
+                    )
+                    commands[probe] = output
+                    host = FakeHost(commands=commands)
+
+                    checked = DockerEngineStep().check(context(host))
+
+                    self.assertEqual(checked.disposition, Disposition.DRIFT)
+                    self.assertEqual(checked.detail, detail)
+                    self.assertIn(f"Install the locked {fix_text}", checked.fix)
+                    self.assertEqual(host.runs[0][0], ("docker", "--version"))
 
     def test_containerd_config_text_is_exact(self) -> None:
         self.assertEqual(
@@ -1429,13 +1842,11 @@ class DockerStepTests(unittest.TestCase):
             "features": {"cdi": True},
             "log-driver": "journald",
         }
-        update = ("apt-get", "update")
-        install = (
-            "apt-get", "install", "-y", "docker-ce", "docker-ce-cli", "containerd.io",
-            "docker-buildx-plugin", "docker-compose-plugin",
-        )
         commands = docker_commands()
-        commands.update({update: completed(update), install: completed(install)})
+        commands.update(dict(apt_command_results((
+            "docker-ce", "docker-ce-cli", "containerd.io", "docker-buildx-plugin",
+            "docker-compose-plugin",
+        ))))
         files = docker_files(daemon)
         files[os.fspath(_CONTAINERD_CONFIG)] = "wrong\n"
         host = FakeHost(files=files, commands=commands)
@@ -1476,12 +1887,10 @@ class DockerStepTests(unittest.TestCase):
 
         enable = ("systemctl", "enable", "--now", "containerd")
         host.commands[enable] = completed(enable)
-        update = ("apt-get", "update")
-        install = (
-            "apt-get", "install", "-y", "docker-ce", "docker-ce-cli", "containerd.io",
-            "docker-buildx-plugin", "docker-compose-plugin",
-        )
-        host.commands.update({update: completed(update), install: completed(install)})
+        host.commands.update(dict(apt_command_results((
+            "docker-ce", "docker-ce-cli", "containerd.io", "docker-buildx-plugin",
+            "docker-compose-plugin",
+        ))))
         DockerEngineStep().apply(context(host))
         self.assertIn(("run", (enable, True)), host.calls)
         self.assertNotIn(
@@ -1512,16 +1921,13 @@ class DockerStepTests(unittest.TestCase):
             "log-driver": "journald",
         }
         restart = ("systemctl", "restart", "systemd-journald")
-        update = ("apt-get", "update")
-        install = (
-            "apt-get", "install", "-y", "docker-ce", "docker-ce-cli", "containerd.io",
-            "docker-buildx-plugin", "docker-compose-plugin",
-        )
         enable = ("systemctl", "enable", "--now", "docker")
         commands = docker_commands()
+        commands.update(dict(apt_command_results((
+            "docker-ce", "docker-ce-cli", "containerd.io", "docker-buildx-plugin",
+            "docker-compose-plugin",
+        ))))
         commands.update({
-            update: completed(update),
-            install: completed(install),
             restart: completed(restart),
             enable: completed(enable),
         })
@@ -1677,6 +2083,7 @@ class NetworkStepTests(unittest.TestCase):
                 active: completed(active, "active\n"),
                 reload_sources: completed(reload_sources),
                 enable: completed(enable),
+                **dict(apt_command_results(["chrony"])),
             },
         )
         step = TimeSyncStep()
@@ -1865,8 +2272,8 @@ class MaintenanceStepTests(unittest.TestCase):
         package = ("dpkg-query", "-W", "-f=${Status} ${Version}\\n", "unattended-upgrades")
         install = ("apt-get", "install", "-y", "unattended-upgrades")
         host = FakeHost(commands={
-                ("apt-get", "update"): completed(("apt-get", "update")),
-package: completed(package), install: completed(install)})
+            package: completed(package), **dict(apt_command_results(["unattended-upgrades"])),
+        })
         step = UnattendedUpgradesStep()
         self.assertEqual(step.check(context(host)).disposition, Disposition.DRIFT)
         step.apply(context(host))
@@ -1883,7 +2290,9 @@ class HostToolsStepTests(unittest.TestCase):
     def test_missing_tools_install_together_and_converge_when_present(self) -> None:
         update = ("apt-get", "update")
         install = ("apt-get", "install", "-y", "ldap-utils", "skopeo", "age", "rsync")
-        host = FakeHost(commands={update: completed(update), install: completed(install)})
+        host = FakeHost(commands=dict(apt_command_results((
+            "ldap-utils", "skopeo", "age", "rsync",
+        ))))
         step = HostToolsStep()
         result = step.check(context(host))
         self.assertEqual(result.disposition, Disposition.DRIFT)
@@ -1902,15 +2311,13 @@ class HostToolsStepTests(unittest.TestCase):
         self.assertEqual(step.check(context(host)).disposition, Disposition.CONVERGED)
 
     def test_only_the_missing_tool_is_installed(self) -> None:
-        update = ("apt-get", "update")
         install = ("apt-get", "install", "-y", "skopeo")
         host = FakeHost(
             commands={
                 self.LDAP: completed(self.LDAP, "install ok installed 2.6.7\n"),
                 self.AGE: completed(self.AGE, "install ok installed 1.0.0\n"),
                 self.RSYNC: completed(self.RSYNC, "install ok installed 3.2.7\n"),
-                update: completed(update),
-                install: completed(install),
+                **dict(apt_command_results(["skopeo"])),
             }
         )
         step = HostToolsStep()
@@ -2167,6 +2574,10 @@ def kvm_commands() -> dict[tuple[str, ...], subprocess.CompletedProcess[str]]:
         ("virsh", "net-info", "default"): completed(("virsh", "net-info", "default"), "Name: default\nActive: yes\nAutostart: yes\n"),
         ("sha256sum", image): completed(("sha256sum", image), "0" * 64 + "  " + image + "\n"),
     })
+    commands.update(dict(apt_command_results((
+        "qemu-system-x86", "libvirt-daemon-system", "guestfs-tools",
+        "libguestfs-tools", "cloud-image-utils",
+    ))))
     return commands
 
 
@@ -2335,8 +2746,6 @@ class ServiceStepTests(unittest.TestCase):
             ("getent", "passwd", "gh-runner"): completed(("getent", "passwd", "gh-runner"), "gh-runner:x:997:997::/home/gh-runner:/usr/sbin/nologin\n"),
             ("getent", "group", "docker"): completed(("getent", "group", "docker"), "docker:x:999:gh-runner\n"),
             RUNNER_VENV_QUERY: completed(RUNNER_VENV_QUERY, "install ok installed 1\n"),
-            ("apt-get", "update"): completed(("apt-get", "update")),
-            RUNNER_VENV_INSTALL: completed(RUNNER_VENV_INSTALL),
             ("sha256sum", image): completed(
                 ("sha256sum", image), HOST_LOCK.gh_runner.sha256 + "  " + image + "\n"
             ),
@@ -2382,6 +2791,7 @@ class ServiceStepTests(unittest.TestCase):
                 ("mv", "-f", RUNNER_SUDOERS_CANDIDATE, RUNNER_SUDOERS)
             ),
         }
+        commands.update(dict(apt_command_results(["python3-venv"])))
         stats = {
             "/opt/gh-runner": directory_stat(0o755, 997, 997),
             RUNNER_SUDOERS: file_stat(0o440, 0, 0),

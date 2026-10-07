@@ -19,6 +19,18 @@ SITE_MISSING_FIX = (
     "Write /etc/gideon/site.yaml from config/site.example.yaml, then re-run provision."
 )
 
+# The operator's fix when a present shared package is below its required floor.
+PREREQUISITE_FLOOR_FIX = (
+    "Upgrade {package} to at least {floor} in an announced maintenance window "
+    "(docs/runbooks/install-upgrade.md §9), then re-run provision."
+)
+# The operator's fix when apt would change a package beyond the absent set.
+APT_REHEARSAL_FIX = (
+    "Upgrade or remove the named packages yourself, in an announced maintenance "
+    "window when containers are running (docs/runbooks/install-upgrade.md §9), "
+    "then re-run provision."
+)
+
 
 def wget_argv_for_site(
     site: SiteConfig | None, output: str, url: str
@@ -140,17 +152,60 @@ def checksum_matches(context: "ProvisionContext", path: str, expected: str) -> b
     return match is not None and match.group(1).lower() == expected.lower()
 
 
-def apt_install(context: "ProvisionContext", packages: Sequence[str]) -> None:
-    """Refresh the package lists, then install *packages*.
+_APT_UPGRADE = re.compile(r"^Inst\s+(\S+)\s+\[([^]]+)\]\s+\((\S+)")
+_APT_REMOVAL = re.compile(r"^Remv\s+(\S+)")
 
-    A fresh cloud image ships empty apt lists (the acceptance VM found this:
-    ``skopeo`` and ``age`` were "unable to locate" until Docker's step had
-    updated), and a box provisioned weeks apart has stale ones; every install
-    therefore updates first, a few seconds each.
+
+def _rehearsal_changes(stdout: str) -> tuple[list[tuple[str, str, str]], list[str]]:
+    """Read package upgrades and removals from an apt install rehearsal."""
+
+    upgrades = []
+    removals = []
+    for line in stdout.splitlines():
+        upgrade = _APT_UPGRADE.match(line)
+        if upgrade is not None:
+            upgrades.append((upgrade.group(1), upgrade.group(2), upgrade.group(3)))
+        removal = _APT_REMOVAL.match(line)
+        if removal is not None:
+            removals.append(removal.group(1))
+    return upgrades, removals
+
+
+def _rehearsal_refusal(
+    absent: Sequence[str], upgrades: Sequence[tuple[str, str, str]], removals: Sequence[str]
+) -> str | None:
+    """Describe every package apt would upgrade, reinstall, or remove."""
+
+    clauses = [f"upgrade {name} {old} → {new}" for name, old, new in upgrades]
+    clauses.extend(f"remove {name}" for name in removals)
+    if not clauses:
+        return None
+    return f"installing {', '.join(absent)} would {'; '.join(clauses)}"
+
+
+def apt_install(context: "ProvisionContext", packages: Sequence[str]) -> None:
+    """Install the absent packages among *packages*, and never move a present one.
+
+    A present package is never named, since ``apt-get install`` moves an
+    installed package to its candidate, and Docker's upgrade restarts every
+    container on the box; the dpkg state word decides presence, so a held
+    package counts. With nothing absent no apt command runs. Otherwise the
+    lists are refreshed first — a fresh cloud image ships empty ones and a
+    box provisioned weeks apart stale ones — and apt's dry run is read before
+    the install: any upgrade or reinstall of a present package, named or
+    pulled in by the resolver, or any removal, is a refusal naming each.
     """
 
+    absent = [package for package in packages if package_version(context, package) is None]
+    if not absent:
+        return
     context.host.run(["apt-get", "update"], check=True)
-    context.host.run(["apt-get", "install", "-y", *packages], check=True)
+    rehearsal = context.host.run(["apt-get", "-s", "install", "-y", *absent], check=True)
+    upgrades, removals = _rehearsal_changes(rehearsal.stdout)
+    refusal = _rehearsal_refusal(absent, upgrades, removals)
+    if refusal is not None:
+        raise StepFailure(refusal, APT_REHEARSAL_FIX)
+    context.host.run(["apt-get", "install", "-y", *absent], check=True)
 
 
 def site_required() -> "CheckResult":
