@@ -72,7 +72,6 @@ def start_screen() -> str:
 
 _LANDING: Final = {
     "host gpu": "the escape hatch, pulled only on eval evidence of reranker latency during bulk embedding",
-    "corpus install": "lands in slice 3 (v0.4.0)",
     "index build": "lands in slice 3 (v0.4.0)",
     "index promote": "lands in slice 3 (v0.4.0)",
     "index gc": "lands in slice 3 (v0.4.0)",
@@ -310,10 +309,11 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     watch.set_defaults(handler=host_cli.run_corpus_watch, command_path="corpus watch")
-    corpus_install = _stub_parser(
-        corpus_sub, "install", "corpus install", "install a corpus lockfile"
+    corpus_install = corpus_sub.add_parser(
+        "install", help="fetch and verify the files pinned by a corpus lockfile"
     )
     corpus_install.add_argument("label", help="lockfile label, e.g. corpus-2026-08-31")
+    corpus_install.set_defaults(handler=host_cli.run_corpus_install, command_path="corpus install")
 
     index = commands.add_parser("index", help="index generations")
     index_sub = index.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)

@@ -240,8 +240,8 @@ class LockContracts(unittest.TestCase):
             backuplock.CORPUS_LOCK,
             backuplock.Lock(
                 "/run/gideon/corpus.lock",
-                "corpus cut",
-                "Wait for the running corpus cut to finish, then retry.",
+                "corpus",
+                "Wait for the running corpus cut or install to finish, then retry.",
             ),
         )
         io = LockFake()
@@ -284,7 +284,7 @@ class LockContracts(unittest.TestCase):
         self.assertFalse(refused.taken)
         self.assertEqual(refused.holder, holder)
         assert refused.refusal is not None
-        self.assertIn("corpus cut lock", refused.refusal.detail)
+        self.assertIn("corpus lock", refused.refusal.detail)
         self.assertIn(holder.command, refused.refusal.detail)
 
 

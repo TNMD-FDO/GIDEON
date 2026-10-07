@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.75](docs/release-notes/v0.3.75.md) — 2026-10-07 — corpus install fetches and verifies
 - [v0.3.74](docs/release-notes/v0.3.74.md) — 2026-10-07 — a weekly watch says when a cut is due
 - [v0.3.73](docs/release-notes/v0.3.73.md) — 2026-10-07 — a sufficient driver and toolkit kept
 - [v0.3.72](docs/release-notes/v0.3.72.md) — 2026-10-07 — preflight reads the lockfile's courts

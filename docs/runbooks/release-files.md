@@ -117,3 +117,12 @@ The command's refusals and their fixes:
 - **A committed lockfile does not load**: restore the named files from the release checkout, then run the command again.
 
 Stopping the command with Ctrl-C is safe. Downloads already started continue in the worker, and the same command joins them.
+
+`sudo python3 -m gideon corpus install <label>` takes a committed lockfile onto a box. It fetches through the worker every pinned file the box does not already hold whole, from `mirror_url` where the lockfile sets one, checks every file's digest and size against the lockfile's sidecar, and records the label as `installing`. On the box that cut the lockfile nothing is fetched; on a receiving office's box the whole corpus comes through the door. It then keeps each snapshot directory a recorded lockfile still needs — one that is cut, installing, or installed, or the previously installed one — and removes a directory only older superseded lockfiles pin. It holds the same corpus lock as the cut and the watch. Its staging and build arrive with slice 3's later releases.
+
+The install's refusals and their fixes:
+
+- **Another corpus command is running**: wait for it to finish, then run the command again.
+- **A file on disk is short or disagrees with its sidecar line**: the copy is damaged. Remove the named file and its `.fetch.json` record, then run the command again, which fetches it anew.
+- **A file just fetched disagrees with its sidecar line**: the upstream now serves other bytes under the pinned name. Repin as the directory's README says — a `mirror_url` serving the pinned bytes, or a new cut — then remove the named file and its record, and run the command again.
+- **The label is superseded**: install the newest committed label the refusal names.

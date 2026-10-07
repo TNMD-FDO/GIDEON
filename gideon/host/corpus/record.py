@@ -1,4 +1,4 @@
-"""Write and read corpus cut and upstream observation rows."""
+"""Write and read corpus lockfile and upstream observation rows."""
 
 import json
 import re
@@ -153,6 +153,17 @@ BEGIN
             VALUES (cut_label, pin->>'source', (pin->>'snapshot_date')::date);
         END LOOP;
     END IF;
+    IF COALESCE((payload->>'install')::boolean, false) THEN
+        IF EXISTS (
+            SELECT 1 FROM public.corpus_lockfiles
+            WHERE label = cut_label AND state = 'superseded'
+        ) THEN
+            RAISE EXCEPTION 'CORPUS_LOCKFILE_SUPERSEDED:%', cut_label;
+        END IF;
+        UPDATE public.corpus_lockfiles
+        SET state = 'installing'
+        WHERE label = cut_label AND state = 'cut';
+    END IF;
 END
 $cut$;
 COMMIT;
@@ -174,8 +185,10 @@ _READ_SQL = """SELECT jsonb_build_object(
         ) ORDER BY binding.source)
         FROM public.lockfile_sources AS binding WHERE binding.label = c.label
     ), '[]'::jsonb)
-) FROM public.corpus_lockfiles AS c WHERE c.label = :'v_label';
-"""
+) FROM public.corpus_lockfiles AS c"""
+
+_READ_CUT_SQL = _READ_SQL + " WHERE c.label = :'v_label';\n"
+_READ_LOCKFILES_SQL = _READ_SQL + " ORDER BY c.label;\n"
 
 _WRITE_OBSERVATIONS_SQL = """BEGIN;
 SELECT set_config('gideon.observations_payload', :'v_payload', true) AS stored \\gset
@@ -282,20 +295,21 @@ def _run(
     return result
 
 
-def write_cut(
+def _write_lockfile(
     host: Host,
     rendered_dir: PathLike,
     lockfile: Lockfile,
     fetched_at: Mapping[str, str],
     verified_at: str,
+    *,
+    install: bool,
+    command_path: str,
 ) -> Problem | None:
-    """Write or verify one cut and its snapshots in a single transaction."""
-
     missing = set(lockfile.sources) - fetched_at.keys()
     if missing:
         return Problem(
             f"fetch times are missing for {', '.join(sorted(missing))}",
-            f"Run {report.command('corpus cut')} after all fetch records are present.",
+            f"Run {report.command(command_path)} after all fetch records are present.",
         )
     payload = {
         "label": lockfile.label,
@@ -317,29 +331,71 @@ def write_cut(
             for name, pin in lockfile.sources.items()
         ],
     }
+    if install:
+        payload["install"] = True
     sql = worker.bind("v_payload", json.dumps(payload, separators=(",", ":"))) + "\n" + _WRITE_SQL
-    result = _run(host, rendered_dir, sql, "corpus cut")
+    result = _run(host, rendered_dir, sql, command_path)
     if isinstance(result, Problem):
         return result
     if result.returncode == 0:
         return None
+    superseded = re.search(r"CORPUS_LOCKFILE_SUPERSEDED:([^\s]+)", result.stderr)
+    if superseded is not None:
+        return Problem(
+            f"lockfile label {superseded.group(1)} is superseded",
+            f"Run {report.command(command_path)} with the newest committed label.",
+        )
     snapshot = re.search(r"CORPUS_SNAPSHOT_CONFLICT:([^:\s]+):([0-9-]+)", result.stderr)
     if snapshot is not None:
+        subject = f"lockfile label {lockfile.label}: " if install else ""
         return Problem(
-            f"source snapshot {snapshot.group(1)} {snapshot.group(2)} differs from its recorded URL or sidecar digest",
+            f"{subject}source snapshot {snapshot.group(1)} {snapshot.group(2)} "
+            "differs from its recorded URL or sidecar digest",
             "Restore the matching lockfile and snapshot, then run "
-            f"{report.command('corpus cut')} again.",
+            f"{report.command(command_path)} again.",
         )
     label = re.search(r"CORPUS_LOCKFILE_CONFLICT:([^\s]+)", result.stderr)
     if label is not None:
         return Problem(
             f"lockfile label {label.group(1)} differs from its recorded cut or source bindings",
             "Restore the matching lockfile, then run "
-            f"{report.command('corpus cut')} again.",
+            f"{report.command(command_path)} again.",
         )
     return Problem(
         f"corpus record write failed (exit {result.returncode})",
-        database_fix(rendered_dir, "corpus cut"),
+        database_fix(rendered_dir, command_path),
+    )
+
+
+def write_cut(
+    host: Host,
+    rendered_dir: PathLike,
+    lockfile: Lockfile,
+    fetched_at: Mapping[str, str],
+    verified_at: str,
+    *,
+    command_path: str,
+) -> Problem | None:
+    """Write or verify one cut and its snapshots in a single transaction."""
+    return _write_lockfile(
+        host, rendered_dir, lockfile, fetched_at, verified_at,
+        install=False, command_path=command_path,
+    )
+
+
+def write_install(
+    host: Host,
+    rendered_dir: PathLike,
+    lockfile: Lockfile,
+    fetched_at: Mapping[str, str],
+    verified_at: str,
+    *,
+    command_path: str,
+) -> Problem | None:
+    """Write an installing label or keep its installed state after comparison."""
+    return _write_lockfile(
+        host, rendered_dir, lockfile, fetched_at, verified_at,
+        install=True, command_path=command_path,
     )
 
 
@@ -376,28 +432,55 @@ def _parse_cut_row(value: object) -> CutRow | None:
 
 
 def read_cut(
-    host: Host, rendered_dir: PathLike, label: str
+    host: Host, rendered_dir: PathLike, label: str, *, command_path: str,
 ) -> CutRow | None | Problem:
     """Read one lockfile row and all of its source bindings."""
 
-    sql = worker.bind("v_label", label) + "\n" + _READ_SQL
-    result = _run(host, rendered_dir, sql, "corpus cut")
+    sql = worker.bind("v_label", label) + "\n" + _READ_CUT_SQL
+    result = _run(host, rendered_dir, sql, command_path)
     if isinstance(result, Problem):
         return result
     if result.returncode != 0:
         return Problem(f"corpus record read failed (exit {result.returncode})",
-                       database_fix(rendered_dir, "corpus cut"))
+                       database_fix(rendered_dir, command_path))
     content = result.stdout.strip()
     if not content:
         return None
     try:
         value: object = json.loads(content)
     except ValueError:
-        return Problem("corpus record row is invalid", database_fix(rendered_dir, "corpus cut"))
+        return Problem("corpus record row is invalid",
+                       database_fix(rendered_dir, command_path))
     row = _parse_cut_row(value)
     if row is None or row.label != label:
-        return Problem("corpus record row is invalid", database_fix(rendered_dir, "corpus cut"))
+        return Problem("corpus record row is invalid",
+                       database_fix(rendered_dir, command_path))
     return row
+
+
+def read_lockfiles(
+    host: Host, rendered_dir: PathLike, *, command_path: str,
+) -> tuple[CutRow, ...] | Problem:
+    """Read every recorded lockfile and its bindings in label order."""
+    result = _run(host, rendered_dir, _READ_LOCKFILES_SQL, command_path)
+    if isinstance(result, Problem):
+        return result
+    if result.returncode != 0:
+        return Problem(f"corpus record read failed (exit {result.returncode})",
+                       database_fix(rendered_dir, command_path))
+    rows: list[CutRow] = []
+    for line in result.stdout.splitlines():
+        try:
+            value: object = json.loads(line)
+        except ValueError:
+            return Problem("corpus record row is invalid",
+                           database_fix(rendered_dir, command_path))
+        row = _parse_cut_row(value)
+        if row is None:
+            return Problem("corpus record row is invalid",
+                           database_fix(rendered_dir, command_path))
+        rows.append(row)
+    return tuple(rows)
 
 
 def write_observations(

@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 
 from gideon.cli import main
 from gideon.host import backuplock, fetch, report, stack, worker
-from gideon.host.corpus import cut, resolve
+from gideon.host.corpus import cut, resolve, snapshots
 from gideon.host.corpus.lockfile import load_lockfile, render_errors
 from gideon.host.corpus.sources import (
     IndexRequest,
@@ -381,6 +381,15 @@ class Cut(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn(f"Remove {self.file} and {self.file}{worker_identity.RECORD_SUFFIX}", out)
 
+    def test_present_file_without_record_refuses_at_fetch(self) -> None:
+        (self.snapshots / f"{self.destination}{worker_identity.RECORD_SUFFIX}").unlink()
+        code, out, _err = self.run_cut()
+        self.assertEqual(code, 1)
+        self.assertIn("fetch: refuse", out)
+        self.assertIn(str(self.file), out)
+        self.assertIn(f"Remove {self.file} and {self.file}{worker_identity.RECORD_SUFFIX}", out)
+        self.assertEqual(len(self.host.job_destinations), 1)
+
     def test_changed_snapshot_writes_new_label_with_instrument_reason(self) -> None:
         self.assertEqual(self.run_cut()[0], 0)
         next_snapshot = "2099-02-02"
@@ -456,7 +465,7 @@ class Cut(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(out, "")
         self.assertIn("gideon corpus cut", err)
-        self.assertIn("corpus cut lock", err)
+        self.assertIn("corpus lock", err)
         self.assertEqual(self.host.lock_releases, 0)
         self.host.lock_holder = None
         self.assertEqual(self.run_cut()[0], 0)
@@ -607,7 +616,7 @@ class Cut(unittest.TestCase):
     def test_fetch_heartbeat_has_counts_and_bytes_alone(self) -> None:
         self.file.unlink()
         (self.snapshots / f"{self.destination}{worker_identity.RECORD_SUFFIX}").unlink()
-        self.host.kept_wait_polls = cut.HEARTBEAT_SECONDS + 1
+        self.host.kept_wait_polls = snapshots.HEARTBEAT_SECONDS + 1
         code, out, err = self.run_cut()
         self.assertEqual(code, 0, out + err)
         self.assertIn("fetch: ok — 0/1 files, 0 bytes", out)

@@ -44,8 +44,8 @@ ENGINE_LOCK = Lock(
 )
 CORPUS_LOCK = Lock(
     f"{LOCK_DIR}/corpus.lock",
-    "corpus cut",
-    "Wait for the running corpus cut to finish, then retry.",
+    "corpus",
+    "Wait for the running corpus cut or install to finish, then retry.",
 )
 
 

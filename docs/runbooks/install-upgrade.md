@@ -197,7 +197,7 @@ same command is run again after the fix.
    sudo python3 -m gideon alerts test
    ```
 
-`gideon corpus install` and `index promote` arrive with slice 3.
+`gideon corpus install <label>` fetches and verifies the files a committed lockfile pins and records the label as installing (the release-files runbook's §10); its staging and build, and `index promote`, arrive with slice 3.
 
 **No-GPU host.** `sudo python3 -m gideon host provision --no-gpu` writes
 `/etc/gideon/no-gpu` once. It is refused on a host with an NVIDIA device; every

@@ -1,6 +1,7 @@
-"""Corpus cut and upstream observation statements over a recording host."""
+"""Corpus lockfile and upstream observation statements over a recording host."""
 
 import json
+import re
 import subprocess
 import unittest
 from collections.abc import Mapping
@@ -13,8 +14,10 @@ from gideon.host.corpus.record import (
     Observation,
     WatchState,
     read_cut,
+    read_lockfiles,
     read_watch_state,
     write_cut,
+    write_install,
     write_observations,
 )
 from gideon.host.report import Problem
@@ -66,6 +69,7 @@ class Writer(unittest.TestCase):
         result = write_cut(
             host, RENDERED, self.lockfile,
             {"example": self.lockfile.cut_at}, self.lockfile.cut_at,
+            command_path="corpus cut",
         )
         self.assertIsNone(result)
         self.assertEqual(len(host.calls), 1)
@@ -86,10 +90,56 @@ class Writer(unittest.TestCase):
         self.assertIn("public.source_snapshots", sql)
         self.assertIn("public.lockfile_sources", sql)
         self.assertTrue(sql.endswith("COMMIT;\n"))
+        payload_match = re.search(r"\\set v_payload '([^']*)'", sql)
+        assert payload_match is not None
+        self.assertNotIn("install", json.loads(payload_match.group(1)))
+
+    def test_install_uses_the_same_transaction_with_state_move_on_stdin(self) -> None:
+        host = FakeHost()
+        result = write_install(
+            host, RENDERED, self.lockfile,
+            {"example": self.lockfile.cut_at}, self.lockfile.cut_at,
+            command_path="corpus install",
+        )
+        self.assertIsNone(result)
+        self.assertEqual(len(host.calls), 1)
+        argv, sql = host.calls[0]
+        self.assertEqual(argv, psql_argv(RENDERED))
+        self.assertNotIn(self.lockfile.label, " ".join(argv))
+        self.assertNotIn(self.lockfile.sources["example"].sidecar_sha256, " ".join(argv))
+        assert sql is not None
+        payload_match = re.search(r"\\set v_payload '([^']*)'", sql)
+        assert payload_match is not None
+        payload = json.loads(payload_match.group(1))
+        self.assertIs(payload["install"], True)
+        self.assertEqual(payload["label"], self.lockfile.label)
+        self.assertEqual(payload["sources"][0]["fetched_at"], self.lockfile.cut_at)
+        self.assertIn("DO $cut$", sql)
+        self.assertIn("CORPUS_LOCKFILE_SUPERSEDED:%", sql)
+        self.assertIn("SET state = 'installing'", sql)
+        self.assertIn("WHERE label = cut_label AND state = 'cut'", sql)
+        self.assertTrue(sql.endswith("COMMIT;\n"))
+
+    def test_superseded_write_refuses_with_install_fix(self) -> None:
+        host = FakeHost(
+            code=3,
+            stderr=f"ERROR: CORPUS_LOCKFILE_SUPERSEDED:{self.lockfile.label}\n",
+        )
+        result = write_install(
+            host, RENDERED, self.lockfile,
+            {"example": self.lockfile.cut_at}, self.lockfile.cut_at,
+            command_path="corpus install",
+        )
+        self.assertIsInstance(result, Problem)
+        assert isinstance(result, Problem)
+        self.assertIn(self.lockfile.label, result.problem)
+        self.assertIn("superseded", result.problem)
+        self.assertIn("corpus install", result.fix)
 
     def test_missing_fetch_time_refuses_before_database(self) -> None:
         host = FakeHost()
-        result = write_cut(host, RENDERED, self.lockfile, {}, self.lockfile.cut_at)
+        result = write_cut(host, RENDERED, self.lockfile, {}, self.lockfile.cut_at,
+                           command_path="corpus cut")
         self.assertIsInstance(result, Problem)
         assert isinstance(result, Problem)
         self.assertIn("example", result.problem)
@@ -100,7 +150,8 @@ class Writer(unittest.TestCase):
         pin = self.lockfile.sources["example"]
         host = FakeHost(code=3, stderr=f"ERROR: CORPUS_SNAPSHOT_CONFLICT:example:{pin.snapshot_date}\n")
         result = write_cut(host, RENDERED, self.lockfile,
-                           {"example": self.lockfile.cut_at}, self.lockfile.cut_at)
+                           {"example": self.lockfile.cut_at}, self.lockfile.cut_at,
+                           command_path="corpus cut")
         self.assertIsInstance(result, Problem)
         assert isinstance(result, Problem)
         self.assertIn(f"example {pin.snapshot_date}", result.problem)
@@ -110,7 +161,8 @@ class Writer(unittest.TestCase):
     def test_label_conflict_and_tool_failure_refuse(self) -> None:
         conflict = FakeHost(code=3, stderr=f"ERROR: CORPUS_LOCKFILE_CONFLICT:{self.lockfile.label}\n")
         result = write_cut(conflict, RENDERED, self.lockfile,
-                           {"example": self.lockfile.cut_at}, self.lockfile.cut_at)
+                           {"example": self.lockfile.cut_at}, self.lockfile.cut_at,
+                           command_path="corpus cut")
         self.assertIsInstance(result, Problem)
         assert isinstance(result, Problem)
         self.assertIn(self.lockfile.label, result.problem)
@@ -118,7 +170,8 @@ class Writer(unittest.TestCase):
 
         unavailable = FakeHost(code=127, stderr="psql unavailable")
         result = write_cut(unavailable, RENDERED, self.lockfile,
-                           {"example": self.lockfile.cut_at}, self.lockfile.cut_at)
+                           {"example": self.lockfile.cut_at}, self.lockfile.cut_at,
+                           command_path="corpus cut")
         self.assertIsInstance(result, Problem)
         assert isinstance(result, Problem)
         self.assertIn("exit 127", result.problem)
@@ -131,7 +184,7 @@ class Reader(unittest.TestCase):
     def test_row_missing_and_parsed(self) -> None:
         label = "corpus-2099-01-03"
         missing = FakeHost()
-        self.assertIsNone(read_cut(missing, RENDERED, label))
+        self.assertIsNone(read_cut(missing, RENDERED, label, command_path="corpus cut"))
         self.assertEqual(missing.calls[0][0], psql_argv(RENDERED))
         self.assertIn("\\set v_label", missing.calls[0][1] or "")
         self.assertNotIn(label, " ".join(missing.calls[0][0]))
@@ -148,7 +201,7 @@ class Reader(unittest.TestCase):
             "sources": [{"source": "example", "snapshot_date": "2099-01-02"}],
         }
         host = FakeHost(stdout=json.dumps(row) + "\n")
-        result = read_cut(host, RENDERED, label)
+        result = read_cut(host, RENDERED, label, command_path="corpus cut")
         self.assertIsInstance(result, CutRow)
         assert isinstance(result, CutRow)
         self.assertEqual(result.label, label)
@@ -158,11 +211,46 @@ class Reader(unittest.TestCase):
     def test_invalid_row_and_failed_command_refuse(self) -> None:
         for host in (FakeHost(stdout="not json\n"), FakeHost(code=127, stderr="psql unavailable")):
             with self.subTest(code=host.code):
-                result = read_cut(host, RENDERED, "corpus-2099-01-03")
+                result = read_cut(host, RENDERED, "corpus-2099-01-03",
+                                  command_path="corpus cut")
                 self.assertIsInstance(result, Problem)
                 assert isinstance(result, Problem)
                 self.assertIn("corpus cut", result.fix)
 
+    def test_all_rows_are_read_in_label_order(self) -> None:
+        first = {
+            "label": "corpus-2099-01-03", "schema": 1, "pipeline": "0.0.0",
+            "cut_at": "2099-01-03T04:05:06+00:00", "reason": "tranche",
+            "base": None, "installed_at": None, "state": "installing",
+            "sources": [{"source": "example", "snapshot_date": "2099-01-02"}],
+        }
+        second = {**first, "label": "corpus-2099-01-04", "state": "installed"}
+        host = FakeHost(stdout=json.dumps(first) + "\n" + json.dumps(second) + "\n")
+        result = read_lockfiles(host, RENDERED, command_path="corpus install")
+        self.assertIsInstance(result, tuple)
+        assert isinstance(result, tuple)
+        self.assertEqual(tuple(row.label for row in result), (first["label"], second["label"]))
+        self.assertEqual(tuple(row.state for row in result), ("installing", "installed"))
+        self.assertEqual(tuple(row.sources[0].source for row in result), ("example", "example"))
+        argv, sql = host.calls[0]
+        self.assertEqual(argv, psql_argv(RENDERED))
+        self.assertNotIn("v_label", sql or "")
+        self.assertIn("ORDER BY c.label", sql or "")
+
+    def test_all_rows_empty_and_invalid_line(self) -> None:
+        self.assertEqual(read_lockfiles(FakeHost(), RENDERED, command_path="corpus install"), ())
+        first = {
+            "label": "corpus-2099-01-03", "schema": 1, "pipeline": "0.0.0",
+            "cut_at": "2099-01-03T04:05:06+00:00", "reason": "tranche",
+            "base": None, "installed_at": None, "state": "cut",
+            "sources": [{"source": "example", "snapshot_date": "2099-01-02"}],
+        }
+        invalid = FakeHost(stdout=json.dumps(first) + "\nnot json\n")
+        result = read_lockfiles(invalid, RENDERED, command_path="corpus install")
+        self.assertIsInstance(result, Problem)
+        assert isinstance(result, Problem)
+        self.assertIn("invalid", result.problem)
+        self.assertIn("corpus install", result.fix)
 
 def watch_row() -> dict[str, object]:
     """One visibly fictitious source after an unanswered run."""

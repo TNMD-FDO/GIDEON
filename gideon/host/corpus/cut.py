@@ -2,25 +2,20 @@
 
 import argparse
 import hashlib
-import re
-import stat
-import subprocess
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from gideon.host import backuplock, fetch, report, stack, worker
-from gideon.host.corpus import record, resolve
+from gideon.host import backuplock, report, stack
+from gideon.host.corpus import artifacts, record, resolve, snapshots
 from gideon.host.corpus.lockfile import (
     PIPELINE_VERSION,
     SCHEMA_VERSION,
     IndexDocument,
     Lockfile,
-    LockfileError,
     SidecarEntry,
     SourcePin,
     check_courts,
@@ -32,37 +27,13 @@ from gideon.host.corpus.lockfile import (
     same_state,
 )
 from gideon.host.corpus.sources import SOURCES, SourceDefinition
-from gideon.host.courts import CourtsError, load_court_map
-from gideon.host.egress import EgressError, load_egress_allowlist
-from gideon.host.render.worker import (
-    KEPT_FORM,
-    RECORD_SUFFIX,
-    SNAPSHOTS_ROOT,
-)
+from gideon.host.render.worker import SNAPSHOTS_ROOT
 from gideon.host.report import Problem, StageResult
 from gideon.host.sysio import PathLike, RealHost, WritableBytesHost
 
-# exempt: mechanics — progress while snapshot transfers continue without a bound.
-HEARTBEAT_SECONDS = 60
-
-@dataclass(frozen=True, slots=True)
-class FetchedSource:
-    """Whole file records and the number of transfers deferred for a source."""
-
-    records: Mapping[str, fetch.FetchRecord]
-    deferred: int
-
 
 def _retry_fix(fix: str) -> str:
-    return resolve.retry_fix(fix, "corpus cut")
-
-
-def _refetch_fix(path: Path) -> str:
-    # The worker never fetches over a whole record, so the record goes with the file.
-    return (
-        f"Remove {path} and {path}{RECORD_SUFFIX}, then run "
-        f"{report.command('corpus cut')} again to fetch it anew."
-    )
+    return snapshots.retry_fix(fix, command_path="corpus cut")
 
 
 def _utc_now() -> datetime:
@@ -78,59 +49,35 @@ def _refuse(name: str, detail: str, fix: str) -> int:
     return 1
 
 
-def _artifact_problem(
-    errors: Sequence[CourtsError | EgressError | LockfileError], artifact: str
-) -> StageResult | None:
-    if not errors:
-        return None
-    problems = "; ".join(error.problem for error in errors)
-    fixes = "; ".join(dict.fromkeys(error.fix for error in errors))
-    return StageResult(
-        "preconditions", False, f"{artifact}: {problems}",
-        f"{fixes} Then run {report.command('corpus cut')} again.",
-    )
-
-
 def _artifact_preconditions(
     host: WritableBytesHost,
     rendered_dir: PathLike,
     checkout: Path,
     registry: Sequence[SourceDefinition],
 ) -> tuple[StageResult, Lockfile | None]:
-    worker_stage = worker.worker_preconditions(host, rendered_dir, command_path="corpus cut")
-    if not worker_stage.ok:
-        return worker_stage, None
-
-    courts_result = load_court_map(checkout / "courts.yaml", host=host)
-    issue = _artifact_problem(courts_result.errors, "court map")
-    if issue is not None:
-        return issue, None
-    court_map = courts_result.court_map
-    assert court_map is not None
-
-    egress_result = load_egress_allowlist(checkout / "config/egress.yaml", host=host)
-    issue = _artifact_problem(egress_result.errors, "egress allowlist")
-    if issue is not None:
-        return issue, None
-    allowlist = egress_result.allowlist
-    assert allowlist is not None
-    corpus_group = allowlist.group("corpus")
-    allowed = {item.host for item in corpus_group.hosts} if corpus_group else set()
-
-    known = {source.name: source.carries_courts for source in registry}
-    directory = read_lockfile_directory(
-        checkout / "corpus/lockfiles", known_sources=known, host=host
+    loaded, issue = artifacts.load_artifacts(
+        host, rendered_dir, checkout, registry, command_path="corpus cut",
     )
-    issue = _artifact_problem(directory.errors, "corpus lockfiles")
     if issue is not None:
         return issue, None
+    assert loaded is not None
+    directory = loaded.directory
+    court_map = loaded.court_map
+    corpus_group = loaded.allowlist.group("corpus")
+    allowed = {item.host for item in corpus_group.hosts} if corpus_group else set()
     for lockfile in directory.lockfiles:
-        issue = _artifact_problem(check_courts(lockfile, court_map), lockfile.label)
+        issue = artifacts.artifact_problem(
+            check_courts(lockfile, court_map), lockfile.label, command_path="corpus cut",
+        )
         if issue is not None:
             return issue, None
-        issue = _artifact_problem(check_egress_hosts(lockfile, allowlist), lockfile.label)
+        issue = artifacts.artifact_problem(
+            check_egress_hosts(lockfile, loaded.allowlist), lockfile.label,
+            command_path="corpus cut",
+        )
         if issue is not None:
             return issue, None
+    known = {source.name: source.carries_courts for source in registry}
     if len(known) != len(registry):
         return StageResult(
             "preconditions", False, "source names repeat in the registry",
@@ -217,143 +164,6 @@ def _preconditions(
     return stage, newest, claim
 
 
-def _fetch_source(
-    host: WritableBytesHost,
-    rendered_dir: PathLike,
-    snapshots_root: PathLike,
-    source: SourceDefinition,
-    resolved: resolve.ResolvedSource,
-    *,
-    sleep: Callable[[float], None],
-    monotonic: Callable[[], float],
-) -> FetchedSource | Problem:
-    records: dict[str, fetch.FetchRecord] = {}
-    pending: dict[str, tuple[int, str]] = {}
-    for entry in resolved.snapshot.entries:
-        try:
-            destination = fetch.snapshot_destination(
-                source.name, resolved.snapshot.snapshot_date, entry.path,
-            )
-        except ValueError:
-            return Problem(
-                f"source {source.name} snapshot path {entry.path!r} is invalid",
-                _retry_fix("Correct the source's index reader in the release."),
-            )
-        existing = fetch.read_record(host, destination, snapshots_root=snapshots_root)
-        if isinstance(existing, Problem):
-            if existing.problem == "fetch file does not match its record":
-                target_path = Path(snapshots_root) / destination
-                return Problem(
-                    f"{target_path}: {existing.problem}",
-                    _refetch_fix(target_path),
-                )
-            return Problem(f"{entry.path}: {existing.problem}", _retry_fix(existing.fix))
-        if existing is not None:
-            records[entry.path] = existing
-            continue
-        job = fetch.defer_fetch(
-            host, rendered_dir, destination=destination, url=entry.url, form=KEPT_FORM,
-        )
-        if isinstance(job, Problem):
-            return Problem(f"{entry.path}: {job.problem}", _retry_fix(job.fix))
-        pending[entry.path] = (job, destination)
-    deferred = len(pending)
-    heartbeat_at = monotonic()
-    while pending:
-        for path, (job, destination) in tuple(pending.items()):
-            outcome = fetch.read_fetch(
-                host, rendered_dir, job, destination=destination,
-                snapshots_root=snapshots_root,
-            )
-            if isinstance(outcome, Problem):
-                return Problem(f"{path}: {outcome.problem}", _retry_fix(outcome.fix))
-            if outcome.failure is not None:
-                return Problem(f"{path}: {outcome.failure.problem}",
-                               _retry_fix(outcome.failure.fix))
-            if outcome.record is not None:
-                records[path] = outcome.record
-                del pending[path]
-                report.print_stage(StageResult(
-                    "fetch", True, f"{path}: {outcome.record.size} bytes", "",
-                ))
-        if not pending:
-            break
-        now = monotonic()
-        if now - heartbeat_at >= HEARTBEAT_SECONDS:
-            report.print_stage(StageResult(
-                "fetch", True,
-                f"{len(records)}/{len(resolved.snapshot.entries)} files, "
-                f"{sum(item.size for item in records.values())} bytes", "",
-            ))
-            heartbeat_at = now
-        sleep(1.0)
-    return FetchedSource(records, deferred)
-
-
-def _verify(
-    host: WritableBytesHost,
-    snapshots_root: PathLike,
-    source: SourceDefinition,
-    resolved: resolve.ResolvedSource,
-    newest: Lockfile | None,
-) -> tuple[tuple[SidecarEntry, ...] | None, StageResult | None]:
-    snapshot = resolved.snapshot
-    previous = newest.sources.get(source.name) if newest is not None else None
-    old_entries = (
-        {entry.path: entry for entry in previous.entries}
-        if previous is not None and previous.snapshot_date == snapshot.snapshot_date else None
-    )
-    verified: list[SidecarEntry] = []
-    seen: set[str] = set()
-    for entry in snapshot.entries:
-        try:
-            destination = fetch.snapshot_destination(source.name, snapshot.snapshot_date, entry.path)
-        except ValueError:
-            return None, StageResult("verify", False, f"invalid snapshot path {entry.path!r}",
-                                     "Correct the source's index reader in the release, then run "
-                                     f"{report.command('corpus cut')} again.")
-        path = Path(snapshots_root) / destination
-        fix = _refetch_fix(path)
-        if entry.path in seen:
-            return None, StageResult("verify", False, f"repeated snapshot path {entry.path}", fix)
-        seen.add(entry.path)
-        record = fetch.read_record(host, destination, snapshots_root=snapshots_root)
-        if isinstance(record, Problem):
-            return None, StageResult("verify", False, f"{path}: {record.problem}", fix)
-        if record is None:
-            return None, StageResult("verify", False, f"{path}: whole fetch record is missing", fix)
-        try:
-            info = host.stat(path)
-            result = host.run(("sha256sum", str(path)))
-        except (OSError, subprocess.SubprocessError) as exc:
-            return None, StageResult(
-                "verify", False, f"{path}: hash tool could not run ({type(exc).__name__})",
-                f"Restore sha256sum, then run {report.command('corpus cut')} again.",
-            )
-        if result.returncode != 0:
-            return None, StageResult(
-                "verify", False, f"{path}: sha256sum failed (exit {result.returncode})",
-                f"Restore sha256sum and access to this file, then run {report.command('corpus cut')} again.",
-            )
-        match = re.fullmatch(r"([0-9a-f]{64})  " + re.escape(str(path)) + r"\n?", result.stdout)
-        if match is None or not stat.S_ISREG(info.st_mode):
-            return None, StageResult("verify", False, f"{path}: invalid hash result or file type", fix)
-        digest = match.group(1)
-        size = info.st_size
-        if (digest, size) != (record.sha256, record.size):
-            return None, StageResult("verify", False, f"{path}: file disagrees with its fetch record", fix)
-        if old_entries is not None:
-            old = old_entries.get(entry.path)
-            if old is None or (digest, size) != (old.sha256, old.size):
-                return None, StageResult("verify", False, f"{path}: file disagrees with its pinned sidecar", fix)
-        verified.append(SidecarEntry(entry.path, digest, size))
-        report.print_stage(StageResult("verify", True, f"{path}: {size} bytes, sha256 {digest}", ""))
-    if old_entries is not None and set(old_entries) != seen:
-        return None, StageResult(
-            "verify", False, f"source {source.name} no longer has the pinned file list",
-            f"Restore the snapshot files, then run {report.command('corpus cut')} again.",
-        )
-    return tuple(sorted(verified, key=lambda item: item.path)), None
 
 
 def _cut_reason(pins: Mapping[str, SourcePin], newest: Lockfile | None) -> str:
@@ -466,7 +276,7 @@ def _lockfile(
             "lockfile", False, f"label {label} already has a lockfile",
             later_fix,
         )
-    recorded = record.read_cut(host, rendered_dir, label)
+    recorded = record.read_cut(host, rendered_dir, label, command_path="corpus cut")
     if isinstance(recorded, Problem):
         return StageResult("lockfile", False, recorded.problem, recorded.fix)
     if recorded is not None:
@@ -533,29 +343,37 @@ def _run_cut_stages(
             f"{source.name}: {result.snapshot.snapshot_date}, {len(result.snapshot.entries)} files", "",
         ))
     active_stage[0] = "fetch"
-    fetched: dict[str, FetchedSource] = {}
+    fetched: dict[str, snapshots.FetchedSource] = {}
     for source in sources:
-        fetch_result = _fetch_source(
-            io, rendered_dir, snapshots_root, source, resolved[source.name],
-            sleep=sleep, monotonic=monotonic,
+        fetch_result = snapshots.fetch_source(
+            io, rendered_dir, snapshots_root, source.name,
+            resolved[source.name].snapshot.snapshot_date,
+            tuple((entry.path, entry.url) for entry in resolved[source.name].snapshot.entries),
+            sleep=sleep, monotonic=monotonic, command_path="corpus cut",
         )
         if isinstance(fetch_result, Problem):
             return _refuse("fetch", f"{source.name}: {fetch_result.problem}", fetch_result.fix)
         fetched[source.name] = fetch_result
-        count = len(fetch_result.records)
-        size = sum(item.size for item in fetch_result.records.values())
-        action = (
-            "no fetches deferred" if fetch_result.deferred == 0
-            else f"{fetch_result.deferred} "
-                 f"{'fetch' if fetch_result.deferred == 1 else 'fetches'} deferred"
-        )
         report.print_stage(StageResult(
-            "fetch", True, f"{source.name}: {count} files, {size} bytes; {action}", "",
+            "fetch", True, f"{source.name}: {fetch_result.summary()}", "",
         ))
     active_stage[0] = "verify"
     verified: dict[str, tuple[SidecarEntry, ...]] = {}
     for source in sources:
-        entries, verify_issue = _verify(io, snapshots_root, source, resolved[source.name], newest)
+        snapshot = resolved[source.name].snapshot
+        previous = newest.sources.get(source.name) if newest is not None else None
+        old_entries = (
+            {entry.path: entry for entry in previous.entries}
+            if previous is not None and previous.snapshot_date == snapshot.snapshot_date else None
+        )
+        entries, verify_issue = snapshots.verify(
+            io, snapshots_root, source.name, snapshot.snapshot_date,
+            tuple((entry.path, (old_entries[entry.path].sha256, old_entries[entry.path].size)
+                   if old_entries is not None and entry.path in old_entries else None)
+                  for entry in snapshot.entries),
+            expected_paths=set(old_entries) if old_entries is not None else None,
+            command_path="corpus cut",
+        )
         if verify_issue is not None:
             return _refuse("verify", verify_issue.detail, verify_issue.fix)
         assert entries is not None
@@ -585,19 +403,18 @@ def _run_cut_stages(
     lockfile = directory.newest
     fetched_at: dict[str, str] = {}
     for source in sources:
-        times = [datetime.fromisoformat(item.fetched_at)
-                 for item in fetched[source.name].records.values()]
-        if not times:
+        latest = fetched[source.name].latest_fetch()
+        if latest is None:
             return _refuse(
                 "record", f"source {source.name} has no fetch records",
                 _retry_fix("Restore its snapshot files."),
             )
-        fetched_at[source.name] = max(times).isoformat()
+        fetched_at[source.name] = latest
     issue = record.write_cut(io, rendered_dir, lockfile, fetched_at,
-                             verified_at.astimezone(UTC).isoformat())
+                             verified_at.astimezone(UTC).isoformat(), command_path="corpus cut")
     if issue is not None:
         return _refuse("record", issue.problem, issue.fix)
-    row = record.read_cut(io, rendered_dir, lockfile.label)
+    row = record.read_cut(io, rendered_dir, lockfile.label, command_path="corpus cut")
     if isinstance(row, Problem):
         return _refuse("record", row.problem, row.fix)
     if row is None:

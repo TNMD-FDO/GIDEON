@@ -23,6 +23,7 @@ from gideon.host import (
     worker,
 )
 from gideon.host.corpus import cut, watch
+from gideon.host.corpus import install as corpus_install
 from gideon.host.render import command as render_command
 from gideon.host.report import refusal
 
@@ -122,3 +123,7 @@ def run_corpus_cut(args: argparse.Namespace) -> int:
 
 def run_corpus_watch(args: argparse.Namespace) -> int:
     return _guarded("corpus watch", watch.run_corpus_watch, args)
+
+
+def run_corpus_install(args: argparse.Namespace) -> int:
+    return _guarded("corpus install", corpus_install.run_corpus_install, args)
