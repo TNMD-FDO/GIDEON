@@ -10,6 +10,7 @@ from pathlib import Path
 
 from gideon.host.images import LIBVIRT_BRIDGE_CIDR as LIBVIRT_BRIDGE_CIDR
 from gideon.host.lock import HostLock
+from gideon.host.models import ModelsLock
 from gideon.host.secrets import SecretReadResult, read_secret
 from gideon.host.site import SiteConfig
 from gideon.host.sysio import Host
@@ -331,11 +332,17 @@ class StepFailure(Exception):
 
 @dataclass(frozen=True, slots=True)
 class ProvisionContext:
-    """Inputs shared by every provisioning step."""
+    """Inputs shared by every provisioning step.
+
+    ``models`` supplies floors a step may judge. ``no_gpu`` is the run's
+    effective mode, including a --no-gpu --dry-run before its marker exists.
+    """
 
     host: Host
     lock: HostLock
     site: SiteConfig | None
+    models: ModelsLock | None = None
+    no_gpu: bool = False
 
 
 class Step:

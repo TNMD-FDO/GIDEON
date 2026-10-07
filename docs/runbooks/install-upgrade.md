@@ -939,6 +939,12 @@ If the store is populated, follow `docs/runbooks/install-upgrade.md §7` by hand
 
 If the store is empty, `sudo cp -p <root-file> <backup-path>`, set `root = '/var/lib/docker/containerd'` in the root file, then run `sudo systemctl restart containerd` and `sudo systemctl restart docker`. To undo it, copy the backup back and run the same two restarts.
 
+### /data mount
+
+The `disk-layout` row names the `/data` mount's filesystem type and size, and the selected profile's data-volume floor. GIDEON does not change an existing mount. A first run with a `/data` mount GIDEON did not build is `blocked` until `/etc/gideon/site.yaml` names the hardware profile whose floor judges it.
+
+Agree a change with the mount's owner. That operator grows the volume or moves its data to a volume meeting the floor; alternatively, the office sets `hardware_profile` in `/etc/gideon/site.yaml` to a profile this host satisfies. A filesystem of another type is reformatted only by its owner, after moving its data off, in an announced window. Then run provision from the release checkout.
+
 From the release checkout, converge after the hand change:
 
 ```sh

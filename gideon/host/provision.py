@@ -3,12 +3,14 @@
 import subprocess
 import sys
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import Final
 
 from gideon.host.lock import HostLockLoadResult, load_host_lock, render_errors
+from gideon.host.models import load_models_lock
+from gideon.host.models import render_errors as render_models_errors
 from gideon.host.nogpu import (
     BUILD_BOX_ONLY_FIX,
     BUILD_BOX_PATH,
@@ -62,17 +64,24 @@ def _one_line(value: str) -> str:
 
 
 def _load_context(
-    host: Host, lock_path: PathLike, site_path: PathLike
+    host: Host, lock_path: PathLike, models_path: PathLike, site_path: PathLike
 ) -> ProvisionContext | None:
     lock_result: HostLockLoadResult = load_host_lock(lock_path, host=host)
     if not lock_result.ok or lock_result.lock is None:
         print(render_errors(lock_result.errors), file=sys.stderr)
         return None
 
+    models_result = load_models_lock(models_path, host=host)
+    if models_result.errors or models_result.lock is None:
+        print(render_models_errors(models_result.errors), file=sys.stderr)
+        return None
+
     # An absent site file is the runbook's expected first-pass state (site
     # steps report blocked); a present-but-unloadable one refuses the run.
     if not host.exists(site_path):
-        return ProvisionContext(host=host, lock=lock_result.lock, site=None)
+        return ProvisionContext(
+            host=host, lock=lock_result.lock, site=None, models=models_result.lock
+        )
     site_result: SiteLoadResult = load_site(Path(site_path), host=host)
     if site_result.errors or site_result.config is None:
         print(_render_site_errors(site_result.errors), file=sys.stderr)
@@ -81,6 +90,7 @@ def _load_context(
         host=host,
         lock=lock_result.lock,
         site=site_result.config,
+        models=models_result.lock,
     )
 
 
@@ -367,6 +377,7 @@ def run_provision(
     *,
     host: Host | None = None,
     lock_path: PathLike | None = None,
+    models_path: PathLike | None = None,
     site_path: PathLike = _SITE_PATH,
     steps: Sequence[Step] | None = None,
 ) -> int:
@@ -408,7 +419,8 @@ def run_provision(
 
     root = Path(__file__).parents[2]
     actual_lock_path = root / "host.lock" if lock_path is None else lock_path
-    context = _load_context(io, actual_lock_path, site_path)
+    actual_models_path = root / "models.lock" if models_path is None else models_path
+    context = _load_context(io, actual_lock_path, actual_models_path, site_path)
     if context is None:
         return 1
 
@@ -431,6 +443,7 @@ def run_provision(
 
     no_gpu = is_no_gpu_host(io) or no_gpu_flag
     build_box = is_build_box(io) or build_box_flag
+    context = replace(context, no_gpu=no_gpu)
     if selected is not None:
         target = by_name[selected]
         if no_gpu and target.gpu_host_only:

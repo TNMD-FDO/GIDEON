@@ -20,7 +20,9 @@ from dataclasses import replace
 from pathlib import Path
 
 from gideon.host import dockerdaemon
+from gideon.host.checks import format_gb
 from gideon.host.lock import load_host_lock
+from gideon.host.models import GIGABYTE, ModelsLock, load_models_lock, select_profile
 from gideon.host.provision import run_provision
 from gideon.host.render import worker
 from gideon.host.render.opensearch import (
@@ -29,6 +31,7 @@ from gideon.host.render.opensearch import (
     OPENSEARCH_UID,
 )
 from gideon.host.render.qdrant import QDRANT_DATA_ROOT
+from gideon.host.report import Problem
 from gideon.host.site import SiteConfig, load_site
 from gideon.host.steps import (
     SITE_MISSING_FIX,
@@ -51,7 +54,14 @@ from gideon.host.steps.command import (
     GideonCommandStep,
     command_text,
 )
-from gideon.host.steps.disk import DiskLayoutStep
+from gideon.host.steps.disk import (
+    _DATA_DIRS,
+    GRAFANA_GID,
+    GRAFANA_UID,
+    PROMETHEUS_GID,
+    PROMETHEUS_UID,
+    DiskLayoutStep,
+)
 from gideon.host.steps.docker import (
     _ARCHITECTURE,
     _COMPONENT,
@@ -135,8 +145,11 @@ from tools.mask import Facts, wrap
 
 ROOT = Path(__file__).resolve().parent.parent
 LOCK = ROOT / "host.lock"
+MODELS = ROOT / "models.lock"
 EXAMPLE = ROOT / "config/site.example.yaml"
 BASELINE = ROOT / "tests/fixtures/host/baseline-post-reinstall"
+MODELS_LOCK = load_models_lock(MODELS).lock
+assert MODELS_LOCK is not None
 
 
 class FakeHost:
@@ -293,15 +306,23 @@ def completed(command: Sequence[str], stdout: str = "") -> subprocess.CompletedP
     return subprocess.CompletedProcess(list(command), 0, stdout, "")
 
 
-def context(host: FakeHost, *, site: SiteConfig | None = None) -> ProvisionContext:
+def context(
+    host: FakeHost,
+    *,
+    site: SiteConfig | None = None,
+    no_site: bool = False,
+    models: ModelsLock | None = MODELS_LOCK,
+    no_gpu: bool = False,
+) -> ProvisionContext:
     lock_result = load_host_lock(LOCK)
     assert lock_result.lock is not None
-    if site is None:
+    if no_site:
+        site = None
+    elif site is None:
         site_result = load_site(EXAMPLE)
         assert site_result.config is not None
         site = site_result.config
-    assert isinstance(site, SiteConfig)
-    return ProvisionContext(host, lock_result.lock, site)
+    return ProvisionContext(host, lock_result.lock, site, models, no_gpu)
 
 
 # The committed pins every fake below must agree with: derived once from the
@@ -439,6 +460,7 @@ def baseline_host() -> FakeHost:
         "/etc/fstab": (BASELINE / "fstab").read_text(),
         "/home/fpdadmin/.ssh/authorized_keys": (BASELINE / "fpdadmin-authorized_keys").read_text(),
         os.fspath(LOCK): LOCK.read_text(),
+        os.fspath(MODELS): MODELS.read_text(),
     }
     return FakeHost(files=files, commands=commands)
 
@@ -800,6 +822,62 @@ def add_data_directory(host: FakeHost, names: Sequence[str] = ()) -> None:
     host.files.update({f"/data/{name}": "" for name in names})
 
 
+_GIDEON_UID = 998
+_GIDEON_GID = 998
+_DIRECTORY_OWNERS = {
+    "gideon": (_GIDEON_UID, _GIDEON_GID),
+    "opensearch": (OPENSEARCH_UID, OPENSEARCH_GID),
+    "prometheus": (PROMETHEUS_UID, PROMETHEUS_GID),
+    "grafana": (GRAFANA_UID, GRAFANA_GID),
+}
+
+
+def data_volume_floor_bytes() -> int:
+    selected = context(FakeHost())
+    assert selected.site is not None and selected.models is not None
+    profile = select_profile(selected.models, selected.site.hardware_profile)
+    assert not isinstance(profile, Problem)
+    return profile.requires.data_volume_gb * GIGABYTE
+
+
+def mounted_reply(
+    source: str, fstype: str, size_bytes: int
+) -> tuple[tuple[str, ...], subprocess.CompletedProcess[str]]:
+    findmnt = (
+        "findmnt", "-rn", "-b", "-o", "TARGET,SOURCE,FSTYPE,SIZE", "--mountpoint", "/data"
+    )
+    return findmnt, completed(findmnt, f"/data {source} {fstype} {size_bytes}\n")
+
+
+def mounted_disk_host(
+    source: str,
+    fstype: str,
+    size_bytes: int,
+) -> FakeHost:
+    passwd = ("getent", "passwd", "gideon")
+    findmnt, reply = mounted_reply(source, fstype, size_bytes)
+    host = disk_host(
+        disk_devices(),
+        commands={
+            findmnt: reply,
+            passwd: completed(
+                passwd,
+                f"gideon:x:{_GIDEON_UID}:{_GIDEON_GID}::/nonexistent:/usr/sbin/nologin\n",
+            ),
+        },
+    )
+    add_data_directory(host)
+    return host
+
+
+def populate_data_directories(host: FakeHost) -> None:
+    for directory in _DATA_DIRS:
+        uid, gid = _DIRECTORY_OWNERS[directory.owner]
+        host.stats[str(Path("/data") / directory.relative_path)] = directory_stat(
+            directory.mode, uid, gid
+        )
+
+
 class DiskLayoutStepTests(unittest.TestCase):
     def test_occupied_unmounted_data_refuses_with_sorted_top_level_names(self) -> None:
         names = ("omega", ".local", "alpha")
@@ -965,10 +1043,12 @@ class DiskLayoutStepTests(unittest.TestCase):
                 self.assertNotIn("pvcreate", [run[0][0] for run in host.runs])
 
     def test_mounted_data_does_not_list_its_entries(self) -> None:
-        findmnt = ("findmnt", "-rn", "-o", "TARGET", "--mountpoint", "/data")
+        findmnt = (
+            "findmnt", "-rn", "-b", "-o", "TARGET,SOURCE,FSTYPE,SIZE", "--mountpoint", "/data"
+        )
         host = disk_host(
             disk_devices(),
-            commands={findmnt: completed(findmnt, "/data\n")},
+            commands={findmnt: completed(findmnt, "/data /dev/mapper/vg_data-data xfs 8464103374848\n")},
         )
         add_data_directory(host, ("client-data",))
 
@@ -978,6 +1058,202 @@ class DiskLayoutStepTests(unittest.TestCase):
         self.assertEqual(result.detail, "the data disk PV is missing")
         self.assertNotIn(("listdir", "/data"), host.calls)
         self.assertEqual([run[0] for run in host.runs].count(findmnt), 1)
+
+    def test_foreign_xfs_and_ext4_mounts_converge_directories_at_floor(self) -> None:
+        floor_bytes = data_volume_floor_bytes()
+        source = "/dev/office-data"
+        step = DiskLayoutStep()
+        for fstype in ("xfs", "ext4"):
+            with self.subTest(fstype=fstype):
+                host = mounted_disk_host(source, fstype, floor_bytes)
+                missing = step.check(context(host))
+                self.assertEqual(missing.disposition, Disposition.DRIFT)
+                self.assertIn("directory /data/fast is missing", missing.detail)
+
+                populate_data_directories(host)
+                current = step.check(context(host))
+                self.assertEqual(current.disposition, Disposition.CONVERGED)
+                self.assertIn("data layout is current; accepted /data mount", current.detail)
+                self.assertIn(source, current.detail)
+                self.assertIn(fstype, current.detail)
+                self.assertIn(format_gb(floor_bytes), current.detail)
+                self.assertNotIn(("listdir", "/data"), host.calls)
+
+    def test_foreign_mount_apply_makes_only_data_directories(self) -> None:
+        host = mounted_disk_host("/dev/office-data", "xfs", data_volume_floor_bytes())
+        step = DiskLayoutStep()
+        step.apply(context(host))
+
+        expected: list[tuple[str, object]] = []
+        for directory in _DATA_DIRS:
+            path = str(Path("/data") / directory.relative_path)
+            uid, gid = _DIRECTORY_OWNERS[directory.owner]
+            expected.extend(
+                [
+                    ("mkdir", (path, directory.mode, False, True)),
+                    ("chmod", (path, directory.mode)),
+                    ("chown", (path, uid, gid)),
+                ]
+            )
+        mutations = [
+            call for call in host.calls
+            if call[0] in {"mkdir", "chmod", "chown", "write_text", "unlink"}
+        ]
+        self.assertEqual(mutations, expected)
+        self.assertNotIn(("mkdir", ("/data", 0o755, False, True)), host.calls)
+        self.assertTrue({run[0][0] for run in host.runs} <= {"lsblk", "findmnt", "getent"})
+        self.assertNotIn(("read_text", "/etc/fstab"), host.calls)
+        self.assertFalse(any(call[0] == "write_text" for call in host.calls))
+
+    def test_foreign_mount_size_and_type_shortfalls_refuse_without_mutation(self) -> None:
+        floor_bytes = data_volume_floor_bytes()
+        source = "/dev/office-data"
+        for fstype, size_bytes in (("xfs", floor_bytes - 1), ("btrfs", floor_bytes)):
+            with self.subTest(fstype=fstype):
+                host = mounted_disk_host(source, fstype, size_bytes)
+                step = DiskLayoutStep()
+                result = step.check(context(host))
+                self.assertEqual(result.disposition, Disposition.UNFIXABLE)
+                for value in (
+                    "/data mount", source, fstype,
+                    f"{size_bytes} bytes ({format_gb(size_bytes)})",
+                    f"{floor_bytes // GIGABYTE} GB",
+                ):
+                    self.assertIn(value, result.detail)
+                self.assertIn("docs/runbooks/install-upgrade.md §10", result.fix)
+
+                with self.assertRaises(StepFailure) as raised:
+                    step.apply(context(host))
+                self.assertEqual(
+                    (raised.exception.detail, raised.exception.fix),
+                    (result.detail, result.fix),
+                )
+                self.assertEqual(
+                    [call for call in host.calls
+                     if call[0] in {"mkdir", "chmod", "chown", "write_text", "unlink"}],
+                    [],
+                )
+                self.assertTrue({run[0][0] for run in host.runs} <= {"lsblk", "findmnt", "getent"})
+
+    def test_foreign_mount_without_site_waits_for_profile(self) -> None:
+        source = "/dev/office-data"
+        host = mounted_disk_host(source, "ext4", data_volume_floor_bytes())
+        step = DiskLayoutStep()
+        result = step.check(context(host, no_site=True))
+        self.assertEqual(result.disposition, Disposition.PENDING_INPUT)
+        self.assertIn(source, result.detail)
+        self.assertIn("ext4", result.detail)
+        self.assertIn(format_gb(data_volume_floor_bytes()), result.detail)
+        self.assertIn("site file names the profile", result.detail)
+        self.assertEqual(result.fix, SITE_MISSING_FIX)
+        with self.assertRaises(StepFailure) as raised:
+            step.apply(context(host, no_site=True))
+        self.assertEqual(
+            (raised.exception.detail, raised.exception.fix),
+            (result.detail, result.fix),
+        )
+        self.assertFalse(any(call[0] in {"mkdir", "chmod", "chown", "write_text"}
+                             for call in host.calls))
+
+    def test_no_gpu_context_skips_mount_floor_but_still_checks_type(self) -> None:
+        below_floor = data_volume_floor_bytes() - 1
+        step = DiskLayoutStep()
+        host = mounted_disk_host("/dev/office-data", "xfs", below_floor)
+        self.assertNotIn("/etc/gideon/no-gpu", host.files)
+        self.assertEqual(step.check(context(host, no_gpu=True)).disposition, Disposition.DRIFT)
+        populate_data_directories(host)
+        self.assertEqual(step.check(context(host, no_gpu=True)).disposition, Disposition.CONVERGED)
+
+        wrong_type = mounted_disk_host("/dev/office-data", "btrfs", below_floor)
+        self.assertEqual(
+            step.check(context(wrong_type, no_gpu=True)).disposition,
+            Disposition.UNFIXABLE,
+        )
+
+    def test_owned_mount_spellings_keep_the_gideon_disk_path(self) -> None:
+        floor_bytes = data_volume_floor_bytes()
+        for source in ("/dev/mapper/vg_data-data", "/dev/vg_data/data"):
+            with self.subTest(source=source):
+                blank = mounted_disk_host(source, "xfs", floor_bytes)
+                result = DiskLayoutStep().check(context(blank))
+                self.assertEqual(result.disposition, Disposition.DRIFT)
+                self.assertEqual(result.detail, "the data disk PV is missing")
+
+                converged = baseline_host()
+                findmnt, reply = mounted_reply(source, "xfs", floor_bytes)
+                converged.commands[findmnt] = reply
+                passwd = ("getent", "passwd", "gideon")
+                converged.commands[passwd] = completed(
+                    passwd,
+                    f"gideon:x:{_GIDEON_UID}:{_GIDEON_GID}::/nonexistent:/usr/sbin/nologin\n",
+                )
+                add_data_directory(converged)
+                populate_data_directories(converged)
+                current = DiskLayoutStep().check(context(converged))
+                self.assertEqual(current.disposition, Disposition.CONVERGED)
+                self.assertEqual(current.detail, "data layout is current")
+
+    def test_foreign_mount_bypasses_lvm_on_blank_second_disk(self) -> None:
+        host = mounted_disk_host("/dev/office-data", "xfs", data_volume_floor_bytes())
+        self.assertEqual(
+            DiskLayoutStep().check(context(host)).disposition, Disposition.DRIFT
+        )
+        self.assertTrue({run[0][0] for run in host.runs} <= {"lsblk", "findmnt", "getent"})
+        self.assertNotIn(("read_text", "/etc/fstab"), host.calls)
+
+    def test_unreadable_mount_reply_refuses_check_and_apply(self) -> None:
+        floor_bytes = data_volume_floor_bytes()
+        for reply_text in (
+            "/data /dev/office-data xfs\n",
+            "/data /dev/office-data xfs not-a-size\n",
+        ):
+            with self.subTest(reply=reply_text):
+                host = mounted_disk_host("/dev/office-data", "xfs", floor_bytes)
+                findmnt, _ = mounted_reply("/dev/office-data", "xfs", floor_bytes)
+                host.commands[findmnt] = completed(findmnt, reply_text)
+                step = DiskLayoutStep()
+                result = step.check(context(host))
+                self.assertEqual(result.disposition, Disposition.UNFIXABLE)
+                self.assertIn("unreadable /data mount", result.detail)
+                with self.assertRaises(StepFailure) as raised:
+                    step.apply(context(host))
+                self.assertEqual(
+                    (raised.exception.detail, raised.exception.fix),
+                    (result.detail, result.fix),
+                )
+                self.assertFalse(any(call[0] in {"mkdir", "chmod", "chown", "write_text"}
+                                     for call in host.calls))
+
+    def test_foreign_mount_unknown_profile_uses_selector_refusal(self) -> None:
+        host = mounted_disk_host("/dev/office-data", "xfs", data_volume_floor_bytes())
+        selected = context(host)
+        assert selected.site is not None and selected.models is not None
+        site = replace(selected.site, hardware_profile="fictional-profile")
+        problem = select_profile(selected.models, site.hardware_profile)
+        assert isinstance(problem, Problem)
+        step = DiskLayoutStep()
+        result = step.check(context(host, site=site))
+        self.assertEqual(result.disposition, Disposition.UNFIXABLE)
+        self.assertEqual((result.detail, result.fix), (problem.problem, problem.fix))
+        with self.assertRaises(StepFailure) as raised:
+            step.apply(context(host, site=site))
+        self.assertEqual(
+            (raised.exception.detail, raised.exception.fix),
+            (result.detail, result.fix),
+        )
+
+    def test_foreign_mount_with_no_models_lock_refuses(self) -> None:
+        host = mounted_disk_host("/dev/office-data", "xfs", data_volume_floor_bytes())
+        step = DiskLayoutStep()
+        result = step.check(context(host, models=None))
+        self.assertEqual(result.disposition, Disposition.UNFIXABLE)
+        self.assertIn("models.lock was not loaded", result.detail)
+        with self.assertRaises(StepFailure) as raised:
+            step.apply(context(host, models=None))
+        self.assertEqual(
+            (raised.exception.detail, raised.exception.fix),
+            (result.detail, result.fix),
+        )
 
     def test_blank_and_partial_gideon_disks_report_first_missing_state(self) -> None:
         blank = disk_host(disk_devices())
@@ -1145,8 +1421,8 @@ class DiskLayoutStepTests(unittest.TestCase):
                     "uuid-data\n",
                 ),
                 disk_command_output(
-                    ("findmnt", "-rn", "-o", "TARGET", "--mountpoint", "/data"),
-                    "/data\n",
+                    ("findmnt", "-rn", "-b", "-o", "TARGET,SOURCE,FSTYPE,SIZE", "--mountpoint", "/data"),
+                    "/data /dev/mapper/vg_data-data xfs 8464103374848\n",
                 ),
                 disk_command_output(
                     ("getent", "passwd", "gideon"),

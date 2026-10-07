@@ -9,7 +9,7 @@
     {"argv": ["lvs", "--reportformat", "json", "-o", "lv_name,vg_name,lv_path"], "returncode": 0, "stdout": "{\"report\":[{\"lv\":[{\"lv_name\":\"data\",\"vg_name\":\"vg_data\",\"lv_path\":\"/dev/vg_data/data\"}]}]}"},
     {"argv": ["blkid", "-o", "value", "-s", "TYPE", "/dev/vg_data/data"], "returncode": 0, "stdout": "xfs\n"},
     {"argv": ["blkid", "-o", "value", "-s", "UUID", "/dev/vg_data/data"], "returncode": 0, "stdout": "baseline-data\n"},
-    {"argv": ["findmnt", "-rn", "-o", "TARGET", "--mountpoint", "/data"], "returncode": 0, "stdout": "/data\n"},
+    {"argv": ["findmnt", "-rn", "-b", "-o", "TARGET,SOURCE,FSTYPE,SIZE", "--mountpoint", "/data"], "returncode": 0, "stdout": "/data /dev/mapper/vg_data-data xfs 8464103374848\n"},
     {"argv": ["dpkg-query", "-W", "-f=${Status} ${Version}\\n", "chrony"], "returncode": 1, "stderr": "not installed\n"},
     {"argv": ["timedatectl", "show", "-p", "Timezone", "--value"], "returncode": 0, "stdout": "Etc/UTC\n"},
     {"argv": ["apt-config", "dump", "APT::Periodic"], "returncode": 0, "stdout": "APT::Periodic \"\";\nAPT::Periodic::Update-Package-Lists \"1\";\nAPT::Periodic::Download-Upgradeable-Packages \"0\";\nAPT::Periodic::AutocleanInterval \"0\";\nAPT::Periodic::Unattended-Upgrade \"1\";\n"},

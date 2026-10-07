@@ -10,6 +10,8 @@ import unittest
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+from gideon.host.models import load_models_lock
+from gideon.host.models import render_errors as render_models_errors
 from gideon.host.nogpu import (
     BUILD_BOX_ONLY_FIX,
     BUILD_BOX_PATH,
@@ -70,6 +72,7 @@ class RealHostRun(unittest.TestCase):
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOCK_PATH = REPO_ROOT / "host.lock"
+MODELS_PATH = REPO_ROOT / "models.lock"
 
 
 class FakeHost:
@@ -199,6 +202,21 @@ class RaisingStep(ScriptStep):
         raise self.error
 
 
+class RecordingStep(ScriptStep):
+    def __init__(self) -> None:
+        super().__init__("recording", [result(Disposition.DRIFT)])
+        self.check_contexts: list[ProvisionContext] = []
+        self.apply_contexts: list[ProvisionContext] = []
+
+    def check(self, context: ProvisionContext) -> CheckResult:
+        self.check_contexts.append(context)
+        return super().check(context)
+
+    def apply(self, context: ProvisionContext) -> str | None:
+        self.apply_contexts.append(context)
+        return super().apply(context)
+
+
 def result(
     disposition: Disposition,
     *,
@@ -236,6 +254,7 @@ class RunnerTests(unittest.TestCase):
         args: object | None = None,
         host: FakeHost | None = None,
         site_path: PathLike = "/missing/site.yaml",
+        models_path: PathLike = MODELS_PATH,
     ) -> tuple[int, str, str]:
         stdout = io.StringIO()
         stderr = io.StringIO()
@@ -244,6 +263,7 @@ class RunnerTests(unittest.TestCase):
                 args or arguments(),
                 host=host or FakeHost(),
                 lock_path=LOCK_PATH,
+                models_path=models_path,
                 site_path=site_path,
                 steps=steps,
             )
@@ -384,6 +404,17 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(step.check_calls, 0)
         self.assertIn("Unknown key", error)
         self.assertIn("Fix:", error)
+
+    def test_invalid_models_lock_refuses_before_steps(self) -> None:
+        host = FakeHost(files={os.fspath(MODELS_PATH): "profiles: []\n"})
+        step = ScriptStep("step", [result(Disposition.CONVERGED)])
+        code, output, error = self.run_steps([step], host=host)
+        expected = render_models_errors(
+            load_models_lock(MODELS_PATH, host=host).errors
+        )
+        self.assertEqual((code, output, error), (1, "", expected + "\n"))
+        self.assertIn("Fix:", error)
+        self.assertEqual(step.check_calls, 0)
 
     def test_root_is_required_but_list_is_unprivileged(self) -> None:
         step = ScriptStep("step", [result(Disposition.CONVERGED)])
@@ -606,6 +637,39 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(gpu_step.check_calls, 0)
         self.assertNotIn("/etc/gideon/no-gpu", host.files)
         self.assertFalse(any(call[0] == "write_text" for call in host.calls))
+
+    def test_step_context_carries_models_and_effective_no_gpu_mode(self) -> None:
+        cases = (
+            ("dry-run flag", FakeHost(), True, True, None, True),
+            ("marker", FakeHost(files={os.fspath(NO_GPU_PATH): ""}), False, False, None, True),
+            ("neither", FakeHost(), False, False, None, False),
+            ("only", FakeHost(), True, True, "recording", True),
+            (
+                "only apply",
+                FakeHost(files={os.fspath(NO_GPU_PATH): ""}),
+                False,
+                False,
+                "recording",
+                True,
+            ),
+        )
+        for label, host, no_gpu_flag, dry_run, only, expected in cases:
+            with self.subTest(label=label):
+                step = RecordingStep()
+                args = arguments(only=only, dry_run=dry_run)
+                args.no_gpu = no_gpu_flag
+                code, _, error = self.run_steps([step], args=args, host=host)
+                self.assertEqual((code, error), (0, ""))
+                self.assertTrue(step.check_contexts)
+                self.assertTrue(all(context.no_gpu is expected for context in step.check_contexts))
+                self.assertTrue(all(context.models is not None for context in step.check_contexts))
+                if dry_run:
+                    self.assertEqual(step.apply_contexts, [])
+                    self.assertNotIn(os.fspath(NO_GPU_PATH), host.files)
+                    self.assertFalse(any(call[0] == "write_text" for call in host.calls))
+                else:
+                    self.assertEqual(len(step.apply_contexts), 1)
+                    self.assertIs(step.apply_contexts[0], step.check_contexts[0])
 
     def test_bare_run_with_marker_skips_gpu_only_steps(self) -> None:
         step = ScriptStep(

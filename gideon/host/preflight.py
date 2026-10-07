@@ -215,10 +215,13 @@ def run_preflight(
         print(render_site_errors(site_result.errors), file=sys.stderr)
         return 1
 
+    no_gpu = nogpu.is_no_gpu_host(io)
     provision_context = ProvisionContext(
         host=io,
         lock=lock_result.lock,
         site=site_result.config,
+        models=models_result.lock,
+        no_gpu=no_gpu,
     )
     preflight_context = PreflightContext(
         host=io,
@@ -227,7 +230,7 @@ def run_preflight(
         site=site_result.config,
         egress=egress_result.allowlist,
         courts=courts_result.court_map,
-        no_gpu=nogpu.is_no_gpu_host(io),
+        no_gpu=no_gpu,
         build_box=nogpu.is_build_box(io),
         lockfile=lockfile,
     )

@@ -1,6 +1,7 @@
-"""Safe identification and convergence of the host data volume.
+"""Safe convergence of GIDEON's data volume or a sufficient existing /data mount.
 
 The step refuses to mount over an unmounted /data holding entries.
+It never changes a /data filesystem it did not build.
 """
 
 import json
@@ -12,6 +13,8 @@ from pathlib import Path
 from typing import Final
 
 from gideon.host import cas
+from gideon.host.checks import format_gb
+from gideon.host.models import GIGABYTE, select_profile
 from gideon.host.render import worker
 from gideon.host.render.opensearch import (
     OPENSEARCH_DATA_ROOT,
@@ -19,13 +22,18 @@ from gideon.host.render.opensearch import (
     OPENSEARCH_UID,
 )
 from gideon.host.render.qdrant import QDRANT_DATA_ROOT
+from gideon.host.report import Problem
 from gideon.host.steps import (
+    BOX_WIDE_SHORTFALL_FIX,
+    SITE_MISSING_FIX,
+    BoxWideSetting,
     CheckResult,
     Disposition,
     ProvisionContext,
     Step,
     StepFailure,
     apt_install,
+    box_wide_shortfall,
     passwd_entry,
 )
 from gideon.host.sysio import Host
@@ -41,6 +49,10 @@ _FSTAB = Path("/etc/fstab")
 _DATA_MOUNT = Path("/data")
 _VG = "vg_data"
 _LV = "data"
+# The box prints GIDEON's own volume as /dev/mapper/vg_data-data.
+_OWN_SOURCES: Final = (f"/dev/mapper/{_VG}-{_LV}", f"/dev/{_VG}/{_LV}")
+_SUPPORTED_FILESYSTEMS: Final = frozenset({"xfs", "ext4"})
+_DATA_MOUNT_SETTING: Final = BoxWideSetting("/data mount")
 # These are the fixed users in the pinned Prometheus and Grafana images.  The
 # data step owns the directories before Compose creates either container.
 PROMETHEUS_UID: Final = 65534
@@ -105,6 +117,8 @@ _DISK_FIX = (
 _DATA_MOVE_FIX = "Move the entries onto the data volume by the procedure in docs/runbooks/install-upgrade.md §8, then re-run provision."
 _DATA_DIR_FIX = "Make /data a directory or remove it, then re-run provision."
 _DATA_NAMES_CAP = 10
+_MOUNT_READ_FIX = "Restore a working findmnt and a readable /data mount, then re-run provision."
+_MODELS_FIX = "Load models.lock from the release checkout, then re-run provision."
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +127,13 @@ class _Disk:
     size: int
     wwn: str
     nodes: tuple[Mapping[str, object], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _Mount:
+    source: str
+    fstype: str
+    size_bytes: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,7 +147,9 @@ class _Inspection:
     filesystem: str | None = None
     uuid: str | None = None
     vg_size: int | None = None
-    mounted: bool = False
+    mount: _Mount | None = None
+    owned: bool = True
+    mount_error: str | None = None
     fstab: str | None = None
     uid: int | None = None
     gid: int | None = None
@@ -319,11 +342,30 @@ def _blkid(host: Host, field: str) -> str | None:
     return value or None
 
 
-def _mounted(host: Host) -> bool:
+def _read_mount(host: Host) -> tuple[_Mount | None, str | None]:
     result = host.run(
-        ["findmnt", "-rn", "-o", "TARGET", "--mountpoint", str(_DATA_MOUNT)]
+        [
+            "findmnt", "-rn", "-b", "-o", "TARGET,SOURCE,FSTYPE,SIZE",
+            "--mountpoint", str(_DATA_MOUNT),
+        ]
     )
-    return result.returncode == 0 and str(_DATA_MOUNT) in result.stdout.split()
+    if result.returncode in (126, 127):
+        return None, (
+            f"findmnt could not run (exit {result.returncode}): "
+            f"{result.stderr.strip()}"
+        )
+    if result.returncode != 0:
+        return None, None
+    fields = result.stdout.split()
+    if len(fields) != 4 or fields[0] != str(_DATA_MOUNT):
+        return None, "findmnt returned an unreadable /data mount"
+    try:
+        size_bytes = int(fields[3])
+    except ValueError:
+        return None, "findmnt returned an unreadable /data mount size"
+    if size_bytes < 0:
+        return None, "findmnt returned an unreadable /data mount size"
+    return _Mount(fields[1], fields[2], size_bytes), None
 
 
 def _occupied_data_detail(names: tuple[str, ...]) -> str:
@@ -446,6 +488,40 @@ def _inspect(context: ProvisionContext) -> _Inspection:
             error_fix=_DISK_FIX,
         )
     os_disk = os_candidates[0]
+    os_nodes = os_disk.nodes
+    if not _has_mount(os_nodes, "/"):
+        return _Inspection(
+            os_disk, None, None,
+            error="OS root is not an ext4 LV mounted at /",
+            error_fix=_REINSTALL_FIX,
+        )
+    if not _has_mount(os_nodes, "/var/lib/docker"):
+        return _Inspection(
+            os_disk, None, None,
+            error="/var/lib/docker is not an ext4 LV mounted at /var/lib/docker",
+            error_fix=_REINSTALL_FIX,
+        )
+    if not _has_swap(os_nodes):
+        return _Inspection(
+            os_disk, None, None,
+            error="the OS swap LV is missing",
+            error_fix=_REINSTALL_FIX,
+        )
+
+    mount, mount_error = _read_mount(context.host)
+    if mount_error is not None:
+        return _Inspection(os_disk, None, None, mount_error=mount_error)
+    owned = mount is None or mount.source in _OWN_SOURCES
+    if not owned:
+        entry = passwd_entry(context, "gideon")
+        return _Inspection(
+            os_disk, None, None,
+            mount=mount,
+            owned=False,
+            uid=entry.uid if entry is not None else None,
+            gid=entry.gid if entry is not None else None,
+        )
+
     candidates = [disk for disk in disks if disk.name != os_disk.name]
     if len(candidates) != 1:
         return _Inspection(
@@ -482,36 +558,9 @@ def _inspect(context: ProvisionContext) -> _Inspection:
             ),
             error_fix=_DISK_FIX,
         )
-    os_nodes = os_disk.nodes
-    if not _has_mount(os_nodes, "/"):
-        return _Inspection(
-            os_disk,
-            data_disk,
-            None,
-            error="OS root is not an ext4 LV mounted at /",
-            error_fix=_REINSTALL_FIX,
-        )
-    if not _has_mount(os_nodes, "/var/lib/docker"):
-        return _Inspection(
-            os_disk,
-            data_disk,
-            None,
-            error="/var/lib/docker is not an ext4 LV mounted at /var/lib/docker",
-            error_fix=_REINSTALL_FIX,
-        )
-    if not _has_swap(os_nodes):
-        return _Inspection(
-            os_disk,
-            data_disk,
-            None,
-            error="the OS swap LV is missing",
-            error_fix=_REINSTALL_FIX,
-        )
-
-    mounted = _mounted(context.host)
     data_names: tuple[str, ...] = ()
     data_list_error: str | None = None
-    if not mounted and context.host.exists(_DATA_MOUNT):
+    if mount is None and context.host.exists(_DATA_MOUNT):
         try:
             data_names = tuple(sorted(context.host.listdir(_DATA_MOUNT)))
         except FileNotFoundError:
@@ -554,17 +603,17 @@ def _inspect(context: ProvisionContext) -> _Inspection:
     fstab = _read_fstab(context.host) if uuid is not None else None
     entry = passwd_entry(context, "gideon")
     return _Inspection(
-        os_disk,
-        data_disk,
-        data_kind,
-        pv_exists,
-        vg_exists,
-        lv_exists,
-        filesystem,
-        uuid,
-        vg_size,
-        mounted,
-        fstab,
+        os_disk=os_disk,
+        data_disk=data_disk,
+        data_kind=data_kind,
+        pv_exists=pv_exists,
+        vg_exists=vg_exists,
+        lv_exists=lv_exists,
+        filesystem=filesystem,
+        uuid=uuid,
+        vg_size=vg_size,
+        mount=mount,
+        fstab=fstab,
         uid=entry.uid if entry is not None else None,
         gid=entry.gid if entry is not None else None,
         data_names=data_names,
@@ -576,20 +625,97 @@ def _failure(detail: str, fix: str = _DISK_FIX) -> CheckResult:
     return CheckResult(Disposition.UNFIXABLE, detail, fix)
 
 
-class DiskLayoutStep(Step):
-    """Converge only a positively identified blank or GIDEON data disk.
+def _mount_description(mount: _Mount) -> str:
+    return f"{mount.source} ({mount.fstype}, {format_gb(mount.size_bytes)})"
 
-    The step refuses to mount over an unmounted /data holding entries.
+
+def _foreign_mount_refusal(context: ProvisionContext, mount: _Mount) -> CheckResult | None:
+    if context.site is None:
+        return CheckResult(
+            Disposition.PENDING_INPUT,
+            f"/data is mounted from {_mount_description(mount)}; "
+            "the site file names the profile whose floor judges it",
+            SITE_MISSING_FIX,
+        )
+    if context.models is None:
+        return _failure(
+            f"models.lock was not loaded; cannot judge /data mount {_mount_description(mount)}",
+            _MODELS_FIX,
+        )
+    profile = select_profile(context.models, context.site.hardware_profile)
+    if isinstance(profile, Problem):
+        return _failure(profile.problem, profile.fix)
+    floor = profile.requires.data_volume_gb
+    if mount.fstype not in _SUPPORTED_FILESYSTEMS or (
+        not context.no_gpu and mount.size_bytes < floor * GIGABYTE
+    ):
+        needed = "xfs or ext4 filesystem"
+        if not context.no_gpu:
+            needed += f" of at least {floor} GB"
+        return _failure(
+            box_wide_shortfall(
+                _DATA_MOUNT_SETTING,
+                f"{mount.fstype}, {mount.size_bytes} bytes ({format_gb(mount.size_bytes)})",
+                needed,
+                mount.source,
+            ),
+            BOX_WIDE_SHORTFALL_FIX,
+        )
+    return None
+
+
+def _directory_result(
+    context: ProvisionContext, inspection: _Inspection, *, detail: str
+) -> CheckResult:
+    if inspection.uid is None or inspection.gid is None:
+        return CheckResult(
+            Disposition.DRIFT,
+            "the gideon service user is missing; data directories cannot yet be owned",
+            "Converge the service-user step, then re-run provision.",
+        )
+    missing_directory = _directory_state(context.host, inspection.uid, inspection.gid)
+    if missing_directory is not None:
+        return CheckResult(
+            Disposition.DRIFT,
+            missing_directory,
+            "Create the /data directory tree owned by gideon, then re-run provision.",
+        )
+    return CheckResult(Disposition.CONVERGED, detail, "")
+
+
+def _apply_directories(context: ProvisionContext) -> None:
+    entry = passwd_entry(context, "gideon")
+    if entry is None:
+        raise StepFailure(
+            "the gideon service user is missing; data directories cannot yet be owned",
+            "Converge the service-user step, then re-run provision.",
+        )
+    owners = _owner_ids(entry.uid, entry.gid)
+    for directory in _DATA_DIRS:
+        path = _DATA_MOUNT / directory.relative_path
+        owner_uid, owner_gid = owners[directory.owner]
+        context.host.mkdir(path, mode=directory.mode, exist_ok=True)
+        context.host.chmod(path, directory.mode)
+        context.host.chown(path, owner_uid, owner_gid)
+
+
+class DiskLayoutStep(Step):
+    """Converge GIDEON's disk or accept a sufficient existing /data mount.
+
+    A foreign mount is never changed; only GIDEON's directories are made on it.
     """
 
     name = "disk-layout"
     summary = "identify disks and converge the data filesystem safely"
     requires = ("service-user",)
+    settings = (_DATA_MOUNT_SETTING,)
 
     def check(self, context: ProvisionContext) -> CheckResult:
         inspection = _inspect(context)
         if inspection.error is not None:
             return _failure(inspection.error, inspection.error_fix)
+        if inspection.mount_error is not None:
+            return _failure(inspection.mount_error, _MOUNT_READ_FIX)
         if inspection.data_list_error is not None:
             return _failure(
                 inspection.data_list_error,
@@ -598,6 +724,19 @@ class DiskLayoutStep(Step):
         if inspection.data_names:
             return _failure(
                 _occupied_data_detail(inspection.data_names), _DATA_MOVE_FIX
+            )
+        if not inspection.owned:
+            assert inspection.mount is not None
+            refusal = _foreign_mount_refusal(context, inspection.mount)
+            if refusal is not None:
+                return refusal
+            return _directory_result(
+                context,
+                inspection,
+                detail=(
+                    "data layout is current; accepted /data mount "
+                    f"{_mount_description(inspection.mount)}"
+                ),
             )
         if inspection.data_disk is None or inspection.data_kind is None:
             return _failure("the data disk was not positively identified")
@@ -667,47 +806,38 @@ class DiskLayoutStep(Step):
                 "an unmanaged /data fstab entry exists beside the managed block",
                 "Rewrite the managed /data fstab block, then re-run provision.",
             )
-        if not inspection.mounted:
+        if inspection.mount is None:
             return CheckResult(
                 Disposition.DRIFT,
                 "/data is not mounted",
                 "Mount the data filesystem at /data, then re-run provision.",
             )
-        if inspection.uid is None or inspection.gid is None:
-            return CheckResult(
-                Disposition.DRIFT,
-                "the gideon service user is missing; data directories cannot yet be owned",
-                "Converge the service-user step, then re-run provision.",
-            )
-        missing_directory = _directory_state(
-            context.host, inspection.uid, inspection.gid
-        )
-        if missing_directory is not None:
-            return CheckResult(
-                Disposition.DRIFT,
-                missing_directory,
-                "Create the /data directory tree owned by gideon, then re-run provision.",
-            )
-        return CheckResult(Disposition.CONVERGED, "data layout is current", "")
+        return _directory_result(context, inspection, detail="data layout is current")
 
     def apply(self, context: ProvisionContext) -> None:
         inspection = _inspect(context)
         if inspection.error is not None:
-            raise RuntimeError(inspection.error)
+            raise StepFailure(inspection.error, inspection.error_fix)
+        if inspection.mount_error is not None:
+            raise StepFailure(inspection.mount_error, _MOUNT_READ_FIX)
+        if inspection.data_list_error is not None:
+            raise StepFailure(inspection.data_list_error, _DATA_DIR_FIX)
+        if inspection.data_names:
+            raise StepFailure(
+                _occupied_data_detail(inspection.data_names), _DATA_MOVE_FIX
+            )
+        if not inspection.owned:
+            assert inspection.mount is not None
+            refusal = _foreign_mount_refusal(context, inspection.mount)
+            if refusal is not None:
+                raise StepFailure(refusal.detail, refusal.fix)
+            _apply_directories(context)
+            return
         if inspection.data_disk is None or inspection.data_kind == "foreign":
             raise RuntimeError("refusing to mutate a foreign or unidentified data disk")
         if inspection.vg_exists and not inspection.pv_exists:
             raise RuntimeError(
                 "vg_data exists but has no PV on the identified data disk"
-            )
-        if inspection.data_list_error is not None:
-            raise StepFailure(
-                inspection.data_list_error,
-                _DATA_DIR_FIX,
-            )
-        if inspection.data_names:
-            raise StepFailure(
-                _occupied_data_detail(inspection.data_names), _DATA_MOVE_FIX
             )
         # Mutate through the stable identity, never the enumeration name: the
         # by-id symlink re-validates the WWN at the moment of use ([36]).
@@ -751,16 +881,15 @@ class DiskLayoutStep(Step):
         if not _fstab_has_block(current_fstab, expected):
             context.host.write_text(_FSTAB, _replace_fstab(current_fstab, expected))
         context.host.mkdir(_DATA_MOUNT, mode=0o755, exist_ok=True)
-        if not _mounted(context.host):
+        current_mount, mount_error = _read_mount(context.host)
+        if mount_error is not None:
+            raise StepFailure(mount_error, _MOUNT_READ_FIX)
+        if current_mount is not None and current_mount.source not in _OWN_SOURCES:
+            raise StepFailure(
+                f"/data was mounted from {_mount_description(current_mount)} "
+                "while provision built GIDEON's volume",
+                "Re-run provision to judge the new /data mount.",
+            )
+        if current_mount is None:
             context.host.run(["mount", str(_DATA_MOUNT)], check=True)
-        entry = passwd_entry(context, "gideon")
-        if entry is None:
-            raise RuntimeError("the gideon service-user UID/GID cannot be resolved")
-        uid, gid = entry.uid, entry.gid
-        owners = _owner_ids(uid, gid)
-        for directory in _DATA_DIRS:
-            path = _DATA_MOUNT / directory.relative_path
-            owner_uid, owner_gid = owners[directory.owner]
-            context.host.mkdir(path, mode=directory.mode, exist_ok=True)
-            context.host.chmod(path, directory.mode)
-            context.host.chown(path, owner_uid, owner_gid)
+        _apply_directories(context)
