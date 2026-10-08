@@ -5,6 +5,7 @@ import re
 import subprocess
 import unittest
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 
 from gideon.host.corpus.lockfile import load_lockfile, render_errors
@@ -17,6 +18,7 @@ from gideon.host.corpus.record import (
     read_lockfiles,
     read_watch_state,
     write_cut,
+    write_derived_cut,
     write_install,
     write_observations,
 )
@@ -175,6 +177,91 @@ class Writer(unittest.TestCase):
         self.assertIsInstance(result, Problem)
         assert isinstance(result, Problem)
         self.assertIn("exit 127", result.problem)
+        self.assertIn("corpus cut", result.fix)
+
+
+class DerivedWriter(unittest.TestCase):
+    """Derived records reuse rows without advancing snapshot verification."""
+
+    def setUp(self) -> None:
+        fixture = FIXTURE.parent / "corpus-2099-01-07.yaml"
+        loaded = load_lockfile(fixture, known_sources={"example": True})
+        self.assertTrue(loaded.ok, render_errors(loaded.errors))
+        assert loaded.lockfile is not None
+        self.lockfile = loaded.lockfile
+
+    def test_one_transaction_binds_payload_and_only_reads_snapshots(self) -> None:
+        host = FakeHost()
+        self.assertIsNone(write_derived_cut(host, RENDERED, self.lockfile, command_path="corpus cut"))
+        self.assertEqual(len(host.calls), 1)
+        argv, sql = host.calls[0]
+        self.assertEqual(argv, psql_argv(RENDERED))
+        self.assertNotIn(self.lockfile.label, " ".join(argv))
+        self.assertNotIn(self.lockfile.base or "", " ".join(argv))
+        self.assertNotIn(self.lockfile.sources["example"].sidecar_sha256, " ".join(argv))
+        assert sql is not None
+        self.assertIn("\\set v_payload '", sql)
+        self.assertIn("BEGIN;", sql)
+        self.assertIn("DO $cut$", sql)
+        self.assertTrue(sql.endswith("COMMIT;\n"))
+        payload = json.loads(sql.split("\\set v_payload '", 1)[1].split("'", 1)[0])
+        self.assertEqual(payload["base"], self.lockfile.base)
+        self.assertEqual(payload["label"], self.lockfile.label)
+        self.assertEqual(payload["sources"][0]["sidecar_sha256"],
+                         self.lockfile.sources["example"].sidecar_sha256)
+        self.assertNotIn("verified_at", payload)
+        self.assertNotIn("fetched_at", payload["sources"][0])
+        self.assertNotIn("verified_at", sql)
+        self.assertNotIn("fetched_at", sql)
+        self.assertIn("CORPUS_SNAPSHOT_MISSING", sql)
+        self.assertIn("CORPUS_BASE_MISSING", sql)
+        self.assertNotIn("UPDATE public.source_snapshots", sql)
+        self.assertNotIn("INSERT INTO public.source_snapshots", sql)
+        self.assertEqual(sql.count("IF label_exists THEN"), 1)
+
+    def test_full_lockfile_omits_base_check(self) -> None:
+        host = FakeHost()
+        self.assertIsNone(write_derived_cut(host, RENDERED, replace(self.lockfile, base=None),
+                                           command_path="corpus cut"))
+        sql = host.calls[0][1]
+        assert sql is not None
+        self.assertNotIn("CORPUS_BASE_MISSING", sql)
+
+    def test_missing_snapshot_and_base_name_install_fix(self) -> None:
+        pin = self.lockfile.sources["example"]
+        for marker, detail in (
+            (f"CORPUS_SNAPSHOT_MISSING:example:{pin.snapshot_date}",
+             f"example {pin.snapshot_date}"),
+            (f"CORPUS_BASE_MISSING:{self.lockfile.base}", self.lockfile.base),
+        ):
+            with self.subTest(marker=marker):
+                host = FakeHost(code=3, stderr=f"ERROR: {marker}\n")
+                result = write_derived_cut(host, RENDERED, self.lockfile, command_path="corpus cut")
+                self.assertIsInstance(result, Problem)
+                assert isinstance(result, Problem)
+                self.assertIn(detail, result.problem)
+                self.assertIn(f"corpus install {self.lockfile.base}", result.fix)
+                self.assertIn("corpus cut", result.fix)
+
+    def test_conflicts_and_command_failure(self) -> None:
+        pin = self.lockfile.sources["example"]
+        for marker, detail in (
+            (f"CORPUS_SNAPSHOT_CONFLICT:example:{pin.snapshot_date}",
+             f"example {pin.snapshot_date}"),
+            (f"CORPUS_LOCKFILE_CONFLICT:{self.lockfile.label}", self.lockfile.label),
+        ):
+            with self.subTest(marker=marker):
+                result = write_derived_cut(FakeHost(code=3, stderr=f"ERROR: {marker}\n"),
+                                           RENDERED, self.lockfile, command_path="corpus cut")
+                self.assertIsInstance(result, Problem)
+                assert isinstance(result, Problem)
+                self.assertIn(detail, result.problem)
+                self.assertIn("Restore the matching lockfile", result.fix)
+        result = write_derived_cut(FakeHost(code=4, stderr="connection failed"),
+                                   RENDERED, self.lockfile, command_path="corpus cut")
+        self.assertIsInstance(result, Problem)
+        assert isinstance(result, Problem)
+        self.assertIn("exit 4", result.problem)
         self.assertIn("corpus cut", result.fix)
 
 

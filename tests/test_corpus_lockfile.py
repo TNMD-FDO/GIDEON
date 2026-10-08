@@ -25,6 +25,7 @@ from gideon.host.egress import default_egress_path, load_egress_allowlist
 
 FIXTURES = Path(__file__).parent / "fixtures/corpus"
 VALID = FIXTURES / "corpus-2099-01-03.yaml"
+DERIVED = FIXTURES / "corpus-2099-01-07.yaml"
 KNOWN = {"example": True}
 
 
@@ -45,11 +46,28 @@ class Fixture(unittest.TestCase):
             self.assertEqual(render_sidecar(pin.entries).encode(), sidecar.read_bytes())
             self.assertEqual(hashlib.sha256(sidecar.read_bytes()).hexdigest(), pin.sidecar_sha256)
 
+    def test_derived_fixture_round_trips_and_copies_companions(self) -> None:
+        base = load_lockfile(FIXTURES / "corpus-2099-01-06.yaml", known_sources=KNOWN)
+        derived = load_lockfile(DERIVED, known_sources=KNOWN)
+        self.assertTrue(base.ok, render_errors(base.errors))
+        self.assertTrue(derived.ok, render_errors(derived.errors))
+        assert base.lockfile is not None and derived.lockfile is not None
+        self.assertEqual(derived.lockfile.base, base.lockfile.label)
+        self.assertEqual(render_lockfile(derived.lockfile), DERIVED.read_text())
+        for name, pin in derived.lockfile.sources.items():
+            base_pin = base.lockfile.sources[name]
+            self.assertEqual(pin.entries, base_pin.entries)
+            self.assertEqual(pin.index, base_pin.index)
+            for filename in (f"{name}.sha256", *(f"{name}.{item.name}" for item in pin.index)):
+                self.assertEqual((DERIVED.with_suffix("") / filename).read_bytes(),
+                                 (FIXTURES / base.lockfile.label / filename).read_bytes())
+            self.assertTrue(set(base_pin.courts or ()) < set(pin.courts or ()))
+
     def test_broken_variants_refuse_their_own_fault(self) -> None:
         cases = {
             "corpus-2099-01-04": "duplicate mapping key",
             "corpus-2099-01-05": "sidecar digest differs",
-            "corpus-2099-01-06": "index document digest differs",
+            "corpus-2099-01-08": "index document digest differs",
         }
         for label, detail in cases.items():
             with self.subTest(label=label):
@@ -103,6 +121,12 @@ class Refusals(unittest.TestCase):
         self.edit("cut_at: '2099-01-03T04:05:06Z'", "cut_at: yesterday")
         self.edit("pipeline: 0.0.0", "pipeline: next")
         self.refusal("label", "cut_at", "pipeline")
+
+    def test_base_label_and_date(self) -> None:
+        self.edit("reason: tranche\n", "reason: tranche\nbase: corpus-yesterday\n")
+        self.refusal("base", "expected a lockfile label")
+        self.edit("base: corpus-yesterday", "base: corpus-2099-02-30")
+        self.refusal("base", "expected a valid YYYY-MM-DD date")
 
     def test_unknown_source_and_missing_known_source(self) -> None:
         self.edit("  example:", "  alien:")
@@ -203,3 +227,24 @@ class Directory(unittest.TestCase):
             result = read_lockfile_directory(root, known_sources=KNOWN)
             self.assertEqual(result.newest.label if result.newest else None, VALID.stem)
             self.assertIn("sidecar digest differs", render_errors(result.errors))
+
+    def test_derived_base_must_be_loaded_and_earlier(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for label in ("corpus-2099-01-06", DERIVED.stem):
+                shutil.copy2(FIXTURES / f"{label}.yaml", root)
+                shutil.copytree(FIXTURES / label, root / label)
+            self.assertEqual(read_lockfile_directory(root, known_sources=KNOWN).errors, ())
+            path = root / DERIVED.name
+            original = path.read_text()
+            for base, detail in (
+                ("corpus-2099-01-05", "is not a lockfile in this directory"),
+                (DERIVED.stem, "is not earlier than this lockfile"),
+            ):
+                with self.subTest(base=base):
+                    path.write_text(original.replace("base: corpus-2099-01-06", f"base: {base}"))
+                    result = read_lockfile_directory(root, known_sources=KNOWN)
+                    self.assertEqual(len(result.errors), 1)
+                    self.assertEqual(result.errors[0].key_path, str(path))
+                    self.assertIn(f"base {base} {detail}", result.errors[0].problem)
+                    self.assertTrue(result.errors[0].fix)

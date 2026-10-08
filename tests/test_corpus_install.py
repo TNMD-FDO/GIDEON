@@ -914,6 +914,41 @@ class Install(unittest.TestCase):
         self.assertIn("superseded", err)
         self.assertIn(self.labels[1], err)
 
+    def _derive_second_label(self) -> None:
+        directory = self.checkout / "corpus/lockfiles"
+        loaded = load_lockfile(directory / f"{self.labels[0]}.yaml",
+                               known_sources={"example": self.source.carries_courts})
+        assert loaded.lockfile is not None
+        shutil.rmtree(directory / self.labels[1])
+        shutil.copytree(directory / self.labels[0], directory / self.labels[1])
+        (directory / f"{self.labels[1]}.yaml").write_text(render_lockfile(replace(
+            loaded.lockfile, label=self.labels[1], base=self.labels[0],
+        )))
+
+    def test_derived_label_follows_its_base_onto_the_box(self) -> None:
+        self._derive_second_label()
+        code, out, err = self.run_install(self.labels[1])
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertIn(f"base {self.labels[0]} of lockfile {self.labels[1]} is not recorded", err)
+        self.assertIn(f"corpus install {self.labels[0]}", err)
+        self.assertIn(f"corpus install {self.labels[1]}", err)
+        self.assertEqual(self.host.record_writes, 0)
+        self.assertEqual(self.host.deferred_urls, [])
+        self.assertFalse(any(command[0] == "sha256sum" for command in self.host.calls))
+        self.assertIsNone(self.host.lock_holder)
+
+        self._hold_record("installing")
+        code, out, err = self.run_install(self.labels[1])
+        self.assertEqual(code, 0, out + err)
+        self.assertIn(
+            f"{self.labels[1]}: example 2099-01-02; not yet recorded; "
+            f"base {self.labels[0]} installing",
+            out,
+        )
+        self.assertEqual(self.host.record_rows[self.labels[1]]["base"], self.labels[0])
+        self.assertEqual(self.host.record_rows[self.labels[1]]["state"], "installing")
+
     def test_root_refuses(self) -> None:
         self.host.euid = 1000
         code, out, err = self.run_install()

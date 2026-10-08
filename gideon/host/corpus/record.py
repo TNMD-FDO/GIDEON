@@ -64,7 +64,7 @@ class WatchState:
     unanswered_since: str | None
 
 
-_WRITE_SQL = """BEGIN;
+_SQL_START = """BEGIN;
 SELECT set_config('gideon.cut_payload', :'v_payload', true) AS stored \\gset
 DO $cut$
 DECLARE
@@ -77,6 +77,9 @@ BEGIN
     SELECT EXISTS (
         SELECT 1 FROM public.corpus_lockfiles WHERE label = cut_label
     ) INTO label_exists;
+"""
+
+_SQL_EXISTING_LABEL = """\
     IF label_exists THEN
         IF NOT EXISTS (
             SELECT 1 FROM public.corpus_lockfiles
@@ -105,7 +108,9 @@ BEGIN
             END IF;
         END LOOP;
     END IF;
+"""
 
+_SQL_FULL_SNAPSHOTS = """\
     FOR pin IN SELECT value FROM jsonb_array_elements(payload->'sources') LOOP
         IF EXISTS (
             SELECT 1 FROM public.source_snapshots
@@ -139,7 +144,9 @@ BEGIN
             );
         END IF;
     END LOOP;
+"""
 
+_SQL_INSERT = """\
     IF NOT label_exists THEN
         INSERT INTO public.corpus_lockfiles (
             label, "schema", pipeline, cut_at, reason, base, installed_at, state
@@ -153,6 +160,9 @@ BEGIN
             VALUES (cut_label, pin->>'source', (pin->>'snapshot_date')::date);
         END LOOP;
     END IF;
+"""
+
+_SQL_INSTALL = """\
     IF COALESCE((payload->>'install')::boolean, false) THEN
         IF EXISTS (
             SELECT 1 FROM public.corpus_lockfiles
@@ -164,10 +174,49 @@ BEGIN
         SET state = 'installing'
         WHERE label = cut_label AND state = 'cut';
     END IF;
+"""
+
+_SQL_END = """\
 END
 $cut$;
 COMMIT;
 """
+
+_SQL_DERIVED_SNAPSHOTS = """\
+    FOR pin IN SELECT value FROM jsonb_array_elements(payload->'sources') LOOP
+        IF NOT EXISTS (
+            SELECT 1 FROM public.source_snapshots
+            WHERE source = pin->>'source'
+              AND snapshot_date = (pin->>'snapshot_date')::date
+        ) THEN
+            RAISE EXCEPTION 'CORPUS_SNAPSHOT_MISSING:%:%',
+                pin->>'source', pin->>'snapshot_date';
+        END IF;
+        IF NOT EXISTS (
+            SELECT 1 FROM public.source_snapshots
+            WHERE source = pin->>'source'
+              AND snapshot_date = (pin->>'snapshot_date')::date
+              AND base_url = pin->>'base_url'
+              AND sidecar_sha256 = pin->>'sidecar_sha256'
+        ) THEN
+            RAISE EXCEPTION 'CORPUS_SNAPSHOT_CONFLICT:%:%',
+                pin->>'source', pin->>'snapshot_date';
+        END IF;
+    END LOOP;
+"""
+
+_SQL_DERIVED_BASE = """\
+    IF NOT EXISTS (
+        SELECT 1 FROM public.corpus_lockfiles WHERE label = payload->>'base'
+    ) THEN
+        RAISE EXCEPTION 'CORPUS_BASE_MISSING:%', payload->>'base';
+    END IF;
+"""
+
+_WRITE_SQL = (
+    _SQL_START + _SQL_EXISTING_LABEL + _SQL_FULL_SNAPSHOTS
+    + _SQL_INSERT + _SQL_INSTALL + _SQL_END
+)
 
 _READ_SQL = """SELECT jsonb_build_object(
     'label', c.label,
@@ -339,6 +388,36 @@ def _write_lockfile(
         return result
     if result.returncode == 0:
         return None
+    return _write_failure(
+        result, rendered_dir, command_path=command_path,
+        snapshot_subject=f"lockfile label {lockfile.label}: " if install else "",
+    )
+
+
+def _write_failure(
+    result: subprocess.CompletedProcess[str],
+    rendered_dir: PathLike,
+    *,
+    command_path: str,
+    snapshot_subject: str = "",
+    install_label: str | None = None,
+) -> Problem:
+    if install_label is not None:
+        snapshot_missing = re.search(r"CORPUS_SNAPSHOT_MISSING:([^:\s]+):([0-9-]+)", result.stderr)
+        if snapshot_missing is not None:
+            return Problem(
+                f"source snapshot {snapshot_missing.group(1)} {snapshot_missing.group(2)} "
+                "is not recorded",
+                f"Run {report.command('corpus install')} {install_label}, then run "
+                f"{report.command(command_path)} again.",
+            )
+        base_missing = re.search(r"CORPUS_BASE_MISSING:([^\s]+)", result.stderr)
+        if base_missing is not None:
+            return Problem(
+                f"base {base_missing.group(1)} is not recorded",
+                f"Run {report.command('corpus install')} {base_missing.group(1)}, then run "
+                f"{report.command(command_path)} again.",
+            )
     superseded = re.search(r"CORPUS_LOCKFILE_SUPERSEDED:([^\s]+)", result.stderr)
     if superseded is not None:
         return Problem(
@@ -347,9 +426,8 @@ def _write_lockfile(
         )
     snapshot = re.search(r"CORPUS_SNAPSHOT_CONFLICT:([^:\s]+):([0-9-]+)", result.stderr)
     if snapshot is not None:
-        subject = f"lockfile label {lockfile.label}: " if install else ""
         return Problem(
-            f"{subject}source snapshot {snapshot.group(1)} {snapshot.group(2)} "
+            f"{snapshot_subject}source snapshot {snapshot.group(1)} {snapshot.group(2)} "
             "differs from its recorded URL or sidecar digest",
             "Restore the matching lockfile and snapshot, then run "
             f"{report.command(command_path)} again.",
@@ -396,6 +474,45 @@ def write_install(
     return _write_lockfile(
         host, rendered_dir, lockfile, fetched_at, verified_at,
         install=True, command_path=command_path,
+    )
+
+
+def write_derived_cut(
+    host: Host, rendered_dir: PathLike, lockfile: Lockfile, *, command_path: str,
+) -> Problem | None:
+    """Record a derived lockfile against existing, unchanged snapshot rows."""
+    payload = {
+        "label": lockfile.label,
+        "schema": lockfile.schema,
+        "pipeline": lockfile.pipeline,
+        "cut_at": lockfile.cut_at,
+        "reason": lockfile.reason,
+        "base": lockfile.base,
+        "sources": [
+            {
+                "source": name,
+                "snapshot_date": pin.snapshot_date,
+                "base_url": pin.base_url,
+                "mirror_url": pin.mirror_url,
+                "sidecar_sha256": pin.sidecar_sha256,
+            }
+            for name, pin in lockfile.sources.items()
+        ],
+    }
+    statement = (
+        _SQL_START + _SQL_EXISTING_LABEL + _SQL_DERIVED_SNAPSHOTS
+        + (_SQL_DERIVED_BASE if lockfile.base is not None else "")
+        + _SQL_INSERT + _SQL_END
+    )
+    sql = worker.bind("v_payload", json.dumps(payload, separators=(",", ":"))) + "\n" + statement
+    result = _run(host, rendered_dir, sql, command_path)
+    if isinstance(result, Problem):
+        return result
+    if result.returncode == 0:
+        return None
+    return _write_failure(
+        result, rendered_dir, command_path=command_path,
+        install_label=lockfile.base or lockfile.label,
     )
 
 

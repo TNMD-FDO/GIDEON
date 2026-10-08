@@ -315,8 +315,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     corpus_sub = corpus.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)
     cut = corpus_sub.add_parser("cut", help="fetch and verify a corpus snapshot, then write its lockfile")
-    cut.add_argument("--base", metavar="<lockfile>", help="derived cuts arrive later")
-    cut.add_argument("--add-courts", metavar="<ids>", help="derived cuts arrive later")
+    cut.add_argument("--base", metavar="<lockfile>",
+                     help="copy the pins of this committed lockfile label (a derived cut)")
+    cut.add_argument("--add-courts", metavar="<ids>",
+                     help="comma-separated court ids to add to the base's courts")
     cut.set_defaults(handler=host_cli.run_corpus_cut, command_path="corpus cut")
     watch = corpus_sub.add_parser(
         "watch",

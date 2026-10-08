@@ -62,7 +62,7 @@ def _derived_cut_fix(label: str, ids: list[str], states: list[str]) -> str:
             "; a state's court ids are read from courts.yaml by its state code at the "
             "state_supreme and state_appellate levels"
         )
-    return fix + "; then re-run preflight."
+    return fix + " (docs/runbooks/release-files.md §11); then re-run preflight."
 
 
 class JurisdictionCheck(PreflightCheck):

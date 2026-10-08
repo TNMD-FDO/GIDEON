@@ -222,6 +222,8 @@ rotated since the set was made (the install runbook's rotation step, `v0.1.40`).
 6. `sudo python3 -m gideon apply`, then `sudo python3 -m gideon backup run --full`,
    then `sudo python3 -m gideon backup drill`.
 
+For the corpus's court coverage after these steps, follow `docs/runbooks/release-files.md §11`.
+
 **The custody line.** After a provision, after a total-loss recovery, and
 whenever the password-manager entry changes, a CSA derives the public half of
 the password manager's identity on their own machine (`age-keygen -y

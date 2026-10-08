@@ -545,6 +545,15 @@ def read_lockfile_directory(path: PathLike, *, known_sources: Mapping[str, bool]
         if result.lockfile is not None:
             lockfiles.append(result.lockfile)
         errors.extend(result.errors)
+    labels = {lockfile.label for lockfile in lockfiles}
+    for lockfile in lockfiles:
+        if lockfile.base is None:
+            continue
+        key_path = str(directory / f"{lockfile.label}.yaml")
+        if lockfile.base not in labels:
+            errors.append(_error(key_path, f"base {lockfile.base} is not a lockfile in this directory"))
+        if lockfile.base[len("corpus-"):] >= lockfile.label[len("corpus-"):]:
+            errors.append(_error(key_path, f"base {lockfile.base} is not earlier than this lockfile"))
     return LockfileDirectoryResult(tuple(lockfiles), tuple(errors))
 
 

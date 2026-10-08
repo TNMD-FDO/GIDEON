@@ -32,3 +32,9 @@ The `pipeline` value is `0.0.0` until a parser and chunker have a released
 version. A change to that version gets a new cut. `courts[]` lists the court
 map IDs in `courts.yaml` that belong to the cut; the IDs must resolve there.
 Preflight reads this list to check the site's home courts.
+
+A derived lockfile copies an earlier committed lockfile's pins, sidecars, and
+index documents byte for byte, extends `courts[]`, names that lockfile in
+`base:`, and carries `reason: tranche`. The corpus cut command's
+`--base <label> --add-courts <ids>` form writes it. Its base must be a
+lockfile in this same directory with an earlier label date.

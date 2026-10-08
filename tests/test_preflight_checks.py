@@ -1487,6 +1487,7 @@ class Jurisdiction(unittest.TestCase):
         self.assertIn("state 'fx-state' (no appellate court", report.detail)
         self.assertIn(f"corpus cut --base {LOCKFILE_LABEL} --add-courts", report.fix)
         self.assertIn("state_supreme and state_appellate levels", report.fix)
+        self.assertIn("docs/runbooks/release-files.md §11", report.fix)
         self.assertTrue(report.fix.endswith("re-run preflight."))
 
     def test_state_with_lockfile_courts_passes(self) -> None:
@@ -1508,6 +1509,7 @@ class Jurisdiction(unittest.TestCase):
         self.assertEqual(report.severity, Severity.WARN)
         self.assertIn("circuit 'fx-circuit' (circuit tier is not in the lockfile)", report.detail)
         self.assertIn(f"--base {LOCKFILE_LABEL} --add-courts fx-circuit", report.fix)
+        self.assertIn("docs/runbooks/release-files.md §11", report.fix)
 
     def test_missing_circuit_refuses_when_circuit_tier_is_carried(self) -> None:
         site = make_jurisdiction_site()

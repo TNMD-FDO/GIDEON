@@ -118,7 +118,7 @@ The command's refusals and their fixes:
 - **The label already has a lockfile, or is already recorded**: a label is used once. Run the command on a later UTC date; never delete a lockfile or its record.
 - **A committed lockfile does not load**: restore the named files from the release checkout, then run the command again.
 
-Stopping the command with Ctrl-C is safe. Downloads already started continue in the worker, and the same command joins them.
+Stopping the command with Ctrl-C is safe. Downloads already started continue in the worker, and the same command joins them. For adding courts without acquiring another snapshot, follow `docs/runbooks/release-files.md §11`.
 
 `sudo python3 -m gideon corpus install <label>` takes a committed lockfile onto a box. It fetches through the worker every pinned file the box does not already hold whole, from `mirror_url` where the lockfile sets one, checks every file's digest and size against the lockfile's sidecar, and records the label as `installing`. On the box that cut the lockfile nothing is fetched; on a receiving office's box the whole corpus comes through the door. It then keeps each snapshot directory a recorded lockfile still needs — one that is cut, installing, or installed, or the previously installed one — and removes a directory only older superseded lockfiles pin. It holds the same corpus lock as the cut and the watch. Its build arrives with slice 3's later releases.
 
@@ -130,7 +130,49 @@ The install's refusals and their fixes:
 - **A file on disk is short or disagrees with its sidecar line**: the copy is damaged. Remove the named file and its `.fetch.json` record, then run the command again, which fetches it anew.
 - **A file just fetched disagrees with its sidecar line**: the upstream now serves other bytes under the pinned name. Repin as the directory's README says — a `mirror_url` serving the pinned bytes, or a new cut — then remove the named file and its record, and run the command again.
 - **The label is superseded**: install the newest committed label the refusal names.
+- **The lockfile's base is not recorded on this box**: a derived lockfile follows its base. Run `corpus install <base>` first, then the command again.
 - **A lockfile court is absent from the dump's courts file**: the court map names a court the snapshot lacks. Review `courts.yaml`, then make a new cut.
 - **A stage input is missing or its digest is off the pin**: remove the named snapshot file and its `.fetch.json` record, then run the command again, which fetches and verifies it before staging.
 - **The stage record disagrees with the lockfile**: remove the named work directory, then run the command again.
 - **The worker cannot write the work directory**: run `host provision`, then `apply`, then the command again.
+
+## 11. Adding courts: the derived cut
+
+A receiving office uses a derived cut to add its state's courts when the newest committed lockfile does not cover them. The maintaining office uses the same command for its own later tranches. Run it on the box from the release checkout, using an earlier committed lockfile as the base. The base must also have been cut or installed on this box.
+
+Find candidate court IDs in `courts.yaml` by state code and by the `state_supreme` and `state_appellate` levels. For Tennessee, run this from the checkout; replace `TN` for another state:
+
+```bash
+grep -E 'state: TN, level: state_(supreme|appellate)' courts.yaml
+```
+
+The Tennessee entries are `tenn` (supreme) and `tenncrimapp`, `tennctapp`, and `tennsuperct` (appellate). CourtListener's table also carries courts long gone, such as `tennsuperct`, a nineteenth-century court; the office decides which of its state's courts belong in this cut. Use the ID before each colon, separated by commas, with no state shorthand.
+
+From the checkout, run:
+
+```bash
+sudo python3 -m gideon corpus cut --base <label> --add-courts <ids>
+```
+
+With `gideon` on the path, the same command is:
+
+```bash
+gideon corpus cut --base <label> --add-courts <ids>
+```
+
+For example, `--add-courts tenn,tenncrimapp,tennctapp` names three Tennessee courts. The command extends the base's `courts[]`, sorts the IDs, and writes a new `corpus-YYYY-MM-DD.yaml` with `base: <label>` and `reason: tranche`. It copies the base's source pins, sidecars, and index documents byte for byte into the new lockfile and its companion directory, then records the new cut. It downloads nothing and does not ask the worker to fetch or verify files. The base stays fixed. Commit the new lockfile and companion files in the office's own release, then run `corpus install <new label>` from that release. On a box that never recorded the base, `corpus install <base>` comes first: the install refuses with that fix before it fetches anything.
+
+If the command refuses:
+
+- **Only one flag was supplied**: give both `--base <label>` and `--add-courts <ids>` in the same `corpus cut` command.
+- **The base label is malformed or unknown**: choose a committed `corpus-YYYY-MM-DD` label under `corpus/lockfiles/`, then run the command again.
+- **An ID is empty, repeated, or unknown**: correct the comma-separated list using `courts.yaml`; an unknown ID's refusal names the nearest ID. Run the command again.
+- **An ID is already in the base**: choose an ID absent from that base's `courts[]`, then run the command again.
+- **The base is not recorded on this box**: run `corpus install <base label>`, then run the cut again. If its record disagrees with its lockfile, restore the matching lockfile from the release checkout first.
+- **Today's label already has a lockfile or record**: run the cut on a later UTC date. A label is used once; do not delete its files or record.
+- **A newer lockfile already pins the requested state**: the command names it as `unchanged` and writes no files. Use that label; the record stage records it if needed.
+- **A committed base is missing or dated after its derived lockfile**: restore the lockfiles and companions from the release checkout, then run the command again.
+
+Ctrl-C is safe: the lock is released, and a repeat run records a lockfile written before the interruption without rewriting it.
+
+After a total-loss recovery by `docs/runbooks/backup-restore.md §5`, the corpus record returns with the restored set. If the release's newest committed lockfile already carries the office's courts, install that lockfile with `corpus install <label>`. If the release lacks the office's derived lockfile, run this cut again from the same committed base with the same IDs on a later UTC date; it writes the same pins and courts under a new label.

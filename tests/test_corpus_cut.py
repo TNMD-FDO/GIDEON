@@ -21,7 +21,12 @@ from urllib.parse import urlsplit
 from gideon.cli import main
 from gideon.host import backuplock, fetch, report, stack, worker
 from gideon.host.corpus import cut, resolve, snapshots
-from gideon.host.corpus.lockfile import load_lockfile, render_errors
+from gideon.host.corpus.lockfile import (
+    Lockfile,
+    load_lockfile,
+    render_errors,
+    render_lockfile,
+)
 from gideon.host.corpus.sources import (
     IndexRequest,
     SourceDefinition,
@@ -47,6 +52,7 @@ class FakeHost(RealHost):
     def __init__(self) -> None:
         super().__init__()
         self.calls: list[list[str]] = []
+        self.sql_calls: list[str] = []
         self.writes: list[str] = []
         self.hash_code = 0
         self.euid = 0
@@ -61,6 +67,7 @@ class FakeHost(RealHost):
         self.resolve_wait_polls = 0
         self.failed_destination: str | None = None
         self.record_row: dict[str, object] | None = None
+        self.base_rows: dict[str, dict[str, object]] = {}
         self.record_writes = 0
         self.record_code = 0
         self.interrupt_at: str | None = None
@@ -169,6 +176,7 @@ class FakeHost(RealHost):
             }), "")
         if command == worker.psql_argv(RENDERED):
             assert input is not None
+            self.sql_calls.append(input)
             if "procrastinate_defer_jobs_v1" in input:
                 args = json.loads(self._bound(input, "v_args"))
                 job = self.next_job
@@ -204,6 +212,7 @@ class FakeHost(RealHost):
                         "label", "schema", "pipeline", "cut_at", "reason", "base",
                     )
                 }
+                fixed["cut_at"] = datetime.fromisoformat(payload["cut_at"].replace("Z", "+00:00")).isoformat()
                 fixed["sources"] = [
                     {"source": pin["source"], "snapshot_date": pin["snapshot_date"]}
                     for pin in payload["sources"]
@@ -221,9 +230,10 @@ class FakeHost(RealHost):
                 return subprocess.CompletedProcess(command, 0, "", "")
             if "jsonb_build_object" in input:
                 requested = self._bound(input, "v_label")
+                row = (self.record_row if self.record_row and self.record_row["label"] == requested
+                       else self.base_rows.get(requested))
                 output = (
-                    json.dumps(self.record_row) + "\n"
-                    if self.record_row and self.record_row["label"] == requested else ""
+                    json.dumps(row) + "\n" if row else ""
                 )
                 return subprocess.CompletedProcess(command, 0, output, "")
             raise AssertionError(f"unexpected psql statement: {input}")
@@ -240,6 +250,8 @@ class FakeHost(RealHost):
     def write_text(
         self, path: PathLike, text: str, *, encoding: str = "utf-8", mode: int = 0o644
     ) -> None:
+        if self.interrupt_at == "lockfile" and str(path).endswith(".yaml"):
+            raise KeyboardInterrupt
         self.writes.append(str(path))
         super().write_text(path, text, encoding=encoding, mode=mode)
 
@@ -312,6 +324,27 @@ class Cut(unittest.TestCase):
                 sources=(self.source,),
             )
         return code, out.getvalue(), err.getvalue()
+
+    def prepare_base(self) -> Lockfile:
+        code, out, err = self.run_cut()
+        self.assertEqual(code, 0, out + err)
+        label = f"corpus-{CUT_AT.date().isoformat()}"
+        loaded = load_lockfile(self.checkout / "corpus/lockfiles" / f"{label}.yaml",
+                               known_sources={"example": True})
+        self.assertTrue(loaded.ok, render_errors(loaded.errors))
+        assert loaded.lockfile is not None and self.host.record_row is not None
+        self.host.base_rows[label] = dict(self.host.record_row)
+        self.assertEqual(self.host.record_row["cut_at"], CUT_AT.isoformat())
+        self.host.calls.clear()
+        self.host.sql_calls.clear()
+        self.host.writes.clear()
+        self.host.chown_calls.clear()
+        return loaded.lockfile
+
+    def assert_no_acquisition(self) -> None:
+        self.assertTrue(all(call == worker.psql_argv(RENDERED) for call in self.host.calls))
+        self.assertTrue(all("procrastinate" not in sql and "resolve/" not in sql
+                            and "fetch" not in sql for sql in self.host.sql_calls))
 
     def test_writes_loadable_lockfile_and_reports_stages(self) -> None:
         code, out, err = self.run_cut()
@@ -660,16 +693,180 @@ class Cut(unittest.TestCase):
         self.assertIn("Remove", out)
 
     def test_derived_flags_refuse_before_host_work(self) -> None:
-        for values in ({"base": "corpus-2099-01-01"}, {"add_courts": "ca6"}):
+        self.host.euid = 1000
+        for values, missing in (
+            ({"base": "corpus-2099-01-01"}, "--add-courts"),
+            ({"add_courts": "ca6"}, "--base"),
+        ):
             with self.subTest(values=values):
                 code, out, err = self.run_cut(
                     base=values.get("base"), add_courts=values.get("add_courts"),
                 )
                 self.assertEqual(code, 1)
                 self.assertEqual(out, "")
-                self.assertIn("derived corpus cut is not implemented yet", err)
-                self.assertIn("corpus cut", err)
+                self.assertIn(f"without {missing}", err)
+                self.assertIn("corpus cut --base <label> --add-courts <ids>", err)
         self.assertEqual(self.host.calls, [])
+        self.assertEqual(self.host.lock_releases, 0)
+
+    def test_derived_preconditions_refuse_bad_base_and_court_ids(self) -> None:
+        base = self.prepare_base()
+        existing_court = (base.sources["example"].courts or ())[0]
+        cases = (
+            ("not-a-label", "scotus", "expected a lockfile label"),
+            ("corpus-2099-01-01", "scotus", "no committed lockfile is labelled"),
+            (base.label, "", "empty court id"),
+            (base.label, "scotus, scotus", "scotus is repeated"),
+            (base.label, "ca66", "unknown court id ca66"),
+            (base.label, existing_court, f"{existing_court} is already in base"),
+        )
+        for label, added, detail in cases:
+            with self.subTest(label=label, added=added):
+                releases = self.host.lock_releases
+                code, out, err = self.run_cut(base=label, add_courts=added,
+                                              cut_at=CUT_AT + timedelta(days=1))
+                self.assertEqual(code, 1)
+                self.assertEqual(out, "")
+                self.assertIn(detail, err)
+                self.assertIn("corpus cut", err)
+                if added == "ca66":
+                    self.assertIn("nearest id is", err)
+                    self.assertIn("docs/runbooks/release-files.md §11", err)
+                self.assertEqual(self.host.writes, [])
+                self.assertEqual(self.host.lock_releases, releases + 1)
+                self.assertIsNone(self.host.lock_holder)
+        self.assert_no_acquisition()
+
+    def test_derived_base_must_be_recorded_and_agree(self) -> None:
+        base = self.prepare_base()
+        self.host.record_row = None
+        self.host.base_rows.clear()
+        code, out, err = self.run_cut(base=base.label, add_courts="scotus",
+                                      cut_at=CUT_AT + timedelta(days=1))
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertIn(f"base {base.label} is not recorded", err)
+        self.assertIn(f"corpus install {base.label}", err)
+        self.assertEqual(self.host.writes, [])
+
+        row = {"label": base.label, "schema": base.schema, "pipeline": base.pipeline,
+               "cut_at": CUT_AT.isoformat(), "reason": "quarterly", "base": base.base,
+               "sources": [{"source": name, "snapshot_date": pin.snapshot_date}
+                           for name, pin in base.sources.items()],
+               "installed_at": None, "state": "cut"}
+        self.host.base_rows[base.label] = row
+        code, out, err = self.run_cut(base=base.label, add_courts="scotus",
+                                      cut_at=CUT_AT + timedelta(days=1))
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertIn(f"base {base.label}'s record disagrees", err)
+        self.assertIn("release checkout", err)
+        self.assertEqual(self.host.writes, [])
+        self.assert_no_acquisition()
+
+    def test_derived_cut_copies_pins_and_bytes_without_acquisition(self) -> None:
+        base = self.prepare_base()
+        self.host.health = "unhealthy"
+        directory = self.checkout / "corpus/lockfiles"
+        self.host.ownership[str(directory)] = (12345, 23456)
+        next_cut = CUT_AT + timedelta(days=1)
+        code, out, err = self.run_cut(base=base.label, add_courts="tenn,scotus", cut_at=next_cut)
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(err, "")
+        self.assertIn("root, release artifacts, and the base's record are ready", out)
+        self.assertIn(f"wrote corpus-{next_cut.date().isoformat()} from {base.label}", out)
+        self.assertIn("courts + tenn,scotus", out)
+        self.assertIn("record: ok", out)
+        self.assertIn(f"base {base.label}", out)
+        self.assertIn("Next: commit the new lockfile", out)
+        self.assertNotIn("resolve:", out)
+        self.assertNotIn("fetch:", out)
+        self.assertNotIn("verify:", out)
+        self.assert_no_acquisition()
+        label = f"corpus-{next_cut.date().isoformat()}"
+        path = directory / f"{label}.yaml"
+        loaded = load_lockfile(path, known_sources={"example": True})
+        self.assertTrue(loaded.ok, render_errors(loaded.errors))
+        assert loaded.lockfile is not None
+        derived = loaded.lockfile
+        self.assertEqual(derived.base, base.label)
+        self.assertEqual(derived.reason, "tranche")
+        self.assertEqual(derived.pipeline, cut.PIPELINE_VERSION)
+        self.assertEqual(derived.sources["example"].courts,
+                         tuple(sorted(set(base.sources["example"].courts or ()) | {"tenn", "scotus"})))
+        self.assertEqual(derived.sources["example"].sidecar_sha256,
+                         base.sources["example"].sidecar_sha256)
+        for name in ("example.sha256", "example.listing.xml"):
+            self.assertEqual((directory / label / name).read_bytes(),
+                             (directory / base.label / name).read_bytes())
+        self.assertEqual(self.host.record_row["base"] if self.host.record_row else None,
+                         base.label)
+        self.assertEqual(self.host.record_writes, 2)
+        self.assertEqual(
+            self.host.chown_calls,
+            [(str(item), 12345, 23456) for item in (
+                directory / label, directory / label / "example.listing.xml",
+                directory / label / "example.sha256", path,
+            )],
+        )
+
+    def test_derived_same_day_label_refuses_and_later_run_is_unchanged(self) -> None:
+        base = self.prepare_base()
+        code, out, err = self.run_cut(base=base.label, add_courts="scotus")
+        self.assertEqual(code, 1)
+        self.assertEqual(err, "")
+        self.assertIn("already has a lockfile", out)
+        self.assertIn("later UTC date", out)
+        self.assertEqual(self.host.writes, [])
+        next_cut = CUT_AT + timedelta(days=1)
+        self.assertEqual(self.run_cut(base=base.label, add_courts="scotus",
+                                      cut_at=next_cut)[0], 0)
+        self.host.calls.clear()
+        self.host.sql_calls.clear()
+        self.host.writes.clear()
+        code, out, err = self.run_cut(base=base.label, add_courts="scotus", cut_at=next_cut)
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("unchanged", out)
+        self.assertIn("record: ok", out)
+        self.assertEqual(self.host.writes, [])
+        self.assert_no_acquisition()
+
+    def test_derived_unchanged_newer_full_lockfile_records_without_base(self) -> None:
+        base = self.prepare_base()
+        next_cut = CUT_AT + timedelta(days=2)
+        label = f"corpus-{next_cut.date().isoformat()}"
+        pin = base.sources["example"]
+        newer = replace(
+            base, label=label, cut_at=next_cut.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            sources={"example": replace(pin, courts=tuple(sorted(set(pin.courts or ()) | {"scotus"})))},
+        )
+        directory = self.checkout / "corpus/lockfiles"
+        shutil.copytree(directory / base.label, directory / label)
+        (directory / f"{label}.yaml").write_text(render_lockfile(newer))
+        code, out, err = self.run_cut(base=base.label, add_courts="scotus",
+                                      cut_at=next_cut + timedelta(days=1))
+        self.assertEqual(code, 0, out + err)
+        self.assertIn(f"unchanged; {label} already pins this state", out)
+        self.assertIn(f"record: ok — {label}: cut", out)
+        self.assertEqual(self.host.writes, [])
+        self.assertEqual(self.host.record_row["base"] if self.host.record_row else "bad", None)
+        self.assertTrue(all("CORPUS_BASE_MISSING" not in sql for sql in self.host.sql_calls))
+        self.assert_no_acquisition()
+
+    def test_derived_interrupt_in_lockfile_releases_lock(self) -> None:
+        base = self.prepare_base()
+        self.host.interrupt_at = "lockfile"
+        releases = self.host.lock_releases
+        code, out, err = self.run_cut(base=base.label, add_courts="scotus",
+                                      cut_at=CUT_AT + timedelta(days=1))
+        self.assertEqual(code, 1)
+        self.assertEqual(err, "")
+        self.assertIn("lockfile: refuse — interrupted; nothing was recorded", out)
+        self.assertIn("corpus cut", out)
+        self.assertEqual(self.host.lock_releases, releases + 1)
+        self.assertIsNone(self.host.lock_holder)
+        self.assertEqual(self.host.record_writes, 1)
+        self.assert_no_acquisition()
 
     def test_hash_tool_failure_refuses_without_writing(self) -> None:
         self.host.hash_code = 127
@@ -715,14 +912,25 @@ class Cut(unittest.TestCase):
 
 
 class Cli(unittest.TestCase):
-    """The public parser dispatches both derived flags to the command refusal."""
+    """The public parser dispatches derived flags and explains both values."""
 
     def test_derived_flags_reach_corpus_cut(self) -> None:
-        for flag, value in (("--base", "corpus-2099-01-01"), ("--add-courts", "ca6")):
+        for flag, value, missing in (
+            ("--base", "corpus-2099-01-01", "--add-courts"),
+            ("--add-courts", "ca6", "--base"),
+        ):
             with self.subTest(flag=flag):
                 out, err = io.StringIO(), io.StringIO()
                 with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                     code = main(["corpus", "cut", flag, value])
                 self.assertEqual(code, 1)
                 self.assertEqual(out.getvalue(), "")
-                self.assertIn("derived corpus cut is not implemented yet", err.getvalue())
+                self.assertIn(f"without {missing}", err.getvalue())
+
+    def test_help_describes_derived_values(self) -> None:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as exit_result:
+            main(["corpus", "cut", "--help"])
+        self.assertEqual(exit_result.exception.code, 0)
+        self.assertIn("copy the pins of this committed lockfile label", out.getvalue())
+        self.assertIn("comma-separated court ids to add to the base's courts", out.getvalue())

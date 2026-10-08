@@ -1,10 +1,12 @@
 """Verify local corpus snapshots and write their committed lockfiles."""
 
 import argparse
+import difflib
 import hashlib
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -12,10 +14,12 @@ from urllib.parse import urlsplit
 from gideon.host import backuplock, report, stack
 from gideon.host.corpus import artifacts, record, resolve, snapshots
 from gideon.host.corpus.lockfile import (
+    LABEL,
     PIPELINE_VERSION,
     SCHEMA_VERSION,
     IndexDocument,
     Lockfile,
+    LockfileDirectoryResult,
     SidecarEntry,
     SourcePin,
     check_courts,
@@ -27,9 +31,28 @@ from gideon.host.corpus.lockfile import (
     same_state,
 )
 from gideon.host.corpus.sources import SOURCES, SourceDefinition
+from gideon.host.courts import CourtMap
 from gideon.host.render.worker import SNAPSHOTS_ROOT
 from gideon.host.report import Problem, StageResult
 from gideon.host.sysio import PathLike, RealHost, WritableBytesHost
+
+
+@dataclass(frozen=True, slots=True)
+class DerivedRequest:
+    """A validated base and the court ids to add to it."""
+
+    base: Lockfile
+    court_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class LockfileCandidate:
+    """A cut's lockfile with the exact companion bytes to write."""
+
+    lockfile: Lockfile
+    index_bytes: Mapping[str, Mapping[str, bytes]]
+    sidecar_bytes: Mapping[str, bytes]
+    written_detail: str
 
 
 def _retry_fix(fix: str) -> str:
@@ -54,12 +77,14 @@ def _artifact_preconditions(
     rendered_dir: PathLike,
     checkout: Path,
     registry: Sequence[SourceDefinition],
-) -> tuple[StageResult, Lockfile | None]:
+    *, check_worker: bool,
+) -> tuple[StageResult, LockfileDirectoryResult | None, CourtMap | None]:
     loaded, issue = artifacts.load_artifacts(
         host, rendered_dir, checkout, registry, command_path="corpus cut",
+        check_worker=check_worker,
     )
     if issue is not None:
-        return issue, None
+        return issue, None, None
     assert loaded is not None
     directory = loaded.directory
     court_map = loaded.court_map
@@ -70,20 +95,20 @@ def _artifact_preconditions(
             check_courts(lockfile, court_map), lockfile.label, command_path="corpus cut",
         )
         if issue is not None:
-            return issue, None
+            return issue, None, None
         issue = artifacts.artifact_problem(
             check_egress_hosts(lockfile, loaded.allowlist), lockfile.label,
             command_path="corpus cut",
         )
         if issue is not None:
-            return issue, None
+            return issue, None, None
     known = {source.name: source.carries_courts for source in registry}
     if len(known) != len(registry):
         return StageResult(
             "preconditions", False, "source names repeat in the registry",
             "Correct the source definitions in the release, then run "
             f"{report.command('corpus cut')} again.",
-        ), None
+        ), None, None
     for source in registry:
         try:
             parsed = urlsplit(source.base_url)
@@ -97,21 +122,21 @@ def _artifact_preconditions(
                 "preconditions", False, f"source {source.name} has an invalid HTTPS base URL",
                 "Correct the source URL in the release, then run "
                 f"{report.command('corpus cut')} again.",
-            ), None
+            ), None, None
         if source_host not in allowed:
             return StageResult(
                 "preconditions", False,
                 f"source {source.name} host {source_host} is outside the corpus allowlist",
                 f"Add {source_host} to the corpus group in config/egress.yaml, "
                 f"run {report.command('apply')}, then retry.",
-            ), None
+            ), None, None
         if source.carries_courts and directory.newest is None:
             if not source.first_courts or tuple(sorted(set(source.first_courts))) != source.first_courts:
                 return StageResult(
                     "preconditions", False, f"source {source.name} first courts are invalid",
                     "Correct the sorted court ids in the release, then run "
                     f"{report.command('corpus cut')} again.",
-                ), None
+                ), None, None
             missing = court_map.unresolved(source.first_courts)
             if missing:
                 return StageResult(
@@ -119,8 +144,99 @@ def _artifact_preconditions(
                     f"source {source.name} has unknown court ids: {', '.join(missing)}",
                     "Correct the court ids in the release, then run "
                     f"{report.command('corpus cut')} again.",
+                ), None, None
+    detail = ("root, worker, and release artifacts are ready" if check_worker
+              else "root and release artifacts are ready")
+    return StageResult("preconditions", True, detail, ""), directory, court_map
+
+
+def _derived_preconditions(
+    host: resolve.CorpusHost,
+    rendered_dir: PathLike,
+    registry: Sequence[SourceDefinition],
+    directory: LockfileDirectoryResult,
+    court_map: CourtMap,
+    base_label: str,
+    added_courts: str,
+) -> tuple[StageResult, DerivedRequest | None]:
+    command = report.command("corpus cut")
+    if LABEL.fullmatch(base_label) is None:
+        return StageResult(
+            "preconditions", False, "expected a lockfile label such as corpus-2026-10-07",
+            f"Choose a label under corpus/lockfiles/, then run {command} again.",
+        ), None
+    base = next((item for item in directory.lockfiles if item.label == base_label), None)
+    if base is None:
+        return StageResult(
+            "preconditions", False, f"no committed lockfile is labelled {base_label}",
+            f"Choose a label under corpus/lockfiles/, then run {command} again.",
+        ), None
+    court_ids = tuple(item.strip() for item in added_courts.split(","))
+    if "" in court_ids:
+        return StageResult(
+            "preconditions", False, "--add-courts has an empty court id",
+            f"Name court ids from courts.yaml, then run {command} again.",
+        ), None
+    seen: set[str] = set()
+    for court_id in court_ids:
+        if court_id in seen:
+            return StageResult(
+                "preconditions", False, f"court id {court_id} is repeated",
+                f"Name each court id once, then run {command} again.",
+            ), None
+        seen.add(court_id)
+    for court_id in court_ids:
+        if court_map.court(court_id) is None:
+            nearest = difflib.get_close_matches(court_id, court_map.courts, n=1, cutoff=0.0)
+            suggestion = f"; nearest id is {nearest[0]}" if nearest else ""
+            return StageResult(
+                "preconditions", False, f"unknown court id {court_id}{suggestion}",
+                f"Look up court ids in courts.yaml as described in "
+                f"docs/runbooks/release-files.md §11, then run {command} again.",
+            ), None
+    court_sources = tuple(source for source in registry if source.carries_courts)
+    for court_id in court_ids:
+        for source in court_sources:
+            if court_id in (base.sources[source.name].courts or ()):
+                return StageResult(
+                    "preconditions", False,
+                    f"court id {court_id} is already in base {base_label}",
+                    f"Choose a court absent from {base_label}, then run {command} again.",
                 ), None
-    return StageResult("preconditions", True, "root, worker, and release artifacts are ready", ""), directory.newest
+    if not court_sources:
+        return StageResult(
+            "preconditions", False, "no source in the registry carries courts",
+            f"Correct the source registry in the release, then run {command} again.",
+        ), None
+    row = record.read_cut(host, rendered_dir, base_label, command_path="corpus cut")
+    if isinstance(row, Problem):
+        return StageResult("preconditions", False, row.problem, row.fix), None
+    if row is None:
+        return StageResult(
+            "preconditions", False, f"base {base_label} is not recorded on this box",
+            f"Run {report.command('corpus install')} {base_label}, then run {command} again.",
+        ), None
+    try:
+        same_time = datetime.fromisoformat(row.cut_at.replace("Z", "+00:00")) == datetime.fromisoformat(
+            base.cut_at.replace("Z", "+00:00")
+        )
+    except ValueError:
+        same_time = False
+    bindings = tuple(sorted((name, pin.snapshot_date) for name, pin in base.sources.items()))
+    recorded_bindings = tuple(sorted((item.source, item.snapshot_date) for item in row.sources))
+    if not (
+        row.label == base.label and row.schema == base.schema
+        and row.pipeline == base.pipeline and same_time
+        and row.reason == base.reason and row.base == base.base
+        and recorded_bindings == bindings
+    ):
+        return StageResult(
+            "preconditions", False, f"base {base_label}'s record disagrees with its lockfile",
+            f"Restore the matching lockfile from the release checkout, then run {command} again.",
+        ), None
+    return StageResult(
+        "preconditions", True, "root, release artifacts, and the base's record are ready", ""
+    ), DerivedRequest(base, court_ids)
 
 
 def _preconditions(
@@ -130,18 +246,23 @@ def _preconditions(
     checkout: Path,
     registry: Sequence[SourceDefinition],
     clock: Callable[[], datetime],
-) -> tuple[StageResult, Lockfile | None, backuplock.Claim | None]:
-    if getattr(args, "base", None) is not None or getattr(args, "add_courts", None) is not None:
+) -> tuple[StageResult, LockfileDirectoryResult | None, DerivedRequest | None,
+           backuplock.Claim | None]:
+    base_label = getattr(args, "base", None)
+    added_courts = getattr(args, "add_courts", None)
+    if (base_label is None) != (added_courts is None):
+        given, missing = (
+            ("--add-courts", "--base") if base_label is None else ("--base", "--add-courts")
+        )
         return StageResult(
-            "preconditions", False, "derived corpus cut is not implemented yet",
-            f"Run {report.command('corpus cut')} without --base or --add-courts; "
-            "the derived form arrives in a later release.",
-        ), None, None
+            "preconditions", False, f"{given} was given without {missing}",
+            f"Run {report.command('corpus cut')} --base <label> --add-courts <ids>.",
+        ), None, None, None
     if host.geteuid() != 0:
         return StageResult(
             "preconditions", False, "root privileges are required",
             f"Run {report.command('corpus cut')}, then retry.",
-        ), None, None
+        ), None, None, None
     claim = backuplock.claim(
         host, command=report.command_name("corpus cut"), now=clock(),
         lock=backuplock.CORPUS_LOCK,
@@ -150,20 +271,27 @@ def _preconditions(
         return StageResult(
             "preconditions", False, claim.refusal.detail,
             _retry_fix(claim.refusal.fix),
-        ), None, None
+        ), None, None, None
     if not claim.taken:
         return StageResult(
             "preconditions", False, "a corpus cut is already running in this process",
             f"Wait for it to finish, then run {report.command('corpus cut')} again.",
-        ), None, None
+        ), None, None, None
     try:
-        stage, newest = _artifact_preconditions(host, rendered_dir, checkout, registry)
+        stage, directory, court_map = _artifact_preconditions(
+            host, rendered_dir, checkout, registry, check_worker=base_label is None,
+        )
+        request: DerivedRequest | None = None
+        if stage.ok and base_label is not None:
+            assert directory is not None and court_map is not None and added_courts is not None
+            stage, request = _derived_preconditions(
+                host, rendered_dir, registry, directory, court_map,
+                base_label, added_courts,
+            )
     except BaseException:
         backuplock.release_claim(host, claim, lock=backuplock.CORPUS_LOCK)
         raise
-    return stage, newest, claim
-
-
+    return stage, directory, request, claim
 
 
 def _cut_reason(pins: Mapping[str, SourcePin], newest: Lockfile | None) -> str:
@@ -197,25 +325,31 @@ def _lockfile_owner(host: WritableBytesHost, checkout: Path, directory: Path) ->
     return owner.st_uid, owner.st_gid
 
 
-def _lockfile(
+def _candidate_time(now: datetime) -> tuple[str, str] | StageResult:
+    if now.tzinfo is None:
+        return StageResult("lockfile", False, "cut clock has no timezone",
+                           f"Use a UTC clock, then run {report.command('corpus cut')} again.")
+    timestamp = now.astimezone(UTC)
+    return f"corpus-{timestamp.date().isoformat()}", timestamp.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _full_candidate(
     host: resolve.CorpusHost,
-    rendered_dir: PathLike,
     checkout: Path,
     registry: Sequence[SourceDefinition],
     resolved: Mapping[str, resolve.ResolvedSource],
     verified: Mapping[str, tuple[SidecarEntry, ...]],
     newest: Lockfile | None,
     now: datetime,
-) -> StageResult:
-    if now.tzinfo is None:
-        return StageResult("lockfile", False, "cut clock has no timezone",
-                           f"Use a UTC clock, then run {report.command('corpus cut')} again.")
-    timestamp = now.astimezone(UTC)
-    label = f"corpus-{timestamp.date().isoformat()}"
+) -> LockfileCandidate | StageResult:
+    time_fields = _candidate_time(now)
+    if isinstance(time_fields, StageResult):
+        return time_fields
+    label, cut_at = time_fields
     directory = checkout / "corpus/lockfiles"
-    companion = directory / label
     pins: dict[str, SourcePin] = {}
     index_bytes: dict[str, Mapping[str, bytes]] = {}
+    sidecar_bytes: dict[str, bytes] = {}
     for source in registry:
         selected = resolved[source.name]
         snapshot = selected.snapshot
@@ -264,10 +398,80 @@ def _lockfile(
             sum(entry.size for entry in entries), indexes, entries, courts,
         )
         index_bytes[source.name] = source_index_bytes
+        sidecar_bytes[source.name] = sidecar
     candidate = Lockfile(
         SCHEMA_VERSION, label, PIPELINE_VERSION,
-        timestamp.strftime("%Y-%m-%dT%H:%M:%SZ"), _cut_reason(pins, newest), pins,
+        cut_at, _cut_reason(pins, newest), pins,
     )
+    return LockfileCandidate(candidate, index_bytes, sidecar_bytes, f"wrote {label}")
+
+
+def _derived_candidate(
+    host: resolve.CorpusHost,
+    checkout: Path,
+    registry: Sequence[SourceDefinition],
+    request: DerivedRequest,
+    now: datetime,
+) -> LockfileCandidate | StageResult:
+    time_fields = _candidate_time(now)
+    if isinstance(time_fields, StageResult):
+        return time_fields
+    label, cut_at = time_fields
+    base = request.base
+    companion = checkout / "corpus/lockfiles" / base.label
+    pins: dict[str, SourcePin] = {}
+    index_bytes: dict[str, Mapping[str, bytes]] = {}
+    sidecar_bytes: dict[str, bytes] = {}
+    for source in registry:
+        pin = base.sources[source.name]
+        courts = (tuple(sorted(set(pin.courts or ()) | set(request.court_ids)))
+                  if source.carries_courts else None)
+        pins[source.name] = SourcePin(
+            pin.snapshot_date, pin.base_url, pin.mirror_url, pin.sidecar_sha256,
+            pin.files, pin.bytes, pin.index, pin.entries, courts,
+        )
+        documents: dict[str, bytes] = {}
+        for document in pin.index:
+            path = companion / f"{source.name}.{document.name}"
+            try:
+                documents[document.name] = host.read_bytes(path)
+            except OSError as exc:
+                return StageResult(
+                    "lockfile", False, f"{path} could not be read ({type(exc).__name__})",
+                    _retry_fix(f"Restore {path} from the release checkout."),
+                )
+        index_bytes[source.name] = documents
+        path = companion / f"{source.name}.sha256"
+        try:
+            sidecar_bytes[source.name] = host.read_bytes(path)
+        except OSError as exc:
+            return StageResult(
+                "lockfile", False, f"{path} could not be read ({type(exc).__name__})",
+                _retry_fix(f"Restore {path} from the release checkout."),
+            )
+    candidate = Lockfile(
+        SCHEMA_VERSION, label, PIPELINE_VERSION, cut_at, "tranche", pins, base.label,
+    )
+    added = ",".join(request.court_ids)
+    return LockfileCandidate(
+        candidate, index_bytes, sidecar_bytes,
+        f"wrote {label} from {base.label}, courts + {added}",
+    )
+
+
+def _write_lockfile(
+    host: resolve.CorpusHost,
+    rendered_dir: PathLike,
+    checkout: Path,
+    registry: Sequence[SourceDefinition],
+    newest: Lockfile | None,
+    built: LockfileCandidate,
+) -> StageResult:
+    candidate = built.lockfile
+    label = candidate.label
+    pins = candidate.sources
+    directory = checkout / "corpus/lockfiles"
+    companion = directory / label
     if newest is not None and same_state(candidate, newest):
         return StageResult("lockfile", True, f"unchanged; {newest.label} already pins this state", "")
     later_fix = f"Run {report.command('corpus cut')} on a later UTC date."
@@ -290,11 +494,11 @@ def _lockfile(
         for source in registry:
             for document in pins[source.name].index:
                 document_path = companion / f"{source.name}.{document.name}"
-                host.write_bytes(document_path, index_bytes[source.name][document.name])
+                host.write_bytes(document_path, built.index_bytes[source.name][document.name])
                 host.chown(document_path, uid, gid)
         for source in registry:
             sidecar_path = companion / f"{source.name}.sha256"
-            host.write_text(sidecar_path, render_sidecar(pins[source.name].entries))
+            host.write_bytes(sidecar_path, built.sidecar_bytes[source.name])
             host.chown(sidecar_path, uid, gid)
         path = directory / f"{label}.yaml"
         host.write_text(path, render_lockfile(candidate))
@@ -311,7 +515,7 @@ def _lockfile(
             "Restore the lockfile files from the release checkout, then run "
             f"{report.command('corpus cut')} again.",
         )
-    return StageResult("lockfile", True, f"wrote {label}", "")
+    return StageResult("lockfile", True, built.written_detail, "")
 
 
 def _run_cut_stages(
@@ -386,11 +590,40 @@ def _run_cut_stages(
         return _refuse("record", "cut clock has no timezone",
                        f"Use a UTC clock, then run {report.command('corpus cut')} again.")
     active_stage[0] = "lockfile"
-    stage = _lockfile(io, rendered_dir, root, sources, resolved, verified, newest, clock())
+    built = _full_candidate(io, root, sources, resolved, verified, newest, clock())
+    if isinstance(built, StageResult):
+        return _refuse("lockfile", built.detail, built.fix)
+    stage = _write_lockfile(io, rendered_dir, root, sources, newest, built)
     if not stage.ok:
         return _refuse("lockfile", stage.detail, stage.fix)
     report.print_stage(stage)
     active_stage[0] = "record"
+    fetched_at: dict[str, str] = {}
+    for source in sources:
+        latest = fetched[source.name].latest_fetch()
+        if latest is None:
+            return _refuse(
+                "record", f"source {source.name} has no fetch records",
+                _retry_fix("Restore its snapshot files."),
+            )
+        fetched_at[source.name] = latest
+    return _record_stage(
+        io, rendered_dir, root, sources, stage,
+        lambda lockfile: record.write_cut(
+            io, rendered_dir, lockfile, fetched_at,
+            verified_at.astimezone(UTC).isoformat(), command_path="corpus cut",
+        ),
+    )
+
+
+def _record_stage(
+    io: resolve.CorpusHost,
+    rendered_dir: PathLike,
+    root: Path,
+    sources: Sequence[SourceDefinition],
+    stage: StageResult,
+    write: Callable[[Lockfile], Problem | None],
+) -> int:
     directory = read_lockfile_directory(
         root / "corpus/lockfiles",
         known_sources={source.name: source.carries_courts for source in sources}, host=io,
@@ -401,17 +634,7 @@ def _run_cut_stages(
             _retry_fix("Restore the lockfile and its companion files from the release checkout."),
         )
     lockfile = directory.newest
-    fetched_at: dict[str, str] = {}
-    for source in sources:
-        latest = fetched[source.name].latest_fetch()
-        if latest is None:
-            return _refuse(
-                "record", f"source {source.name} has no fetch records",
-                _retry_fix("Restore its snapshot files."),
-            )
-        fetched_at[source.name] = latest
-    issue = record.write_cut(io, rendered_dir, lockfile, fetched_at,
-                             verified_at.astimezone(UTC).isoformat(), command_path="corpus cut")
+    issue = write(lockfile)
     if issue is not None:
         return _refuse("record", issue.problem, issue.fix)
     row = record.read_cut(io, rendered_dir, lockfile.label, command_path="corpus cut")
@@ -422,10 +645,38 @@ def _run_cut_stages(
             "record", f"lockfile {lockfile.label} was not found after writing",
             _retry_fix(f"Run {stack.logs_fix(rendered_dir, 'postgres')} to inspect the record."),
         )
-    report.print_stage(StageResult("record", True, f"{row.label}: {row.state}", ""))
+    base_detail = f", base {row.base}" if row.base is not None else ""
+    report.print_stage(StageResult("record", True, f"{row.label}: {row.state}{base_detail}", ""))
     if stage.detail.startswith("wrote "):
         print("Next: commit the new lockfile and companion files.")
     return 0
+
+
+def _run_derived_stages(
+    io: resolve.CorpusHost,
+    rendered_dir: PathLike,
+    root: Path,
+    clock: Callable[[], datetime],
+    sources: Sequence[SourceDefinition],
+    newest: Lockfile | None,
+    request: DerivedRequest,
+    active_stage: list[str],
+) -> int:
+    active_stage[0] = "lockfile"
+    built = _derived_candidate(io, root, sources, request, clock())
+    if isinstance(built, StageResult):
+        return _refuse("lockfile", built.detail, built.fix)
+    stage = _write_lockfile(io, rendered_dir, root, sources, newest, built)
+    if not stage.ok:
+        return _refuse("lockfile", stage.detail, stage.fix)
+    report.print_stage(stage)
+    active_stage[0] = "record"
+    return _record_stage(
+        io, rendered_dir, root, sources, stage,
+        lambda lockfile: record.write_derived_cut(
+            io, rendered_dir, lockfile, command_path="corpus cut",
+        ),
+    )
 
 
 def run_corpus_cut(
@@ -446,13 +697,20 @@ def run_corpus_cut(
     active_stage = ["preconditions"]
     lock_claim: backuplock.Claim | None = None
     try:
-        stage, newest, lock_claim = _preconditions(args, io, rendered_dir, root, sources, clock)
+        stage, directory, request, lock_claim = _preconditions(
+            args, io, rendered_dir, root, sources, clock,
+        )
         if not stage.ok:
             return _refuse("preconditions", stage.detail, stage.fix)
         report.print_stage(stage)
+        assert directory is not None
+        if request is not None:
+            return _run_derived_stages(
+                io, rendered_dir, root, clock, sources, directory.newest, request, active_stage,
+            )
         return _run_cut_stages(
             io, rendered_dir, root, snapshots_root, clock, sleep, monotonic,
-            sources, newest, active_stage,
+            sources, directory.newest, active_stage,
         )
     except KeyboardInterrupt:
         if active_stage[0] == "fetch":

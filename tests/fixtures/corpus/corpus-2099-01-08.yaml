@@ -1,8 +1,8 @@
 # Written by the corpus cut command; edit mirror_url alone.
 schema: 1
-label: corpus-2099-01-06
+label: corpus-2099-01-08
 pipeline: 0.0.0
-cut_at: '2099-01-06T04:05:06Z'
+cut_at: '2099-01-03T04:05:06Z'
 reason: tranche
 sources:
   example:

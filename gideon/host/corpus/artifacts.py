@@ -45,12 +45,15 @@ def load_artifacts(
     rendered_dir: PathLike,
     checkout: Path,
     registry: Sequence[SourceDefinition],
-    *, command_path: str,
+    *, command_path: str, check_worker: bool = True,
 ) -> tuple[CorpusArtifacts | None, StageResult | None]:
     """Load all committed lockfiles and their shared dependencies."""
-    worker_stage = worker.worker_preconditions(host, rendered_dir, command_path=command_path)
-    if not worker_stage.ok:
-        return None, worker_stage
+    if check_worker:
+        worker_stage = worker.worker_preconditions(
+            host, rendered_dir, command_path=command_path,
+        )
+        if not worker_stage.ok:
+            return None, worker_stage
 
     courts_result = load_court_map(checkout / "courts.yaml", host=host)
     issue = artifact_problem(courts_result.errors, "court map", command_path=command_path)

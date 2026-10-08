@@ -139,12 +139,27 @@ def _artifact_preconditions(
             "preconditions", False, f"lockfile label {label} is superseded",
             f"Run {report.command(f'{COMMAND_PATH} {newest.label}')} instead.",
         ), None
+    base_text = ""
+    if lockfile.base is not None:
+        base_row = record.read_cut(host, rendered_dir, lockfile.base, command_path=COMMAND_PATH)
+        if isinstance(base_row, Problem):
+            return StageResult("preconditions", False, base_row.problem, base_row.fix), None
+        if base_row is None:
+            # The record's base column is a foreign key, so a derived lockfile
+            # follows its base onto a box, and the refusal comes before any fetch.
+            return StageResult(
+                "preconditions", False,
+                f"base {lockfile.base} of lockfile {label} is not recorded on this box",
+                f"Run {report.command(f'{COMMAND_PATH} {lockfile.base}')}, then run "
+                f"{report.command(f'{COMMAND_PATH} {label}')} again.",
+            ), None
+        base_text = f"; base {lockfile.base} {base_row.state}"
     snapshots_text = ", ".join(
         f"{name} {pin.snapshot_date}" for name, pin in lockfile.sources.items()
     )
     state = row.state if row is not None else "not yet recorded"
     return StageResult(
-        "preconditions", True, f"{label}: {snapshots_text}; {state}", "",
+        "preconditions", True, f"{label}: {snapshots_text}; {state}{base_text}", "",
     ), lockfile
 
 
