@@ -3,7 +3,7 @@
 from collections.abc import Mapping
 from typing import Final
 
-from gideon.host import weights
+from gideon.host import gpus, weights
 from gideon.host.images import RegistryTarget, parse_registry, reference
 from gideon.host.models import ModelPin
 from gideon.host.render import RenderInputs
@@ -110,8 +110,9 @@ def model_service(
     if model.gpu < 0 or model.gpu >= len(inputs.facts.gpu_uuids):
         raise ValueError(
             f"Cannot render Compose: profile {inputs.profile.name} assigns {member.role} GPU "
-            f"index {model.gpu}, but the host has {len(inputs.facts.gpu_uuids)} GPU UUID(s). "
-            "Run nvidia-smi -L and re-run preflight's hardware-profile check."
+            f"index {model.gpu}, but the GPU record {gpus.GPU_RECORD_PATH} names "
+            f"{len(inputs.facts.gpu_uuids)} card(s). Run nvidia-smi -L and re-run "
+            f"preflight's hardware-profile check. {gpus.re_record_fix()}"
         )
     hf_home = model.serve.env.get("HF_HOME")
     if not hf_home:

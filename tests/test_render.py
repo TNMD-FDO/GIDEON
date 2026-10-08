@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 
 import yaml  # type: ignore[import-untyped]
 
-from gideon.host import nogpu, report, secrets, weights
+from gideon.host import gpus, nogpu, report, secrets, weights
 from gideon.host.egress import load_egress_allowlist
 from gideon.host.images import (
     ImageLock,
@@ -141,9 +141,18 @@ NVIDIA_SMI_L = (
 class FakeHost:
     """A command-and-file Host for the facts gatherer."""
 
-    def __init__(self, *, commands: Mapping[tuple[str, ...], subprocess.CompletedProcess[str]] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        commands: Mapping[tuple[str, ...], subprocess.CompletedProcess[str]] | None = None,
+        files: Mapping[str, str] | None = None,
+    ) -> None:
         self.commands = dict(commands or {})
+        self.files = dict(files or {})
         self.calls: list[tuple[str, ...]] = []
+        self.reads: list[str] = []
+        self.record_writes: list[tuple[str, str, int]] = []
+        self.mkdirs: list[tuple[str, int, bool, bool]] = []
 
     def run(
         self,
@@ -162,13 +171,21 @@ class FakeHost:
         return self.commands.get(command, subprocess.CompletedProcess(list(command), 127, "", ""))
 
     def read_text(self, path: PathLike, *, encoding: str = "utf-8") -> str:
-        raise FileNotFoundError(os.fspath(path))
+        del encoding
+        key = os.fspath(path)
+        self.reads.append(key)
+        if key not in self.files:
+            raise FileNotFoundError(key)
+        return self.files[key]
 
     def write_text(self, path: PathLike, text: str, *, encoding: str = "utf-8", mode: int = 0o644) -> None:
-        raise NotImplementedError
+        del encoding
+        key = os.fspath(path)
+        self.record_writes.append((key, text, mode))
+        self.files[key] = text
 
     def exists(self, path: PathLike) -> bool:
-        return False
+        return os.fspath(path) in self.files
 
     def listdir(self, path: PathLike) -> list[str]:
         raise NotImplementedError
@@ -186,7 +203,7 @@ class FakeHost:
         raise NotImplementedError
 
     def mkdir(self, path: PathLike, *, mode: int = 0o755, parents: bool = False, exist_ok: bool = False) -> None:
-        raise NotImplementedError
+        self.mkdirs.append((os.fspath(path), mode, parents, exist_ok))
 
     def geteuid(self) -> int:
         return 0
@@ -243,7 +260,7 @@ def inputs(site_path: Path = EXAMPLE, **overrides: object) -> RenderInputs:
 class Facts(unittest.TestCase):
     SMI = ("nvidia-smi", "-L")
 
-    def test_gpu_uuids_in_nvidia_smi_order(self) -> None:
+    def test_first_gather_records_nvidia_smi_order(self) -> None:
         group = ("getent", "group", "gideon")
         host = FakeHost(
             commands={
@@ -252,6 +269,66 @@ class Facts(unittest.TestCase):
             }
         )
         self.assertEqual(gather_facts(host), HostFacts(("GPU-aaaa", "GPU-bbbb"), service_gid=4242))
+        self.assertEqual(len(host.record_writes), 1)
+        path, text, mode = host.record_writes[0]
+        self.assertEqual(path, os.fspath(gpus.GPU_RECORD_PATH))
+        self.assertEqual(mode, 0o644)
+        self.assertTrue(text.startswith("#"))
+        self.assertEqual(yaml.safe_load(text), {"gpus": ["GPU-aaaa", "GPU-bbbb"]})
+        self.assertIn(
+            (os.fspath(gpus.GPU_RECORD_PATH.parent), 0o755, True, True), host.mkdirs
+        )
+
+    def test_reordered_probe_keeps_recorded_positions(self) -> None:
+        group = ("getent", "group", "gideon")
+        host = FakeHost(
+            commands={
+                self.SMI: subprocess.CompletedProcess(
+                    list(self.SMI), 0,
+                    "GPU 0: X (UUID: GPU-bbbb)\nGPU 1: X (UUID: GPU-aaaa)\n", "",
+                ),
+                group: subprocess.CompletedProcess(list(group), 0, "gideon:x:4242:\n", ""),
+            },
+            files={os.fspath(gpus.GPU_RECORD_PATH): "gpus:\n  - GPU-aaaa\n  - GPU-bbbb\n"},
+        )
+        self.assertEqual(gather_facts(host), HostFacts(("GPU-aaaa", "GPU-bbbb"), 4242))
+        self.assertEqual(host.record_writes, [])
+
+    def test_missing_recorded_card_refuses_with_position_and_fix(self) -> None:
+        group = ("getent", "group", "gideon")
+        host = FakeHost(
+            commands={
+                self.SMI: subprocess.CompletedProcess(
+                    list(self.SMI), 0, "GPU 0: X (UUID: GPU-aaaa)\n", ""
+                ),
+                group: subprocess.CompletedProcess(list(group), 0, "gideon:x:4242:\n", ""),
+            },
+            files={os.fspath(gpus.GPU_RECORD_PATH): "gpus:\n  - GPU-aaaa\n  - GPU-bbbb\n"},
+        )
+        facts = gather_facts(host)
+        self.assertIsInstance(facts, FactsError)
+        assert isinstance(facts, FactsError)
+        for fragment in (str(gpus.GPU_RECORD_PATH), "GPU index 1", "GPU-bbbb"):
+            self.assertIn(fragment, facts.problem)
+        for fragment in (str(gpus.GPU_RECORD_PATH), "as root", "render --diff"):
+            self.assertIn(fragment, facts.fix)
+        self.assertEqual(host.record_writes, [])
+
+    def test_malformed_record_refuses_by_file(self) -> None:
+        group = ("getent", "group", "gideon")
+        host = FakeHost(
+            commands={
+                self.SMI: subprocess.CompletedProcess(list(self.SMI), 0, NVIDIA_SMI_L, ""),
+                group: subprocess.CompletedProcess(list(group), 0, "gideon:x:4242:\n", ""),
+            },
+            files={os.fspath(gpus.GPU_RECORD_PATH): "gpus: []\n"},
+        )
+        facts = gather_facts(host)
+        self.assertIsInstance(facts, FactsError)
+        assert isinstance(facts, FactsError)
+        self.assertIn(str(gpus.GPU_RECORD_PATH), facts.problem)
+        self.assertIn("render --diff", facts.fix)
+        self.assertEqual(host.record_writes, [])
 
     def test_missing_service_group_refuses_with_the_service_user_fix(self) -> None:
         host = FakeHost(
@@ -263,6 +340,8 @@ class Facts(unittest.TestCase):
         self.assertIsInstance(facts, FactsError)
         assert isinstance(facts, FactsError)
         self.assertIn("service-user", facts.fix)
+        self.assertEqual(host.record_writes, [])
+        self.assertNotIn(os.fspath(gpus.GPU_RECORD_PATH), host.reads)
 
     def test_absent_nvidia_smi_refuses_naming_the_driver_step(self) -> None:
         facts = gather_facts(FakeHost())
@@ -285,6 +364,8 @@ class Facts(unittest.TestCase):
             HostFacts((), service_gid=4242),
         )
         self.assertNotIn(self.SMI, host.calls)
+        self.assertNotIn(os.fspath(gpus.GPU_RECORD_PATH), host.reads)
+        self.assertEqual(host.record_writes, [])
 
     def test_failing_nvidia_smi_refuses_with_its_stderr(self) -> None:
         host = FakeHost(commands={self.SMI: subprocess.CompletedProcess(list(self.SMI), 9, "", "NVML: Driver/library version mismatch")})
@@ -1640,7 +1721,7 @@ class RenderCommand(unittest.TestCase):
                 self.assertIn("notes.txt", err)
                 self.assertIn("Fix:", err)
 
-    def test_diff_reports_without_writing_and_names_services(self) -> None:
+    def test_diff_writes_only_the_gpu_record_and_names_services(self) -> None:
         host = DirHost(checkout_files())
         code, out, err = render(host, diff=True)
         self.assertEqual((code, err), (0, ""))
@@ -1650,7 +1731,7 @@ class RenderCommand(unittest.TestCase):
             "Services apply would recreate: " + ", ".join(service_names(inputs())),
             out,
         )
-        self.assertEqual(host.writes, [])
+        self.assertEqual(host.writes, [os.fspath(gpus.GPU_RECORD_PATH)])
         render(host)
         code, out, _ = render(host, diff=True)
         self.assertEqual(code, 0)

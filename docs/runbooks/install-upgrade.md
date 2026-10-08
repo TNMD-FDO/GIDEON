@@ -121,17 +121,18 @@ same command is run again after the fix.
    and a second pull started while one runs refuses naming it.
    **The engine** (`v0.1.6`): on a GPU host apply renders
    `gideon-generator` from the profile's `serve` block — the vLLM image at its
-   `images.lock` digest, GPU 0 reserved by UUID through CDI, `/data/models`
-   mounted read-only, no published port — and starts it in the `start`
-   stage. The model takes minutes to load, so `verify` waits for the model
-   servers together for up to the longest of their allowances from the start
+   `images.lock` digest, the recorded GPU 0 card reserved by UUID through
+   CDI, `/data/models` mounted read-only, no published port — and starts it
+   in the `start` stage. The model takes minutes to load, so `verify` waits
+   for the model servers together for up to the longest of their allowances
+   from the start
    stage (the same clock as each container's healthcheck), reports
    `model servers healthy N s after start` — the moment the last of them
    answered — and keeps every other service on its one-minute bound. The
    embedding server, `gideon-embed`, is the engine's sibling on the same
-   image: GPU 1 by UUID, a fixed share of that card held from its start, its
-   own key `/etc/gideon/secrets/embed_api_key` read inside its container the
-   same way, the same wait. It starts only when that share is free on the
+   image: the recorded GPU 1 card by UUID, a fixed share of that card held
+   from its start, its own key `/etc/gideon/secrets/embed_api_key` read
+   inside its container the same way, the same wait. It starts only when that share is free on the
    card; otherwise its logs name the shortfall and `verify` fails naming
    them. The engine's API
    key is the generated secret `/etc/gideon/secrets/engine_api_key`, created
@@ -206,6 +207,14 @@ exporter, its scrape job, the GPU board, and the driver-drift rule are not
 rendered. `--only` on a skipped step refuses and names the marker. To leave the
 mode, remove the marker and re-run provision; the next apply renders the removed
 files as new. The marker is never carried in a backup set.
+
+**GPU record.** The first render on a GPU host, including `render --diff`, writes
+`/etc/gideon/gpus.yaml` from `nvidia-smi -L` order; later renders bind each
+`models.lock` GPU position to that recorded card. If a recorded card is no
+longer reported, render refuses with its position and UUID; after a card
+change, remove the file as root with `sudo rm /etc/gideon/gpus.yaml`, then run
+`sudo python3 -m gideon render --diff` to re-record the cards and inspect what
+moves before applying. The record is never carried in a backup set.
 
 **Build box.** The KVM, registry, and runner steps (`kvm`, `registry`, and
 `gh-runner`) converge only on TNMD's box, declared once with

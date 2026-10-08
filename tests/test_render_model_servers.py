@@ -10,7 +10,7 @@ from pathlib import Path
 import yaml  # type: ignore[import-untyped]
 from test_render import EXAMPLE, ROOT, SECOND, inputs
 
-from gideon.host import weights
+from gideon.host import gpus, weights
 from gideon.host.images import parse_registry, reference
 from gideon.host.models import GIGABYTE, load_models_lock
 from gideon.host.render.compose import ComposeArtifact, service_blocks
@@ -21,9 +21,10 @@ from gideon.host.render.engine import (
     metrics_target,
     model_server,
 )
+from gideon.host.render.facts import HostFacts
 from gideon.host.render.prometheus import PrometheusConfigArtifact
 from gideon.host.render.services import image_pin
-from gideon.host.render.services.model_server import model_command
+from gideon.host.render.services.model_server import model_command, model_service
 
 
 class Family(unittest.TestCase):
@@ -55,6 +56,29 @@ class Family(unittest.TestCase):
 
 
 class EmbedRender(unittest.TestCase):
+    def test_out_of_range_gpu_refusal_names_the_record_and_re_record_step(self) -> None:
+        rendered_inputs = inputs(EXAMPLE)
+        pin = rendered_inputs.profile.model(EMBED.role)
+        assert pin is not None
+        recorded = rendered_inputs.facts.gpu_uuids[:pin.gpu]
+        facts = HostFacts(recorded, rendered_inputs.facts.service_gid)
+
+        with self.assertRaises(ValueError) as caught:
+            model_service(replace(rendered_inputs, facts=facts), EMBED)
+
+        refusal = str(caught.exception)
+        for fragment in (
+            EMBED.role,
+            f"index {pin.gpu}",
+            str(gpus.GPU_RECORD_PATH),
+            f"{len(recorded)} card(s)",
+            "nvidia-smi -L",
+            "hardware-profile",
+            "as root",
+            "render --diff",
+        ):
+            self.assertIn(fragment, refusal)
+
     def test_scrape_jobs_follow_the_family_on_gpu_hosts(self) -> None:
         for site in (EXAMPLE, SECOND):
             with self.subTest(site=site.name):

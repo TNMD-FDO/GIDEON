@@ -1,9 +1,9 @@
-"""Host facts gathered through the bare-host system-I/O seam."""
+"""Host facts gathered through the bare-host system-I/O seam: the GPU record, the service gid."""
 
 import re
 from dataclasses import dataclass
 
-from gideon.host import nogpu, report
+from gideon.host import gpus, nogpu, report
 from gideon.host.secrets import SERVICE_GROUP_PROBLEM, service_group_gid
 from gideon.host.sysio import Host
 
@@ -12,7 +12,7 @@ from gideon.host.sysio import Host
 class HostFacts:
     """Facts read from the host and supplied to the pure render core."""
 
-    gpu_uuids: tuple[str, ...]
+    gpu_uuids: tuple[str, ...]  # Recorded cards by lock position; first use takes today's order.
     service_gid: int
 
 
@@ -32,14 +32,15 @@ def _service_group_fix() -> str:
 
 
 def gather_facts(host: Host, *, no_gpu: bool = False) -> HostFacts | FactsError:
-    """Read GPU UUIDs in the order reported by ``nvidia-smi -L``.
+    """Read present cards and bind GPU UUIDs to recorded lock positions.
 
     A no-GPU host (the marker) has no UUIDs and is never probed; a GPU host
-    without a working driver refuses naming both ways out.
+    without a working driver refuses naming both ways out. First use records
+    today's order after the other host facts have been checked.
     """
 
     if no_gpu:
-        uuids: tuple[str, ...] = ()
+        present: tuple[str, ...] = ()
     else:
         result = host.run(["nvidia-smi", "-L"])
         if result.returncode != 0:
@@ -55,8 +56,13 @@ def gather_facts(host: Host, *, no_gpu: bool = False) -> HostFacts | FactsError:
             match = _GPU_UUID.search(line)
             if match is not None:
                 found.append(match.group(1))
-        uuids = tuple(found)
+        present = tuple(found)
     service_gid = service_group_gid(host)
     if service_gid is None:
         return FactsError(problem=SERVICE_GROUP_PROBLEM, fix=_service_group_fix())
-    return HostFacts(gpu_uuids=uuids, service_gid=service_gid)
+    if no_gpu:
+        return HostFacts(gpu_uuids=(), service_gid=service_gid)
+    bound = gpus.bind(host, present)
+    if isinstance(bound, report.Problem):
+        return FactsError(problem=bound.problem, fix=bound.fix)
+    return HostFacts(gpu_uuids=bound, service_gid=service_gid)

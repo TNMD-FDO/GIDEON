@@ -14,6 +14,7 @@ ENTRIES = {
     "gideon/egress/settings.py": "slice-3 ticket 80: egress service settings fixes",
     "gideon/host/alerts.py": "front-door ticket 29: alerts test fixes",
     "gideon/host/cas.py": "front-door ticket 29: content-addressed store fixes",
+    "gideon/host/gpus.py": "the GPU record's own text names the command that wrote it",
     "gideon/host/grafana.py": "the test alert's summary names the command that sent it",
     "gideon/host/nogpu.py": "the mode marker's own text names the declaring command",
     "gideon/host/preflight.py": "front-door ticket 29: preflight fixes",
