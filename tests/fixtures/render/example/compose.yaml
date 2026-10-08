@@ -577,6 +577,7 @@ services:
     volumes:
       - "/opt/gideon/gideon:/opt/gideon-src/gideon:ro"
       - "/data/bulk/snapshots:/data/bulk/snapshots"
+      - "/data/work:/data/work"
     read_only: true
     group_add:
       - "4242"

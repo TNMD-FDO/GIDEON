@@ -1,4 +1,4 @@
-"""Queue worker tasks for verification, recovery, and corpus fetches."""
+"""Queue worker tasks for verification, recovery, corpus fetch, and staging."""
 
 import asyncio
 import logging
@@ -7,6 +7,7 @@ from typing import Final
 import procrastinate
 from procrastinate.exceptions import UniqueViolation
 
+from . import staging
 from .fetch import (
     FETCH_QUEUE,
     FETCH_TASK,
@@ -15,6 +16,7 @@ from .fetch import (
     transfer,
     write_job_failure,
 )
+from .staging import STAGE_QUEUE, STAGE_TASK
 
 VERIFY_TASK: Final = "gideon.worker.tasks.verify"
 VERIFY_QUEUE: Final = "verify"
@@ -68,8 +70,26 @@ def fetch(
         raise
 
 
+def stage(
+    context: procrastinate.JobContext, label: str, snapshot: str,
+    courts: list[str], inputs: dict[str, dict[str, str]],
+) -> None:
+    """Stage a pinned snapshot outside the worker's event loop."""
+
+    job_id = context.job.id
+    if job_id is None:
+        raise staging.StageFailure("invalid")
+    try:
+        staging.stage(
+            SNAPSHOTS_ROOT, staging.WORK_ROOT, label, snapshot, courts, inputs, job_id,
+        )
+    except staging.StageFailure as failure:
+        staging.write_job_failure(staging.WORK_ROOT, label, snapshot, job_id, failure)
+        raise
+
+
 def register_tasks(app: procrastinate.App) -> None:
-    """Register verification, recovery, and synchronous corpus transfer."""
+    """Register verification, recovery, and synchronous corpus fetch and stage."""
 
     app.task(name=VERIFY_TASK, queue=VERIFY_QUEUE)(verify)
     task = app.task(
@@ -85,3 +105,9 @@ def register_tasks(app: procrastinate.App) -> None:
         pass_context=True,
         retry=False,
     )(fetch)
+    app.task(
+        name=STAGE_TASK,
+        queue=STAGE_QUEUE,
+        pass_context=True,
+        retry=False,
+    )(stage)

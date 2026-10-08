@@ -1,4 +1,4 @@
-"""Fetch and verify the files pinned by a committed corpus lockfile."""
+"""Fetch, verify, record, stage, and retain a committed corpus lockfile."""
 
 import argparse
 import sys
@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
-from gideon.host import backuplock, report, stack
+from gideon.host import backuplock, report, stack, staging
 from gideon.host.corpus import artifacts, record, snapshots
 from gideon.host.corpus.lockfile import (
     LABEL,
@@ -16,8 +16,13 @@ from gideon.host.corpus.lockfile import (
     check_courts,
     check_egress_hosts,
 )
-from gideon.host.corpus.sources import SOURCES, SourceDefinition
-from gideon.host.render.worker import RESOLVE_DIR, SNAPSHOTS_ROOT
+from gideon.host.corpus.sources import SOURCES, SourceDefinition, data_file
+from gideon.host.render.worker import (
+    RESOLVE_DIR,
+    SNAPSHOTS_ROOT,
+    STAGE_TABLES,
+    WORK_ROOT,
+)
 from gideon.host.report import Problem, StageResult
 from gideon.host.sysio import LockingHost, PathLike, RealHost, WritableBytesHost
 
@@ -143,6 +148,7 @@ def _run_install_stages(
     host: CorpusHost,
     rendered_dir: PathLike,
     snapshots_root: PathLike,
+    work_root: PathLike,
     lockfile: Lockfile,
     clock: Callable[[], datetime],
     sleep: Callable[[float], None],
@@ -212,8 +218,117 @@ def _run_install_stages(
             _retry_fix(f"Run {stack.logs_fix(rendered_dir, 'postgres')} to inspect the record."),
         )
     report.print_stage(StageResult("record", True, f"{row.label}: {row.state}", ""))
+    active_stage[0] = "stage"
+    staged = _stage(host, rendered_dir, work_root, lockfile, sleep, monotonic)
+    if staged:
+        return staged
     active_stage[0] = "retain"
     return _retain(host, rendered_dir, snapshots_root)
+
+
+def _stage(
+    host: CorpusHost, rendered_dir: PathLike, work_root: PathLike,
+    lockfile: Lockfile, sleep: Callable[[float], None],
+    monotonic: Callable[[], float],
+) -> int:
+    """Keep matching work, or defer and wait for each source carrying courts."""
+
+    for name, pin in lockfile.sources.items():
+        if pin.courts is None:
+            continue
+        snapshot = f"{name}-{pin.snapshot_date}"
+        entries = {entry.path: entry for entry in pin.entries}
+        inputs: dict[str, dict[str, str]] = {}
+        for table in STAGE_TABLES:
+            path = data_file(table, pin.snapshot_date)
+            entry = entries.get(path)
+            if entry is None:
+                return _refuse(
+                    "stage", f"{name}: pinned stage input {path} is missing",
+                    f"Run {report.command('corpus cut')} to pin {path}, then run "
+                    f"{report.command(COMMAND_PATH)} with the new label.",
+                )
+            inputs[table] = {"path": path, "sha256": entry.sha256}
+        courts = list(pin.courts)
+        existing = staging.read_record(
+            host, lockfile.label, name, work_root=work_root, command_path=COMMAND_PATH,
+        )
+        if isinstance(existing, Problem):
+            return _refuse("stage", f"{name}: {existing.problem}", existing.fix)
+        if existing is not None:
+            if not _stage_matches(existing, snapshot, courts, inputs):
+                return _refuse("stage", f"{name}: stage record disagrees with the lockfile",
+                               _stage_removal_fix(lockfile.label, name, work_root))
+            _court_stage_rows(existing)
+            report.print_stage(StageResult("stage", True, f"{name}: complete; nothing deferred", ""))
+            continue
+        job = staging.defer_stage(
+            host, rendered_dir, label=lockfile.label, snapshot=snapshot,
+            courts=courts, inputs=inputs, command_path=COMMAND_PATH,
+        )
+        if isinstance(job, Problem):
+            return _refuse("stage", f"{name}: {job.problem}", job.fix)
+        heartbeat_at = monotonic()
+        started = heartbeat_at
+        while True:
+            outcome = staging.read_stage(
+                host, rendered_dir, job, label=lockfile.label, snapshot=snapshot,
+                work_root=work_root, command_path=COMMAND_PATH,
+            )
+            if isinstance(outcome, Problem):
+                return _refuse("stage", f"{name}: {outcome.problem}", outcome.fix)
+            if outcome.failure is not None:
+                return _refuse("stage", f"{name}: {outcome.failure.problem}", outcome.failure.fix)
+            if outcome.record is not None:
+                if not _stage_matches(outcome.record, snapshot, courts, inputs):
+                    return _refuse("stage", f"{name}: stage record disagrees with the lockfile",
+                                   _stage_removal_fix(lockfile.label, name, work_root))
+                _court_stage_rows(outcome.record)
+                read_count = sum(outcome.record.records.values())
+                report.print_stage(StageResult(
+                    "stage", True,
+                    f"{name}: {len(courts)} courts staged, {read_count} records read, "
+                    f"{round(outcome.record.seconds)} seconds", "",
+                ))
+                break
+            now = monotonic()
+            if now - heartbeat_at >= snapshots.HEARTBEAT_SECONDS:
+                report.print_stage(StageResult(
+                    "stage", True, f"{name}: staging, {round(now - started)} seconds", "",
+                ))
+                heartbeat_at = now
+            sleep(1.0)
+    return 0
+
+
+def _stage_matches(
+    record: staging.StageRecord, snapshot: str, courts: list[str],
+    inputs: dict[str, dict[str, str]],
+) -> bool:
+    return (
+        record.snapshot == snapshot and record.courts == courts
+        and all(
+            record.inputs[table]["path"] == inputs[table]["path"]
+            and record.inputs[table]["sha256"] == inputs[table]["sha256"]
+            for table in STAGE_TABLES
+        )
+    )
+
+
+def _stage_removal_fix(label: str, source: str, work_root: PathLike) -> str:
+    directory = staging.work_directory(label, source, work_root=work_root)
+    return f"Remove {directory}, then run {report.command(COMMAND_PATH)} again."
+
+
+def _court_stage_rows(record: staging.StageRecord) -> None:
+    for court in record.courts:
+        counts = record.counts[court]
+        report.print_stage(StageResult(
+            "stage", True,
+            f"{court}: dockets {counts['dockets']}, "
+            f"opinion-clusters {counts['opinion-clusters']}, "
+            f"citations {counts['citations']}, opinions {counts['opinions']}", "",
+        ))
 
 
 def _retain(host: CorpusHost, rendered_dir: PathLike, snapshots_root: PathLike) -> int:
@@ -291,12 +406,13 @@ def run_corpus_install(
     rendered_dir: PathLike = "/etc/gideon/rendered",
     checkout: PathLike | None = None,
     snapshots_root: PathLike = SNAPSHOTS_ROOT,
+    work_root: PathLike = WORK_ROOT,
     clock: Callable[[], datetime] = _utc_now,
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
     sources: Sequence[SourceDefinition] = SOURCES,
 ) -> int:
-    """Run the install's preconditions, fetch, verify, record, and retain stages."""
+    """Run preconditions, fetch, verify, record, stage, and retain."""
     io = host if host is not None else RealHost()
     root = Path(checkout) if checkout is not None else Path(__file__).parents[3]
     active_stage = ["preconditions"]
@@ -308,13 +424,19 @@ def run_corpus_install(
         assert lockfile is not None
         report.print_stage(stage)
         return _run_install_stages(
-            io, rendered_dir, snapshots_root, lockfile, clock, sleep, monotonic, active_stage,
+            io, rendered_dir, snapshots_root, work_root, lockfile,
+            clock, sleep, monotonic, active_stage,
         )
     except KeyboardInterrupt:
         if active_stage[0] == "fetch":
             return _refuse(
                 "fetch", "interrupted; downloads continue in the worker",
                 f"Run {report.command(COMMAND_PATH)} again to rejoin them.",
+            )
+        if active_stage[0] == "stage":
+            return _refuse(
+                "stage", "interrupted; the stage continues in the worker",
+                f"Run {report.command(COMMAND_PATH)} again to rejoin it.",
             )
         if active_stage[0] == "retain":
             return _refuse(

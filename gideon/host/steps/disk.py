@@ -85,7 +85,9 @@ _DATA_DIRS: Final[tuple[_DataDirectory, ...]] = (
     _DataDirectory(
         str(worker.SNAPSHOTS_ROOT.relative_to(_DATA_MOUNT)), "gideon", worker.DIR_MODE
     ),
-    _DataDirectory("work", "gideon", 0o755),
+    _DataDirectory(
+        str(worker.WORK_ROOT.relative_to(_DATA_MOUNT)), "gideon", worker.DIR_MODE
+    ),
     _DataDirectory("models", "gideon", 0o755),
     _DataDirectory("registry", "gideon", 0o755),
     _DataDirectory("drill", "gideon", 0o755),

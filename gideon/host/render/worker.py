@@ -29,14 +29,28 @@ WORKER_MIGRATION_STEM: Final[str] = "0007_procrastinate_queue"
 
 FETCH_TASK: Final[str] = "gideon.worker.tasks.fetch"
 FETCH_QUEUE: Final[str] = "fetch"
+STAGE_TASK: Final[str] = "gideon.worker.tasks.stage"
+STAGE_QUEUE: Final[str] = "stage"
 SNAPSHOTS_ROOT: Final = Path("/data/bulk/snapshots")
+WORK_ROOT: Final = Path("/data/work")
 DIR_MODE: Final[int] = 0o2770
 RESOLVE_DIR: Final[str] = "resolve"
 KEPT_FORM: Final[str] = "kept"
 FRESH_FORM: Final[str] = "fresh"
 RECORD_SUFFIX: Final[str] = ".fetch.json"
 FAILURE_SUFFIX: Final[str] = ".fetch-failed.json"
-RESERVED_SUFFIXES: Final = (".partial", RECORD_SUFFIX, FAILURE_SUFFIX)
+PARTIAL_SUFFIX: Final[str] = ".partial"
+STAGE_RECORD_NAME: Final[str] = "stage.json"
+STAGE_FAILURE_NAME: Final[str] = "stage-failed.json"
+STAGE_TABLES: Final = (
+    "courts", "dockets", "opinion-clusters", "citations", "opinions",
+)
+COURT_PATTERN: Final[str] = r"[a-z0-9]{1,32}"
+STAGE_FAILURE_REASONS: Final = frozenset({
+    "invalid", "missing-input", "input-mismatch", "unknown-court",
+    "malformed", "local", "busy",
+})
+RESERVED_SUFFIXES: Final = (PARTIAL_SUFFIX, RECORD_SUFFIX, FAILURE_SUFFIX)
 # exempt: two fetch lanes are the starting value until the corpus run measures one.
 LANE_COUNT: Final[int] = 2
 SEGMENT_PATTERN: Final[str] = r"[A-Za-z0-9][A-Za-z0-9._-]*"

@@ -1,8 +1,11 @@
 """Verification and recovery tasks over Procrastinate's in-memory connector."""
 
 import asyncio
+import bz2
 import datetime
+import hashlib
 import inspect
+import json
 import tempfile
 import threading
 import unittest
@@ -16,7 +19,7 @@ import procrastinate
 from procrastinate.testing import InMemoryConnector
 
 from gideon.host.render import worker
-from gideon.worker import fetch, tasks
+from gideon.worker import fetch, staging, tasks
 
 
 class Unread(httpx.SyncByteStream):
@@ -55,13 +58,90 @@ class RecoveryTask(unittest.TestCase):
         )
         self.assertEqual(
             {name for name in app.tasks if name.startswith("gideon.worker.tasks.")},
-            {tasks.VERIFY_TASK, tasks.RECOVERY_TASK, fetch.FETCH_TASK},
+            {tasks.VERIFY_TASK, tasks.RECOVERY_TASK, fetch.FETCH_TASK,
+             staging.STAGE_TASK},
         )
         fetching = app.tasks[fetch.FETCH_TASK]
         self.assertEqual(fetching.queue, fetch.FETCH_QUEUE)
         self.assertTrue(fetching.pass_context)
         self.assertIsNone(fetching.queueing_lock)
         self.assertFalse(inspect.iscoroutinefunction(tasks.fetch))
+        staged = app.tasks[staging.STAGE_TASK]
+        self.assertEqual(staged.queue, staging.STAGE_QUEUE)
+        self.assertTrue(staged.pass_context)
+        self.assertIsNone(staged.queueing_lock)
+        self.assertFalse(inspect.iscoroutinefunction(tasks.stage))
+
+    def test_stage_jobs_run_off_the_event_loop_and_a_failure_is_filed(self) -> None:
+        snapshot = "fictions-2099-01-02"
+        threads: list[bool] = []
+        original_stage = staging.stage
+
+        with tempfile.TemporaryDirectory() as temporary:
+            snapshots = Path(temporary) / "snapshots"
+            work = Path(temporary) / "work"
+            dump = snapshots / snapshot
+            dump.mkdir(parents=True)
+            work.mkdir()
+            bodies = {
+                "courts": b"id,note\ncourt1,fictitious selected\n",
+                "dockets": b"id,court_id\nd1,court1\n",
+                "opinion-clusters": b"id,docket_id\ncl1,d1\n",
+                "citations": b"cluster_id,note\ncl1,fictitious citation\n",
+                "opinions": b"cluster_id,note\ncl1,fictitious opinion\n",
+            }
+            inputs: dict[str, dict[str, str]] = {}
+            for table, body in bodies.items():
+                path = dump / f"{table}.csv.bz2"
+                compressed = bz2.compress(body)
+                path.write_bytes(compressed)
+                digest = hashlib.sha256(compressed).hexdigest()
+                inputs[table] = {"path": path.name, "sha256": digest}
+                fetch.write_record(
+                    path.with_name(path.name + fetch.RECORD_SUFFIX),
+                    fetch.FetchRecord(
+                        "whole", fetch.KEPT_FORM, "archive.example.test", f"/{path.name}",
+                        None, None, len(compressed), len(compressed), len(compressed),
+                        digest, "2099-01-02T00:00:00+00:00", 3, 0.0, 0,
+                    ),
+                )
+
+            def in_thread(*args: object, **kwargs: object) -> staging.StageRecord:
+                threads.append(threading.current_thread() is threading.main_thread())
+                return original_stage(*args, **kwargs)  # type: ignore[arg-type]
+
+            connector = InMemoryConnector()
+            app = procrastinate.App(connector=connector)
+            tasks.register_tasks(app)
+
+            async def exercise() -> tuple[int, int]:
+                async with app.open_async():
+                    whole = await app.configure_task(staging.STAGE_TASK).defer_async(
+                        label="corpus-2099-01-03", snapshot=snapshot,
+                        courts=["court1"], inputs=inputs,  # type: ignore[arg-type]
+                    )
+                    missing = await app.configure_task(staging.STAGE_TASK).defer_async(
+                        label="corpus-2099-01-04", snapshot=snapshot,
+                        courts=["absent"], inputs=inputs,  # type: ignore[arg-type]
+                    )
+                    await app.run_worker_async(wait=False, listen_notify=False)
+                return whole, missing
+
+            with (
+                patch.object(staging, "stage", new=in_thread),
+                patch.object(tasks, "SNAPSHOTS_ROOT", snapshots),
+                patch.object(staging, "WORK_ROOT", work),
+            ):
+                whole, missing = asyncio.run(exercise())
+            self.assertEqual(connector.jobs[whole]["status"], "succeeded")
+            self.assertEqual(connector.jobs[missing]["status"], "failed")
+            self.assertEqual(threads, [False, False])
+            record_path = work / "corpus-2099-01-03/fictions" / staging.STAGE_RECORD_NAME
+            self.assertEqual(staging.read_record(record_path).job, whole)  # type: ignore[union-attr]
+            failure_path = work / "corpus-2099-01-04" / f"fictions.{staging.STAGE_FAILURE_NAME}"
+            failure = json.loads(failure_path.read_text())
+            self.assertEqual((failure["job"], failure["reason"], failure["court"]),
+                             (missing, "unknown-court", "absent"))
 
     def test_fetch_jobs_run_off_the_event_loop_and_a_failure_is_filed(self) -> None:
         body = b"Fictitious queued corpus object."

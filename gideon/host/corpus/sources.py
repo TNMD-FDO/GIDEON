@@ -68,6 +68,12 @@ def _caselaw_index_documents() -> tuple[IndexRequest, ...]:
     return (IndexRequest("listing.xml", CASELAW_LISTING_URL),)
 
 
+def data_file(name: str, snapshot_date: str) -> str:
+    """Name one dated compressed CSV file in a source snapshot."""
+
+    return f"{name}-{snapshot_date}.csv.bz2"
+
+
 def _read_caselaw_index(documents: Mapping[str, bytes]) -> SourceResolution | Problem:
     data = documents.get("listing.xml")
     if data is None:
@@ -101,7 +107,7 @@ def _read_caselaw_index(documents: Mapping[str, bytes]) -> SourceResolution | Pr
         return _listing_problem("document has no dated opinions key")
     newest = max(dates).isoformat()
     paths = (
-        *(f"{name}-{newest}.csv.bz2" for name in _DATA_FILES),
+        *(data_file(name, newest) for name in _DATA_FILES),
         f"schema-{newest}.sql",
         f"load-bulk-data-{newest}.sh",
     )

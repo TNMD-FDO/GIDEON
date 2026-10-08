@@ -118,7 +118,9 @@ The command's refusals and their fixes:
 
 Stopping the command with Ctrl-C is safe. Downloads already started continue in the worker, and the same command joins them.
 
-`sudo python3 -m gideon corpus install <label>` takes a committed lockfile onto a box. It fetches through the worker every pinned file the box does not already hold whole, from `mirror_url` where the lockfile sets one, checks every file's digest and size against the lockfile's sidecar, and records the label as `installing`. On the box that cut the lockfile nothing is fetched; on a receiving office's box the whole corpus comes through the door. It then keeps each snapshot directory a recorded lockfile still needs — one that is cut, installing, or installed, or the previously installed one — and removes a directory only older superseded lockfiles pin. It holds the same corpus lock as the cut and the watch. Its staging and build arrive with slice 3's later releases.
+`sudo python3 -m gideon corpus install <label>` takes a committed lockfile onto a box. It fetches through the worker every pinned file the box does not already hold whole, from `mirror_url` where the lockfile sets one, checks every file's digest and size against the lockfile's sidecar, and records the label as `installing`. On the box that cut the lockfile nothing is fetched; on a receiving office's box the whole corpus comes through the door. It then keeps each snapshot directory a recorded lockfile still needs — one that is cut, installing, or installed, or the previously installed one — and removes a directory only older superseded lockfiles pin. It holds the same corpus lock as the cut and the watch. Its build arrives with slice 3's later releases.
+
+Before that, the install stages the case law. The worker reads the snapshot's courts, dockets, opinion clusters, citations, and opinions files — the opinions file once — and writes each lockfile court's rows, unchanged and under each file's header, to `/data/work/<label>/caselaw/<court>/`, with a `stage.json` record beside them naming the inputs and the counts. One line per court gives its counts. This takes about two and a half hours for tranche 1. Running the command again finds the record whole and prints `complete; nothing deferred`. Stopping it with Ctrl-C is safe: the stage continues in the worker, and the same command joins it. `/data/work` is derived state outside every backup set.
 
 The install's refusals and their fixes:
 
@@ -126,3 +128,7 @@ The install's refusals and their fixes:
 - **A file on disk is short or disagrees with its sidecar line**: the copy is damaged. Remove the named file and its `.fetch.json` record, then run the command again, which fetches it anew.
 - **A file just fetched disagrees with its sidecar line**: the upstream now serves other bytes under the pinned name. Repin as the directory's README says — a `mirror_url` serving the pinned bytes, or a new cut — then remove the named file and its record, and run the command again.
 - **The label is superseded**: install the newest committed label the refusal names.
+- **A lockfile court is absent from the dump's courts file**: the court map names a court the snapshot lacks. Review `courts.yaml`, then make a new cut.
+- **A stage input is missing or its digest is off the pin**: remove the named snapshot file and its `.fetch.json` record, then run the command again, which fetches and verifies it before staging.
+- **The stage record disagrees with the lockfile**: remove the named work directory, then run the command again.
+- **The worker cannot write the work directory**: run `host provision`, then `apply`, then the command again.

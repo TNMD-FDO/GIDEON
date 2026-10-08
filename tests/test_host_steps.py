@@ -1466,6 +1466,7 @@ class DiskLayoutStepTests(unittest.TestCase):
             (0o42770, 0, 0, 0, 998, 998, 0, 0, 0, 0, 0)
         )
         stats[str(worker.SNAPSHOTS_ROOT)] = directory_stat(worker.DIR_MODE, 998, 998)
+        stats[str(worker.WORK_ROOT)] = directory_stat(worker.DIR_MODE, 998, 998)
         stats[QDRANT_DATA_ROOT] = os.stat_result(
             (0o40750, 0, 0, 0, 998, 998, 0, 0, 0, 0, 0)
         )
@@ -1553,6 +1554,11 @@ class DiskLayoutStepTests(unittest.TestCase):
             ],
         )
         snapshots_path = str(worker.SNAPSHOTS_ROOT)
+        work_path = str(worker.WORK_ROOT)
+        self.assertIn(
+            ("mkdir", (work_path, worker.DIR_MODE, False, True)), host.calls,
+        )
+        self.assertIn(("chmod", (work_path, worker.DIR_MODE)), host.calls)
         self.assertEqual(
             host.calls[bulk_chown + 4 : bulk_chown + 7],
             [
@@ -1580,6 +1586,15 @@ class DiskLayoutStepTests(unittest.TestCase):
         self.assertEqual(wrong_snapshots_mode.disposition, Disposition.DRIFT)
         self.assertIn("2770", wrong_snapshots_mode.detail)
         host.stats[snapshots_path] = correct_snapshots
+        correct_work = host.stats.pop(work_path)
+        missing_work = step.check(context(host))
+        self.assertEqual(missing_work.disposition, Disposition.DRIFT)
+        self.assertIn(work_path, missing_work.detail)
+        host.stats[work_path] = directory_stat(0o770, 998, 998)
+        wrong_work_mode = step.check(context(host))
+        self.assertEqual(wrong_work_mode.disposition, Disposition.DRIFT)
+        self.assertIn("2770", wrong_work_mode.detail)
+        host.stats[work_path] = correct_work
         self.assertIn(
             ("chown", ("/data/observability", 998, 998)),
             host.calls,
@@ -5767,6 +5782,7 @@ class BaselineCheckPass(unittest.TestCase):
         )
         host.stats["/data/bulk/cas"] = directory_stat(0o2770, 998, 998)
         host.stats[str(worker.SNAPSHOTS_ROOT)] = directory_stat(worker.DIR_MODE, 998, 998)
+        host.stats[str(worker.WORK_ROOT)] = directory_stat(worker.DIR_MODE, 998, 998)
         host.stats[QDRANT_DATA_ROOT] = directory_stat(0o750, 998, 998)
         host.stats[OPENSEARCH_DATA_ROOT] = directory_stat(
             0o700, OPENSEARCH_UID, OPENSEARCH_GID

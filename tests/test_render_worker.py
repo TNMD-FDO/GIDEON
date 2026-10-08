@@ -35,7 +35,7 @@ from gideon.host.render.services.worker import (
     WorkerService,
 )
 from gideon.host.stores import ROLE_SPECS
-from gideon.worker import fetch, metrics, settings, tasks
+from gideon.worker import fetch, metrics, settings, staging, tasks
 
 
 class WorkerIdentity(unittest.TestCase):
@@ -70,6 +70,23 @@ class WorkerIdentity(unittest.TestCase):
         self.assertEqual(
             fetch.PUBLIC_REPOSITORY_URL, PUBLIC_REPOSITORY_URL,
             "Fix: keep the fetch agent's repository address equal to the rendered card.",
+        )
+
+    def test_stage_identity_and_grammars_match_the_worker(self) -> None:
+        self.assertEqual(
+            (
+                worker.STAGE_TASK, worker.STAGE_QUEUE, worker.WORK_ROOT,
+                worker.PARTIAL_SUFFIX, worker.STAGE_RECORD_NAME,
+                worker.STAGE_FAILURE_NAME, worker.STAGE_TABLES,
+                worker.COURT_PATTERN, worker.STAGE_FAILURE_REASONS,
+            ),
+            (
+                staging.STAGE_TASK, staging.STAGE_QUEUE, staging.WORK_ROOT,
+                staging.PARTIAL_SUFFIX, staging.STAGE_RECORD_NAME,
+                staging.STAGE_FAILURE_NAME, staging.STAGE_TABLES,
+                staging.COURT_PATTERN, staging.STAGE_FAILURE_REASONS,
+            ),
+            "Fix: keep the host stage identity equal to the worker's grammar and names.",
         )
 
     def test_role_matches_the_store_and_runtime_names_match_the_render(self) -> None:
@@ -189,6 +206,7 @@ class WorkerBlock(unittest.TestCase):
                         "volumes": [
                             f"{rendered_inputs.checkout}/gideon:{API_MOUNT_TARGET}:ro",
                             f"{worker.SNAPSHOTS_ROOT}:{worker.SNAPSHOTS_ROOT}",
+                            f"{worker.WORK_ROOT}:{worker.WORK_ROOT}",
                         ],
                         "read_only": True,
                         "group_add": [str(rendered_inputs.facts.service_gid)],

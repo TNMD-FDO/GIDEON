@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from gideon.host import backuplock, fetch, report, stack, worker
+from gideon.host import backuplock, fetch, report, stack, staging, worker
 from gideon.host.corpus import install
 from gideon.host.corpus.lockfile import (
     IndexDocument,
@@ -29,7 +29,7 @@ from gideon.host.corpus.lockfile import (
     render_lockfile,
     render_sidecar,
 )
-from gideon.host.corpus.sources import SourceDefinition, SourceResolution
+from gideon.host.corpus.sources import SourceDefinition, SourceResolution, data_file
 from gideon.host.egress import load_egress_allowlist
 from gideon.host.render import worker as worker_identity
 from gideon.host.sysio import Command, PathLike, RealHost
@@ -67,9 +67,14 @@ class FakeHost(RealHost):
         self.lock_releases = 0
         self.calls: list[list[str]] = []
         self.snapshots = Path("/unused")
+        self.work = Path("/unused-work")
         self.served_bytes: dict[str, bytes] = {}
         self.deferred_urls: list[str] = []
         self.job_destinations: dict[int, str] = {}
+        self.stage_jobs: dict[int, dict[str, Any]] = {}
+        self.stage_deferred: list[dict[str, Any]] = []
+        self.stage_failure: str | None = None
+        self.interrupt_stage_job = False
         self.job_polls: dict[int, int] = {}
         self.next_job = 100
         self.unreadable_root = False
@@ -102,6 +107,47 @@ class FakeHost(RealHost):
         (self.snapshots / f"{destination}{worker_identity.RECORD_SUFFIX}").write_text(
             json.dumps(_whole_record(data, url, job))
         )
+
+    def stage_record(self, job: int, args: dict[str, Any]) -> dict[str, Any]:
+        inputs = {
+            table: {**item, "size": (
+                self.snapshots / args["snapshot"] / item["path"]
+            ).stat().st_size}
+            for table, item in args["inputs"].items()
+        }
+        return {
+            "schema": 1, "label": args["label"],
+            "source": args["snapshot"][:-staging.DATE_SUFFIX_LENGTH],
+            "snapshot": args["snapshot"], "courts": args["courts"],
+            "inputs": inputs,
+            "records": dict.fromkeys(worker_identity.STAGE_TABLES, 3),
+            "counts": {
+                court: dict.fromkeys(worker_identity.STAGE_TABLES[1:], index + 1)
+                for index, court in enumerate(args["courts"])
+            },
+            "job": job, "seconds": 7.6, "staged_at": NOW.isoformat(),
+        }
+
+    def _write_stage(self, job: int, args: dict[str, Any]) -> None:
+        directory = staging.work_directory(
+            args["label"], args["snapshot"][:-staging.DATE_SUFFIX_LENGTH],
+            work_root=self.work,
+        )
+        directory.parent.mkdir(parents=True, exist_ok=True)
+        if self.stage_failure is not None:
+            failure = {
+                "schema": 1, "job": job, "reason": self.stage_failure,
+                "table": "opinions" if self.stage_failure == "malformed" else None,
+                "court": None, "error": None, "at": NOW.isoformat(),
+            }
+            (directory.with_name(
+                directory.name + "." + worker_identity.STAGE_FAILURE_NAME
+            )).write_text(json.dumps(failure))
+        else:
+            directory.mkdir()
+            (directory / worker_identity.STAGE_RECORD_NAME).write_text(
+                json.dumps(self.stage_record(job, args))
+            )
 
     def geteuid(self) -> int:
         return self.euid
@@ -149,21 +195,32 @@ class FakeHost(RealHost):
                 args = json.loads(self._bound(input, "v_args"))
                 job = self.next_job
                 self.next_job += 1
-                destination = args["destination"]
-                url = args["url"]
-                self.deferred_urls.append(url)
-                self.job_destinations[job] = destination
                 self.job_polls[job] = 0
-                self._write_fetch(job, destination, url)
+                if "snapshot" in args:
+                    self.stage_jobs[job] = args
+                    self.stage_deferred.append(args)
+                    self._write_stage(job, args)
+                else:
+                    destination = args["destination"]
+                    url = args["url"]
+                    self.deferred_urls.append(url)
+                    self.job_destinations[job] = destination
+                    self._write_fetch(job, destination, url)
                 return subprocess.CompletedProcess(command, 0, f"{job}\n", "")
             if "FROM procrastinate_jobs" in input:
-                if self.interrupt_job:
-                    raise KeyboardInterrupt
                 job = int(self._bound(input, "v_job_id"))
-                assert job in self.job_destinations
+                if self.interrupt_job and job in self.job_destinations:
+                    raise KeyboardInterrupt
+                if self.interrupt_stage_job and job in self.stage_jobs:
+                    raise KeyboardInterrupt
+                assert job in self.job_destinations or job in self.stage_jobs
                 polls = self.job_polls[job]
                 self.job_polls[job] += 1
-                status = "doing" if polls == 0 else "succeeded"
+                status = (
+                    "doing" if polls == 0 else
+                    "failed" if job in self.stage_jobs and self.stage_failure is not None
+                    else "succeeded"
+                )
                 return subprocess.CompletedProcess(command, 0, f"{job}|{status}|1\n", "")
             if "DO $cut$" in input:
                 self.record_writes += 1
@@ -246,6 +303,8 @@ class Install(unittest.TestCase):
         root = Path(temporary.name)
         self.checkout = root / "checkout"
         self.snapshots = root / "snapshots"
+        self.work = root / "work"
+        self.work.mkdir()
         (self.checkout / "config").mkdir(parents=True)
         shutil.copy2(ROOT / "courts.yaml", self.checkout / "courts.yaml")
         shutil.copy2(ROOT / "config/egress.yaml", self.checkout / "config/egress.yaml")
@@ -256,7 +315,7 @@ class Install(unittest.TestCase):
         base_url = f"https://{group.hosts[0].host}/archive/"
         self.mirror_url = f"https://{group.hosts[0].host}/mirror/"
         self.source = SourceDefinition(
-            "example", base_url, True, ("ca6",), lambda: (),
+            "example", base_url, False, (), lambda: (),
             lambda _documents: SourceResolution("2099-01-02", ()),
         )
         self.labels: tuple[str, ...] = ("corpus-2099-01-03", "corpus-2099-01-04")
@@ -267,6 +326,7 @@ class Install(unittest.TestCase):
             self._write_snapshot(label, date, data)
         self.host = FakeHost()
         self.host.snapshots = self.snapshots
+        self.host.work = self.work
         self.destination = fetch.snapshot_destination("example", "2099-01-02", FILE_PATH)
         self.file = self.snapshots / self.destination
         self.record_file = self.snapshots / f"{self.destination}{worker_identity.RECORD_SUFFIX}"
@@ -283,7 +343,7 @@ class Install(unittest.TestCase):
         )
         pin = SourcePin(
             date, self.source.base_url, None,
-            hashlib.sha256(sidecar.encode()).hexdigest(), 1, len(data), (index,), (entry,), ("ca6",),
+            hashlib.sha256(sidecar.encode()).hexdigest(), 1, len(data), (index,), (entry,), None,
         )
         lockfile = Lockfile(1, label, "0.0.0", "2099-01-03T04:05:06Z", "tranche", {"example": pin})
         directory = self.checkout / "corpus/lockfiles"
@@ -307,7 +367,7 @@ class Install(unittest.TestCase):
 
     def _set_mirror(self) -> None:
         path = self.checkout / "corpus/lockfiles" / f"{self.labels[0]}.yaml"
-        result = load_lockfile(path, known_sources={"example": True})
+        result = load_lockfile(path, known_sources={"example": self.source.carries_courts})
         assert result.lockfile is not None
         lockfile = result.lockfile
         pin = lockfile.sources["example"]
@@ -317,7 +377,7 @@ class Install(unittest.TestCase):
 
     def _hold_record(self, state: str, label: str | None = None) -> None:
         path = self.checkout / "corpus/lockfiles" / f"{label or self.labels[0]}.yaml"
-        loaded = load_lockfile(path, known_sources={"example": True})
+        loaded = load_lockfile(path, known_sources={"example": self.source.carries_courts})
         assert loaded.lockfile is not None
         lockfile = loaded.lockfile
         pin = lockfile.sources["example"]
@@ -341,13 +401,70 @@ class Install(unittest.TestCase):
         self.labels += (label,)
         return label
 
+    def _enable_stage(self, *, missing: str | None = None) -> None:
+        """Give each committed fixture a court pin and dated stage inputs."""
+
+        for label in self.labels:
+            lock_path = self.checkout / "corpus/lockfiles" / f"{label}.yaml"
+            loaded = load_lockfile(lock_path, known_sources={"example": False})
+            assert loaded.lockfile is not None
+            lockfile = loaded.lockfile
+            pin = lockfile.sources["example"]
+            entries = list(pin.entries)
+            for table in worker_identity.STAGE_TABLES:
+                if label == self.labels[0] and table == missing:
+                    continue
+                name = data_file(table, pin.snapshot_date)
+                body = f"fictitious {table} rows for {label}\n".encode()
+                entry = SidecarEntry(name, hashlib.sha256(body).hexdigest(), len(body))
+                entries.append(entry)
+                destination = fetch.snapshot_destination("example", pin.snapshot_date, name)
+                path = self.snapshots / destination
+                path.write_bytes(body)
+                url = f"{self.source.base_url}{name}"
+                (path.with_name(path.name + worker_identity.RECORD_SUFFIX)).write_text(
+                    json.dumps(_whole_record(body, url, 1))
+                )
+            sidecar = render_sidecar(entries)
+            (lock_path.parent / label / "example.sha256").write_text(sidecar)
+            updated = replace(
+                pin, sidecar_sha256=hashlib.sha256(sidecar.encode()).hexdigest(),
+                files=len(entries), bytes=sum(entry.size for entry in entries),
+                entries=tuple(sorted(entries, key=lambda entry: entry.path)),
+                courts=("ca6", "scotus"),
+            )
+            lock_path.write_text(render_lockfile(replace(
+                lockfile, sources={"example": updated},
+            )))
+        self.source = replace(
+            self.source, carries_courts=True, first_courts=("ca6", "scotus"),
+        )
+
+    def _seed_complete_stage(self) -> Path:
+        lock_path = self.checkout / "corpus/lockfiles" / f"{self.labels[0]}.yaml"
+        loaded = load_lockfile(lock_path, known_sources={"example": True})
+        assert loaded.lockfile is not None
+        pin = loaded.lockfile.sources["example"]
+        entries = {entry.path: entry for entry in pin.entries}
+        args = {
+            "label": self.labels[0], "snapshot": f"example-{pin.snapshot_date}",
+            "courts": list(pin.courts or ()),
+            "inputs": {
+                table: {"path": data_file(table, pin.snapshot_date),
+                        "sha256": entries[data_file(table, pin.snapshot_date)].sha256}
+                for table in worker_identity.STAGE_TABLES
+            },
+        }
+        self.host._write_stage(91, args)
+        return staging.work_directory(self.labels[0], "example", work_root=self.work)
+
     def run_install(self, label: str | None = None) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = install.run_corpus_install(
                 argparse.Namespace(label=label or self.labels[0]),
                 host=self.host, rendered_dir=RENDERED, checkout=self.checkout,
-                snapshots_root=self.snapshots, clock=lambda: NOW,
+                snapshots_root=self.snapshots, work_root=self.work, clock=lambda: NOW,
                 sleep=lambda _seconds: None, monotonic=lambda: 0.0,
                 sources=(self.source,),
             )
@@ -372,6 +489,78 @@ class Install(unittest.TestCase):
         )
         self.assertEqual(self.host.record_rows[self.labels[0]]["state"], "installing")
         self.assertEqual(self.host.lock_releases, 1)
+
+    def test_stage_rows_follow_record_and_summarize_the_deferred_job(self) -> None:
+        self._enable_stage()
+        code, out, err = self.run_install()
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(err, "")
+        self.assertLess(out.index("record: ok"), out.index("stage: ok"))
+        self.assertLess(out.index("stage: ok"), out.index("retain: ok"))
+        self.assertIn("ca6: dockets 1, opinion-clusters 1, citations 1, opinions 1", out)
+        self.assertIn("scotus: dockets 2, opinion-clusters 2, citations 2, opinions 2", out)
+        self.assertIn("example: 2 courts staged, 15 records read, 8 seconds", out)
+        self.assertEqual(len(self.host.stage_deferred), 1)
+        self.assertEqual(self.host.stage_deferred[0]["courts"], ["ca6", "scotus"])
+        self.assertEqual(tuple(self.host.stage_deferred[0]["inputs"]), worker_identity.STAGE_TABLES)
+
+    def test_complete_matching_stage_prints_courts_and_defers_nothing(self) -> None:
+        self._enable_stage()
+        self._seed_complete_stage()
+        code, out, err = self.run_install()
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("ca6: dockets 1, opinion-clusters 1, citations 1, opinions 1", out)
+        self.assertIn("scotus: dockets 2, opinion-clusters 2, citations 2, opinions 2", out)
+        self.assertIn("example: complete; nothing deferred", out)
+        self.assertEqual(self.host.stage_deferred, [])
+        again, rerun, _ = self.run_install()
+        self.assertEqual(again, 0, rerun)
+        self.assertIn("example: complete; nothing deferred", rerun)
+        self.assertEqual(self.host.stage_deferred, [])
+
+    def test_disagreeing_stage_record_refuses_with_work_removal_fix(self) -> None:
+        self._enable_stage()
+        directory = self._seed_complete_stage()
+        path = directory / worker_identity.STAGE_RECORD_NAME
+        record = json.loads(path.read_text())
+        record["inputs"]["opinions"]["sha256"] = "a" * 64
+        path.write_text(json.dumps(record))
+        code, out, err = self.run_install()
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("stage: refuse", out)
+        self.assertIn("stage record disagrees with the lockfile", out)
+        self.assertIn(f"Remove {directory}", out)
+        self.assertIn(report.command("corpus install"), out)
+        self.assertEqual(self.host.stage_deferred, [])
+
+    def test_failed_stage_job_refuses_with_the_worker_logs_fix(self) -> None:
+        self._enable_stage()
+        self.host.stage_failure = "malformed"
+        code, out, err = self.run_install()
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("stage: refuse", out)
+        self.assertIn("opinions input is malformed", out)
+        self.assertIn(stack.logs_fix(RENDERED, worker_identity.WORKER_SERVICE_NAME), out)
+        self.assertEqual(len(self.host.stage_deferred), 1)
+
+    def test_interrupt_during_stage_reports_the_worker_continues(self) -> None:
+        self._enable_stage()
+        self.host.interrupt_stage_job = True
+        code, out, err = self.run_install()
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("stage: refuse", out)
+        self.assertIn("interrupted; the stage continues in the worker", out)
+        self.assertIn(report.command("corpus install"), out)
+        self.assertEqual(self.host.lock_releases, 1)
+
+    def test_missing_pinned_stage_input_refuses_before_defer(self) -> None:
+        self._enable_stage(missing="opinions")
+        code, out, err = self.run_install()
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("stage: refuse", out)
+        self.assertIn(data_file("opinions", "2099-01-02"), out)
+        self.assertIn(report.command("corpus cut"), out)
+        self.assertEqual(self.host.stage_deferred, [])
 
     def test_empty_record_inserts_installing_with_fetch_and_verify_times(self) -> None:
         code, out, err = self.run_install()
@@ -619,7 +808,7 @@ class Install(unittest.TestCase):
         first, second = self.labels[:2]
         first_lock = load_lockfile(
             self.checkout / "corpus/lockfiles" / f"{first}.yaml",
-            known_sources={"example": True},
+            known_sources={"example": self.source.carries_courts},
         ).lockfile
         assert first_lock is not None
         second_lock_path = self.checkout / "corpus/lockfiles" / f"{second}.yaml"

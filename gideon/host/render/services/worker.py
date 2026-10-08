@@ -24,6 +24,7 @@ from gideon.host.render.worker import (
     DATABASE_ROLE_ENV,
     PASSWORD_FILE_ENV,
     SNAPSHOTS_ROOT,
+    WORK_ROOT,
     WORKER_CONCURRENCY,
     WORKER_DATABASE_HOST,
     WORKER_DATABASE_NAME,
@@ -67,6 +68,7 @@ class WorkerService(ServiceDefinition):
             "volumes": [
                 f"{inputs.checkout}/gideon:{API_MOUNT_TARGET}:ro",
                 f"{SNAPSHOTS_ROOT}:{SNAPSHOTS_ROOT}",
+                f"{WORK_ROOT}:{WORK_ROOT}",
             ],
             "read_only": True,
             "group_add": [str(inputs.facts.service_gid)],
