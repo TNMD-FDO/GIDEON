@@ -346,6 +346,24 @@ CUDA_ENTRY = (
     f"deb [signed-by={_KEYRING_FILE}] {CUDA_REPOSITORY}/ /\n"
 )
 TOOLKIT_PACKAGE = "nvidia-container-toolkit"
+CDI_PATH = "/etc/cdi/nvidia.yaml"
+CDI_READ = ("nvidia-ctk", "cdi", "generate")
+CDI_WRITE = (*CDI_READ, f"--output={CDI_PATH}")
+
+
+def nvidia_generate_commands(
+    text: str, *, diagnostic: str | None = None
+) -> dict[tuple[str, ...], subprocess.CompletedProcess[str]]:
+    """Answer a read-only generate and allow the file-writing form."""
+
+    read = (
+        completed(CDI_READ, text)
+        if diagnostic is None
+        else subprocess.CompletedProcess(
+            list(CDI_READ), 1, "", f"discovering fictitious devices\n{diagnostic}\n\n"
+        )
+    )
+    return {CDI_READ: read, CDI_WRITE: completed(CDI_WRITE)}
 
 
 def nvidia_driver_host(
@@ -441,13 +459,24 @@ def assert_nvidia_read_only(test: unittest.TestCase, host: FakeHost) -> None:
     test.assertEqual(writes, [])
     installs = [
         argv for argv, _, _ in host.runs
-        if argv[0] in {"apt-get", "dpkg", "wget", "mv", "nvidia-ctk"}
+        if argv[0] in {"apt-get", "dpkg", "wget", "mv"}
+        or (argv[0] == "nvidia-ctk" and any(arg.startswith("--output=") for arg in argv))
         or argv[:2] in {
             ("apt-mark", "hold"),
             ("systemctl", "enable"),
         }
     ]
     test.assertEqual(installs, [])
+
+
+class UnreadableCdiHost(FakeHost):
+    """A fake host whose CDI file raises a read error."""
+
+    def read_text(self, path: PathLike, *, encoding: str = "utf-8") -> str:
+        if os.fspath(path) == CDI_PATH:
+            self.calls.append(("read_text", CDI_PATH))
+            raise OSError("fictitious CDI read error")
+        return super().read_text(path, encoding=encoding)
 
 
 def baseline_host() -> FakeHost:
@@ -1778,7 +1807,7 @@ class DockerKeyringOrderTests(unittest.TestCase):
 
 
 class NvidiaStepTests(unittest.TestCase):
-    """Driver and toolkit outcomes over package, module, and apt-source readings."""
+    """Driver and toolkit outcomes over package, module, apt-source, and CDI readings."""
 
     def test_absent_driver_refuses_before_legacy_unlinks(self) -> None:
         pinning = f"nvidia-driver-pinning-{HOST_LOCK.driver.branch}"
@@ -2123,8 +2152,12 @@ class NvidiaStepTests(unittest.TestCase):
             loaded_version=version,
             disk_version=version,
             packages={TOOLKIT_PACKAGE: HOST_LOCK.minimums.toolkit},
-            files={**sources, "/etc/cdi/nvidia.yaml": "spec"},
-            commands={enabled: completed(enabled, "enabled\n"), policy: completed(policy)},
+            files={**sources, CDI_PATH: "fictitious spec"},
+            commands={
+                enabled: completed(enabled, "enabled\n"),
+                policy: completed(policy),
+                **nvidia_generate_commands("fictitious spec"),
+            },
         )
         toolkit_result = NvidiaToolkitStep().check(context(toolkit))
         self.assertEqual(toolkit_result.disposition, Disposition.CONVERGED)
@@ -2193,9 +2226,8 @@ class NvidiaStepTests(unittest.TestCase):
     def test_absent_toolkit_installs_keyring_before_package(self) -> None:
         version = f"{HOST_LOCK.driver.branch}.0.0-fictitious"
         enable = ("systemctl", "enable", "--now", "nvidia-persistenced")
-        generate = ("nvidia-ctk", "cdi", "generate", "--output=/etc/cdi/nvidia.yaml")
         commands = nvidia_install_commands(TOOLKIT_PACKAGE)
-        commands.update({enable: completed(enable), generate: completed(generate)})
+        commands.update({enable: completed(enable), **nvidia_generate_commands("fictitious spec")})
         host = nvidia_driver_host(loaded_version=version, disk_version=version, commands=commands)
         step = NvidiaToolkitStep()
         checked = step.check(context(host))
@@ -2208,7 +2240,11 @@ class NvidiaStepTests(unittest.TestCase):
         self.assertLess(runs.index(deb_install), runs.index(("apt-get", "update")))
         self.assertLess(runs.index(("apt-get", "-s", "install", "-y", TOOLKIT_PACKAGE)), runs.index(toolkit_install))
         self.assertLess(runs.index(deb_install), runs.index(toolkit_install))
-        self.assertIn(("run", (generate, True)), host.calls)
+        self.assertNotIn(CDI_PATH, host.files)
+        self.assertNotIn(CDI_READ, runs[:runs.index(toolkit_install)])
+        self.assertLess(runs.index(toolkit_install), runs.index(CDI_WRITE))
+        self.assertIn(("run", (CDI_READ, False)), host.calls)
+        self.assertIn(("run", (CDI_WRITE, True)), host.calls)
 
     def test_short_toolkit_refuses_before_any_write(self) -> None:
         floor = HOST_LOCK.minimums.toolkit
@@ -2233,25 +2269,200 @@ class NvidiaStepTests(unittest.TestCase):
     def test_toolkit_service_and_cdi_drift_then_converge(self) -> None:
         version = f"{HOST_LOCK.driver.branch}.0.0-fictitious"
         enabled = ("systemctl", "is-enabled", "nvidia-persistenced")
+        enable = ("systemctl", "enable", "--now", "nvidia-persistenced")
+        fresh = "kind: fictitious CDI\nname: GPU-00000000-0000-0000-0000-000000000001\n"
         host = nvidia_driver_host(
             loaded_version=version,
             disk_version=version,
             packages={TOOLKIT_PACKAGE: HOST_LOCK.minimums.toolkit},
+            commands={enable: completed(enable), **nvidia_generate_commands(fresh)},
         )
         step = NvidiaToolkitStep()
         service = step.check(context(host))
         self.assertEqual(service.disposition, Disposition.DRIFT)
         self.assertIn("not enabled", service.detail)
+        step.apply(context(host))
+        self.assertIn(("run", (enable, True)), host.calls)
+        self.assertEqual(host.runs[-1][0], CDI_WRITE)
         host.commands[enabled] = completed(enabled, "enabled\n")
         cdi = step.check(context(host))
         self.assertEqual(cdi.disposition, Disposition.DRIFT)
         self.assertIn("CDI specification is missing", cdi.detail)
-        host.files["/etc/cdi/nvidia.yaml"] = "fictitious spec"
+        step.apply(context(host))
+        self.assertEqual(host.runs[-1][0], CDI_WRITE)
+        host.files[CDI_PATH] = fresh.replace("fictitious CDI", "old fictitious CDI")
+        stale = step.check(context(host))
+        self.assertEqual(stale.disposition, Disposition.DRIFT)
+        self.assertEqual(
+            stale.detail,
+            "the NVIDIA CDI specification differs from a fresh generate "
+            "(a driver, toolkit, or device change)",
+        )
+        step.apply(context(host))
+        self.assertEqual(host.runs[-1][0], CDI_WRITE)
+        host.files[CDI_PATH] = fresh
         host.commands[_TOOLKIT_POLICY] = completed(_TOOLKIT_POLICY)
         converged = step.check(context(host))
         self.assertEqual(converged.disposition, Disposition.CONVERGED)
         self.assertIn("toolkit and CDI are current", converged.detail)
+        self.assertEqual([argv for argv, _, _ in host.runs].count(CDI_WRITE), 3)
+
+    def test_toolkit_regenerates_spec_naming_other_cards(self) -> None:
+        version = f"{HOST_LOCK.driver.branch}.0.0-fictitious"
+        enabled = ("systemctl", "is-enabled", "nvidia-persistenced")
+        enable = ("systemctl", "enable", "--now", "nvidia-persistenced")
+        disk_cards = (
+            "GPU-00000000-0000-0000-0000-000000000001",
+            "GPU-00000000-0000-0000-0000-000000000002",
+        )
+        fresh_cards = (
+            "GPU-00000000-0000-0000-0000-000000000003",
+            "GPU-00000000-0000-0000-0000-000000000004",
+        )
+        disk = f"name: '{disk_cards[1]}'\nname: {disk_cards[0]}\n"
+        fresh = f'name: "{fresh_cards[1]}"\nname: {fresh_cards[0]}\n'
+        host = nvidia_driver_host(
+            loaded_version=version,
+            disk_version=version,
+            packages={TOOLKIT_PACKAGE: HOST_LOCK.minimums.toolkit},
+            files={CDI_PATH: disk},
+            commands={
+                enabled: completed(enabled, "enabled\n"),
+                enable: completed(enable),
+                **nvidia_generate_commands(fresh),
+            },
+        )
+        step = NvidiaToolkitStep()
+        checked = step.check(context(host))
+        self.assertEqual(checked.disposition, Disposition.DRIFT)
+        self.assertEqual(
+            checked.detail,
+            "the NVIDIA CDI specification names different cards "
+            f"(on disk: {', '.join(disk_cards)}; fresh: {', '.join(fresh_cards)})",
+        )
+        self.assertIn("Generate the NVIDIA CDI specification", checked.fix)
+        self.assertNotIn(CDI_WRITE, [argv for argv, _, _ in host.runs])
+        step.apply(context(host))
+        self.assertEqual([argv for argv, _, _ in host.runs][-2:], [CDI_READ, CDI_WRITE])
+        self.assertIn(("run", (CDI_WRITE, True)), host.calls)
+
+    def test_current_spec_survives_service_enable_without_regeneration(self) -> None:
+        version = f"{HOST_LOCK.driver.branch}.0.0-fictitious"
+        enabled = ("systemctl", "is-enabled", "nvidia-persistenced")
+        enable = ("systemctl", "enable", "--now", "nvidia-persistenced")
+        fresh = "name: GPU-00000000-0000-0000-0000-000000000001\n"
+        host = nvidia_driver_host(
+            loaded_version=version,
+            disk_version=version,
+            packages={TOOLKIT_PACKAGE: HOST_LOCK.minimums.toolkit},
+            files={CDI_PATH: fresh},
+            commands={enable: completed(enable), **nvidia_generate_commands(fresh)},
+        )
+        step = NvidiaToolkitStep()
+        checked = step.check(context(host))
+        self.assertEqual(checked.disposition, Disposition.DRIFT)
+        self.assertIn("not enabled", checked.detail)
+        step.apply(context(host))
+        self.assertIn(("run", (enable, True)), host.calls)
+        self.assertIn(CDI_READ, [argv for argv, _, _ in host.runs])
+        self.assertNotIn(CDI_WRITE, [argv for argv, _, _ in host.runs])
+        self.assertEqual(host.files[CDI_PATH], fresh)
+        host.commands[enabled] = completed(enabled, "enabled\n")
+        self.assertEqual(step.check(context(host)).disposition, Disposition.CONVERGED)
+
+    def test_stale_spec_with_same_cards_names_content_change(self) -> None:
+        version = f"{HOST_LOCK.driver.branch}.0.0-fictitious"
+        enabled = ("systemctl", "is-enabled", "nvidia-persistenced")
+        card = "GPU-00000000-0000-0000-0000-000000000001"
+        fresh = f"name: {card}\ncontainerEdits: fictitious-new\n"
+        disk = f"name: {card}\ncontainerEdits: fictitious-old\n"
+        host = nvidia_driver_host(
+            loaded_version=version,
+            disk_version=version,
+            packages={TOOLKIT_PACKAGE: HOST_LOCK.minimums.toolkit},
+            files={CDI_PATH: disk},
+            commands={
+                enabled: completed(enabled, "enabled\n"),
+                **nvidia_generate_commands(fresh),
+            },
+        )
+        checked = NvidiaToolkitStep().check(context(host))
+        self.assertEqual(checked.disposition, Disposition.DRIFT)
+        self.assertEqual(
+            checked.detail,
+            "the NVIDIA CDI specification differs from a fresh generate "
+            "(a driver, toolkit, or device change)",
+        )
+        self.assertNotIn(card, checked.detail)
+
+    def test_failed_generate_refuses_with_last_diagnostic_before_cdi_write(self) -> None:
+        version = f"{HOST_LOCK.driver.branch}.0.0-fictitious"
+        enabled = ("systemctl", "is-enabled", "nvidia-persistenced")
+        enable = ("systemctl", "enable", "--now", "nvidia-persistenced")
+        diagnostic = "fictitious toolkit cannot inspect cards"
+        host = nvidia_driver_host(
+            loaded_version=version,
+            disk_version=version,
+            packages={TOOLKIT_PACKAGE: HOST_LOCK.minimums.toolkit},
+            files={CDI_PATH: "fictitious prior spec"},
+            commands={
+                enabled: completed(enabled, "enabled\n"),
+                enable: completed(enable),
+                **nvidia_generate_commands("fictitious fresh spec", diagnostic=diagnostic),
+            },
+        )
+        step = NvidiaToolkitStep()
+        checked = step.check(context(host))
+        self.assertEqual(checked.disposition, Disposition.UNFIXABLE)
+        self.assertEqual(checked.detail, f"nvidia-ctk cdi generate failed: {diagnostic}")
+        self.assertNotIn("discovering", checked.detail)
+        self.assertIn("Repair the NVIDIA container toolkit", checked.fix)
         assert_nvidia_read_only(self, host)
+        with self.assertRaises(StepFailure) as raised:
+            step.apply(context(host))
+        self.assertEqual(
+            (raised.exception.detail, raised.exception.fix),
+            (checked.detail, checked.fix),
+        )
+        self.assertNotIn(CDI_WRITE, [argv for argv, _, _ in host.runs])
+        self.assertEqual(host.files[CDI_PATH], "fictitious prior spec")
+
+    def test_unreadable_cdi_spec_is_drift_and_regenerated(self) -> None:
+        version = f"{HOST_LOCK.driver.branch}.0.0-fictitious"
+        enabled = ("systemctl", "is-enabled", "nvidia-persistenced")
+        enable = ("systemctl", "enable", "--now", "nvidia-persistenced")
+        fresh = "name: GPU-00000000-0000-0000-0000-000000000001\n"
+        setup = nvidia_driver_host(
+            loaded_version=version,
+            disk_version=version,
+            packages={TOOLKIT_PACKAGE: HOST_LOCK.minimums.toolkit},
+            files={CDI_PATH: "fictitious unreadable spec"},
+            commands={
+                enabled: completed(enabled, "enabled\n"),
+                enable: completed(enable),
+                **nvidia_generate_commands(fresh),
+            },
+        )
+        host = UnreadableCdiHost(files=setup.files, commands=setup.commands)
+        step = NvidiaToolkitStep()
+        checked = step.check(context(host))
+        self.assertEqual(checked.disposition, Disposition.DRIFT)
+        self.assertIn("fictitious CDI read error", checked.detail)
+        self.assertIn("Generate the NVIDIA CDI specification", checked.fix)
+        assert_nvidia_read_only(self, host)
+        step.apply(context(host))
+        self.assertIn(("run", (CDI_WRITE, True)), host.calls)
+
+    def test_real_toolkit_step_is_skipped_on_no_gpu_host_without_commands(self) -> None:
+        host = baseline_host()
+        host.files["/etc/gideon/no-gpu"] = ""
+        args = type("Arguments", (), {"only": None, "dry_run": False, "list": False})()
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            code = run_provision(args, host=host, lock_path=LOCK, steps=[NvidiaToolkitStep()])
+        self.assertEqual(code, 0)
+        self.assertIn("nvidia-toolkit: skipped — no-GPU host", stdout.getvalue())
+        self.assertEqual(host.runs, [])
 
     def test_toolkit_reports_distinct_other_policy_repositories(self) -> None:
         version = f"{HOST_LOCK.driver.branch}.0.0-fictitious"
@@ -2272,8 +2483,12 @@ class NvidiaStepTests(unittest.TestCase):
             loaded_version=version,
             disk_version=version,
             packages={TOOLKIT_PACKAGE: floor},
-            files={"/etc/cdi/nvidia.yaml": "fictitious spec", CUDA_SOURCE: CUDA_ENTRY},
-            commands={enabled: completed(enabled, "enabled\n"), _TOOLKIT_POLICY: completed(_TOOLKIT_POLICY, policy_text)},
+            files={CDI_PATH: "fictitious spec", CUDA_SOURCE: CUDA_ENTRY},
+            commands={
+                enabled: completed(enabled, "enabled\n"),
+                _TOOLKIT_POLICY: completed(_TOOLKIT_POLICY, policy_text),
+                **nvidia_generate_commands("fictitious spec"),
+            },
         )
         result = NvidiaToolkitStep().check(context(host))
         self.assertEqual(result.disposition, Disposition.CONVERGED)
@@ -2290,8 +2505,12 @@ class NvidiaStepTests(unittest.TestCase):
             loaded_version=version,
             disk_version=version,
             packages={TOOLKIT_PACKAGE: HOST_LOCK.minimums.toolkit},
-            files={"/etc/cdi/nvidia.yaml": "fictitious spec"},
-            commands={enabled: completed(enabled, "enabled\n"), _TOOLKIT_POLICY: failed},
+            files={CDI_PATH: "fictitious spec"},
+            commands={
+                enabled: completed(enabled, "enabled\n"),
+                _TOOLKIT_POLICY: failed,
+                **nvidia_generate_commands("fictitious spec"),
+            },
         )
         result = NvidiaToolkitStep().check(context(host))
         self.assertEqual(result.disposition, Disposition.CONVERGED)

@@ -4,7 +4,8 @@ An open driver from any packaging meets the branch floor; the recipe installs
 one only when absent. A sufficient toolkit is accepted from any repository.
 Both steps read CUDA apt sources before writes and install the recipe's source
 only when needed. A loaded module differing from the installed one is reported
-as a pending reboot.
+as a pending reboot. The toolkit compares its CDI specification with a fresh
+generate and rewrites the file only when it is out of date.
 """
 
 import re
@@ -55,6 +56,12 @@ _DRIVER_PREFIXES = (
     "nvidia-headless",
 )
 _TOOLKIT_POLICY = ("apt-cache", "policy", "nvidia-container-toolkit")
+_CDI_PATH = Path("/etc/cdi/nvidia.yaml")
+_CDI_GENERATE_READ = ("nvidia-ctk", "cdi", "generate")
+_CDI_GENERATE_WRITE = (*_CDI_GENERATE_READ, f"--output={_CDI_PATH}")
+_CDI_CARD_NAME = re.compile(
+    r"(?m)^\s*name:\s*(?P<quote>['\"]?)(?P<uuid>GPU-[A-Za-z0-9-]+)(?P=quote)(?=\s|$)"
+)
 _DPKG_STATUS_SOURCE = "/var/lib/dpkg/status"
 _DRIVER_REBOOT_FIX = (
     "Reboot the host, then re-run provision "
@@ -92,6 +99,10 @@ _OCCUPIED_SOURCE_FIX = (
 _TOOLKIT_FIX = "Install the pinned NVIDIA container toolkit, then re-run provision."
 _PERSISTENCE_FIX = "Enable nvidia-persistenced, then re-run provision."
 _CDI_FIX = "Generate the NVIDIA CDI specification, then re-run provision."
+_CDI_GENERATE_FIX = (
+    "Repair the NVIDIA container toolkit until nvidia-ctk cdi generate succeeds, "
+    "then re-run provision."
+)
 _TOOLKIT_PACKAGE = "nvidia-container-toolkit"
 _PACKAGE_VERSION = re.compile(r"(?:^|\s)v?(\d+(?:\.\d+){0,3})(?=$|[\s\-+~:])")
 _POLICY_SOURCE = re.compile(r"^\s*\d+\s+(\S+)\s+.*\bPackages\s*$")
@@ -144,6 +155,22 @@ class _SourceReading:
     files: tuple[str, ...] = ()
     count: int = 0
     error: str = ""
+
+
+@dataclass(frozen=True)
+class _CdiReading:
+    fresh_text: str | None
+    generate_error: str | None
+    disk_text: str | None
+    read_error: str | None
+
+    @property
+    def current(self) -> bool:
+        return (
+            self.fresh_text is not None
+            and self.disk_text is not None
+            and self.fresh_text == self.disk_text
+        )
 
 
 def _version_tuple(version: str) -> tuple[int, ...] | None:
@@ -444,6 +471,55 @@ def _toolkit_policy_report(context: ProvisionContext) -> str:
     )
 
 
+def _cdi_reading(context: ProvisionContext) -> _CdiReading:
+    result = context.host.run(_CDI_GENERATE_READ)
+    fresh_text = result.stdout if result.returncode == 0 else None
+    generate_error = None
+    if result.returncode != 0:
+        generate_error = next(
+            (
+                line.strip()
+                for line in reversed(result.stderr.splitlines())
+                if line.strip()
+            ),
+            "no diagnostic",
+        )
+    try:
+        disk_text = context.host.read_text(_CDI_PATH)
+    except FileNotFoundError:
+        return _CdiReading(fresh_text, generate_error, None, None)
+    except (OSError, UnicodeError) as exc:
+        return _CdiReading(fresh_text, generate_error, None, str(exc))
+    return _CdiReading(fresh_text, generate_error, disk_text, None)
+
+
+def _cdi_drift_detail(reading: _CdiReading) -> str:
+    if reading.read_error is not None:
+        return f"the NVIDIA CDI specification cannot be read: {reading.read_error}"
+    if reading.disk_text is None:
+        return "the NVIDIA CDI specification is missing"
+    assert reading.fresh_text is not None
+    fresh_cards = sorted(
+        {match.group("uuid") for match in _CDI_CARD_NAME.finditer(reading.fresh_text)}
+    )
+    disk_cards = sorted(
+        {match.group("uuid") for match in _CDI_CARD_NAME.finditer(reading.disk_text)}
+    )
+    if fresh_cards != disk_cards:
+        return (
+            "the NVIDIA CDI specification names different cards "
+            f"(on disk: {', '.join(disk_cards) or 'none'}; fresh: {', '.join(fresh_cards) or 'none'})"
+        )
+    return (
+        "the NVIDIA CDI specification differs from a fresh generate "
+        "(a driver, toolkit, or device change)"
+    )
+
+
+def _cdi_generate_detail(reading: _CdiReading) -> str:
+    return f"nvidia-ctk cdi generate failed: {reading.generate_error}"
+
+
 class NvidiaDriverStep(Step):
     """Accept a sufficient open module or install the absent driver recipe."""
 
@@ -548,10 +624,10 @@ class NvidiaDriverStep(Step):
 
 
 class NvidiaToolkitStep(Step):
-    """Accept a sufficient toolkit or install it after the driver is live."""
+    """Accept or install the toolkit and keep its CDI specification current."""
 
     name = "nvidia-toolkit"
-    summary = "install the NVIDIA container toolkit and CDI spec"
+    summary = "install the NVIDIA container toolkit and keep its CDI spec current"
     gpu_host_only = True
     requires = ("nvidia-driver",)
 
@@ -590,10 +666,17 @@ class NvidiaToolkitStep(Step):
                 "nvidia-persistenced is not enabled",
                 _PERSISTENCE_FIX,
             )
-        if not context.host.exists("/etc/cdi/nvidia.yaml"):
+        reading = _cdi_reading(context)
+        if reading.generate_error is not None:
+            return CheckResult(
+                Disposition.UNFIXABLE,
+                _cdi_generate_detail(reading),
+                _CDI_GENERATE_FIX,
+            )
+        if not reading.current:
             return CheckResult(
                 Disposition.DRIFT,
-                "the NVIDIA CDI specification is missing",
+                _cdi_drift_detail(reading),
                 _CDI_FIX,
             )
         detail = "NVIDIA toolkit and CDI are current" + _toolkit_policy_report(context)
@@ -622,13 +705,9 @@ class NvidiaToolkitStep(Step):
         context.host.run(
             ["systemctl", "enable", "--now", "nvidia-persistenced"], check=True
         )
-        context.host.mkdir(Path("/etc/cdi"), mode=0o755, parents=True, exist_ok=True)
-        context.host.run(
-            [
-                "nvidia-ctk",
-                "cdi",
-                "generate",
-                "--output=/etc/cdi/nvidia.yaml",
-            ],
-            check=True,
-        )
+        context.host.mkdir(_CDI_PATH.parent, mode=0o755, parents=True, exist_ok=True)
+        reading = _cdi_reading(context)
+        if reading.generate_error is not None:
+            raise StepFailure(_cdi_generate_detail(reading), _CDI_GENERATE_FIX)
+        if not reading.current:
+            context.host.run(_CDI_GENERATE_WRITE, check=True)

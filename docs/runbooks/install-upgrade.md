@@ -892,11 +892,7 @@ sudo apt-mark hold nvidia-open
 sudo reboot
 ```
 
-After a driver reboot, regenerate the CDI specification as the toolkit step does:
-
-```sh
-sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
-```
+After a driver reboot, re-run provision (Converge, next); its toolkit step regenerates the CDI specification when it no longer matches a fresh `nvidia-ctk cdi generate`.
 
 ### Converge
 
