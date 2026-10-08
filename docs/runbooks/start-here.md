@@ -11,11 +11,11 @@ This is one page by situation: each item gives a command, when there is one, and
 - A page with subject `[GIDEON <office>] FIRING: <rule>`: run `gideon status`, then follow the rule's row. [docs/runbooks/observability.md §4](observability.md)
 - An `Upstream watch notice` page: a cut is due. Run `gideon proposals`; its upstream section names the source. [docs/runbooks/release-files.md §10](release-files.md)
 - Planned restore, NAS window, or driver move: silence the affected rule before work begins. [docs/runbooks/observability.md §5](observability.md)
-- Monday's `Proposals waiting` nudge: run `gideon proposals`; bring any fired row to the developer for a ruling. [docs/runbooks/observability.md §10](observability.md); [docs/runbooks/release-files.md §7](release-files.md)
+- Monday's `Proposals waiting` nudge, maintaining office only: run `gideon proposals`; bring any fired row to the developer for a ruling. [docs/runbooks/observability.md §10](observability.md); [docs/runbooks/release-files.md §7](release-files.md)
 
 ## 3. Once a week
 
-- Saturday: the heartbeat email should arrive. If it does not, open Grafana and run `gideon alerts test`. [docs/runbooks/observability.md §4](observability.md); [docs/runbooks/observability.md §2](observability.md)
+- Saturday: the email with subject `[GIDEON <office>] Channel heartbeat` should arrive; it asks nothing. If it does not, run `gideon status` first (exit 2 means Grafana could not be checked), then `gideon alerts test`. [docs/runbooks/observability.md §4](observability.md)
 - Monday, maintaining office only: sort open pin-watch and Dependabot PRs on GitHub by the table; merge routine kinds when green and leave user-facing or proposal kinds for a release. [docs/runbooks/release-files.md §9](release-files.md)
 - A built-pin proposal, maintaining office only: rebuild on the box before merging. [docs/runbooks/built-images.md §2](built-images.md)
 - A frontend or model bump goes to the developer for its proof and release decision. [docs/runbooks/model-upgrade.md §2](model-upgrade.md)

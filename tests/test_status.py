@@ -95,14 +95,16 @@ def _alert(
     started_at: str,
     *,
     alert_class: str = "page",
-    heartbeat: str = "false",
+    heartbeat: bool = False,
     nudge: str | None = None,
     state: str = "active",
     summary: str = "Fictitious summary",
     runbook: str = "docs/runbooks/observability.md#example",
     silenced: bool = False,
 ) -> grafana.Alert:
-    labels = {"alertname": title, "class": alert_class, "heartbeat": heartbeat}
+    labels = {"alertname": title, "class": "dashboard" if heartbeat else alert_class}
+    if heartbeat:
+        labels["heartbeat"] = "true"
     if nudge is not None:
         labels["nudge"] = nudge
     return grafana.Alert(
@@ -814,7 +816,7 @@ class Status(unittest.TestCase):
         fake = FakeGrafana(
             (
                 _alert("ZetaPage", (NOW - timedelta(minutes=20)).isoformat()),
-                _alert("Heartbeat", NOW.isoformat(), heartbeat="true"),
+                _alert("Heartbeat", NOW.isoformat(), heartbeat=True),
                 _alert("DashboardAlert", NOW.isoformat(), alert_class="dashboard"),
                 _alert("AlphaPage", "2099-01-03T10:00:00.123456789Z"),
             )

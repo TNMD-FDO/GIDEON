@@ -11,7 +11,6 @@ from gideon.host.report import Problem, one_line
 from gideon.status.glance import age_text
 
 PAGE_CLASS: Final[str] = "page"
-HEARTBEAT_LABEL: Final[str] = "heartbeat"
 _GRAFANA_FIX: Final[str] = stack.logs_fix("/etc/gideon/rendered", "grafana")
 _LONG_FRACTION: Final[re.Pattern[str]] = re.compile(r"(\.\d{6})\d+(?=Z|[+-]\d{2}:\d{2}$)")
 
@@ -41,7 +40,7 @@ def _started_at(value: str) -> datetime | None:
 
 
 def pages(alerts: Iterable[grafana.Alert]) -> tuple[Page, ...]:
-    """Select page alerts, excluding the heartbeat and ordering them stably."""
+    """Select alerts by page class and order them stably."""
 
     result = tuple(
         Page(
@@ -53,7 +52,6 @@ def pages(alerts: Iterable[grafana.Alert]) -> tuple[Page, ...]:
         )
         for alert in alerts
         if alert.labels.get("class") == PAGE_CLASS
-        and alert.labels.get(HEARTBEAT_LABEL, "").lower() != "true"
     )
     return tuple(
         sorted(

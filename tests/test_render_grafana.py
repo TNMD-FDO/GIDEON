@@ -332,7 +332,7 @@ class Overview(unittest.TestCase):
                 ):
                     GrafanaOverviewArtifact().emit(altered)
 
-    def test_alert_list_selects_page_instances_without_the_heartbeat(self) -> None:
+    def test_alert_list_selects_page_instances_by_class(self) -> None:
         panel = json.loads(GrafanaOverviewArtifact().emit(inputs()))["panels"][0]
         self.assertEqual(panel["type"], "alertlist")
         self.assertEqual(panel["title"], "Needs attention")
@@ -365,7 +365,7 @@ class Overview(unittest.TestCase):
         label_filter = options["alertInstanceLabelFilter"]
         self.assertTrue(label_filter.startswith("{") and label_filter.endswith("}"))
         clauses = label_filter[1:-1].split(",")
-        self.assertEqual(len(clauses), 2)
+        self.assertEqual(len(clauses), 1)
         matchers = []
         for clause in clauses:
             match = re.fullmatch(r'\s*([a-z_]+)\s*(!?=)\s*"([^"]+)"\s*', clause)
@@ -374,7 +374,7 @@ class Overview(unittest.TestCase):
             matchers.append(match.groups())
         self.assertEqual(
             set(matchers),
-            {("class", "=", attention.PAGE_CLASS), (attention.HEARTBEAT_LABEL, "!=", "true")},
+            {("class", "=", attention.PAGE_CLASS)},
         )
 
     def test_start_here_links_follow_applicable_registered_boards(self) -> None:
@@ -768,7 +768,7 @@ class Alerting(unittest.TestCase):
                 document = yaml.safe_load(text)
                 contact = document["contactPoints"][0]
                 receiver = contact["receivers"][0]
-                self.assertEqual([item["name"] for item in document["contactPoints"]], ["page", "nudge", "upstream"])
+                self.assertEqual([item["name"] for item in document["contactPoints"]], ["page", "nudge", "upstream", "heartbeat"])
                 self.assertEqual(contact["name"], "page")
                 self.assertEqual(receiver["uid"], "page-email")
                 self.assertEqual(receiver["type"], "email")
@@ -857,6 +857,29 @@ class Alerting(unittest.TestCase):
                 self.assertTrue(upstream_receiver["disableResolveMessage"])
                 self.assertEqual(upstream_receiver["settings"], receiver["settings"])
 
+                heartbeat = document["contactPoints"][3]
+                self.assertEqual(heartbeat["orgId"], 1)
+                self.assertEqual(heartbeat["name"], "heartbeat")
+                self.assertEqual(len(heartbeat["receivers"]), 1)
+                heartbeat_receiver = heartbeat["receivers"][0]
+                self.assertEqual(heartbeat_receiver["uid"], "heartbeat-email")
+                self.assertEqual(heartbeat_receiver["type"], "email")
+                self.assertTrue(heartbeat_receiver["disableResolveMessage"])
+                settings = heartbeat_receiver["settings"]
+                self.assertEqual(settings["addresses"], ";".join(site_inputs.site.alerts.recipients))
+                self.assertTrue(settings["singleEmail"])
+                self.assertEqual(settings["subject"], f"[GIDEON {site_inputs.site.office.short_name}] Channel heartbeat")
+                self.assertNotIn("FIRING", settings["subject"])
+                self.assertEqual(
+                    settings["message"],
+                    "The alert engine and the mail path are alive: this is the Saturday heartbeat "
+                    f"from the GIDEON box at {site_inputs.site.office.short_name}.\n"
+                    "Nothing is owed. A Saturday without this email is the alarm; the start-here "
+                    "card's weekly section says what to do then.\n",
+                )
+                self.assertNotIn("{{", settings["message"])
+                self.assertNotIn("What to do:", settings["message"])
+
     def test_policy_and_time_interval_use_the_site_timezone(self) -> None:
         for site_path in (EXAMPLE, SECOND):
             with self.subTest(site=site_path.name):
@@ -866,6 +889,8 @@ class Alerting(unittest.TestCase):
                 child = policy["routes"][0]
                 self.assertEqual(policy["receiver"], "page")
                 self.assertEqual(policy["group_by"], ["alertname"])
+                self.assertEqual(child["receiver"], "heartbeat")
+                self.assertEqual(child["object_matchers"], [["heartbeat", "=", "true"]])
                 self.assertEqual(child["repeat_interval"], "6d")
                 self.assertEqual(child["active_time_intervals"], ["saturday-morning"])
                 self.assertFalse(child["continue"])
@@ -950,6 +975,13 @@ class Alerting(unittest.TestCase):
                     if rule["uid"] == "gideon-proposals-waiting":
                         self.assertEqual(rule["labels"], {"class": "dashboard", "nudge": "true"})
                         self.assertEqual(rule["annotations"]["runbook"], "docs/runbooks/observability.md §10")
+                    elif rule["uid"] == "gideon-heartbeat":
+                        self.assertEqual(rule["title"], "Channel heartbeat")
+                        self.assertEqual(rule["labels"], {"class": "dashboard", "heartbeat": "true"})
+                        self.assertEqual(rule["annotations"], {
+                            "summary": "The alert engine and the mail path are alive",
+                            "runbook": "docs/runbooks/observability.md §4",
+                        })
                     else:
                         self.assertEqual(rule["labels"]["class"], "page")
                         self.assertIn("docs/runbooks/observability.md §4", rule["annotations"]["runbook"])
@@ -1029,6 +1061,29 @@ class Alerting(unittest.TestCase):
                 ):
                     self.assertEqual(rules[uid]["noDataState"], "Alerting")
                     self.assertEqual(rules[uid]["execErrState"], "Alerting")
+
+    def test_every_dashboard_rule_label_has_a_noncontinuing_route(self) -> None:
+        for site_path, no_gpu in ((EXAMPLE, False), (SECOND, False), (EXAMPLE, True)):
+            with self.subTest(site=site_path.name, no_gpu=no_gpu):
+                site_inputs = inputs(site_path, no_gpu=no_gpu)
+                groups = yaml.safe_load(GrafanaRulesArtifact().emit(site_inputs))["groups"]
+                policy = yaml.safe_load(GrafanaPoliciesArtifact().emit(site_inputs))["policies"][0]
+                self.assertEqual(policy["receiver"], "page")
+                for group in groups:
+                    for rule in group["rules"]:
+                        if rule["labels"]["class"] == "page":
+                            continue
+                        for label, value in rule["labels"].items():
+                            if label == "class":
+                                continue
+                            with self.subTest(rule=rule["uid"], label=label):
+                                self.assertTrue(
+                                    any(
+                                        [label, "=", value] in route["object_matchers"]
+                                        and route["continue"] is False
+                                        for route in policy["routes"]
+                                    )
+                                )
 
     def test_proposals_rule_uses_the_newest_tally_count_and_reduced_value(self) -> None:
         for site_path, no_gpu in ((EXAMPLE, False), (SECOND, False), (EXAMPLE, True)):

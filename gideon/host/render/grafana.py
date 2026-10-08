@@ -189,7 +189,7 @@ class GrafanaDashboardsProviderArtifact(Artifact):
 
 
 class GrafanaContactPointsArtifact(Artifact):
-    """Provision the page, nudge, and upstream email contact points."""
+    """Provision the page, nudge, upstream, and heartbeat email contact points."""
 
     name = "grafana-contact-points"
     relative_path = "grafana/provisioning/alerting/contact-points.yaml"
@@ -238,7 +238,7 @@ class GrafanaTimeIntervalsArtifact(Artifact):
 
 
 class GrafanaRulesArtifact(Artifact):
-    """Provision the SQL and Prometheus page-class rules."""
+    """Provision page-class rules and the nudge and heartbeat dashboard-class rules."""
 
     name = "grafana-rules"
     relative_path = "grafana/provisioning/alerting/rules.yaml"

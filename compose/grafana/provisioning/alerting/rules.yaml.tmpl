@@ -570,7 +570,7 @@ $search_rules
 $api_rules
 $gpu_rules
       - uid: gideon-heartbeat
-        title: Alerting heartbeat
+        title: Channel heartbeat
         condition: B
         data:
           - refId: A
@@ -592,6 +592,6 @@ $gpu_rules
         for: 0s
         noDataState: OK
         execErrState: OK
-        annotations: {summary: The Grafana alerting channel heartbeat, runbook: docs/runbooks/observability.md §4}
-        labels: {class: page, heartbeat: 'true'}
+        annotations: {summary: The alert engine and the mail path are alive, runbook: docs/runbooks/observability.md §4}
+        labels: {class: dashboard, heartbeat: 'true'}
         isPaused: false

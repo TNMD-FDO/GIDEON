@@ -8,7 +8,7 @@ policies:
     group_interval: 5m
     repeat_interval: 24h
     routes:
-      - receiver: page
+      - receiver: heartbeat
         object_matchers:
           - [heartbeat, "=", "true"]
         repeat_interval: 6d

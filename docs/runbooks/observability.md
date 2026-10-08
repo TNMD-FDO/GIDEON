@@ -162,6 +162,9 @@ body's labels, values, and buttons are gone; a silence is made in Grafana
 file (`compose/grafana/provisioning/alerting/rules.yaml.tmpl`). An unresolved
 condition is re-sent daily, except the upstream watch notice, which is emailed
 once and never re-sent or resolved by mail; acknowledgement follows business hours.
+Saturday's heartbeat is not a page and takes none of this format: its own contact
+point sends `[GIDEON <office>] Channel heartbeat` with the two fixed body lines in
+the table below.
 `sudo python3 -m gideon status` lists the pages firing now with each rule's runbook section.
 Exit code 0 means nothing needs attention; 1 means a page is firing or `sudo`
 itself refused; 2 means status could not check or the installed command itself
@@ -187,13 +190,14 @@ refused (for example, the install home has no checkout).
 | TLS expiring | the certificate Caddy serves expires within 14 days | renew with the office CA, replace `/etc/gideon/tls/cert.pem` and `secrets/tls_key`, `sudo python3 -m gideon tls reload` |
 | driver drift | a DCGM series carries a driver version other than `host.lock`'s tested one | `sudo python3 -m gideon preflight` (the driver step), then the pin-watch runbook for a tested-version move |
 | upstream watch notice | a corpus source's newest upstream snapshot date is pinned by no recorded lockfile and was first seen within the last 7 days, one instance per source. Emailed once, never re-sent or resolved by mail; the instance clears when the week passes or a cut pins the date, and `gideon proposals` keeps the notice listed until a lockfile pins it | `sudo python3 -m gideon proposals` (the `upstream` section names the source, the newest date upstream, and the newest pinned); plan a window; then `corpus cut` per `release-files.md` §10. Nothing cuts by itself |
-| channel heartbeat | always — one email each Saturday 08:00–09:00 office time saying the engine and the mail path are alive | nothing; **its absence on a Saturday is the alarm**: a dead Grafana pages nothing, so check `/grafana/` and `alerts test` |
+| Channel heartbeat | always — one email each Saturday 08:00–09:00 office time with subject `[GIDEON <office>] Channel heartbeat`; its two lines say the alert engine and mail path are alive and nothing is owed. It is not a page: no `FIRING:`, no what-to-do line, and it appears in neither the box status nor the Overview's *Needs attention* list | nothing; **its absence on a Saturday is the alarm**: run `sudo python3 -m gideon status` first (exit 2 means Grafana could not be checked), then `sudo python3 -m gideon alerts test`, then open `/grafana/` |
 
 `sudo python3 -m gideon alerts test` sends one message through the provisioned
-contact point and the relay and writes one `alerts_test` row; it proves the
-contact point and the relay, not the routing tree (which is a file under test
-and the Saturday email). Run it after any change to `alerts.*` in the site file
-(then `apply`), and after a relay change.
+`page` contact point and the relay and writes one `alerts_test` row. It proves
+`page` and the relay, not the routing tree or the `heartbeat` contact point:
+the routing tree is a file under test, and the Saturday email checks the
+heartbeat path. Run it after any change to `alerts.*` in the site file (then
+`apply`), and after a relay change.
 
 ## 5. Silencing during planned work
 
@@ -245,7 +249,7 @@ notice.
 6. **host filesystem low**: a directory made under `/var/tmp` (on the root filesystem; `/tmp` is a tmpfs on the box), one `fallocate` there sized as the filesystem's free bytes less 14 % of its size, both read from the node exporter's two series or `df -B1 /`; the rule fires at its next evaluation (no pending period) and the email follows the group wait; removing the directory resolves it; never on `/var/lib/docker` while a build or a pull runs. (Verified 2026-09-15: filled 20:57:17 to 14.00 % free, the rule Alerting at 20:58:20 and the notifier handed the alert at 20:58:24 — 67 s from the fill, no pending period; the `/var/lib/docker` instance stayed Normal throughout; the directory removed 20:59:38, the rule Normal at 21:00:20 and the alert gone at 21:00:38; both emails confirmed at the page receiver, the resolved one at 21:04 on the policy's 5 m group tick.)
 7. **TLS expiring**: not induced on the live box; the probe's `probe_ssl_earliest_cert_expiry` value is read in Prometheus and the rule's expression checked against it.
 8. **driver drift**: not induced; the rule's rendered version string is compared with `host.lock`'s `driver.tested` and DCGM's `DCGM_FI_DRIVER_VERSION` label in Prometheus (`curl -s 'http://127.0.0.1:9090/api/v1/query?query=DCGM_FI_DEV_GPU_UTIL'`).
-9. **heartbeat**: the first Saturday after `apply`; before that, `alerts test`.
+9. **heartbeat**: the first Saturday after `apply`; before that, use Grafana's own test of the `heartbeat` contact point (Alerting → Contact points → `heartbeat` → Test), since `alerts test` exercises `page` alone.
 10. **engine down**: `docker compose -f /etc/gideon/rendered/compose.yaml stop gideon-generator`; wait a little over five minutes; `start` it. Exactly one page arrives (Engine down); Target down stays Normal, since its expression excludes the engine job. Do it in the quiet window — General is unavailable meanwhile. (Verified 2026-09-06: stopped 20:39:05, `up` 0 within a scrape, the rule Pending from 20:39:22 and Alerting at 20:44:20, the notifier handed the alert at 20:44:22; started 20:45:28, the container healthy at 20:46:29, `up` 1 at 20:46:49, the rule Normal at 20:47:22 and the resolved notice sent.)
 11. **API probe failing**: on a GPU host, `docker compose -f /etc/gideon/rendered/compose.yaml stop gideon-api`; watch `probe_success{job="api"}` until the rule is pending, then `start` the container again inside the ten-minute pending period. Confirm the probe clears and no page is sent; use `logs gideon-api` and `sudo python3 -m gideon apply` for a real failure.
 12. **nightly run failed**: silence `Search probe failing` for thirty minutes, stop SearXNG, and check `search-01` alone through the turn harness fails rather than refuses. Run `general-smoke` as kind `nightly` (with `--force` outside the night); confirm its row says `fail`, its rule instance is Alerting at the next minute's evaluation, and the `guardrails` instance stays Normal. Start SearXNG, confirm its probe is green, run the suite again, and confirm a `pass` row and a Normal rule instance. Read both transitions from Grafana's history (`api/v1/rules/history?ruleUID=gideon-nightly-run-failed`; its `from` and `to` are seconds, its `time` column microseconds) and confirm the page and resolved notice at the receiver. Keep SearXNG's stop inside the silence: its probe pages ten minutes after it fails, and a silence that ends first sends that page. (Verified 2026-09-29: the failing run 13:44:16–13:50:06, its instance Alerting at 13:51:00; the passing run 14:12:26–14:21:24, Normal at 14:22:00.)

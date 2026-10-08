@@ -40,3 +40,16 @@ contactPoints:
             {{ range .Alerts }}{{ .Status | toUpper }}: {{ .Labels.alertname }}: {{ .Annotations.summary }}{{ with .Annotations.runbook }} (runbook: {{ . }}){{ end }}
             {{ end }}
             What to do: on the box, run gideon status; the full steps are in the runbook named above.
+  - orgId: 1
+    name: heartbeat
+    receivers:
+      - uid: heartbeat-email
+        type: email
+        disableResolveMessage: true
+        settings:
+          addresses: "$recipients"
+          singleEmail: true
+          subject: "[GIDEON $short_name] Channel heartbeat"
+          message: |
+            The alert engine and the mail path are alive: this is the Saturday heartbeat from the GIDEON box at $short_name.
+            Nothing is owed. A Saturday without this email is the alarm; the start-here card's weekly section says what to do then.

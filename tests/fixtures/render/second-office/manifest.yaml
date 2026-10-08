@@ -44,12 +44,12 @@ files:
     owners:
       - "grafana"
   "grafana/provisioning/alerting/contact-points.yaml":
-    sha256: "763e8175de17f4ca302aa08a7f59d64ffc2a485527014688171d64b112f00bb6"
+    sha256: "8acc0c1c0632ccc8809ab29f097148812737f7519d4d85676e61cde906f599c9"
     mode: "0644"
     owners:
       - "grafana"
   "grafana/provisioning/alerting/policies.yaml":
-    sha256: "bc488490ca61f04a6d38ee865c82e9002dccbc789f851321b66370ced1fff776"
+    sha256: "0de079e61fa2b0d35a952f9526921aa674c111db36005b57e40a6e75755c4749"
     mode: "0644"
     owners:
       - "grafana"
@@ -59,7 +59,7 @@ files:
     owners:
       - "grafana"
   "grafana/provisioning/alerting/rules.yaml":
-    sha256: "6ecba24ed04653ec3dad4f022bf5a7b3ef34fa1523e40d4dc0c163d992f56015"
+    sha256: "79f216a96065f6a4529e4dcb62eb94dd3c87db2008586d29c88b38dc31c56471"
     mode: "0644"
     owners:
       - "grafana"
@@ -69,7 +69,7 @@ files:
     owners:
       - "grafana"
   "grafana/dashboards/overview.json":
-    sha256: "d5c06654279bd9bd53c4c54b21b7860d92949313b799ef98ba8b3482d50d4b00"
+    sha256: "a44817cc1231f4d3442d071d661248f386d950ba591bf425e6b11b5b448d0b21"
     mode: "0644"
     owners:
       - "grafana"
