@@ -24,7 +24,6 @@ TILE_TABLE_HEADING = "### The tiles on *Services and probes*"
 SECTION_FOUR_HEADING = "## 4. What pages, and what to do"
 GPU_ONLY = "A GPU host only."
 SEARCH_ONLY = "Present only while `web.search` is on"
-CORE_PAGE = "core service down"
 POSTGRES_EXPORTER_SERVICE = "postgres-exporter"
 TILE_KINDS = {"up": "plain", "probe_success": "probe", "pg_up": "database"}
 WATCHED_KIND_ORDER = ("probe", "database", "plain")  # a row is held to its most specific tile
@@ -42,6 +41,24 @@ class TileRow:
     description: str
     page: str
     line: int
+
+
+@dataclass(frozen=True)
+class RuleRow:
+    titles: tuple[str, ...]
+    line: int
+
+
+@dataclass(frozen=True)
+class RenderedRule:
+    title: str
+    rule_class: str
+
+
+@dataclass(frozen=True)
+class RuleRender:
+    label: str
+    rules: tuple[RenderedRule, ...]
 
 
 @dataclass(frozen=True)
@@ -93,6 +110,20 @@ def markdown_table(text: str, heading: str) -> tuple[tuple[MarkdownRow, ...], tu
     return tuple(rows), tuple(findings)
 
 
+def code_span_names(cell: str, line: int) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """A cell's names, written as code spans separated by commas and nothing else.
+
+    One spelling per name lets a table cell be compared exactly with the
+    render's tile names and rule titles.
+    """
+
+    if re.fullmatch(r"`[^`]+`(?:, `[^`]+`)*", cell) is None:
+        return (), (
+            f"runbook line {line}: write names in code spans, separated by commas and nothing else",
+        )
+    return tuple(re.findall(r"`([^`]+)`", cell)), ()
+
+
 def tile_table(text: str) -> tuple[tuple[TileRow, ...], tuple[str, ...]]:
     """The tile table's rows: tile names, what each checks, and its page."""
 
@@ -102,22 +133,82 @@ def tile_table(text: str) -> tuple[tuple[TileRow, ...], tuple[str, ...]]:
     for row in rows:
         if len(row.cells) != 3:
             findings.append(f"runbook line {row.line}: give the tile table three columns")
-        elif re.fullmatch(r"`[^`]+`(?:, `[^`]+`)*", row.cells[0]) is None:
-            findings.append(
-                f"runbook line {row.line}: write the first cell as tile names in code spans,"
-                " separated by commas and nothing else"
-            )
-        else:
-            names = tuple(re.findall(r"`([^`]+)`", row.cells[0]))
-            parsed.append(TileRow(names, row.cells[1], row.cells[2], row.line))
+            continue
+        names, name_findings = code_span_names(row.cells[0], row.line)
+        pages, page_findings = code_span_names(row.cells[2], row.line)
+        findings.extend(name_findings)
+        findings.extend(page_findings)
+        if len(pages) != 1 and not page_findings:
+            findings.append(f"runbook line {row.line}: give the page cell exactly one code-span title")
+        if names and len(pages) == 1:
+            parsed.append(TileRow(names, row.cells[1], pages[0], row.line))
     return tuple(parsed), tuple(findings)
 
 
-def section_four_rows(text: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """The rule names section 4's table holds, as it spells them."""
+def section_four_rows(text: str) -> tuple[tuple[RuleRow, ...], tuple[str, ...]]:
+    """Read section 4's rule titles and their lines for render comparisons."""
 
-    rows, findings = markdown_table(text, SECTION_FOUR_HEADING)
-    return tuple(row.cells[0] for row in rows), findings
+    rows, issues = markdown_table(text, SECTION_FOUR_HEADING)
+    findings = list(issues)
+    parsed: list[RuleRow] = []
+    for row in rows:
+        if len(row.cells) != 3:
+            findings.append(f"runbook line {row.line}: give the rule table three columns")
+            continue
+        titles, title_findings = code_span_names(row.cells[0], row.line)
+        findings.extend(title_findings)
+        if titles:
+            parsed.append(RuleRow(titles, row.line))
+    return tuple(parsed), tuple(findings)
+
+
+def render_rule_facts(site_inputs: RenderInputs, label: str) -> RuleRender:
+    """Read each rule's rendered title and class for one labelled host kind."""
+
+    document = yaml.safe_load(GrafanaRulesArtifact().emit(site_inputs))
+    return RuleRender(
+        label,
+        tuple(
+            RenderedRule(rule["title"], rule["labels"]["class"])
+            for group in document["groups"]
+            for rule in group["rules"]
+        ),
+    )
+
+
+def rule_table_findings(
+    rows: tuple[RuleRow, ...], renders: tuple[RuleRender, ...]
+) -> tuple[str, ...]:
+    """Every way section 4's Rule cells disagree with the rendered rules.
+
+    A page-class title any host kind renders needs exactly one row; a
+    dashboard-class title may have one and never needs it; a listed title
+    must be one some host kind renders, spelled exactly.
+    """
+
+    listed = Counter(title for row in rows for title in row.titles)
+    rendered = {rule.title for render in renders for rule in render.rules}
+    page_kinds: dict[str, list[str]] = {}
+    for render in renders:
+        for rule in render.rules:
+            if rule.rule_class == "page":
+                page_kinds.setdefault(rule.title, []).append(render.label)
+    findings = [
+        f"{title}: list this title in one section 4 row"
+        for title, count in sorted(listed.items())
+        if count > 1
+    ]
+    findings.extend(
+        f"{title}: give this page-class rule a section 4 row, or list it in the row whose steps"
+        f" cover it (rendered on {', '.join(labels)})"
+        for title, labels in sorted(page_kinds.items())
+        if title not in listed
+    )
+    findings.extend(
+        f"{title}: spell this as a rendered rule title or remove it from section 4"
+        for title in sorted(listed.keys() - rendered)
+    )
+    return tuple(findings)
 
 
 def _watching_expression(kind: str, job: str, engine_jobs: set[str], target_down: str) -> str:
@@ -195,7 +286,7 @@ def _offered(row: TileRow, render: RenderFacts) -> bool:
 
 
 def service_tile_findings(
-    rows: tuple[TileRow, ...], pages: tuple[str, ...], renders: tuple[RenderFacts, ...]
+    rows: tuple[TileRow, ...], rule_rows: tuple[RuleRow, ...], renders: tuple[RenderFacts, ...]
 ) -> tuple[str, ...]:
     """Every way the runbook's tile table disagrees with the renders.
 
@@ -212,20 +303,17 @@ def service_tile_findings(
     gpu_jobs = jobs_of(full) - jobs_of(no_gpu)
     search_jobs = jobs_of(full) - jobs_of(search_off)
     tiles = {tile.name: tile for render in renders for tile in render.tiles}
-    by_casefold = {page.casefold(): page for page in pages}
-    core = by_casefold.get(CORE_PAGE)
+    titles = {title for row in rule_rows for title in row.titles}
 
     findings: list[str] = []
-    if core is None:
-        findings.append(f"{CORE_PAGE}: restore this row to section 4's table")
     counts = Counter(name for row in rows for name in row.tiles)
     findings += [
         f"{name}: name this tile in one row of the table" for name, count in sorted(counts.items()) if count > 1
     ]
     for row in rows:
         first = row.tiles[0]
-        if row.page not in pages:
-            findings.append(f"{first}: its page cell `{row.page}` is no section 4 row")
+        if row.page not in titles:
+            findings.append(f"{first}: list its page-cell title `{row.page}` in section 4")
         drawn = [tiles[name] for name in row.tiles if name in tiles]
         row_jobs = sorted({tile.job for tile in drawn})
         if len(row_jobs) > 1:
@@ -242,11 +330,11 @@ def service_tile_findings(
             if tile.kind == "probe" and tile.job not in plain_jobs:
                 findings.append(f"{tile.name}: move it into the row naming `{tile.job}`")
         watched = min(drawn, key=lambda tile: WATCHED_KIND_ORDER.index(tile.kind))
-        wanted = by_casefold.get(watched.rule.casefold(), core)
-        if wanted is not None and row.page != wanted:
+        if watched.rule not in titles:
+            findings.append(f"{watched.name}: list its watching rule `{watched.rule}` in section 4")
+        if row.page != watched.rule:
             findings.append(
-                f"{watched.name}: set its page cell to `{wanted}`, the section 4 row"
-                f" of its rule {watched.rule!r}"
+                f"{watched.name}: set its page cell to `{watched.rule}`, its watching rule's title"
             )
     for render in renders:
         offered = {name for row in rows if _offered(row, render) for name in row.tiles}
@@ -264,14 +352,14 @@ def service_tile_findings(
 
 class ServiceTileTable(unittest.TestCase):
     rows: tuple[TileRow, ...]
-    pages: tuple[str, ...]
+    rule_rows: tuple[RuleRow, ...]
     renders: tuple[RenderFacts, ...]
 
     @classmethod
     def setUpClass(cls) -> None:
         text = OBSERVABILITY_RUNBOOK.read_text(encoding="utf-8")
         cls.rows, row_findings = tile_table(text)
-        cls.pages, page_findings = section_four_rows(text)
+        cls.rule_rows, rule_findings = section_four_rows(text)
         cls.renders = tuple(
             render_tile_facts(inputs(path, no_gpu=no_gpu), label)
             for path, no_gpu, label in (
@@ -280,8 +368,8 @@ class ServiceTileTable(unittest.TestCase):
                 (EXAMPLE, True, "no-GPU"),
             )
         )
-        if row_findings or page_findings:
-            raise AssertionError(row_findings + page_findings)
+        if row_findings or rule_findings:
+            raise AssertionError(row_findings + rule_findings)
 
     def test_the_runbook_table_matches_every_render(self) -> None:
         full, search_off, no_gpu = self.renders
@@ -291,7 +379,7 @@ class ServiceTileTable(unittest.TestCase):
         self.assertEqual(len({frozenset(tile.job for tile in render.tiles) for render in self.renders}), 3)
         for render in self.renders:
             self.assertEqual(render.findings, (), render.label)
-        self.assertEqual(service_tile_findings(self.rows, self.pages, self.renders), ())
+        self.assertEqual(service_tile_findings(self.rows, self.rule_rows, self.renders), ())
 
     def test_card_description_cites_the_tile_table_and_pages(self) -> None:
         dashboard = json.loads(GrafanaOverviewArtifact().emit(inputs()))
@@ -315,7 +403,7 @@ class ServiceTileTable(unittest.TestCase):
         self.assertLess(lines.index(TILE_TABLE_HEADING), section_four)
 
     def test_each_seeded_variant_names_its_job_or_tile(self) -> None:
-        rows, pages, renders = self.rows, self.pages, self.renders
+        rows, rule_rows, renders = self.rows, self.rule_rows, self.renders
 
         def row_of(tile: str) -> TileRow:
             return next(row for row in rows if tile in row.tiles)
@@ -330,13 +418,13 @@ class ServiceTileTable(unittest.TestCase):
             return tuple(replace(render, tiles=change(render.tiles)) for render in renders)
 
         added = ServiceTile("fictitious", "fictitious", "plain", "Target down")
-        cases: list[tuple[str, tuple[str, ...], tuple[TileRow, ...], tuple[str, ...], tuple[RenderFacts, ...]]] = [
-            ("job added", ("fictitious",), rows, pages, each_render(lambda tiles: (*tiles, added))),
+        cases: list[tuple[str, tuple[str, ...], tuple[TileRow, ...], tuple[RuleRow, ...], tuple[RenderFacts, ...]]] = [
+            ("job added", ("fictitious",), rows, rule_rows, each_render(lambda tiles: (*tiles, added))),
             (
                 "job renamed",
                 ("renamed", "cadvisor"),
                 rows,
-                pages,
+                rule_rows,
                 each_render(
                     lambda tiles: tuple(
                         replace(tile, name="renamed", job="renamed") if tile.job == "cadvisor" else tile
@@ -348,57 +436,179 @@ class ServiceTileTable(unittest.TestCase):
                 "job removed",
                 ("cadvisor",),
                 rows,
-                pages,
+                rule_rows,
                 each_render(lambda tiles: tuple(tile for tile in tiles if tile.job != "cadvisor")),
             ),
-            ("row removed", ("cadvisor",), without_row("cadvisor"), pages, renders),
-            ("probe span dropped", ("ingress probe",), with_row("ingress", tiles=("ingress",)), pages, renders),
-            ("database row dropped", ("postgres database",), without_row("postgres database"), pages, renders),
+            ("row removed", ("cadvisor",), without_row("cadvisor"), rule_rows, renders),
+            ("probe span dropped", ("ingress probe",), with_row("ingress", tiles=("ingress",)), rule_rows, renders),
+            ("database row dropped", ("postgres database",), without_row("postgres database"), rule_rows, renders),
             (
                 "GPU sentence on an unconditional row",
                 ("node",),
                 with_row("node", description=f"{row_of('node').description} {GPU_ONLY}"),
-                pages,
+                rule_rows,
                 renders,
             ),
             (
                 "GPU sentence off a GPU row",
                 ("dcgm",),
                 with_row("dcgm", description=row_of("dcgm").description.replace(GPU_ONLY, "")),
-                pages,
+                rule_rows,
                 renders,
             ),
             (
                 "search sentence on an unconditional row",
                 ("node",),
                 with_row("node", description=f"{row_of('node').description} {SEARCH_ONLY}."),
-                pages,
+                rule_rows,
                 renders,
             ),
             (
                 "search sentence off the search row",
                 ("search",),
                 with_row("search", description=row_of("search").description.replace(SEARCH_ONLY, "")),
-                pages,
+                rule_rows,
                 renders,
             ),
-            ("page cell no section 4 row", ("search",), with_row("search", page="search down"), pages, renders),
-            ("search page cell set to the core row", ("search probe",), with_row("search", page=CORE_PAGE), pages, renders),
+            ("page cell no section 4 row", ("search",), with_row("search", page="Search down"), rule_rows, renders),
+            ("search page cell set to Target down", ("search probe",), with_row("search", page="Target down"), rule_rows, renders),
             (
-                "core row absent from section 4",
+                "Target down absent from section 4",
                 ("caddy",),
                 rows,
-                tuple(page for page in pages if page != CORE_PAGE),
+                tuple(
+                    replace(row, titles=tuple(title for title in row.titles if title != "Target down"))
+                    for row in rule_rows
+                ),
                 renders,
             ),
         ]
-        for label, names, variant_rows, variant_pages, variant_renders in cases:
+        for label, names, variant_rows, variant_rule_rows, variant_renders in cases:
             with self.subTest(variant=label):
-                findings = service_tile_findings(variant_rows, variant_pages, variant_renders)
+                findings = service_tile_findings(variant_rows, variant_rule_rows, variant_renders)
                 for name in names:
                     self.assertTrue(
                         any(finding.startswith(f"{name}:") for finding in findings), (name, findings)
                     )
+
+        text = OBSERVABILITY_RUNBOOK.read_text(encoding="utf-8")
+        search_line = next(line for line in text.splitlines() if line.startswith("| `search`, `search probe` |"))
+        malformed = text.replace(
+            search_line,
+            search_line.replace("`Search probe failing`", "`Search probe failing`, `Target down`"),
+        )
+        _, findings = tile_table(malformed)
+        self.assertTrue(
+            any(
+                finding.startswith(f"runbook line {row_of('search').line}:")
+                and "exactly one code-span title" in finding
+                for finding in findings
+            ),
+            findings,
+        )
+
+
+class RuleTable(unittest.TestCase):
+    rows: tuple[RuleRow, ...]
+    renders: tuple[RuleRender, ...]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.rows, findings = section_four_rows(OBSERVABILITY_RUNBOOK.read_text(encoding="utf-8"))
+        cls.renders = (
+            *(
+                render_rule_facts(inputs(path, build_box=build_box), label)
+                for path, build_box, label in (
+                    (EXAMPLE, False, "example"),
+                    (EXAMPLE, True, "example build box"),
+                    (SECOND, False, "second office"),
+                    (SECOND, True, "second office build box"),
+                )
+            ),
+            render_rule_facts(inputs(EXAMPLE, no_gpu=True), "no-GPU"),
+        )
+        if findings:
+            raise AssertionError(findings)
+
+    def test_every_host_kind_has_a_row_for_each_page_title(self) -> None:
+        title_sets = {frozenset(rule.title for rule in render.rules) for render in self.renders}
+        self.assertEqual(len(title_sets), 5)
+        self.assertEqual(rule_table_findings(self.rows, self.renders), ())
+
+    def test_each_seeded_variant_names_its_title(self) -> None:
+        rows, renders = self.rows, self.renders
+        missing = "Backup set overdue"
+        duplicate = "Push overdue"
+        added_page = "Fictitious page"
+        listed_only = "Fictitious title"
+        dashboard_only = "Fictitious dashboard"
+
+        def add_rule(title: str, rule_class: str) -> tuple[RuleRender, ...]:
+            first, *others = renders
+            return (
+                replace(first, rules=(*first.rules, RenderedRule(title, rule_class))),
+                *others,
+            )
+
+        cases = (
+            ("page added to one render", added_page, rows, add_rule(added_page, "page")),
+            (
+                "rendered title dropped from its row",
+                missing,
+                tuple(
+                    replace(row, titles=tuple(title for title in row.titles if title != missing))
+                    for row in rows
+                ),
+                renders,
+            ),
+            (
+                "title listed in two rows",
+                duplicate,
+                tuple(
+                    replace(row, titles=(*row.titles, duplicate)) if missing in row.titles else row
+                    for row in rows
+                ),
+                renders,
+            ),
+            ("unrendered title listed", listed_only, (*rows, RuleRow((listed_only,), 0)), renders),
+        )
+        for label, title, variant_rows, variant_renders in cases:
+            with self.subTest(variant=label):
+                findings = rule_table_findings(variant_rows, variant_renders)
+                self.assertTrue(
+                    any(finding.startswith(f"{title}:") for finding in findings), findings
+                )
+
+        text = OBSERVABILITY_RUNBOOK.read_text(encoding="utf-8")
+        rule_line = next(line for line in text.splitlines() if line.startswith("| `Backup set overdue` |"))
+        malformed = text.replace(rule_line, rule_line.replace("`Backup set overdue`", "Backup set overdue"))
+        _, findings = section_four_rows(malformed)
+        line = next(row.line for row in rows if missing in row.titles)
+        self.assertTrue(any(finding.startswith(f"runbook line {line}:") for finding in findings), findings)
+
+        with self.subTest(variant="dashboard title added to one render"):
+            self.assertEqual(rule_table_findings(rows, add_rule(dashboard_only, "dashboard")), ())
+
+    def test_silenced_page_remains_listed_until_its_condition_clears(self) -> None:
+        dashboard = json.loads(GrafanaOverviewArtifact().emit(inputs()))
+        panel = next(item for item in dashboard["panels"] if item["title"] == "Needs attention")
+        description = panel["description"]
+        self.assertIn("A silenced rule stays listed here until its condition clears", description)
+        self.assertIn("the box status marks it silenced and does not count it", description)
+        runbook_path = OBSERVABILITY_RUNBOOK.relative_to(ROOT).as_posix()
+        self.assertTrue(description.endswith(f"Follow {runbook_path} §4."))
+
+        text = OBSERVABILITY_RUNBOOK.read_text(encoding="utf-8")
+        section_five = re.sub(r"\s+", " ", text.split("## 5.", 1)[1].split("## 6.", 1)[0])
+        self.assertIn("A silence stops the email alone", section_five)
+        self.assertIn(
+            "the rule stays listed on the Overview's *Needs attention* panel until its condition clears",
+            section_five,
+        )
+        self.assertIn("`gideon status` marks it `silenced` and does not count it", section_five)
+        self.assertIn(
+            "Grafana keeps sending a cleared rule's resolved alert for 15 minutes", section_five
+        )
 
 
 if __name__ == "__main__":

@@ -69,7 +69,7 @@ files:
     owners:
       - "grafana"
   "grafana/dashboards/overview.json":
-    sha256: "a44817cc1231f4d3442d071d661248f386d950ba591bf425e6b11b5b448d0b21"
+    sha256: "2ef3cb9917bbaf4ffada24f34bd5d2fd0b5180f19d5fa537980a4afd3a0a55ca"
     mode: "0644"
     owners:
       - "grafana"

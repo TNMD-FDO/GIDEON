@@ -8,7 +8,7 @@
   "links": [{"type": "dashboards", "tags": ["GIDEON"], "asDropdown": false, "title": "GIDEON boards", "includeVars": false, "keepTime": false, "targetBlank": false}],
   "panels": [
     {
-      "description": "This lists the page-class alerts firing now. An empty list means no page needs attention; a listed rule needs action. The Saturday heartbeat is not a page and never appears here. Follow docs/runbooks/observability.md §4.",
+      "description": "This lists the page-class alerts firing now. An empty list means no page needs attention; a listed rule needs action. The Saturday heartbeat is not a page and never appears here. A silenced rule stays listed here until its condition clears; the box status marks it silenced and does not count it. Follow docs/runbooks/observability.md §4.",
       "gridPos": {"h": 8, "w": 16, "x": 0, "y": 0},
       "options": {"viewMode": "list", "groupMode": "default", "groupBy": [], "maxItems": 20, "sortOrder": 4, "dashboardAlerts": false, "alertName": "", "showInstances": true, "showInactiveAlerts": false, "alertInstanceLabelFilter": "{class=\"page\"}", "stateFilter": {"firing": true, "pending": false, "noData": true, "normal": false, "error": true, "recovering": false}},
       "title": "Needs attention",

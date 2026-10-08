@@ -20,7 +20,7 @@
   ],
   "panels": [
     {
-      "description": "This lists the page-class alerts firing now. An empty list means no page needs attention; a listed rule needs action. The Saturday heartbeat is not a page and never appears here. Follow docs/runbooks/observability.md §4.",
+      "description": "This lists the page-class alerts firing now. An empty list means no page needs attention; a listed rule needs action. The Saturday heartbeat is not a page and never appears here. A silenced rule stays listed here until its condition clears; the box status marks it silenced and does not count it. Follow docs/runbooks/observability.md §4.",
       "gridPos": {
         "h": 8,
         "w": 16,
