@@ -78,10 +78,18 @@ OVERVIEW_SENTINELS: Final = (
 )
 # The Overview's home dashboard path inside the container.
 HOME_DASHBOARD_PATH: Final = DASHBOARDS_MOUNT + "/" + PurePosixPath(OVERVIEW_PATH).name
-# The start-here card's relative path under the install home.
+# The card's relative path under the install home and the public export's
+# repository URL. export_tree_url owns the link shape for the card and page email.
 START_HERE_CARD: Final = "docs/runbooks/start-here.md"
-# The public export's repository URL.
 PUBLIC_REPOSITORY_URL: Final = "https://github.com/TNMD-FDO/GIDEON"
+
+
+def export_tree_url(release: str) -> str:
+    """Return the public export tree's URL at a release."""
+
+    return f"{PUBLIC_REPOSITORY_URL}/blob/v{release}"
+
+
 # These are the maximum gaps permitted by the actual Saturday calendars, not
 # the nominal cadence: 1w is seven days; a 2w run on days 15–21 can miss the
 # next month's first-week Saturday by 21 days; first-week 1m Saturdays can be
@@ -203,6 +211,7 @@ class GrafanaContactPointsArtifact(Artifact):
             {
                 "recipients": ";".join(inputs.site.alerts.recipients),
                 "short_name": inputs.site.office.short_name,
+                "export_tree_url": export_tree_url(inputs.release),
             },
         )
 
@@ -424,7 +433,7 @@ def start_here_markdown(inputs: RenderInputs) -> str:
         if board.applies(inputs):
             dashboard = json.loads(template_text(inputs, board.template_paths[0]))
             links.append(f"- [{dashboard['title']}]({GRAFANA_SUB_PATH}d/{dashboard['uid']})")
-    card_url = f"{PUBLIC_REPOSITORY_URL}/blob/v{inputs.release}/{START_HERE_CARD}"
+    card_url = f"{export_tree_url(inputs.release)}/{START_HERE_CARD}"
     paragraphs = (
         # One paragraph: the panel's fixed height holds every line only so.
         "On the box, run `gideon status` for what needs attention now. "

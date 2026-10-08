@@ -86,6 +86,7 @@ from gideon.host.render.grafana import (
     GRAFANA_ADMIN_USER,
     GRAFANA_SUB_PATH,
     NOTIFICATION_LOG_RETENTION,
+    GrafanaContactPointsArtifact,
     GrafanaOverviewArtifact,
 )
 from gideon.host.render.opensearch import (
@@ -1343,15 +1344,21 @@ class Core(unittest.TestCase):
         self.assertEqual(first.by_path["searxng/env"].owners, ("searxng",))
         self.assertEqual(first.by_path["searxng/logging.json"].owners, ("searxng",))
 
-    def test_release_string_enters_only_the_overview_card_link(self) -> None:
+    def test_release_string_enters_page_email_links_then_overview_card_link(self) -> None:
         marker = "9.9.9-marker"
         occurrences = []
         for rendered in render_all(inputs(release=marker)).files:
             count = rendered.content.count(marker)
             if count:
                 occurrences.append((rendered.relative_path, count))
-                self.assertIn(f"blob/v{marker}/", rendered.content)
-        self.assertEqual(occurrences, [(GrafanaOverviewArtifact.relative_path, 1)])
+                self.assertEqual(rendered.content.count(f"blob/v{marker}/"), count)
+        self.assertEqual(
+            occurrences,
+            [
+                (GrafanaContactPointsArtifact.relative_path, 2),
+                (GrafanaOverviewArtifact.relative_path, 1),
+            ],
+        )
 
     def test_facts_do_not_leak_into_non_compose_release_files(self) -> None:
         for rendered in render_all(inputs()).files:

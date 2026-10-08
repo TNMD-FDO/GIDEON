@@ -52,6 +52,7 @@ from gideon.host.render.grafana import (
     GrafanaPoliciesArtifact,
     GrafanaRulesArtifact,
     GrafanaTimeIntervalsArtifact,
+    export_tree_url,
 )
 from gideon.host.render.prometheus import PrometheusConfigArtifact
 from gideon.host.render.searxng import search_enabled
@@ -422,6 +423,10 @@ class Overview(unittest.TestCase):
                     export_link.group(1),
                     PUBLIC_REPOSITORY_URL + "/blob/vfixture/" + START_HERE_CARD,
                 )
+                self.assertEqual(
+                    export_link.group(1),
+                    f"{export_tree_url(site_inputs.release)}/{START_HERE_CARD}",
+                )
                 self.assertEqual(export_link.group(2), "in the public export at this release")
                 self.assertEqual(content.count('target="_blank"'), 1)
                 self.assertTrue(all('target=' not in line for line in content.splitlines() if line.startswith("- [")))
@@ -761,9 +766,11 @@ class Overview(unittest.TestCase):
 
 class Alerting(unittest.TestCase):
     def test_contact_point_uses_each_sites_recipients_and_subject(self) -> None:
-        for site_path in (EXAMPLE, SECOND):
-            with self.subTest(site=site_path.name):
-                site_inputs = inputs(site_path)
+        for site_path, no_gpu in (
+            (EXAMPLE, False), (SECOND, False), (EXAMPLE, True), (SECOND, True)
+        ):
+            with self.subTest(site=site_path.name, no_gpu=no_gpu):
+                site_inputs = inputs(site_path, no_gpu=no_gpu)
                 text = GrafanaContactPointsArtifact().emit(site_inputs)
                 document = yaml.safe_load(text)
                 contact = document["contactPoints"][0]
@@ -796,6 +803,10 @@ class Alerting(unittest.TestCase):
                 )
                 self.assertNotIn(".Values", page_message)
                 self.assertNotIn("URL", page_message)
+                self.assertIn(
+                    f"(runbook: {export_tree_url(site_inputs.release)}/{{{{ . }}}})",
+                    page_message,
+                )
                 message_lines = page_message.rstrip("\n").splitlines()
                 self.assertEqual(
                     message_lines[-1],
@@ -814,7 +825,7 @@ class Alerting(unittest.TestCase):
                     "          message: |\n"
                     "            {{ range .Alerts }}{{ .Status | toUpper }}: {{ .Labels.alertname }}: "
                     "{{ .Annotations.summary }}{{ with .Annotations.runbook }} "
-                    "(runbook: {{ . }}){{ end }}\n"
+                    f"(runbook: {export_tree_url(site_inputs.release)}/{{{{ . }}}}){{{{ end }}}}\n"
                     "            {{ end }}\n"
                     "            What to do: on the box, run gideon status; "
                     "the full steps are in the runbook named above.\n"

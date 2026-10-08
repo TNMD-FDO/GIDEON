@@ -10,7 +10,7 @@ contactPoints:
           singleEmail: true
           subject: "[GIDEON $short_name] {{ .Status | toUpper }}: {{ .CommonLabels.alertname }}"
           message: |
-            {{ range .Alerts }}{{ .Status | toUpper }}: {{ .Labels.alertname }}: {{ .Annotations.summary }}{{ with .Annotations.runbook }} (runbook: {{ . }}){{ end }}
+            {{ range .Alerts }}{{ .Status | toUpper }}: {{ .Labels.alertname }}: {{ .Annotations.summary }}{{ with .Annotations.runbook }} (runbook: $export_tree_url/{{ . }}){{ end }}
             {{ end }}
             What to do: on the box, run gideon status; the full steps are in the runbook named above.
   - orgId: 1
@@ -37,7 +37,7 @@ contactPoints:
           singleEmail: true
           subject: "[GIDEON $short_name] {{ .Status | toUpper }}: {{ .CommonLabels.alertname }}"
           message: |
-            {{ range .Alerts }}{{ .Status | toUpper }}: {{ .Labels.alertname }}: {{ .Annotations.summary }}{{ with .Annotations.runbook }} (runbook: {{ . }}){{ end }}
+            {{ range .Alerts }}{{ .Status | toUpper }}: {{ .Labels.alertname }}: {{ .Annotations.summary }}{{ with .Annotations.runbook }} (runbook: $export_tree_url/{{ . }}){{ end }}
             {{ end }}
             What to do: on the box, run gideon status; the full steps are in the runbook named above.
   - orgId: 1

@@ -4,6 +4,7 @@ import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Final
 
 from gideon.host import grafana, stack
@@ -65,13 +66,16 @@ def pages(alerts: Iterable[grafana.Alert]) -> tuple[Page, ...]:
     )
 
 
-def page_line(page: Page, now: datetime) -> str:
+def page_line(page: Page, now: datetime, root: Path) -> str:
     """Render a page with its summary, runbook, and firing age."""
 
     parts = [part for part in (page.title, page.summary) if part]
     detail = ": ".join(parts)
     if page.runbook:
-        detail += f" — {page.runbook}"
+        runbook = page.runbook
+        if not runbook.startswith("/") and "://" not in runbook:
+            runbook = str(root / runbook)
+        detail += f" — {runbook}"
     age = "unknown" if page.started_at is None else age_text(now, page.started_at)
     marker = "silenced, " if page.suppressed else ""
     return one_line(f"{detail} ({marker}firing {age})")

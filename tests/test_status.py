@@ -26,7 +26,7 @@ from gideon.host.report import Problem
 from gideon.host.sysio import Command, PathLike, RealHost
 from gideon.improvement import feedback, ratings, trips
 from gideon.improvement.sections import Context, Row, Scope, Section, SectionReport
-from gideon.status import command, glance
+from gideon.status import attention, command, glance
 
 ROOT = Path(__file__).resolve().parent.parent
 SITE_PATH = Path("/tmp/gideon-status/site.yaml")
@@ -466,12 +466,34 @@ class Status(unittest.TestCase):
         )
         self.assertIn(
             "needs attention\nFictitiousPage: Fictitious summary"
-            " — docs/runbooks/observability.md#example (firing 30m)\n",
+            f" — {CHECKOUT / 'docs/runbooks/observability.md#example'} (firing 30m)\n",
             stdout,
         )
         self.assertIn("waiting on you\nnone\nat a glance", stdout)
         self.assertTrue(stdout.rstrip().endswith("status: 1 need attention"))
         self.assertEqual(fake.reads, 1)
+
+    def test_page_line_names_the_runbook_for_its_reader(self) -> None:
+        cases = (
+            ("docs/runbooks/fictitious.md §4", f"{CHECKOUT}/docs/runbooks/fictitious.md §4"),
+            ("/tmp/fictitious-runbook.md §4", "/tmp/fictitious-runbook.md §4"),
+            ("https://example.invalid/runbook.md §4", "https://example.invalid/runbook.md §4"),
+            ("", ""),
+        )
+        for runbook, expected in cases:
+            with self.subTest(runbook=runbook):
+                page = attention.Page(
+                    title="Fictitious page",
+                    summary="Fictitious summary",
+                    runbook=runbook,
+                    started_at=NOW - timedelta(minutes=30),
+                    suppressed=False,
+                )
+                clause = f" — {expected}" if expected else ""
+                self.assertEqual(
+                    attention.page_line(page, NOW, CHECKOUT),
+                    f"Fictitious page: Fictitious summary{clause} (firing 30m)",
+                )
 
     def test_clear_alerts_exit_zero_and_glance_uses_each_reader(self) -> None:
         host = self.make_host()
@@ -827,7 +849,10 @@ class Status(unittest.TestCase):
         alpha = stdout.index("AlphaPage:")
         zeta = stdout.index("ZetaPage:")
         self.assertLess(alpha, zeta)
-        self.assertIn("AlphaPage: Fictitious summary — docs/runbooks/observability.md#example (firing 1h)", stdout)
+        self.assertIn(
+            f"AlphaPage: Fictitious summary — {CHECKOUT / 'docs/runbooks/observability.md#example'} (firing 1h)",
+            stdout,
+        )
         self.assertNotIn("Heartbeat:", stdout)
         self.assertNotIn("DashboardAlert:", stdout)
         self.assertTrue(stdout.rstrip().endswith("status: 2 need attention"))

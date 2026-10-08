@@ -132,7 +132,7 @@ def run_status(
         firing = 0
     elif alert_result:
         for page in alert_result:
-            _print_line(attention.page_line(page, current))
+            _print_line(attention.page_line(page, current, checkout))
         firing = sum(not page.suppressed for page in alert_result)
     else:
         _print_line("none")

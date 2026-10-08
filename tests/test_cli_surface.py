@@ -9,8 +9,9 @@ import argparse
 import contextlib
 import io
 import unittest
+from pathlib import Path
 
-from gideon.cli import SITUATIONS, _label_stub_groups, _stub, main
+from gideon.cli import SITUATIONS, _label_stub_groups, _stub, main, start_screen
 from gideon.host.steps import STEPS
 
 TOP_LEVEL = [
@@ -64,9 +65,21 @@ class Start(unittest.TestCase):
         self.assertEqual(err.getvalue(), "")
         commands = [line.strip() for line in screen.splitlines() if line.startswith("  gideon ")]
         self.assertEqual(commands[0], "gideon status")
-        self.assertTrue(commands[-1].startswith("gideon --help"))
+        root = Path(__file__).resolve().parent.parent
+        self.assertEqual(
+            commands[-1],
+            f"gideon --help, and the operator card at {root}/docs/runbooks/start-here.md",
+        )
         self.assertIn("runs as root", screen)
         self.assertIn("at most once a sitting", collapsed(screen))
+
+    def test_start_screen_names_the_card_under_a_given_tree(self) -> None:
+        screen = start_screen(Path("/tmp/fictitious-tree"))
+        self.assertIn(
+            "  gideon --help, and the operator card at "
+            "/tmp/fictitious-tree/docs/runbooks/start-here.md",
+            screen.splitlines(),
+        )
 
     def test_situation_commands_parse_and_are_not_stubs(self) -> None:
         stub_paths = {" ".join(argv[:2]) for argv, _ in STUBS}

@@ -19,6 +19,7 @@ import os
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Final
 
 import gideon
@@ -26,8 +27,9 @@ from gideon.host import cli as host_cli
 from gideon.host import report
 from gideon.host.cotenants import ACKNOWLEDGE_DISRUPTION_FLAG
 from gideon.host.render.ci import PRODUCTION_STACK, STACKS
+from gideon.host.render.grafana import START_HERE_CARD
 
-_EVERYTHING_ELSE: Final = "Everything else\n  gideon --help, and the operator card at docs/runbooks/start-here.md"
+_EVERYTHING_ELSE: Final = "Everything else\n  gideon --help, and the operator card at "
 _ROOT_LINE: Final = (
     "Every command runs as root: sudo asks for the password at most once a sitting,\n"
     "how often being the office's policy."
@@ -62,13 +64,15 @@ SITUATIONS: Final = (
 )
 
 
-def start_screen() -> str:
+def start_screen(tree_root: Path | None = None) -> str:
     """What a bare ``gideon`` prints: the situations, the everything-else line, the root line."""
+    root = Path(__file__).parents[1] if tree_root is None else tree_root
     blocks = [
         "\n".join([situation.heading, *(f"  gideon {path} {hint}".rstrip() for path, hint in situation.entries)])
         for situation in SITUATIONS
     ]
-    return "\n\n".join(["Where to start:", "\n".join([*blocks, _EVERYTHING_ELSE]), _ROOT_LINE])
+    everything_else = f"{_EVERYTHING_ELSE}{root / START_HERE_CARD}"
+    return "\n\n".join(["Where to start:", "\n".join([*blocks, everything_else]), _ROOT_LINE])
 
 
 _LANDING: Final = {

@@ -155,8 +155,10 @@ to them does not.
 ## 4. What pages, and what to do
 
 Every page-class email lists each alert on one line — its status, its rule,
-its summary, and its runbook section — and ends with one line: run
-`gideon status` on the box, then follow the runbook named above. The default
+its summary, and the runbook's link in the public export at the running release
+with its section beside it, the link resolving once that release's export has
+run — and ends with one line: run `gideon status` on the box, then follow the
+runbook named above. The default
 body's labels, values, and buttons are gone; a silence is made in Grafana
 (§5). The rule set is a release
 file (`compose/grafana/provisioning/alerting/rules.yaml.tmpl`). An unresolved
@@ -165,7 +167,7 @@ once and never re-sent or resolved by mail; acknowledgement follows business hou
 Saturday's heartbeat is not a page and takes none of this format: its own contact
 point sends `[GIDEON <office>] Channel heartbeat` with the two fixed body lines in
 the table below.
-`sudo python3 -m gideon status` lists the pages firing now with each rule's runbook section.
+`sudo python3 -m gideon status` lists the pages firing now with each rule's runbook path on the box and its section.
 Exit code 0 means nothing needs attention; 1 means a page is firing or `sudo`
 itself refused; 2 means status could not check or the installed command itself
 refused (for example, the install home has no checkout).
