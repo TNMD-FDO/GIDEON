@@ -55,6 +55,7 @@ DEFAULTS = {
     "hardware_profile": "2x96v-256d",
     "registry": "ghcr.io/tnmd-fdo",
     "egress_proxy": "",
+    "docker_address_pool": "",
     "web.search": "on",
     "web.engines": ["brave", "bing", "startpage", "wikipedia"],
     "web.domain_filter": [],
@@ -114,7 +115,7 @@ class SiteValidation(unittest.TestCase):
         self.assertIsNotNone(result.config)
         assert result.config is not None
 
-        self.assertEqual(len(DEFAULTS), 19)
+        self.assertEqual(len(DEFAULTS), 20)
         for path, expected in DEFAULTS.items():
             with self.subTest(path=path):
                 self.assertEqual(config_value(result.config, path), expected)
@@ -184,6 +185,56 @@ class SiteValidation(unittest.TestCase):
                 self._set_path(document, path, [])
                 result = self._load_document(document)
                 self.assertIn(path, {error.key_path for error in result.errors})
+
+    def test_docker_address_pool_refuses_invalid_cidrs_with_fixes(self) -> None:
+        """The address pool must be a canonical, sufficiently wide IPv4 network."""
+
+        fixture = load_site(FIXTURES / "bad-docker-address-pool.yaml")
+        self.assertEqual([error.key_path for error in fixture.errors], ["docker_address_pool"])
+        self.assertIn("expected an IPv4 network in address/prefix-length form", fixture.errors[0].problem)
+        self.assertEqual(fixture.errors[0].fix, GENERAL_FIX.removeprefix("Fix: "))
+
+        cases: dict[str, tuple[object, str]] = {
+            "non-string": (42, "expected an IPv4 network in address/prefix-length form"),
+            "non-CIDR": ("not-a-cidr", "expected an IPv4 network in address/prefix-length form"),
+            "IPv6": ("2001:db8::/32", "expected an IPv4 network in address/prefix-length form"),
+            "dotted netmask": ("198.18.0.0/255.255.0.0", "expected an IPv4 network in address/prefix-length form"),
+            "leading zero": ("198.018.0.0/16", "expected an IPv4 network in address/prefix-length form"),
+            "too narrow": ("198.18.0.0/21", "a /21 pool holds fewer than 16 networks of /24; state /20 or wider"),
+        }
+        for label, (value, reason) in cases.items():
+            with self.subTest(case=label):
+                document = self._example_document()
+                document["docker_address_pool"] = value
+                result = self._load_document(document)
+                self.assertEqual([error.key_path for error in result.errors], ["docker_address_pool"])
+                self.assertIn(reason, result.errors[0].problem)
+                self.assertEqual(result.errors[0].fix, GENERAL_FIX.removeprefix("Fix: "))
+
+    def test_docker_address_pool_refuses_overlap_with_lan_cidr(self) -> None:
+        """An office LAN inside the pool is refused at site load."""
+
+        document = self._example_document()
+        document["docker_address_pool"] = "198.18.0.0/16"
+        document["lan_cidrs"] = ["192.0.2.0/24", "198.18.0.0/24"]
+        result = self._load_document(document)
+        self.assertEqual([error.key_path for error in result.errors], ["docker_address_pool"])
+        self.assertEqual(result.errors[0].problem, "docker_address_pool overlaps lan_cidrs[1].")
+        self.assertIn("outside the office's networks", result.errors[0].fix)
+        self.assertIn("config/site.example.yaml", result.errors[0].fix)
+
+    def test_docker_address_pool_loads_empty_and_wide_networks(self) -> None:
+        """An unset pool and pools with at least sixteen /24s reach SiteConfig."""
+
+        for pool in ("", "198.18.0.0/20", "198.18.0.0/16"):
+            with self.subTest(pool=pool):
+                document = self._example_document()
+                document["docker_address_pool"] = pool
+                result = self._load_document(document)
+                self.assertTrue(result.ok, render_errors(result.errors))
+                self.assertIsNotNone(result.config)
+                assert result.config is not None
+                self.assertEqual(result.config.docker_address_pool, pool)
 
     def test_web_engines_and_domain_filter_refusals(self) -> None:
         """The three web keys accept six engine names and bare domains."""

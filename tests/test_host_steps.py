@@ -3969,6 +3969,116 @@ class DockerOwnedKeyTests(unittest.TestCase):
         self.assertEqual(self._docker_restarts(host), 0)
         self.assertEqual(json.loads(host.files[os.fspath(_DAEMON)]), daemon)
 
+    def test_address_pool_absent_is_written_once_and_restarts_docker(self) -> None:
+        """A stated pool fills an absent daemon key in one announced Docker restart."""
+
+        base = "198.18.0.0/16"
+        site = replace(self.site, docker_address_pool=base)
+        host = self._host(self.daemon)
+        checked = self.step.check(context(host, site=site))
+        self.assertEqual(checked.disposition, Disposition.DRIFT, checked)
+        self.assertIn("default-address-pools", checked.detail)
+        self.assertIn("maintenance window", checked.fix)
+        self.assertIn("--acknowledge-disruption", checked.fix)
+
+        host.calls.clear()
+        self.step.apply(context(host, site=site))
+        self.assertEqual(len(self._daemon_writes(host)), 1)
+        self.assertEqual(
+            [method for method, _ in host.calls if method == "write_text"],
+            ["write_text"],
+        )
+        self.assertEqual(self._docker_restarts(host), 1)
+        written = json.loads(host.files[os.fspath(_DAEMON)])
+        self.assertEqual(written["default-address-pools"], dockerdaemon.address_pool_value(base))
+        self.assertEqual(
+            self.step.check(context(host, site=site)).disposition,
+            Disposition.CONVERGED,
+        )
+
+    def test_equal_address_pool_is_converged_without_write_or_restart(self) -> None:
+        """The exact one-entry pool meets the site without changing the daemon."""
+
+        base = "198.18.0.0/16"
+        site = replace(self.site, docker_address_pool=base)
+        daemon = {**self.daemon, "default-address-pools": dockerdaemon.address_pool_value(base)}
+        host = self._host(daemon)
+        checked = self.step.check(context(host, site=site))
+        self.assertEqual(checked.disposition, Disposition.CONVERGED, checked)
+
+        host.calls.clear()
+        self.step.apply(context(host, site=site))
+        self.assertEqual(self._daemon_writes(host), [])
+        self.assertFalse(any(method == "write_text" for method, _ in host.calls))
+        self.assertEqual(self._docker_restarts(host), 0)
+        self.assertEqual(json.loads(host.files[os.fspath(_DAEMON)]), daemon)
+
+    def test_different_address_pool_refuses_before_write_or_restart(self) -> None:
+        """A different entry or extra entry remains the other operator's setting."""
+
+        base = "198.18.0.0/16"
+        site = replace(self.site, docker_address_pool=base)
+        wanted = dockerdaemon.address_pool_value(base)
+        other = dockerdaemon.address_pool_value("198.19.0.0/16")
+        for found in (other, wanted + other):
+            with self.subTest(found=found):
+                daemon = {**self.daemon, "default-address-pools": found}
+                host = self._host(daemon)
+                checked = self.step.check(context(host, site=site))
+                self.assertEqual(checked.disposition, Disposition.UNFIXABLE, checked)
+                self.assertIn("default-address-pools", checked.detail)
+                self.assertIn(dockerdaemon.render(found), checked.detail)
+                self.assertIn(dockerdaemon.render(wanted), checked.detail)
+                self.assertIn("docs/runbooks/install-upgrade.md §10", checked.fix)
+
+                host.calls.clear()
+                with self.assertRaises(StepFailure) as raised:
+                    self.step.apply(context(host, site=site))
+                self.assertEqual(raised.exception.detail, checked.detail)
+                self.assertEqual(raised.exception.fix, checked.fix)
+                self.assertFalse(any(method == "write_text" for method, _ in host.calls))
+                self.assertEqual(self._docker_restarts(host), 0)
+                self.assertEqual(json.loads(host.files[os.fspath(_DAEMON)]), daemon)
+
+    def test_unset_address_pool_is_foreign_and_kept(self) -> None:
+        """A daemon pool remains foreign when the site no longer selects it."""
+
+        daemon = {
+            **self.daemon,
+            "default-address-pools": dockerdaemon.address_pool_value("198.18.0.0/16"),
+        }
+        host = self._host(daemon)
+        checked = self.step.check(context(host))
+        self.assertEqual(checked.disposition, Disposition.CONVERGED, checked)
+        self.assertIn(
+            "daemon.json also holds keys GIDEON does not own: default-address-pools",
+            checked.detail,
+        )
+
+        host.calls.clear()
+        self.step.apply(context(host))
+        self.assertEqual(self._daemon_writes(host), [])
+        self.assertFalse(any(method == "write_text" for method, _ in host.calls))
+        self.assertEqual(self._docker_restarts(host), 0)
+        self.assertEqual(json.loads(host.files[os.fspath(_DAEMON)]), daemon)
+
+    def test_non_list_address_pool_refuses_as_malformed(self) -> None:
+        """A selected pool with the wrong container kind is refused as a list."""
+
+        site = replace(self.site, docker_address_pool="198.18.0.0/16")
+        host = self._host({**self.daemon, "default-address-pools": {"base": "198.19.0.0/16"}})
+        checked = self.step.check(context(host, site=site))
+        self.assertEqual(checked.disposition, Disposition.UNFIXABLE, checked)
+        self.assertIn("default-address-pools is", checked.detail)
+        self.assertIn("not a list", checked.detail)
+
+        host.calls.clear()
+        with self.assertRaises(StepFailure) as raised:
+            self.step.apply(context(host, site=site))
+        self.assertEqual(raised.exception.detail, checked.detail)
+        self.assertFalse(any(method == "write_text" for method, _ in host.calls))
+        self.assertEqual(self._docker_restarts(host), 0)
+
     def test_invalid_json_array_and_malformed_feature_refuse_before_writes(self) -> None:
         """Broken daemon JSON and a malformed owned container refuse before any write."""
 
@@ -4096,6 +4206,26 @@ class DockerDaemonLeafTests(unittest.TestCase):
         first_row = self._header_index(lines) + 2
         without_one_row = "\n".join(lines[:first_row] + lines[first_row + 1:])
         self.assertNotEqual(self._table_names(without_one_row), names)
+
+    def test_address_pool_row_states_default_need_and_site_condition(self) -> None:
+        """The leaf gives the pool's default, one-entry need, and site condition."""
+
+        if absent_from_export("docs/archi/host.md", ROOT):
+            self.skipTest("the architecture leaf is absent from this exported tree")
+        leaf = (ROOT / "docs/archi/host.md").read_text()
+        rows = [
+            line for line in leaf.splitlines()
+            if line.startswith("| `default-address-pools` |")
+        ]
+        self.assertEqual(len(rows), 1)
+        cells = [cell.strip() for cell in rows[0].split("|")]
+        self.assertEqual(cells[2], "absent, or an empty list")
+        self.assertEqual(
+            cells[3],
+            "exactly one entry — the site's `docker_address_pool` as `base`, "
+            f"`size` {dockerdaemon.ADDRESS_POOL_SIZE}",
+        )
+        self.assertEqual(cells[4], "the site sets `docker_address_pool`")
 
 
 class BoxWideSettingsLeafTests(unittest.TestCase):
@@ -5939,6 +6069,10 @@ class ServiceStepTests(unittest.TestCase):
 class BaselineCheckPass(unittest.TestCase):
     def test_recorded_baseline_has_no_docker_source_and_engine_is_absent(self) -> None:
         host = baseline_host()
+        site = context(host).site
+        self.assertIsNotNone(site)
+        assert site is not None
+        self.assertEqual(site.docker_address_pool, "")
         self.assertFalse(
             any(path.startswith("/etc/apt/sources.list") for path in host.files)
         )

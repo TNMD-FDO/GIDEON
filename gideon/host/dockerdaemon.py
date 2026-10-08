@@ -1,13 +1,24 @@
 """GIDEON's keys in Docker's shared daemon file.
 
 GIDEON owns the keys `OWNED_KEYS` names and sets one only while it is absent or
-at its default; it never changes or removes any other key.
+at its default; it never changes or removes any other key. The address pool is
+met only by GIDEON's exact one-entry list, never by membership: Docker allocates
+across every pool listed, so a second pool would hand out ranges the first keeps
+clear of the office's networks.
 """
 
 import json
 from copy import deepcopy
 from dataclasses import dataclass
+from typing import Final
 from urllib.parse import urlsplit, urlunsplit
+
+# The prefix length of each network Docker carves from GIDEON's pool, and the
+# longest prefix a pool may have so it holds at least sixteen such networks: the
+# default bridge, rebuilt from the pool at Docker's restart, the standing
+# bridges, the throwaway CI projects, and headroom.
+ADDRESS_POOL_SIZE: Final = 24
+ADDRESS_POOL_MAX_PREFIX: Final = 20
 
 
 @dataclass(frozen=True)
@@ -38,12 +49,34 @@ _CDI = OwnedKey("features.cdi", ("features", "cdi"), (), False)
 _HTTP_PROXY = OwnedKey("proxies.http-proxy", ("proxies", "http-proxy"), (), False)
 _HTTPS_PROXY = OwnedKey("proxies.https-proxy", ("proxies", "https-proxy"), (), False)
 _REGISTRIES = OwnedKey("insecure-registries", ("insecure-registries",), ([],), True)
-OWNED_KEYS = (_DATA_ROOT, _LOG_DRIVER, _CDI, _HTTP_PROXY, _HTTPS_PROXY, _REGISTRIES)
+_ADDRESS_POOLS = OwnedKey("default-address-pools", ("default-address-pools",), ([],), False)
+OWNED_KEYS = (
+    _DATA_ROOT,
+    _LOG_DRIVER,
+    _CDI,
+    _HTTP_PROXY,
+    _HTTPS_PROXY,
+    _REGISTRIES,
+    _ADDRESS_POOLS,
+)
 # The top-level keys whose value must be an object or a list for GIDEON's paths.
-_CONTAINERS: dict[str, type] = {"features": dict, "proxies": dict, "insecure-registries": list}
+CONTAINER_KINDS: dict[str, type] = {
+    "features": dict,
+    "proxies": dict,
+    "insecure-registries": list,
+    "default-address-pools": list,
+}
 
 
-def needs(egress_proxy: str | None, insecure_registry: str | None) -> tuple[Need, ...]:
+def address_pool_value(base: str) -> list[dict[str, object]]:
+    """Build the one pool entry Docker uses to allocate container networks."""
+
+    return [{"base": base, "size": ADDRESS_POOL_SIZE}]
+
+
+def needs(
+    egress_proxy: str | None, insecure_registry: str | None, address_pool: str | None
+) -> tuple[Need, ...]:
     """Select the owned keys required by the current site facts."""
 
     wanted = [Need(_DATA_ROOT, "/var/lib/docker"), Need(_LOG_DRIVER, "journald"), Need(_CDI, True)]
@@ -51,6 +84,8 @@ def needs(egress_proxy: str | None, insecure_registry: str | None) -> tuple[Need
         wanted.extend((Need(_HTTP_PROXY, egress_proxy), Need(_HTTPS_PROXY, egress_proxy)))
     if insecure_registry:
         wanted.append(Need(_REGISTRIES, insecure_registry))
+    if address_pool:
+        wanted.append(Need(_ADDRESS_POOLS, address_pool_value(address_pool)))
     return tuple(wanted)
 
 
@@ -98,7 +133,7 @@ def read(current: dict[str, object], wanted: tuple[Need, ...]) -> Reading:
     entered = {need.key.path[0] for need in wanted}
     malformed = tuple(
         (name, render(current[name]))
-        for name, kind in _CONTAINERS.items()
+        for name, kind in CONTAINER_KINDS.items()
         if name in entered and name in current and not isinstance(current[name], kind)
     )
     malformed_names = {name for name, _ in malformed}

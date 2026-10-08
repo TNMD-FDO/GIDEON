@@ -5,7 +5,8 @@ accepts it when present and sufficient whatever file installed it, and refuses
 a second apt source for its repository before writing anything, since two
 entries under different keys break apt for the whole box. It owns the keys
 `dockerdaemon.OWNED_KEYS` names, sets each only at its default, and keeps every
-other daemon key.
+other daemon key. The optional `default-address-pools` key holds the site's
+range for Docker to carve into container networks.
 Containerd's root and journald's storage are box-wide settings: their effects
 are read, set at their defaults, accepted when met, and refused when short.
 """
@@ -19,7 +20,7 @@ from enum import Enum
 from pathlib import Path
 
 from gideon.host import aptsources, dockerdaemon
-from gideon.host.cotenants import guard
+from gideon.host.cotenants import ACKNOWLEDGE_DISRUPTION_FLAG, guard
 from gideon.host.images import is_loopback_registry, is_plain_registry, parse_registry
 from gideon.host.steps import (
     BOX_WIDE_SHORTFALL_FIX,
@@ -102,7 +103,8 @@ _JOURNALD_READ_FIX = "Repair journald's configuration so systemd-analyze can rea
 _JOURNALD_DROP_IN_FIX = f"Repair access to {_JOURNALD}, then re-run provision."
 _DAEMON_OBJECT_FIX = f"Repair {_DAEMON} by hand as one JSON object, then re-run provision."
 _DAEMON_CONTAINER_FIX = f"Repair the named key in {_DAEMON} by hand, then re-run provision."
-_DAEMON_SHORT_FIX = f"Agree the value of the named key with the box's other operators, set it in {_DAEMON} and restart Docker in an announced maintenance window, since the restart reaches every container, then re-run provision."
+_DAEMON_SET_FIX = f"Announce a maintenance window to every project sharing the daemon (docs/runbooks/install-upgrade.md §9), since writing GIDEON's daemon.json keys restarts Docker, which reaches every container on the box; then re-run provision {ACKNOWLEDGE_DISRUPTION_FLAG}."
+_DAEMON_SHORT_FIX = f"Agree the value of the named key with the box's other operators, set it in {_DAEMON} and restart Docker in an announced maintenance window, since the restart reaches every container, then re-run provision. See docs/runbooks/install-upgrade.md §10."
 # Read the binaries' reports, not dpkg's epoch-prefixed versions (such as
 # 5:29...). docker --version comes from docker-ce-cli, shipped at the engine version.
 _VERSION = re.compile(r"(?:^|\s)v?(\d+)(?:\.(\d+))?")
@@ -283,6 +285,7 @@ def _source_refusal(
 
 def _daemon_needs(context: ProvisionContext) -> tuple[dockerdaemon.Need, ...]:
     egress_proxy = context.site.egress_proxy if context.site is not None else None
+    address_pool = context.site.docker_address_pool if context.site is not None else None
     insecure_registry = None
     if context.site is not None:
         target = parse_registry(context.site.registry)
@@ -292,7 +295,7 @@ def _daemon_needs(context: ProvisionContext) -> tuple[dockerdaemon.Need, ...]:
             and not is_loopback_registry(target.authority)
         ):
             insecure_registry = target.authority
-    return dockerdaemon.needs(egress_proxy, insecure_registry)
+    return dockerdaemon.needs(egress_proxy, insecure_registry, address_pool)
 
 
 def _daemon_read(
@@ -329,7 +332,7 @@ def _daemon_mode(context: ProvisionContext) -> int:
 def _daemon_refusal(reading: dockerdaemon.Reading) -> CheckResult | None:
     if reading.malformed:
         detail = "; ".join(
-            f"{name} is {found}, not {'a list' if name == 'insecure-registries' else 'an object'}"
+            f"{name} is {found}, not {'a list' if dockerdaemon.CONTAINER_KINDS[name] is list else 'an object'}"
             for name, found in reading.malformed
         )
         return CheckResult(Disposition.UNFIXABLE, detail, _DAEMON_CONTAINER_FIX)
@@ -598,7 +601,7 @@ class DockerEngineStep(Step):
         reading = daemon[1]
         if reading.to_set:
             keys = ", ".join(reading.to_set)
-            return CheckResult(Disposition.DRIFT, f"{_DAEMON} lacks GIDEON's keys: {keys}", "Set GIDEON's daemon.json keys, then re-run provision.")
+            return CheckResult(Disposition.DRIFT, f"{_DAEMON} lacks GIDEON's keys: {keys}", _DAEMON_SET_FIX)
         if containerd in _CONTAINERD_WRITABLE:
             return CheckResult(
                 Disposition.DRIFT,

@@ -6,6 +6,7 @@ office:
 
 hostname: gideon.example.org
 lan_cidrs: [192.0.2.0/24, 198.51.100.0/24]
+docker_address_pool: 198.18.0.0/20
 jurisdiction: {circuit: ca6, districts: [tnmd], states: [tenn]}
 
 auth:

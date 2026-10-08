@@ -43,7 +43,7 @@ class RedactContracts(unittest.TestCase):
             raise AssertionError(render_errors(result.errors))
         cls.site = result.config
 
-    def test_marked_registry_is_exactly_the_sixteen_office_value_paths(self) -> None:
+    def test_marked_registry_is_exactly_the_seventeen_office_value_paths(self) -> None:
         expected = {
             "hostname",
             "lan_cidrs",
@@ -61,6 +61,7 @@ class RedactContracts(unittest.TestCase):
             "alerts.recipients",
             "registry",
             "egress_proxy",
+            "docker_address_pool",
         }
         marked = {spec.path for spec in FIELD_REGISTRY if spec.office_value}
         self.assertEqual(marked, expected)
@@ -74,6 +75,7 @@ class RedactContracts(unittest.TestCase):
                             "non-empty string",
                             "string list",
                             "non-empty string list",
+                            "CIDR",
                             "CIDR list",
                         },
                     )
@@ -113,6 +115,7 @@ class RedactContracts(unittest.TestCase):
                     f"certificate CN={site.auth.ldap.host.upper()}",
                     "dn cn=last\\, first,ou=security groups,dc=example,dc=org",
                     f"firewall from {site.lan_cidrs[0]}",
+                    f"pool {site.docker_address_pool}",
                     "address 192.0.2.42",
                     f"mail {site.alerts.smtp.from_} {site.alerts.recipients[1]}",
                     f"default {site.auth.ldap.admins_group}",
@@ -138,6 +141,7 @@ class RedactContracts(unittest.TestCase):
                     "certificate CN=<auth.ldap.host>",
                     "dn <auth.ldap.users_group>",
                     "firewall from <lan_cidrs[0]>",
+                    "pool <docker_address_pool>",
                     "address <address in lan_cidrs[0]>",
                     "mail <alerts.smtp.from> <alerts.recipients[1]>",
                     f"default {site.auth.ldap.admins_group}",

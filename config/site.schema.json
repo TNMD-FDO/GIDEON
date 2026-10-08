@@ -175,6 +175,11 @@
       ],
       "type": "object"
     },
+    "docker_address_pool": {
+      "default": "",
+      "description": "The IPv4 range Docker carves its container networks from, kept clear of every office network; unset leaves Docker's own pool.",
+      "type": "string"
+    },
     "egress_proxy": {
       "default": "",
       "description": "Optional proxy applied to package, image, and web egress.",

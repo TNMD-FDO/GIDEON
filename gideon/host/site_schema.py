@@ -21,7 +21,12 @@ def _leaf_schema(spec: FieldSpec) -> dict[str, Any]:
     kind = spec.kind
     item_schema: dict[str, Any] | None = None
 
-    if kind == "string" or kind == "non-empty string" or kind == "timezone":
+    if (
+        kind == "string"
+        or kind == "non-empty string"
+        or kind == "timezone"
+        or kind == "CIDR"
+    ):
         schema["type"] = "string"
         if kind == "non-empty string":
             schema["minLength"] = 1

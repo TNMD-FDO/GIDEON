@@ -55,6 +55,8 @@ alerts:
 # hardware_profile: 2x96v-256d      profile section of models.lock; unknown refuses, non-reference warns
 # registry: ghcr.io/tnmd-fdo       image-reference prefix for every image in images.lock (the two plain-HTTP registries: loopback 127.0.0.1:5000 pre-1.0, and the box's bridge address 192.168.122.1:5000 for the acceptance VM)
 # egress_proxy: ""                 optional; applied to apt, Docker pulls, the CLI, SearXNG, Open WebUI, gideon-egress; credentials in secrets/proxy_auth
+# docker_address_pool: ""          optional; an IPv4 /20 or wider the office keeps clear of its networks (example: 198.18.0.0/16); Docker carves every container network, including the default bridge, as a /24 from daemon.json's default-address-pools
+#                                  set it when an office host (relay, directory, or backup target) sits in a private range Docker could otherwise assign; add it after upgrading to a release that knows the key (docs/runbooks/install-upgrade.md §2), then provision in an announced window to write the key and restart Docker once
 
 # web:                             General branch search policy
 #   search: on                     off = no web search anywhere; SearXNG not started

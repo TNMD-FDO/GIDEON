@@ -16,6 +16,7 @@ from typing import Any, Final, Literal, assert_never, cast
 
 import yaml  # type: ignore[import-untyped]
 
+from gideon.host import dockerdaemon
 from gideon.host.sysio import Host, RealHost
 
 Kind = Literal[
@@ -25,6 +26,7 @@ Kind = Literal[
     "enum",
     "string list",
     "non-empty string list",
+    "CIDR",
     "CIDR list",
     "timezone",
 ]
@@ -326,6 +328,16 @@ FIELD_REGISTRY: Final[tuple[FieldSpec, ...]] = (
         office_value=True,
     ),
     _field(
+        "docker_address_pool",
+        kind="CIDR",
+        default="",
+        description=(
+            "The IPv4 range Docker carves its container networks from, kept clear "
+            "of every office network; unset leaves Docker's own pool."
+        ),
+        office_value=True,
+    ),
+    _field(
         "web.search",
         kind="enum",
         default="on",
@@ -521,6 +533,9 @@ class SiteConfig:
     )
     registry: str = field(default_factory=lambda: _default_string("registry"))
     egress_proxy: str = field(default_factory=lambda: _default_string("egress_proxy"))
+    docker_address_pool: str = field(
+        default_factory=lambda: _default_string("docker_address_pool")
+    )
     web: Web = field(default_factory=Web)
     retention: Retention = field(default_factory=Retention)
     prompt_logging: str = field(
@@ -604,6 +619,9 @@ class SiteConfig:
             registry=cast(str, document.get("registry", _default("registry"))),
             egress_proxy=cast(
                 str, document.get("egress_proxy", _default("egress_proxy"))
+            ),
+            docker_address_pool=cast(
+                str, document.get("docker_address_pool", _default("docker_address_pool"))
             ),
             web=Web(
                 search=web.get("search", _default("web.search")),
@@ -919,6 +937,31 @@ def _validate_leaf(spec: FieldSpec, value: object) -> SiteError | None:
             spec, value, "expected a non-empty list of non-empty strings"
         )
 
+    if kind == "CIDR":
+        expected = (
+            "expected an IPv4 network in address/prefix-length form, "
+            "such as 198.18.0.0/16"
+        )
+        if not isinstance(value, str):
+            return _invalid_value_error(spec, value, expected)
+        if not value:
+            return None
+        try:
+            network = ipaddress.ip_network(value)
+        except ValueError:
+            return _invalid_value_error(spec, value, expected)
+        if not isinstance(network, ipaddress.IPv4Network) or value != str(network):
+            return _invalid_value_error(spec, value, expected)
+        if network.prefixlen > dockerdaemon.ADDRESS_POOL_MAX_PREFIX:
+            return _invalid_value_error(
+                spec,
+                value,
+                f"a /{network.prefixlen} pool holds fewer than 16 networks of "
+                f"/{dockerdaemon.ADDRESS_POOL_SIZE}; state "
+                f"/{dockerdaemon.ADDRESS_POOL_MAX_PREFIX} or wider",
+            )
+        return None
+
     if kind == "CIDR list":
         if isinstance(value, list) and value:
             for item in value:
@@ -996,6 +1039,35 @@ def validate_site(document: Mapping[str, object]) -> list[SiteError]:
                 ),
             )
         )
+
+    pool_present, pool = _lookup(document, "docker_address_pool")
+    lan_present, lan_cidrs = _lookup(document, "lan_cidrs")
+    if (
+        pool_present
+        and isinstance(pool, str)
+        and pool
+        and _validate_leaf(_spec("docker_address_pool"), pool) is None
+        and lan_present
+        and _validate_leaf(_spec("lan_cidrs"), lan_cidrs) is None
+    ):
+        pool_network = ipaddress.ip_network(pool)
+        for index, cidr in enumerate(cast(list[str], lan_cidrs)):
+            lan_network = ipaddress.ip_network(cidr)
+            if (
+                isinstance(lan_network, ipaddress.IPv4Network)
+                and pool_network.overlaps(lan_network)
+            ):
+                errors.append(
+                    SiteError(
+                        key_path="docker_address_pool",
+                        problem=f"docker_address_pool overlaps lan_cidrs[{index}].",
+                        fix=(
+                            "State a Docker address pool outside the office's "
+                            "networks in /etc/gideon/site.yaml; consult "
+                            "config/site.example.yaml."
+                        ),
+                    )
+                )
     return errors
 
 

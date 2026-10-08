@@ -63,7 +63,12 @@ same command is run again after the fix.
    `office-services-setup.md`. On the build box,
    `sudo python3 -m gideon registry mirror` pulls the release's images into its
    loopback registry, and where a receiving office pulls its images from is
-   settled with the release registry at `v1.0.0`.
+   settled with the release registry at `v1.0.0`. Set `docker_address_pool` when
+   an office host sits in a range Docker could assign to a container network;
+   the next provision writes the pool and restarts Docker once, so announce a
+   window for every container on the box. A network made before the restart
+   keeps its subnet until it is removed, so pause anything that makes networks,
+   such as a CI runner, from just before that provision until it finishes.
 4. **Provision again**. The
    site-dependent steps — `egress-proxy`, `firewall`, `time-sync`, and
    `timezone` — are blocked until the site file exists, and preflight refuses
@@ -330,6 +335,14 @@ command runs from the *current* release's tree and hands over to the new tree's
 own CLI after the checkout; nothing of the new release is loaded into the
 running process.
 
+The installed release's site loader refuses keys it does not know from every
+command and timer running from `/opt/gideon`, and `upgrade` loads the site file
+before checking out the new release. Add any key named in a release note's
+"new site keys" line to `/etc/gideon/site.yaml` only after that release's
+`upgrade` finishes. Then run `sudo gideon host provision` and
+`sudo gideon apply`. `docker_address_pool` is the first key that follows this
+sequence.
+
 **From go-live.** A tag is user-facing from the office's first
 users; before them the rules below do not bind. The **quiet window** is
 weeknights 19:00–06:00 and Friday 19:00 to Monday 06:00 in the site's timezone
@@ -386,6 +399,14 @@ that set and applies the previous release, returning both data and product
 state to the saved point. How far a
 rollback got is a second, small record, `/data/backup-staging/rollback.json`,
 which exists only while one is in progress (the `plan` row below).
+
+Before rolling back across the release that introduced `docker_address_pool`,
+remove the field from `/etc/gideon/site.yaml`: the previous release's site
+loader refuses it, so its rollback stages cannot start while the field is
+present. The restore replaces the site file with the pre-upgrade set's copy,
+which did not hold the field because the set includes `/etc/gideon`. The
+daemon's `default-address-pools` key remains; the previous release treats it
+as foreign and keeps it, so the pool still protects new Docker networks.
 
 | Stage | What happens |
 |---|---|
@@ -913,7 +934,7 @@ A merged `host.minimums.*` or `host.driver.branch` bump makes provision and pref
 
 ## 10. Changing a moved box-wide setting
 
-When provision, preflight, or `upgrade`'s provision stage reports a moved setting that falls short, its row names the setting, the value found, and the value needed. GIDEON does not change a moved setting. Agree the value with the box's other operators, make the applicable change below, then re-run provision from the release checkout.
+When provision, preflight, or `upgrade`'s provision stage reports a moved setting or Docker address pool that falls short, its row names the setting or key, the value found, and the value needed. GIDEON does not change a moved setting or pool. Agree the value with the box's other operators, make the applicable change below, then re-run provision from the release checkout.
 
 ### Time zone
 
@@ -934,6 +955,10 @@ Set `Storage=persistent` in the file the refusal names, or, when `Storage=auto` 
 ### Apt periodic triggers
 
 Use `sudo grep -r 'Unattended-Upgrade\|Update-Package-Lists' /etc/apt/apt.conf.d/` to find the file setting the refused key to `"0"`; set that key to `"1"` there. Read `apt-config dump APT::Periodic` to confirm both triggers are on. No maintenance window is needed.
+
+### Docker address pool
+
+If the refusal names `default-address-pools` with another value, agree one pool with the box's other operators. Docker allocates across every entry in that list, so a second pool defeats the office's choice. Use one IPv4 range of /20 or wider, clear of every office network, for Docker to carve into /24 networks. Set `docker_address_pool` in `/etc/gideon/site.yaml` to that range and remove the other entries from `/etc/docker/daemon.json` by hand, or have the other operator adopt GIDEON's range. Run `sudo systemctl restart docker` in an announced window because the restart reaches every container on the box. Then re-run provision from the release checkout, which reads the single entry as its own.
 
 ### Containerd root
 

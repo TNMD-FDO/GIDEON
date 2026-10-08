@@ -37,7 +37,7 @@ class SiteSchema(unittest.TestCase):
             leaf = schema_at(schema, spec.path)
             self.assertEqual(leaf["description"], spec.description)
             kind = spec.kind
-            if kind == "string" or kind == "non-empty string" or kind == "timezone":
+            if kind in ("string", "non-empty string", "timezone", "CIDR"):
                 self.assertEqual(leaf["type"], "string")
             elif kind == "int":
                 self.assertEqual(leaf["type"], "integer")
