@@ -15,6 +15,7 @@ TEXT_SOURCES: Final = (
 )
 
 MarkerKind = Literal["page", "footnote-mark", "editorial"]
+BlockKind = Literal["opinion", "author", "headmatter", "footnote", "heading", "quote"]
 FailureReason = Literal["empty", "unparseable"]
 
 _XML_BLOCKS: Final = frozenset({
@@ -41,11 +42,22 @@ class Marker:
 
 
 @dataclass(frozen=True, slots=True)
+class Block:
+    """A text-bearing element's kind, label, and span in canonical text."""
+
+    kind: BlockKind
+    label: str
+    start: int
+    end: int
+
+
+@dataclass(frozen=True, slots=True)
 class Parsed:
-    """The NFC canonical text and the markers dropped from it, in document order."""
+    """The canonical text with its dropped locators and structural blocks."""
 
     text: str
     markers: tuple[Marker, ...]
+    blocks: tuple[Block, ...]
 
 
 class OpinionTextFailure(Exception):
@@ -68,8 +80,9 @@ def choose(row: Mapping[str, str | None]) -> tuple[str, str] | None:
 
 def _normalized_segment(
     raw: str, markers: list[tuple[int, MarkerKind, str]], preserve: bool,
-) -> tuple[str, list[Marker]]:
-    """One line's text, its whitespace collapsed unless preserved, and its markers.
+    positions: list[int],
+) -> tuple[str, list[Marker], list[int]]:
+    """One line's text and normalized offsets for locators and block boundaries.
 
     Each word is normalized alone: a space never composes, so the joined words
     equal the line's normalization, and a marker's offset counts the normalized
@@ -80,10 +93,11 @@ def _normalized_segment(
         start = len(raw) - len(raw.lstrip("\r\n"))
         end = len(raw.rstrip("\r\n"))
         text = unicodedata.normalize("NFC", raw[start:end])
-        return text, [
-            Marker(kind, label, len(unicodedata.normalize("NFC", raw[start:max(start, min(pos, end))])))
-            for pos, kind, label in markers
-        ]
+        def locate_preserved(pos: int) -> int:
+            return len(unicodedata.normalize("NFC", raw[start:max(start, min(pos, end))]))
+
+        return (text, [Marker(kind, label, locate_preserved(pos)) for pos, kind, label in markers],
+                [locate_preserved(pos) for pos in positions])
 
     words = list(_WORD.finditer(raw))
     starts = [word.start() for word in words]
@@ -98,20 +112,30 @@ def _normalized_segment(
         pieces.append(part)
         length += len(part)
 
-    located: list[Marker] = []
-    for pos, kind, label in markers:
+    def locate_collapsed(pos: int) -> int:
         index = bisect_right(starts, pos) - 1
         if index < 0:
-            offset = 0
-        elif pos <= words[index].end():
+            return 0
+        if pos <= words[index].end():
             prefix = raw[words[index].start():pos]
-            offset = offsets[index] + len(unicodedata.normalize("NFC", prefix))
-        elif index + 1 < len(words):
-            offset = offsets[index + 1]
-        else:
-            offset = length
-        located.append(Marker(kind, label, offset))
-    return " ".join(pieces), located
+            return offsets[index] + len(unicodedata.normalize("NFC", prefix))
+        if index + 1 < len(words):
+            return offsets[index + 1]
+        return length
+
+    return (" ".join(pieces),
+            [Marker(kind, label, locate_collapsed(pos)) for pos, kind, label in markers],
+            [locate_collapsed(pos) for pos in positions])
+
+
+@dataclass(slots=True)
+class _OpenBlock:
+    kind: BlockKind
+    label: str
+    raw_start: int | None
+    raw_end: int | None = None
+    start: int | None = None
+    end: int | None = None
 
 
 class _Builder:
@@ -125,6 +149,17 @@ class _Builder:
         self.length = 0
         self.breaks = 0
         self.preserve = False
+        self.blocks: list[_OpenBlock] = []
+        self.pending_blocks: list[_OpenBlock] = []
+
+    def open_block(self, kind: BlockKind, label: str) -> _OpenBlock:
+        block = _OpenBlock(kind, label, self.raw_length)
+        self.blocks.append(block)
+        self.pending_blocks.append(block)
+        return block
+
+    def close_block(self, block: _OpenBlock) -> None:
+        block.raw_end = self.raw_length
 
     def text(self, value: str | None) -> None:
         if value:
@@ -135,17 +170,35 @@ class _Builder:
         self.raw_markers.append((self.raw_length, kind, label))
 
     def flush(self) -> None:
-        value, markers = _normalized_segment(
-            "".join(self.raw), self.raw_markers, self.preserve,
+        raw = "".join(self.raw)
+        pending = self.pending_blocks
+        positions: list[int] = []
+        for block in pending:
+            assert block.raw_start is not None
+            positions.extend((block.raw_start, block.raw_end if block.raw_end is not None else len(raw)))
+        value, markers, offsets = _normalized_segment(
+            raw, self.raw_markers, self.preserve, positions,
         )
         self.raw = []
         self.raw_length = 0
         self.raw_markers = []
+        separator = "\n" * self.breaks if self.parts and value else ""
+        base = self.length + len(separator)
+        for index, block in enumerate(pending):
+            assert block.raw_start is not None
+            raw_end = block.raw_end if block.raw_end is not None else len(raw)
+            has_text = bool(raw[block.raw_start:raw_end].strip())
+            if has_text and value and block.start is None:
+                block.start = base + offsets[2 * index]
+            if block.raw_end is not None:
+                block.end = base + offsets[2 * index + 1] if has_text and value else self.length
+                block.raw_start = None
+            else:
+                block.raw_start = 0
+        self.pending_blocks = [block for block in pending if block.raw_start is not None]
         if not value:
             self.pending_markers.extend((marker.kind, marker.label) for marker in markers)
             return
-        separator = "\n" * self.breaks if self.parts else ""
-        base = self.length + len(separator)
         self.parts.append(separator + value)
         self.markers.extend(Marker(kind, label, base) for kind, label in self.pending_markers)
         self.markers.extend(
@@ -171,7 +224,12 @@ class _Builder:
         value = "".join(self.parts)
         if not value.strip():
             raise OpinionTextFailure("empty")
-        return Parsed(value, tuple(self.markers))
+        blocks = tuple(
+            Block(block.kind, block.label, block.start, block.end)
+            for block in self.blocks
+            if block.start is not None and block.end is not None and block.end > block.start
+        )
+        return Parsed(value, tuple(self.markers), blocks)
 
 
 def _tag(element: etree._Element) -> str:
@@ -211,7 +269,89 @@ def _is_block(element: etree._Element, column: str) -> bool:
     return tag in _XML_BLOCKS or tag == "div" and bool(classes & {"footnote", "footnotes"})
 
 
-def _walk(element: etree._Element, column: str, builder: _Builder) -> None:
+def _block_kind(
+    element: etree._Element, column: str, header: etree._Element | None,
+) -> tuple[BlockKind, str] | None:
+    tag = _tag(element)
+    classes = set((element.get("class") or "").split())
+    if column == "xml_harvard":
+        if tag == "opinion":
+            return "opinion", (element.get("type") or "").lower()
+        if tag == "author":
+            return "author", ""
+        if tag in {
+            "judges", "attorneys", "headnotes", "summary", "history", "decisiondate",
+            "otherdate", "docketnumber", "seealso", "citation", "court",
+        }:
+            return "headmatter", tag
+        if tag == "footnote" or tag == "div" and "footnote" in classes:
+            return "footnote", element.get("label") or ""
+        if tag == "blockquote":
+            return "quote", ""
+    elif column == "html_columbia":
+        if tag in {"h3", "center"}:
+            return "heading", ""
+        if tag == "blockquote":
+            return "quote", ""
+        if tag == "footnote_body" or tag == "div" and "footnote" in classes:
+            return "footnote", ""
+    elif column == "html_lawbox":
+        if element is header:
+            return "headmatter", "header"
+        if tag in {"h1", "h2", "center"}:
+            return "heading", ""
+        if tag == "blockquote":
+            return "quote", ""
+    elif column == "html_anon_2020":
+        if tag == "div":
+            if "opinion" in classes:
+                return "opinion", element.get("opiniontype") or ""
+            if "caseopinionby" in classes:
+                return "author", ""
+            if classes & {"courtcasedochead", "judges", "counsel", "representation", "panel"}:
+                return "headmatter", ""
+        if tag == "counselor":
+            return "headmatter", ""
+        if tag == "h" or tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+            return "heading", ""
+        if tag == "excerpt":
+            return "quote", ""
+        if tag == "li" and any(
+            _tag(parent) == "div" and "footnotes" in (parent.get("class") or "").split()
+            for parent in element.iterancestors()
+        ):
+            return "footnote", ""
+    elif column == "html":
+        if tag == "p" and classes & {"case_cite", "date", "parties", "docket", "court"}:
+            return "headmatter", ""
+        if tag == "div" and "prelims" in classes:
+            return "headmatter", ""
+        if tag == "div" and "footnote" in classes or tag == "p" and "MsoFootnoteText" in classes:
+            return "footnote", ""
+        if tag in {"h1", "h2", "h3", "h4", "h5", "h6", "center"}:
+            return "heading", ""
+        if tag == "blockquote":
+            return "quote", ""
+    return None
+
+
+def _lawbox_header(root: etree._Element) -> etree._Element | None:
+    first_h1 = next((element for element in root.iter()
+                     if isinstance(element.tag, str) and _tag(element) == "h1"), None)
+    if first_h1 is None:
+        return None
+    for parent in first_h1.iterancestors():
+        if parent is root:
+            break
+        if _tag(parent) == "div":
+            return parent
+    return None
+
+
+def _walk(
+    element: etree._Element, column: str, builder: _Builder,
+    header: etree._Element | None,
+) -> None:
     if not isinstance(element.tag, str):
         return
     marker = _marker(element, column)
@@ -227,13 +367,17 @@ def _walk(element: etree._Element, column: str, builder: _Builder) -> None:
     block = _is_block(element, column)
     if block:
         builder.block_break()
+    kind = _block_kind(element, column, header)
+    opened = builder.open_block(*kind) if kind is not None else None
     previous_preserve = builder.preserve
     if tag == "pre":
         builder.preserve = True
     builder.text(element.text)
     for child in element:
-        _walk(child, column, builder)
+        _walk(child, column, builder, header)
         builder.text(child.tail)
+    if opened is not None:
+        builder.close_block(opened)
     if block:
         builder.block_break()
     builder.preserve = previous_preserve
@@ -252,7 +396,7 @@ def canonical_text(column: str, raw: str) -> Parsed:
         )
         if not value.strip():
             raise OpinionTextFailure("empty")
-        return Parsed(value, ())
+        return Parsed(value, (), ())
 
     try:
         if column == "xml_harvard":
@@ -267,5 +411,6 @@ def canonical_text(column: str, raw: str) -> Parsed:
     if root is None:
         raise OpinionTextFailure("unparseable")
     builder = _Builder()
-    _walk(root, column, builder)
+    header = _lawbox_header(root) if column == "html_lawbox" else None
+    _walk(root, column, builder, header)
     return builder.finish()

@@ -81,6 +81,7 @@ class FakeHost(RealHost):
         self.caselaw_deferred: list[dict[str, Any]] = []
         self.caselaw_failure: str | None = None
         self.caselaw_counts: dict[str, dict[str, object]] = {}
+        self.caselaw_section_counts: dict[str, dict[str, object]] = {}
         self.interrupt_caselaw_job = False
         self.caselaw_events: list[tuple[str, str]] = []
         self.job_polls: dict[int, int] = {}
@@ -251,6 +252,29 @@ class FakeHost(RealHost):
                     else "succeeded"
                 )
                 return subprocess.CompletedProcess(command, 0, f"{job}|{status}|1\n", "")
+            if "WITH ready_documents AS" in input:
+                court = self._bound(input, "v_court")
+                if court in self.caselaw_section_counts:
+                    counts = self.caselaw_section_counts[court]
+                else:
+                    by_status = self.caselaw_counts.get(court, {}).get("by_status")
+                    if isinstance(by_status, dict):
+                        ready = by_status.get("ready", 0)
+                    else:
+                        source = self._bound(input, "v_source")
+                        directory = staging.work_directory(
+                            self.current_label, source, work_root=self.work,
+                        )
+                        stage_record = json.loads(
+                            (directory / worker_identity.STAGE_RECORD_NAME).read_text()
+                        )
+                        ready = stage_record["counts"][court]["opinions"]
+                    counts = {
+                        "ready": ready, "sectioned": ready,
+                        "sections_by_type": {"majority": ready} if ready else {},
+                        "chars_by_type": {"majority": 10 * ready} if ready else {},
+                    }
+                return subprocess.CompletedProcess(command, 0, json.dumps(counts) + "\n", "")
             if "JOIN public.opinions" in input:
                 court = self._bound(input, "v_court")
                 self.caselaw_events.append(("counts", court))
@@ -591,6 +615,11 @@ class Install(unittest.TestCase):
             f"ingest: ok — caselaw: ingesting, 2 courts, {snapshots.HEARTBEAT_SECONDS} seconds",
             out,
         )
+        self.assertIn(
+            f"ingest: ok — caselaw: 2 courts, 3 opinions, 3 ready, 0 failed, "
+            f"{snapshots.HEARTBEAT_SECONDS} seconds",
+            out,
+        )
         self.assertEqual(
             self.host.caselaw_events[:6],
             [("defer", "ca6"), ("defer", "scotus"),
@@ -614,18 +643,37 @@ class Install(unittest.TestCase):
                 "by_failure_reason": {},
             },
         }
+        self.host.caselaw_section_counts = {
+            "ca6": {
+                "ready": 0, "sectioned": 0,
+                "sections_by_type": {}, "chars_by_type": {},
+            },
+            "scotus": {
+                "ready": 2, "sectioned": 2,
+                "sections_by_type": {"majority": 3, "footnote": 1},
+                "chars_by_type": {"majority": 12, "footnote": 8},
+            },
+        }
         code, out, err = self.run_install()
         self.assertEqual(code, 0, out + err)
+        section_shares = {"majority": "60 % (3)", "footnote": "40 % (1)"}
         rows = [line for line in out.splitlines() if line.startswith("ingest: ok — ")]
         self.assertEqual(rows, [
             "ingest: ok — ca6: 1 opinions; ready 0, failed 1 "
             "(no-text 1, unparseable 0, empty 0, interrupted 0); "
             "xml_harvard 0, html_columbia 0, html_lawbox 0, html_anon_2020 0, "
             "html 0, plain_text 0; published 0, unpublished 0, unknown 1",
+            "ingest: ok — ca6 sections: 0 of 0 ready documents; "
+            + ", ".join(f"{kind} 0 % (0)" for kind in worker_identity.SECTION_TYPES),
             "ingest: ok — scotus: 2 opinions; ready 2, failed 0 "
             "(no-text 0, unparseable 0, empty 0, interrupted 0); "
             "xml_harvard 1, html_columbia 1, html_lawbox 0, html_anon_2020 0, "
             "html 0, plain_text 0; published 1, unpublished 1, unknown 0",
+            "ingest: ok — scotus sections: 2 of 2 ready documents; "
+            + ", ".join(
+                f"{kind} {section_shares.get(kind, '0 % (0)')}"
+                for kind in worker_identity.SECTION_TYPES
+            ),
             "ingest: ok — caselaw: 2 courts, 3 opinions, 2 ready, 1 failed, 0 seconds",
         ])
         self.assertLess(out.index(rows[-1]), out.index("retain: ok"))
@@ -644,6 +692,37 @@ class Install(unittest.TestCase):
         self.assertIn(report.command("corpus install"), out)
         self.assertNotIn("retain: ok", out)
         self.assertTrue(directory.exists())
+
+    def test_ingest_refuses_ready_documents_without_sections(self) -> None:
+        self._enable_stage()
+        self._seed_complete_stage()
+        self.host.caselaw_section_counts["ca6"] = {
+            "ready": 1, "sectioned": 0,
+            "sections_by_type": {}, "chars_by_type": {},
+        }
+        code, out, err = self.run_install()
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("ingest: refuse — ca6: 0 of 1 ready documents have sections", out)
+        self.assertIn(stack.logs_fix(RENDERED, worker_identity.WORKER_SERVICE_NAME), out)
+        self.assertIn(report.command("corpus install"), out)
+        self.assertNotIn("ca6 sections:", out)
+        self.assertNotIn("caselaw: 2 courts,", out)
+        self.assertNotIn("retain: ok", out)
+
+    def test_ingest_section_count_problem_refuses_with_court_and_fix(self) -> None:
+        self._enable_stage()
+        self._seed_complete_stage()
+        issue = report.Problem("section read failed", "Run the fictitious fix.")
+        with patch.object(install.caselaw, "read_section_counts", return_value=issue) as read:
+            code, out, err = self.run_install()
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("ingest: refuse — ca6: section read failed", out)
+        self.assertIn(issue.fix, out)
+        self.assertNotIn("retain: ok", out)
+        read.assert_called_once_with(
+            self.host, RENDERED, source="example", snapshot_date="2099-01-02",
+            court="ca6", command_path=install.COMMAND_PATH,
+        )
 
     def test_failed_ingest_job_refuses_with_its_court_and_fix(self) -> None:
         self._enable_stage()

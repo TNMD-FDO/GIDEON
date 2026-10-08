@@ -20,6 +20,7 @@ from gideon.host.corpus.sources import SOURCES, SourceDefinition, data_file
 from gideon.host.render.worker import (
     PRECEDENTIAL_VALUES,
     RESOLVE_DIR,
+    SECTION_TYPES,
     SNAPSHOTS_ROOT,
     STAGE_TABLES,
     TEXT_SOURCES,
@@ -430,6 +431,31 @@ def _ingest(
                 f"Run {stack.logs_fix(rendered_dir, WORKER_SERVICE_NAME)}, then run "
                 f"{report.command(COMMAND_PATH)} again.",
             )
+        section_counts = caselaw.read_section_counts(
+            host, rendered_dir, source=source, snapshot_date=snapshot_date,
+            court=court, command_path=COMMAND_PATH,
+        )
+        if isinstance(section_counts, Problem):
+            return _refuse("ingest", f"{court}: {section_counts.problem}", section_counts.fix)
+        if section_counts.sectioned < section_counts.ready:
+            return _refuse(
+                "ingest",
+                f"{court}: {section_counts.sectioned} of {section_counts.ready} ready documents have sections",
+                f"Run {stack.logs_fix(rendered_dir, WORKER_SERVICE_NAME)}, then run "
+                f"{report.command(COMMAND_PATH)} again.",
+            )
+        total_chars = sum(section_counts.chars_by_type.values())
+        section_detail = ", ".join(
+            f"{section_type} "
+            f"{round(100 * section_counts.chars_by_type.get(section_type, 0) / total_chars) if total_chars else 0} % "
+            f"({section_counts.sections_by_type.get(section_type, 0)})"
+            for section_type in SECTION_TYPES
+        )
+        report.print_stage(StageResult(
+            "ingest", True,
+            f"{court} sections: {section_counts.sectioned} of {section_counts.ready} "
+            f"ready documents; {section_detail}", "",
+        ))
         total += counts.opinions
         ready += counts.by_status.get("ready", 0)
         failed += counts.by_status.get("failed", 0)

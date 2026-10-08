@@ -9,10 +9,10 @@ class OpinionText(unittest.TestCase):
     def assert_parsed(
         self, column: str, raw: str, expected: str,
         markers: tuple[opiniontext.Marker, ...],
-    ) -> None:
+    ) -> opiniontext.Parsed:
         parsed = opiniontext.canonical_text(column, raw)
-        self.assertEqual(parsed.text, expected)
-        self.assertEqual(parsed.markers, markers)
+        self.assertEqual((parsed.text, parsed.markers), (expected, markers))
+        return parsed
 
     def test_source_order_skips_blank_values_and_derived_markup(self) -> None:
         self.assertEqual(opiniontext.TEXT_SOURCES, (
@@ -90,10 +90,16 @@ class OpinionText(unittest.TestCase):
             "10 Example 20\n\nFiction v. Example\nAppeal\n\nWeagree."
             "\n\nNOTES\n\n[1] Note text.\n\n  col  one\n  two  three  "
         )
-        self.assert_parsed("html_lawbox", raw, expected, (
+        parsed = self.assert_parsed("html_lawbox", raw, expected, (
             opiniontext.Marker("page", "837", expected.index("We") + len("We")),
             opiniontext.Marker("footnote-mark", "[1]", expected.index("Weagree") + len("Weagree")),
         ))
+        self.assertEqual(parsed.blocks[0], opiniontext.Block(
+            "headmatter", "header", expected.index("10 Example"),
+            expected.index("Appeal") + len("Appeal"),
+        ))
+        self.assertEqual(tuple(block for block in parsed.blocks if block.kind == "headmatter"),
+                         (parsed.blocks[0],))
 
     def test_anonymous_html_uses_printed_page_instead_of_scheme_number(self) -> None:
         raw = (
@@ -180,6 +186,141 @@ class OpinionText(unittest.TestCase):
                 with self.assertRaises(opiniontext.OpinionTextFailure) as raised:
                     opiniontext.canonical_text(column, raw)
                 self.assertEqual(raised.exception.reason, reason)
+
+
+class Blocks(unittest.TestCase):
+    def assert_blocks(
+        self, column: str, raw: str,
+        expected: tuple[tuple[opiniontext.BlockKind, str, str, str], ...],
+    ) -> None:
+        parsed = opiniontext.canonical_text(column, raw)
+        self.assertEqual(parsed.blocks, tuple(
+            opiniontext.Block(kind, label, parsed.text.index(first),
+                              parsed.text.index(last) + len(last))
+            for kind, label, first, last in expected
+        ))
+
+    def test_element_blocks_by_column_and_nested_spans(self) -> None:
+        cases: tuple[
+            tuple[str, str, tuple[tuple[opiniontext.BlockKind, str, str, str], ...]], ...
+        ] = (
+            (
+                "xml_harvard",
+                '<opinion type="MAJORITY"><judges>Panel</judges><author>Judge</author>'
+                '<p>Body</p><footnote label="1"><blockquote><p>Note</p>'
+                '</blockquote></footnote></opinion>',
+                (("opinion", "majority", "Panel", "Note"),
+                 ("headmatter", "judges", "Panel", "Panel"),
+                 ("author", "", "Judge", "Judge"),
+                 ("footnote", "1", "Note", "Note"),
+                 ("quote", "", "Note", "Note")),
+            ),
+            (
+                "html_columbia",
+                '<div><h3>Head</h3><blockquote><p>Quote</p></blockquote>'
+                '<footnote_body>Note</footnote_body></div>',
+                (("heading", "", "Head", "Head"), ("quote", "", "Quote", "Quote"),
+                 ("footnote", "", "Note", "Note")),
+            ),
+            (
+                "html_lawbox",
+                '<div><center><h1>Caption</h1></center></div><p>Body</p>',
+                (("headmatter", "header", "Caption", "Caption"),
+                 ("heading", "", "Caption", "Caption"),
+                 ("heading", "", "Caption", "Caption")),
+            ),
+            (
+                "html_anon_2020",
+                '<div class="courtcasedochead">Header</div>'
+                '<div class="opinion" opiniontype="dissent">'
+                '<div class="caseopinionby">Judge</div><p>Body</p></div>'
+                '<div class="footnotes"><li><p>Note</p></li></div>',
+                (("headmatter", "", "Header", "Header"),
+                 ("opinion", "dissent", "Judge", "Body"),
+                 ("author", "", "Judge", "Judge"),
+                 ("footnote", "", "Note", "Note")),
+            ),
+            (
+                "html",
+                '<div class="prelims">Header</div><center>Heading</center>'
+                '<blockquote><p>Quote</p></blockquote>'
+                '<p class="MsoFootnoteText">Note</p>',
+                (("headmatter", "", "Header", "Header"),
+                 ("heading", "", "Heading", "Heading"),
+                 ("quote", "", "Quote", "Quote"),
+                 ("footnote", "", "Note", "Note")),
+            ),
+            ("plain_text", "Header\n\nBody", ()),
+        )
+        for column, raw, expected in cases:
+            with self.subTest(column=column):
+                self.assert_blocks(column, raw, expected)
+
+    def test_empty_block_and_dropped_locator_before_nfc_adjusted_start(self) -> None:
+        raw = (
+            '<div><h3></h3><p>cafe\u0301'
+            '<span class="star-pagination">*Page 5</span></p>'
+            '<blockquote><p>Quoted</p></blockquote></div>'
+        )
+        parsed = opiniontext.canonical_text("html_columbia", raw)
+        self.assertEqual(parsed.text, "café\n\nQuoted")
+        self.assertEqual(parsed.markers, (opiniontext.Marker("page", "5", len("café")),))
+        self.assertEqual(parsed.blocks, (
+            opiniontext.Block("quote", "", parsed.text.index("Quoted"),
+                              parsed.text.index("Quoted") + len("Quoted")),
+        ))
+
+    def test_root_div_is_not_a_lawbox_header(self) -> None:
+        self.assert_blocks(
+            "html_lawbox", "<div><h1>Caption</h1><p>Body</p></div>",
+            (("heading", "", "Caption", "Caption"),),
+        )
+
+    def test_inline_headmatter_uses_its_own_text_boundaries(self) -> None:
+        self.assert_blocks(
+            "html_anon_2020", "<p>A <counselor>Counsel</counselor> B</p>",
+            (("headmatter", "", "Counsel", "Counsel"),),
+        )
+
+    def test_other_element_table_entries(self) -> None:
+        cases: tuple[
+            tuple[str, str, tuple[tuple[opiniontext.BlockKind, str, str, str], ...]], ...
+        ] = (
+            (
+                "xml_harvard",
+                '<opinion><attorneys>Counsel</attorneys><div class="footnotes">'
+                '<div class="footnote" label="2"><p>Note</p></div></div></opinion>',
+                (("opinion", "", "Counsel", "Note"),
+                 ("headmatter", "attorneys", "Counsel", "Counsel"),
+                 ("footnote", "2", "Note", "Note")),
+            ),
+            (
+                "html_columbia",
+                '<div><center>Head</center><div class="footnote">Note</div></div>',
+                (("heading", "", "Head", "Head"),
+                 ("footnote", "", "Note", "Note")),
+            ),
+            (
+                "html_anon_2020",
+                '<div class="judges">Panel</div><counselor>Counsel</counselor>'
+                '<h>Head</h><excerpt><p>Quote</p></excerpt>',
+                (("headmatter", "", "Panel", "Panel"),
+                 ("headmatter", "", "Counsel", "Counsel"),
+                 ("heading", "", "Head", "Head"),
+                 ("quote", "", "Quote", "Quote")),
+            ),
+            (
+                "html",
+                '<p class="case_cite">Citation</p><p class="date">Date</p>'
+                '<div class="footnote"><p>Note</p></div>',
+                (("headmatter", "", "Citation", "Citation"),
+                 ("headmatter", "", "Date", "Date"),
+                 ("footnote", "", "Note", "Note")),
+            ),
+        )
+        for column, raw, expected in cases:
+            with self.subTest(column=column):
+                self.assert_blocks(column, raw, expected)
 
 
 if __name__ == "__main__":

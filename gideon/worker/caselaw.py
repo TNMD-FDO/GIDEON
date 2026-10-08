@@ -20,7 +20,7 @@ import gideon.host.cas
 from gideon.host.report import Problem
 from gideon.host.sysio import RealHost
 
-from . import fetch, opiniontext, settings, staging
+from . import fetch, opiniontext, sections, settings, staging
 
 CASELAW_TASK: Final = "gideon.worker.tasks.caselaw"
 CASELAW_QUEUE: Final = "caselaw"
@@ -28,7 +28,7 @@ CASELAW_FAILURE_NAME: Final = "caselaw-failed.json"
 LOCK_SUFFIX: Final = ".caselaw.lock"
 CASELAW_FAILURE_REASONS: Final = frozenset({
     "invalid", "missing-stage", "stage-mismatch", "malformed", "store",
-    "database", "local", "busy",
+    "database", "local", "busy", "segmenter", "text-mismatch",
 })
 DOCUMENT_FAILURE_REASONS: Final = frozenset({
     "no-text", "unparseable", "empty", "interrupted",
@@ -44,12 +44,14 @@ _CLUSTER_COLUMNS: Final = (
     "id", "date_filed", "date_filed_is_approximate", "precedential_status", "docket_id",
 )
 _CITATION_COLUMNS: Final = ("cluster_id", "volume", "reporter", "page")
-_OPINION_COLUMNS: Final = ("id", "cluster_id", "type", *opiniontext.TEXT_SOURCES)
+_OPINION_COLUMNS: Final = ("id", "cluster_id", "type", "per_curiam", *opiniontext.TEXT_SOURCES)
 _POSITIVE_INTEGER: Final = re.compile(r"[0-9]+")
 _ISO_DATE: Final = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 
 PRESENT_SQL: Final = (
-    "SELECT o.opinion_id, d.doc_id, d.status, d.attempts "
+    "SELECT o.opinion_id, d.doc_id, d.status, d.attempts, d.text_source, "
+    "d.sha256, d.canonical_text_sha256, "
+    "EXISTS (SELECT 1 FROM sections WHERE doc_id = d.doc_id) AS sectioned "
     "FROM opinions AS o JOIN documents AS d ON d.doc_id = o.doc_id "
     "WHERE d.source = %s AND d.source_snapshot = %s AND o.court = %s"
 )
@@ -73,6 +75,11 @@ FINISH_READY_SQL: Final = (
 FINISH_FAILED_SQL: Final = (
     "UPDATE documents SET status = 'failed', failure_reason = %s, sha256 = %s, "
     "ingested_at = %s WHERE doc_id = %s"
+)
+SECTION_SQL: Final = (
+    "INSERT INTO sections (section_id, doc_id, ordinal, section_type, typed_by, "
+    "char_start, char_end, label, ref_offset, parent_section_id) "
+    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
 )
 
 logger = logging.getLogger(__name__)
@@ -116,6 +123,10 @@ class PresentRow:
     doc_id: str
     status: str
     attempts: int
+    text_source: str | None
+    sha256: str | None
+    canonical_text_sha256: str | None
+    sectioned: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +159,22 @@ class NewOpinion:
 
 
 @dataclass(frozen=True, slots=True)
+class NewSection:
+    """A document's typed text span ready for the record."""
+
+    section_id: str
+    doc_id: str
+    ordinal: int
+    section_type: str
+    typed_by: str
+    char_start: int
+    char_end: int
+    label: str | None
+    ref_offset: int | None
+    parent_section_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class IngestCounts:
     """Counts from one bounded or whole court stream."""
 
@@ -157,6 +184,7 @@ class IngestCounts:
     failed: int
     retried: int
     interrupted: int
+    sectioned: int
 
 
 class DocumentRecord(Protocol):
@@ -166,11 +194,28 @@ class DocumentRecord(Protocol):
     def begin(self, document: NewDocument, opinion: NewOpinion) -> None: ...
     def retry(self, doc_id: str) -> None: ...
     def give_back(self, doc_id: str) -> None: ...
-    def finish_ready(self, doc_id: str, sha256: str, canonical_sha256: str, at: datetime) -> None: ...
+    def finish_ready(
+        self, doc_id: str, sha256: str, canonical_sha256: str, at: datetime,
+        sections: tuple[NewSection, ...],
+    ) -> None: ...
+    def write_sections(self, doc_id: str, sections: tuple[NewSection, ...]) -> None: ...
     def finish_failed(
         self, doc_id: str, reason: str, at: datetime, sha256: str | None = None,
     ) -> None: ...
     def close(self) -> None: ...
+
+
+def _section_statements(
+    doc_id: str, rows: tuple[NewSection, ...],
+) -> tuple[tuple[str, tuple[object, ...]], ...]:
+    return tuple(
+        (SECTION_SQL, (
+            row.section_id, doc_id, row.ordinal, row.section_type, row.typed_by,
+            row.char_start, row.char_end, row.label, row.ref_offset,
+            row.parent_section_id,
+        ))
+        for row in rows
+    )
 
 
 class PsycopgRecord:
@@ -219,8 +264,15 @@ class PsycopgRecord:
 
         rows = self._run(((PRESENT_SQL, (source, snapshot_date, court)),), read=True)
         return {
-            int(opinion_id): PresentRow(str(doc_id), str(status), int(attempts))
-            for opinion_id, doc_id, status, attempts in rows
+            int(opinion_id): PresentRow(
+                str(doc_id), str(status), int(attempts),
+                str(text_source) if text_source is not None else None,
+                str(sha256) if sha256 is not None else None,
+                str(canonical_sha256) if canonical_sha256 is not None else None,
+                bool(sectioned),
+            )
+            for opinion_id, doc_id, status, attempts, text_source, sha256,
+            canonical_sha256, sectioned in rows
         }
 
     def begin(self, document: NewDocument, opinion: NewOpinion) -> None:
@@ -249,10 +301,19 @@ class PsycopgRecord:
 
         self._run(((GIVE_BACK_SQL, (doc_id,)),))
 
-    def finish_ready(self, doc_id: str, sha256: str, canonical_sha256: str, at: datetime) -> None:
-        """Finish a parsed document with names of both stored objects."""
+    def finish_ready(
+        self, doc_id: str, sha256: str, canonical_sha256: str, at: datetime,
+        sections: tuple[NewSection, ...],
+    ) -> None:
+        """Commit the ready document and its sections together."""
 
-        self._run(((FINISH_READY_SQL, (sha256, canonical_sha256, at, doc_id)),))
+        self._run(((FINISH_READY_SQL, (sha256, canonical_sha256, at, doc_id)),
+                   *_section_statements(doc_id, sections)))
+
+    def write_sections(self, doc_id: str, sections: tuple[NewSection, ...]) -> None:
+        """Commit sections for an already ready document."""
+
+        self._run(_section_statements(doc_id, sections))
 
     def finish_failed(
         self, doc_id: str, reason: str, at: datetime, sha256: str | None = None,
@@ -303,22 +364,24 @@ class _Progress:
     failed: int = 0
     retried: int = 0
     interrupted: int = 0
+    sectioned: int = 0
     error: str = "-"
 
     def counts(self) -> IngestCounts:
         return IngestCounts(
             self.seen, self.present, self.ready, self.failed,
-            self.retried, self.interrupted,
+            self.retried, self.interrupted, self.sectioned,
         )
 
 
 def _log(progress: _Progress, action: str) -> None:
     logger.info(
         "action=caselaw_%s job_id=%d label=%s court=%s seen=%d present=%d "
-        "ready=%d failed=%d retried=%d interrupted=%d seconds=%.3f error=%s",
+        "ready=%d failed=%d retried=%d interrupted=%d sectioned=%d seconds=%.3f error=%s",
         action, progress.job, progress.label, progress.court, progress.seen,
         progress.present, progress.ready, progress.failed, progress.retried,
-        progress.interrupted, max(0.0, progress.monotonic() - progress.started),
+        progress.interrupted, progress.sectioned,
+        max(0.0, progress.monotonic() - progress.started),
         progress.error,
     )
 
@@ -449,6 +512,33 @@ def _document_id(opinion_id: int, snapshot_date: date) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _section_id(doc_id: str, start: int, end: int) -> str:
+    return hashlib.sha256(f"{doc_id}\n{start}\n{end}".encode()).hexdigest()
+
+
+def _section_rows(
+    doc_id: str, parsed: opiniontext.Parsed, *, opinion_type: str,
+    per_curiam: bool, column: str,
+) -> tuple[NewSection, ...]:
+    try:
+        result = sections.segment(
+            parsed, opinion_type=opinion_type, per_curiam=per_curiam, column=column,
+        )
+        ids = tuple(_section_id(doc_id, section.char_start, section.char_end)
+                    for section in result)
+        return tuple(
+            NewSection(
+                ids[ordinal], doc_id, ordinal, section.section_type,
+                section.typed_by, section.char_start, section.char_end,
+                section.label, section.ref_offset,
+                ids[section.parent] if section.parent is not None else None,
+            )
+            for ordinal, section in enumerate(result)
+        )
+    except Exception as exc:  # any segmenter exception is a defect, filed by class.
+        raise CaselawFailure("segmenter", error=type(exc).__name__) from exc
+
+
 def _precedential(raw: str) -> str:
     # The two CourtListener values that state a status; every other is unknown.
     return {"Published": "published", "Unpublished": "unpublished"}.get(raw, "unknown")
@@ -464,7 +554,8 @@ def _put(host: RealHost, root: Path, text: str) -> str:
 
 def _parse_opinion(
     record: DocumentRecord, host: RealHost, store_root: Path, doc_id: str,
-    chosen: tuple[str, str] | None, progress: _Progress,
+    chosen: tuple[str, str] | None, opinion_type: str, per_curiam: bool,
+    progress: _Progress,
     clock: Callable[[], datetime],
 ) -> None:
     if chosen is None:
@@ -484,9 +575,37 @@ def _parse_opinion(
         record.finish_failed(doc_id, "unparseable", clock(), original)
         progress.failed += 1
         return
+    section_rows = _section_rows(
+        doc_id, parsed, opinion_type=opinion_type,
+        per_curiam=per_curiam, column=column,
+    )
     canonical = _put(host, store_root, parsed.text)
-    record.finish_ready(doc_id, original, canonical, clock())
+    record.finish_ready(doc_id, original, canonical, clock(), section_rows)
     progress.ready += 1
+
+
+def _backfill(
+    record: DocumentRecord, host: RealHost, store_root: Path, present: PresentRow,
+    *, opinion_type: str, per_curiam: bool, progress: _Progress,
+) -> None:
+    if (present.sha256 is None or present.canonical_text_sha256 is None
+            or present.text_source is None):
+        raise CaselawFailure("text-mismatch")
+    original = gideon.host.cas.get(host, present.sha256, root=store_root)
+    if isinstance(original, Problem):
+        raise CaselawFailure("store")
+    try:
+        parsed = opiniontext.canonical_text(present.text_source, original.decode("utf-8"))
+    except Exception as exc:  # a walk that no longer reads its original is a corpus event.
+        raise CaselawFailure("text-mismatch", error=type(exc).__name__) from exc
+    if hashlib.sha256(parsed.text.encode("utf-8")).hexdigest() != present.canonical_text_sha256:
+        raise CaselawFailure("text-mismatch")
+    section_rows = _section_rows(
+        present.doc_id, parsed, opinion_type=opinion_type,
+        per_curiam=per_curiam, column=present.text_source,
+    )
+    record.write_sections(present.doc_id, section_rows)
+    progress.sectioned += 1
 
 
 @contextmanager
@@ -553,10 +672,22 @@ def ingest(
                         progress.seen += 1
                         opinion_id = _positive_integer(fields[columns["id"]], "opinions")
                         cluster_id = _positive_integer(fields[columns["cluster_id"]], "opinions")
+                        per_curiam_value = fields[columns["per_curiam"]]
+                        if per_curiam_value not in {"t", "f"}:
+                            raise CaselawFailure("malformed", table="opinions", error="ValueError")
+                        per_curiam = per_curiam_value == "t"
+                        opinion_type = fields[columns["type"]]
                         chosen = opiniontext.choose({
                             name: fields[columns[name]] for name in opiniontext.TEXT_SOURCES
                         })
                         previous = present.get(opinion_id)
+                        if previous is not None and previous.status == "ready" and not previous.sectioned:
+                            _backfill(
+                                record, host, store_root, previous,
+                                opinion_type=opinion_type, per_curiam=per_curiam,
+                                progress=progress,
+                            )
+                            continue
                         # Only a processing row is unfinished; every other status is final here.
                         if previous is not None and previous.status != "processing":
                             progress.present += 1
@@ -589,16 +720,18 @@ def ingest(
                                         _precedential(cluster.precedential_raw),
                                         cluster.precedential_raw,
                                         tuple(citations.get(cluster_id, ())),
-                                        fields[columns["type"]],
+                                        opinion_type,
                                     ),
                                 )
                                 active_doc = doc_id
                             _parse_opinion(
                                 record, host, store_root, active_doc, chosen,
-                                progress, clock,
+                                opinion_type, per_curiam, progress, clock,
                             )
                         except CaselawFailure as exc:
-                            if active_doc is not None and exc.reason in {"store", "database", "local"}:
+                            if active_doc is not None and exc.reason in {
+                                "store", "database", "local", "segmenter",
+                            }:
                                 with suppress(CaselawFailure, psycopg.Error):
                                     record.give_back(active_doc)
                             raise

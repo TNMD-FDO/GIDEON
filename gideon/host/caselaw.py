@@ -17,6 +17,7 @@ from gideon.host.render.worker import (
     COURT_PATTERN,
     DOCUMENT_FAILURE_REASONS,
     PRECEDENTIAL_VALUES,
+    SECTION_TYPES,
     SEGMENT_PATTERN,
     STAGE_TABLES,
     TEXT_SOURCES,
@@ -64,6 +65,36 @@ SELECT jsonb_build_object(
 );
 """
 
+SECTION_COUNTS_SQL = """WITH ready_documents AS (
+    SELECT d.doc_id
+    FROM public.documents AS d
+    JOIN public.opinions AS o ON o.doc_id = d.doc_id
+    WHERE d.source = :'v_source'
+      AND d.source_snapshot = :'v_snapshot_date'::date
+      AND o.court = :'v_court'
+      AND d.status = 'ready'
+), typed AS (
+    SELECT s.section_type, count(*) AS sections, sum(s.char_end - s.char_start) AS chars
+    FROM public.sections AS s
+    JOIN ready_documents AS d ON d.doc_id = s.doc_id
+    GROUP BY s.section_type
+)
+SELECT jsonb_build_object(
+    'ready', (SELECT count(*) FROM ready_documents),
+    'sectioned', (
+        SELECT count(DISTINCT s.doc_id)
+        FROM public.sections AS s
+        JOIN ready_documents AS d ON d.doc_id = s.doc_id
+    ),
+    'sections_by_type', COALESCE((
+        SELECT jsonb_object_agg(section_type, sections) FROM typed
+    ), '{}'::jsonb),
+    'chars_by_type', COALESCE((
+        SELECT jsonb_object_agg(section_type, chars) FROM typed
+    ), '{}'::jsonb)
+);
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class CaselawRead:
@@ -84,6 +115,16 @@ class CourtCounts:
     by_text_source: dict[str, int]
     by_precedential: dict[str, int]
     by_failure_reason: dict[str, int]
+
+
+@dataclass(frozen=True, slots=True)
+class SectionCounts:
+    """Ready document coverage and section totals for one court."""
+
+    ready: int
+    sectioned: int
+    sections_by_type: dict[str, int]
+    chars_by_type: dict[str, int]
 
 
 def _logs_fix(rendered_dir: PathLike, command_path: str) -> str:
@@ -192,6 +233,18 @@ def _failure_problem(
         )
     if reason == "busy":
         return Problem("caselaw is busy with another job", f"Wait, then run {install} again.")
+    if reason == "segmenter":
+        return Problem(
+            f"caselaw segmenter failure ({error or 'unknown error'})",
+            f"Run {stack.logs_fix(rendered_dir, WORKER_SERVICE_NAME)}, report the defect, "
+            f"then run {install} again after the fix.",
+        )
+    if reason == "text-mismatch":
+        return Problem(
+            "caselaw text no longer matches its recorded canonical text",
+            f"Run {stack.logs_fix(rendered_dir, WORKER_SERVICE_NAME)}, make a new corpus cut "
+            f"with {report.command('corpus cut')}, then run {install} for its new label.",
+        )
     return Problem(f"caselaw failed: {reason}", _logs_fix(rendered_dir, command_path))
 
 
@@ -269,12 +322,10 @@ def _counts_from_json(value: object) -> CourtCounts | None:
     return CourtCounts(value["opinions"], status, sources, precedential, reasons)
 
 
-def read_counts(
-    host: Host, rendered_dir: PathLike, *, source: str, snapshot_date: str,
-    court: str, command_path: str = COMMAND_PATH,
-) -> CourtCounts | Problem:
-    """Read one JSON count row; null text sources and reasons are omitted."""
-
+def _read_court_row(
+    host: Host, rendered_dir: PathLike, statement: str, noun: str, *, source: str,
+    snapshot_date: str, court: str, command_path: str,
+) -> object | Problem:
     if not isinstance(source, str) or re.fullmatch(SEGMENT_PATTERN, source) is None:
         return Problem("caselaw source is invalid", f"Use one source name, then run {report.command(command_path)} again.")
     try:
@@ -292,33 +343,83 @@ def read_counts(
     sql = "\n".join((
         worker.bind("v_source", source),
         worker.bind("v_snapshot_date", snapshot_date),
-        worker.bind("v_court", court), CASELAW_COUNTS_SQL,
+        worker.bind("v_court", court), statement,
     ))
     try:
         result = host.run(worker.psql_argv(rendered_dir), input=sql)
     except (OSError, subprocess.SubprocessError) as exc:
         return Problem(
-            f"caselaw counts command could not run ({type(exc).__name__})",
+            f"caselaw {noun} command could not run ({type(exc).__name__})",
             f"Run {report.command('host provision')}, then {report.command('apply')}, "
             f"then {report.command(command_path)} again.",
         )
     if result.returncode == 127:
         return Problem(
-            "caselaw counts command is unavailable (exit 127)",
+            f"caselaw {noun} command is unavailable (exit 127)",
             f"Run {report.command('host provision')}, then {report.command('apply')}, "
             f"then {report.command(command_path)} again.",
         )
     if result.returncode != 0:
         return Problem(
-            f"caselaw counts read failed (exit {result.returncode}): "
+            f"caselaw {noun} read failed (exit {result.returncode}): "
             f"{report.command_detail(result)}",
             _logs_fix(rendered_dir, command_path),
         )
     try:
         value: object = json.loads(result.stdout.strip())
     except ValueError:
-        return Problem("caselaw counts row is invalid", _logs_fix(rendered_dir, command_path))
+        return Problem(f"caselaw {noun} row is invalid", _logs_fix(rendered_dir, command_path))
+    return value
+
+
+def read_counts(
+    host: Host, rendered_dir: PathLike, *, source: str, snapshot_date: str,
+    court: str, command_path: str = COMMAND_PATH,
+) -> CourtCounts | Problem:
+    """Read one JSON count row; null text sources and reasons are omitted."""
+
+    value = _read_court_row(
+        host, rendered_dir, CASELAW_COUNTS_SQL, "counts", source=source,
+        snapshot_date=snapshot_date, court=court, command_path=command_path,
+    )
+    if isinstance(value, Problem):
+        return value
     counts = _counts_from_json(value)
     if counts is None:
         return Problem("caselaw counts row is invalid", _logs_fix(rendered_dir, command_path))
+    return counts
+
+
+def _section_counts_from_json(value: object) -> SectionCounts | None:
+    if not isinstance(value, dict) or set(value) != {
+        "ready", "sectioned", "sections_by_type", "chars_by_type",
+    }:
+        return None
+    ready, sectioned = value["ready"], value["sectioned"]
+    if (type(ready) is not int or ready < 0 or type(sectioned) is not int
+            or sectioned < 0 or sectioned > ready):
+        return None
+    allowed = frozenset(SECTION_TYPES)
+    section_totals = _counts_map(value["sections_by_type"], allowed)
+    char_totals = _counts_map(value["chars_by_type"], allowed)
+    if section_totals is None or char_totals is None:
+        return None
+    return SectionCounts(ready, sectioned, section_totals, char_totals)
+
+
+def read_section_counts(
+    host: Host, rendered_dir: PathLike, *, source: str, snapshot_date: str,
+    court: str, command_path: str = COMMAND_PATH,
+) -> SectionCounts | Problem:
+    """Read ready document coverage and section totals for one court."""
+
+    value = _read_court_row(
+        host, rendered_dir, SECTION_COUNTS_SQL, "sections", source=source,
+        snapshot_date=snapshot_date, court=court, command_path=command_path,
+    )
+    if isinstance(value, Problem):
+        return value
+    counts = _section_counts_from_json(value)
+    if counts is None:
+        return Problem("caselaw sections row is invalid", _logs_fix(rendered_dir, command_path))
     return counts

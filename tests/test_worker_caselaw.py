@@ -13,7 +13,7 @@ import tempfile
 import time
 import unittest
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -22,7 +22,7 @@ import psycopg
 
 from gideon.host import cas
 from gideon.host.sysio import RealHost
-from gideon.worker import caselaw, fetch, logs, opiniontext, settings, staging
+from gideon.worker import caselaw, fetch, logs, opiniontext, sections, settings, staging
 
 DOCKET_COLUMNS = (
     "id", "date_created", "date_modified", "source", "appeal_from_str",
@@ -66,7 +66,7 @@ OPINION_COLUMNS = (
 
 def _opinion(opinion_id: str, cluster_id: str, **text: str) -> dict[str, str]:
     return {**dict.fromkeys(OPINION_COLUMNS, ""), "id": opinion_id,
-            "cluster_id": cluster_id, "type": "020", **text}
+            "cluster_id": cluster_id, "type": "020", "per_curiam": "f", **text}
 
 
 def _doc_id(opinion_id: int, snapshot: date) -> str:
@@ -85,6 +85,7 @@ class _Row:
     canonical_text_sha256: str | None = None
     failure_reason: str | None = None
     ingested_at: datetime | None = None
+    sections: tuple[caselaw.NewSection, ...] = field(default_factory=tuple)
 
 
 class _Record:
@@ -114,10 +115,13 @@ class _Record:
             assert row.failure_reason in caselaw.DOCUMENT_FAILURE_REASONS
         if row.opinion is not None:
             assert row.opinion.doc_id == row.document.doc_id
+        assert row.status == "ready" or not row.sections
+        assert all(section.doc_id == row.document.doc_id for section in row.sections)
 
     def seed(
         self, opinion_id: int, status: str, attempts: int, *,
         court: str, source: str, snapshot: date, now: datetime,
+        sectioned: bool | None = None,
     ) -> _Row:
         document = caselaw.NewDocument(
             _doc_id(opinion_id, snapshot), "caselaw", source, snapshot, "plain_text", now,
@@ -129,6 +133,13 @@ class _Record:
             failure_reason="no-text" if status == "failed" else None,
             ingested_at=None if status == "processing" else now,
         )
+        if sectioned is None:
+            sectioned = status == "ready"
+        if sectioned:
+            row.sections = (caselaw.NewSection(
+                "c" * 64, document.doc_id, 0, "unknown", "none", 0, 1,
+                None, None, None,
+            ),)
         self._check(row)
         self.rows[opinion_id] = row
         return row
@@ -138,7 +149,10 @@ class _Record:
         if self.fail_present is not None:
             raise self.fail_present
         return {
-            opinion_id: caselaw.PresentRow(row.document.doc_id, row.status, row.attempts)
+            opinion_id: caselaw.PresentRow(
+                row.document.doc_id, row.status, row.attempts, row.document.text_source,
+                row.sha256, row.canonical_text_sha256, bool(row.sections),
+            )
             for opinion_id, row in self.rows.items()
             if row.document.source == source
             and row.document.source_snapshot == snapshot_date and row.court == court
@@ -165,15 +179,28 @@ class _Record:
         self._check(row)
         self.events.append(("give_back", doc_id))
 
-    def finish_ready(self, doc_id: str, sha256: str, canonical_sha256: str, at: datetime) -> None:
+    def finish_ready(
+        self, doc_id: str, sha256: str, canonical_sha256: str, at: datetime,
+        sections: tuple[caselaw.NewSection, ...],
+    ) -> None:
         row = self._row(doc_id)
         assert row.status == "processing"
         row.status = "ready"
         row.sha256 = sha256
         row.canonical_text_sha256 = canonical_sha256
         row.ingested_at = at
+        row.sections = sections
         self._check(row)
         self.events.append(("ready", doc_id))
+
+    def write_sections(
+        self, doc_id: str, sections: tuple[caselaw.NewSection, ...],
+    ) -> None:
+        row = self._row(doc_id)
+        assert row.status == "ready" and not row.sections
+        row.sections = sections
+        self._check(row)
+        self.events.append(("sectioned", doc_id))
 
     def finish_failed(
         self, doc_id: str, reason: str, at: datetime, sha256: str | None = None,
@@ -296,6 +323,21 @@ class WorkerCaselaw(unittest.TestCase):
     def _objects(self) -> set[str]:
         return {path.name for path in self.store_root.rglob("*") if path.is_file()}
 
+    def _ready_without_sections(self, raw: str, *, column: str = "plain_text") -> _Row:
+        self.stage(opinions=[_opinion("1", "100", **{column: raw})])
+        row = self.record.seed(
+            1, "ready", 1, court=self.court, source=self.source,
+            snapshot=self.snapshot_date, now=self.now, sectioned=False,
+        )
+        row.document = replace(row.document, text_source=column)
+        original = cas.put(RealHost(), raw.encode(), root=self.store_root)
+        assert isinstance(original, str)
+        row.sha256 = original
+        parsed = opiniontext.canonical_text(column, raw)
+        row.canonical_text_sha256 = hashlib.sha256(parsed.text.encode()).hexdigest()
+        self.record._check(row)
+        return row
+
     def test_ready_failed_outcomes_and_stored_bytes(self) -> None:
         raw = "<opinion><p>Cafe\u0301<page-number>*3</page-number> wins.</p></opinion>"
         no_text = _opinion("2", "100", html_with_citations="<p>derived only</p>")
@@ -308,7 +350,7 @@ class WorkerCaselaw(unittest.TestCase):
         ])
         self.assertEqual(stat.S_IMODE(self.store_root.stat().st_mode), cas.DIRECTORY_MODE)
         counts = self.run_ingest()
-        self.assertEqual(counts, caselaw.IngestCounts(4, 0, 1, 3, 0, 0))
+        self.assertEqual(counts, caselaw.IngestCounts(4, 0, 1, 3, 0, 0, 0))
         self.assertEqual(self.record.present_calls, [(self.source, self.snapshot_date, self.court)])
         self.assertEqual(self.record.closed, 1)
 
@@ -325,6 +367,26 @@ class WorkerCaselaw(unittest.TestCase):
         self.assertEqual(ready.canonical_text_sha256, hashlib.sha256(canonical).hexdigest())
         self.assertEqual(cas.get(RealHost(), ready.canonical_text_sha256 or "",
                                  root=self.store_root), canonical)
+        expected = sections.segment(
+            opiniontext.canonical_text("xml_harvard", raw),
+            opinion_type="020", per_curiam=False, column="xml_harvard",
+        )
+        self.assertEqual(len(ready.sections), len(expected))
+        for index, (written, section) in enumerate(zip(ready.sections, expected, strict=True)):
+            self.assertEqual(written.ordinal, index)
+            self.assertEqual(written.doc_id, ready.document.doc_id)
+            self.assertEqual(written.section_id, hashlib.sha256(
+                f"{ready.document.doc_id}\n{section.char_start}\n{section.char_end}".encode()
+            ).hexdigest())
+            self.assertEqual(
+                (written.section_type, written.typed_by, written.char_start,
+                 written.char_end, written.label, written.ref_offset,
+                 written.parent_section_id),
+                (section.section_type, section.typed_by, section.char_start,
+                 section.char_end, section.label, section.ref_offset,
+                 ready.sections[section.parent].section_id
+                 if section.parent is not None else None),
+            )
 
         blank = self.record.rows[2]
         self.assertEqual((blank.status, blank.failure_reason, blank.document.text_source,
@@ -340,6 +402,7 @@ class WorkerCaselaw(unittest.TestCase):
                 self.assertEqual(row.sha256, hashlib.sha256(original.encode()).hexdigest())
                 self.assertEqual(cas.get(RealHost(), row.sha256 or "", root=self.store_root),
                                  original.encode())
+                self.assertEqual(row.sections, ())
 
     def test_each_text_source_becomes_a_ready_document(self) -> None:
         examples = {
@@ -373,7 +436,7 @@ class WorkerCaselaw(unittest.TestCase):
         self.stage(opinions=[_opinion("1", "100", xml_harvard=raw)])
         with patch.object(opiniontext, "canonical_text", side_effect=RecursionError("private text")):
             counts = self.run_ingest()
-        self.assertEqual(counts, caselaw.IngestCounts(1, 0, 0, 1, 0, 0))
+        self.assertEqual(counts, caselaw.IngestCounts(1, 0, 0, 1, 0, 0, 0))
         row = self.record.rows[1]
         self.assertEqual((row.status, row.failure_reason, row.canonical_text_sha256),
                          ("failed", "unparseable", None))
@@ -437,9 +500,120 @@ class WorkerCaselaw(unittest.TestCase):
             self.record.seed(index, status, 1, court=self.court, source=self.source,
                              snapshot=self.snapshot_date, now=self.now)
         counts = self.run_ingest()
-        self.assertEqual(counts, caselaw.IngestCounts(3, 3, 0, 0, 0, 0))
+        self.assertEqual(counts, caselaw.IngestCounts(3, 3, 0, 0, 0, 0, 0))
         self.assertEqual(self.record.events, [])
         self.assertEqual(self._objects(), set())
+
+    def test_section_ids_depend_on_document_even_for_equal_text(self) -> None:
+        body = "Fictitious opinion body."
+        self.stage(opinions=[
+            _opinion("1", "100", plain_text=body),
+            _opinion("2", "100", plain_text=body),
+        ])
+        self.assertEqual(self.run_ingest().ready, 2)
+        first, second = self.record.rows[1], self.record.rows[2]
+        self.assertEqual(first.canonical_text_sha256, second.canonical_text_sha256)
+        self.assertEqual(
+            [(s.char_start, s.char_end) for s in first.sections],
+            [(s.char_start, s.char_end) for s in second.sections],
+        )
+        self.assertTrue(first.sections)
+        self.assertNotEqual(first.sections[0].section_id, second.sections[0].section_id)
+
+    def test_footnote_section_writes_the_parent_id(self) -> None:
+        raw = (
+            '<opinion><p>Fictitious body<footnotemark>1</footnotemark>.</p>'
+            '<footnote label="1"><p>Fictitious note.</p></footnote></opinion>'
+        )
+        self.stage(opinions=[_opinion("1", "100", xml_harvard=raw)])
+        self.assertEqual(self.run_ingest().ready, 1)
+        written = self.record.rows[1].sections
+        footnote = next(section for section in written if section.section_type == "footnote")
+        self.assertEqual(footnote.label, "1")
+        self.assertEqual(footnote.parent_section_id, written[0].section_id)
+        self.assertEqual(footnote.ref_offset,
+                         opiniontext.canonical_text("xml_harvard", raw).text.index("body") + 4)
+
+    def test_ready_backfill_reads_original_without_counting_an_attempt(self) -> None:
+        row = self._ready_without_sections("Fictitious recovered opinion.")
+        original_state = (row.status, row.attempts, row.sha256, row.canonical_text_sha256)
+        self.assertEqual(self.run_ingest(), caselaw.IngestCounts(1, 0, 0, 0, 0, 0, 1))
+        self.assertEqual(
+            (row.status, row.attempts, row.sha256, row.canonical_text_sha256),
+            original_state,
+        )
+        self.assertTrue(row.sections)
+        self.assertEqual(self.record.events, [("sectioned", row.document.doc_id)])
+        self.assertEqual(self.run_ingest(), caselaw.IngestCounts(1, 1, 0, 0, 0, 0, 0))
+        self.assertEqual(self.record.events, [("sectioned", row.document.doc_id)])
+
+    def test_backfill_refuses_text_mismatch_and_missing_original(self) -> None:
+        row = self._ready_without_sections("Fictitious original opinion.")
+        altered = cas.put(
+            RealHost(), b"Fictitious altered opinion.", root=self.store_root,
+        )
+        assert isinstance(altered, str)
+        row.sha256 = altered
+        with self.assertRaises(caselaw.CaselawFailure) as raised:
+            self.run_ingest()
+        self.assertEqual(raised.exception.reason, "text-mismatch")
+        self.assert_failure(raised.exception)
+        self.assertEqual((row.status, row.attempts, row.sections), ("ready", 1, ()))
+
+        row.document = replace(row.document, text_source="bad-column")
+        with self.assertRaises(caselaw.CaselawFailure) as refused:
+            self.run_ingest()
+        self.assertEqual((refused.exception.reason, refused.exception.error),
+                         ("text-mismatch", "ValueError"))
+        self.assert_failure(refused.exception)
+        row.document = replace(row.document, text_source="plain_text")
+        row.sha256 = "f" * 64
+        with self.assertRaises(caselaw.CaselawFailure) as missing:
+            self.run_ingest()
+        self.assertEqual(missing.exception.reason, "store")
+        self.assert_failure(missing.exception)
+        self.assertEqual(self.record.events, [])
+
+    def test_segmenter_exception_refuses_new_and_backfill_without_spending_attempt(self) -> None:
+        self.stage(opinions=[_opinion("1", "100", plain_text="Fictitious opinion.")])
+        with (patch.object(sections, "segment", side_effect=RuntimeError("private body")),
+              self.assertRaises(caselaw.CaselawFailure) as raised):
+            self.run_ingest()
+        self.assertEqual((raised.exception.reason, raised.exception.error),
+                         ("segmenter", "RuntimeError"))
+        self.assert_failure(raised.exception)
+        row = self.record.rows[1]
+        self.assertEqual((row.status, row.attempts, row.sections), ("processing", 0, ()))
+        self.assertEqual([event for event, _ in self.record.events], ["begin", "give_back"])
+
+        second = _Record()
+        self.record = second
+        backfill = self._ready_without_sections("Fictitious recovered opinion.")
+        with (patch.object(sections, "segment", side_effect=RuntimeError("private body")),
+              self.assertRaises(caselaw.CaselawFailure) as refused):
+            self.run_ingest()
+        self.assertEqual((refused.exception.reason, refused.exception.error),
+                         ("segmenter", "RuntimeError"))
+        self.assert_failure(refused.exception)
+        self.assertEqual((backfill.status, backfill.attempts, backfill.sections),
+                         ("ready", 1, ()))
+        self.assertEqual(self.record.events, [])
+
+    def test_per_curiam_flag_is_read_and_bad_value_refuses_opinions(self) -> None:
+        self.stage(opinions=[_opinion(
+            "1", "100", per_curiam="t", plain_text="Fictitious body.",
+        )])
+        self.assertEqual(self.run_ingest().ready, 1)
+        self.assertEqual(self.record.rows[1].sections[0].section_type, "per_curiam")
+        self.stage(opinions=[_opinion(
+            "2", "100", per_curiam="maybe", plain_text="Fictitious body.",
+        )])
+        with self.assertRaises(caselaw.CaselawFailure) as raised:
+            self.run_ingest()
+        self.assertEqual((raised.exception.reason, raised.exception.table),
+                         ("malformed", "opinions"))
+        self.assert_failure(raised.exception)
+        self.assertNotIn(2, self.record.rows)
 
     def test_processing_attempts_retry_and_interrupt_at_the_bound(self) -> None:
         self.stage(opinions=[_opinion(str(index), "100", plain_text=f"Fiction {index}.")
@@ -448,7 +622,7 @@ class WorkerCaselaw(unittest.TestCase):
             self.record.seed(index, "processing", attempts, court=self.court,
                              source=self.source, snapshot=self.snapshot_date, now=self.now)
         counts = self.run_ingest()
-        self.assertEqual(counts, caselaw.IngestCounts(3, 0, 2, 1, 2, 1))
+        self.assertEqual(counts, caselaw.IngestCounts(3, 0, 2, 1, 2, 1, 0))
         self.assertEqual([(self.record.rows[index].status, self.record.rows[index].attempts)
                           for index in (1, 2)], [("ready", 1), ("ready", 2)])
         third = self.record.rows[3]
@@ -473,7 +647,7 @@ class WorkerCaselaw(unittest.TestCase):
         self.store_root.unlink()
         self.store_root.mkdir(mode=cas.DIRECTORY_MODE)
         self.store_root.chmod(cas.DIRECTORY_MODE)
-        self.assertEqual(self.run_ingest(), caselaw.IngestCounts(1, 0, 1, 0, 1, 0))
+        self.assertEqual(self.run_ingest(), caselaw.IngestCounts(1, 0, 1, 0, 1, 0, 0))
         self.assertEqual((first.status, first.attempts), ("ready", 1))
         self.assertEqual([event for event, _ in self.record.events],
                          ["begin", "give_back", "retry", "ready"])
@@ -482,10 +656,10 @@ class WorkerCaselaw(unittest.TestCase):
     def test_limit_counts_seen_rows_and_repeat_changes_nothing(self) -> None:
         self.stage(opinions=[_opinion(str(index), "100", plain_text=f"Fiction {index}.")
                              for index in range(1, 4)])
-        self.assertEqual(self.run_ingest(limit=2), caselaw.IngestCounts(2, 0, 2, 0, 0, 0))
+        self.assertEqual(self.run_ingest(limit=2), caselaw.IngestCounts(2, 0, 2, 0, 0, 0, 0))
         names = self._objects()
         events = list(self.record.events)
-        self.assertEqual(self.run_ingest(limit=2), caselaw.IngestCounts(2, 2, 0, 0, 0, 0))
+        self.assertEqual(self.run_ingest(limit=2), caselaw.IngestCounts(2, 2, 0, 0, 0, 0, 0))
         self.assertEqual(self._objects(), names)
         self.assertEqual(self.record.events, events)
         self.assertNotIn(3, self.record.rows)
@@ -640,6 +814,7 @@ class WorkerCaselaw(unittest.TestCase):
         self.assertTrue(any("action=caselaw_end" in line for line in lines))
         for line in lines:
             self.assertNotIn(sentinel, line)
+            self.assertIn("sectioned=", line)
 
 
 class _CapturedConnection:
@@ -714,19 +889,29 @@ class PsycopgDocumentRecord(unittest.TestCase):
             91, document.doc_id, "court1", 100, "23-A", snapshot, False,
             "published", "Published", ("1 Example 2", "3 Example 4"), "020",
         )
-        self.connection.rows = [(91, document.doc_id, "processing", 0)]
+        self.connection.rows = [(
+            91, document.doc_id, "processing", 0, "plain_text", None, None, False,
+        )]
+        section = caselaw.NewSection(
+            "d" * 64, document.doc_id, 0, "footnote", "markup", 4, 9,
+            "1", 2, None,
+        )
+        backfilled = replace(section, section_id="e" * 64)
         record = caselaw.PsycopgRecord(connect=self.connect, worker_settings=self.configuration)
         self.assertEqual(record.present(document.source, snapshot, opinion.court), {
-            91: caselaw.PresentRow(document.doc_id, "processing", 0),
+            91: caselaw.PresentRow(
+                document.doc_id, "processing", 0, "plain_text", None, None, False,
+            ),
         })
         record.begin(document, opinion)
         record.retry(document.doc_id)
         record.give_back(document.doc_id)
-        record.finish_ready(document.doc_id, "b" * 64, "c" * 64, now)
+        record.finish_ready(document.doc_id, "b" * 64, "c" * 64, now, (section,))
+        record.write_sections(document.doc_id, (backfilled,))
         record.finish_failed(document.doc_id, "unparseable", now, "b" * 64)
         record.close()
         self.assertTrue(self.connection.closed)
-        self.assertEqual(self.connection.commits, 6)
+        self.assertEqual(self.connection.commits, 7)
         self.assertEqual(self.connection.rollbacks, 0)
         self.assertEqual(self.connection_kwargs, {
             **settings.connection_kwargs(self.configuration), "autocommit": False,
@@ -746,6 +931,14 @@ class PsycopgDocumentRecord(unittest.TestCase):
             (caselaw.RETRY_SQL, (document.doc_id,)),
             (caselaw.GIVE_BACK_SQL, (document.doc_id,)),
             (caselaw.FINISH_READY_SQL, ("b" * 64, "c" * 64, now, document.doc_id)),
+            (caselaw.SECTION_SQL, (
+                section.section_id, document.doc_id, 0, "footnote", "markup",
+                4, 9, "1", 2, None,
+            )),
+            (caselaw.SECTION_SQL, (
+                backfilled.section_id, document.doc_id, 0, "footnote", "markup",
+                4, 9, "1", 2, None,
+            )),
             (caselaw.FINISH_FAILED_SQL, ("unparseable", "b" * 64, now, document.doc_id)),
         ])
         for statement, parameters in self.connection.statements:

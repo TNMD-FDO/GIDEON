@@ -79,6 +79,15 @@ def counts_for() -> dict[str, object]:
     }
 
 
+def section_counts_for() -> dict[str, object]:
+    return {
+        "ready": 2,
+        "sectioned": 2,
+        "sections_by_type": {"majority": 3, "footnote": 1},
+        "chars_by_type": {"majority": 40, "footnote": 5},
+    }
+
+
 class CaselawHost(unittest.TestCase):
     """Queue arguments, durable failures, and count rows stay bounded and typed."""
 
@@ -97,6 +106,12 @@ class CaselawHost(unittest.TestCase):
 
     def read_counts(self) -> caselaw.CourtCounts | report.Problem:
         return caselaw.read_counts(
+            self.host, RENDERED, source=SOURCE,
+            snapshot_date="2099-01-02", court=COURT,
+        )
+
+    def read_section_counts(self) -> caselaw.SectionCounts | report.Problem:
+        return caselaw.read_section_counts(
             self.host, RENDERED, source=SOURCE,
             snapshot_date="2099-01-02", court=COURT,
         )
@@ -179,6 +194,8 @@ class CaselawHost(unittest.TestCase):
             "local": ("host provision", "apply", "corpus install"),
             "busy": ("Wait", "corpus install"),
             "invalid": ("logs", "corpus install"),
+            "segmenter": ("logs", "report the defect", "corpus install"),
+            "text-mismatch": ("logs", "new corpus cut", "corpus cut", "corpus install"),
         }
         self.assertEqual(set(expected), identity.CASELAW_FAILURE_REASONS)
         for reason, fix_parts in expected.items():
@@ -311,6 +328,83 @@ class CaselawHost(unittest.TestCase):
         self.host.code = 0
         self.host.run_error = FileNotFoundError("private executable path")
         result = self.read_counts()
+        self.assertIsInstance(result, report.Problem)
+        assert isinstance(result, report.Problem)
+        self.assertIn("FileNotFoundError", result.problem)
+        self.assertNotIn("private executable path", result.problem)
+
+    def test_read_section_counts_binds_values_and_parses_one_json_row(self) -> None:
+        self.host.counts_output = json.dumps(section_counts_for()) + "\n"
+        self.assertEqual(self.read_section_counts(), caselaw.SectionCounts(
+            2, 2, {"majority": 3, "footnote": 1},
+            {"majority": 40, "footnote": 5},
+        ))
+        self.assertEqual(len(self.host.calls), 1)
+        argv, sql = self.host.calls[0]
+        self.assertEqual(argv, worker.psql_argv(RENDERED))
+        assert sql is not None
+        for name, expected in (("v_source", SOURCE),
+                               ("v_snapshot_date", "2099-01-02"),
+                               ("v_court", COURT)):
+            self.assertIn(worker.bind(name, expected), sql)
+            self.assertNotIn(expected, " ".join(argv))
+        self.assertIn(caselaw.SECTION_COUNTS_SQL, sql)
+        self.assertNotIn(caselaw.CASELAW_COUNTS_SQL, sql)
+        self.assertIn("public.sections", sql)
+        self.assertIn("count(DISTINCT s.doc_id)", sql)
+        self.assertIn("sum(s.char_end - s.char_start)", sql)
+
+    def test_read_section_counts_refuses_bad_rows(self) -> None:
+        base = section_counts_for()
+        cases = (
+            ("ready", -1), ("ready", True), ("ready", "2"),
+            ("sectioned", -1), ("sectioned", True), ("sectioned", 3),
+            ("sections_by_type", {"invented": 1}),
+            ("sections_by_type", {"majority": -1}),
+            ("sections_by_type", {"majority": True}),
+            ("chars_by_type", {"invented": 1}),
+            ("chars_by_type", {"majority": "4"}),
+        )
+        for field, bad in cases:
+            with self.subTest(field=field, bad=bad):
+                self.host.counts_output = json.dumps({**base, field: bad})
+                result = self.read_section_counts()
+                self.assertIsInstance(result, report.Problem)
+                assert isinstance(result, report.Problem)
+                self.assertIn("sections row is invalid", result.problem)
+        for value in ({**base, "extra": 1},
+                      {key: item for key, item in base.items() if key != "ready"}):
+            self.host.counts_output = json.dumps(value)
+            self.assertIsInstance(self.read_section_counts(), report.Problem)
+        self.host.counts_output = "not json"
+        self.assertIsInstance(self.read_section_counts(), report.Problem)
+
+    def test_read_section_counts_refuses_bad_arguments_and_psql_outcomes(self) -> None:
+        for field, bad in (("source", "../outside"), ("snapshot_date", "2099-99-02"),
+                           ("snapshot_date", "20990102"), ("court", "Court1")):
+            with self.subTest(field=field):
+                args = {"source": SOURCE, "snapshot_date": "2099-01-02", "court": COURT}
+                args[field] = bad
+                self.host.calls.clear()
+                self.assertIsInstance(
+                    caselaw.read_section_counts(self.host, RENDERED, **args), report.Problem,
+                )
+                self.assertEqual(self.host.calls, [])
+        self.host.code = 127
+        result = self.read_section_counts()
+        self.assertIsInstance(result, report.Problem)
+        assert isinstance(result, report.Problem)
+        self.assertIn("unavailable", result.problem)
+        self.assertIn("host provision", result.fix)
+        self.host.code = 3
+        result = self.read_section_counts()
+        self.assertIsInstance(result, report.Problem)
+        assert isinstance(result, report.Problem)
+        self.assertIn("exit 3", result.problem)
+        self.assertIn(self.host.stderr, result.problem)
+        self.host.code = 0
+        self.host.run_error = FileNotFoundError("private executable path")
+        result = self.read_section_counts()
         self.assertIsInstance(result, report.Problem)
         assert isinstance(result, report.Problem)
         self.assertIn("FileNotFoundError", result.problem)
