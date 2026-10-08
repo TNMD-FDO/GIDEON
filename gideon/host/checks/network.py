@@ -2,6 +2,7 @@
 
 import re
 
+from gideon.host import cotenants
 from gideon.host.checks import (
     CheckReport,
     PreflightCheck,
@@ -19,7 +20,14 @@ _EGRESS_FIX = (
     "Allow the listed hosts through the firewall or configure egress_proxy "
     "per docs/runbooks/release-files.md §5, then re-run preflight."
 )
-_PORT_FIX = "Stop or move the squatting process, then re-run preflight."
+_PORT_FIX = (
+    "Stop the process or container, or publish the container on another port, "
+    "then re-run preflight."
+)
+_DOCKER_FIX = (
+    "Repair docker ps so the container publishing the port can be listed, "
+    "then re-run preflight."
+)
 _HOSTNAME_FIX = (
     "Create the site hostname's DNS record per "
     "docs/runbooks/office-services-setup.md §2, then re-run preflight."
@@ -164,35 +172,11 @@ def _holder(line: str) -> str:
     return fields[-1] if len(fields) > 5 else "unknown process"
 
 
-def _docker_owner(context: PreflightContext, port: int) -> str | None:
-    """The single container publishing *port*, or ``None`` when unresolvable."""
-
-    result = context.host.run(
-        ["docker", "ps", "--filter", f"publish={port}", "--format", "{{.Names}}"]
-    )
-    if result.returncode != 0:
-        return None
-    names = result.stdout.split()
-    return names[0] if len(names) == 1 else None
-
-
-def _expected_container(port: int, owner: str | None) -> bool:
-    # 5000 belongs to provision's registry container by exact name; 443's
-    # Caddy container name is not pinned yet, so match on the service.
-    if owner is None:
-        return False
-    if port == 5000:
-        return owner == "gideon-registry"
-    if port == 9090:
-        return "prometheus" in owner
-    return "caddy" in owner
-
-
 class PortsCheck(PreflightCheck):
-    """Ensure ingress ports are free or owned by expected services."""
+    """Ensure the required ports are free or held by GIDEON containers."""
 
     name = "ports"
-    summary = "check ports 443, 5000, and 9090 for expected owners"
+    summary = "check ports 443, 5000, and 9090 are free or held by GIDEON"
 
     def run(self, context: PreflightContext) -> CheckReport:
         result = context.host.run(["ss", "-ltnp"])
@@ -209,26 +193,49 @@ class PortsCheck(PreflightCheck):
                 holders[port].append(_holder(line))
         unexpected: list[str] = []
         details: dict[int, str] = {}
+        needs_port_fix = False
+        needs_docker_fix = False
         for port, actual in holders.items():
             if not actual:
                 details[port] = f"{port} is free"
                 continue
-            for holder in set(actual):
-                if port == 443 and holder == "caddy":
-                    details[port] = f"{port} held by caddy"
-                elif holder == "docker-proxy":
-                    owner = _docker_owner(context, port)
-                    if _expected_container(port, owner):
-                        details[port] = f"{port} held by container {owner}"
-                    else:
+            for holder in dict.fromkeys(actual):
+                if holder == "docker-proxy":
+                    listing = context.host.run(cotenants.publish_ps_argv(port))
+                    if listing.returncode != 0:
                         unexpected.append(
-                            f"port {port} held by container "
-                            f"{owner or '(unresolvable)'}"
+                            f"port {port} held by docker-proxy, and docker ps could not "
+                            "list the container publishing it"
                         )
+                        needs_docker_fix = True
+                        continue
+                    rows = cotenants.parse_rows(listing.stdout)
+                    if not rows:
+                        unexpected.append(
+                            f"port {port} held by docker-proxy, and no running container publishes it"
+                        )
+                        needs_docker_fix = True
+                        continue
+                    unmarked = cotenants.foreign(rows)
+                    if unmarked:
+                        unexpected.append(f"port {port} held by {cotenants.describe(unmarked)}")
+                        needs_port_fix = True
+                        continue
+                    details[port] = "; ".join(
+                        f"{port} held by container {row.name} "
+                        f"({'no Compose project' if row.project is None else f'project {row.project}'})"
+                        for row in rows
+                    )
                 else:
                     unexpected.append(f"port {port} held by {holder}")
+                    needs_port_fix = True
         if unexpected:
-            return CheckReport(Severity.REFUSE, "; ".join(unexpected), _PORT_FIX)
+            fixes = []
+            if needs_port_fix:
+                fixes.append(_PORT_FIX)
+            if needs_docker_fix:
+                fixes.append(_DOCKER_FIX)
+            return CheckReport(Severity.REFUSE, "; ".join(unexpected), " ".join(fixes))
         detail = ", ".join(details[port] for port in sorted(details))
         return CheckReport(Severity.PASS, detail)
 

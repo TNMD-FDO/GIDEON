@@ -14,7 +14,7 @@ from typing import ClassVar, Self, cast
 from unittest import mock
 from urllib.parse import parse_qs, urlsplit
 
-from gideon.host import nogpu
+from gideon.host import cotenants, nogpu
 from gideon.host.checks import (
     CHECKS,
     PreflightContext,
@@ -510,9 +510,25 @@ class Egress(unittest.TestCase):
 
 
 class Ports(unittest.TestCase):
-    """Spec bug (c): free **or held by the expected owner**."""
+    """Required ports are free or held by marked GIDEON containers."""
 
     SS = ("ss", "-ltnp")
+
+    def proxy_host(
+        self, rows: Mapping[int, str], *, failed: Collection[int] = ()
+    ) -> FakeHost:
+        lines = "".join(
+            f'LISTEN 0 128 127.0.0.1:{port} 0.0.0.0:* '
+            f'users:(("docker-proxy",pid={port},fd=4))\n'
+            for port in rows
+        )
+        commands: dict[tuple[str, ...], subprocess.CompletedProcess[str]] = {
+            self.SS: completed(self.SS, lines)
+        }
+        for port, stdout in rows.items():
+            argv = cotenants.publish_ps_argv(port)
+            commands[argv] = completed(argv, stdout, 1 if port in failed else 0)
+        return FakeHost(commands=commands)
 
     def report(self, stdout: str, returncode: int = 0):
         host = FakeHost(commands={self.SS: completed(self.SS, stdout, returncode)})
@@ -523,68 +539,109 @@ class Ports(unittest.TestCase):
         self.assertEqual(report.severity, Severity.PASS)
 
     def test_expected_owners_pass(self) -> None:
-        docker = ("docker", "ps", "--filter", "publish=5000", "--format", "{{.Names}}")
-        prometheus_docker = ("docker", "ps", "--filter", "publish=9090", "--format", "{{.Names}}")
-        host = FakeHost(
-            commands={
-                self.SS: completed(
-                    self.SS,
-                    'LISTEN 0 128 0.0.0.0:443 0.0.0.0:* users:(("caddy",pid=2,fd=3))\n'
-                    'LISTEN 0 128 127.0.0.1:5000 0.0.0.0:* users:(("docker-proxy",pid=3,fd=4))\n',
-                ),
-                docker: completed(docker, "gideon-registry\n"),
-                prometheus_docker: completed(prometheus_docker, "gideon-prometheus-1\n"),
+        host = self.proxy_host(
+            {
+                443: "gideon-caddy-1\tgideon\n",
+                5000: "gideon-registry\t\n",
+                9090: "gideon-prometheus-1\tgideon\n",
             }
         )
         report = PortsCheck().run(context(host))
         self.assertEqual(report.severity, Severity.PASS, report.detail)
+        self.assertIn("443 held by container gideon-caddy-1 (project gideon)", report.detail)
+        self.assertIn("5000 held by container gideon-registry (no Compose project)", report.detail)
+        self.assertIn("9090 held by container gideon-prometheus-1 (project gideon)", report.detail)
+        for port in (443, 5000, 9090):
+            self.assertEqual(host.calls.count(("run", cotenants.publish_ps_argv(port))), 1)
 
     def test_prometheus_port_expected_owner_passes(self) -> None:
-        docker = ("docker", "ps", "--filter", "publish=9090", "--format", "{{.Names}}")
-        host = FakeHost(
-            commands={
-                self.SS: completed(
-                    self.SS,
-                    'LISTEN 0 128 127.0.0.1:9090 0.0.0.0:* users:(("docker-proxy",pid=4,fd=4))\n',
-                ),
-                docker: completed(docker, "gideon-prometheus-1\n"),
-            }
-        )
+        host = self.proxy_host({9090: "gideon-prometheus-1\tgideon\n"})
         report = PortsCheck().run(context(host))
         self.assertEqual(report.severity, Severity.PASS, report.detail)
 
     def test_prometheus_port_stranger_refuses(self) -> None:
-        docker = ("docker", "ps", "--filter", "publish=9090", "--format", "{{.Names}}")
-        host = FakeHost(
-            commands={
-                self.SS: completed(
-                    self.SS,
-                    'LISTEN 0 128 127.0.0.1:9090 0.0.0.0:* users:(("docker-proxy",pid=4,fd=4))\n',
-                ),
-                docker: completed(docker, "unexpected\n"),
-            }
-        )
+        host = self.proxy_host({9090: "other-app-monitor-1\tother-app\n"})
         report = PortsCheck().run(context(host))
         self.assertEqual(report.severity, Severity.REFUSE)
-        self.assertIn("9090", report.detail)
-        self.assertIn("unexpected", report.detail)
+        self.assertEqual(report.detail, "port 9090 held by project other-app (other-app-monitor-1)")
 
     def test_docker_proxy_for_a_stranger_container_refuses(self) -> None:
-        """Spec bug (c): docker-proxy alone proves nothing — the owner must match."""
+        host = self.proxy_host({5000: "other-app-registry-1\tother-app\n"})
+        report = PortsCheck().run(context(host))
+        self.assertEqual(report.severity, Severity.REFUSE)
+        self.assertEqual(report.detail, "port 5000 held by project other-app (other-app-registry-1)")
 
-        docker = ("docker", "ps", "--filter", "publish=5000", "--format", "{{.Names}}")
-        host = FakeHost(
-            commands={
-                self.SS: completed(
-                    self.SS,
-                    'LISTEN 0 128 127.0.0.1:5000 0.0.0.0:* users:(("docker-proxy",pid=3,fd=4))\n',
-                ),
-                docker: completed(docker, "shady\n"),
-            }
+    def test_unmarked_container_named_with_caddy_refuses(self) -> None:
+        host = self.proxy_host({443: "other-app-caddy-1\tother-app\n"})
+        report = PortsCheck().run(context(host))
+        self.assertEqual(report.severity, Severity.REFUSE)
+        self.assertEqual(report.detail, "port 443 held by project other-app (other-app-caddy-1)")
+        self.assertIn("publish the container on another port", report.fix)
+
+    def test_unlabelled_container_named_with_caddy_refuses(self) -> None:
+        host = self.proxy_host({443: "other-app-caddy-1\t\n"})
+        report = PortsCheck().run(context(host))
+        self.assertEqual(report.severity, Severity.REFUSE)
+        self.assertEqual(report.detail, "port 443 held by no Compose project (other-app-caddy-1)")
+
+    def test_marked_project_passes_with_any_container_name(self) -> None:
+        host = self.proxy_host({443: "container\tgideon-ci\n"})
+        report = PortsCheck().run(context(host))
+        self.assertEqual(report.severity, Severity.PASS)
+        self.assertIn("443 held by container container (project gideon-ci)", report.detail)
+
+    def test_two_publishing_containers_pass_and_name_each_when_marked(self) -> None:
+        host = self.proxy_host({443: "container-one\tgideon\ncontainer-two\tgideon-ci\n"})
+        report = PortsCheck().run(context(host))
+        self.assertEqual(report.severity, Severity.PASS)
+        self.assertIn("container container-one (project gideon)", report.detail)
+        self.assertIn("container container-two (project gideon-ci)", report.detail)
+
+    def test_two_publishing_containers_refuse_only_unmarked_holder(self) -> None:
+        host = self.proxy_host({443: "gideon-caddy-1\tgideon\nother-app-ingress-1\tother-app\n"})
+        report = PortsCheck().run(context(host))
+        self.assertEqual(report.severity, Severity.REFUSE)
+        self.assertEqual(report.detail, "port 443 held by project other-app (other-app-ingress-1)")
+
+    def test_failed_docker_read_refuses_with_repair(self) -> None:
+        host = self.proxy_host({443: "gideon-caddy-1\tgideon\n"}, failed=(443,))
+        report = PortsCheck().run(context(host))
+        self.assertEqual(report.severity, Severity.REFUSE)
+        self.assertEqual(
+            report.detail,
+            "port 443 held by docker-proxy, and docker ps could not list the container publishing it",
+        )
+        self.assertIn("Repair docker ps", report.fix)
+
+    def test_empty_docker_read_refuses_with_repair(self) -> None:
+        host = self.proxy_host({443: ""})
+        report = PortsCheck().run(context(host))
+        self.assertEqual(report.severity, Severity.REFUSE)
+        self.assertEqual(
+            report.detail,
+            "port 443 held by docker-proxy, and no running container publishes it",
+        )
+        self.assertIn("Repair docker ps", report.fix)
+
+    def test_bare_caddy_process_refuses(self) -> None:
+        report = self.report(
+            'LISTEN 0 128 0.0.0.0:443 0.0.0.0:* users:(("caddy",pid=2,fd=3))\n'
+        )
+        self.assertEqual(report.severity, Severity.REFUSE)
+        self.assertEqual(report.detail, "port 443 held by caddy")
+
+    def test_mixed_holder_kinds_keep_both_fixes(self) -> None:
+        host = self.proxy_host({443: ""})
+        host.commands[self.SS] = completed(
+            self.SS,
+            'LISTEN 0 128 0.0.0.0:443 0.0.0.0:* users:(("docker-proxy",pid=2,fd=3))\n'
+            'LISTEN 0 128 0.0.0.0:5000 0.0.0.0:* users:(("python3",pid=3,fd=4))\n',
         )
         report = PortsCheck().run(context(host))
         self.assertEqual(report.severity, Severity.REFUSE)
-        self.assertIn("shady", report.detail)
+        self.assertIn("port 5000 held by python3", report.detail)
+        self.assertIn("Stop the process or container", report.fix)
+        self.assertIn("Repair docker ps", report.fix)
 
     def test_unexpected_holder_refuses_and_is_named(self) -> None:
         report = self.report(

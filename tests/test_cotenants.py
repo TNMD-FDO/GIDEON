@@ -18,6 +18,9 @@ from gideon.host.cotenants import (
     describe,
     foreign,
     guard,
+    is_marked,
+    parse_rows,
+    publish_ps_argv,
     running_containers,
 )
 from gideon.host.lock import HostLock
@@ -59,6 +62,26 @@ def context(host: RunHost, *, acknowledged: bool = False) -> ProvisionContext:
 
 
 class Reader(unittest.TestCase):
+    def test_publish_read_filters_the_shared_name_and_project_format(self) -> None:
+        self.assertEqual(
+            publish_ps_argv(443),
+            ("docker", "ps", "--filter", "publish=443", "--format", DOCKER_PS_ARGV[-1]),
+        )
+
+    def test_parser_returns_valid_rows_with_optional_project(self) -> None:
+        cases = (
+            ("one\tgideon\n", (ContainerRow("one", "gideon"),)),
+            (
+                "one\tgideon\ntwo\ttranscribe\n",
+                (ContainerRow("one", "gideon"), ContainerRow("two", "transcribe")),
+            ),
+            ("gideon-registry\t\n", (ContainerRow("gideon-registry", None),)),
+            ("", ()),
+        )
+        for stdout, expected in cases:
+            with self.subTest(stdout=stdout):
+                self.assertEqual(parse_rows(stdout), expected)
+
     def test_absent_docker_stops_before_daemon_and_listing_reads(self) -> None:
         host = RunHost({DOCKER_VERSION_ARGV: completed(DOCKER_VERSION_ARGV, returncode=127)})
 
@@ -137,6 +160,19 @@ class Reader(unittest.TestCase):
 
 
 class Ownership(unittest.TestCase):
+    def test_mark_recognizes_projects_and_the_unlabelled_registry_name(self) -> None:
+        cases = (
+            (ContainerRow("container", "gideon"), True),
+            (ContainerRow("container", "gideon-ci"), True),
+            (ContainerRow("container", "gideon-drill"), True),
+            (ContainerRow("gideon-registry", None), True),
+            (ContainerRow("container", "transcribe"), False),
+            (ContainerRow("other-box", None), False),
+        )
+        for row, expected in cases:
+            with self.subTest(row=row):
+                self.assertEqual(is_marked(row), expected)
+
     def test_gideon_projects_and_unlabeled_registry_are_marked(self) -> None:
         projects = (
             "gideon",

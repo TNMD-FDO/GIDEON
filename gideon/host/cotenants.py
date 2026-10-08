@@ -25,11 +25,12 @@ OWNERSHIP_PREFIX = "gideon"
 ACKNOWLEDGE_DISRUPTION_FLAG = "--acknowledge-disruption"
 DOCKER_VERSION_ARGV = ("docker", "--version")
 DOCKER_ACTIVE_ARGV = ("systemctl", "is-active", "docker")
+_DOCKER_PS_FORMAT = '{{.Names}}\t{{.Label "com.docker.compose.project"}}'
 DOCKER_PS_ARGV = (
     "docker",
     "ps",
     "--format",
-    '{{.Names}}\t{{.Label "com.docker.compose.project"}}',
+    _DOCKER_PS_FORMAT,
 )
 
 _WINDOW_FIX = (
@@ -74,6 +75,26 @@ class ContainerListing:
     diagnostic: str = ""
 
 
+def publish_ps_argv(port: int) -> tuple[str, ...]:
+    """The read of the running containers publishing one port, in the box-wide read's columns.
+
+    Running alone, since a stopped container publishes nothing.
+    """
+
+    return ("docker", "ps", "--filter", f"publish={port}", "--format", _DOCKER_PS_FORMAT)
+
+
+def parse_rows(stdout: str) -> tuple[ContainerRow, ...]:
+    """Return valid name and project rows, skipping malformed Docker lines."""
+
+    rows: list[ContainerRow] = []
+    for line in stdout.splitlines():
+        name, separator, project = line.partition("\t")
+        if separator and name:
+            rows.append(ContainerRow(name, project or None))
+    return tuple(rows)
+
+
 def running_containers(host: Host) -> ContainerListing:
     """Read only names and Compose project labels from running containers."""
 
@@ -93,12 +114,16 @@ def running_containers(host: Host) -> ContainerListing:
             diagnostic=diagnostic[0] if diagnostic else "no diagnostic",
         )
 
-    rows: list[ContainerRow] = []
-    for line in result.stdout.splitlines():
-        name, separator, project = line.partition("\t")
-        if separator and name:
-            rows.append(ContainerRow(name, project or None))
-    return ContainerListing(DaemonState.LISTED, tuple(rows))
+    return ContainerListing(DaemonState.LISTED, parse_rows(result.stdout))
+
+
+def is_marked(row: ContainerRow) -> bool:
+    """Whether a row carries GIDEON's mark: its project begins with the prefix,
+    or, with no project label, its name does."""
+
+    if row.project is not None:
+        return row.project.startswith(OWNERSHIP_PREFIX)
+    return row.name.startswith(OWNERSHIP_PREFIX)
 
 
 def foreign(rows: Sequence[ContainerRow]) -> dict[str | None, list[str]]:
@@ -106,10 +131,7 @@ def foreign(rows: Sequence[ContainerRow]) -> dict[str | None, list[str]]:
 
     groups: dict[str | None, list[str]] = {}
     for row in rows:
-        if row.project is not None:
-            if row.project.startswith(OWNERSHIP_PREFIX):
-                continue
-        elif row.name.startswith(OWNERSHIP_PREFIX):
+        if is_marked(row):
             continue
         groups.setdefault(row.project, []).append(row.name)
     return groups
