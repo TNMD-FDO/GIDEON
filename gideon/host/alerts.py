@@ -10,9 +10,8 @@ from typing import Any, Final
 import yaml  # type: ignore[import-untyped]
 
 from gideon.host import audit as audit_module
-from gideon.host import grafana, secrets, site, stack, tls
-from gideon.host.render.grafana import GRAFANA_ADMIN_USER
-from gideon.host.report import StageResult, print_stage
+from gideon.host import grafana, site, stack
+from gideon.host.report import Problem, StageResult, print_stage
 from gideon.host.sysio import Host, PathLike, RealHost
 
 _SITE_PATH: Final[str] = "/etc/gideon/site.yaml"
@@ -108,15 +107,9 @@ def run_alerts_test(
         print_stage(_failed("preconditions", detail, _APPLY_FIX))
         return 1
 
-    admin_secret = secrets.read_secret(io, "grafana_admin_password")
-    if not admin_secret.ok or admin_secret.value is None:
-        print_stage(
-            _failed(
-                "preconditions",
-                admin_secret.problem or "Grafana administrator secret is unavailable.",
-                _APPLY_FIX,
-            )
-        )
+    admin = grafana.administrator(io, config.hostname, client_factory=client_factory)
+    if isinstance(admin, Problem):
+        print_stage(_failed("preconditions", admin.problem, admin.fix))
         return 1
 
     audit_problem = audit_api.probe(io, rendered_dir)
@@ -139,12 +132,9 @@ def run_alerts_test(
         )
     )
 
-    make_client = client_factory or grafana.ingress_client_factory(
-        config.hostname, ca_path=tls.CA_PATH
-    )
     try:
         ready = grafana.wait_ready(
-            make_client(), attempts=_READY_ATTEMPTS, sleep=sleep
+            admin.factory(), attempts=_READY_ATTEMPTS, sleep=sleep
         )
     except (grafana.GrafanaError, OSError):
         ready = grafana.ReadyResult(False, "Grafana readiness request failed.", _GRAFANA_FIX)
@@ -157,9 +147,7 @@ def run_alerts_test(
     relay = f"{config.alerts.smtp.host}:{config.alerts.smtp.port}"
     send_result: grafana.TestResult
     try:
-        client = make_client(
-            credential=(GRAFANA_ADMIN_USER, admin_secret.value)
-        )
+        client = admin.client()
         receiver = client.get_receiver("page")
         if receiver is None:
             send_result = grafana.TestResult(

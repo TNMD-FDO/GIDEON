@@ -7,9 +7,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
-from gideon.host import backupset, grafana, nogpu, owui, report, secrets, site, tls
+from gideon.host import backupset, grafana, nogpu, owui, report, site
 from gideon.host.render.ci import CI_ROOT
-from gideon.host.render.grafana import GRAFANA_ADMIN_USER
 from gideon.host.report import Problem, one_line, refusal
 from gideon.host.sysio import Host, PathLike, RealHost
 from gideon.improvement import owuifeedback, proposals, triggers
@@ -82,17 +81,10 @@ def _attention_result(
     hostname: str,
     client_factory: Callable[..., grafana.Client] | None,
 ) -> tuple[attention.Page, ...] | Problem:
-    secret = secrets.read_secret(host, "grafana_admin_password")
-    if not secret.ok or secret.value is None:
-        return Problem(
-            secret.problem or "Grafana administrator secret is unavailable.",
-            f"Run {report.command('apply')}, then retry.",
-        )
-    make_client = client_factory or grafana.ingress_client_factory(
-        hostname, ca_path=tls.CA_PATH
-    )
-    credential = (GRAFANA_ADMIN_USER, secret.value)
-    return attention.read_pages(lambda: make_client(credential=credential))
+    admin = grafana.administrator(host, hostname, client_factory=client_factory)
+    if isinstance(admin, Problem):
+        return admin
+    return attention.read_pages(admin.client)
 
 
 def run_status(

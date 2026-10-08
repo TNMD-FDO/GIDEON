@@ -12,7 +12,7 @@ from typing import Any
 
 import yaml  # type: ignore[import-untyped]
 
-from gideon.host import alerts, audit, grafana
+from gideon.host import alerts, audit, grafana, secrets
 from gideon.host.render.grafana import GRAFANA_ADMIN_USER
 from gideon.host.site import load_site
 from gideon.host.sysio import Command, PathLike
@@ -263,6 +263,35 @@ class CommandTests(unittest.TestCase):
                 self.assertTrue(out.startswith("preconditions: refuse"))
                 self.assertIn(expected, out)
                 self.assertEqual(backend.rows, [])
+
+    def test_empty_secret_refuses_before_factory_and_audit(self) -> None:
+        host = FakeHost(secret="")
+        fake = FakeGrafana(receiver=self.receiver())
+        code, out, backend = self.run_command(host, fake)
+        path = secrets.secret_path("grafana_admin_password")
+
+        self.assertEqual(code, 1)
+        self.assertIn(f"preconditions: refuse — Secret file is empty: {path}.", out)
+        self.assertIn(f"Rewrite {path} in place from the office password manager, then retry.", out)
+        self.assertEqual(fake.credentials, [])
+        self.assertEqual(backend.rows, [])
+        self.assertEqual(len(out.splitlines()), 1)
+
+    def test_unreadable_secret_fix_names_password_manager_without_command(self) -> None:
+        class UnreadableSecretHost(FakeHost):
+            def read_text(self, path: PathLike, *, encoding: str = "utf-8") -> str:
+                if str(path) == str(secrets.secret_path("grafana_admin_password")):
+                    raise OSError("fictitious read failure")
+                return super().read_text(path, encoding=encoding)
+
+        code, out, backend = self.run_command(UnreadableSecretHost(), FakeGrafana())
+        path = secrets.secret_path("grafana_admin_password")
+
+        self.assertEqual(code, 1)
+        self.assertIn(f"preconditions: refuse — Secret file is unreadable: {path}", out)
+        self.assertIn(f"Rewrite {path} in place from the office password manager, then retry.", out)
+        self.assertNotIn("apply", out)
+        self.assertEqual(backend.rows, [])
 
     def test_grafana_refusal_names_logs_and_does_not_audit(self) -> None:
         code, out, backend = self.run_command(

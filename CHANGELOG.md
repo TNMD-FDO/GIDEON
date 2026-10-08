@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.88](docs/release-notes/v0.3.88.md) — 2026-10-07 — one way to open Grafana as the break-glass administrator
 - [v0.3.87](docs/release-notes/v0.3.87.md) — 2026-10-07 — the heartbeat is its own email
 - [v0.3.84](docs/release-notes/v0.3.84.md) — 2026-10-07 — the CDI spec kept current
 - [v0.3.83](docs/release-notes/v0.3.83.md) — 2026-10-07 — corpus install stages each court's rows

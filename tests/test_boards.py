@@ -845,6 +845,18 @@ class BoardRows(unittest.TestCase):
         self.assertIn("preconditions: refuse — Secret file is missing", stdout)
         self.assertIn("Fix: ", stdout)
 
+    def test_empty_secret_precondition_refuses_without_exposing_password(self) -> None:
+        host = FakeHost(board_document("example-board", [("Figure", "timeseries")]))
+        path = secret_path("grafana_admin_password")
+        host.files[str(path)] = "\t\n"
+        code, stdout, stderr = self.invoke(host, FakePage(host, []))
+
+        self.assertEqual((code, stderr), (1, ""))
+        self.assertIn(f"preconditions: refuse — Secret file is empty: {path}.", stdout)
+        self.assertIn(f"Rewrite {path} in place from the office password manager, then retry.", stdout)
+        self.assertNotIn("\t", stdout)
+        self.assertEqual(len(stdout.splitlines()), 1)
+
     def test_no_provisioned_board_without_uid_refuses_with_fix(self) -> None:
         host = FakeHost(board_document("example-board", [("Figure", "timeseries")]))
         host.files.pop(str(BOARD_PATH))

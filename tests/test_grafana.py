@@ -6,9 +6,10 @@ import http.server
 import json
 import threading
 import unittest
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 from unittest.mock import patch
 
+from gideon.host import grafana, report, secrets
 from gideon.host.grafana import (
     Alert,
     Client,
@@ -18,6 +19,106 @@ from gideon.host.grafana import (
     SniHTTPSConnection,
     wait_ready,
 )
+from gideon.host.render.grafana import GRAFANA_ADMIN_USER
+from gideon.host.sysio import Host, PathLike
+
+
+class _SecretHost:
+    """A dict-backed read seam for the administrator's secret alone."""
+
+    def __init__(self, value: str | None = None, failure: OSError | UnicodeDecodeError | None = None) -> None:
+        self.files = {} if value is None else {
+            str(secrets.secret_path("grafana_admin_password")): value
+        }
+        self.failure = failure
+
+    def read_text(self, path: PathLike, *, encoding: str = "utf-8") -> str:
+        del encoding
+        if self.failure is not None:
+            raise self.failure
+        try:
+            return self.files[str(path)]
+        except KeyError as exc:
+            raise FileNotFoundError(str(path)) from exc
+
+
+class AdministratorAccess(unittest.TestCase):
+    """The break-glass administrator's access, read once, and its secret file's refusals."""
+
+    def test_available_secret_opens_injected_client_without_exposing_password(self) -> None:
+        password = "fictitious-grafana-password"
+        host = _SecretHost(password + "\n")
+        calls: list[tuple[str, str] | None] = []
+        client = object()
+
+        def factory(*, credential: tuple[str, str] | None = None) -> object:
+            calls.append(credential)
+            return client
+
+        admin = grafana.administrator(cast(Host, host), "grafana.example.org", client_factory=factory)
+        self.assertIsInstance(admin, grafana.Administrator)
+        assert isinstance(admin, grafana.Administrator)
+        self.assertEqual(admin.user, GRAFANA_ADMIN_USER)
+        self.assertIs(admin.client(), client)
+        self.assertEqual(calls, [(GRAFANA_ADMIN_USER, password)])
+        self.assertNotIn(password, repr(admin))
+        self.assertNotIn(password, str(admin))
+
+    def test_default_client_is_constructed_without_connecting(self) -> None:
+        with (
+            patch.object(grafana.ssl, "create_default_context") as context,
+            patch.object(grafana.Client, "_connection", side_effect=AssertionError("connection opened")) as connection,
+        ):
+            admin = grafana.administrator(cast(Host, _SecretHost("fictitious-password")), "grafana.example.org")
+            self.assertIsInstance(admin, grafana.Administrator)
+            assert isinstance(admin, grafana.Administrator)
+            self.assertIsInstance(admin.client(), grafana.Client)
+        context.assert_called_once()
+        connection.assert_not_called()
+
+    def test_missing_secret_names_rewrite_and_first_apply_in_both_command_forms(self) -> None:
+        path = secrets.secret_path("grafana_admin_password")
+        for installed in (False, True):
+            with self.subTest(installed=installed):
+                try:
+                    report.set_installed_form(installed)
+                    result = grafana.administrator(cast(Host, _SecretHost()), "grafana.example.org")
+                    self.assertIsInstance(result, report.Problem)
+                    assert isinstance(result, report.Problem)
+                    self.assertEqual(result.problem, f"Secret file is missing: {path}.")
+                    self.assertIn(f"Rewrite {path} in place from the office password manager", result.fix)
+                    self.assertIn(report.command("apply"), result.fix)
+                    self.assertIn("before its first", result.fix)
+                finally:
+                    report.set_installed_form(False)
+
+    def test_unreadable_secret_keeps_reader_problem_and_names_rewrite(self) -> None:
+        path = secrets.secret_path("grafana_admin_password")
+        cases = (
+            (OSError("fictitious read failure"), "Secret file is unreadable:"),
+            (UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"), "Secret file is not valid UTF-8:"),
+        )
+        for failure, problem in cases:
+            with self.subTest(problem=problem):
+                result = grafana.administrator(cast(Host, _SecretHost(failure=failure)), "grafana.example.org")
+                self.assertIsInstance(result, report.Problem)
+                assert isinstance(result, report.Problem)
+                self.assertIn(f"{problem} {path}", result.problem)
+                self.assertIn(f"Rewrite {path} in place from the office password manager", result.fix)
+                self.assertNotIn("apply", result.fix)
+
+    def test_empty_and_whitespace_only_secret_refuse_before_client(self) -> None:
+        path = secrets.secret_path("grafana_admin_password")
+        for value in ("", " \t \n"):
+            with self.subTest(value=value):
+                result = grafana.administrator(cast(Host, _SecretHost(value)), "grafana.example.org")
+                self.assertIsInstance(result, report.Problem)
+                assert isinstance(result, report.Problem)
+                self.assertEqual(result.problem, f"Secret file is empty: {path}.")
+                self.assertEqual(
+                    result.fix,
+                    f"Rewrite {path} in place from the office password manager, then retry.",
+                )
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):

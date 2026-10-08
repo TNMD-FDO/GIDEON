@@ -872,6 +872,17 @@ class Status(unittest.TestCase):
                 self.assertIn("waiting on you\nnone\nat a glance", stdout)
                 self.assertTrue(stdout.rstrip().endswith("status: could not check"))
 
+    def test_empty_grafana_secret_refuses_before_opening_client(self) -> None:
+        host = self.make_host()
+        path = secrets.secret_path("grafana_admin_password")
+        host.files[os.fspath(path)] = "\n"
+        code, stdout, stderr, factory_calls = self.run_status(host)
+
+        self.assertEqual((code, stderr), (2, ""))
+        self.assertIn(f"could not check — Secret file is empty: {path}.", stdout)
+        self.assertIn(f"Rewrite {path} in place from the office password manager, then retry.", stdout)
+        self.assertEqual(factory_calls, [])
+
     def test_non_root_and_invalid_site_refuse_on_stderr(self) -> None:
         host = self.make_host(euid=1000)
         code, stdout, stderr, _ = self.run_status(host)

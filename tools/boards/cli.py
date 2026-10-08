@@ -11,8 +11,7 @@ from pathlib import Path
 from typing import Final
 
 from gideon.evaluation.turns import chromium
-from gideon.host import grafana, secrets, site, tls
-from gideon.host.render.grafana import GRAFANA_ADMIN_USER
+from gideon.host import grafana, site
 from gideon.host.report import Problem, StageResult, print_stage
 from gideon.host.sysio import Host, RealHost
 from tools.boards import inventory, page
@@ -44,7 +43,6 @@ _PANEL_MISSING_FIX: Final = (
 )
 _RECORD_FIX: Final = "Make --out writable with free space, then retry."
 _INTERNAL_FIX: Final = "Check the board check's inputs and browser setup, then retry."
-_SECRET_FIX: Final = "Correct the Grafana break-glass secret file, then retry."
 _SUMMARY_FIX: Final = "Correct the failing rows, then rerun the board check."
 
 type PageFactory = Callable[
@@ -218,17 +216,11 @@ def _run(
         if problem is not None:
             _refuse("preconditions", problem)
             return 1
-    secret = secrets.read_secret(host, "grafana_admin_password")
-    if secret.problem is not None:
-        _refuse("preconditions", Problem(secret.problem, secret.fix))
-        return 1
-    password = secret.value
-    del secret
-    if not password:
-        _refuse(
-            "preconditions",
-            Problem("Grafana break-glass password is empty", _SECRET_FIX),
-        )
+    admin = grafana.administrator(
+        host, loaded_site.config.hostname, client_factory=client_factory
+    )
+    if isinstance(admin, Problem):
+        _refuse("preconditions", admin)
         return 1
     available = inventory.provisioned_boards(host, rendered_root=rendered_root)
     if not options.uids and not available:
@@ -289,8 +281,8 @@ def _run(
         try:
             signin_problem = page.sign_in(
                 browser_page,
-                GRAFANA_ADMIN_USER,
-                password,
+                admin.user,
+                admin.password,
                 timeout=chromium.PAGE_TIMEOUT_SECONDS,
             )
         except Exception:  # noqa: BLE001 - no page exception text may reach a row.
@@ -302,7 +294,7 @@ def _run(
         else:
             signin_ok = True
             print_stage(
-                StageResult("signin", True, f"signed in as {GRAFANA_ADMIN_USER}", "")
+                StageResult("signin", True, f"signed in as {admin.user}", "")
             )
             known_uids = sorted(
                 board.uid for board in available if isinstance(board, inventory.Board)
@@ -330,15 +322,7 @@ def _run(
                 if isinstance(item, str):
                     if remote_client is None:
                         try:
-                            make_client = (
-                                client_factory
-                                or grafana.ingress_client_factory(
-                                    hostname, ca_path=tls.CA_PATH
-                                )
-                            )
-                            remote_client = make_client(
-                                credential=(GRAFANA_ADMIN_USER, password)
-                            )
+                            remote_client = admin.client()
                         except grafana.GrafanaError as exc:
                             remote_client = Problem(exc.problem, exc.fix)
                         except Exception:  # noqa: BLE001 - a client failure is one safe board row.

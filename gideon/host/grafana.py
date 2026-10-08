@@ -1,4 +1,4 @@
-"""The stdlib Grafana health client used through the HTTPS ingress."""
+"""The stdlib Grafana client and administrator access through the HTTPS ingress."""
 
 import base64
 import http.client
@@ -8,17 +8,19 @@ import re
 import ssl
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Final
+from typing import Final, overload
 from urllib.parse import quote, urlsplit
 
-from gideon.host import report
+from gideon.host import report, secrets, tls
 from gideon.host.ingress import SniHTTPSConnection
-from gideon.host.sysio import PathLike
+from gideon.host.render.grafana import GRAFANA_ADMIN_USER
+from gideon.host.sysio import Host, PathLike
 
 _DEFAULT_TIMEOUT: Final[float] = 15.0
 _READY_SLEEP_SECONDS: Final[float] = 5.0
 _RETRY_FIX: Final[str] = "Check Grafana availability, then retry."
 _HEALTH_PATH: Final[str] = "/api/health"
+_ADMIN_SECRET: Final[str] = "grafana_admin_password"
 _RECEIVERS_NAMESPACE: Final[str] = "default"
 _RECEIVERS_PATH: Final[str] = (
     "/apis/notifications.alerting.grafana.app/v1beta1/"
@@ -30,6 +32,16 @@ _SMTP_CODE = re.compile(r"(?<!\d)(?:[245]\d{2})(?!\d)")
 
 def _apply_fix() -> str:
     return f"Run {report.command('apply')}, then retry."
+
+
+def _administrator_secret_fix(*, missing: bool) -> str:
+    fix = (
+        f"Rewrite {secrets.secret_path(_ADMIN_SECRET)} in place from the office "
+        "password manager, then retry."
+    )
+    if missing:
+        fix += f" A box before its first {report.command('apply')} gets it from that run."
+    return fix
 
 
 class GrafanaError(Exception):
@@ -392,6 +404,20 @@ class ReadyResult:
     fix: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class Administrator[T]:
+    """Grafana access with the password withheld from repr; the bare factory probes readiness."""
+
+    user: str
+    password: str = field(repr=False)
+    factory: Callable[..., T]
+
+    def client(self) -> T:
+        """Open a client with the administrator's credential."""
+
+        return self.factory(credential=(self.user, self.password))
+
+
 def wait_ready(
     client: Client,
     *,
@@ -440,3 +466,39 @@ def ingress_client_factory(
         )
 
     return factory
+
+
+@overload
+def administrator[T](
+    host: Host, hostname: str, *, client_factory: Callable[..., T]
+) -> Administrator[T] | report.Problem: ...
+
+
+@overload
+def administrator(
+    host: Host, hostname: str, *, client_factory: None = None
+) -> Administrator[Client] | report.Problem: ...
+
+
+def administrator[T](
+    host: Host, hostname: str, *, client_factory: Callable[..., T] | None = None
+) -> Administrator[T] | Administrator[Client] | report.Problem:
+    """Read the break-glass administrator's access once without opening a client."""
+
+    secret = secrets.read_secret(host, _ADMIN_SECRET)
+    if secret.problem is not None:
+        return report.Problem(
+            secret.problem, _administrator_secret_fix(missing=secret.missing)
+        )
+    if secret.value is None or not secret.value.strip():
+        return report.Problem(
+            f"Secret file is empty: {secrets.secret_path(_ADMIN_SECRET)}.",
+            _administrator_secret_fix(missing=False),
+        )
+    if client_factory is None:
+        return Administrator(
+            GRAFANA_ADMIN_USER,
+            secret.value,
+            ingress_client_factory(hostname, ca_path=tls.CA_PATH),
+        )
+    return Administrator(GRAFANA_ADMIN_USER, secret.value, client_factory)
