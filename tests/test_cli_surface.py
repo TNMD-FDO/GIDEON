@@ -89,6 +89,18 @@ class Help(unittest.TestCase):
         for name in TOP_LEVEL:
             self.assertIn(name, out.getvalue())
 
+    def test_upgrade_help_lists_disruption_acknowledgment(self) -> None:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as ctx:
+            main(["upgrade", "--help"])
+        self.assertEqual(ctx.exception.code, 0)
+        help_text = collapsed(out.getvalue())
+        self.assertIn("--acknowledge-disruption", help_text)
+        self.assertIn(
+            "pass the disruption acknowledgment to the new release's host provision",
+            help_text,
+        )
+
     def test_corpus_help_names_the_watch(self) -> None:
         group = io.StringIO()
         with contextlib.redirect_stdout(group), self.assertRaises(SystemExit) as ctx:
@@ -308,17 +320,24 @@ class ProvisionList(unittest.TestCase):
         with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as ctx:
             main(["host", "provision", "--help"])
         self.assertEqual(ctx.exception.code, 0)
+        help_text = collapsed(out.getvalue())
         self.assertIn(
             "--no-gpu",
-            out.getvalue(),
+            help_text,
         )
         self.assertIn(
             "declare a host without a GPU: the engine is pinned out",
-            out.getvalue(),
+            help_text,
         )
-        self.assertIn("--build-box", out.getvalue())
-        self.assertIn("declare this host the build box", out.getvalue())
-        self.assertIn("KVM, registry, and", out.getvalue())
+        self.assertIn("--build-box", help_text)
+        self.assertIn("declare this host the build box", help_text)
+        self.assertIn("KVM, registry, and", help_text)
+        self.assertIn("--acknowledge-disruption", help_text)
+        self.assertIn(
+            "acknowledge that this run may restart or reboot every container on the box, "
+            "after the maintenance window is announced",
+            help_text,
+        )
 
     def test_provision_modes_are_mutually_exclusive(self) -> None:
         err = io.StringIO()

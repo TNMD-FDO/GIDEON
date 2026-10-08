@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.81](docs/release-notes/v0.3.81.md) — 2026-10-07 — provision stops before a box-wide restart while a co-tenant runs, unless acknowledged
 - [v0.3.80](docs/release-notes/v0.3.80.md) — 2026-10-07 — disk-layout accepts an existing /data
 - [v0.3.77](docs/release-notes/v0.3.77.md) — 2026-10-07 — RAM warning below the memory floor
 - [v0.3.76](docs/release-notes/v0.3.76.md) — 2026-10-07 — firewall rules in their own chain

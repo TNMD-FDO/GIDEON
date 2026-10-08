@@ -64,7 +64,11 @@ def _one_line(value: str) -> str:
 
 
 def _load_context(
-    host: Host, lock_path: PathLike, models_path: PathLike, site_path: PathLike
+    host: Host,
+    lock_path: PathLike,
+    models_path: PathLike,
+    site_path: PathLike,
+    disruption_acknowledged: bool = False,
 ) -> ProvisionContext | None:
     lock_result: HostLockLoadResult = load_host_lock(lock_path, host=host)
     if not lock_result.ok or lock_result.lock is None:
@@ -80,7 +84,11 @@ def _load_context(
     # steps report blocked); a present-but-unloadable one refuses the run.
     if not host.exists(site_path):
         return ProvisionContext(
-            host=host, lock=lock_result.lock, site=None, models=models_result.lock
+            host=host,
+            lock=lock_result.lock,
+            site=None,
+            models=models_result.lock,
+            disruption_acknowledged=disruption_acknowledged,
         )
     site_result: SiteLoadResult = load_site(Path(site_path), host=host)
     if site_result.errors or site_result.config is None:
@@ -91,6 +99,7 @@ def _load_context(
         lock=lock_result.lock,
         site=site_result.config,
         models=models_result.lock,
+        disruption_acknowledged=disruption_acknowledged,
     )
 
 
@@ -420,7 +429,10 @@ def run_provision(
     root = Path(__file__).parents[2]
     actual_lock_path = root / "host.lock" if lock_path is None else lock_path
     actual_models_path = root / "models.lock" if models_path is None else models_path
-    context = _load_context(io, actual_lock_path, actual_models_path, site_path)
+    disruption_acknowledged = bool(getattr(args, "acknowledge_disruption", False))
+    context = _load_context(
+        io, actual_lock_path, actual_models_path, site_path, disruption_acknowledged
+    )
     if context is None:
         return 1
 

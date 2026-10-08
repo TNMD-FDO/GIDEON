@@ -24,6 +24,7 @@ from typing import Final
 import gideon
 from gideon.host import cli as host_cli
 from gideon.host import report
+from gideon.host.cotenants import ACKNOWLEDGE_DISRUPTION_FLAG
 from gideon.host.render.ci import PRODUCTION_STACK, STACKS
 
 _EVERYTHING_ELSE: Final = "Everything else\n  gideon --help, and the operator card at docs/runbooks/start-here.md"
@@ -175,6 +176,14 @@ def build_parser() -> argparse.ArgumentParser:
     provision.add_argument(
         "--list", action="store_true", help="list the provisioning steps"
     )
+    provision.add_argument(
+        ACKNOWLEDGE_DISRUPTION_FLAG,
+        action="store_true",
+        help=(
+            "acknowledge that this run may restart or reboot every container "
+            "on the box, after the maintenance window is announced"
+        ),
+    )
     provision_mode = provision.add_mutually_exclusive_group()
     provision_mode.add_argument(
         "--no-gpu",
@@ -222,6 +231,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--acknowledge-breaking",
         action="store_true",
         help="required to cross a major version",
+    )
+    upgrade.add_argument(
+        ACKNOWLEDGE_DISRUPTION_FLAG,
+        action="store_true",
+        help="pass the disruption acknowledgment to the new release's host provision",
     )
     upgrade.set_defaults(handler=host_cli.run_upgrade, command_path="upgrade")
 

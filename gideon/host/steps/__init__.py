@@ -343,6 +343,7 @@ class ProvisionContext:
     site: SiteConfig | None
     models: ModelsLock | None = None
     no_gpu: bool = False
+    disruption_acknowledged: bool = False
 
 
 class Step:

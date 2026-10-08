@@ -25,6 +25,7 @@ import gideon
 from gideon.host import audit as audit_module
 from gideon.host import backup, backupset, preflight, report, site, stack
 from gideon.host.checks import PreflightCheck, Severity
+from gideon.host.cotenants import ACKNOWLEDGE_DISRUPTION_FLAG
 from gideon.host.render.engine import ENGINE_SERVICE_NAME
 from gideon.host.report import StageResult, command_detail, print_stage, refusal
 from gideon.host.stages import aware_now, site_problem
@@ -88,6 +89,14 @@ def _after_checkout_fix(tag: str) -> str:
     return (
         f"Reboot if asked or correct the refusal, then re-run {_upgrade()} "
         f"{tag}; to abandon, {_rollback()} moves the checkout back."
+    )
+
+
+def _provision_fix(tag: str) -> str:
+    return (
+        f"Reboot if asked or correct the refusal, then re-run {_upgrade()} "
+        f"{tag}, with {ACKNOWLEDGE_DISRUPTION_FLAG} when the provision row above "
+        f"asks for it; to abandon, {_rollback()} moves the checkout back."
     )
 
 
@@ -1625,6 +1634,7 @@ def run_upgrade(
             now=now,
             audit_api=audit_api,
         )
+    acknowledge_disruption = bool(getattr(args, "acknowledge_disruption", False))
     if not isinstance(tag, str) or not tag:
         return _refuse("a target tag is required.", _tag_fix())
     try:
@@ -1644,6 +1654,7 @@ def run_upgrade(
     )
     before_fix = _before_new_tree_fix(tag)
     after_checkout_fix = _after_checkout_fix(tag)
+    provision_fix = _provision_fix(tag)
     audit_fix = f"Check the rendered Postgres service, then re-run {retry}."
     timer = _StageTimer()
 
@@ -1764,8 +1775,11 @@ def run_upgrade(
 
     # From here on the tree under this process is the new release's; every step is
     # the new tree's own CLI as a child, and nothing below imports anything.
+    provision_arguments = ("host", "provision") + (
+        (ACKNOWLEDGE_DISRUPTION_FLAG,) if acknowledge_disruption else ()
+    )
     for name, key, arguments, fix in (
-        ("provision", "provision", ("host", "provision"), after_checkout_fix),
+        ("provision", "provision", provision_arguments, provision_fix),
         ("preflight", "new-tree-preflight", ("preflight",), after_checkout_fix),
         ("apply", "apply", ("apply",), _after_apply_fix()),
     ):

@@ -19,6 +19,7 @@ from enum import Enum
 from pathlib import Path
 
 from gideon.host import aptsources, dockerdaemon
+from gideon.host.cotenants import guard
 from gideon.host.images import is_loopback_registry, is_plain_registry, parse_registry
 from gideon.host.steps import (
     BOX_WIDE_SHORTFALL_FIX,
@@ -137,6 +138,10 @@ class _ContainerdKind(Enum):
     OWN = "own"
     PACKAGE_DEFAULT = "package_default"
     MOVED_MET = "moved_met"
+
+
+# The readings where provision writes its own containerd file and restarts.
+_CONTAINERD_WRITABLE = (_ContainerdKind.ABSENT, _ContainerdKind.PACKAGE_DEFAULT)
 
 
 @dataclass(frozen=True)
@@ -594,7 +599,7 @@ class DockerEngineStep(Step):
         if reading.to_set:
             keys = ", ".join(reading.to_set)
             return CheckResult(Disposition.DRIFT, f"{_DAEMON} lacks GIDEON's keys: {keys}", "Set GIDEON's daemon.json keys, then re-run provision.")
-        if containerd in (_ContainerdKind.ABSENT, _ContainerdKind.PACKAGE_DEFAULT):
+        if containerd in _CONTAINERD_WRITABLE:
             return CheckResult(
                 Disposition.DRIFT,
                 f"{_CONTAINERD_CONFIG} is at the package default; GIDEON sets containerd's root",
@@ -669,6 +674,22 @@ class DockerEngineStep(Step):
             containerd = _containerd_read(context, self.settings[1])
             if isinstance(containerd, CheckResult):
                 raise StepFailure(containerd.detail, containerd.fix)
+        current = daemon[0] if daemon is not None else {}
+        merged, daemon_changed = dockerdaemon.merge(current, wanted)
+        journald_written = not journald.outside and journald.drop_in != _JOURNALD_TEXT
+        # An absent Docker's containerd file is read only after the install, so
+        # its write is counted as one to come; the guard passes there anyway,
+        # since no runtime is running containers.
+        restarts = []
+        if version.docker_absent or containerd in _CONTAINERD_WRITABLE:
+            restarts.append("restarting containerd and Docker")
+        elif daemon_changed:
+            restarts.append("restarting Docker")
+        if journald_written:
+            restarts.append("restarting journald")
+        if restarts:
+            guard(context, " and ".join(restarts))
+
         if version.docker_absent:
             context.host.mkdir(_KEYRING.parent, mode=0o755, parents=True, exist_ok=True)
             # Keyring strictly before the source entry: a failed fetch must never
@@ -685,15 +706,11 @@ class DockerEngineStep(Step):
                 raise StepFailure(containerd.detail, containerd.fix)
         assert isinstance(containerd, _ContainerdKind)
 
-        current = daemon[0] if daemon is not None else {}
-        merged, daemon_changed = dockerdaemon.merge(current, wanted)
         if daemon_changed:
             context.host.mkdir(_DAEMON.parent, mode=0o755, parents=True, exist_ok=True)
             context.host.write_text(_DAEMON, dockerdaemon.text(merged), mode=_daemon_mode(context))
 
-        containerd_written = containerd in (
-            _ContainerdKind.ABSENT, _ContainerdKind.PACKAGE_DEFAULT
-        )
+        containerd_written = containerd in _CONTAINERD_WRITABLE
         if containerd_written:
             context.host.mkdir(_CONTAINERD_CONFIG.parent, mode=0o755, parents=True, exist_ok=True)
             context.host.write_text(_CONTAINERD_CONFIG, _CONTAINERD_TEXT)
@@ -701,7 +718,7 @@ class DockerEngineStep(Step):
         if containerd_written:
             context.host.run(["systemctl", "restart", "containerd"], check=True)
 
-        if not journald.outside and journald.drop_in != _JOURNALD_TEXT:
+        if journald_written:
             context.host.mkdir(_JOURNALD.parent, mode=0o755, parents=True, exist_ok=True)
             context.host.write_text(_JOURNALD, _JOURNALD_TEXT)
             context.host.run(["systemctl", "restart", "systemd-journald"], check=True)

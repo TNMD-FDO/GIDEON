@@ -351,7 +351,7 @@ A model upgrade's proof window precedes its tag: announce it under
 | `backup` | the pre-upgrade set, `pre-<tag>`, a full set whose manifest must record the commit the checkout is leaving (rollback's way back). When the plain label exists from an attempt that never crossed the checkout, a suffixed `pre-<tag>-<timestamp>` set is taken (the earlier one may predate later writes). When the checkout already stands at the tag, an earlier attempt crossed it: the newest `pre-<tag>[-…]` set naming another release is **reused**, never re-taken | the backup's own rows carry the fix |
 | `audit-intent` | one `upgrade` row: from-version, to-tag, both commits, the set label | the Postgres service; re-run |
 | `checkout` | `git checkout --detach <tag>` as the owner (skipped when already there) | re-run |
-| `provision` | the **new tree's** `host provision`, its rows streamed as they happen; exits 0 on `blocked` and `reboot-required` rows | — the next stage judges |
+| `provision` | the **new tree's** `host provision`, with `--acknowledge-disruption` passed through when given, its rows streamed as they happen; exits 0 on `blocked` and `reboot-required` rows | a failed child names its refusal and the fix to re-run `upgrade <tag>`, with `--acknowledge-disruption` when the provision row asks for it; the next stage judges `blocked` and `reboot-required` |
 | `preflight` | the new tree's preflight: the gate for apply and the new release's own readiness checks. An unconverged or `reboot-required` step, or a new office-services requirement, refuses here — nothing of the product has changed yet | **reboot if asked, then re-run `upgrade <tag>`**: the checkout is already made and the set is reused, so the re-run resumes here |
 | `apply` | the new tree's `apply` (thirteen stages, streamed; a pin bump in `models.lock` fetches the new revision here, before the engine restarts) | `upgrade --rollback`; but when the row names the engine lock's holder, nothing was changed: wait for that evaluation to finish and re-run `upgrade <tag>`, which the version stage accepts as a re-run |
 | `verify` | the new tree answers `--version` with the tag's version, the applied record names it, every service the rendered project declares has a container that is running and healthy on a fresh read | `upgrade --rollback` |
@@ -423,6 +423,14 @@ rules after the old tree has run, and announce the return the same way.
   (`office-services-setup.md` §4).
 - `upgrade <tag>` again after a reboot: the checkout is already at the tag, the
   set is reused, and the run resumes at the new tree's provision.
+- A provision refusal naming running containers outside GIDEON's ownership mark:
+  announce a maintenance window to every project sharing the daemon (§9), then
+  re-run `host provision` or `upgrade <tag>` with `--acknowledge-disruption`.
+  When the release running the upgrade has no such flag on `upgrade`, the
+  checkout is already at the tag: from `/opt/gideon`, run
+  `sudo python3 -m gideon host provision --acknowledge-disruption` by hand,
+  then re-run `sudo python3 -m gideon upgrade <tag>`, which resumes at the new
+  tree's provision and reuses the set.
 - `upgrade <tag>` again after an attempt that stopped before the checkout: a
   fresh suffixed set is taken (the stale plain-label set is left alone); the
   stale set can be pruned by hand.
@@ -849,7 +857,7 @@ Run only the rehearsal for the prerequisite being upgraded; replace `<branch>` w
 
 ### Announce
 
-Announce a maintenance window at least one working day ahead to users and every project sharing the daemon. A Docker upgrade restarts every container on the box. A driver upgrade needs a reboot. Agree on the timing with the other projects' operators before starting.
+Announce a maintenance window at least one working day ahead to users and every project sharing the daemon. A Docker upgrade restarts every container on the box. A driver upgrade needs a reboot. Agree on the timing with the other projects' operators before starting. When `host provision`'s co-tenant guard names running containers, use that list to announce the window to their projects; `--acknowledge-disruption` acknowledges the disruption on the re-run but does not announce the window.
 
 ### Upgrade
 

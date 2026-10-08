@@ -3,6 +3,7 @@
 import re
 from pathlib import Path
 
+from gideon.host.cotenants import guard
 from gideon.host.steps import (
     BOX_WIDE_SHORTFALL_FIX,
     LIBVIRT_BRIDGE_CIDR,
@@ -389,6 +390,8 @@ class FirewallStep(Step):
             refusal = _policy_refusal(context, self.settings[0])
             if refusal is not None:
                 raise StepFailure(refusal.detail, refusal.fix)
+        else:
+            guard(context, "enabling ufw")
         desired = _desired_rules(context)
         needed = list(desired)
         stale_numbers: list[int] = []

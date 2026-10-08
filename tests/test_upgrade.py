@@ -18,6 +18,7 @@ from unittest.mock import patch
 import gideon
 from gideon.host import audit, backupset, nogpu, report, upgrade
 from gideon.host.checks import CheckReport, PreflightCheck, PreflightContext, Severity
+from gideon.host.cotenants import ACKNOWLEDGE_DISRUPTION_FLAG
 from gideon.host.site import load_site
 from gideon.host.steps import CheckResult, Disposition, ProvisionContext, Step
 from gideon.host.steps.site_dirs import AGE_IDENTITY_PATH
@@ -399,6 +400,7 @@ class CommandRunner(unittest.TestCase):
         *,
         tag: str | None = HIGHER,
         acknowledge: bool = False,
+        disruption: bool = False,
         rollback: bool = False,
         runners: FakeRunners | None = None,
         audit_backend: FakeAudit | None = None,
@@ -414,7 +416,13 @@ class CommandRunner(unittest.TestCase):
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = upgrade.run_upgrade(
-                argparse.Namespace(command_path="upgrade", tag=tag, rollback=rollback, acknowledge_breaking=acknowledge),
+                argparse.Namespace(
+                    command_path="upgrade",
+                    tag=tag,
+                    rollback=rollback,
+                    acknowledge_breaking=acknowledge,
+                    acknowledge_disruption=disruption,
+                ),
                 host=host,
                 site_path=EXAMPLE,
                 rendered_dir=RENDERED,
@@ -596,7 +604,7 @@ class UpgradeTests(CommandRunner):
                         FakeHost(failing_child="host provision"),
                         FakeRunners(),
                         False,
-                        f"Fix: Reboot if asked or correct the refusal, then re-run {upgrade_command} {HIGHER}; to abandon, {rollback_command} moves the checkout back.",
+                        f"Fix: Reboot if asked or correct the refusal, then re-run {upgrade_command} {HIGHER}, with {ACKNOWLEDGE_DISRUPTION_FLAG} when the provision row above asks for it; to abandon, {rollback_command} moves the checkout back.",
                     ),
                     (
                         FakeHost(failing_child="apply"),
@@ -714,6 +722,43 @@ class UpgradeTests(CommandRunner):
                 ("--version",),
                 ("engine", "verify"),
             ],
+        )
+
+    def test_disruption_acknowledgment_reaches_only_the_provision_child(self) -> None:
+        host = FakeHost(applied_release=HIGHER.removeprefix("v"))
+
+        code, out, err, _, _ = self.run_upgrade(host, disruption=True)
+
+        self.assertEqual(code, 0, out + err)
+        children = [
+            call[0][3:]
+            for call in host.calls
+            if call[0][:3] == (PYTHON, "-m", "gideon")
+        ]
+        self.assertEqual(
+            children,
+            [
+                ("host", "provision", ACKNOWLEDGE_DISRUPTION_FLAG),
+                ("preflight",),
+                ("apply",),
+                ("--version",),
+                ("engine", "verify"),
+            ],
+        )
+
+    def test_failed_acknowledged_provision_names_the_flag_in_its_fix(self) -> None:
+        host = FakeHost(
+            failing_child=f"host provision {ACKNOWLEDGE_DISRUPTION_FLAG}"
+        )
+
+        code, out, _, _, _ = self.run_upgrade(host, disruption=True)
+
+        self.assertEqual(code, 1, out)
+        provision_row = next(line for line in out.splitlines() if line.startswith("provision: refuse —"))
+        self.assertIn(
+            f"re-run sudo python3 -m gideon upgrade {HIGHER}, with "
+            f"{ACKNOWLEDGE_DISRUPTION_FLAG} when the provision row above asks for it",
+            provision_row,
         )
 
     def test_a_root_owned_checkout_runs_git_without_sudo(self) -> None:
@@ -869,11 +914,12 @@ class UpgradeTests(CommandRunner):
     def test_next_step_by_failure_position(self) -> None:
         before = f"Correct the refusal, then re-run sudo python3 -m gideon upgrade {HIGHER}."
         after_checkout = f"re-run sudo python3 -m gideon upgrade {HIGHER}; to abandon, sudo python3 -m gideon upgrade --rollback moves the checkout back."
+        provision_fix = f"re-run sudo python3 -m gideon upgrade {HIGHER}, with {ACKNOWLEDGE_DISRUPTION_FLAG} when the provision row above asks for it; to abandon, sudo python3 -m gideon upgrade --rollback moves the checkout back."
         rollback = "Fix: Run sudo python3 -m gideon upgrade --rollback."
         cases: list[tuple[str, FakeHost, FakeRunners, str, str, list[str]]] = [
             ("preflight", FakeHost(), FakeRunners(preflight=2), "preflight", before, []),
             ("backup", FakeHost(), FakeRunners(backup=2), "backup", before, []),
-            ("provision", FakeHost(failing_child="host provision"), FakeRunners(), "provision", after_checkout, ["intent", "failed"]),
+            ("provision", FakeHost(failing_child="host provision"), FakeRunners(), "provision", provision_fix, ["intent", "failed"]),
             ("new preflight", FakeHost(failing_child="preflight"), FakeRunners(), "preflight", after_checkout, ["intent", "failed"]),
             ("apply", FakeHost(failing_child="apply"), FakeRunners(), "apply", rollback, ["intent", "failed"]),
             ("verify", FakeHost(version_output="gideon 999.0.0\n"), FakeRunners(), "verify", rollback, ["intent", "failed"]),
@@ -1029,6 +1075,24 @@ class RollbackTests(CommandRunner):
     def run_rollback(self, host: Any, **kwargs: Any) -> tuple[int, str, str, FakeRunners, FakeAudit]:
         kwargs.setdefault("tag", None)
         return self.run_upgrade(host, rollback=True, **kwargs)
+
+    def test_disruption_acknowledgment_does_not_change_rollback_children_or_rows(self) -> None:
+        plain_host = rollback_host()
+        acknowledged_host = rollback_host()
+
+        plain_code, plain_out, plain_err, _, _ = self.run_rollback(plain_host)
+        acknowledged_code, acknowledged_out, acknowledged_err, _, _ = self.run_rollback(
+            acknowledged_host, disruption=True
+        )
+
+        self.assertEqual(plain_code, 0, plain_out + plain_err)
+        self.assertEqual(acknowledged_code, 0, acknowledged_out + acknowledged_err)
+        self.assertEqual(rows_of(plain_out), ROLLBACK_ROWS)
+        self.assertEqual(rows_of(acknowledged_out), ROLLBACK_ROWS)
+        self.assertEqual(
+            [call[0][3:] for call in plain_host.calls if call[0][:3] == (PYTHON, "-m", "gideon")],
+            [call[0][3:] for call in acknowledged_host.calls if call[0][:3] == (PYTHON, "-m", "gideon")],
+        )
 
     def test_rollback_restores_the_newest_pre_upgrade_set(self) -> None:
         plain = f"pre-{HIGHER}"

@@ -232,18 +232,18 @@ def arguments(
     dry_run: bool = False,
     listing: bool = False,
     build_box: bool = False,
+    acknowledge_disruption: bool | None = None,
 ):
-    return type(
-        "Arguments",
-        (),
-        {
-            "only": only,
-            "dry_run": dry_run,
-            "list": listing,
-            "no_gpu": False,
-            "build_box": build_box,
-        },
-    )()
+    values = {
+        "only": only,
+        "dry_run": dry_run,
+        "list": listing,
+        "no_gpu": False,
+        "build_box": build_box,
+    }
+    if acknowledge_disruption is not None:
+        values["acknowledge_disruption"] = acknowledge_disruption
+    return type("Arguments", (), values)()
 
 
 class RunnerTests(unittest.TestCase):
@@ -276,6 +276,35 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(step.apply_calls, 1)
         self.assertEqual(step.check_calls, 2)
         self.assertIn("drift: applied", output)
+
+    def test_acknowledgment_reaches_step_context_and_defaults_false(self) -> None:
+        class ContextStep(ScriptStep):
+            def __init__(self) -> None:
+                super().__init__("context", [result(Disposition.DRIFT)])
+                self.seen: list[bool] = []
+
+            def apply(self, context: ProvisionContext) -> None:
+                self.seen.append(context.disruption_acknowledged)
+
+        site_path = REPO_ROOT / "config/site.example.yaml"
+        for loaded in (False, True):
+            for flag, args in (
+                (False, arguments()),
+                (True, arguments(acknowledge_disruption=True)),
+            ):
+                with self.subTest(loaded=loaded, flag=flag):
+                    host = FakeHost(
+                        files={os.fspath(site_path): site_path.read_text()} if loaded else {}
+                    )
+                    step = ContextStep()
+                    code, output, error = self.run_steps(
+                        [step],
+                        args=args,
+                        host=host,
+                        site_path=site_path if loaded else "/missing/site.yaml",
+                    )
+                    self.assertEqual(code, 0, output + error)
+                    self.assertEqual(step.seen, [flag])
 
     def test_converged_does_not_apply_and_dry_run_would_apply(self) -> None:
         converged = ScriptStep("ready", [result(Disposition.CONVERGED)])

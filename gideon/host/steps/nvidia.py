@@ -13,6 +13,7 @@ from enum import Enum
 from pathlib import Path
 
 from gideon.host import aptsources
+from gideon.host.cotenants import guard
 from gideon.host.steps import (
     PREREQUISITE_FLOOR_FIX,
     CheckResult,
@@ -530,6 +531,7 @@ class NvidiaDriverStep(Step):
             )
             if refusal is not None:
                 raise StepFailure(*refusal)
+            guard(context, "installing the NVIDIA driver, which needs a reboot")
         driver = context.lock.driver.package
         # Remove the old source before any apt command reads it.
         context.host.unlink(_LEGACY_SOURCE, missing_ok=True)

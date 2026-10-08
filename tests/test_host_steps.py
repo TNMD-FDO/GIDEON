@@ -21,6 +21,11 @@ from pathlib import Path
 
 from gideon.host import dockerdaemon
 from gideon.host.checks import format_gb
+from gideon.host.cotenants import (
+    DOCKER_ACTIVE_ARGV,
+    DOCKER_PS_ARGV,
+    DOCKER_VERSION_ARGV,
+)
 from gideon.host.lock import load_host_lock
 from gideon.host.models import GIGABYTE, ModelsLock, load_models_lock, select_profile
 from gideon.host.provision import run_provision
@@ -414,6 +419,9 @@ def nvidia_install_commands(*packages: str) -> dict[tuple[str, ...], subprocess.
         move: completed(move),
         sha: completed(sha, f"{HOST_LOCK.driver.keyring_sha256}  {deb}\n"),
         dpkg: completed(dpkg),
+        DOCKER_VERSION_ARGV: completed(DOCKER_VERSION_ARGV),
+        DOCKER_ACTIVE_ARGV: completed(DOCKER_ACTIVE_ARGV, "active\n"),
+        DOCKER_PS_ARGV: completed(DOCKER_PS_ARGV),
         ("apt-mark", "hold", HOST_LOCK.driver.package): completed(
             ("apt-mark", "hold", HOST_LOCK.driver.package)
         ),
@@ -1757,6 +1765,48 @@ class DockerKeyringOrderTests(unittest.TestCase):
 class NvidiaStepTests(unittest.TestCase):
     """Driver and toolkit outcomes over package, module, and apt-source readings."""
 
+    def test_absent_driver_refuses_before_legacy_unlinks(self) -> None:
+        pinning = f"nvidia-driver-pinning-{HOST_LOCK.driver.branch}"
+        driver = HOST_LOCK.driver.package
+        legacy_entry = f"deb [signed-by={_LEGACY_KEYRING}] {CUDA_REPOSITORY}/ /\n"
+        commands = nvidia_install_commands(pinning, driver)
+        commands[DOCKER_PS_ARGV] = completed(DOCKER_PS_ARGV, "other-box\tother-project\n")
+        host = nvidia_driver_host(
+            files={str(_LEGACY_SOURCE): legacy_entry}, commands=commands
+        )
+
+        with self.assertRaises(StepFailure) as raised:
+            NvidiaDriverStep().apply(context(host))
+
+        self.assertIn(
+            "installing the NVIDIA driver, which needs a reboot reaches every container",
+            raised.exception.detail,
+        )
+        self.assertIn("project other-project (other-box)", raised.exception.detail)
+        self.assertIn("--acknowledge-disruption", raised.exception.fix)
+        self.assertIn(str(_LEGACY_SOURCE), host.files)
+        assert_nvidia_read_only(self, host)
+
+    def test_acknowledged_driver_install_skips_container_listing(self) -> None:
+        pinning = f"nvidia-driver-pinning-{HOST_LOCK.driver.branch}"
+        driver = HOST_LOCK.driver.package
+        legacy_entry = f"deb [signed-by={_LEGACY_KEYRING}] {CUDA_REPOSITORY}/ /\n"
+        host = nvidia_driver_host(
+            files={str(_LEGACY_SOURCE): legacy_entry},
+            commands=nvidia_install_commands(pinning, driver),
+        )
+
+        NvidiaDriverStep().apply(
+            replace(context(host), disruption_acknowledged=True)
+        )
+
+        runs = [argv for argv, _, _ in host.runs]
+        self.assertNotIn(DOCKER_VERSION_ARGV, runs)
+        self.assertNotIn(DOCKER_ACTIVE_ARGV, runs)
+        self.assertNotIn(DOCKER_PS_ARGV, runs)
+        self.assertNotIn(str(_LEGACY_SOURCE), host.files)
+        self.assertIn(("apt-get", "install", "-y", driver), runs)
+
     def test_open_driver_from_other_packaging_at_or_above_floor_is_accepted(self) -> None:
         branch = HOST_LOCK.driver.branch
         package = "nvidia-driver-fictitious-open"
@@ -1978,6 +2028,8 @@ class NvidiaStepTests(unittest.TestCase):
         step.apply(context(host))
         self.assertIn(("run", (hold, True)), host.calls)
         self.assertFalse(any(argv[0] in {"apt-get", "dpkg", "wget"} for argv, _, _ in host.runs))
+        self.assertNotIn(DOCKER_VERSION_ARGV, [argv for argv, _, _ in host.runs])
+        self.assertNotIn(DOCKER_PS_ARGV, [argv for argv, _, _ in host.runs])
         host.commands[("apt-mark", "showhold")] = completed(("apt-mark", "showhold"), f"{driver}\n")
         self.assertEqual(step.check(context(host)).disposition, Disposition.CONVERGED)
         prior = len(host.runs)
@@ -2298,6 +2350,7 @@ def docker_commands(
     containerd_active_command = ("systemctl", "is-active", "containerd")
     commands = {
         ("docker", "--version"): completed(("docker", "--version"), f"Docker version {docker_version}, build abc\n"),
+        DOCKER_PS_ARGV: completed(DOCKER_PS_ARGV),
         ("docker", "compose", "version"): completed(("docker", "compose", "version"), f"Docker Compose version v{compose_version}\n"),
         containerd_enabled_command: subprocess.CompletedProcess(
             list(containerd_enabled_command),
@@ -2426,6 +2479,127 @@ class DockerStepTests(unittest.TestCase):
 
     def recorded_journald(self) -> str:
         return baseline_host().commands[_JOURNALD_CAT].stdout
+
+    def test_disruptive_restart_phrases_refuse_before_any_write(self) -> None:
+        docker_only = docker_files({
+            "data-root": "/var/lib/docker",
+            "features": {"cdi": True},
+            "log-driver": "json-file",
+        })
+        containerd_only = docker_files(docker_policy())
+        containerd_only[os.fspath(_CONTAINERD_CONFIG)] = "version = 4\n"
+        journald_only = docker_files(docker_policy())
+        del journald_only[os.fspath(_JOURNALD)]
+        joined = dict(docker_only)
+        joined[os.fspath(_CONTAINERD_CONFIG)] = "version = 4\n"
+        del joined[os.fspath(_JOURNALD)]
+        containerd_reads: dict[
+            tuple[str, ...], subprocess.CompletedProcess[str]
+        ] = {
+            _CONTAINERD_VERIFY: completed(_CONTAINERD_VERIFY),
+            _CONTAINERD_DUMP: containerd_dump(_CONTAINERD_DEFAULT_ROOT),
+        }
+        journald_reads: dict[
+            tuple[str, ...], subprocess.CompletedProcess[str]
+        ] = {
+            _JOURNALD_CAT: completed(_JOURNALD_CAT, self.recorded_journald()),
+        }
+        cases: tuple[
+            tuple[dict[str, str], dict[tuple[str, ...], subprocess.CompletedProcess[str]], str],
+            ...,
+        ] = (
+            (docker_only, {}, "restarting Docker"),
+            (containerd_only, containerd_reads, "restarting containerd and Docker"),
+            (journald_only, journald_reads, "restarting journald"),
+            (
+                joined,
+                {**containerd_reads, **journald_reads},
+                "restarting containerd and Docker and restarting journald",
+            ),
+        )
+        read_commands = {
+            DOCKER_VERSION_ARGV,
+            ("docker", "compose", "version"),
+            DOCKER_ACTIVE_ARGV,
+            DOCKER_PS_ARGV,
+            _CONTAINERD_VERIFY,
+            _CONTAINERD_DUMP,
+            _JOURNALD_CAT,
+        }
+        for files, commands, mutation in cases:
+            with self.subTest(mutation=mutation):
+                host = self.setting_host(
+                    files=files,
+                    commands={
+                        **commands,
+                        DOCKER_PS_ARGV: completed(DOCKER_PS_ARGV, "other-box\tother-project\n"),
+                    },
+                )
+
+                with self.assertRaises(StepFailure) as raised:
+                    DockerEngineStep().apply(context(host))
+
+                self.assertIn(f"{mutation} reaches every container on the box", raised.exception.detail)
+                self.assertIn("project other-project (other-box)", raised.exception.detail)
+                self.assertIn("--acknowledge-disruption", raised.exception.fix)
+                assert_no_host_mutation(self, host, read_commands)
+
+    def test_acknowledged_restart_proceeds_without_container_listing(self) -> None:
+        files = docker_files({
+            "data-root": "/var/lib/docker",
+            "features": {"cdi": True},
+            "log-driver": "json-file",
+        })
+        host = self.setting_host(files=files)
+
+        DockerEngineStep().apply(
+            replace(context(host), disruption_acknowledged=True)
+        )
+
+        self.assertIn(("run", (("systemctl", "restart", "docker"), True)), host.calls)
+        self.assertNotIn(DOCKER_ACTIVE_ARGV, [argv for argv, _, _ in host.runs])
+        self.assertNotIn(DOCKER_PS_ARGV, [argv for argv, _, _ in host.runs])
+
+    def test_absent_docker_does_not_list_containers(self) -> None:
+        host = FakeHost(
+            files=docker_recipe_files(docker_policy()),
+            commands=docker_absent_commands(),
+        )
+
+        DockerEngineStep().apply(context(host))
+
+        runs = [argv for argv, _, _ in host.runs]
+        self.assertIn(DOCKER_VERSION_ARGV, runs)
+        self.assertNotIn(DOCKER_ACTIVE_ARGV, runs)
+        self.assertNotIn(DOCKER_PS_ARGV, runs)
+
+    def test_stopped_docker_refuses_before_any_write(self) -> None:
+        files = docker_files({
+            "data-root": "/var/lib/docker",
+            "features": {"cdi": True},
+            "log-driver": "json-file",
+        })
+        inactive = subprocess.CompletedProcess(list(DOCKER_ACTIVE_ARGV), 3, "inactive\n", "")
+        host = self.setting_host(files=files, commands={DOCKER_ACTIVE_ARGV: inactive})
+
+        with self.assertRaises(StepFailure) as raised:
+            DockerEngineStep().apply(context(host))
+
+        self.assertIn("live-restore", raised.exception.detail)
+        self.assertIn("Start Docker", raised.exception.fix)
+        self.assertNotIn(DOCKER_PS_ARGV, [argv for argv, _, _ in host.runs])
+        assert_no_host_mutation(
+            self,
+            host,
+            {
+                DOCKER_VERSION_ARGV,
+                ("docker", "compose", "version"),
+                DOCKER_ACTIVE_ARGV,
+                _CONTAINERD_VERIFY,
+                _CONTAINERD_DUMP,
+                _JOURNALD_CAT,
+            },
+        )
 
     def test_insecure_registries_follows_the_plain_registry_rule(self) -> None:
         """A plain, non-loopback site registry at the VM bridge address is listed
@@ -3756,6 +3930,50 @@ class NetworkStepTests(unittest.TestCase):
         self.assertEqual((raised.exception.detail, raised.exception.fix), (reading.detail, reading.fix))
         assert_no_host_mutation(self, host, {self.UFW_STATUS, self.UFW_VERBOSE})
 
+    def test_inactive_ufw_refuses_before_rule_changes(self) -> None:
+        host = self.firewall_converged_host()
+        host.commands[self.UFW_STATUS] = completed(self.UFW_STATUS, "Status: inactive\n")
+        host.commands[DOCKER_PS_ARGV] = completed(
+            DOCKER_PS_ARGV, "other-box\tother-project\n"
+        )
+
+        with self.assertRaises(StepFailure) as raised:
+            FirewallStep().apply(context(host))
+
+        self.assertIn("enabling ufw reaches every container", raised.exception.detail)
+        self.assertIn("project other-project (other-box)", raised.exception.detail)
+        self.assertIn("--acknowledge-disruption", raised.exception.fix)
+        assert_no_host_mutation(
+            self,
+            host,
+            {self.UFW_STATUS, DOCKER_VERSION_ARGV, DOCKER_ACTIVE_ARGV, DOCKER_PS_ARGV},
+        )
+
+    def test_acknowledged_inactive_ufw_enables_without_container_listing(self) -> None:
+        host = self.firewall_converged_host()
+        host.commands[self.UFW_STATUS] = completed(
+            self.UFW_STATUS,
+            host.commands[self.UFW_STATUS].stdout.replace(
+                "Status: active", "Status: inactive"
+            ),
+        )
+        for command in (
+            ("ufw", "default", "deny", "incoming"),
+            ("ufw", "--force", "enable"),
+        ):
+            host.commands[command] = completed(command)
+
+        FirewallStep().apply(
+            replace(context(host), disruption_acknowledged=True)
+        )
+
+        runs = [argv for argv, _, _ in host.runs]
+        self.assertNotIn(DOCKER_VERSION_ARGV, runs)
+        self.assertNotIn(DOCKER_ACTIVE_ARGV, runs)
+        self.assertNotIn(DOCKER_PS_ARGV, runs)
+        self.assertIn(("ufw", "default", "deny", "incoming"), runs)
+        self.assertIn(("ufw", "--force", "enable"), runs)
+
     def test_firewall_removes_only_stale_tagged_rules_and_preserves_order(self) -> None:
         status = (
             "Status: inactive\n"
@@ -3857,6 +4075,9 @@ class NetworkStepTests(unittest.TestCase):
                 ("systemctl", "enable", "gideon-docker-user"): completed(("systemctl", "enable", "gideon-docker-user")),
                 ("systemctl", "start", "gideon-docker-user"): completed(("systemctl", "start", "gideon-docker-user")),
                 ("ufw", "reload"): completed(("ufw", "reload")),
+                DOCKER_VERSION_ARGV: completed(DOCKER_VERSION_ARGV),
+                DOCKER_ACTIVE_ARGV: completed(DOCKER_ACTIVE_ARGV, "active\n"),
+                DOCKER_PS_ARGV: completed(DOCKER_PS_ARGV),
             },
             files={
                 "/etc/ufw/after.rules": UFW_AFTER_RULES + "\n" + _docker_user_block(["192.0.2.0/24"]),
@@ -3885,6 +4106,8 @@ class NetworkStepTests(unittest.TestCase):
                 self.assertNotIn(("run", (("ufw", "default", "deny", "incoming"), True)), host.calls)
                 self.assertNotIn(("run", (("ufw", "--force", "enable"), True)), host.calls)
                 self.assertIn(("run", (("ufw", "reload"), True)), host.calls)
+                self.assertNotIn(DOCKER_VERSION_ARGV, [argv for argv, _, _ in host.runs])
+                self.assertNotIn(DOCKER_PS_ARGV, [argv for argv, _, _ in host.runs])
 
     def test_active_allow_refuses_before_rules_drift_or_mutation(self) -> None:
         host = self.firewall_converged_host()
