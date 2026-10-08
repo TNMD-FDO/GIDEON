@@ -1,8 +1,7 @@
 """Loading and validation for the committed models lock.
 
-The models lock is release data, not site configuration.  It names the
-hardware profiles a release has evaluated, their model pins, and optional
-candidate pins.
+The models lock is release data, not site configuration. It names evaluated
+hardware profiles, model pins, optional co-tenant reserves, and candidates.
 """
 
 import difflib
@@ -46,6 +45,14 @@ class MemoryRow:
     service: str
     gb: int
     role: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class CotenantReserve:
+    """Whole decimal gigabytes left for other applications on one card."""
+
+    gpu: int
+    gb: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +118,7 @@ class HardwareProfile:
     memory: tuple[MemoryRow, ...]
     models: tuple[ModelPin, ...]
     embedding_space: EmbeddingSpace | None = None
+    cotenant_reserve: tuple[CotenantReserve, ...] = ()
 
     def model(self, role: str) -> ModelPin | None:
         """Return the model for *role*, or ``None`` when it is absent."""
@@ -121,6 +129,11 @@ class HardwareProfile:
         """Return the memory row for *service*, or ``None`` when absent."""
 
         return next((row for row in self.memory if row.service == service), None)
+
+    def cotenant_reserve_gb(self, position: int) -> int:
+        """Return a card's reserve, or zero when its position is unnamed."""
+
+        return next((row.gb for row in self.cotenant_reserve if row.gpu == position), 0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,7 +221,7 @@ _CANDIDATE_CLASH_FIX: Final = (
     "Rename the candidate in models.lock; consult docs/runbooks/release-files.md §4."
 )
 _ROOT_KEYS: Final =("version", "reference", "profiles", "candidates")
-_PROFILE_KEYS: Final = ("requires", "memory", "models", "embedding_space")
+_PROFILE_KEYS: Final = ("requires", "memory", "models", "embedding_space", "cotenant_reserve_gb")
 _REQUIRES_KEYS: Final = ("platform", "gpu", "dram_gb", "data_volume_gb")
 _GPU_KEYS: Final = (
     "architecture",
@@ -667,6 +680,27 @@ def _validate_embedding_space(
     _int(space, "dimensions", errors, error_path=f"{path}.dimensions")
 
 
+def _validate_cotenant_reserve(
+    profile_path: str,
+    value: object,
+    gpu_count: int | None,
+    errors: list[ModelsLockError],
+) -> None:
+    """Validate each optional card position and its whole gigabyte reserve."""
+
+    path = f"{profile_path}.cotenant_reserve_gb"
+    if not isinstance(value, Mapping):
+        errors.append(_mapping_error(path, value))
+        return
+    for position, gb in value.items():
+        row_path = _path(path, position)
+        if type(position) is not int or position < 0:
+            errors.append(_error(row_path, "expected a non-negative whole-number GPU position"))
+        elif gpu_count is not None and position >= gpu_count:
+            errors.append(_error(row_path, f"must be below requires.gpu.count ({gpu_count})"))
+        _int({"gb": gb}, "gb", errors, positive=False, error_path=row_path)
+
+
 def validate_models_lock(document: Mapping[str, object]) -> list[ModelsLockError]:
     """Return all shape, grammar, pin, and unknown-key errors in a lock."""
 
@@ -728,6 +762,10 @@ def validate_models_lock(document: Mapping[str, object]) -> list[ModelsLockError
             roles = tuple(role for role in models or {} if isinstance(role, str))
             if "embedding_space" in profile:
                 _validate_embedding_space(profile_path, profile["embedding_space"], roles, errors)
+            if "cotenant_reserve_gb" in profile:
+                _validate_cotenant_reserve(
+                    profile_path, profile["cotenant_reserve_gb"], gpu_count, errors
+                )
 
             if "memory" not in profile:
                 errors.append(_error(f"{profile_path}.memory", "missing required key", fix=_MEMORY_FIX))
@@ -805,7 +843,15 @@ def _construct(document: Mapping[str, object]) -> ModelsLock:
                 cast(str, space["role"]),
                 cast(int, space["dimensions"]),
             )
-        profiles.append(HardwareProfile(cast(str, name), requirements, memory, models, embedding_space))
+        reserve_value = cast(Mapping[int, int], profile.get("cotenant_reserve_gb", {}))
+        cotenant_reserve = tuple(
+            CotenantReserve(position, gb) for position, gb in sorted(reserve_value.items())
+        )
+        profiles.append(
+            HardwareProfile(
+                cast(str, name), requirements, memory, models, embedding_space, cotenant_reserve
+            )
+        )
     candidates_value = cast(Mapping[str, object], document.get("candidates", {}))
     candidates = tuple(
         _construct_candidate(cast(str, name), cast(Mapping[str, object], value))
@@ -904,7 +950,7 @@ def _finish(result: ModelsLockLoadResult) -> ModelsLockLoadResult:
 
 
 def load_models_lock(path: PathLike, *, host: Host | None = None) -> ModelsLockLoadResult:
-    """Parse, validate, and construct a models lock from a path."""
+    """Load model pins and optional co-tenant reserves from a models lock."""
 
     return _finish(read_models_lock(path, host=host))
 

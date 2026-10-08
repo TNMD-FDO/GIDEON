@@ -106,6 +106,15 @@ profiles:
         gb: 12
       gideon-egress:
         gb: 1
+    # The co-tenant reserve is memory GIDEON leaves unclaimed on each card
+    # for whatever other application an office installs. It belongs to the
+    # profile, never to a named application. A test holds the model servers'
+    # budgets plus this reserve within each card. GPU 1's starting figure is
+    # the shared box ledger's line; E6 corrects it from measurement. A card
+    # not named here reserves nothing, and the pin watch patches nothing here.
+    cotenant_reserve_gb:
+      0: 0
+      1: 24
     # The embedding space: the one vector space every stored chunk and every
     # query is embedded into. Its id names the model, the dimension, and the
     # precision together, and is the third part of a generation's name and

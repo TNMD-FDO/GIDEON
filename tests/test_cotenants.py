@@ -167,6 +167,7 @@ class Ownership(unittest.TestCase):
             (ContainerRow("container", "gideon-drill"), True),
             (ContainerRow("gideon-registry", None), True),
             (ContainerRow("container", "transcribe"), False),
+            (ContainerRow("gideon-worker", "transcribe"), False),
             (ContainerRow("other-box", None), False),
         )
         for row, expected in cases:

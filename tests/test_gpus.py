@@ -209,5 +209,27 @@ class Record(unittest.TestCase):
         self.assertNotIn("python3 -m", installed_form.fix)
 
 
+class Resolution(unittest.TestCase):
+    CARDS = ("GPU-alpha", "GPU-beta")
+
+    def test_recorded_cards_resolve_in_recorded_order(self) -> None:
+        self.assertEqual(
+            gpus.resolve(self.CARDS, ("GPU-extra", "GPU-beta", "GPU-alpha")),
+            self.CARDS,
+        )
+
+    def test_missing_recorded_card_refuses_with_its_position_and_fix(self) -> None:
+        result = gpus.resolve(self.CARDS, ("GPU-alpha",))
+        self.assertIsInstance(result, Problem)
+        assert isinstance(result, Problem)
+        self.assertIn("GPU index 1 UUID GPU-beta", result.problem)
+        self.assertEqual(result.fix, gpus.re_record_fix())
+
+    def test_no_record_uses_present_order(self) -> None:
+        present = ("GPU-beta", "GPU-alpha")
+        self.assertEqual(gpus.resolve(None, present), present)
+        self.assertEqual(gpus.resolve(None, ()), ())
+
+
 if __name__ == "__main__":
     unittest.main()

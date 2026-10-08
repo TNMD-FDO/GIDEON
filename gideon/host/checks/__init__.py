@@ -3,7 +3,9 @@
 import re
 from dataclasses import dataclass
 from enum import Enum
+from subprocess import CompletedProcess
 
+from gideon.host import nogpu
 from gideon.host.corpus.lockfile import Lockfile
 from gideon.host.courts import CourtMap
 from gideon.host.egress import EgressAllowlist
@@ -15,6 +17,7 @@ from gideon.host.site import SiteConfig
 from gideon.host.sysio import Host
 
 read_secret_file = read_secret
+MEBIBYTE = 2**20
 
 
 def format_gb(byte_count: int) -> str:
@@ -49,6 +52,22 @@ class CheckReport:
     severity: Severity
     detail: str
     fix: str = ""
+
+
+def nvidia_failure(result: CompletedProcess[str]) -> CheckReport:
+    """Render a failed NVIDIA probe with the driver repair action."""
+
+    returncode = result.returncode
+    stderr = result.stderr.strip()
+    if returncode == 127:
+        detail = "nvidia-smi is not available"
+    else:
+        detail = "nvidia-smi failed"
+        if stderr:
+            detail += f": {stderr}"
+        else:
+            detail += f" with exit code {returncode}"
+    return CheckReport(Severity.REFUSE, detail, nogpu.GPU_DRIVER_FIX)
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,7 +107,11 @@ def _registered_checks() -> tuple[PreflightCheck, ...]:
         JurisdictionCheck,
         OsKernelCheck,
     )
-    from gideon.host.checks.capacity import DataVolumeCheck, HostMemoryCheck
+    from gideon.host.checks.capacity import (
+        DataVolumeCheck,
+        GpuMemoryCheck,
+        HostMemoryCheck,
+    )
     from gideon.host.checks.network import (
         EgressCheck,
         HostnameCheck,
@@ -109,6 +132,7 @@ def _registered_checks() -> tuple[PreflightCheck, ...]:
         HostMemoryCheck(),
         JurisdictionCheck(),
         HardwareProfileCheck(),
+        GpuMemoryCheck(),
         DriverTestedCheck(),
         OsKernelCheck(),
     )

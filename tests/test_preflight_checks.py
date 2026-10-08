@@ -14,9 +14,11 @@ from typing import ClassVar, Self, cast
 from unittest import mock
 from urllib.parse import parse_qs, urlsplit
 
-from gideon.host import cotenants, nogpu
+from gideon.host import cotenants, gpus, nogpu
 from gideon.host.checks import (
     CHECKS,
+    MEBIBYTE,
+    CheckReport,
     PreflightContext,
     Severity,
     capacity,
@@ -32,11 +34,16 @@ from gideon.host.checks.artifacts import (
 )
 from gideon.host.checks.capacity import (
     DATA_DF_ARGV,
+    GPU_MEMORY_CARD_ARGV,
+    GPU_MEMORY_CONTAINERS_ARGV,
+    GPU_MEMORY_FLAG,
+    GPU_MEMORY_PROCESS_ARGV,
     HOST_MEMORY_FLOOR_FRACTION,
     MEMORY_LOW_QUERY,
     PROMETHEUS_QUERY_PATH,
     PROMETHEUS_TIMEOUT_SECONDS,
     DataVolumeCheck,
+    GpuMemoryCheck,
     HostMemoryCheck,
     LowReader,
     LowReading,
@@ -62,7 +69,7 @@ from gideon.host.courts import Court, CourtMap, CourtSource
 from gideon.host.egress import EgressAllowlist, EgressGroup, EgressHost
 from gideon.host.ldap import ldapsearch_argv
 from gideon.host.lock import load_host_lock
-from gideon.host.models import GIGABYTE, load_models_lock
+from gideon.host.models import GIGABYTE, ModelPin, ModelsLock, load_models_lock
 from gideon.host.render.services.prometheus import PROMETHEUS_LOOPBACK_ADDRESS
 from gideon.host.site import load_site, render_errors
 from gideon.host.sshtarget import BACKUP_PROBE_SHA256
@@ -348,6 +355,7 @@ class Registry(unittest.TestCase):
                 "host-memory",
                 "jurisdiction",
                 "hardware-profile",
+                "gpu-memory",
                 "driver-tested",
                 "os-kernel",
             ],
@@ -1797,6 +1805,284 @@ class HardwareProfile(unittest.TestCase):
     def test_unreadable_gpus_refuse(self) -> None:
         report = HardwareProfileCheck().run(context(self.gpu_host(gpu_returncode=12)))
         self.assertEqual(report.severity, Severity.REFUSE)
+
+
+class GpuMemory(unittest.TestCase):
+    PROFILE = next(
+        profile for profile in MODELS.profiles if profile.name == MODELS.reference
+    )
+    UUIDS = tuple(f"GPU-fictitious-{position}" for position in range(PROFILE.requires.gpu.count))
+    TOTAL_MIB = _ceil_div(PROFILE.requires.gpu.vram_gb * GIGABYTE, MEBIBYTE)
+    CONTAINER_ID = "a" * 64
+
+    def budgets(self) -> dict[int, int]:
+        totals: dict[int, int] = {}
+        for model in self.PROFILE.models:
+            fraction = Fraction(str(model.serve.flags[GPU_MEMORY_FLAG]))
+            mib = _ceil_div(self.TOTAL_MIB * fraction.numerator, fraction.denominator)
+            totals[model.gpu] = totals.get(model.gpu, 0) + mib
+        return totals
+
+    def host(
+        self,
+        *,
+        free: Mapping[int, int] | None = None,
+        processes: tuple[tuple[int, int, int], ...] = (),
+        containers: tuple[tuple[str, str, str, str], ...] = (),
+        cgroups: Mapping[int, str] | None = None,
+        record: str | None = "valid",
+        card_output: str | None = None,
+        card_code: int = 0,
+        process_output: str | None = None,
+        process_code: int = 0,
+        docker_code: int = 0,
+    ) -> FakeHost:
+        if card_output is None:
+            card_output = "\n".join(
+                f"{uuid}, {self.TOTAL_MIB}, {(free or {}).get(position, self.TOTAL_MIB)}"
+                for position, uuid in enumerate(self.UUIDS)
+            )
+        if process_output is None:
+            process_output = "\n".join(
+                f"{self.UUIDS[position]}, {pid}, {used}"
+                for position, pid, used in processes
+            )
+        listing = "\n".join("\t".join(row) for row in containers)
+        files = {f"/proc/{pid}/cgroup": text for pid, text in (cgroups or {}).items()}
+        if record is not None:
+            files[str(gpus.GPU_RECORD_PATH)] = (
+                "gpus:\n" + "".join(f"  - {uuid}\n" for uuid in self.UUIDS)
+                if record == "valid" else record
+            )
+        return FakeHost(
+            commands={
+                GPU_MEMORY_CARD_ARGV: completed(GPU_MEMORY_CARD_ARGV, card_output, card_code, "driver failed"),
+                GPU_MEMORY_PROCESS_ARGV: completed(
+                    GPU_MEMORY_PROCESS_ARGV, process_output, process_code, "process query failed"
+                ),
+                GPU_MEMORY_CONTAINERS_ARGV: completed(
+                    GPU_MEMORY_CONTAINERS_ARGV, listing, docker_code, "daemon unavailable"
+                ),
+            },
+            files=files,
+        )
+
+    def run_check(
+        self, host: FakeHost, *, models: ModelsLock | None = None, no_gpu: bool = False
+    ) -> CheckReport:
+        return GpuMemoryCheck().run(context(host, models=models, no_gpu=no_gpu))
+
+    def lock_with(self, *models: ModelPin) -> ModelsLock:
+        profile = dataclasses.replace(self.PROFILE, models=models)
+        return dataclasses.replace(
+            MODELS,
+            profiles=tuple(
+                profile if item.name == self.PROFILE.name else item for item in MODELS.profiles
+            ),
+        )
+
+    def with_flags(
+        self, model: ModelPin, flags: Mapping[str, str | int | float | bool]
+    ) -> ModelPin:
+        return dataclasses.replace(model, serve=dataclasses.replace(model.serve, flags=flags))
+
+    def test_fresh_start_fits_on_every_card(self) -> None:
+        host = self.host()
+        report = self.run_check(host)
+        self.assertEqual(report.severity, Severity.PASS, report.detail)
+        for uuid in self.UUIDS:
+            self.assertIn(uuid, report.detail)
+        self.assertEqual(
+            [value for name, value in host.calls if name == "run"],
+            [GPU_MEMORY_CARD_ARGV, GPU_MEMORY_PROCESS_ARGV, GPU_MEMORY_CONTAINERS_ARGV],
+        )
+        self.assertFalse(any(name == "write_text" for name, _ in host.calls))
+
+    def test_short_card_refuses_with_card_holders_and_budget(self) -> None:
+        model = self.PROFILE.models[0]
+        budget = self.budgets()[model.gpu]
+        free = budget - 1
+        host = self.host(free={model.gpu: free})
+        report = self.run_check(host)
+        self.assertEqual(report.severity, Severity.REFUSE)
+        for fragment in (
+            f"GPU index {model.gpu}", self.UUIDS[model.gpu], f"{free} of {self.TOTAL_MIB} MiB",
+            "GIDEON holding none", "others 0 process(es), 0 MiB",
+            f"{model.role} {budget} MiB", "preflight",
+        ):
+            self.assertIn(fragment, report.detail + report.fix)
+        self.assertTrue(report.detail.startswith(f"GPU index {model.gpu}"))
+
+    def test_own_server_holding_counts_as_available(self) -> None:
+        model = self.PROFILE.models[0]
+        budget = self.budgets()[model.gpu]
+        free = max(1, budget // 10)
+        used = budget - free
+        host = self.host(
+            free={model.gpu: free},
+            processes=((model.gpu, 101, used),),
+            containers=((self.CONTAINER_ID, "server", "gideon", "model-server"),),
+            cgroups={101: f"0::/system.slice/docker-{self.CONTAINER_ID}.scope\n"},
+        )
+        report = self.run_check(host)
+        self.assertEqual(report.severity, Severity.PASS, report.detail)
+        self.assertIn(f"model-server {used} MiB", report.detail)
+        self.assertIn("others 0 process(es), 0 MiB", report.detail)
+
+        unlabeled = self.host(
+            free={model.gpu: free},
+            processes=((model.gpu, 102, used),),
+            containers=((self.CONTAINER_ID, "gideon-server", "", "model-server"),),
+            cgroups={102: f"0::/system.slice/docker-{self.CONTAINER_ID}.scope\n"},
+        )
+        self.assertEqual(self.run_check(unlabeled).severity, Severity.PASS)
+
+    def test_cotenant_processes_make_a_card_short(self) -> None:
+        model = self.PROFILE.models[0]
+        budget = self.budgets()[model.gpu]
+        free = budget - 1
+        foreign_id = "b" * 64
+        host = self.host(
+            free={model.gpu: free},
+            processes=((model.gpu, 201, 17), (model.gpu, 202, 23)),
+            containers=((foreign_id, "other-service", "other-project", "other"),),
+            cgroups={
+                201: f"0::/system.slice/docker-{foreign_id}.scope\n",
+                202: f"0::/system.slice/docker-{foreign_id}.scope\n",
+            },
+        )
+        report = self.run_check(host)
+        self.assertEqual(report.severity, Severity.REFUSE)
+        self.assertIn("others 2 process(es), 40 MiB", report.detail)
+        self.assertNotIn("other-service", report.detail)
+
+    def test_unrecorded_cards_use_todays_order_without_writing(self) -> None:
+        host = self.host(record=None)
+        report = self.run_check(host)
+        self.assertEqual(report.severity, Severity.PASS)
+        self.assertIn("unrecorded; today's order, which the first render records", report.detail)
+        self.assertFalse(any(name == "write_text" for name, _ in host.calls))
+
+    def test_missing_recorded_card_refuses_with_re_record_fix(self) -> None:
+        host = self.host(card_output=f"{self.UUIDS[0]}, {self.TOTAL_MIB}, {self.TOTAL_MIB}\n")
+        report = self.run_check(host)
+        self.assertEqual(report.severity, Severity.REFUSE)
+        self.assertIn(self.UUIDS[1], report.detail)
+        self.assertIn("render --diff", report.fix)
+        self.assertNotIn(("run", GPU_MEMORY_PROCESS_ARGV), host.calls)
+
+    def test_malformed_record_refuses(self) -> None:
+        report = self.run_check(self.host(record="gpus: []\n"))
+        self.assertEqual(report.severity, Severity.REFUSE)
+        self.assertIn(str(gpus.GPU_RECORD_PATH), report.detail)
+        self.assertIn("render --diff", report.fix)
+
+    def test_no_gpu_host_skips_without_readings(self) -> None:
+        host = self.host()
+        report = self.run_check(host, no_gpu=True)
+        self.assertEqual(report.severity, Severity.PASS)
+        self.assertIn("skipped: no-GPU host", report.detail)
+        self.assertEqual(host.calls, [])
+
+    def test_nvidia_failures_refuse_with_driver_fix(self) -> None:
+        for host in (self.host(card_code=127), self.host(process_code=1)):
+            with self.subTest(host=host):
+                report = self.run_check(host)
+                self.assertEqual(report.severity, Severity.REFUSE)
+                self.assertIn("nvidia-smi", report.detail)
+                self.assertIn("nvidia-driver", report.fix)
+
+    def test_unreadable_card_or_process_memory_refuses(self) -> None:
+        for host, fragment in (
+            (self.host(card_output=f"{self.UUIDS[0]}, N/A, 1"), "GPU memory"),
+            (self.host(process_output=f"{self.UUIDS[0]}, 123, N/A"), "per-process memory"),
+        ):
+            with self.subTest(fragment=fragment):
+                report = self.run_check(host)
+                self.assertEqual(report.severity, Severity.REFUSE)
+                self.assertIn(fragment, report.detail)
+                self.assertIn("nvidia-driver", report.fix)
+
+    def test_failed_docker_listing_judges_free_alone(self) -> None:
+        model = self.PROFILE.models[0]
+        budget = self.budgets()[model.gpu]
+        host = self.host(
+            free={model.gpu: budget - 1},
+            processes=((model.gpu, 301, budget),),
+            containers=((self.CONTAINER_ID, "server", "gideon", "model-server"),),
+            cgroups={301: f"0::/system.slice/docker-{self.CONTAINER_ID}.scope\n"},
+            docker_code=1,
+        )
+        report = self.run_check(host)
+        self.assertEqual(report.severity, Severity.REFUSE)
+        self.assertIn("judged on free memory alone", report.detail)
+        self.assertIn(f"others 1 process(es), {budget} MiB", report.detail)
+        self.assertNotIn(("read_text", "/proc/301/cgroup"), host.calls)
+
+    def test_unreadable_cgroup_counts_as_other(self) -> None:
+        model = self.PROFILE.models[0]
+        budget = self.budgets()[model.gpu]
+        host = self.host(
+            free={model.gpu: budget - 1},
+            processes=((model.gpu, 401, 37),),
+            containers=((self.CONTAINER_ID, "server", "gideon", "model-server"),),
+        )
+        report = self.run_check(host)
+        self.assertEqual(report.severity, Severity.REFUSE)
+        self.assertIn("others 1 process(es), 37 MiB", report.detail)
+        self.assertIn(("read_text", "/proc/401/cgroup"), host.calls)
+
+    def test_missing_fraction_refuses_before_driver_read(self) -> None:
+        model = self.PROFILE.models[0]
+        flags = {key: value for key, value in model.serve.flags.items() if key != GPU_MEMORY_FLAG}
+        changed_lock = self.lock_with(self.with_flags(model, flags), *self.PROFILE.models[1:])
+        host = self.host()
+        report = self.run_check(host, models=changed_lock)
+        self.assertEqual(report.severity, Severity.REFUSE)
+        self.assertIn(f"models.{model.role}.serve.flags.{GPU_MEMORY_FLAG}", report.detail)
+        self.assertIn("docs/runbooks/release-files.md §4", report.fix)
+        self.assertEqual(host.calls, [])
+
+    def test_out_of_range_fraction_refuses_before_driver_read(self) -> None:
+        model = self.PROFILE.models[0]
+        for value in (0, 1.1, True):
+            with self.subTest(value=value):
+                flags = {**model.serve.flags, GPU_MEMORY_FLAG: value}
+                changed_lock = self.lock_with(self.with_flags(model, flags), *self.PROFILE.models[1:])
+                host = self.host()
+                report = self.run_check(host, models=changed_lock)
+                self.assertEqual(report.severity, Severity.REFUSE)
+                self.assertIn(GPU_MEMORY_FLAG, report.detail)
+                self.assertEqual(host.calls, [])
+
+    def test_model_position_past_resolved_cards_refuses(self) -> None:
+        model = dataclasses.replace(self.PROFILE.models[0], gpu=len(self.UUIDS))
+        changed_lock = self.lock_with(model, *self.PROFILE.models[1:])
+        report = self.run_check(self.host(), models=changed_lock)
+        self.assertEqual(report.severity, Severity.REFUSE)
+        self.assertIn(f"GPU index {len(self.UUIDS)}", report.detail)
+        self.assertIn(f"{len(self.UUIDS)} card(s)", report.detail)
+        self.assertIn("render --diff", report.fix)
+
+    def test_card_without_a_server_is_not_judged_or_named(self) -> None:
+        model = self.PROFILE.models[0]
+        unused = next(position for position in range(len(self.UUIDS)) if position != model.gpu)
+        report = self.run_check(self.host(free={unused: 0}), models=self.lock_with(model))
+        self.assertEqual(report.severity, Severity.PASS, report.detail)
+        self.assertIn(self.UUIDS[model.gpu], report.detail)
+        self.assertNotIn(self.UUIDS[unused], report.detail)
+
+    def test_committed_fractions_set_the_exact_budget_boundary(self) -> None:
+        budgets = self.budgets()
+        at_budget = self.run_check(self.host(free=budgets))
+        self.assertEqual(at_budget.severity, Severity.PASS, at_budget.detail)
+        for position, budget in budgets.items():
+            self.assertIn(f"{budget} MiB", at_budget.detail)
+            short = dict(budgets)
+            short[position] -= 1
+            report = self.run_check(self.host(free=short))
+            self.assertEqual(report.severity, Severity.REFUSE, report.detail)
+            self.assertTrue(report.detail.startswith(f"GPU index {position}"))
 
 
 class DriverTested(unittest.TestCase):

@@ -26,6 +26,8 @@ The hardware profiles contain the minimum host requirements checked by `prefligh
 
 A profile may also name its embedding space: an id, the role of the model that embeds into it, and the dimension. Every stored vector belongs to that space, so a person moves the id in the same change whenever the embedding model, any of its weight files, the dimension, or the precision changes; the id is lowercase words and digits joined by single hyphens, and the role must be one of the profile's models.
 
+A profile may also carry its co-tenant reserve, `cotenant_reserve_gb`: for each GPU position, the whole decimal gigabytes GIDEON leaves unclaimed on that card for whatever other application an office installs; a position not named reserves nothing. A test holds each card's model-server budgets, their `gpu-memory-utilization` fractions of the card, plus its reserve within the card's size.
+
 `models pull` fetches and verifies exactly the files named by the selected profile. It does not select additional files from a model repository.
 
 On the build box the lock may also carry a `candidates:` map of A/B weights. Each entry is keyed by a lowercase hyphenated name that is no profile's model role, and holds `repo`, `revision`, `serve`, and `files` as a profile's model does, but no `gpu`, plus the `role` it stands in for. `models pull <candidate>` pulls the selected profile's files and then that candidate's. The bare `models pull` keeps a candidate while its block is in the lock and removes its files once the block is deleted. A released lock carries no candidate.

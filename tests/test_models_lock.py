@@ -2,10 +2,12 @@
 
 import json
 import os
+import re
 import subprocess
 import unittest
 from collections.abc import Mapping
 from dataclasses import FrozenInstanceError, fields, is_dataclass
+from fractions import Fraction
 from pathlib import Path
 
 from gideon.host.images import DIGEST
@@ -20,6 +22,7 @@ from gideon.host.models import (
     ROLE_NAME,
     SERVICE_NAME,
     CandidatePin,
+    CotenantReserve,
     EmbeddingSpace,
     GpuRequirements,
     HardwareProfile,
@@ -38,6 +41,7 @@ from gideon.host.models import (
 )
 from gideon.host.report import Problem
 from gideon.host.sysio import Command, PathLike
+from tools.exportboundary import absent_from_export
 
 ROOT = Path(__file__).resolve().parent.parent
 LOCK = ROOT / "models.lock"
@@ -124,6 +128,11 @@ SPACE = """    embedding_space:
       dimensions: 17
 """
 VALID_WITH_SPACE = VALID.replace("    models:\n", SPACE + "    models:\n")
+RESERVE = """    cotenant_reserve_gb:
+      0: 3
+      1: 5
+"""
+VALID_WITH_RESERVE = VALID.replace("    memory:\n", RESERVE + "    memory:\n", 1)
 CANDIDATE = f"""candidates:
   alternate-embed:
     role: embed
@@ -209,6 +218,56 @@ def load_text(text: str) -> ModelsLockLoadResult:
 
 
 class CommittedLock(unittest.TestCase):
+    def test_committed_reserves_and_model_budgets_fit_each_card(self) -> None:
+        result = load_models_lock(LOCK)
+        self.assertTrue(result.ok, render_errors(result.errors))
+        assert result.lock is not None and result.document is not None
+        profiles_document = result.document["profiles"]
+        assert isinstance(profiles_document, Mapping)
+        for profile in result.lock.profiles:
+            with self.subTest(profile=profile.name):
+                profile_document = profiles_document[profile.name]
+                assert isinstance(profile_document, Mapping)
+                reserve_document = profile_document.get("cotenant_reserve_gb")
+                self.assertIsInstance(reserve_document, Mapping)
+                assert isinstance(reserve_document, Mapping)
+                positions = set(range(profile.requires.gpu.count))
+                self.assertEqual(set(reserve_document), positions)
+                self.assertEqual({row.gpu for row in profile.cotenant_reserve}, positions)
+                fractions: dict[int, list[Fraction]] = {position: [] for position in positions}
+                for model in profile.models:
+                    with self.subTest(role=model.role):
+                        self.assertIn("gpu-memory-utilization", model.serve.flags)
+                        value = model.serve.flags["gpu-memory-utilization"]
+                        self.assertNotIsInstance(value, bool)
+                        fraction = Fraction(str(value))
+                        self.assertGreater(fraction, 0)
+                        self.assertLessEqual(fraction, 1)
+                        fractions[model.gpu].append(fraction)
+                for position in positions:
+                    reserve = profile.cotenant_reserve_gb(position)
+                    self.assertEqual(reserve, reserve_document[position])
+                    self.assertLessEqual(
+                        sum(fractions[position], Fraction()) * profile.requires.gpu.vram_gb
+                        + reserve,
+                        profile.requires.gpu.vram_gb,
+                    )
+
+    def test_gpu_one_reserve_matches_shared_ledger(self) -> None:
+        if absent_from_export("docs/box-ledger.md", ROOT):
+            self.skipTest("shared GPU memory record is absent from the exported tree")
+        text = (ROOT / "docs/box-ledger.md").read_text(encoding="utf-8")
+        row = text.split("| GIDEON's plan", 1)[1].split("\n", 1)[0]
+        match = re.search(r"([0-9]+) GB co-tenant reserve on GPU ([0-9]+)", row)
+        self.assertIsNotNone(match)
+        assert match is not None
+        result = load_models_lock(LOCK)
+        self.assertTrue(result.ok, render_errors(result.errors))
+        assert result.lock is not None
+        profile = result.lock.profile(result.lock.reference)
+        assert profile is not None
+        self.assertEqual(profile.cotenant_reserve_gb(int(match.group(2))), int(match.group(1)))
+
     def test_committed_lock_has_exact_release_facts_and_grammar_pins(self) -> None:
         result = load_models_lock(LOCK)
         self.assertTrue(result.ok, render_errors(result.errors))
@@ -322,6 +381,7 @@ class CommittedLock(unittest.TestCase):
             GpuRequirements("Example", "1.0", "Example GPU", 1, 1),
             ProfileRequirements("x86_64", GpuRequirements("Example", "1.0", "Example GPU", 1, 1), 1, 1),
             MemoryRow("example-service", 1, None),
+            CotenantReserve(0, 3),
             EmbeddingSpace("example-space", "generator", 17),
             HardwareProfile("2x1v-1d", ProfileRequirements("x86_64", GpuRequirements("Example", "1.0", "Example GPU", 1, 1), 1, 1), (MemoryRow("example-service", 1, None),), ()),
             ModelsLock(1, "2x1v-1d", ()),
@@ -440,6 +500,52 @@ class Refusals(unittest.TestCase):
         self.assertTrue(with_space.ok, render_errors(with_space.errors))
         assert with_space.lock is not None
         self.assertEqual(with_space.lock.profiles[0].embedding_space, EmbeddingSpace("example-space-17", "generator", 17))
+
+    def test_cotenant_reserve_is_optional(self) -> None:
+        absent = load_text(VALID)
+        self.assertTrue(absent.ok, render_errors(absent.errors))
+        assert absent.lock is not None
+        self.assertEqual(absent.lock.profiles[0].cotenant_reserve, ())
+        self.assertEqual(absent.lock.profiles[0].cotenant_reserve_gb(0), 0)
+
+        present = load_text(VALID_WITH_RESERVE)
+        self.assertTrue(present.ok, render_errors(present.errors))
+        assert present.lock is not None
+        profile = present.lock.profiles[0]
+        self.assertEqual(profile.cotenant_reserve, (CotenantReserve(0, 3), CotenantReserve(1, 5)))
+        self.assertEqual(profile.cotenant_reserve_gb(1), 5)
+        self.assertEqual(profile.cotenant_reserve_gb(2), 0)
+
+    def test_cotenant_reserve_shape_refusals(self) -> None:
+        path = "profiles.2x96v-256d.cotenant_reserve_gb"
+        cases = (
+            (VALID_WITH_RESERVE.replace(RESERVE, "    cotenant_reserve_gb: []\n"), "expected a mapping", path),
+            (VALID_WITH_RESERVE.replace("      1: 5\n", "      2: 5\n"), "below requires.gpu.count", f"{path}.2"),
+            (VALID_WITH_RESERVE.replace("      0: 3\n", "      0: -1\n"), "non-negative integer", f"{path}.0"),
+            (VALID_WITH_RESERVE.replace("      0: 3\n", "      0: true\n"), "non-negative integer", f"{path}.0"),
+            (VALID_WITH_RESERVE.replace("      0: 3\n", "      first: 3\n"), "whole-number GPU position", f"{path}.first"),
+            (
+                VALID_WITH_RESERVE.replace("      0: 3\n      1: 5\n", "      true: 3\n"),
+                "whole-number GPU position",
+                f"{path}.True",
+            ),
+        )
+        for text, fragment, key_path in cases:
+            with self.subTest(fragment=fragment, key_path=key_path):
+                self.assert_refused(text, fragment, key_path=key_path)
+                result = load_text(text)
+                self.assertTrue(
+                    all("docs/runbooks/release-files.md §4" in error.fix for error in result.errors)
+                )
+
+        collected = load_text(
+            VALID_WITH_RESERVE.replace("      0: 3\n      1: 5\n", "      0: -1\n      2: true\n")
+        )
+        self.assertEqual(
+            {error.key_path for error in collected.errors},
+            {f"{path}.0", f"{path}.2"},
+        )
+        self.assertEqual(len(collected.errors), 3)
 
     def test_embedding_space_shape_refusals(self) -> None:
         path = "profiles.2x96v-256d.embedding_space"

@@ -2,16 +2,17 @@
 
 import re
 from dataclasses import dataclass
-from subprocess import CompletedProcess
 
 from gideon.host import nogpu, report
 from gideon.host.checks import (
+    MEBIBYTE,
     CheckReport,
     PreflightCheck,
     PreflightContext,
     Severity,
     format_gb,
     meminfo_kb,
+    nvidia_failure,
 )
 from gideon.host.courts import CourtMap
 from gideon.host.models import GIGABYTE, select_profile
@@ -28,7 +29,6 @@ _PROFILE_FIX = (
     "/etc/gideon/site.yaml to a profile this host satisfies, then re-run preflight."
 )
 _FACT_FIX = "Restore uname and /proc/meminfo on the host, then re-run preflight."
-_MEBIBYTE = 2**20
 _KIBIBYTE = 1024
 _VERSION = re.compile(r"\d+(?:\.\d+){0,3}")
 
@@ -179,7 +179,7 @@ def _gpu_facts(output: str) -> list[_GpuFacts] | None:
             _GpuFacts(
                 model=columns[0],
                 compute_capability=columns[1],
-                vram_bytes=int(match.group(1)) * _MEBIBYTE,
+                vram_bytes=int(match.group(1)) * MEBIBYTE,
                 architecture="",
             )
         )
@@ -229,7 +229,7 @@ class HardwareProfileCheck(PreflightCheck):
             ]
         )
         if result.returncode != 0:
-            return _nvidia_failure(result)
+            return nvidia_failure(result)
         facts = _gpu_facts(result.stdout)
         if facts is None:
             return CheckReport(
@@ -240,7 +240,7 @@ class HardwareProfileCheck(PreflightCheck):
 
         architecture_result = context.host.run(["nvidia-smi", "-q"])
         if architecture_result.returncode != 0:
-            return _nvidia_failure(architecture_result)
+            return nvidia_failure(architecture_result)
         architectures = _architectures(architecture_result.stdout)
         if len(architectures) != len(facts):
             return CheckReport(
@@ -291,7 +291,7 @@ class HardwareProfileCheck(PreflightCheck):
                     f"profile requires {required.gpu.architecture}"
                 )
             if fact.vram_bytes < required.gpu.vram_gb * GIGABYTE:
-                vram_mib = fact.vram_bytes // _MEBIBYTE
+                vram_mib = fact.vram_bytes // MEBIBYTE
                 shortfalls.append(
                     f"GPU {index} VRAM is {vram_mib} MiB ({format_gb(fact.vram_bytes)}), "
                     f"profile requires {required.gpu.vram_gb} GB"
@@ -322,22 +322,6 @@ def _unreadable_detail(command: str, stderr: str) -> str:
 
     detail = stderr.strip()
     return f"{command} could not determine the host fact" + (f": {detail}" if detail else "")
-
-
-def _nvidia_failure(result: CompletedProcess[str]) -> CheckReport:
-    """Render the shared driver refusal for either NVIDIA probe."""
-
-    returncode = result.returncode
-    stderr = result.stderr.strip()
-    if returncode == 127:
-        detail = "nvidia-smi is not available"
-    else:
-        detail = "nvidia-smi failed"
-        if stderr:
-            detail += f": {stderr}"
-        else:
-            detail += f" with exit code {returncode}"
-    return CheckReport(Severity.REFUSE, detail, nogpu.GPU_DRIVER_FIX)
 
 
 def _matched_detail(platform: str, facts: list[_GpuFacts], dram_bytes: int) -> str:

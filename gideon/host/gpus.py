@@ -1,8 +1,9 @@
 """The GPU record: host state binding each models.lock GPU position to a card.
 
 The first render that finds no record writes the cards in the order
-``nvidia-smi -L`` reports them; every later render reads the record instead of
-the order, so a card added or enumerated differently moves no model server.
+``nvidia-smi -L`` reports them; later renders and preflight read the record
+instead of the order, so a card added or enumerated differently moves no
+model server.
 Host state, never a site key, and outside every backup set like the markers.
 """
 
@@ -78,17 +79,10 @@ def write(host: Host, cards: tuple[str, ...]) -> Problem | None:
     return None
 
 
-def bind(host: Host, present: tuple[str, ...]) -> tuple[str, ...] | Problem:
-    """Keep recorded lock positions while requiring every recorded card to be present."""
+def resolve(recorded: tuple[str, ...] | None, present: tuple[str, ...]) -> tuple[str, ...] | Problem:
+    """Resolve lock positions from a record, or today's order when unrecorded."""
 
-    recorded = read(host)
-    if isinstance(recorded, Problem):
-        return recorded
     if recorded is None:
-        if present:
-            problem = write(host, present)
-            if problem is not None:
-                return problem
         return present
     present_cards = set(present)
     missing = [
@@ -99,3 +93,17 @@ def bind(host: Host, present: tuple[str, ...]) -> tuple[str, ...] | Problem:
     if missing:
         return Problem(f"{MISSING_CARD_PROBLEM}: {', '.join(missing)}", re_record_fix())
     return recorded
+
+
+def bind(host: Host, present: tuple[str, ...]) -> tuple[str, ...] | Problem:
+    """Resolve lock positions and record today's order on first render."""
+
+    recorded = read(host)
+    if isinstance(recorded, Problem):
+        return recorded
+    resolved = resolve(recorded, present)
+    if recorded is None and present:
+        problem = write(host, present)
+        if problem is not None:
+            return problem
+    return resolved
