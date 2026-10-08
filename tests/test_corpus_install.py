@@ -11,15 +11,16 @@ import shutil
 import subprocess
 import tempfile
 import unittest
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 from urllib.parse import urlsplit
 
 from gideon.host import backuplock, fetch, report, stack, staging, worker
-from gideon.host.corpus import install
+from gideon.host.corpus import install, snapshots
 from gideon.host.corpus.lockfile import (
     IndexDocument,
     Lockfile,
@@ -68,6 +69,7 @@ class FakeHost(RealHost):
         self.calls: list[list[str]] = []
         self.snapshots = Path("/unused")
         self.work = Path("/unused-work")
+        self.current_label = ""
         self.served_bytes: dict[str, bytes] = {}
         self.deferred_urls: list[str] = []
         self.job_destinations: dict[int, str] = {}
@@ -75,6 +77,12 @@ class FakeHost(RealHost):
         self.stage_deferred: list[dict[str, Any]] = []
         self.stage_failure: str | None = None
         self.interrupt_stage_job = False
+        self.caselaw_jobs: dict[int, dict[str, Any]] = {}
+        self.caselaw_deferred: list[dict[str, Any]] = []
+        self.caselaw_failure: str | None = None
+        self.caselaw_counts: dict[str, dict[str, object]] = {}
+        self.interrupt_caselaw_job = False
+        self.caselaw_events: list[tuple[str, str]] = []
         self.job_polls: dict[int, int] = {}
         self.next_job = 100
         self.unreadable_root = False
@@ -196,7 +204,23 @@ class FakeHost(RealHost):
                 job = self.next_job
                 self.next_job += 1
                 self.job_polls[job] = 0
-                if "snapshot" in args:
+                if self._bound(input, "v_task") == worker_identity.CASELAW_TASK:
+                    self.caselaw_jobs[job] = args
+                    self.caselaw_deferred.append(args)
+                    self.caselaw_events.append(("defer", args["court"]))
+                    if self.caselaw_failure is not None:
+                        directory = staging.work_directory(
+                            args["label"], args["snapshot"][:-staging.DATE_SUFFIX_LENGTH],
+                            work_root=self.work,
+                        )
+                        (directory / f"{args['court']}.{worker_identity.CASELAW_FAILURE_NAME}").write_text(
+                            json.dumps({
+                                "schema": 1, "job": job, "court": args["court"],
+                                "reason": self.caselaw_failure, "table": None,
+                                "error": None, "at": NOW.isoformat(),
+                            })
+                        )
+                elif "snapshot" in args:
                     self.stage_jobs[job] = args
                     self.stage_deferred.append(args)
                     self._write_stage(job, args)
@@ -213,15 +237,37 @@ class FakeHost(RealHost):
                     raise KeyboardInterrupt
                 if self.interrupt_stage_job and job in self.stage_jobs:
                     raise KeyboardInterrupt
-                assert job in self.job_destinations or job in self.stage_jobs
+                if self.interrupt_caselaw_job and job in self.caselaw_jobs:
+                    raise KeyboardInterrupt
+                assert job in self.job_destinations or job in self.stage_jobs or job in self.caselaw_jobs
+                if job in self.caselaw_jobs:
+                    self.caselaw_events.append(("read", self.caselaw_jobs[job]["court"]))
                 polls = self.job_polls[job]
                 self.job_polls[job] += 1
                 status = (
                     "doing" if polls == 0 else
-                    "failed" if job in self.stage_jobs and self.stage_failure is not None
+                    "failed" if (job in self.stage_jobs and self.stage_failure is not None)
+                    or (job in self.caselaw_jobs and self.caselaw_failure is not None)
                     else "succeeded"
                 )
                 return subprocess.CompletedProcess(command, 0, f"{job}|{status}|1\n", "")
+            if "JOIN public.opinions" in input:
+                court = self._bound(input, "v_court")
+                self.caselaw_events.append(("counts", court))
+                if court in self.caselaw_counts:
+                    counts = self.caselaw_counts[court]
+                else:
+                    source = self._bound(input, "v_source")
+                    directory = staging.work_directory(self.current_label, source, work_root=self.work)
+                    stage_record = json.loads((directory / worker_identity.STAGE_RECORD_NAME).read_text())
+                    count = stage_record["counts"][court]["opinions"]
+                    counts = {
+                        "opinions": count, "by_status": {"ready": count},
+                        "by_text_source": {"xml_harvard": count},
+                        "by_precedential": {"published": count},
+                        "by_failure_reason": {},
+                    }
+                return subprocess.CompletedProcess(command, 0, json.dumps(counts) + "\n", "")
             if "DO $cut$" in input:
                 self.record_writes += 1
                 payload: dict[str, Any] = json.loads(self._bound(input, "v_payload"))
@@ -458,14 +504,19 @@ class Install(unittest.TestCase):
         self.host._write_stage(91, args)
         return staging.work_directory(self.labels[0], "example", work_root=self.work)
 
-    def run_install(self, label: str | None = None) -> tuple[int, str, str]:
+    def run_install(
+        self, label: str | None = None, *, sleep: Callable[[float], None] | None = None,
+        monotonic: Callable[[], float] | None = None,
+    ) -> tuple[int, str, str]:
+        self.host.current_label = label or self.labels[0]
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = install.run_corpus_install(
                 argparse.Namespace(label=label or self.labels[0]),
                 host=self.host, rendered_dir=RENDERED, checkout=self.checkout,
                 snapshots_root=self.snapshots, work_root=self.work, clock=lambda: NOW,
-                sleep=lambda _seconds: None, monotonic=lambda: 0.0,
+                sleep=sleep or (lambda _seconds: None),
+                monotonic=monotonic or (lambda: 0.0),
                 sources=(self.source,),
             )
         return code, out.getvalue(), err.getvalue()
@@ -496,13 +547,18 @@ class Install(unittest.TestCase):
         self.assertEqual(code, 0, out + err)
         self.assertEqual(err, "")
         self.assertLess(out.index("record: ok"), out.index("stage: ok"))
-        self.assertLess(out.index("stage: ok"), out.index("retain: ok"))
+        self.assertLess(out.index("stage: ok"), out.index("ingest: ok"))
+        self.assertLess(out.index("ingest: ok"), out.index("retain: ok"))
         self.assertIn("ca6: dockets 1, opinion-clusters 1, citations 1, opinions 1", out)
         self.assertIn("scotus: dockets 2, opinion-clusters 2, citations 2, opinions 2", out)
         self.assertIn("example: 2 courts staged, 15 records read, 8 seconds", out)
         self.assertEqual(len(self.host.stage_deferred), 1)
         self.assertEqual(self.host.stage_deferred[0]["courts"], ["ca6", "scotus"])
         self.assertEqual(tuple(self.host.stage_deferred[0]["inputs"]), worker_identity.STAGE_TABLES)
+        self.assertEqual([args["court"] for args in self.host.caselaw_deferred], ["ca6", "scotus"])
+        self.assertEqual(self.host.caselaw_events[:2], [("defer", "ca6"), ("defer", "scotus")])
+        self.assertTrue(all(set(args) == {"label", "snapshot", "court"}
+                            for args in self.host.caselaw_deferred))
 
     def test_complete_matching_stage_prints_courts_and_defers_nothing(self) -> None:
         self._enable_stage()
@@ -517,6 +573,136 @@ class Install(unittest.TestCase):
         self.assertEqual(again, 0, rerun)
         self.assertIn("example: complete; nothing deferred", rerun)
         self.assertEqual(self.host.stage_deferred, [])
+
+    def test_ingest_waits_once_per_round_and_reports_a_minute_heartbeat(self) -> None:
+        self._enable_stage()
+        self._seed_complete_stage()
+        now = [0.0]
+        sleeps: list[float] = []
+
+        def sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            now[0] += snapshots.HEARTBEAT_SECONDS
+
+        code, out, err = self.run_install(sleep=sleep, monotonic=lambda: now[0])
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(sleeps, [1.0])
+        self.assertIn(
+            f"ingest: ok — caselaw: ingesting, 2 courts, {snapshots.HEARTBEAT_SECONDS} seconds",
+            out,
+        )
+        self.assertEqual(
+            self.host.caselaw_events[:6],
+            [("defer", "ca6"), ("defer", "scotus"),
+             ("read", "ca6"), ("read", "scotus"),
+             ("read", "ca6"), ("read", "scotus")],
+        )
+
+    def test_ingest_prints_exact_court_rows_and_summary(self) -> None:
+        self._enable_stage()
+        self._seed_complete_stage()
+        self.host.caselaw_counts = {
+            "ca6": {
+                "opinions": 1, "by_status": {"failed": 1},
+                "by_text_source": {}, "by_precedential": {"unknown": 1},
+                "by_failure_reason": {"no-text": 1},
+            },
+            "scotus": {
+                "opinions": 2, "by_status": {"ready": 2},
+                "by_text_source": {"xml_harvard": 1, "html_columbia": 1},
+                "by_precedential": {"published": 1, "unpublished": 1},
+                "by_failure_reason": {},
+            },
+        }
+        code, out, err = self.run_install()
+        self.assertEqual(code, 0, out + err)
+        rows = [line for line in out.splitlines() if line.startswith("ingest: ok — ")]
+        self.assertEqual(rows, [
+            "ingest: ok — ca6: 1 opinions; ready 0, failed 1 "
+            "(no-text 1, unparseable 0, empty 0, interrupted 0); "
+            "xml_harvard 0, html_columbia 0, html_lawbox 0, html_anon_2020 0, "
+            "html 0, plain_text 0; published 0, unpublished 0, unknown 1",
+            "ingest: ok — scotus: 2 opinions; ready 2, failed 0 "
+            "(no-text 0, unparseable 0, empty 0, interrupted 0); "
+            "xml_harvard 1, html_columbia 1, html_lawbox 0, html_anon_2020 0, "
+            "html 0, plain_text 0; published 1, unpublished 1, unknown 0",
+            "ingest: ok — caselaw: 2 courts, 3 opinions, 2 ready, 1 failed, 0 seconds",
+        ])
+        self.assertLess(out.index(rows[-1]), out.index("retain: ok"))
+
+    def test_ingest_shortfall_refuses_with_both_counts_and_worker_logs(self) -> None:
+        self._enable_stage()
+        directory = self._seed_complete_stage()
+        self.host.caselaw_counts["ca6"] = {
+            "opinions": 0, "by_status": {}, "by_text_source": {},
+            "by_precedential": {}, "by_failure_reason": {},
+        }
+        code, out, err = self.run_install()
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("ingest: refuse — ca6: 0 opinions recorded; 1 staged", out)
+        self.assertIn(stack.logs_fix(RENDERED, worker_identity.WORKER_SERVICE_NAME), out)
+        self.assertIn(report.command("corpus install"), out)
+        self.assertNotIn("retain: ok", out)
+        self.assertTrue(directory.exists())
+
+    def test_failed_ingest_job_refuses_with_its_court_and_fix(self) -> None:
+        self._enable_stage()
+        self._seed_complete_stage()
+        self.host.caselaw_failure = "store"
+        code, out, err = self.run_install()
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("ingest: refuse — ca6: caselaw store failed", out)
+        self.assertIn(report.command("host provision --only disk-layout"), out)
+        self.assertIn(report.command("apply"), out)
+        self.assertIn(report.command("corpus install"), out)
+        self.assertNotIn("retain: ok", out)
+
+    def test_ingest_count_problem_refuses_with_court_and_fix(self) -> None:
+        self._enable_stage()
+        self._seed_complete_stage()
+        issue = report.Problem("count read failed", "Run the fictitious fix.")
+        with patch.object(install.caselaw, "read_counts", return_value=issue) as read_counts:
+            code, out, err = self.run_install()
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("ingest: refuse — ca6: count read failed", out)
+        self.assertIn(issue.fix, out)
+        self.assertNotIn("retain: ok", out)
+        read_counts.assert_called_once_with(
+            self.host, RENDERED, source="example", snapshot_date="2099-01-02",
+            court="ca6", command_path=install.COMMAND_PATH,
+        )
+
+    def test_ingest_missing_or_unreadable_stage_record_refuses_with_its_fix(self) -> None:
+        self._enable_stage()
+        directory = self._seed_complete_stage()
+        complete = staging.read_record(
+            self.host, self.labels[0], "example", work_root=self.work,
+            command_path=install.COMMAND_PATH,
+        )
+        self.assertIsInstance(complete, staging.StageRecord)
+        for issue in (None, report.Problem("record damaged", "Repair the fictitious record.")):
+            with self.subTest(issue=issue):
+                with patch.object(install.staging, "read_record", side_effect=[complete, issue]) as read_record:
+                    code, out, err = self.run_install()
+                self.assertEqual(code, 1, out + err)
+                self.assertIn("ingest: refuse", out)
+                self.assertEqual(read_record.call_count, 2)
+                self.assertEqual(self.host.caselaw_deferred, [])
+                if issue is None:
+                    self.assertIn(f"Remove {directory}", out)
+                else:
+                    self.assertIn(issue.fix, out)
+
+    def test_interrupt_during_ingest_reports_the_worker_continues(self) -> None:
+        self._enable_stage()
+        self._seed_complete_stage()
+        self.host.interrupt_caselaw_job = True
+        code, out, err = self.run_install()
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("ingest: refuse", out)
+        self.assertIn("interrupted; the ingest continues in the worker", out)
+        self.assertIn(report.command("corpus install"), out)
+        self.assertEqual(self.host.lock_releases, 1)
 
     def test_disagreeing_stage_record_refuses_with_work_removal_fix(self) -> None:
         self._enable_stage()

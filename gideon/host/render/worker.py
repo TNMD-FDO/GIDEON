@@ -31,6 +31,23 @@ FETCH_TASK: Final[str] = "gideon.worker.tasks.fetch"
 FETCH_QUEUE: Final[str] = "fetch"
 STAGE_TASK: Final[str] = "gideon.worker.tasks.stage"
 STAGE_QUEUE: Final[str] = "stage"
+CASELAW_TASK: Final[str] = "gideon.worker.tasks.caselaw"
+CASELAW_QUEUE: Final[str] = "caselaw"
+CASELAW_FAILURE_NAME: Final[str] = "caselaw-failed.json"
+CASELAW_FAILURE_REASONS: Final = frozenset({
+    "invalid", "missing-stage", "stage-mismatch", "malformed", "store",
+    "database", "local", "busy",
+})
+DOCUMENT_FAILURE_REASONS: Final = frozenset({
+    "no-text", "unparseable", "empty", "interrupted",
+})
+TEXT_SOURCES: Final = (
+    "xml_harvard", "html_columbia", "html_lawbox", "html_anon_2020",
+    "html", "plain_text",
+)
+PRECEDENTIAL_VALUES: Final = ("published", "unpublished", "unknown")
+# exempt: the bound limits a queue argument and exceeds any one court's rows.
+CASELAW_LIMIT_MAX: Final[int] = 10_000_000
 SNAPSHOTS_ROOT: Final = Path("/data/bulk/snapshots")
 WORK_ROOT: Final = Path("/data/work")
 DIR_MODE: Final[int] = 0o2770

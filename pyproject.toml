@@ -51,3 +51,7 @@ warn_unused_ignores = true
 [[tool.mypy.overrides]]
 module = ["eyecite", "eyecite.*"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["lxml", "lxml.*"]
+ignore_missing_imports = true

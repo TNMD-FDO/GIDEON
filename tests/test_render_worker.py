@@ -7,6 +7,7 @@ from dataclasses import replace
 
 from test_render import EXAMPLE, ROOT, SECOND, DirHost, declared_source_files, inputs
 
+from gideon.host import cas
 from gideon.host.images import parse_registry, reference
 from gideon.host.models import GIGABYTE
 from gideon.host.render import render_all, worker
@@ -35,7 +36,7 @@ from gideon.host.render.services.worker import (
     WorkerService,
 )
 from gideon.host.stores import ROLE_SPECS
-from gideon.worker import fetch, metrics, settings, staging, tasks
+from gideon.worker import caselaw, fetch, metrics, opiniontext, settings, staging, tasks
 
 
 class WorkerIdentity(unittest.TestCase):
@@ -87,6 +88,23 @@ class WorkerIdentity(unittest.TestCase):
                 staging.COURT_PATTERN, staging.STAGE_FAILURE_REASONS,
             ),
             "Fix: keep the host stage identity equal to the worker's grammar and names.",
+        )
+
+    def test_caselaw_identity_and_values_match_the_worker(self) -> None:
+        self.assertEqual(
+            (
+                worker.CASELAW_TASK, worker.CASELAW_QUEUE,
+                worker.CASELAW_FAILURE_NAME, worker.CASELAW_FAILURE_REASONS,
+                worker.DOCUMENT_FAILURE_REASONS, worker.TEXT_SOURCES,
+                worker.PRECEDENTIAL_VALUES, worker.CASELAW_LIMIT_MAX,
+            ),
+            (
+                caselaw.CASELAW_TASK, caselaw.CASELAW_QUEUE,
+                caselaw.CASELAW_FAILURE_NAME, caselaw.CASELAW_FAILURE_REASONS,
+                caselaw.DOCUMENT_FAILURE_REASONS, opiniontext.TEXT_SOURCES,
+                caselaw.PRECEDENTIAL_VALUES, caselaw.LIMIT_MAX,
+            ),
+            "Fix: keep the rendered caselaw identity equal to the worker's values.",
         )
 
     def test_role_matches_the_store_and_runtime_names_match_the_render(self) -> None:
@@ -160,8 +178,12 @@ class WorkerBlock(unittest.TestCase):
             "Fix: register the worker's service definition.",
         )
         self.assertEqual(
-            definition.sources, ("gideon/worker",),
-            "Fix: declare the worker package as its mounted source.",
+            definition.sources,
+            (
+                "gideon/worker", "gideon/host/cas.py", "gideon/host/sysio.py",
+                "gideon/host/report.py",
+            ),
+            "Fix: declare the worker package and its store dependencies.",
         )
         self.assertFalse(
             definition.store, "Fix: start the worker after store convergence."
@@ -207,6 +229,7 @@ class WorkerBlock(unittest.TestCase):
                             f"{rendered_inputs.checkout}/gideon:{API_MOUNT_TARGET}:ro",
                             f"{worker.SNAPSHOTS_ROOT}:{worker.SNAPSHOTS_ROOT}",
                             f"{worker.WORK_ROOT}:{worker.WORK_ROOT}",
+                            f"{cas.ROOT}:{cas.ROOT}",
                         ],
                         "read_only": True,
                         "group_add": [str(rendered_inputs.facts.service_gid)],

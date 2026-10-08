@@ -102,6 +102,7 @@ _CURATED_ALLOWLIST: tuple[str, ...] = (
     "readthedocs.io",
     "reason.com",
     "redhat.com",
+    "resource.org",
     "searxng.org",
     "sil.org",
     "socket.io",

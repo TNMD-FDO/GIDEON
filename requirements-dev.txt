@@ -41,3 +41,5 @@ croniter==6.2.4
 python-dateutil==2.9.0.post0
 six==1.17.0
 packaging==26.3
+# eyecite's dependency in the image, and the worker's opinion parser's.
+lxml==6.1.3

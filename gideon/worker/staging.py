@@ -12,12 +12,12 @@ import re
 import shutil
 import sys
 import time
-from collections.abc import Callable, Generator, Iterator
+from collections.abc import Callable, Generator, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import BinaryIO, Final
+from typing import BinaryIO, Final, Literal
 
 from . import fetch
 from .fetch import (
@@ -251,13 +251,13 @@ def lock_partial(path: Path) -> Iterator[None]:
         os.close(descriptor)
 
 
-def _write_json(path: Path, value: StageRecord | StageFailureRecord, mode: int) -> None:
+def _write_json(path: Path, value: Mapping[str, object], mode: int) -> None:
     temporary = path.with_name(path.name + TEMP_SUFFIX)
     temporary.unlink(missing_ok=True)
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     with os.fdopen(descriptor, "w", encoding="utf-8") as output:
         os.fchmod(output.fileno(), mode)
-        json.dump(asdict(value), output, sort_keys=True, separators=(",", ":"))
+        json.dump(value, output, sort_keys=True, separators=(",", ":"))
         output.write("\n")
         output.flush()
         os.fsync(output.fileno())
@@ -268,13 +268,13 @@ def _write_json(path: Path, value: StageRecord | StageFailureRecord, mode: int) 
 def write_record(path: Path, record: StageRecord) -> None:
     """Atomically write a whole stage record inside the partial directory."""
 
-    _write_json(path, record, FILE_MODE)
+    _write_json(path, asdict(record), FILE_MODE)
 
 
-def write_failure(path: Path, record: StageFailureRecord) -> None:
-    """Atomically write a structured failed-job outcome."""
+def write_failure(path: Path, fields: Mapping[str, object]) -> None:
+    """Atomically write a failed job's outcome, the stage's or the ingest's fields."""
 
-    _write_json(path, record, PARTIAL_MODE)
+    _write_json(path, fields, PARTIAL_MODE)
 
 
 def read_record(path: Path) -> StageRecord | None:
@@ -334,6 +334,10 @@ class _Progress:
     def seconds(self) -> float:
         return max(0.0, self.monotonic() - self.started)
 
+    def row(self, table: str) -> None:
+        self.records[table] += 1
+        _log_progress(self, table)
+
 
 def _log(progress: _Progress, action: str, *, table: str = "-", error: str = "-") -> None:
     logger.info(
@@ -351,15 +355,19 @@ def _log_progress(progress: _Progress, table: str) -> None:
         progress.last_progress = now
 
 
-def _rows(path: Path, table: str) -> Generator[tuple[list[str], list[str]], None, None]:
+def read_rows(
+    path: Path, table: str,
+    opener: Callable[[Path, Literal["rb"]], bz2.BZ2File | BinaryIO],
+) -> Generator[tuple[list[str], list[str]], None, None]:
     """Yield each parsed record with the input lines it was read from.
 
+    The opener reads either a compressed dump or an uncompressed staged file.
     The lines are valid until the next record is read; most records are
     skipped, so they are joined and encoded only where one is written.
     """
 
     with io.TextIOWrapper(
-        bz2.open(path, "rb"), encoding="utf-8", errors="strict", newline="",
+        opener(path, "rb"), encoding="utf-8", errors="strict", newline="",
     ) as source:
         consumed: list[str] = []
 
@@ -383,34 +391,41 @@ def _rows(path: Path, table: str) -> Generator[tuple[list[str], list[str]], None
             consumed.clear()
 
 
-def _encoded(lines: list[str]) -> bytes:
+def encoded_lines(lines: list[str]) -> bytes:
     # The text was decoded strictly, so its UTF-8 encoding is the input's bytes.
     return "".join(lines).encode("utf-8")
 
 
-def _header(
+def read_header(
     rows: Iterator[tuple[list[str], list[str]]], table: str,
+    *, columns: tuple[str, ...] | None = None,
 ) -> tuple[dict[str, int], int, bytes]:
+    """Return required column positions, row width, and the original header bytes."""
+
     try:
         fields, lines = next(rows)
     except StopIteration as exc:
         raise StageFailure("malformed", table=table, error=type(exc).__name__) from exc
     try:
-        positions = {name: fields.index(name) for name in REQUIRED_COLUMNS[table]}
+        positions = {name: fields.index(name) for name in (
+            REQUIRED_COLUMNS[table] if columns is None else columns
+        )}
     except ValueError as exc:
         raise StageFailure("malformed", table=table, error=type(exc).__name__) from exc
-    return positions, len(fields), _encoded(lines)
+    return positions, len(fields), encoded_lines(lines)
 
 
-def _checked_rows(
+def checked_rows(
     rows: Iterator[tuple[list[str], list[str]]], width: int, table: str,
-    progress: _Progress,
+    on_row: Callable[[str], None] | None = None,
 ) -> Iterator[tuple[list[str], list[str]]]:
+    """Refuse width changes and report each complete data row."""
+
     for fields, lines in rows:
         if len(fields) != width:
             raise StageFailure("malformed", table=table)
-        progress.records[table] += 1
-        _log_progress(progress, table)
+        if on_row is not None:
+            on_row(table)
         yield fields, lines
 
 
@@ -447,12 +462,12 @@ def _scan_courts(
     path: Path, courts: list[str], progress: _Progress,
 ) -> dict[str, int]:
     table = STAGE_TABLES[0]
-    rows = _rows(path, table)
+    rows = read_rows(path, table, bz2.open)
     try:
-        columns, width, _ = _header(rows, table)
+        columns, width, _ = read_header(rows, table)
         found: set[str] = set()
         court_index = {court: index for index, court in enumerate(courts)}
-        for fields, _ in _checked_rows(rows, width, table, progress):
+        for fields, _ in checked_rows(rows, width, table, progress.row):
             if fields[columns["id"]] in court_index:
                 found.add(fields[columns["id"]])
         for court in courts:
@@ -470,19 +485,19 @@ def _stream_related(
     counts: dict[str, dict[str, int]],
     ids: dict[str, int] | None = None,
 ) -> None:
-    rows = _rows(path, table)
+    rows = read_rows(path, table, bz2.open)
     try:
-        columns, width, header = _header(rows, table)
+        columns, width, header = read_header(rows, table)
         with _outputs(directory, courts, table) as outputs:
             for output in outputs:
                 output.write(header)
-            for fields, lines in _checked_rows(rows, width, table, progress):
+            for fields, lines in checked_rows(rows, width, table, progress.row):
                 court = lookup.get(fields[columns[reference]])
                 if court is None:
                     continue
                 if ids is not None:
                     ids[fields[columns["id"]]] = court
-                outputs[court].write(_encoded(lines))
+                outputs[court].write(encoded_lines(lines))
                 counts[courts[court]][table] += 1
         _log(progress, "table", table=table)
     finally:
@@ -601,10 +616,10 @@ def write_job_failure(
         _make_directory(whole.parent)
         write_failure(
             whole.with_name(whole.name + f".{STAGE_FAILURE_NAME}"),
-            StageFailureRecord(
+            asdict(StageFailureRecord(
                 job, failure.reason, failure.table, failure.court, failure.error,
                 clock().astimezone(UTC).isoformat(),
-            ),
+            )),
         )
     except (StageFailure, OSError):
         return

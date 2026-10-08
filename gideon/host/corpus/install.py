@@ -1,4 +1,4 @@
-"""Fetch, verify, record, stage, and retain a committed corpus lockfile."""
+"""Fetch, verify, record, stage, ingest, and retain a committed corpus lockfile."""
 
 import argparse
 import sys
@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
-from gideon.host import backuplock, report, stack, staging
+from gideon.host import backuplock, caselaw, report, stack, staging
 from gideon.host.corpus import artifacts, record, snapshots
 from gideon.host.corpus.lockfile import (
     LABEL,
@@ -18,10 +18,13 @@ from gideon.host.corpus.lockfile import (
 )
 from gideon.host.corpus.sources import SOURCES, SourceDefinition, data_file
 from gideon.host.render.worker import (
+    PRECEDENTIAL_VALUES,
     RESOLVE_DIR,
     SNAPSHOTS_ROOT,
     STAGE_TABLES,
+    TEXT_SOURCES,
     WORK_ROOT,
+    WORKER_SERVICE_NAME,
 )
 from gideon.host.report import Problem, StageResult
 from gideon.host.sysio import LockingHost, PathLike, RealHost, WritableBytesHost
@@ -222,6 +225,10 @@ def _run_install_stages(
     staged = _stage(host, rendered_dir, work_root, lockfile, sleep, monotonic)
     if staged:
         return staged
+    active_stage[0] = "ingest"
+    ingested = _ingest(host, rendered_dir, work_root, lockfile, sleep, monotonic)
+    if ingested:
+        return ingested
     active_stage[0] = "retain"
     return _retain(host, rendered_dir, snapshots_root)
 
@@ -331,6 +338,109 @@ def _court_stage_rows(record: staging.StageRecord) -> None:
         ))
 
 
+def _ingest(
+    host: CorpusHost, rendered_dir: PathLike, work_root: PathLike,
+    lockfile: Lockfile, sleep: Callable[[float], None],
+    monotonic: Callable[[], float],
+) -> int:
+    """Defer every court, wait for the jobs, and compare their recorded counts."""
+
+    started = heartbeat_at = monotonic()
+    courts: list[tuple[str, str, str, int]] = []
+    pending: dict[int, tuple[str, str, str]] = {}
+    for name, pin in lockfile.sources.items():
+        if pin.courts is None:
+            continue
+        stage_record = staging.read_record(
+            host, lockfile.label, name, work_root=work_root, command_path=COMMAND_PATH,
+        )
+        if isinstance(stage_record, Problem):
+            return _refuse("ingest", f"{name}: {stage_record.problem}", stage_record.fix)
+        if stage_record is None:
+            return _refuse(
+                "ingest", f"{name}: stage record is missing",
+                _stage_removal_fix(lockfile.label, name, work_root),
+            )
+        if stage_record.courts != list(pin.courts):
+            return _refuse("ingest", f"{name}: stage record disagrees with the lockfile",
+                           _stage_removal_fix(lockfile.label, name, work_root))
+        snapshot = f"{name}-{pin.snapshot_date}"
+        for court in pin.courts:
+            job = caselaw.defer_caselaw(
+                host, rendered_dir, label=lockfile.label, snapshot=snapshot,
+                court=court, command_path=COMMAND_PATH,
+            )
+            if isinstance(job, Problem):
+                return _refuse("ingest", f"{court}: {job.problem}", job.fix)
+            courts.append((name, pin.snapshot_date, court, stage_record.counts[court]["opinions"]))
+            pending[job] = (name, pin.snapshot_date, court)
+
+    while pending:
+        for job, (source, snapshot_date, court) in tuple(pending.items()):
+            outcome = caselaw.read_caselaw(
+                host, rendered_dir, job, label=lockfile.label,
+                snapshot=f"{source}-{snapshot_date}", court=court,
+                work_root=work_root, command_path=COMMAND_PATH,
+            )
+            if isinstance(outcome, Problem):
+                return _refuse("ingest", f"{court}: {outcome.problem}", outcome.fix)
+            if outcome.failure is not None:
+                return _refuse("ingest", f"{court}: {outcome.failure.problem}", outcome.failure.fix)
+            if outcome.done:
+                del pending[job]
+        if not pending:
+            break
+        sleep(1.0)
+        now = monotonic()
+        if now - heartbeat_at >= snapshots.HEARTBEAT_SECONDS:
+            report.print_stage(StageResult(
+                "ingest", True,
+                f"caselaw: ingesting, {len(courts)} courts, {round(now - started)} seconds", "",
+            ))
+            heartbeat_at = now
+
+    total = ready = failed = 0
+    for source, snapshot_date, court, expected in courts:
+        counts = caselaw.read_counts(
+            host, rendered_dir, source=source, snapshot_date=snapshot_date,
+            court=court, command_path=COMMAND_PATH,
+        )
+        if isinstance(counts, Problem):
+            return _refuse("ingest", f"{court}: {counts.problem}", counts.fix)
+        detail = (
+            f"{court}: {counts.opinions} opinions; ready {counts.by_status.get('ready', 0)}, "
+            f"failed {counts.by_status.get('failed', 0)} ("
+            + ", ".join(
+                f"{reason} {counts.by_failure_reason.get(reason, 0)}"
+                for reason in ("no-text", "unparseable", "empty", "interrupted")
+            ) + "); "
+            + ", ".join(
+                f"{source_name} {counts.by_text_source.get(source_name, 0)}"
+                for source_name in TEXT_SOURCES
+            ) + "; "
+            + ", ".join(
+                f"{value} {counts.by_precedential.get(value, 0)}"
+                for value in PRECEDENTIAL_VALUES
+            )
+        )
+        report.print_stage(StageResult("ingest", True, detail, ""))
+        if counts.opinions < expected:
+            return _refuse(
+                "ingest", f"{court}: {counts.opinions} opinions recorded; {expected} staged",
+                f"Run {stack.logs_fix(rendered_dir, WORKER_SERVICE_NAME)}, then run "
+                f"{report.command(COMMAND_PATH)} again.",
+            )
+        total += counts.opinions
+        ready += counts.by_status.get("ready", 0)
+        failed += counts.by_status.get("failed", 0)
+    report.print_stage(StageResult(
+        "ingest", True,
+        f"caselaw: {len(courts)} courts, {total} opinions, {ready} ready, "
+        f"{failed} failed, {round(monotonic() - started)} seconds", "",
+    ))
+    return 0
+
+
 def _retain(host: CorpusHost, rendered_dir: PathLike, snapshots_root: PathLike) -> int:
     rows = record.read_lockfiles(host, rendered_dir, command_path=COMMAND_PATH)
     if isinstance(rows, Problem):
@@ -412,7 +522,7 @@ def run_corpus_install(
     monotonic: Callable[[], float] = time.monotonic,
     sources: Sequence[SourceDefinition] = SOURCES,
 ) -> int:
-    """Run preconditions, fetch, verify, record, stage, and retain."""
+    """Run preconditions, fetch, verify, record, stage, ingest, and retain."""
     io = host if host is not None else RealHost()
     root = Path(checkout) if checkout is not None else Path(__file__).parents[3]
     active_stage = ["preconditions"]
@@ -436,6 +546,11 @@ def run_corpus_install(
         if active_stage[0] == "stage":
             return _refuse(
                 "stage", "interrupted; the stage continues in the worker",
+                f"Run {report.command(COMMAND_PATH)} again to rejoin it.",
+            )
+        if active_stage[0] == "ingest":
+            return _refuse(
+                "ingest", "interrupted; the ingest continues in the worker",
                 f"Run {report.command(COMMAND_PATH)} again to rejoin it.",
             )
         if active_stage[0] == "retain":

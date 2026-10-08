@@ -1,4 +1,4 @@
-"""Queue worker tasks for verification, recovery, corpus fetch, and staging."""
+"""Queue worker tasks for verification, recovery, fetch, stage, and ingest."""
 
 import asyncio
 import logging
@@ -7,6 +7,9 @@ from typing import Final
 import procrastinate
 from procrastinate.exceptions import UniqueViolation
 
+import gideon.host.cas
+
+from . import caselaw as document_ingest
 from . import staging
 from .fetch import (
     FETCH_QUEUE,
@@ -88,8 +91,29 @@ def stage(
         raise
 
 
+def caselaw(
+    context: procrastinate.JobContext, label: str, snapshot: str,
+    court: str, limit: int | None = None,
+) -> None:
+    """Ingest one staged court outside the worker's event loop."""
+
+    job_id = context.job.id
+    if job_id is None:
+        raise document_ingest.CaselawFailure("invalid")
+    try:
+        document_ingest.ingest(
+            SNAPSHOTS_ROOT, staging.WORK_ROOT, gideon.host.cas.ROOT,
+            label, snapshot, court, limit, job_id, document_ingest.PsycopgRecord(),
+        )
+    except document_ingest.CaselawFailure as failure:
+        document_ingest.write_job_failure(
+            staging.WORK_ROOT, label, snapshot, court, job_id, failure,
+        )
+        raise
+
+
 def register_tasks(app: procrastinate.App) -> None:
-    """Register verification, recovery, and synchronous corpus fetch and stage."""
+    """Register verification, recovery, and synchronous corpus jobs."""
 
     app.task(name=VERIFY_TASK, queue=VERIFY_QUEUE)(verify)
     task = app.task(
@@ -111,3 +135,9 @@ def register_tasks(app: procrastinate.App) -> None:
         pass_context=True,
         retry=False,
     )(stage)
+    app.task(
+        name=document_ingest.CASELAW_TASK,
+        queue=document_ingest.CASELAW_QUEUE,
+        pass_context=True,
+        retry=False,
+    )(caselaw)

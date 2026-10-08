@@ -1,0 +1,799 @@
+"""Court opinion ingest over fictitious staged files and a checked record."""
+
+from __future__ import annotations
+
+import csv
+import fcntl
+import hashlib
+import io
+import json
+import logging
+import stat
+import tempfile
+import time
+import unittest
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, date, datetime
+from pathlib import Path
+from unittest.mock import patch
+
+import psycopg
+
+from gideon.host import cas
+from gideon.host.sysio import RealHost
+from gideon.worker import caselaw, fetch, logs, opiniontext, settings, staging
+
+DOCKET_COLUMNS = (
+    "id", "date_created", "date_modified", "source", "appeal_from_str",
+    "assigned_to_str", "referred_to_str", "panel_str", "date_last_index",
+    "date_cert_granted", "date_cert_denied", "date_argued", "date_reargued",
+    "date_reargument_denied", "date_filed", "date_terminated",
+    "date_last_filing", "case_name_short", "case_name", "case_name_full", "slug",
+    "docket_number", "docket_number_core", "pacer_case_id", "cause",
+    "nature_of_suit", "jury_demand", "jurisdiction_type",
+    "appellate_fee_status", "appellate_case_type_information", "mdl_status",
+    "filepath_local", "filepath_ia", "filepath_ia_json", "ia_upload_failure_count",
+    "ia_needs_upload", "ia_date_first_change", "view_count", "date_blocked",
+    "blocked", "appeal_from_id", "assigned_to_id", "court_id", "idb_data_id",
+    "originating_court_information_id", "referred_to_id", "federal_dn_case_type",
+    "federal_dn_office_code", "federal_dn_judge_initials_assigned",
+    "federal_dn_judge_initials_referred", "federal_defendant_number",
+    "parent_docket_id", "docket_number_raw", "docket_number_source",
+)
+CLUSTER_COLUMNS = (
+    "id", "date_created", "date_modified", "judges", "date_filed",
+    "date_filed_is_approximate", "slug", "case_name_short", "case_name",
+    "case_name_full", "scdb_id", "scdb_decision_direction", "scdb_votes_majority",
+    "scdb_votes_minority", "source", "procedural_history", "attorneys",
+    "nature_of_suit", "posture", "syllabus", "headnotes", "summary", "disposition",
+    "history", "other_dates", "cross_reference", "correction", "citation_count",
+    "precedential_status", "date_blocked", "blocked", "filepath_json_harvard",
+    "filepath_pdf_harvard", "docket_id", "arguments", "headmatter",
+)
+CITATION_COLUMNS = (
+    "id", "volume", "reporter", "page", "type", "cluster_id",
+    "date_created", "date_modified",
+)
+OPINION_COLUMNS = (
+    "id", "date_created", "date_modified", "author_str", "per_curiam",
+    "joined_by_str", "type", "sha1", "page_count", "download_url", "local_path",
+    "plain_text", "html", "html_lawbox", "html_columbia", "html_anon_2020",
+    "xml_harvard", "xml_scan", "html_with_citations", "extracted_by_ocr",
+    "author_id", "cluster_id",
+)
+
+
+def _opinion(opinion_id: str, cluster_id: str, **text: str) -> dict[str, str]:
+    return {**dict.fromkeys(OPINION_COLUMNS, ""), "id": opinion_id,
+            "cluster_id": cluster_id, "type": "020", **text}
+
+
+def _doc_id(opinion_id: int, snapshot: date) -> str:
+    return hashlib.sha256(f"caselaw\n{opinion_id}\n{snapshot.isoformat()}".encode()).hexdigest()
+
+
+@dataclass
+class _Row:
+    opinion_id: int
+    court: str
+    document: caselaw.NewDocument
+    opinion: caselaw.NewOpinion | None
+    status: str
+    attempts: int
+    sha256: str | None = None
+    canonical_text_sha256: str | None = None
+    failure_reason: str | None = None
+    ingested_at: datetime | None = None
+
+
+class _Record:
+    """Hold opinion rows while enforcing the document migration's checks."""
+
+    def __init__(self) -> None:
+        self.rows: dict[int, _Row] = {}
+        self.events: list[tuple[str, str]] = []
+        self.present_calls: list[tuple[str, date, str]] = []
+        self.closed = 0
+        self.fail_present: caselaw.CaselawFailure | None = None
+
+    def _row(self, doc_id: str) -> _Row:
+        return next(row for row in self.rows.values() if row.document.doc_id == doc_id)
+
+    def _check(self, row: _Row) -> None:
+        assert 0 <= row.attempts <= caselaw.MAX_ATTEMPTS
+        assert row.status in {"processing", "ready", "failed", "withdrawn"}
+        assert (row.status == "processing") == (row.ingested_at is None)
+        assert (row.status == "failed") == (row.failure_reason is not None)
+        assert row.status == "ready" or row.canonical_text_sha256 is None
+        assert row.status != "ready" or (
+            row.sha256 is not None and row.canonical_text_sha256 is not None
+        )
+        assert row.status != "processing" or row.sha256 is None
+        if row.failure_reason is not None:
+            assert row.failure_reason in caselaw.DOCUMENT_FAILURE_REASONS
+        if row.opinion is not None:
+            assert row.opinion.doc_id == row.document.doc_id
+
+    def seed(
+        self, opinion_id: int, status: str, attempts: int, *,
+        court: str, source: str, snapshot: date, now: datetime,
+    ) -> _Row:
+        document = caselaw.NewDocument(
+            _doc_id(opinion_id, snapshot), "caselaw", source, snapshot, "plain_text", now,
+        )
+        row = _Row(
+            opinion_id, court, document, None, status, attempts,
+            sha256="a" * 64 if status == "ready" else None,
+            canonical_text_sha256="b" * 64 if status == "ready" else None,
+            failure_reason="no-text" if status == "failed" else None,
+            ingested_at=None if status == "processing" else now,
+        )
+        self._check(row)
+        self.rows[opinion_id] = row
+        return row
+
+    def present(self, source: str, snapshot_date: date, court: str) -> dict[int, caselaw.PresentRow]:
+        self.present_calls.append((source, snapshot_date, court))
+        if self.fail_present is not None:
+            raise self.fail_present
+        return {
+            opinion_id: caselaw.PresentRow(row.document.doc_id, row.status, row.attempts)
+            for opinion_id, row in self.rows.items()
+            if row.document.source == source
+            and row.document.source_snapshot == snapshot_date and row.court == court
+        }
+
+    def begin(self, document: caselaw.NewDocument, opinion: caselaw.NewOpinion) -> None:
+        assert opinion.opinion_id not in self.rows
+        row = _Row(opinion.opinion_id, opinion.court, document, opinion, "processing", 1)
+        self._check(row)
+        self.rows[opinion.opinion_id] = row
+        self.events.append(("begin", document.doc_id))
+
+    def retry(self, doc_id: str) -> None:
+        row = self._row(doc_id)
+        assert row.status == "processing" and row.attempts < caselaw.MAX_ATTEMPTS
+        row.attempts += 1
+        self._check(row)
+        self.events.append(("retry", doc_id))
+
+    def give_back(self, doc_id: str) -> None:
+        row = self._row(doc_id)
+        assert row.status == "processing" and row.attempts > 0
+        row.attempts -= 1
+        self._check(row)
+        self.events.append(("give_back", doc_id))
+
+    def finish_ready(self, doc_id: str, sha256: str, canonical_sha256: str, at: datetime) -> None:
+        row = self._row(doc_id)
+        assert row.status == "processing"
+        row.status = "ready"
+        row.sha256 = sha256
+        row.canonical_text_sha256 = canonical_sha256
+        row.ingested_at = at
+        self._check(row)
+        self.events.append(("ready", doc_id))
+
+    def finish_failed(
+        self, doc_id: str, reason: str, at: datetime, sha256: str | None = None,
+    ) -> None:
+        row = self._row(doc_id)
+        assert row.status == "processing"
+        row.status = "failed"
+        row.failure_reason = reason
+        row.sha256 = sha256
+        row.ingested_at = at
+        self._check(row)
+        self.events.append(("failed", doc_id))
+
+    def close(self) -> None:
+        self.closed += 1
+
+
+class WorkerCaselaw(unittest.TestCase):
+    """A staged court produces durable objects or named document and job failures."""
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        self.snapshots_root = root / "snapshots"
+        self.work_root = root / "work"
+        self.store_root = root / "store"
+        self.snapshots_root.mkdir()
+        self.work_root.mkdir()
+        self.store_root.mkdir(mode=cas.DIRECTORY_MODE)
+        self.store_root.chmod(cas.DIRECTORY_MODE)
+        self.label = "corpus-2099-01-01"
+        self.snapshot = "fictional-dump-2099-01-02"
+        self.snapshot_date = date(2099, 1, 2)
+        self.source = "fictional-dump"
+        self.court = "court1"
+        self.job = 41
+        self.now = datetime(2099, 1, 2, 12, 34, tzinfo=UTC)
+        self.whole = self.work_root / self.label / self.source
+        self.court_dir = self.whole / self.court
+        self.failure_path = self.whole / f"{self.court}.{caselaw.CASELAW_FAILURE_NAME}"
+        self.lock_path = self.whole / f"{self.court}{caselaw.LOCK_SUFFIX}"
+        self.record = _Record()
+
+    def _csv(self, table: str, columns: tuple[str, ...], rows: list[dict[str, str]]) -> None:
+        with (self.court_dir / f"{table}.csv").open("w", encoding="utf-8", newline="") as output:
+            output.write(",".join(columns) + "\n")
+            writer = csv.writer(
+                output, delimiter=",", quotechar='"', escapechar="\\",
+                doublequote=False, quoting=csv.QUOTE_ALL, lineterminator="\n",
+            )
+            for row in rows:
+                writer.writerow([row.get(column, "") for column in columns])
+
+    def stage(
+        self, *, dockets: list[dict[str, str]] | None = None,
+        clusters: list[dict[str, str]] | None = None,
+        citations: list[dict[str, str]] | None = None,
+        opinions: list[dict[str, str]] | None = None,
+        record_courts: list[str] | None = None,
+    ) -> None:
+        if dockets is None:
+            dockets = [{"id": "10", "docket_number": "23-A", "court_id": self.court}]
+        if clusters is None:
+            clusters = [{
+                "id": "100", "date_filed": "2099-01-01", "date_filed_is_approximate": "f",
+                "precedential_status": "Published", "docket_id": "10",
+            }]
+        if citations is None:
+            citations = [{"id": "1", "cluster_id": "100", "volume": "1",
+                          "reporter": "Example", "page": "2"}]
+        if opinions is None:
+            opinions = [_opinion("1", "100", xml_harvard="<opinion><p>Fiction.</p></opinion>")]
+        self.court_dir.mkdir(parents=True, exist_ok=True)
+        tables = {
+            "dockets": (DOCKET_COLUMNS, dockets),
+            "opinion-clusters": (CLUSTER_COLUMNS, clusters),
+            "citations": (CITATION_COLUMNS, citations),
+            "opinions": (OPINION_COLUMNS, opinions),
+        }
+        for table, (columns, rows) in tables.items():
+            self._csv(table, columns, rows)
+        counts = {table: len(rows) for table, (_, rows) in tables.items()}
+        courts = [self.court] if record_courts is None else record_courts
+        staging.write_record(self.whole / staging.STAGE_RECORD_NAME, staging.StageRecord(
+            self.label, self.source, self.snapshot, courts,
+            {table: {"path": f"{table}.csv.bz2", "sha256": "a" * 64, "size": 1}
+             for table in staging.STAGE_TABLES},
+            {"courts": len(courts), **counts},
+            {court: dict(counts) for court in courts},
+            self.job, 0.0, self.now.isoformat(),
+        ))
+
+    def run_ingest(self, *, limit: int | None = None, record: _Record | None = None,
+                   monotonic: Callable[[], float] = time.monotonic) -> caselaw.IngestCounts:
+        return caselaw.ingest(
+            self.snapshots_root, self.work_root, self.store_root,
+            self.label, self.snapshot, self.court, limit, self.job,
+            self.record if record is None else record,
+            clock=lambda: self.now, monotonic=monotonic,
+        )
+
+    def assert_failure(
+        self, failure: caselaw.CaselawFailure, *, file: bool = True,
+    ) -> None:
+        caselaw.write_job_failure(
+            self.work_root, self.label, self.snapshot, self.court, self.job,
+            failure, clock=lambda: self.now,
+        )
+        if not file:
+            self.assertFalse(self.failure_path.exists())
+            return
+        self.assertEqual(json.loads(self.failure_path.read_text()), {
+            "schema": 1, "job": self.job, "court": self.court,
+            "reason": failure.reason, "table": failure.table,
+            "error": failure.error, "at": self.now.isoformat(),
+        })
+        self.assertEqual(stat.S_IMODE(self.failure_path.stat().st_mode), fetch.PARTIAL_MODE)
+
+    def _objects(self) -> set[str]:
+        return {path.name for path in self.store_root.rglob("*") if path.is_file()}
+
+    def test_ready_failed_outcomes_and_stored_bytes(self) -> None:
+        raw = "<opinion><p>Cafe\u0301<page-number>*3</page-number> wins.</p></opinion>"
+        no_text = _opinion("2", "100", html_with_citations="<p>derived only</p>")
+        unparseable = "<"
+        empty = "<opinion><page-number>*3</page-number></opinion>"
+        self.stage(opinions=[
+            _opinion("1", "100", xml_harvard=raw), no_text,
+            _opinion("3", "100", xml_harvard=unparseable),
+            _opinion("4", "100", xml_harvard=empty),
+        ])
+        self.assertEqual(stat.S_IMODE(self.store_root.stat().st_mode), cas.DIRECTORY_MODE)
+        counts = self.run_ingest()
+        self.assertEqual(counts, caselaw.IngestCounts(4, 0, 1, 3, 0, 0))
+        self.assertEqual(self.record.present_calls, [(self.source, self.snapshot_date, self.court)])
+        self.assertEqual(self.record.closed, 1)
+
+        ready = self.record.rows[1]
+        self.assertEqual(ready.document.doc_id, _doc_id(1, self.snapshot_date))
+        self.assertEqual((ready.document.profile, ready.document.source,
+                          ready.document.source_snapshot, ready.document.text_source),
+                         ("caselaw", self.source, self.snapshot_date, "xml_harvard"))
+        self.assertEqual((ready.status, ready.attempts, ready.ingested_at),
+                         ("ready", 1, self.now))
+        self.assertEqual(cas.get(RealHost(), ready.sha256 or "", root=self.store_root), raw.encode())
+        canonical = opiniontext.canonical_text("xml_harvard", raw).text.encode()
+        self.assertEqual(canonical, "Café wins.".encode())
+        self.assertEqual(ready.canonical_text_sha256, hashlib.sha256(canonical).hexdigest())
+        self.assertEqual(cas.get(RealHost(), ready.canonical_text_sha256 or "",
+                                 root=self.store_root), canonical)
+
+        blank = self.record.rows[2]
+        self.assertEqual((blank.status, blank.failure_reason, blank.document.text_source,
+                          blank.sha256, blank.canonical_text_sha256),
+                         ("failed", "no-text", None, None, None))
+        for opinion_id, original, reason in (
+            (3, unparseable, "unparseable"), (4, empty, "empty"),
+        ):
+            with self.subTest(opinion_id=opinion_id):
+                row = self.record.rows[opinion_id]
+                self.assertEqual((row.status, row.failure_reason, row.canonical_text_sha256),
+                                 ("failed", reason, None))
+                self.assertEqual(row.sha256, hashlib.sha256(original.encode()).hexdigest())
+                self.assertEqual(cas.get(RealHost(), row.sha256 or "", root=self.store_root),
+                                 original.encode())
+
+    def test_each_text_source_becomes_a_ready_document(self) -> None:
+        examples = {
+            "xml_harvard": "<opinion><p>Harvard text.</p></opinion>",
+            "html_columbia": "<p>Columbia text.</p>",
+            "html_lawbox": "<p>Lawbox text.</p>",
+            "html_anon_2020": "<bodytext><p>Anonymous text.</p></bodytext>",
+            "html": "<p>Generic text.</p>",
+            "plain_text": "Plain text.",
+        }
+        self.stage(opinions=[
+            _opinion(str(index), "100", html_with_citations="<p>derived only</p>",
+                     **{column: examples[column]})
+            for index, column in enumerate(opiniontext.TEXT_SOURCES, start=1)
+        ])
+        self.assertEqual(self.run_ingest().ready, len(opiniontext.TEXT_SOURCES))
+        for index, column in enumerate(opiniontext.TEXT_SOURCES, start=1):
+            with self.subTest(column=column):
+                row = self.record.rows[index]
+                self.assertEqual((row.status, row.document.text_source), ("ready", column))
+                self.assertEqual(cas.get(RealHost(), row.sha256 or "", root=self.store_root),
+                                 examples[column].encode())
+                canonical = opiniontext.canonical_text(column, examples[column]).text.encode()
+                self.assertEqual(row.canonical_text_sha256,
+                                 hashlib.sha256(canonical).hexdigest())
+                self.assertEqual(cas.get(RealHost(), row.canonical_text_sha256 or "",
+                                         root=self.store_root), canonical)
+
+    def test_unexpected_parse_exception_is_an_unparseable_document(self) -> None:
+        raw = "<opinion><p>Fictitious body.</p></opinion>"
+        self.stage(opinions=[_opinion("1", "100", xml_harvard=raw)])
+        with patch.object(opiniontext, "canonical_text", side_effect=RecursionError("private text")):
+            counts = self.run_ingest()
+        self.assertEqual(counts, caselaw.IngestCounts(1, 0, 0, 1, 0, 0))
+        row = self.record.rows[1]
+        self.assertEqual((row.status, row.failure_reason, row.canonical_text_sha256),
+                         ("failed", "unparseable", None))
+        self.assertEqual(cas.get(RealHost(), row.sha256 or "", root=self.store_root),
+                         raw.encode())
+
+    def test_precedential_dockets_and_citations_keep_the_staged_metadata(self) -> None:
+        statuses = ("Published", "Unpublished", "Errata", "")
+        clusters = [{
+            "id": str(100 + index), "date_filed": "2099-01-01",
+            "date_filed_is_approximate": "t" if index == 0 else "f",
+            "precedential_status": raw, "docket_id": str(10 + index),
+        } for index, raw in enumerate(statuses)]
+        dockets = [{"id": str(10 + index), "court_id": self.court,
+                    "docket_number": "" if index == 0 else f"23-{index}"}
+                   for index in range(len(statuses))]
+        citations = [
+            {"id": "1", "cluster_id": "100", "volume": "1", "reporter": "Example", "page": "2"},
+            {"id": "2", "cluster_id": "100", "volume": "3", "reporter": "Example", "page": "4"},
+        ]
+        self.stage(
+            dockets=dockets, clusters=clusters, citations=citations,
+            opinions=[_opinion(str(index + 1), str(100 + index), plain_text="Fiction.")
+                      for index in range(len(statuses))],
+        )
+        self.assertEqual(self.run_ingest().ready, len(statuses))
+        for index, (raw, expected) in enumerate(zip(
+            statuses, ("published", "unpublished", "unknown", "unknown"), strict=True,
+        ), start=1):
+            with self.subTest(raw=raw):
+                opinion = self.record.rows[index].opinion
+                assert opinion is not None
+                self.assertEqual((opinion.precedential, opinion.precedential_raw), (expected, raw))
+                self.assertEqual(opinion.opinion_type, "020")
+        first = self.record.rows[1].opinion
+        second = self.record.rows[2].opinion
+        assert first is not None and second is not None
+        self.assertEqual((first.docket, first.reporter_cites, first.decided_date,
+                          first.decided_date_is_approximate),
+                         (None, ("1 Example 2", "3 Example 4"), date(2099, 1, 1), True))
+        self.assertEqual(second.reporter_cites, ())
+
+    def test_staged_rows_use_quoted_values_and_backslash_escapes(self) -> None:
+        docket_number = 'Fiction "quoted" \\ path'
+        self.stage(dockets=[{
+            "id": "10", "docket_number": docket_number, "court_id": self.court,
+        }])
+        staged_bytes = (self.court_dir / "dockets.csv").read_bytes()
+        self.assertIn(b'"Fiction \\"quoted\\" \\\\ path"', staged_bytes)
+        self.assertIn(b'"1",', (self.court_dir / "opinions.csv").read_bytes())
+        self.assertIn(b',"100"\n', (self.court_dir / "opinions.csv").read_bytes())
+        self.assertEqual(self.run_ingest().ready, 1)
+        opinion = self.record.rows[1].opinion
+        assert opinion is not None
+        self.assertEqual(opinion.docket, docket_number)
+
+    def test_present_terminal_rows_are_skipped_without_writes(self) -> None:
+        self.stage(opinions=[_opinion(str(index), "100", plain_text=f"Fiction {index}.")
+                             for index in range(1, 4)])
+        for index, status in enumerate(("ready", "failed", "withdrawn"), start=1):
+            self.record.seed(index, status, 1, court=self.court, source=self.source,
+                             snapshot=self.snapshot_date, now=self.now)
+        counts = self.run_ingest()
+        self.assertEqual(counts, caselaw.IngestCounts(3, 3, 0, 0, 0, 0))
+        self.assertEqual(self.record.events, [])
+        self.assertEqual(self._objects(), set())
+
+    def test_processing_attempts_retry_and_interrupt_at_the_bound(self) -> None:
+        self.stage(opinions=[_opinion(str(index), "100", plain_text=f"Fiction {index}.")
+                             for index in range(1, 4)])
+        for index, attempts in enumerate((0, 1, caselaw.MAX_ATTEMPTS), start=1):
+            self.record.seed(index, "processing", attempts, court=self.court,
+                             source=self.source, snapshot=self.snapshot_date, now=self.now)
+        counts = self.run_ingest()
+        self.assertEqual(counts, caselaw.IngestCounts(3, 0, 2, 1, 2, 1))
+        self.assertEqual([(self.record.rows[index].status, self.record.rows[index].attempts)
+                          for index in (1, 2)], [("ready", 1), ("ready", 2)])
+        third = self.record.rows[3]
+        self.assertEqual((third.status, third.failure_reason, third.sha256),
+                         ("failed", "interrupted", None))
+        self.assertNotIn(hashlib.sha256(b"Fiction 3.").hexdigest(), self._objects())
+        self.assertEqual([event for event, _ in self.record.events],
+                         ["retry", "ready", "retry", "ready", "failed"])
+
+    def test_store_refusal_gives_back_then_retries_from_zero(self) -> None:
+        self.stage()
+        self.store_root.rmdir()
+        self.store_root.write_text("occupied fictitious store root")
+        with self.assertRaises(caselaw.CaselawFailure) as raised:
+            self.run_ingest()
+        self.assertEqual(raised.exception.reason, "store")
+        first = self.record.rows[1]
+        self.assertEqual((first.status, first.attempts, first.sha256),
+                         ("processing", 0, None))
+        self.assertEqual([event for event, _ in self.record.events], ["begin", "give_back"])
+        self.assert_failure(raised.exception)
+        self.store_root.unlink()
+        self.store_root.mkdir(mode=cas.DIRECTORY_MODE)
+        self.store_root.chmod(cas.DIRECTORY_MODE)
+        self.assertEqual(self.run_ingest(), caselaw.IngestCounts(1, 0, 1, 0, 1, 0))
+        self.assertEqual((first.status, first.attempts), ("ready", 1))
+        self.assertEqual([event for event, _ in self.record.events],
+                         ["begin", "give_back", "retry", "ready"])
+        self.assertFalse(self.failure_path.exists())
+
+    def test_limit_counts_seen_rows_and_repeat_changes_nothing(self) -> None:
+        self.stage(opinions=[_opinion(str(index), "100", plain_text=f"Fiction {index}.")
+                             for index in range(1, 4)])
+        self.assertEqual(self.run_ingest(limit=2), caselaw.IngestCounts(2, 0, 2, 0, 0, 0))
+        names = self._objects()
+        events = list(self.record.events)
+        self.assertEqual(self.run_ingest(limit=2), caselaw.IngestCounts(2, 2, 0, 0, 0, 0))
+        self.assertEqual(self._objects(), names)
+        self.assertEqual(self.record.events, events)
+        self.assertNotIn(3, self.record.rows)
+
+    def test_invalid_arguments_and_missing_stage_file_safe_reasons(self) -> None:
+        self.stage()
+        invalid = (
+            ("bad", self.snapshot, self.court, None),
+            (self.label, "fictional-dump-2099-99-02", self.court, None),
+            (self.label, self.snapshot, "Bad Court", None),
+            (self.label, self.snapshot, self.court, True),
+            (self.label, self.snapshot, self.court, caselaw.LIMIT_MAX + 1),
+            (self.label, self.snapshot, self.court, 0),
+        )
+        for label, snapshot, court, limit in invalid:
+            with self.subTest(arguments=(label, snapshot, court, limit)):
+                with self.assertRaises(caselaw.CaselawFailure) as raised:
+                    caselaw.ingest(self.snapshots_root, self.work_root, self.store_root,
+                                   label, snapshot, court, limit, self.job, self.record)
+                self.assertEqual(raised.exception.reason, "invalid")
+                if label == self.label and snapshot == self.snapshot and court == self.court:
+                    self.assert_failure(raised.exception)
+        self.assertEqual(self.record.present_calls, [])
+        (self.whole / staging.STAGE_RECORD_NAME).unlink()
+        with self.assertRaises(caselaw.CaselawFailure) as raised:
+            self.run_ingest()
+        self.assertEqual(raised.exception.reason, "missing-stage")
+        self.assert_failure(raised.exception)
+
+    def test_stage_chain_refusals_name_the_damaged_court(self) -> None:
+        self.stage(record_courts=["othercourt"])
+        with self.assertRaises(caselaw.CaselawFailure) as raised:
+            self.run_ingest()
+        self.assertEqual(raised.exception.reason, "stage-mismatch")
+        self.assert_failure(raised.exception)
+        cases: tuple[
+            tuple[list[dict[str, str]] | None, list[dict[str, str]] | None], ...
+        ] = (
+            ([], None),
+            (None, []),
+            ([{"id": "10", "docket_number": "23-A", "court_id": "othercourt"}], None),
+        )
+        for dockets, clusters in cases:
+            with self.subTest(dockets=dockets, clusters=clusters):
+                self.stage(dockets=dockets, clusters=clusters)
+                with self.assertRaises(caselaw.CaselawFailure) as raised:
+                    self.run_ingest()
+                self.assertEqual((raised.exception.reason, raised.exception.table),
+                                 ("stage-mismatch", "opinions"))
+                self.assert_failure(raised.exception)
+        self.assertEqual(self.record.rows, {})
+
+    def test_malformed_header_id_date_and_boolean_name_the_table(self) -> None:
+        cases: tuple[tuple[str, str, str], ...] = (
+            ("opinions", "header", "ValueError"),
+            ("opinions", "width", "StageFailure"),
+            ("dockets", "id", "ValueError"),
+            ("opinion-clusters", "date", "ValueError"),
+            ("opinion-clusters", "boolean", "ValueError"),
+        )
+        for table, defect, error in cases:
+            with self.subTest(table=table, defect=defect):
+                self.stage()
+                path = self.court_dir / f"{table}.csv"
+                body = path.read_text()
+                if defect == "header":
+                    body = body.replace("type,", "missing_type,", 1)
+                elif defect == "width":
+                    body += '"extra"\n'
+                elif defect == "id":
+                    body = body.replace('"10"', '"zero"', 1)
+                elif defect == "date":
+                    body = body.replace('"2099-01-01"', '"2099-99-01"', 1)
+                else:
+                    body = body.replace('"f"', '"maybe"', 1)
+                path.write_text(body)
+                with self.assertRaises(caselaw.CaselawFailure) as raised:
+                    self.run_ingest()
+                self.assertEqual((raised.exception.reason, raised.exception.table,
+                                  raised.exception.error), ("malformed", table, error))
+                self.assert_failure(raised.exception)
+
+    def test_database_and_local_failures_are_filed_with_classes(self) -> None:
+        self.stage()
+        self.record.fail_present = caselaw.CaselawFailure("database", error="OperationalError")
+        with self.assertRaises(caselaw.CaselawFailure) as raised:
+            self.run_ingest()
+        self.assertEqual((raised.exception.reason, raised.exception.error),
+                         ("database", "OperationalError"))
+        self.assert_failure(raised.exception)
+        self.assertEqual(self.record.closed, 1)
+        self.record.fail_present = None
+        with (patch("gideon.worker.caselaw.os.open", side_effect=PermissionError("private path")),
+              self.assertRaises(caselaw.CaselawFailure) as raised):
+            self.run_ingest()
+        self.assertEqual((raised.exception.reason, raised.exception.error),
+                         ("local", "PermissionError"))
+        self.assert_failure(raised.exception)
+
+    def test_busy_lock_and_symbolic_links_refuse_without_following(self) -> None:
+        self.stage()
+        with self.lock_path.open("w") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                with self.assertRaises(caselaw.CaselawFailure) as raised:
+                    self.run_ingest()
+                self.assertEqual(raised.exception.reason, "busy")
+                self.assert_failure(raised.exception, file=False)
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        self.lock_path.unlink()
+
+        target = self.work_root / "outside-court"
+        self.court_dir.rename(target)
+        self.court_dir.symlink_to(target, target_is_directory=True)
+        with self.assertRaises(caselaw.CaselawFailure) as raised:
+            self.run_ingest()
+        self.assertEqual(raised.exception.reason, "stage-mismatch")
+        self.court_dir.unlink()
+        target.rename(self.court_dir)
+
+        target = self.work_root / "outside-lock"
+        target.write_text("fictitious lock target")
+        self.lock_path.symlink_to(target)
+        with self.assertRaises(caselaw.CaselawFailure) as raised:
+            self.run_ingest()
+        self.assertEqual(raised.exception.reason, "stage-mismatch")
+        self.assertEqual(target.read_text(), "fictitious lock target")
+        self.assertEqual(self.record.rows, {})
+
+    def test_logs_exclude_opinion_docket_and_citation_text(self) -> None:
+        sentinel = "PRIVATE_CASELAW_SENTINEL"
+        self.stage(
+            dockets=[{"id": "10", "docket_number": sentinel, "court_id": self.court}],
+            citations=[{"id": "1", "cluster_id": "100", "volume": "1",
+                        "reporter": sentinel, "page": "2"}],
+            opinions=[_opinion("1", "100", plain_text=sentinel)],
+        )
+        output = io.StringIO()
+        root_logger = logging.getLogger()
+        previous_handlers = list(root_logger.handlers)
+        previous_level = root_logger.level
+        ticks = iter(range(0, 10000, fetch.LOG_INTERVAL_SECONDS + 1))
+        logs.install_handler(output)
+        try:
+            self.run_ingest(monotonic=lambda: float(next(ticks)))
+        finally:
+            root_logger.handlers[:] = previous_handlers
+            root_logger.setLevel(previous_level)
+        lines = output.getvalue().splitlines()
+        self.assertTrue(any("action=caselaw_progress" in line for line in lines))
+        self.assertTrue(any("action=caselaw_end" in line for line in lines))
+        for line in lines:
+            self.assertNotIn(sentinel, line)
+
+
+class _CapturedConnection:
+    """Capture SQL calls and transaction boundaries without a database."""
+
+    def __init__(self) -> None:
+        self.statements: list[tuple[str, tuple[object, ...]]] = []
+        self.rows: list[tuple[object, ...]] = []
+        self.commits = 0
+        self.rollbacks = 0
+        self.closed = False
+        self.fail_execute = False
+        self.fail_commit = False
+        self.fail_close = False
+
+    def cursor(self) -> _CapturedConnection:
+        return self
+
+    def __enter__(self) -> _CapturedConnection:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def execute(self, statement: str, parameters: tuple[object, ...]) -> None:
+        self.statements.append((statement, parameters))
+        if self.fail_execute:
+            raise psycopg.OperationalError("private database detail")
+
+    def fetchall(self) -> list[tuple[object, ...]]:
+        return self.rows
+
+    def commit(self) -> None:
+        if self.fail_commit:
+            raise psycopg.OperationalError("private database detail")
+        self.commits += 1
+
+    def rollback(self) -> None:
+        self.rollbacks += 1
+
+    def close(self) -> None:
+        if self.fail_close:
+            raise psycopg.OperationalError("private database detail")
+        self.closed = True
+
+
+class PsycopgDocumentRecord(unittest.TestCase):
+    """The SQL record binds metadata and commits each transition once."""
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.password = Path(temporary.name) / "password"
+        self.password.write_text("fictitious-secret")
+        self.configuration = settings.Settings(
+            "db.example.test", 5432, "gideon", "gideon_worker", self.password, 2,
+        )
+        self.connection = _CapturedConnection()
+        self.connection_kwargs: dict[str, object] = {}
+
+    def connect(self, **kwargs: object) -> _CapturedConnection:
+        self.connection_kwargs = kwargs
+        return self.connection
+
+    def test_statements_bind_only_record_fields_and_commit_once_per_method(self) -> None:
+        now = datetime(2099, 1, 2, 12, 34, tzinfo=UTC)
+        snapshot = now.date()
+        document = caselaw.NewDocument(
+            "a" * 64, "caselaw", "fictional-dump", snapshot, "plain_text", now,
+        )
+        opinion = caselaw.NewOpinion(
+            91, document.doc_id, "court1", 100, "23-A", snapshot, False,
+            "published", "Published", ("1 Example 2", "3 Example 4"), "020",
+        )
+        self.connection.rows = [(91, document.doc_id, "processing", 0)]
+        record = caselaw.PsycopgRecord(connect=self.connect, worker_settings=self.configuration)
+        self.assertEqual(record.present(document.source, snapshot, opinion.court), {
+            91: caselaw.PresentRow(document.doc_id, "processing", 0),
+        })
+        record.begin(document, opinion)
+        record.retry(document.doc_id)
+        record.give_back(document.doc_id)
+        record.finish_ready(document.doc_id, "b" * 64, "c" * 64, now)
+        record.finish_failed(document.doc_id, "unparseable", now, "b" * 64)
+        record.close()
+        self.assertTrue(self.connection.closed)
+        self.assertEqual(self.connection.commits, 6)
+        self.assertEqual(self.connection.rollbacks, 0)
+        self.assertEqual(self.connection_kwargs, {
+            **settings.connection_kwargs(self.configuration), "autocommit": False,
+        })
+        self.assertEqual(self.connection.statements, [
+            (caselaw.PRESENT_SQL, (document.source, snapshot, opinion.court)),
+            (caselaw.BEGIN_DOCUMENT_SQL, (
+                document.doc_id, document.profile, document.source, snapshot,
+                document.text_source, now,
+            )),
+            (caselaw.BEGIN_OPINION_SQL, (
+                opinion.opinion_id, opinion.doc_id, opinion.court, opinion.cluster_id,
+                opinion.docket, opinion.decided_date, opinion.decided_date_is_approximate,
+                opinion.precedential, opinion.precedential_raw,
+                ["1 Example 2", "3 Example 4"], opinion.opinion_type,
+            )),
+            (caselaw.RETRY_SQL, (document.doc_id,)),
+            (caselaw.GIVE_BACK_SQL, (document.doc_id,)),
+            (caselaw.FINISH_READY_SQL, ("b" * 64, "c" * 64, now, document.doc_id)),
+            (caselaw.FINISH_FAILED_SQL, ("unparseable", "b" * 64, now, document.doc_id)),
+        ])
+        for statement, parameters in self.connection.statements:
+            self.assertNotIn("PRIVATE_CASELAW_SENTINEL", statement)
+            self.assertIn("%s", statement)
+            self.assertIsInstance(parameters, tuple)
+
+    def test_psycopg_error_rolls_back_and_exposes_only_its_class(self) -> None:
+        self.connection.fail_execute = True
+        record = caselaw.PsycopgRecord(connect=self.connect, worker_settings=self.configuration)
+        with self.assertRaises(caselaw.CaselawFailure) as raised:
+            record.retry("a" * 64)
+        self.assertEqual((raised.exception.reason, raised.exception.error),
+                         ("database", "OperationalError"))
+        self.assertNotIn("private database detail", str(raised.exception))
+        self.assertEqual((self.connection.commits, self.connection.rollbacks), (0, 1))
+        record.close()
+
+    def test_connect_error_is_database_without_secret_text(self) -> None:
+        def refuse(**_kwargs: object) -> _CapturedConnection:
+            raise psycopg.OperationalError("private database detail")
+
+        record = caselaw.PsycopgRecord(connect=refuse, worker_settings=self.configuration)
+        with self.assertRaises(caselaw.CaselawFailure) as raised:
+            record.present("fictional-dump", date(2099, 1, 2), "court1")
+        self.assertEqual((raised.exception.reason, raised.exception.error),
+                         ("database", "OperationalError"))
+        self.assertNotIn("private database detail", str(raised.exception))
+
+    def test_commit_and_close_errors_roll_back_with_class_only(self) -> None:
+        self.connection.fail_commit = True
+        record = caselaw.PsycopgRecord(connect=self.connect, worker_settings=self.configuration)
+        with self.assertRaises(caselaw.CaselawFailure) as raised:
+            record.retry("a" * 64)
+        self.assertEqual((raised.exception.reason, raised.exception.error),
+                         ("database", "OperationalError"))
+        self.assertEqual(self.connection.rollbacks, 1)
+        self.assertNotIn("private database detail", str(raised.exception))
+
+        self.connection.fail_commit = False
+        self.connection.fail_close = True
+        with self.assertRaises(caselaw.CaselawFailure) as raised:
+            record.close()
+        self.assertEqual((raised.exception.reason, raised.exception.error),
+                         ("database", "OperationalError"))
+        self.assertEqual(self.connection.rollbacks, 2)
+        self.assertNotIn("private database detail", str(raised.exception))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -3,6 +3,7 @@
 from collections.abc import Mapping
 from typing import Final
 
+from gideon.host.cas import ROOT as CAS_ROOT
 from gideon.host.images import RegistryTarget, reference
 from gideon.host.render import RenderInputs
 from gideon.host.render.api import (
@@ -47,10 +48,13 @@ WORKER_HEALTHCHECK: Final[Mapping[str, object]] = {
 
 
 class WorkerService(ServiceDefinition):
-    """The queue worker with its package and writable snapshots mount."""
+    """The queue worker writes snapshots, staged files, and stored objects."""
 
     name = WORKER_SERVICE_NAME
-    sources = ("gideon/worker",)
+    sources = (
+        "gideon/worker", "gideon/host/cas.py", "gideon/host/sysio.py",
+        "gideon/host/report.py",
+    )
 
     def block(
         self, inputs: RenderInputs, target: RegistryTarget
@@ -69,6 +73,7 @@ class WorkerService(ServiceDefinition):
                 f"{inputs.checkout}/gideon:{API_MOUNT_TARGET}:ro",
                 f"{SNAPSHOTS_ROOT}:{SNAPSHOTS_ROOT}",
                 f"{WORK_ROOT}:{WORK_ROOT}",
+                f"{CAS_ROOT}:{CAS_ROOT}",
             ],
             "read_only": True,
             "group_add": [str(inputs.facts.service_gid)],

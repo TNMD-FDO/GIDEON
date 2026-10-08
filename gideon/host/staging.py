@@ -85,34 +85,42 @@ def _aware_time(value: object) -> bool:
     return parsed.tzinfo is not None
 
 
-def _label_problem(label: object, command_path: str) -> Problem | None:
+def label_problem(
+    label: object, command_path: str, *, subject: str = "stage",
+) -> Problem | None:
+    """Validate a dated corpus label for a host job."""
+
     match = LABEL_PATTERN.fullmatch(label) if isinstance(label, str) else None
     if match is None:
         return Problem(
-            "stage label is invalid",
+            f"{subject} label is invalid",
             _retry_fix("Use a label of the form corpus-YYYY-MM-DD.", command_path),
         )
     try:
         datetime.date.fromisoformat(match[1])
     except ValueError:
         return Problem(
-            "stage label has an invalid date",
+            f"{subject} label has an invalid date",
             _retry_fix("Use a real date in corpus-YYYY-MM-DD.", command_path),
         )
     return None
 
 
-def _snapshot_problem(snapshot: object, command_path: str) -> Problem | None:
+def snapshot_problem(
+    snapshot: object, command_path: str, *, subject: str = "stage",
+) -> Problem | None:
+    """Validate a kept snapshot name and its date for a host job."""
+
     if not isinstance(snapshot, str) or re.fullmatch(SOURCE_PATTERN, snapshot) is None:
         return Problem(
-            "stage snapshot is invalid",
+            f"{subject} snapshot is invalid",
             _retry_fix("Use a kept snapshot of the form <source>-YYYY-MM-DD.", command_path),
         )
     try:
         datetime.date.fromisoformat(snapshot[-10:])
     except ValueError:
         return Problem(
-            "stage snapshot has an invalid date",
+            f"{subject} snapshot has an invalid date",
             _retry_fix("Use a real date in <source>-YYYY-MM-DD.", command_path),
         )
     return None
@@ -199,8 +207,8 @@ def defer_stage(
     """Validate the bounded queue arguments before deferring one stage job."""
 
     for problem in (
-        _label_problem(label, command_path),
-        _snapshot_problem(snapshot, command_path),
+        label_problem(label, command_path),
+        snapshot_problem(snapshot, command_path),
         _courts_problem(courts, command_path),
         _inputs_problem(inputs, command_path),
     ):
@@ -243,9 +251,9 @@ def _record_from_json(value: dict[str, object], label: str, source: str) -> Stag
     snapshot = value["snapshot"]
     if (
         not _is_int(value["schema"]) or value["schema"] != 1
-        or value["label"] != label or _label_problem(value["label"], COMMAND_PATH) is not None
+        or value["label"] != label or label_problem(value["label"], COMMAND_PATH) is not None
         or value["source"] != source or _source_problem(value["source"], COMMAND_PATH) is not None
-        or _snapshot_problem(snapshot, COMMAND_PATH) is not None
+        or snapshot_problem(snapshot, COMMAND_PATH) is not None
         or not isinstance(snapshot, str)
         or source != snapshot[:-DATE_SUFFIX_LENGTH]
         or not isinstance(courts, list) or not _courts_valid(courts)
@@ -273,7 +281,7 @@ def read_record(
 ) -> StageRecord | None | Problem:
     """Read a whole stage record through the host seam, if one is present."""
 
-    for problem in (_label_problem(label, command_path), _source_problem(source, command_path)):
+    for problem in (label_problem(label, command_path), _source_problem(source, command_path)):
         if problem is not None:
             return problem
     path = work_directory(label, source, work_root=work_root) / STAGE_RECORD_NAME
@@ -356,7 +364,7 @@ def read_stage(
 ) -> StageRead | Problem:
     """Combine one queue row with its whole stage record or filed failure."""
 
-    for problem in (_label_problem(label, command_path), _snapshot_problem(snapshot, command_path)):
+    for problem in (label_problem(label, command_path), snapshot_problem(snapshot, command_path)):
         if problem is not None:
             return problem
     source = snapshot[:-DATE_SUFFIX_LENGTH]

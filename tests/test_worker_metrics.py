@@ -14,7 +14,7 @@ from socketserver import ThreadingMixIn
 
 import psycopg
 
-from gideon.worker import fetch, health, metrics, staging, tasks
+from gideon.worker import caselaw, fetch, health, metrics, staging, tasks
 from gideon.worker.settings import Settings, connection_kwargs
 
 
@@ -83,7 +83,7 @@ class WorkerMetrics(unittest.TestCase):
         body = metrics.format_metrics([], None, self.settings.concurrency)
         for queue in (
             tasks.VERIFY_QUEUE, tasks.RECOVERY_QUEUE, fetch.FETCH_QUEUE,
-            staging.STAGE_QUEUE,
+            staging.STAGE_QUEUE, caselaw.CASELAW_QUEUE,
         ):
             for status in ("todo", "doing"):
                 with self.subTest(queue=queue, status=status):
@@ -91,7 +91,7 @@ class WorkerMetrics(unittest.TestCase):
                         f'{metrics.QUEUE_JOBS_METRIC}{{queue="{queue}",status="{status}"}} 0\n',
                         body,
                     )
-        self.assertEqual(body.count(f"{metrics.QUEUE_JOBS_METRIC}{{"), 8)
+        self.assertEqual(body.count(f"{metrics.QUEUE_JOBS_METRIC}{{"), 10)
         self.assertIn(f"# HELP {metrics.QUEUE_JOBS_METRIC} M15 ", body)
         self.assertIn(f"# TYPE {metrics.QUEUE_JOBS_METRIC} gauge\n", body)
         self.assertIn(f"# TYPE {metrics.HEARTBEAT_AGE_METRIC} gauge\n", body)

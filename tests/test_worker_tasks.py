@@ -18,8 +18,9 @@ import httpx
 import procrastinate
 from procrastinate.testing import InMemoryConnector
 
+from gideon.host import cas
 from gideon.host.render import worker
-from gideon.worker import fetch, staging, tasks
+from gideon.worker import caselaw, fetch, staging, tasks
 
 
 class Unread(httpx.SyncByteStream):
@@ -59,7 +60,7 @@ class RecoveryTask(unittest.TestCase):
         self.assertEqual(
             {name for name in app.tasks if name.startswith("gideon.worker.tasks.")},
             {tasks.VERIFY_TASK, tasks.RECOVERY_TASK, fetch.FETCH_TASK,
-             staging.STAGE_TASK},
+             staging.STAGE_TASK, caselaw.CASELAW_TASK},
         )
         fetching = app.tasks[fetch.FETCH_TASK]
         self.assertEqual(fetching.queue, fetch.FETCH_QUEUE)
@@ -71,6 +72,45 @@ class RecoveryTask(unittest.TestCase):
         self.assertTrue(staged.pass_context)
         self.assertIsNone(staged.queueing_lock)
         self.assertFalse(inspect.iscoroutinefunction(tasks.stage))
+
+    def test_caselaw_task_files_and_reraises_a_job_failure(self) -> None:
+        app = procrastinate.App(connector=InMemoryConnector())
+        tasks.register_tasks(app)
+        registered = app.tasks[caselaw.CASELAW_TASK]
+        self.assertEqual(registered.queue, caselaw.CASELAW_QUEUE)
+        self.assertTrue(registered.pass_context)
+        self.assertIsNone(registered.retry_strategy)
+        self.assertFalse(inspect.iscoroutinefunction(tasks.caselaw))
+
+        job_id = 77
+        label = "corpus-2099-01-01"
+        snapshot = "fiction-2099-01-02"
+        court = "fictioncourt"
+        context = procrastinate.JobContext(
+            app=app,
+            job=procrastinate.jobs.Job(
+                id=job_id, queue=caselaw.CASELAW_QUEUE, lock=None,
+                queueing_lock=None, task_name=caselaw.CASELAW_TASK,
+            ),
+            start_timestamp=0.0,
+            abort_reason=lambda: None,
+        )
+        failure = caselaw.CaselawFailure("store")
+        with (
+            patch.object(caselaw, "PsycopgRecord") as record_factory,
+            patch.object(caselaw, "ingest", side_effect=failure) as ingest,
+            patch.object(caselaw, "write_job_failure") as file_failure,
+            self.assertRaises(caselaw.CaselawFailure) as raised,
+        ):
+            tasks.caselaw(context, label, snapshot, court)
+        self.assertIs(raised.exception, failure)
+        ingest.assert_called_once_with(
+            tasks.SNAPSHOTS_ROOT, staging.WORK_ROOT, cas.ROOT,
+            label, snapshot, court, None, job_id, record_factory.return_value,
+        )
+        file_failure.assert_called_once_with(
+            staging.WORK_ROOT, label, snapshot, court, job_id, failure,
+        )
 
     def test_stage_jobs_run_off_the_event_loop_and_a_failure_is_filed(self) -> None:
         snapshot = "fictions-2099-01-02"
