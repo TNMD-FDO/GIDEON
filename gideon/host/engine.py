@@ -223,7 +223,8 @@ def _frontend_fix(rendered_dir: PathLike) -> str:
     verify = report.command("engine verify")
     return (
         f"Do not go live on this frontend. Run {apply_command} "
-        "(which pushes the guardrail Function and reads it back); "
+        "(which renders the frontend's connection to General's service and "
+        "syncs General's model record); "
         f"then read the frontend logs with {stack.logs_fix(rendered_dir, 'open-webui')}; "
         f"then re-run {verify}."
     )
@@ -936,7 +937,7 @@ def _frontend_outcome(
     refusals = tuple(_normalised(refusal) for refusal in guardrail.REFUSALS)
     if any(_normalised(content).endswith(refusal) for refusal in refusals):
         # The service stores one shape: the released prefix, the module's
-        # separator, then the refusal; there is no pre-outlet answer to read.
+        # separator, then the refusal; no whole answer stands behind it to read.
         return "refused-stream", None
     return "answered", None
 

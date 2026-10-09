@@ -209,10 +209,10 @@ def tail_for(text: str) -> str:
 
     An answer :func:`is_stamped` already reads as stamped is owed nothing, one
     :func:`detect` finds a shape in is owed the label, and anything else is
-    owed nothing.  The stamp's own failure fails toward the label, as the
-    Function's fallback does — an already-stamped answer is still owed nothing
-    when that second read succeeds — so this never raises and its callers need
-    no guard of their own. It logs nothing: it holds model text.
+    owed nothing. The stamp's own failure fails toward the label; an
+    already-stamped answer is still owed nothing when that second read succeeds,
+    so this never raises and its callers need no guard of their own. It logs
+    nothing: it holds model text.
     """
 
     try:

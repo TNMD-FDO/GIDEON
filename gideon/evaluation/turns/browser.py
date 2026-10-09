@@ -504,7 +504,7 @@ def turn(
     """One turn from the composer of a new chat, every painted state judged as it arrives.
 
     *judge* answers a pattern id or ``None`` for a block text and an answer,
-    the block ignored since the Filter withholds the reasoning (the block's
+    the block ignored since the service withholds the reasoning (the block's
     text beyond whitespace is the withholding check's flag, not the judge's);
     *is_replacement* says whether an answer is the guardrail's refusal, alone
     or after a prefix and the stream separator.

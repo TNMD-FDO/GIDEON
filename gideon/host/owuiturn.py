@@ -2,8 +2,9 @@
 
 The recipe relies on the pinned routes' behaviour: the managed completion
 returns ``null`` and persists the turn, the chat list is the way to learn the
-created chat id, the stored history contains the outlet's edits, deletion
-reports a boolean, omitting the background-task key avoids follow-up work, and
+created chat id, and the stored history holds the answer as the service
+released it (on a trip, the released prefix and the refusal). Deletion reports
+a boolean, omitting the background-task key avoids follow-up work, and
 the session token is not limited to an allowlist of endpoints.
 Its three callers are ``gideon.evaluation.turns.run.ApiTurnDriver``, ``engine verify``'s
 frontend case, and ``tests/contract/search_sentinel.py``. Each identifies its

@@ -1,10 +1,12 @@
-# The frontend-bump cases are the two-mode proof of an
-# `images.open-webui` bump, the pin-watch review's frontend-bump bullet.
+# The frontend-bump cases are the turn harness's part of the pin-watch
+# runbook's proof set for an `images.open-webui` bump, run in its API mode and
+# its browser mode, beside the progress line's seat driver and the frontend
+# contract job.
 # Three turns hold the refused, recorded, and not-confirmed shapes. Each uses
 # `block: any`: the service sends no reasoning, so no turn stores a block, and
 # the value is kept so the file reads the same across frontend pins.
 # direct-01, confirm-01, and control-02 are the seed's three shapes with their
-# expectations. `cancel-force-02` reaches the stream hook's trip and the
+# expectations. `cancel-force-02` reaches the service's streamed trip and the
 # frontend's Stop path. Every prompt is invented and was taken from the
 # earlier browser proof cases, and carries no sentinel word (the harness tags
 # each prompt). No search case, so both modes load the file whole; the searched

@@ -44,7 +44,7 @@ class TripRow:
 
 
 def dispatch_trip_row(row: TripRow) -> None:
-    """Start the trip writer without making the Filter wait for the database."""
+    """Start the trip writer without making the service's response wait for the database."""
 
     Thread(target=write_trip_row, args=(row,), daemon=True).start()
 

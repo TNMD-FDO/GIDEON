@@ -27,17 +27,16 @@ def _new_text_state() -> dict[str, object]:
     }
 
 
-# The per-request state remains on request metadata until the request ends.
+# The per-request state is the request's own in the service for its scope.
 class StreamState(dict[str, object]):
-    """The per-request stream state, kept on ``__metadata__`` under STREAM_STATE_KEY.
+    """The per-request stream state General's service keeps for one request.
 
-    A dict subclass, so the frontend's metadata stays a mapping tree, whose
-    ``repr`` and ``str`` are content-free: the pinned frontend formats the
-    whole request with ``%s`` into a DEBUG log line, and no character of the
-    stream or of the user's dates may reach a log.  The content entry holds
-    its accumulated string, released length, decided length, and release
-    constraints; the state also holds the finished flag, the trip, and the
-    inlet stash.
+    A dict subclass whose ``repr`` and ``str`` are content-free: no character
+    of the stream or of the user's dates may reach a log. The content entry
+    holds its accumulated string, released length, decided length, and release
+    constraints. The state also holds the finished flag, the trip, supplied
+    figures and confirmation context, and the request's branch, source word,
+    and chat id, which the trip's row reads.
     """
 
     def __init__(

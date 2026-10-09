@@ -729,6 +729,15 @@ class CommandTests(unittest.TestCase):
                 frontend_fix = engine._frontend_fix(RENDERED)
                 self.assertIn(f"Run {prefix} apply", frontend_fix)
                 self.assertIn(f"then re-run {prefix} engine verify.", frontend_fix)
+                fixes = (
+                    engine._sample_fix(),
+                    engine._models_fix(),
+                    engine._filler_fix(),
+                    engine._engine_fix(RENDERED, GENERATOR),
+                    frontend_fix,
+                )
+                for fix in fixes:
+                    self.assertNotRegex(fix, r"\bFunction\b")
 
                 host = self.make_host(ps=ps_output(embed_state="exited", embed_health=""))
                 with patch.object(host, "take_lock", wraps=host.take_lock) as take_lock:
@@ -1400,6 +1409,7 @@ class CommandTests(unittest.TestCase):
                 code, output, backend = self.run_command(host, frontend=frontend)
                 self.assertEqual(code, 1)
                 self.assertIn(f"{expected_names[0]}: refuse", output)
+                self.assertNotRegex(output, r"\bFunction\b")
                 self.assertTrue(all(f"{case_name}: " in output for case_name in expected_names))
                 self.assertIn("audit: ok", output)
                 checks = backend.rows[0].detail["checks"]

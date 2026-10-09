@@ -325,7 +325,8 @@ def judge_rendered(
 def judge_message(
     message: Mapping[str, object], messages: list[object], assistant_position: int
 ) -> Trip | None:
-    """Read the body's context and judge every rendered assistant text (the outlet's judgement)."""
+    """Judge every rendered assistant text of a completion served whole, or of
+    a stored record ``engine verify`` reads back, against the body's context."""
 
     supplied, contexts = message_context(messages, assistant_position)
     answer = message.get("content")

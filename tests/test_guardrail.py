@@ -7,6 +7,7 @@ patched seams target ``FILTER.writer``.
 
 import contextlib
 import io
+import re
 import sys
 import tempfile
 import threading
@@ -1800,6 +1801,26 @@ class BoundsAndHygiene(unittest.TestCase):
 
 class ModuleContract(unittest.TestCase):
     """What ``engine verify``'s by-path loader refused before it read the Function."""
+
+    def test_retired_frontend_words_are_absent_from_service_sources(self) -> None:
+        retired = re.compile(
+            r"\b(?:Filter|Function)\b|__metadata__|STREAM_STATE_KEY|"
+            r"(?i:\b(?:inlet|outlet)\b)"
+        )
+        findings: list[str] = []
+        for directory in (
+            "gideon/guardrail",
+            "gideon/api",
+            "gideon/evaluation/turns",
+        ):
+            for path in sorted((ROOT / directory).rglob("*.py")):
+                if "__pycache__" in path.parts:
+                    continue
+                lines = path.read_text(encoding="utf-8").splitlines()
+                for number, line in enumerate(lines, 1):
+                    for match in retired.finditer(line):
+                        findings.append(f"{path.relative_to(ROOT)}:{number}: {match.group()}")
+        self.assertFalse(findings, "Retired frontend words:\n" + "\n".join(findings))
 
     def test_the_lag_is_a_positive_integer(self) -> None:
         self.assertIs(type(FILTER.LAG_CHARS), int)

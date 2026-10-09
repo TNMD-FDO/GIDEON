@@ -47,9 +47,10 @@ SMOKE_TURNS: Final[int] = 12
 # run's span, divided by that run's browser turns.
 BROWSER_ENGINE_CALLS_PER_TURN: Final[int] = 3
 # A leak in the final released stream text and a flash from a seat are failures;
-# this is the one policy both fields share, enforced by the Filter stream hook
-# (v0.1.18). A flash is a painted trip the final text does not confirm, replaced
-# by the refusal or cleared by a state that does not continue it.
+# this is the one policy both fields share, originating in v0.1.18 and read
+# against the stream the service's lag window releases. A flash is a painted
+# trip the final text does not confirm, replaced by the refusal or cleared by
+# a state that does not continue it.
 STREAM_LEAK_FAILS: Final[bool] = True
 # The browser mode drains its frame observer this often; the observer captures
 # every painted frame regardless, so this is the drain interval, not the
