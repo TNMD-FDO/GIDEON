@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.115](docs/release-notes/v0.3.115.md) — 2026-10-09 — E32, the pattern set against CaseHOLD
 - [v0.3.114](docs/release-notes/v0.3.114.md) — 2026-10-09 — gideon uninstall
 - [v0.3.113](docs/release-notes/v0.3.113.md) — 2026-10-09 — the agreement check of citation edges against CourtListener's map
 - [v0.3.112](docs/release-notes/v0.3.112.md) — 2026-10-09 — treatment patterns

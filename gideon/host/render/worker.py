@@ -73,7 +73,7 @@ CITE_TYPES: Final = (
     "state_code", "case_cite", "law_cite", "journal_cite", "unknown",
 )
 CITE_FORMS: Final = ("full", "short", "id", "supra", "reference")
-PATTERN_SET_ID: Final = "treatment/patterns@1"
+PATTERN_SET_ID: Final = "treatment/patterns@2"
 TREATMENT_SIGNALS: Final = (
     "overruled", "abrogated", "superseded", "reversed", "vacated", "disapproved",
 )
