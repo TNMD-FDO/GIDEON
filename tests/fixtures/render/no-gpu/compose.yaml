@@ -551,6 +551,7 @@ networks:
   gideon: {}
   internal:
     internal: true
+  integration: {}
 volumes:
   caddy_data: {}
   caddy_config: {}

@@ -463,6 +463,7 @@ services:
       start_period: "900s"
     networks:
       - "gideon"
+      - "integration"
     mem_limit: 32000000000
   gideon-embed:
     image: "ghcr.io/tnmd-fdo/vllm-openai@sha256:0a51ea5b4ae2dc5d81890e5173f54203d2a3ae0cfffe51b8fd2afd4391bfd967"
@@ -741,6 +742,7 @@ networks:
   gideon: {}
   internal:
     internal: true
+  integration: {}
 volumes:
   caddy_data: {}
   caddy_config: {}

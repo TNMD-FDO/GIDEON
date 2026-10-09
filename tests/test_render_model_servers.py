@@ -17,6 +17,7 @@ from gideon.host.render.compose import ComposeArtifact, service_blocks
 from gideon.host.render.engine import (
     EMBED,
     GENERATOR,
+    INTEGRATION_NETWORK_NAME,
     MODEL_SERVERS,
     metrics_target,
     model_server,
@@ -37,6 +38,8 @@ class Family(unittest.TestCase):
         gpu = inputs(EXAMPLE)
 
         self.assertEqual(MODEL_SERVERS[0], GENERATOR)
+        self.assertTrue(GENERATOR.joins_integration_network)
+        self.assertFalse(EMBED.joins_integration_network)
         for field in ("role", "service_name", "secret_name", "job_name", "words"):
             with self.subTest(field=field):
                 values = [getattr(member, field) for member in MODEL_SERVERS]
@@ -113,6 +116,8 @@ class EmbedRender(unittest.TestCase):
                 block = blocks[EMBED.service_name]
                 generator = blocks[GENERATOR.service_name]
                 assert isinstance(block, Mapping) and isinstance(generator, Mapping)
+                self.assertEqual(generator["networks"], ["gideon", INTEGRATION_NETWORK_NAME])
+                self.assertEqual(block["networks"], ["gideon"])
                 target = parse_registry(rendered_inputs.site.registry)
                 assert target is not None
 

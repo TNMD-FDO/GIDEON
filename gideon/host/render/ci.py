@@ -1,4 +1,7 @@
-"""Pure Compose and Open WebUI artifacts for the standing CI sibling stack."""
+"""Pure Compose and Open WebUI artifacts for the standing CI sibling stack.
+
+The relay reaches the engine through the integration network.
+"""
 
 import hashlib
 from collections.abc import Mapping
@@ -10,8 +13,8 @@ from gideon.host.render import RenderInputs
 from gideon.host.render.api import API_SECRET_NAME, API_SERVICE_NAME
 from gideon.host.render.compose import (
     NETWORK_NAME,
-    PROJECT_NAME,
     image_pin,
+    integration_network_name,
     memory_limit_bytes,
     mounted_secret_names,
     with_memory_limit,
@@ -21,6 +24,7 @@ from gideon.host.render.engine import (
     ENGINE_PORT,
     ENGINE_SECRET_NAME,
     ENGINE_SERVICE_NAME,
+    INTEGRATION_NETWORK_NAME,
 )
 from gideon.host.render.opensearch import (
     OPENSEARCH_DATA_MOUNT,
@@ -128,12 +132,6 @@ CI_WIPE_PATHS: Final[tuple[str, ...]] = (
 )
 
 
-def production_network_name() -> str:
-    """Return production's Docker network name from its Compose constants."""
-
-    return f"{PROJECT_NAME}_{NETWORK_NAME}"
-
-
 def _relay_base_url() -> str:
     return f"http://{RELAY_SERVICE_NAME}:{ENGINE_PORT}/v1"
 
@@ -232,7 +230,7 @@ def ci_compose_document(inputs: RenderInputs) -> Mapping[str, object]:
             "retries": 3,
             "start_period": "5s",
         },
-        "networks": [NETWORK_NAME, "production"],
+        "networks": [NETWORK_NAME, INTEGRATION_NETWORK_NAME],
     }
     services: dict[str, object] = {
         PostgresService.name: with_memory_limit(
@@ -272,7 +270,10 @@ def ci_compose_document(inputs: RenderInputs) -> Mapping[str, object]:
         "services": services,
         "networks": {
             NETWORK_NAME: {},
-            "production": {"external": True, "name": production_network_name()},
+            INTEGRATION_NETWORK_NAME: {
+                "external": True,
+                "name": integration_network_name(),
+            },
         },
         "secrets": secrets,
     }

@@ -15,7 +15,7 @@ inputs:
   build_box: false
 files:
   compose.yaml:
-    sha256: "98a929e5d0117aa0c2c8deafcf83cd0a52b831a58045972622fe6335a98230bb"
+    sha256: "9edbed61d91882cc3219b7831ebf5a16b88c1b9245c535f1f5b1699e80de4284"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
@@ -222,7 +222,7 @@ services:
   qdrant: "b5e29333bb138a6ee121685c8055c888a7764c148983c7d5388333add92c1dc4"
   opensearch: "08e7f7f187f8096b0ffe685762cecb8eef93910df4a9e3167147e1c189bc4478"
   open-webui: "ab6f28a087b2cacffc68f9ca6c8f5c88f4d809c0936e4375f852e9f66c063700"
-  gideon-generator: "7e6fb8478dc880dc237408c62456aa742b2612de5c2bb1e2882ad65d8eaf800b"
+  gideon-generator: "84079f1b7d3e982523b147ec321f76cfdd3059213f4eba877d26cdc59b6e3912"
   gideon-embed: "a1799c9ceff0b6159be9b8588da119879ef38280aaeb577c6a3542828eb20d8e"
   gideon-api: "8b3c7b753c431e1a7b2129827bbf649ed2ae44862a9de0d454b6418ea22f0f53"
   gideon-worker: "bc8b45e0b0e4cda17c10579ae541f17534e48813d0b3b1a03d8878f03a01e5b2"
@@ -231,9 +231,9 @@ services:
   postgres-exporter: "d36e03785dee0d52e65763c1d7f6dda2c4c09b17c129d7e8439fe5994338bfe7"
   cadvisor: "7bd0e221d909e45fc1555750f1839250774b89d6333a0fb7b0443bcca62ec837"
   blackbox-exporter: "5b3942cc5a72cac952fe8085233662b727ad6e9ee6caf933d7f4590572db8024"
-top_level: "8e2d90d8ee0ab974f995f48a408b39d5507f5bacebee64ea29b8d2b5fb6101d6"
+top_level: "87d2498c99fcb5405b14a786285ed8ba1478f4943a5d85a46ded52f9f03952f0"
 top_level_parts:
-  static: "61fdb7792fd6cf372e9432c5e781656dd757524791b5bad7318f028abed07b94"
+  static: "9d8f1896c9ac3c179131b112cf67afcceeee7672c19635149ea32c986c4dcb6a"
   secrets:
     tls_key:
       sha256: "7f0573b4c1802e8ff8b41a7577595a36ff897f93a664cbda3c291a1da8cd17cf"
@@ -305,3 +305,7 @@ top_level_parts:
       sha256: "a89f49fbb102aa419c38007e9f09d713bde51256f25062db22689378542dfab1"
       mounts:
         - "gideon-worker"
+  networks:
+    gideon: "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
+    internal: "cb59b295bf6f3c8c9ef5c9eb85c7281c911ece8f10d06b4274d03561e28f4aa8"
+    integration: "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"

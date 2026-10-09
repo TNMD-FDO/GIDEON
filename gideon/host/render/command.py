@@ -26,6 +26,7 @@ from gideon.host.models import render_errors as render_models_errors
 from gideon.host.render import ARTIFACTS, RenderedSet, RenderInputs, render_all
 from gideon.host.render.compose import (
     compose_top_level,
+    network_name,
     service_blocks,
     service_names,
 )
@@ -202,10 +203,15 @@ class SecretPart:
 
 @dataclass(frozen=True, slots=True)
 class TopLevelParts:
-    """The non-secret top level and its ordered secret entries."""
+    """The non-secret top level, secret entries, and per-network digests.
+
+    Per-network digests identify which definitions moved; an older record has
+    none because it did not store this field.
+    """
 
     static: str
     secrets: Mapping[str, SecretPart]
+    networks: Mapping[str, str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,7 +235,7 @@ class AppliedManifest:
 
 @dataclass(frozen=True, slots=True)
 class RecreateJudgment:
-    """The ordered recreate union and the reasons that selected its services."""
+    """The ordered recreate union, its service reasons, and moved networks."""
 
     SECRETS_REASON: ClassVar[str] = "changed compose secrets"
 
@@ -240,6 +246,7 @@ class RecreateJudgment:
     first_apply: bool
     secrets: tuple[str, ...] = ()
     changed_entries: tuple[str, ...] = ()
+    networks: tuple[str, ...] = ()
 
     def reasons(self) -> tuple[tuple[str, tuple[str, ...]], ...]:
         """Return nonempty recreate reasons in the order shown to operators."""
@@ -262,7 +269,9 @@ def compose_digests(inputs: RenderInputs) -> ComposeDigests:
     """Digest each service block, the whole top level, and its separate parts.
 
     Each digest hashes the deterministic serializer's header-less text. Secret
-    parts contain the entry and its mounters, never the secret's value.
+    parts contain the entry and its mounters, never the secret's value. Each
+    network entry has its own digest, so a moved definition is named by its key
+    and a network the record never held is not judged moved.
     """
 
     blocks = service_blocks(inputs)
@@ -283,11 +292,19 @@ def compose_digests(inputs: RenderInputs) -> ComposeDigests:
         if name not in consumers:
             raise ValueError(f"Compose top-level secret has no consumer: {name}")
         secrets[name] = SecretPart(_sha256(dump_fragment(entry)), consumers[name].mounts)
+    network_entries = top_level["networks"]
+    if not isinstance(network_entries, Mapping):
+        raise TypeError("Compose top-level networks is not a mapping")
+    networks: dict[str, str] = {}
+    for name, entry in network_entries.items():
+        if not isinstance(name, str) or not isinstance(entry, Mapping):
+            raise TypeError("Compose top-level network entry is not a named mapping")
+        networks[name] = _sha256(dump_fragment(entry))
     static = {name: value for name, value in top_level.items() if name != "secrets"}
     return ComposeDigests(
         services=services,
         top_level=_sha256(dump_fragment(top_level)),
-        top_level_parts=TopLevelParts(_sha256(dump_fragment(static)), secrets),
+        top_level_parts=TopLevelParts(_sha256(dump_fragment(static)), secrets, networks),
     )
 
 
@@ -310,6 +327,8 @@ def _manifest_mapping(
             "owners": list(rendered_file.owners),
         }
     digests = compose_digests(inputs)
+    networks = digests.top_level_parts.networks
+    assert networks is not None
     return {
         "release": inputs.release,
         "inputs": {
@@ -332,6 +351,7 @@ def _manifest_mapping(
                 name: {"sha256": part.sha256, "mounts": list(part.mounts)}
                 for name, part in digests.top_level_parts.secrets.items()
             },
+            "networks": dict(networks),
         },
     }
 
@@ -497,7 +517,16 @@ def _manifest_digests(
             ):
                 raise TypeError(f"manifest top_level_parts has invalid secret entry: {path}")
             secrets[name] = SecretPart(digest, tuple(mounts))
-        top_level_parts = TopLevelParts(static, secrets)
+        networks: Mapping[str, str] | None = None
+        if "networks" in parts_value:
+            networks_value = parts_value["networks"]
+            if not isinstance(networks_value, Mapping) or not all(
+                isinstance(name, str) and isinstance(digest, str)
+                for name, digest in networks_value.items()
+            ):
+                raise TypeError(f"manifest top_level_parts has invalid networks: {path}")
+            networks = cast(Mapping[str, str], networks_value)
+        top_level_parts = TopLevelParts(static, secrets, networks)
     return services, top_level, top_level_parts
 
 
@@ -538,8 +567,20 @@ def recreate_judgment(
     if applied is None:
         return RecreateJudgment(ordered, (), (), (), True)
 
+    moved_networks: tuple[str, ...] = ()
+    candidate_networks = digests.top_level_parts.networks
+    recorded_networks = (
+        applied.top_level_parts.networks if applied.top_level_parts is not None else None
+    )
+    if candidate_networks is not None and recorded_networks is not None:
+        moved_networks = tuple(
+            name
+            for name, digest in candidate_networks.items()
+            if name in recorded_networks and recorded_networks[name] != digest
+        )
+
     if applied.services is None:
-        return RecreateJudgment(ordered, (), ordered, (), False)
+        return RecreateJudgment(ordered, (), ordered, (), False, networks=moved_networks)
 
     file_services: set[str] = set()
     for rendered_file in rendered.files:
@@ -599,7 +640,9 @@ def recreate_judgment(
     secrets = current(secret_services)
     top_level = ordered if top_level_changed else ()
     union = current((*files, *block, *secrets, *top_level))
-    return RecreateJudgment(union, files, block, top_level, False, secrets, changed_entries)
+    return RecreateJudgment(
+        union, files, block, top_level, False, secrets, changed_entries, moved_networks
+    )
 
 
 def recreate_services(
@@ -647,6 +690,11 @@ def _print_diff(
             else ""
         )
         print(f"  {label}{entries}: {', '.join(services)}")
+    if judgment.networks:
+        moved = ", ".join(
+            f"{key} ({network_name(key)})" for key in judgment.networks
+        )
+        print(f"  networks recreated, their members stopped first: {moved}")
     _print_summary(classifications, stale)
 
 

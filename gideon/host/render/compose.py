@@ -7,6 +7,7 @@ from gideon.host.images import parse_registry
 from gideon.host.models import GIGABYTE, HardwareProfile
 from gideon.host.render import Artifact, RenderInputs
 from gideon.host.render.engine import ENGINE_READY_SECONDS as ENGINE_READY_SECONDS
+from gideon.host.render.engine import INTEGRATION_NETWORK_NAME
 from gideon.host.render.owui import PERMISSIONS_TEMPLATE
 from gideon.host.render.services import (
     all_service_names,
@@ -100,6 +101,31 @@ def service_blocks(inputs: RenderInputs) -> Mapping[str, object]:
     services = document["services"]
     assert isinstance(services, Mapping)
     return services
+
+
+def network_name(key: str) -> str:
+    """Return the Docker name of a network in this Compose project."""
+
+    return f"{PROJECT_NAME}_{key}"
+
+
+def integration_network_name() -> str:
+    """Return the Docker name of the engine's integration network."""
+
+    return network_name(INTEGRATION_NETWORK_NAME)
+
+
+def network_members(inputs: RenderInputs, key: str) -> tuple[str, ...]:
+    """Return rendered services on a network in document order."""
+
+    members: list[str] = []
+    for name, block in service_blocks(inputs).items():
+        assert isinstance(block, Mapping)
+        networks = block["networks"]
+        assert isinstance(networks, list)
+        if key in networks:
+            members.append(name)
+    return tuple(members)
 
 
 def compose_top_level(inputs: RenderInputs) -> Mapping[str, object]:
@@ -224,7 +250,14 @@ def _compose_document(inputs: RenderInputs) -> Mapping[str, object]:
     return {
         "name": PROJECT_NAME,
         "services": services,
-        "networks": {NETWORK_NAME: {}, INTERNAL_NETWORK_NAME: {"internal": True}},
+        "networks": {
+            NETWORK_NAME: {},
+            INTERNAL_NETWORK_NAME: {"internal": True},
+            # Empty on purpose: a release never moves its digest, so another
+            # application's client on it never stands between a release and its
+            # recreate; apply refuses while one is attached if it ever must move.
+            INTEGRATION_NETWORK_NAME: {},
+        },
         "volumes": {"caddy_data": {}, "caddy_config": {}},
         "secrets": secrets,
     }

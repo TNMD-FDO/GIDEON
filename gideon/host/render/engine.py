@@ -4,6 +4,7 @@ A model server serves one pinned model on the engine image; the family is one
 member per model role of the lock, the generator first. A member holds its
 service name (the stable alias), container port, secret name, scrape job name,
 slow-start allowance, and the words its clients use for the server.
+It also says whether the member joins the integration network.
 Its served name and GPU are its pin's, the served name held equal to the
 service name by a test. The generator's identity is shared by its Compose
 definition (``render/services/generator.py``), the frontend's connection
@@ -20,6 +21,7 @@ ENGINE_SECRET_NAME: Final = "engine_api_key"
 ENGINE_PORT: Final = 8000
 ENGINE_JOB_NAME: Final = "engine"
 ENGINE_READY_SECONDS: Final = 900
+INTEGRATION_NETWORK_NAME: Final = "integration"
 
 EMBED_SERVICE_NAME: Final = "gideon-embed"
 EMBED_SECRET_NAME: Final = "embed_api_key"
@@ -35,7 +37,7 @@ EMBED_READY_SECONDS: Final = 300
 
 @dataclass(frozen=True, slots=True)
 class ModelServerMember:
-    """One model role's service identity and startup allowance."""
+    """One model role's identity, startup allowance, and integration join."""
 
     role: str
     service_name: str
@@ -44,6 +46,7 @@ class ModelServerMember:
     job_name: str
     ready_seconds: int
     words: str
+    joins_integration_network: bool
 
     @property
     def key_file_words(self) -> str:
@@ -60,6 +63,7 @@ GENERATOR: Final = ModelServerMember(
     ENGINE_JOB_NAME,
     ENGINE_READY_SECONDS,
     "engine",
+    True,
 )
 EMBED: Final = ModelServerMember(
     "embed",
@@ -69,6 +73,7 @@ EMBED: Final = ModelServerMember(
     EMBED_JOB_NAME,
     EMBED_READY_SECONDS,
     "embedding server",
+    False,
 )
 MODEL_SERVERS: Final = (GENERATOR, EMBED)
 

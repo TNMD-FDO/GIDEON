@@ -49,9 +49,9 @@ from gideon.host.render.ci import (
     ci_env_file,
     ci_instruction,
     ci_manifest,
-    production_network_name,
 )
 from gideon.host.render.command import load_render_inputs
+from gideon.host.render.compose import integration_network_name
 from gideon.host.render.engine import ENGINE_PORT
 from gideon.host.render.opensearch import (
     OPENSEARCH_GID,
@@ -85,9 +85,9 @@ _RENDER_FIX: Final = "Correct the CI render inputs, then retry."
 _FOREIGN_FIX: Final = "Remove or move the foreign file(s), then retry."
 _SECRET_FIX: Final = "Correct the CI secrets directory, then retry."
 _WIPE_FIX: Final = f"Correct ownership and mode under {CI_ROOT}, then retry."
-# Production's `compose down` cannot remove a network a container still joins.
+# Production's `compose down` leaves the integration network standing while the relay joins it.
 _RELAY_REMINDER: Final = (
-    "; run sudo python3 -m tools.cistack down before a restore or upgrade --rollback"
+    "; the relay keeps the integration network in use, so run sudo python3 -m tools.cistack down before a restore or upgrade --rollback"
 )
 _HEALTH_SCRIPT: Final = (
     "import urllib.request; "
@@ -211,25 +211,25 @@ def _preconditions(
         return _error_row("preconditions", models_result.errors, "models.lock is unavailable")
 
     try:
-        network = io.run(["docker", "network", "inspect", production_network_name()])
+        network = io.run(["docker", "network", "inspect", integration_network_name()])
     except OSError as exc:
         return StageResult(
             "preconditions",
             False,
-            f"production Docker network could not be inspected: {exc}",
+            f"integration Docker network could not be inspected: {exc}",
             _NETWORK_FIX,
         )
     if network.returncode != 0:
         return StageResult(
             "preconditions",
             False,
-            f"production Docker network is unavailable: {command_detail(network)}",
+            f"integration Docker network is unavailable: {command_detail(network)}",
             _NETWORK_FIX,
         )
     return StageResult(
         "preconditions",
         True,
-        "root, render inputs, CI data root, and production network are available"
+        "root, render inputs, CI data root, and integration network are available"
         + (f"; {lock_detail}" if lock_detail else ""),
         "",
     )
@@ -784,20 +784,20 @@ def down(ci_stack: CiStack, io: Host, *, wipe: bool = False) -> int:
 
 def _relay_attached(io: Host) -> tuple[bool, str] | str:
     try:
-        result = io.run(["docker", "network", "inspect", production_network_name()])
+        result = io.run(["docker", "network", "inspect", integration_network_name()])
     except OSError as exc:
-        return f"production network inspection failed: {exc}"
+        return f"integration network inspection failed: {exc}"
     if result.returncode != 0:
-        return f"production network inspection failed: {command_detail(result)}"
+        return f"integration network inspection failed: {command_detail(result)}"
     try:
         documents = json.loads(result.stdout)
     except json.JSONDecodeError:
-        return "production network inspection returned invalid JSON"
+        return "integration network inspection returned invalid JSON"
     if not isinstance(documents, list) or not documents or not isinstance(documents[0], Mapping):
-        return "production network inspection returned no network"
+        return "integration network inspection returned no network"
     containers = documents[0].get("Containers", {})
     if not isinstance(containers, Mapping):
-        return False, "engine relay is absent from production's network"
+        return False, "engine relay is absent from the integration network"
     for value in containers.values():
         if not isinstance(value, Mapping):
             continue
@@ -808,12 +808,12 @@ def _relay_attached(io: Host) -> tuple[bool, str] | str:
             and labels.get("com.docker.compose.project") == CI_PROJECT
             and labels.get("com.docker.compose.service") == RELAY_SERVICE_NAME
         ):
-            return True, "engine relay is attached to production's network" + _RELAY_REMINDER
-    return False, "engine relay is absent from production's network"
+            return True, "engine relay is attached to the integration network" + _RELAY_REMINDER
+    return False, "engine relay is absent from the integration network"
 
 
 def status(ci_stack: CiStack, io: Host) -> int:
-    """Report running CI services and the relay's production-network attachment."""
+    """Report running CI services and whether the relay joins the integration network."""
 
     root = _root_row(io, "status")
     if root is not None:

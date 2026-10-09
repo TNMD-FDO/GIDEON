@@ -84,6 +84,15 @@ def publish_ps_argv(port: int) -> tuple[str, ...]:
     return ("docker", "ps", "--filter", f"publish={port}", "--format", _DOCKER_PS_FORMAT)
 
 
+def network_ps_argv(network: str) -> tuple[str, ...]:
+    """The read of one network's running containers, in the box-wide read's columns.
+
+    Running alone, since a stopped container holds no endpoint on the network.
+    """
+
+    return ("docker", "ps", "--filter", f"network={network}", "--format", _DOCKER_PS_FORMAT)
+
+
 def parse_rows(stdout: str) -> tuple[ContainerRow, ...]:
     """Return valid name and project rows, skipping malformed Docker lines."""
 

@@ -28,6 +28,7 @@ from gideon.host.apply import (
     preconditions,
     run_apply,
 )
+from gideon.host.cotenants import network_ps_argv
 from gideon.host.egress import EgressAllowlist, load_egress_allowlist
 from gideon.host.images import load_image_lock
 from gideon.host.models import (
@@ -41,10 +42,12 @@ from gideon.host.render import ARTIFACTS, RenderInputs
 from gideon.host.render.command import run_render
 from gideon.host.render.compose import (
     ENGINE_READY_SECONDS,
+    NETWORK_NAME,
+    network_name,
     service_blocks,
     service_names,
 )
-from gideon.host.render.engine import ENGINE_SERVICE_NAME
+from gideon.host.render.engine import ENGINE_SERVICE_NAME, INTEGRATION_NETWORK_NAME
 from gideon.host.render.grafana import GRAFANA_ADMIN_USER
 from gideon.host.render.owui import GENERAL_MODEL_ID
 from gideon.host.render.services import all_service_names, store_services
@@ -84,6 +87,16 @@ RECREATE_OPEN_WEBUI = tuple(compose_argv(RENDERED, "up", "-d", "--no-deps", "--f
 STORE_UP = tuple(compose_argv(RENDERED, "up", "-d", "postgres"))
 UP = tuple(compose_argv(RENDERED, "up", "-d", "--remove-orphans"))
 PS = tuple(compose_argv(RENDERED, "ps", "--all", "--format", "json"))
+INTEGRATION_READ = network_ps_argv(network_name(INTEGRATION_NETWORK_NAME))
+PROJECT_READ = network_ps_argv(network_name(NETWORK_NAME))
+INTEGRATION_STOP = tuple(compose_argv(RENDERED, "stop", ENGINE_SERVICE_NAME))
+PROJECT_MEMBERS = (
+    "caddy", "prometheus", "node-exporter", "grafana", "postgres", "qdrant",
+    "opensearch", "open-webui", "gideon-generator", "gideon-embed", "gideon-api",
+    "gideon-egress", "searxng", "dcgm-exporter", "postgres-exporter", "cadvisor",
+    "blackbox-exporter",
+)
+PROJECT_STOP = tuple(compose_argv(RENDERED, "stop", *PROJECT_MEMBERS))
 PSQL_POSTGRES_QUERY = tuple(exec_argv(RENDERED, "postgres", "psql", "-U", "postgres", "-d", "postgres", "-tA", "-f", "-"))
 PSQL_POSTGRES_STATEMENT = tuple(exec_argv(RENDERED, "postgres", "psql", "-U", "postgres", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-f", "-"))
 PSQL_GIDEON_QUERY = tuple(exec_argv(RENDERED, "postgres", "psql", "-U", "gideon", "-d", "gideon", "-tA", "-f", "-"))
@@ -342,6 +355,7 @@ class ApplyHost:
         self.files = dict(files)
         self.euid = euid
         self.calls: list[tuple[tuple[str, ...], Mapping[str, str] | None]] = []
+        self.run_errors: set[tuple[str, ...]] = set()
         self.inputs: list[tuple[tuple[str, ...], str | None]] = []
         self.writes: list[str] = []
         self.write_modes: dict[str, int] = {}
@@ -363,6 +377,8 @@ class ApplyHost:
         command = tuple(argv)
         self.calls.append((command, env))
         self.inputs.append((command, input))
+        if command in self.run_errors:
+            raise OSError("fixture Docker read failure")
         if command and command[0] in {"openssl", "mv"}:
             answered = answer_pair_command(command, self.files, self.public_keys)
             if answered is not None:
@@ -520,6 +536,10 @@ def healthy_commands(
         SYSTEMCTL_ENABLE_UPSTREAM_WATCH: done(SYSTEMCTL_ENABLE_UPSTREAM_WATCH),
         SYSTEMCTL_ACTIVE_UPSTREAM_WATCH: done(SYSTEMCTL_ACTIVE_UPSTREAM_WATCH, stdout="active\n"),
         PS: done(PS, stdout=running_rows(render_inputs=render_inputs)),
+        INTEGRATION_READ: done(INTEGRATION_READ),
+        PROJECT_READ: done(PROJECT_READ),
+        INTEGRATION_STOP: done(INTEGRATION_STOP),
+        PROJECT_STOP: done(PROJECT_STOP),
         **healthy_ingress(),
     }
     # Both tiers' force-recreate commands need answers on every host, so the
@@ -701,6 +721,7 @@ class HappyPath(unittest.TestCase):
                 "preconditions",
                 "secrets",
                 "render",
+                "network",
                 "registry",
                 "pull",
                 "models",
@@ -713,6 +734,9 @@ class HappyPath(unittest.TestCase):
                 "record",
             ],
         )
+        self.assertIn("network: ok — no network definition moved", out)
+        self.assertNotIn(INTEGRATION_READ, argv_calls(host))
+        self.assertNotIn(PROJECT_READ, argv_calls(host))
         self.assertIn("recreate: ok — recreated postgres: first apply", out)
         self.assertIn("engine_api_key", out)
         self.assertIn(SYSTEMCTL_LINK_PROPOSALS, argv_calls(host))
@@ -937,6 +961,232 @@ class HappyPath(unittest.TestCase):
         code, out, _ = apply(host)
         self.assertEqual(code, 0, out)
         self.assertIn(manifest_inspect(hostname_ref, insecure=False), argv_calls(host))
+
+
+class NetworkChanges(unittest.TestCase):
+    def moved_host(self, key: str) -> ApplyHost:
+        host = ApplyHost(healthy_commands(), base_files())
+        self.assertEqual(apply(host)[0], 0)
+        applied = yaml.safe_load(host.files[f"{RENDERED}/applied.yaml"])
+        applied["top_level"] = "0" * 64
+        applied["top_level_parts"]["networks"][key] = "0" * 64
+        host.files[f"{RENDERED}/applied.yaml"] = yaml.safe_dump(applied, sort_keys=False)
+        host.calls.clear()
+        host.pull_calls.clear()
+        return host
+
+    def test_unmarked_container_refuses_before_preparation_or_recreate(self) -> None:
+        host = self.moved_host(INTEGRATION_NETWORK_NAME)
+        host.commands[INTEGRATION_READ] = done(
+            INTEGRATION_READ, stdout="outside-client\t\n"
+        )
+
+        code, out, err = apply(host)
+
+        self.assertEqual((code, err), (1, ""))
+        self.assertEqual(stages(out), ["preconditions", "secrets", "render", "network"])
+        self.assertIn("no Compose project (outside-client)", out)
+        self.assertIn("Announce the change", out)
+        self.assertIn("wait until they have left gideon_integration", out)
+        self.assertIn(f"re-run {report.command('apply')}", out)
+        self.assertEqual(argv_calls(host)[-1], INTEGRATION_READ)
+        self.assertFalse(any(call[:2] == ("docker", "manifest") for call in argv_calls(host)))
+        self.assertNotIn(PULL, argv_calls(host))
+        self.assertNotIn(INTEGRATION_STOP, argv_calls(host))
+        self.assertFalse(any("--force-recreate" in call for call in argv_calls(host)))
+        self.assertNotIn(UP, argv_calls(host))
+
+    def test_ci_project_container_refuses_with_the_sibling_down_fix(self) -> None:
+        host = self.moved_host(INTEGRATION_NETWORK_NAME)
+        host.commands[INTEGRATION_READ] = done(
+            INTEGRATION_READ, stdout="relay\tgideon-ci\n"
+        )
+
+        code, out, err = apply(host)
+
+        self.assertEqual((code, err), (1, ""))
+        self.assertEqual(stages(out)[-1], "network")
+        self.assertIn("project gideon-ci (relay)", out)
+        self.assertIn("sudo python3 -m tools.cistack down", out)
+        self.assertNotIn(PULL, argv_calls(host))
+
+    def test_unlabelled_marked_container_is_a_sibling_in_first_seen_groups(self) -> None:
+        host = self.moved_host(INTEGRATION_NETWORK_NAME)
+        host.commands[INTEGRATION_READ] = done(
+            INTEGRATION_READ,
+            stdout="relay-one\tgideon-ci\ngideon-registry\t\nrelay-two\tgideon-ci\n",
+        )
+
+        code, out, err = apply(host)
+
+        self.assertEqual((code, err), (1, ""))
+        self.assertEqual(stages(out)[-1], "network")
+        self.assertIn(
+            "project gideon-ci (relay-one, relay-two); no Compose project (gideon-registry)",
+            out,
+        )
+        self.assertIn("tools.cistack down", out)
+        self.assertNotIn(PULL, argv_calls(host))
+
+    def test_unreadable_attached_read_refuses_with_the_network_name(self) -> None:
+        for failure in ("nonzero", "oserror"):
+            with self.subTest(failure=failure):
+                host = self.moved_host(INTEGRATION_NETWORK_NAME)
+                if failure == "nonzero":
+                    host.commands[INTEGRATION_READ] = done(INTEGRATION_READ, 1, stderr="unavailable")
+                else:
+                    host.run_errors.add(INTEGRATION_READ)
+
+                code, out, err = apply(host)
+
+                self.assertEqual((code, err), (1, ""))
+                self.assertEqual(stages(out)[-1], "network")
+                self.assertIn("cannot read what is attached to gideon_integration", out)
+                self.assertIn("docker-engine", out)
+                self.assertNotIn(PULL, argv_calls(host))
+                self.assertNotIn(INTEGRATION_STOP, argv_calls(host))
+
+    def test_generator_alone_passes_and_is_stopped_before_recreate(self) -> None:
+        host = self.moved_host(INTEGRATION_NETWORK_NAME)
+        host.commands[INTEGRATION_READ] = done(
+            INTEGRATION_READ, stdout=f"{ENGINE_SERVICE_NAME}\tgideon\n"
+        )
+
+        code, out, err = apply(host)
+
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertIn(
+            f"network: ok — network gideon_integration moved; {ENGINE_SERVICE_NAME} stops for its recreate",
+            out,
+        )
+        self.assertIn(
+            f"recreate: ok — stopped network members before recreate: {ENGINE_SERVICE_NAME}; recreated postgres: changed compose top-level",
+            out,
+        )
+        self.assertEqual(argv_calls(host).count(INTEGRATION_STOP), 1)
+        self.assertLess(argv_calls(host).index(INTEGRATION_READ), argv_calls(host).index(PULL))
+        self.assertLess(argv_calls(host).index(PULL), argv_calls(host).index(INTEGRATION_STOP))
+        self.assertLess(argv_calls(host).index(INTEGRATION_STOP), argv_calls(host).index(RECREATE_POSTGRES))
+        self.assertLess(stages(out).index("models"), stages(out).index("recreate"))
+        self.assertEqual(len(host.pull_calls), 1)
+
+    def test_unjudged_member_of_a_moved_network_is_force_recreated(self) -> None:
+        """A stopped member left to ``up -d`` would point at the removed network."""
+
+        host = self.moved_host(INTEGRATION_NETWORK_NAME)
+        applied = yaml.safe_load(host.files[f"{RENDERED}/applied.yaml"])
+        manifest = yaml.safe_load(host.files[f"{RENDERED}/manifest.yaml"])
+        applied["top_level"] = manifest["top_level"]
+        host.files[f"{RENDERED}/applied.yaml"] = yaml.safe_dump(applied, sort_keys=False)
+        host.commands[INTEGRATION_READ] = done(
+            INTEGRATION_READ, stdout=f"{ENGINE_SERVICE_NAME}\tgideon\n"
+        )
+        recreate_generator = tuple(
+            compose_argv(RENDERED, "up", "-d", "--no-deps", "--force-recreate", ENGINE_SERVICE_NAME)
+        )
+
+        code, out, err = apply(host)
+
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertIn(
+            f"start: ok — recreated {ENGINE_SERVICE_NAME}: moved network member", out
+        )
+        calls = argv_calls(host)
+        self.assertNotIn(RECREATE_POSTGRES, calls)
+        self.assertLess(calls.index(INTEGRATION_STOP), calls.index(recreate_generator))
+        self.assertLess(calls.index(recreate_generator), calls.index(UP))
+
+    def test_preparation_refusals_never_stop_a_moved_network(self) -> None:
+        for failure in ("registry", "pull", "models"):
+            with self.subTest(failure=failure):
+                host = self.moved_host(INTEGRATION_NETWORK_NAME)
+                egress_path: str | None = None
+                if failure == "registry":
+                    inspect = manifest_inspect(PUBLIC_REF, insecure=False)
+                    host.commands[inspect] = done(inspect, 1, stderr="unavailable")
+                elif failure == "pull":
+                    host.commands[PULL] = done(PULL, 1, stderr="unavailable")
+                else:
+                    egress_path = "/fixture/missing-egress.yaml"
+
+                code, out, err = apply(host, egress_path=egress_path)
+
+                self.assertEqual((code, err), (1, ""))
+                self.assertEqual(stages(out)[-1], failure)
+                self.assertIn(INTEGRATION_READ, argv_calls(host))
+                self.assertNotIn(INTEGRATION_STOP, argv_calls(host))
+                self.assertFalse(any("--force-recreate" in call for call in argv_calls(host)))
+
+    def test_old_record_without_network_parts_reads_and_stops_nothing(self) -> None:
+        host = self.moved_host(INTEGRATION_NETWORK_NAME)
+        applied = yaml.safe_load(host.files[f"{RENDERED}/applied.yaml"])
+        del applied["top_level_parts"]["networks"]
+        host.files[f"{RENDERED}/applied.yaml"] = yaml.safe_dump(applied, sort_keys=False)
+
+        code, out, err = apply(host)
+
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertIn("network: ok — no network definition moved", out)
+        self.assertNotIn(INTEGRATION_READ, argv_calls(host))
+        self.assertNotIn(PROJECT_READ, argv_calls(host))
+        self.assertNotIn(INTEGRATION_STOP, argv_calls(host))
+
+    def test_project_network_stops_all_its_members_once_in_document_order(self) -> None:
+        host = self.moved_host(NETWORK_NAME)
+        host.commands[PROJECT_READ] = done(
+            PROJECT_READ,
+            stdout="".join(f"{service}-1\tgideon\n" for service in PROJECT_MEMBERS),
+        )
+
+        code, out, err = apply(host)
+
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertIn("network: ok — network gideon_gideon moved", out)
+        self.assertIn(f"stopped network members before recreate: {', '.join(PROJECT_MEMBERS)}", out)
+        self.assertEqual(argv_calls(host).count(PROJECT_STOP), 1)
+        self.assertLess(argv_calls(host).index(PROJECT_STOP), argv_calls(host).index(RECREATE_POSTGRES))
+        self.assertLess(argv_calls(host).index(RECREATE_POSTGRES), argv_calls(host).index(UP))
+
+    def test_failed_stop_refuses_recreate_with_first_members_logs_fix(self) -> None:
+        for failure in ("nonzero", "oserror"):
+            with self.subTest(failure=failure):
+                host = self.moved_host(NETWORK_NAME)
+                if failure == "nonzero":
+                    host.commands[PROJECT_STOP] = done(PROJECT_STOP, 1, stderr="stop failed")
+                else:
+                    host.run_errors.add(PROJECT_STOP)
+
+                code, out, err = apply(host)
+
+                self.assertEqual((code, err), (1, ""))
+                self.assertEqual(stages(out)[-1], "recreate")
+                self.assertIn("Compose stop failed", out)
+                self.assertIn("logs caddy", out)
+                self.assertNotIn(RECREATE_POSTGRES, argv_calls(host))
+                self.assertNotIn(UP, argv_calls(host))
+
+    def test_unmoved_integration_attachment_does_not_block_project_recreate(self) -> None:
+        host = self.moved_host(NETWORK_NAME)
+        host.commands[INTEGRATION_READ] = done(
+            INTEGRATION_READ, stdout="outside-client\t\n"
+        )
+        blocks = service_blocks(_EXAMPLE_INPUTS)
+        generator = blocks[ENGINE_SERVICE_NAME]
+        assert isinstance(generator, Mapping)
+        self.assertEqual(generator["networks"], [NETWORK_NAME, INTEGRATION_NETWORK_NAME])
+
+        code, out, err = apply(host)
+
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertIn("network: ok — network gideon_gideon moved", out)
+        self.assertNotIn(INTEGRATION_READ, argv_calls(host))
+        self.assertEqual(argv_calls(host).count(PROJECT_READ), 1)
+        self.assertEqual(argv_calls(host).count(PROJECT_STOP), 1)
+        recreated = [call[-1] for call in argv_calls(host) if "--force-recreate" in call]
+        self.assertEqual(len(recreated), len(service_names(_EXAMPLE_INPUTS)))
+        self.assertEqual(set(recreated), set(service_names(_EXAMPLE_INPUTS)))
+        self.assertEqual(recreated[0], "postgres")
+        self.assertLess(argv_calls(host).index(PROJECT_STOP), argv_calls(host).index(RECREATE_POSTGRES))
 
 
 class Refusals(unittest.TestCase):

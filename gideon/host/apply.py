@@ -14,6 +14,7 @@ from typing import Final, Protocol
 
 from gideon.host import (
     backuplock,
+    cotenants,
     egress,
     grafana,
     models,
@@ -43,7 +44,10 @@ from gideon.host.render.command import (
     render_to_disk,
 )
 from gideon.host.render.compose import (
+    PROJECT_NAME,
     STORE_SERVICES,
+    network_members,
+    network_name,
     service_images,
     service_names,
 )
@@ -262,6 +266,75 @@ def _render_stage(
     )
 
 
+def _network_stage(io: Host, context: _ApplyContext) -> StageResult:
+    """Refuse a moved network that a container outside production still joins.
+
+    Docker cannot remove a network while any container holds an endpoint on it,
+    so the recreate would fail midway; the read runs before anything is pulled,
+    stopped, or recreated. Production's own members are stopped by the recreate.
+    """
+
+    if not context.judgment.networks:
+        return StageResult("network", True, "no network definition moved", "")
+
+    details: list[str] = []
+    for key in context.judgment.networks:
+        docker_name = network_name(key)
+        try:
+            result = io.run(cotenants.network_ps_argv(docker_name))
+        except OSError as exc:
+            return StageResult(
+                "network",
+                False,
+                f"cannot read what is attached to {docker_name}: {exc}",
+                _docker_fix(),
+            )
+        if result.returncode != 0:
+            return StageResult(
+                "network",
+                False,
+                f"cannot read what is attached to {docker_name}: {command_detail(result)}",
+                _docker_fix(),
+            )
+        attached = cotenants.parse_rows(result.stdout)
+        foreign = cotenants.foreign(attached)
+        if foreign:
+            return StageResult(
+                "network",
+                False,
+                f"{docker_name}'s definition moved and containers outside GIDEON's "
+                f"projects are attached: {cotenants.describe(foreign)}",
+                "Announce the change to the attached containers' operator, wait "
+                f"until they have left {docker_name}, then re-run "
+                f"{report.command('apply')}.",
+            )
+
+        siblings: dict[str | None, list[str]] = {}
+        for row in attached:
+            if cotenants.is_marked(row) and row.project != PROJECT_NAME:
+                siblings.setdefault(row.project, []).append(row.name)
+        if siblings:
+            return StageResult(
+                "network",
+                False,
+                f"{docker_name}'s definition moved and another GIDEON project's "
+                f"containers are attached: {cotenants.describe(siblings)}",
+                "Take the named project down (the CI sibling with sudo python3 -m "
+                f"tools.cistack down), then re-run {report.command('apply')}.",
+            )
+
+        members = network_members(context.inputs, key)
+        if len(members) == 1:
+            member_detail = f"{members[0]} stops for its recreate"
+        elif members:
+            member_detail = f"{', '.join(members)} stop for their recreate"
+        else:
+            member_detail = "no rendered service stops for its recreate"
+        details.append(f"network {docker_name} moved; {member_detail}")
+
+    return StageResult("network", True, "; ".join(details), "")
+
+
 def _registry_stage(io: Host, context: _ApplyContext) -> StageResult:
     environment: Mapping[str, str] | None = None
     if context.inputs.site.egress_proxy:
@@ -455,6 +528,29 @@ def force_recreate_services(
     return None
 
 
+def _moved_network_members(context: _ApplyContext) -> tuple[str, ...]:
+    """Every rendered member of a moved network, in render order."""
+
+    members = {
+        member
+        for key in context.judgment.networks
+        for member in network_members(context.inputs, key)
+    }
+    return tuple(service for service in service_names(context.inputs) if service in members)
+
+
+def _recreated(context: _ApplyContext) -> tuple[str, ...]:
+    """The judged services and every moved network's members, in render order.
+
+    A stopped member Compose does not recreate keeps its endpoint on the removed
+    network and fails at ``up -d``, so each member is force-recreated whether or
+    not the judgment names it.
+    """
+
+    selected = {*context.judgment.services, *_moved_network_members(context)}
+    return tuple(service for service in service_names(context.inputs) if service in selected)
+
+
 def _recreate_detail(
     services: tuple[str, ...], judgment: RecreateJudgment, none_text: str
 ) -> str:
@@ -462,6 +558,7 @@ def _recreate_detail(
 
     One reason stands bare; several are joined by ``; ``, each naming the
     stage's services it covers, a service under two reasons appearing in both.
+    A service no reason covers is a moved network's member.
     """
 
     if not services:
@@ -470,6 +567,13 @@ def _recreate_detail(
         (label, [service for service in services if service in covered])
         for label, covered in judgment.reasons()
     ]
+    covered_any = {service for _, members in clauses for service in members}
+    clauses.append(
+        (
+            "moved network member",
+            [service for service in services if service not in covered_any],
+        )
+    )
     clauses = [(label, members) for label, members in clauses if members]
     if len(clauses) == 1:
         reason = clauses[0][0]
@@ -481,8 +585,27 @@ def _recreate_detail(
 def _recreate_stage(
     io: Host, rendered_dir: PathLike, context: _ApplyContext
 ) -> StageResult:
+    stopped = _moved_network_members(context)
+    if stopped:
+        try:
+            stop_result = io.run(stack.compose_argv(rendered_dir, "stop", *stopped))
+        except OSError as exc:
+            return StageResult(
+                "recreate",
+                False,
+                f"Compose stop failed for {', '.join(stopped)}: {exc}",
+                stack.logs_fix(rendered_dir, stopped[0]),
+            )
+        if stop_result.returncode != 0:
+            return StageResult(
+                "recreate",
+                False,
+                f"Compose stop failed for {', '.join(stopped)}: {command_detail(stop_result)}",
+                stack.logs_fix(rendered_dir, stopped[0]),
+            )
+
     store_recreate = tuple(
-        service for service in context.judgment.services if service in STORE_SERVICES
+        service for service in _recreated(context) if service in STORE_SERVICES
     )
     failure = force_recreate_services(io, rendered_dir, store_recreate, "recreate")
     if failure is not None:
@@ -511,6 +634,8 @@ def _recreate_stage(
         context.judgment,
         "no store-tier rendered file or compose block changed",
     )
+    if stopped:
+        detail = f"stopped network members before recreate: {', '.join(stopped)}; {detail}"
     return StageResult("recreate", True, detail, "")
 
 
@@ -518,7 +643,7 @@ def _start_stage(
     io: Host, rendered_dir: PathLike, context: _ApplyContext
 ) -> StageResult:
     other_recreate = tuple(
-        service for service in context.judgment.services if service not in STORE_SERVICES
+        service for service in _recreated(context) if service not in STORE_SERVICES
     )
     failure = force_recreate_services(io, rendered_dir, other_recreate, "start")
     if failure is not None:
@@ -1077,6 +1202,11 @@ def converge(
     )
     print_stage(rendered_result)
     if not rendered_result.ok or context is None:
+        return 1
+
+    network_result = _network_stage(io, context)
+    print_stage(network_result)
+    if not network_result.ok:
         return 1
 
     registry_result = _registry_stage(io, context)

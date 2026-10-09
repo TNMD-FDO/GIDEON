@@ -441,6 +441,15 @@ own published ports stay protected by the older rules. Announce the firewall
 consequence and the hour with the rollback; tell the co-tenant to re-add its
 rules after the old tree has run, and announce the return the same way.
 
+A rollback by `upgrade --rollback` or `restore` to a tag before the release
+that gave the engine its integration network, `gideon_integration`, renders
+`gideon-generator` on `gideon_gideon` alone, and the older sibling tool puts
+its relay back on `gideon_gideon` at its next `up`. `gideon_integration`
+stays in place with no engine on it, so a co-tenant's client on that network
+cannot reach the engine until GIDEON upgrades back or the client's operator
+moves it back to `gideon_gideon`. Announce that consequence and the hour with
+the rollback, and announce the return the same way.
+
 ## 4. Re-runs and refusals
 
 - `install` again on a live box: a no-op apply, an incremental set, a drill,

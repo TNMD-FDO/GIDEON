@@ -31,6 +31,7 @@ from gideon.host.render.ci import (
     ci_compose_document,
     ci_instruction,
 )
+from gideon.host.render.compose import integration_network_name
 from gideon.host.render.engine import EMBED_SECRET_NAME, ENGINE_SECRET_NAME
 from gideon.host.render.opensearch import (
     OPENSEARCH_GID,
@@ -67,6 +68,7 @@ class FakeHost:
     def __init__(self, *, euid: int = 0, network_returncode: int = 0) -> None:
         self.euid = euid
         self.network_returncode = network_returncode
+        self.network_containers: dict[str, object] = {}
         self.files: dict[str, str] = {
             os.fspath(SITE_PATH): (ROOT / "config/site.example.yaml").read_text(
                 encoding="utf-8"
@@ -101,10 +103,11 @@ class FakeHost:
         command = tuple(argv)
         self.commands.append(command)
         if command[:3] == ("docker", "network", "inspect"):
+            assert command == ("docker", "network", "inspect", integration_network_name())
             return completed(
                 command,
                 returncode=self.network_returncode,
-                stdout='[{"Containers": {}}]\n',
+                stdout=json.dumps([{"Containers": self.network_containers}]) + "\n",
                 stderr="network unavailable\n" if self.network_returncode else "",
             )
         if command[:2] == ("docker", "compose") and "ps" in command:
@@ -227,6 +230,18 @@ class Preconditions(unittest.TestCase):
     def result(self, host: FakeHost) -> StageResult:
         return cistack_run._preconditions(ci_stack(), host, site_path=SITE_PATH)
 
+    def test_available_integration_network_is_named_in_the_row(self) -> None:
+        host = FakeHost()
+
+        result = self.result(host)
+
+        self.assertTrue(result.ok)
+        self.assertIn("integration network", result.detail)
+        self.assertIn(
+            ("docker", "network", "inspect", integration_network_name()),
+            host.commands,
+        )
+
     def test_refusal_matrix_names_the_fix_and_stops_at_preconditions(self) -> None:
         cases = (
             ("root", FakeHost(euid=1000), "tools.cistack up"),
@@ -240,6 +255,9 @@ class Preconditions(unittest.TestCase):
                 self.assertFalse(result.ok)
                 self.assertIn(expected, result.fix)
                 self.assertEqual(result.name, "preconditions")
+                if name == "network":
+                    self.assertIn("integration Docker network", result.detail)
+                    self.assertEqual(result.fix, "Run sudo python3 -m gideon apply, then retry.")
 
     @staticmethod
     def _no_gpu_host() -> FakeHost:
@@ -772,6 +790,39 @@ class DownAndSecrets(unittest.TestCase):
             cistack_run.secrets.select_directory(original_directory)
         self.assertEqual(len(minted_values), 2)
         self.assertNotEqual(first_values, second_values)
+
+
+class Status(unittest.TestCase):
+    def test_relay_row_names_the_integration_network(self) -> None:
+        for attached in (False, True):
+            with self.subTest(attached=attached):
+                host = FakeHost()
+                host.files[f"{CI_ROOT}/compose.yaml"] = "services: {}\n"
+                if attached:
+                    host.network_containers["relay-id"] = {
+                        "Name": "fixture-relay",
+                        "Labels": {
+                            "com.docker.compose.project": cistack_run.CI_PROJECT,
+                            "com.docker.compose.service": cistack_run.RELAY_SERVICE_NAME,
+                        },
+                    }
+                output = io.StringIO()
+
+                with contextlib.redirect_stdout(output):
+                    code = cistack_run.status(ci_stack(), host)
+
+                self.assertEqual(code, 0)
+                state = "attached to" if attached else "absent from"
+                self.assertIn(
+                    f"relay: ok — engine relay is {state} the integration network",
+                    output.getvalue(),
+                )
+                if attached:
+                    self.assertIn("tools.cistack down before a restore", output.getvalue())
+                self.assertIn(
+                    ("docker", "network", "inspect", integration_network_name()),
+                    host.commands,
+                )
 
 
 class Cli(unittest.TestCase):

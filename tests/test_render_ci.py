@@ -47,13 +47,12 @@ from gideon.host.render.ci import (
     ci_env_file,
     ci_instruction,
     ci_manifest,
-    production_network_name,
 )
 from gideon.host.render.compose import (
     NETWORK_NAME,
-    PROJECT_NAME,
     SWAP_CEILING_BYTES,
     image_pin,
+    integration_network_name,
     memory_limit_bytes,
     mounted_secret_names,
     service_names,
@@ -62,6 +61,7 @@ from gideon.host.render.engine import (
     ENGINE_PORT,
     ENGINE_SECRET_NAME,
     ENGINE_SERVICE_NAME,
+    INTEGRATION_NETWORK_NAME,
 )
 from gideon.host.render.facts import HostFacts
 from gideon.host.render.opensearch import (
@@ -271,12 +271,14 @@ class Compose(unittest.TestCase):
             ),
         )
         networks = mapping(document["networks"])
+        self.assertEqual(tuple(networks), (NETWORK_NAME, INTEGRATION_NETWORK_NAME))
+        self.assertNotIn("production", networks)
         self.assertEqual(networks[NETWORK_NAME], {})
         self.assertEqual(
-            networks["production"],
-            {"external": True, "name": production_network_name()},
+            networks[INTEGRATION_NETWORK_NAME],
+            {"external": True, "name": integration_network_name()},
         )
-        self.assertEqual(production_network_name(), f"{PROJECT_NAME}_{NETWORK_NAME}")
+        self.assertEqual(integration_network_name(), "gideon_integration")
 
     def test_only_the_frontend_publishes_a_loopback_port(self) -> None:
         services = mapping(ci_compose_document(inputs())["services"])
@@ -337,11 +339,11 @@ class Compose(unittest.TestCase):
                 or path == f"/etc/gideon/secrets/{ENGINE_SECRET_NAME}"
             )
 
-    def test_relay_is_the_only_production_network_joiner_and_api_uses_it(self) -> None:
+    def test_relay_is_the_only_integration_network_joiner_and_api_uses_it(self) -> None:
         render_inputs = inputs()
         services = mapping(ci_compose_document(render_inputs)["services"])
         relay = mapping(services[RELAY_SERVICE_NAME])
-        self.assertEqual(relay["networks"], [NETWORK_NAME, "production"])
+        self.assertEqual(relay["networks"], [NETWORK_NAME, INTEGRATION_NETWORK_NAME])
         self.assertEqual(relay["entrypoint"], ["python3", "/relay/relay.py"])
         relay_volume = relay["volumes"]
         assert isinstance(relay_volume, list)
@@ -359,7 +361,7 @@ class Compose(unittest.TestCase):
         joiners = [
             name
             for name, value in services.items()
-            if "production" in list(mapping(value).get("networks", []))  # type: ignore[call-overload]
+            if INTEGRATION_NETWORK_NAME in list(mapping(value).get("networks", []))  # type: ignore[call-overload]
         ]
         self.assertEqual(joiners, [RELAY_SERVICE_NAME])
         for name in joiners:

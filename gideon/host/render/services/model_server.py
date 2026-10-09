@@ -7,7 +7,11 @@ from gideon.host import gpus, weights
 from gideon.host.images import RegistryTarget, parse_registry, reference
 from gideon.host.models import ModelPin
 from gideon.host.render import RenderInputs
-from gideon.host.render.engine import GENERATOR, ModelServerMember
+from gideon.host.render.engine import (
+    GENERATOR,
+    INTEGRATION_NETWORK_NAME,
+    ModelServerMember,
+)
 from gideon.host.render.services import (
     MountedSecret,
     ServiceDefinition,
@@ -136,6 +140,9 @@ def model_service(
         environment[name] = value
     environment.pop("TZ", None)
     environment["TZ"] = inputs.site.office.timezone
+    networks = ["gideon"]
+    if member.joins_integration_network:
+        networks.append(INTEGRATION_NETWORK_NAME)
     return {
         "image": reference(target, image_pin(inputs, "vllm-openai")),
         "restart": "unless-stopped",
@@ -148,7 +155,7 @@ def model_service(
         "volumes": [f"{weights.MODELS_ROOT}:{hf_home}:ro"],
         "secrets": [member.secret_name],
         "healthcheck": dict(model_healthcheck(member)),
-        "networks": ["gideon"],
+        "networks": networks,
     }
 
 

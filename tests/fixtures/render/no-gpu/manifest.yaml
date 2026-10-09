@@ -15,7 +15,7 @@ inputs:
   build_box: false
 files:
   compose.yaml:
-    sha256: "eda14b0d1c017413b826e90c40766bdb97067683b36831492d6a25341c0ade0c"
+    sha256: "1894cc56671c80062950603a1d1cad3134e691a0efc37747462a2564c793fb4e"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
@@ -210,9 +210,9 @@ services:
   postgres-exporter: "71024e25f248a0a94b2ea92c4f48813f8b4f95e3d17d41522f300fa9f1407291"
   cadvisor: "6e4def0c2cc0e80a5357574ad6a8e81286c1f29140a78422632c6e860d14d83e"
   blackbox-exporter: "959ff7e850d35c00a0a178fca5cf671d37dffa6ea5db86790b9166f5182999d3"
-top_level: "88c69bd974e576f43cc06d43d05af38b515087ec0883a345d422bdd57d6989fc"
+top_level: "d319eb68e802c967a383824f8d24db48bb38b27ea9c0f4249ff6747a5ea9cc5d"
 top_level_parts:
-  static: "61fdb7792fd6cf372e9432c5e781656dd757524791b5bad7318f028abed07b94"
+  static: "9d8f1896c9ac3c179131b112cf67afcceeee7672c19635149ea32c986c4dcb6a"
   secrets:
     tls_key:
       sha256: "7f0573b4c1802e8ff8b41a7577595a36ff897f93a664cbda3c291a1da8cd17cf"
@@ -263,3 +263,7 @@ top_level_parts:
       sha256: "a89f49fbb102aa419c38007e9f09d713bde51256f25062db22689378542dfab1"
       mounts:
         - "gideon-worker"
+  networks:
+    gideon: "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
+    internal: "cb59b295bf6f3c8c9ef5c9eb85c7281c911ece8f10d06b4274d03561e28f4aa8"
+    integration: "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"

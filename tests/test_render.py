@@ -13,6 +13,7 @@ import unittest
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 from urllib.parse import urlsplit
 
 import yaml  # type: ignore[import-untyped]
@@ -60,7 +61,10 @@ from gideon.host.render.compose import (
     ENGINE_HEALTHCHECK,
     ENGINE_READY_SECONDS,
     ENGINE_USAGE_SWITCHES,
+    INTERNAL_NETWORK_NAME,
+    NETWORK_NAME,
     OWUI_COMMAND,
+    PROJECT_NAME,
     UNIT_PATTERN,
     ComposeArtifact,
     compose_top_level,
@@ -68,6 +72,9 @@ from gideon.host.render.compose import (
     engine_service,
     engine_wrapper,
     grafana_environment,
+    network_members,
+    network_name,
+    service_blocks,
     service_images,
     service_names,
 )
@@ -78,6 +85,7 @@ from gideon.host.render.engine import (
     ENGINE_PORT,
     ENGINE_SECRET_NAME,
     ENGINE_SERVICE_NAME,
+    INTEGRATION_NETWORK_NAME,
     engine_metrics_target,
 )
 from gideon.host.render.facts import FactsError, HostFacts, gather_facts
@@ -481,9 +489,89 @@ class Registry(unittest.TestCase):
 
 
 class Compose(unittest.TestCase):
-    def test_internal_network_is_declared_after_the_project_network(self) -> None:
+    def test_networks_are_declared_in_project_internal_integration_order(self) -> None:
         networks = compose_top_level(inputs())["networks"]
-        self.assertEqual(networks, {"gideon": {}, "internal": {"internal": True}})
+        assert isinstance(networks, Mapping)
+        self.assertEqual(
+            networks,
+            {
+                NETWORK_NAME: {},
+                INTERNAL_NETWORK_NAME: {"internal": True},
+                INTEGRATION_NETWORK_NAME: {},
+            },
+        )
+        self.assertEqual(
+            tuple(networks),
+            (NETWORK_NAME, INTERNAL_NETWORK_NAME, INTEGRATION_NETWORK_NAME),
+        )
+
+    def test_integration_members_follow_the_rendered_service_blocks(self) -> None:
+        for site_path, no_gpu in ((EXAMPLE, False), (SECOND, False), (EXAMPLE, True)):
+            with self.subTest(site=site_path.name, no_gpu=no_gpu):
+                rendered_inputs = inputs(site_path, no_gpu=no_gpu)
+                blocks = service_blocks(rendered_inputs)
+                joiners = tuple(
+                    name
+                    for name, block in blocks.items()
+                    if isinstance(block, Mapping)
+                    and INTEGRATION_NETWORK_NAME in block["networks"]
+                )
+                self.assertEqual(joiners, () if no_gpu else (ENGINE_SERVICE_NAME,))
+                self.assertEqual(
+                    network_members(rendered_inputs, INTEGRATION_NETWORK_NAME), joiners
+                )
+                internal = network_members(rendered_inputs, INTERNAL_NETWORK_NAME)
+                self.assertEqual(
+                    set(internal),
+                    {"prometheus", "postgres", "gideon-worker", "gideon-egress"},
+                )
+                self.assertEqual(
+                    internal, tuple(name for name in blocks if name in internal)
+                )
+
+    def test_network_names(self) -> None:
+        networks = compose_top_level(inputs())["networks"]
+        assert isinstance(networks, Mapping)
+        for key in networks:
+            self.assertEqual(network_name(key), f"{PROJECT_NAME}_{key}")
+
+    def test_compose_digests_identify_each_network_definition(self) -> None:
+        rendered_inputs = inputs()
+        networks = compose_top_level(rendered_inputs)["networks"]
+        assert isinstance(networks, Mapping)
+        digests = compose_digests(rendered_inputs).top_level_parts.networks
+        assert digests is not None
+        self.assertEqual(tuple(digests), tuple(networks))
+        for key, entry in networks.items():
+            with self.subTest(network=key):
+                self.assertIsInstance(entry, Mapping)
+                self.assertEqual(
+                    digests[key], hashlib.sha256(dump_fragment(entry).encode()).hexdigest()
+                )
+
+    def test_moved_network_definition_moves_the_static_part(self) -> None:
+        """Every member of a moved network is then judged, so each is force-recreated.
+
+        A stopped member Compose never recreates still points at the removed
+        network and fails at ``up -d``, so the static part must cover the entries.
+        """
+
+        rendered_inputs = inputs()
+        before = compose_digests(rendered_inputs).top_level_parts
+        top_level = dict(compose_top_level(rendered_inputs))
+        networks = top_level["networks"]
+        assert isinstance(networks, Mapping)
+        top_level["networks"] = {**networks, INTEGRATION_NETWORK_NAME: {"internal": True}}
+        with mock.patch(
+            "gideon.host.render.command.compose_top_level", return_value=top_level
+        ):
+            after = compose_digests(rendered_inputs).top_level_parts
+        assert before.networks is not None and after.networks is not None
+        self.assertNotEqual(before.static, after.static)
+        self.assertNotEqual(
+            before.networks[INTEGRATION_NETWORK_NAME], after.networks[INTEGRATION_NETWORK_NAME]
+        )
+        self.assertEqual(before.networks[NETWORK_NAME], after.networks[NETWORK_NAME])
 
     def test_frontend_command_is_explicit_in_production_and_drill_documents(self) -> None:
         documents = (
@@ -1822,6 +1910,31 @@ class RenderCommand(unittest.TestCase):
         )
         self.assertTrue(lines[lines.index(row) + 2].startswith("Summary:"))
 
+    def test_diff_names_moved_network_after_service_reasons_only_when_moved(self) -> None:
+        host = DirHost(checkout_files())
+        self.assertEqual(render(host)[0], 0)
+        candidate = host.files[f"{RENDERED}/manifest.yaml"]
+        host.files[f"{RENDERED}/applied.yaml"] = candidate
+        code, out, err = render(host, diff=True)
+        self.assertEqual((code, err), (0, ""))
+        self.assertNotIn("  networks recreated, their members stopped first:", out)
+
+        applied = yaml.safe_load(candidate)
+        applied["top_level"] = "0" * 64
+        applied["top_level_parts"]["static"] = "0" * 64
+        applied["top_level_parts"]["networks"][INTEGRATION_NETWORK_NAME] = "0" * 64
+        host.files[f"{RENDERED}/applied.yaml"] = yaml.safe_dump(applied, sort_keys=False)
+        code, out, err = render(host, diff=True)
+        self.assertEqual((code, err), (0, ""))
+        lines = out.splitlines()
+        reason = f"  changed compose top-level: {', '.join(service_names(inputs()))}"
+        self.assertEqual(
+            lines[lines.index(reason) + 1],
+            "  networks recreated, their members stopped first: "
+            f"{INTEGRATION_NETWORK_NAME} ({network_name(INTEGRATION_NETWORK_NAME)})",
+        )
+        self.assertTrue(lines[lines.index(reason) + 2].startswith("Summary:"))
+
     def test_emitter_failure_is_a_refusal_not_a_traceback(self) -> None:
         files = checkout_files()
         files[SITE] += "\nregistry: http://user:pw@ghcr.io\n"
@@ -1868,6 +1981,7 @@ class RecreateRule(unittest.TestCase):
         )
 
     def test_no_applied_manifest_recreates_every_current_service(self) -> None:
+        self.assertEqual(self.judgment(None).networks, ())
         self.assertEqual(
             recreate_services(
                 self.rendered(), None, ("caddy", "later"), compose_digests(inputs())
@@ -2060,6 +2174,68 @@ class RecreateRule(unittest.TestCase):
                 self.assertEqual(judgment.secrets, ())
                 self.assertEqual(judgment.changed_entries, ())
 
+    def test_moved_network_names_every_service_and_preserves_network_order(self) -> None:
+        applied = self.applied_with_parts()
+        assert applied.top_level_parts is not None
+        parts = applied.top_level_parts
+        assert parts.networks is not None
+        recorded = dict(parts.networks)
+        for key in (NETWORK_NAME, INTEGRATION_NETWORK_NAME):
+            recorded[key] = "0" * 64
+        judgment = self.judgment(
+            replace(
+                applied,
+                top_level="0" * 64,
+                top_level_parts=replace(parts, static="0" * 64, networks=recorded),
+            )
+        )
+        self.assertEqual(judgment.networks, (NETWORK_NAME, INTEGRATION_NETWORK_NAME))
+        self.assertEqual(judgment.top_level, service_names(inputs()))
+        self.assertEqual(judgment.services, judgment.top_level)
+        self.assertEqual(
+            judgment.reasons(), (("changed compose top-level", judgment.services),)
+        )
+
+    def test_network_judgment_requires_digests_on_both_sides(self) -> None:
+        applied = self.applied_with_parts()
+        assert applied.top_level_parts is not None
+        parts = applied.top_level_parts
+        assert parts.networks is not None
+        self.assertEqual(self.judgment(applied).networks, ())
+        self.assertEqual(
+            self.judgment(replace(applied, top_level_parts=replace(parts, networks=None))).networks,
+            (),
+        )
+        self.assertEqual(self.judgment(replace(applied, top_level_parts=None)).networks, ())
+
+        recorded = dict(parts.networks)
+        del recorded[INTEGRATION_NETWORK_NAME]
+        self.assertEqual(
+            self.judgment(
+                replace(applied, top_level_parts=replace(parts, networks=recorded))
+            ).networks,
+            (),
+        )
+        candidate = compose_digests(inputs())
+        candidate_parts = candidate.top_level_parts
+        assert candidate_parts.networks is not None
+        candidate_networks = dict(candidate_parts.networks)
+        del candidate_networks[INTEGRATION_NETWORK_NAME]
+        recorded_with_change = dict(parts.networks)
+        recorded_with_change[INTEGRATION_NETWORK_NAME] = "0" * 64
+        self.assertEqual(
+            recreate_judgment(
+                self.rendered(),
+                replace(applied, top_level_parts=replace(parts, networks=recorded_with_change)),
+                service_names(inputs()),
+                replace(
+                    candidate,
+                    top_level_parts=replace(candidate_parts, networks=candidate_networks),
+                ),
+            ).networks,
+            (),
+        )
+
     def test_unattributed_top_level_move_names_every_service(self) -> None:
         """Old or unexplained records retain the shared top-level rule."""
 
@@ -2112,7 +2288,7 @@ class RecreateRule(unittest.TestCase):
         parts = document["top_level_parts"]
         keys = tuple(document)
         self.assertEqual(keys[keys.index("top_level") + 1], "top_level_parts")
-        self.assertEqual(tuple(parts), ("static", "secrets"))
+        self.assertEqual(tuple(parts), ("static", "secrets", "networks"))
         self.assertEqual(tuple(parts["secrets"]), tuple(entries))
         static = {name: value for name, value in top_level.items() if name != "secrets"}
         self.assertEqual(
@@ -2128,6 +2304,16 @@ class RecreateRule(unittest.TestCase):
                     part["sha256"], hashlib.sha256(dump_fragment(entry).encode()).hexdigest()
                 )
                 self.assertEqual(part["mounts"], list(consumers[name].mounts))
+        networks = top_level["networks"]
+        assert isinstance(networks, Mapping)
+        self.assertEqual(tuple(parts["networks"]), tuple(networks))
+        for name, entry in networks.items():
+            with self.subTest(network=name):
+                self.assertIsInstance(entry, Mapping)
+                self.assertEqual(
+                    parts["networks"][name],
+                    hashlib.sha256(dump_fragment(entry).encode()).hexdigest(),
+                )
 
     def test_written_manifest_read_back_judges_empty(self) -> None:
         """A persisted candidate record attributes no pending change."""
@@ -2146,9 +2332,23 @@ class RecreateRule(unittest.TestCase):
         self.assertIsNotNone(applied)
         assert applied is not None
         self.assertIsNotNone(applied.top_level_parts)
+        assert applied.top_level_parts is not None
+        self.assertEqual(
+            applied.top_level_parts.networks, compose_digests(rendered_inputs).top_level_parts.networks
+        )
         judgment = self.judgment(applied)
         self.assertEqual(judgment.services, ())
         self.assertEqual(judgment.changed_entries, ())
+        self.assertEqual(judgment.networks, ())
+
+        old_document = yaml.safe_load(document)
+        del old_document["top_level_parts"]["networks"]
+        older = read_applied_manifest(
+            DirHost({str(path): yaml.safe_dump(old_document)}), path
+        )
+        assert older is not None and older.top_level_parts is not None
+        self.assertIsNone(older.top_level_parts.networks)
+        self.assertEqual(self.judgment(older).networks, ())
 
     def test_applied_manifest_absent_vs_corrupt(self) -> None:
         host = DirHost({})
@@ -2181,6 +2381,10 @@ class RecreateRule(unittest.TestCase):
             {"static": "digest", "secrets": {"example_key": {"sha256": "digest"}}},
             {"static": "digest", "secrets": {"example_key": {"sha256": "digest", "mounts": "service"}}},
             {"static": "digest", "secrets": {"example_key": {"sha256": "digest", "mounts": [1]}}},
+            {"static": "digest", "secrets": {}, "networks": None},
+            {"static": "digest", "secrets": {}, "networks": []},
+            {"static": "digest", "secrets": {}, "networks": {1: "digest"}},
+            {"static": "digest", "secrets": {}, "networks": {"integration": 1}},
         )
         for parts in invalid_parts:
             with self.subTest(parts=parts):

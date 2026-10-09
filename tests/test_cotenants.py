@@ -19,6 +19,7 @@ from gideon.host.cotenants import (
     foreign,
     guard,
     is_marked,
+    network_ps_argv,
     parse_rows,
     publish_ps_argv,
     running_containers,
@@ -66,6 +67,15 @@ class Reader(unittest.TestCase):
         self.assertEqual(
             publish_ps_argv(443),
             ("docker", "ps", "--filter", "publish=443", "--format", DOCKER_PS_ARGV[-1]),
+        )
+
+    def test_network_read_filters_the_shared_name_and_project_format(self) -> None:
+        self.assertEqual(
+            network_ps_argv("gideon_integration"),
+            (
+                "docker", "ps", "--filter", "network=gideon_integration", "--format",
+                DOCKER_PS_ARGV[-1],
+            ),
         )
 
     def test_parser_returns_valid_rows_with_optional_project(self) -> None:
