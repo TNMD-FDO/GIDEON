@@ -26,7 +26,7 @@ _IMAGE_DIR = Path("/var/lib/libvirt/images")
 _LIBVIRT_NETWORK = "default"
 _BRIDGE_CIDR = LIBVIRT_BRIDGE_CIDR
 _REGISTRY_TAG = "gideon-registry"
-_REGISTRY_UNIT = Path("/etc/systemd/system/gideon-registry.service")
+REGISTRY_UNIT = Path("/etc/systemd/system/gideon-registry.service")
 _RUNNER_USER = "gh-runner"
 _RUNNER_HOME = Path("/home/gh-runner")
 _RUNNER_DIR = Path("/opt/gh-runner")
@@ -36,7 +36,7 @@ _RUNNER_SETTINGS_FILE = _RUNNER_DIR / ".runner"
 _RUNNER_MIGRATED_SETTINGS = _RUNNER_DIR / ".runner_migrated"
 _RUNNER_SERVICE = _RUNNER_DIR / ".service"
 _RUNNER_TOKEN = Path("/etc/gideon/secrets/gh_runner_token")
-_RUNNER_SUDOERS = Path("/etc/sudoers.d/gideon-acceptance")
+RUNNER_SUDOERS = Path("/etc/sudoers.d/gideon-acceptance")
 _RUNNER_SUDOERS_CANDIDATE = Path("/etc/sudoers.d/gideon-acceptance.candidate")
 _RUNNER_PACKAGE = "python3-venv"
 # The runner matches the ACTIONS_RUNNER_INPUT_ prefix case-insensitively and
@@ -239,14 +239,14 @@ class RegistryStep(Step):
 
     def check(self, context: ProvisionContext) -> CheckResult:
         expected = _registry_unit_text(context.lock.registry_image)
-        if not context.host.exists(_REGISTRY_UNIT):
-            return CheckResult(Disposition.DRIFT, f"{_REGISTRY_UNIT} is missing", _REGISTRY_FIX)
+        if not context.host.exists(REGISTRY_UNIT):
+            return CheckResult(Disposition.DRIFT, f"{REGISTRY_UNIT} is missing", _REGISTRY_FIX)
         try:
-            current = context.host.read_text(_REGISTRY_UNIT)
+            current = context.host.read_text(REGISTRY_UNIT)
         except (OSError, UnicodeError) as exc:
-            return CheckResult(Disposition.UNFIXABLE, f"cannot read {_REGISTRY_UNIT}: {exc}", _REGISTRY_FIX)
+            return CheckResult(Disposition.UNFIXABLE, f"cannot read {REGISTRY_UNIT}: {exc}", _REGISTRY_FIX)
         if current != expected:
-            return CheckResult(Disposition.DRIFT, f"{_REGISTRY_UNIT} differs from the pinned registry", _REGISTRY_FIX)
+            return CheckResult(Disposition.DRIFT, f"{REGISTRY_UNIT} differs from the pinned registry", _REGISTRY_FIX)
         enabled = context.host.run(["systemctl", "is-enabled", "gideon-registry"])
         active = context.host.run(["systemctl", "is-active", "gideon-registry"])
         if enabled.returncode != 0 or active.returncode != 0:
@@ -278,15 +278,15 @@ class RegistryStep(Step):
             )
         expected = _registry_unit_text(image)
         changed = True
-        if context.host.exists(_REGISTRY_UNIT):
+        if context.host.exists(REGISTRY_UNIT):
             try:
-                changed = context.host.read_text(_REGISTRY_UNIT) != expected
+                changed = context.host.read_text(REGISTRY_UNIT) != expected
             except (OSError, UnicodeError):
                 changed = True
-        context.host.write_text(_REGISTRY_UNIT, expected)
+        context.host.write_text(REGISTRY_UNIT, expected)
         if changed:
             context.host.run(["systemctl", "daemon-reload"], check=True)
-            if context.host.exists(_REGISTRY_UNIT):
+            if context.host.exists(REGISTRY_UNIT):
                 context.host.run(["systemctl", "restart", "gideon-registry"], check=True)
         context.host.run(["systemctl", "enable", "--now", "gideon-registry"], check=True)
 
@@ -526,45 +526,45 @@ class GhRunnerStep(Step):
         )
 
     def _sudoers_check(self, context: ProvisionContext) -> CheckResult | None:
-        if not context.host.exists(_RUNNER_SUDOERS):
+        if not context.host.exists(RUNNER_SUDOERS):
             return CheckResult(
                 Disposition.DRIFT,
-                f"{_RUNNER_SUDOERS} is missing",
+                f"{RUNNER_SUDOERS} is missing",
                 _RUNNER_SUDOERS_FIX,
             )
         try:
-            current = context.host.read_text(_RUNNER_SUDOERS)
+            current = context.host.read_text(RUNNER_SUDOERS)
         except (OSError, UnicodeError) as exc:
             return CheckResult(
                 Disposition.UNFIXABLE,
-                f"cannot read {_RUNNER_SUDOERS}: {exc}",
+                f"cannot read {RUNNER_SUDOERS}: {exc}",
                 _RUNNER_SUDOERS_FIX,
             )
         if current != self._sudoers_text():
             return CheckResult(
                 Disposition.DRIFT,
-                f"{_RUNNER_SUDOERS} differs from the runner's rules",
+                f"{RUNNER_SUDOERS} differs from the runner's rules",
                 _RUNNER_SUDOERS_FIX,
             )
         try:
-            details = context.host.stat(_RUNNER_SUDOERS)
+            details = context.host.stat(RUNNER_SUDOERS)
         except OSError as exc:
             return CheckResult(
                 Disposition.UNFIXABLE,
-                f"cannot stat {_RUNNER_SUDOERS}: {exc}",
+                f"cannot stat {RUNNER_SUDOERS}: {exc}",
                 _RUNNER_SUDOERS_FIX,
             )
         mode = stat.S_IMODE(details.st_mode)
         if mode != 0o440:
             return CheckResult(
                 Disposition.DRIFT,
-                f"{_RUNNER_SUDOERS} has mode {mode:04o}, expected 0440",
+                f"{RUNNER_SUDOERS} has mode {mode:04o}, expected 0440",
                 _RUNNER_SUDOERS_FIX,
             )
         if details.st_uid != 0 or details.st_gid != 0:
             return CheckResult(
                 Disposition.DRIFT,
-                f"{_RUNNER_SUDOERS} is owned by {details.st_uid}:{details.st_gid}, expected root:root",
+                f"{RUNNER_SUDOERS} is owned by {details.st_uid}:{details.st_gid}, expected root:root",
                 _RUNNER_SUDOERS_FIX,
             )
         return None
@@ -782,9 +782,9 @@ class GhRunnerStep(Step):
                 "mv",
                 "-f",
                 str(_RUNNER_SUDOERS_CANDIDATE),
-                str(_RUNNER_SUDOERS),
+                str(RUNNER_SUDOERS),
             ],
             check=True,
         )
-        context.host.chmod(_RUNNER_SUDOERS, 0o440)
-        context.host.chown(_RUNNER_SUDOERS, 0, 0)
+        context.host.chmod(RUNNER_SUDOERS, 0o440)
+        context.host.chown(RUNNER_SUDOERS, 0, 0)

@@ -17,6 +17,7 @@ from gideon.host import (
     restore,
     rotate,
     tls,
+    uninstall,
     upgrade,
     users,
     weights,
@@ -54,6 +55,10 @@ def run_install(args: argparse.Namespace) -> int:
 
 def run_upgrade(args: argparse.Namespace) -> int:
     return _guarded("upgrade", upgrade.run_upgrade, args)
+
+
+def run_uninstall(args: argparse.Namespace) -> int:
+    return _guarded("uninstall", uninstall.run_uninstall, args)
 
 
 def run_registry_mirror(args: argparse.Namespace) -> int:

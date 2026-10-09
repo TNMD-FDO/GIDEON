@@ -46,7 +46,7 @@ _LSBLK = [
     "NAME,TYPE,SIZE,WWN,FSTYPE,MOUNTPOINT,PKNAME",
 ]
 _FSTAB = Path("/etc/fstab")
-_DATA_MOUNT = Path("/data")
+DATA_MOUNT = Path("/data")
 _VG = "vg_data"
 _LV = "data"
 # The box prints GIDEON's own volume as /dev/mapper/vg_data-data.
@@ -73,20 +73,20 @@ class _DataDirectory:
 _DATA_DIRS: Final[tuple[_DataDirectory, ...]] = (
     _DataDirectory("fast", "gideon", 0o755),
     _DataDirectory(
-        str(Path(QDRANT_DATA_ROOT).relative_to(_DATA_MOUNT)), "gideon", 0o750
+        str(Path(QDRANT_DATA_ROOT).relative_to(DATA_MOUNT)), "gideon", 0o750
     ),
     _DataDirectory(
-        str(Path(OPENSEARCH_DATA_ROOT).relative_to(_DATA_MOUNT)), "opensearch", 0o700
+        str(Path(OPENSEARCH_DATA_ROOT).relative_to(DATA_MOUNT)), "opensearch", 0o700
     ),
     _DataDirectory("bulk", "gideon", 0o755),
     _DataDirectory(
-        str(cas.ROOT.relative_to(_DATA_MOUNT)), "gideon", cas.DIRECTORY_MODE
+        str(cas.ROOT.relative_to(DATA_MOUNT)), "gideon", cas.DIRECTORY_MODE
     ),
     _DataDirectory(
-        str(worker.SNAPSHOTS_ROOT.relative_to(_DATA_MOUNT)), "gideon", worker.DIR_MODE
+        str(worker.SNAPSHOTS_ROOT.relative_to(DATA_MOUNT)), "gideon", worker.DIR_MODE
     ),
     _DataDirectory(
-        str(worker.WORK_ROOT.relative_to(_DATA_MOUNT)), "gideon", worker.DIR_MODE
+        str(worker.WORK_ROOT.relative_to(DATA_MOUNT)), "gideon", worker.DIR_MODE
     ),
     _DataDirectory("models", "gideon", 0o755),
     _DataDirectory("registry", "gideon", 0o755),
@@ -98,6 +98,14 @@ _DATA_DIRS: Final[tuple[_DataDirectory, ...]] = (
     _DataDirectory("observability/prometheus", "prometheus", 0o750),
     _DataDirectory("observability/grafana", "grafana", 0o750),
 )
+
+
+def data_directories() -> tuple[str, ...]:
+    """Top-level managed directories beneath /data, in layout order."""
+
+    return tuple(
+        dict.fromkeys(directory.relative_path.split("/", 1)[0] for directory in _DATA_DIRS)
+    )
 
 
 def _owner_ids(uid: int, gid: int) -> Mapping[str, tuple[int, int]]:
@@ -348,7 +356,7 @@ def _read_mount(host: Host) -> tuple[_Mount | None, str | None]:
     result = host.run(
         [
             "findmnt", "-rn", "-b", "-o", "TARGET,SOURCE,FSTYPE,SIZE",
-            "--mountpoint", str(_DATA_MOUNT),
+            "--mountpoint", str(DATA_MOUNT),
         ]
     )
     if result.returncode in (126, 127):
@@ -359,7 +367,7 @@ def _read_mount(host: Host) -> tuple[_Mount | None, str | None]:
     if result.returncode != 0:
         return None, None
     fields = result.stdout.split()
-    if len(fields) != 4 or fields[0] != str(_DATA_MOUNT):
+    if len(fields) != 4 or fields[0] != str(DATA_MOUNT):
         return None, "findmnt returned an unreadable /data mount"
     try:
         size_bytes = int(fields[3])
@@ -377,7 +385,7 @@ def _occupied_data_detail(names: tuple[str, ...]) -> str:
     remaining = count - _DATA_NAMES_CAP
     if remaining > 0:
         shown += f", and {remaining} more"
-    return f"{_DATA_MOUNT} is not a mount point and holds {count} {entry}: {shown}"
+    return f"{DATA_MOUNT} is not a mount point and holds {count} {entry}: {shown}"
 
 
 def _read_fstab(host: Host) -> str | None:
@@ -430,7 +438,7 @@ def _unmanaged_data_entry(line: str) -> bool:
     if not stripped or stripped.startswith("#"):
         return False
     fields = stripped.split()
-    return len(fields) >= 2 and fields[1] == str(_DATA_MOUNT)
+    return len(fields) >= 2 and fields[1] == str(DATA_MOUNT)
 
 
 def _has_unmanaged_data_entry(text: str) -> bool:
@@ -453,7 +461,7 @@ def _replace_fstab(text: str, block: str) -> str:
 def _directory_state(host: Host, uid: int, gid: int) -> str | None:
     owners = _owner_ids(uid, gid)
     for directory in _DATA_DIRS:
-        path = _DATA_MOUNT / directory.relative_path
+        path = DATA_MOUNT / directory.relative_path
         if not host.exists(path):
             return f"directory {path} is missing"
         try:
@@ -562,13 +570,13 @@ def _inspect(context: ProvisionContext) -> _Inspection:
         )
     data_names: tuple[str, ...] = ()
     data_list_error: str | None = None
-    if mount is None and context.host.exists(_DATA_MOUNT):
+    if mount is None and context.host.exists(DATA_MOUNT):
         try:
-            data_names = tuple(sorted(context.host.listdir(_DATA_MOUNT)))
+            data_names = tuple(sorted(context.host.listdir(DATA_MOUNT)))
         except FileNotFoundError:
             pass
         except OSError as exc:
-            data_list_error = f"cannot list {_DATA_MOUNT}: {exc}"
+            data_list_error = f"cannot list {DATA_MOUNT}: {exc}"
 
     pv_exists, vg_exists, lv_exists, foreign_pv, vg_size = _lvm_state(
         context.host, data_disk
@@ -694,7 +702,7 @@ def _apply_directories(context: ProvisionContext) -> None:
         )
     owners = _owner_ids(entry.uid, entry.gid)
     for directory in _DATA_DIRS:
-        path = _DATA_MOUNT / directory.relative_path
+        path = DATA_MOUNT / directory.relative_path
         owner_uid, owner_gid = owners[directory.owner]
         context.host.mkdir(path, mode=directory.mode, exist_ok=True)
         context.host.chmod(path, directory.mode)
@@ -882,7 +890,7 @@ class DiskLayoutStep(Step):
         expected = _fstab_block(uuid)
         if not _fstab_has_block(current_fstab, expected):
             context.host.write_text(_FSTAB, _replace_fstab(current_fstab, expected))
-        context.host.mkdir(_DATA_MOUNT, mode=0o755, exist_ok=True)
+        context.host.mkdir(DATA_MOUNT, mode=0o755, exist_ok=True)
         current_mount, mount_error = _read_mount(context.host)
         if mount_error is not None:
             raise StepFailure(mount_error, _MOUNT_READ_FIX)
@@ -893,5 +901,5 @@ class DiskLayoutStep(Step):
                 "Re-run provision to judge the new /data mount.",
             )
         if current_mount is None:
-            context.host.run(["mount", str(_DATA_MOUNT)], check=True)
+            context.host.run(["mount", str(DATA_MOUNT)], check=True)
         _apply_directories(context)

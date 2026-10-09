@@ -46,7 +46,7 @@ _CONTAINERD_VERIFY = ("dpkg", "--verify", "containerd.io")
 _CONTAINERD_DUMP = ("containerd", "--config", str(_CONTAINERD_CONFIG), "config", "dump")
 _CONTAINERD_DEFAULT_ROOT = Path("/var/lib/containerd")
 _CONTAINERD_ROOT = Path("/var/lib/docker/containerd")
-_JOURNALD = Path("/etc/systemd/journald.conf.d/gideon.conf")
+JOURNALD_DROP_IN = Path("/etc/systemd/journald.conf.d/gideon.conf")
 _JOURNALD_CAT = ("systemd-analyze", "cat-config", "systemd/journald.conf")
 _JOURNALD_KEYS = ("Storage", "SystemMaxUse", "MaxRetentionSec")
 _JOURNAL_DIR = Path("/var/log/journal")
@@ -100,7 +100,7 @@ _CONTAINERD_VERIFY_FIX = "Repair dpkg's containerd.io verification, then re-run 
 _CONTAINERD_DUMP_FIX = f"Repair {_CONTAINERD_CONFIG} or the files it imports by hand (containerd config dump names the error), then re-run provision."
 _CONTAINERD_READ_FIX = f"Repair access to {_CONTAINERD_CONFIG}, then re-run provision."
 _JOURNALD_READ_FIX = "Repair journald's configuration so systemd-analyze can read it, then re-run provision."
-_JOURNALD_DROP_IN_FIX = f"Repair access to {_JOURNALD}, then re-run provision."
+_JOURNALD_DROP_IN_FIX = f"Repair access to {JOURNALD_DROP_IN}, then re-run provision."
 _DAEMON_OBJECT_FIX = f"Repair {_DAEMON} by hand as one JSON object, then re-run provision."
 _DAEMON_CONTAINER_FIX = f"Repair the named key in {_DAEMON} by hand, then re-run provision."
 _DAEMON_SET_FIX = f"Announce a maintenance window to every project sharing the daemon (docs/runbooks/install-upgrade.md §9), since writing GIDEON's daemon.json keys restarts Docker, which reaches every container on the box; then re-run provision {ACKNOWLEDGE_DISRUPTION_FLAG}."
@@ -478,7 +478,7 @@ def _journald_read(
             if name in values:
                 values[name] = _JournalKey(name, value, file) if value else None
     outside = tuple(
-        key for key in values.values() if key is not None and key.file != str(_JOURNALD)
+        key for key in values.values() if key is not None and key.file != str(JOURNALD_DROP_IN)
     )
     # Only a configuration another file moved is judged; at the default GIDEON sets it.
     storage = values["Storage"]
@@ -496,13 +496,13 @@ def _journald_read(
             BOX_WIDE_SHORTFALL_FIX,
         )
     drop_in = None
-    if not outside and context.host.exists(_JOURNALD):
+    if not outside and context.host.exists(JOURNALD_DROP_IN):
         try:
-            drop_in = context.host.read_text(_JOURNALD)
+            drop_in = context.host.read_text(JOURNALD_DROP_IN)
         except (OSError, UnicodeError) as exc:
             return CheckResult(
                 Disposition.UNFIXABLE,
-                f"cannot read {_JOURNALD}: {exc}",
+                f"cannot read {JOURNALD_DROP_IN}: {exc}",
                 _JOURNALD_DROP_IN_FIX,
             )
     return _JournaldReading(outside, drop_in)
@@ -610,8 +610,8 @@ class DockerEngineStep(Step):
             )
         if not journald.outside and journald.drop_in != _JOURNALD_TEXT:
             if journald.drop_in is None:
-                return CheckResult(Disposition.DRIFT, f"{_JOURNALD} is missing", "Write the journald retention drop-in, then re-run provision.")
-            return CheckResult(Disposition.DRIFT, f"{_JOURNALD} differs from the desired retention policy", "Rewrite the journald retention drop-in, then re-run provision.")
+                return CheckResult(Disposition.DRIFT, f"{JOURNALD_DROP_IN} is missing", "Write the journald retention drop-in, then re-run provision.")
+            return CheckResult(Disposition.DRIFT, f"{JOURNALD_DROP_IN} differs from the desired retention policy", "Rewrite the journald retention drop-in, then re-run provision.")
         containerd_enabled = context.host.run(["systemctl", "is-enabled", "containerd"])
         containerd_active = context.host.run(["systemctl", "is-active", "containerd"])
         docker_enabled = context.host.run(["systemctl", "is-enabled", "docker"])
@@ -722,8 +722,8 @@ class DockerEngineStep(Step):
             context.host.run(["systemctl", "restart", "containerd"], check=True)
 
         if journald_written:
-            context.host.mkdir(_JOURNALD.parent, mode=0o755, parents=True, exist_ok=True)
-            context.host.write_text(_JOURNALD, _JOURNALD_TEXT)
+            context.host.mkdir(JOURNALD_DROP_IN.parent, mode=0o755, parents=True, exist_ok=True)
+            context.host.write_text(JOURNALD_DROP_IN, _JOURNALD_TEXT)
             context.host.run(["systemctl", "restart", "systemd-journald"], check=True)
         context.host.run(["systemctl", "enable", "--now", "docker"], check=True)
         if daemon_changed or containerd_written:

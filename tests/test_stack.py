@@ -4,10 +4,21 @@ import unittest
 from pathlib import Path
 
 from gideon.host.render.api import API_MOUNT_TARGET, API_WORKING_DIRECTORY
-from gideon.host.stack import container_remove_argv, image_present_argv, image_run_argv
+from gideon.host.stack import (
+    compose_project_argv,
+    container_remove_argv,
+    image_present_argv,
+    image_run_argv,
+)
 
 
 class ImageCommands(unittest.TestCase):
+    def test_compose_project_without_rendered_file(self) -> None:
+        self.assertEqual(
+            compose_project_argv("gideon-drill", "down", "--volumes", "--remove-orphans"),
+            ["docker", "compose", "-p", "gideon-drill", "down", "--volumes", "--remove-orphans"],
+        )
+
     def test_run_mounts_checkout_package_read_only_without_network_or_daemon_logs(self) -> None:
         reference = "registry.example/gideon@sha256:" + "a" * 64
         checkout = Path("/fictitious-checkout")

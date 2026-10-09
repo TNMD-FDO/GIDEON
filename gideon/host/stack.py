@@ -34,6 +34,12 @@ def compose_argv(rendered_dir: PathLike, *args: str) -> list[str]:
     ]
 
 
+def compose_project_argv(name: str, *args: str) -> list[str]:
+    """Build a Compose invocation for a project without its rendered file."""
+
+    return ["docker", "compose", "-p", name, *args]
+
+
 def exec_argv(
     rendered_dir: PathLike,
     service: str,

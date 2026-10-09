@@ -4,10 +4,11 @@ import contextlib
 import io
 import os
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from gideon import cli
-from gideon.host import report
+from gideon.host import report, uninstall
 from gideon.host.sysio import RealHost
 
 
@@ -26,6 +27,7 @@ class InstallPathForms(unittest.TestCase):
                     (["models", "pull"], "models pull"),
                     (["install"], "install"),
                     (["upgrade", "v1.2.3"], "upgrade v1.2.3"),
+                    (["uninstall"], "uninstall"),
                 ):
                     with self.subTest(installed=installed, path=path):
                         environment = (
@@ -48,12 +50,15 @@ class InstallPathForms(unittest.TestCase):
                             fix = f"Fix: Run {sudo_prefix} install, then retry."
                         elif path.startswith("upgrade"):
                             fix = f"Fix: Run {sudo_prefix} {path} as root."
+                        elif path == "uninstall":
+                            checkout = Path(uninstall.__file__).resolve().parents[2]
+                            fix = f"Fix: Run sudo python3 -m gideon uninstall from {checkout}."
                         elif path.startswith("secrets rotate") or path == "models pull":
                             fix = f"Fix: Run {sudo_prefix} {path}."
                         else:
                             fix = f"Fix: Run {prefix} {path} as root, for example with sudo."
                         self.assertIn(fix, err.getvalue())
-            self.assertEqual(geteuid.call_count, 12)
+            self.assertEqual(geteuid.call_count, 14)
             read_text.assert_not_called()
 
 

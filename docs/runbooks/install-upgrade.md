@@ -998,3 +998,48 @@ From the release checkout, converge after the hand change:
 cd /opt/gideon
 sudo python3 -m gideon host provision
 ```
+
+## 11. Removing GIDEON
+
+Use this procedure to take GIDEON off a box. `gideon uninstall` removes the host state that carries GIDEON's ownership mark and reverts no setting another application may rely on. It runs unattended and asks nothing; every stage reads before it acts.
+
+### Announce
+
+Removal stops the whole stack, as an upgrade does. Announce it to every project sharing the daemon, and once users are on the box, in a maintenance window announced to them at least one working day ahead. A container on one of GIDEON's networks loses that network: the run's `attached` row lists each one outside GIDEON's ownership mark, by network and project, before anything stops — an application using GIDEON's engine among them. Tell their operators before the window.
+
+### Choose plain or `--purge`
+
+A plain run removes GIDEON's Compose projects (the stack, the drill, and the CI sibling), its `gideon-*` units and timers, its firewall chain with its tagged jump from `DOCKER-USER`, its block in `/etc/ufw/after.rules`, and the `gideon-docker-user` unit, the installed `gideon` command, and its Docker networks once nothing is attached. It keeps `/etc/gideon`, GIDEON's directories under `/data`, the stack's volumes, and the drop-in files provision wrote, so a later install finds the configuration and data where they were.
+
+`--purge` also removes `/etc/gideon` whole (the site file, the secrets, the rendered tree, and the box's backup identity), each directory `disk-layout` makes under `/data`, the stack's volumes, and the three drop-ins that hold a GIDEON fact: the apt proxy file, the chrony sources file, and the network wait-online drop-in, each followed by its reload.
+
+Both keep `/data` itself with its volume, mount, and `/etc/fstab` block; `/opt/gideon`; the `gideon` account; every package; Docker's `daemon.json` and containerd's configuration; the image store; the firewall's default policy with the tagged `ufw` rules that admit SSH under it; and the journald, SSH key-only, and automatic-upgrades drop-ins, each holding a setting the box keeps.
+
+On the build box the registry and the CI runner are kept by their own installed state: the registry's unit with `/data/registry`, and the runner's sudoers file with `/data/acceptance`, under `--purge` too and on every later run.
+
+A plain removal keeps `/etc/gideon/backup_age_identity`, so the box's own backup sets still open with it. After `--purge`, the sets pushed to the backup target open with the office identity kept in the office password manager.
+
+### Run
+
+From any directory:
+
+```sh
+gideon uninstall
+```
+
+or `gideon uninstall --purge`. The run removes the installed command, so every fix it prints, and every re-run after it, is the long form from the checkout:
+
+```sh
+cd /opt/gideon
+sudo python3 -m gideon uninstall
+```
+
+with `--purge` when the first run had it. A re-run finds nothing left to remove, prints every row `ok`, and exits 0. Keep the transcript: GIDEON's database goes with the stack, so the rows are the record of the removal.
+
+### A network still held
+
+The last row, `networks`, fails when a container is still attached to one of GIDEON's networks, and names it. Everything else is removed by then. Tell that container's operator, wait until it has left the network, then re-run from the checkout as above; the re-run removes the network.
+
+### What stays
+
+The closing `Kept:` line names what the command leaves. Remove the checkout with `sudo rm -rf /opt/gideon` once nothing more is needed from it. The `gideon` account, the packages GIDEON installed, Docker's `daemon.json` keys, and containerd's configuration are shared with whatever else runs on the box: change or remove them only after agreeing it with the box's other operators. Unmounting `/data` and removing its `/etc/fstab` block is the data volume owner's decision, in an announced window.

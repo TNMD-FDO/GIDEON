@@ -66,6 +66,7 @@ from gideon.host.steps.disk import (
     PROMETHEUS_GID,
     PROMETHEUS_UID,
     DiskLayoutStep,
+    data_directories,
 )
 from gideon.host.steps.docker import (
     _ARCHITECTURE,
@@ -78,7 +79,6 @@ from gideon.host.steps.docker import (
     _CONTAINERD_TEXT,
     _CONTAINERD_VERIFY,
     _DAEMON,
-    _JOURNALD,
     _JOURNALD_CAT,
     _JOURNALD_TEXT,
     _KEY_URL,
@@ -88,21 +88,28 @@ from gideon.host.steps.docker import (
     _REPOSITORY,
     _SOURCE,
     _SUITE,
+    JOURNALD_DROP_IN,
     DockerEngineStep,
 )
-from gideon.host.steps.maintenance import _DROP_IN, _PERIODIC, UnattendedUpgradesStep
+from gideon.host.steps.maintenance import (
+    _PERIODIC,
+    AUTO_UPGRADES_DROP_IN,
+    UnattendedUpgradesStep,
+)
 from gideon.host.steps.network import (
-    _DOCKER_USER_UNIT,
     _DOCKER_USER_UNIT_TEXT,
     _JUMP,
-    _WAIT_ONLINE_DROPIN,
     _WAIT_ONLINE_FIX,
     _WAIT_ONLINE_TEXT,
+    DOCKER_USER_UNIT,
+    WAIT_ONLINE_DROPIN,
     FirewallStep,
     TimeSyncStep,
     WaitOnlineStep,
     _docker_user_block,
     _docker_user_rules,
+    ufw_active,
+    without_block,
 )
 from gideon.host.steps.nvidia import (
     _DEB_TMP,
@@ -916,6 +923,15 @@ def populate_data_directories(host: FakeHost) -> None:
 
 
 class DiskLayoutStepTests(unittest.TestCase):
+    def test_data_directories_are_top_level_in_layout_order(self) -> None:
+        names = data_directories()
+        self.assertEqual(
+            names,
+            ("fast", "bulk", "work", "models", "registry", "drill", "ci",
+             "backup-staging", "acceptance", "observability"),
+        )
+        self.assertEqual(len(names), len(set(names)))
+
     def test_occupied_unmounted_data_refuses_with_sorted_top_level_names(self) -> None:
         names = ("omega", ".local", "alpha")
         host = disk_host(disk_devices())
@@ -2576,7 +2592,7 @@ def docker_commands(
         journald_cat_stdout = (
             "# /etc/systemd/journald.conf\n[Journal]\n"
             "# Storage=auto\n# SystemMaxUse=\n# MaxRetentionSec=\n"
-            f"# {_JOURNALD}\n{_JOURNALD_TEXT}"
+            f"# {JOURNALD_DROP_IN}\n{_JOURNALD_TEXT}"
             "# /usr/lib/systemd/journald.conf.d/syslog.conf\n[Journal]\n"
             "ForwardToSyslog=no\n"
         )
@@ -2723,10 +2739,10 @@ class DockerStepTests(unittest.TestCase):
         containerd_only = docker_files(docker_policy())
         containerd_only[os.fspath(_CONTAINERD_CONFIG)] = "version = 4\n"
         journald_only = docker_files(docker_policy())
-        del journald_only[os.fspath(_JOURNALD)]
+        del journald_only[os.fspath(JOURNALD_DROP_IN)]
         joined = dict(docker_only)
         joined[os.fspath(_CONTAINERD_CONFIG)] = "version = 4\n"
-        del joined[os.fspath(_JOURNALD)]
+        del joined[os.fspath(JOURNALD_DROP_IN)]
         containerd_reads: dict[
             tuple[str, ...], subprocess.CompletedProcess[str]
         ] = {
@@ -3234,7 +3250,7 @@ class DockerStepTests(unittest.TestCase):
         commands = docker_commands(
             journald_cat_stdout=(
                 "# /etc/systemd/journald.conf\n[Journal]\n# Storage=auto\n"
-                f"# {_JOURNALD}\n[Journal]\nStorage=volatile\n"
+                f"# {JOURNALD_DROP_IN}\n[Journal]\nStorage=volatile\n"
             )
         )
         commands.update(dict(apt_command_results((
@@ -3286,7 +3302,7 @@ class DockerStepTests(unittest.TestCase):
 
     def test_journald_all_unset_without_directory_writes_own_default(self) -> None:
         files = docker_files(docker_policy())
-        del files[os.fspath(_JOURNALD)]
+        del files[os.fspath(JOURNALD_DROP_IN)]
         output = self.recorded_journald()
         host = self.setting_host(
             files=files,
@@ -3294,13 +3310,13 @@ class DockerStepTests(unittest.TestCase):
         )
         checked = DockerEngineStep().check(context(host))
         self.assertEqual(checked.disposition, Disposition.DRIFT, checked)
-        self.assertIn(f"{_JOURNALD} is missing", checked.detail)
+        self.assertIn(f"{JOURNALD_DROP_IN} is missing", checked.detail)
         host.calls.clear()
         DockerEngineStep().apply(context(host))
-        self.assertEqual(host.files[os.fspath(_JOURNALD)], _JOURNALD_TEXT)
+        self.assertEqual(host.files[os.fspath(JOURNALD_DROP_IN)], _JOURNALD_TEXT)
         self.assertEqual(
             [call for call in host.calls if call[0] == "write_text"],
-            [("write_text", (os.fspath(_JOURNALD), _JOURNALD_TEXT))],
+            [("write_text", (os.fspath(JOURNALD_DROP_IN), _JOURNALD_TEXT))],
         )
         self.assertIn(("run", (("systemctl", "restart", "systemd-journald"), True)), host.calls)
 
@@ -3310,13 +3326,13 @@ class DockerStepTests(unittest.TestCase):
             with self.subTest(own=own):
                 files = docker_files(docker_policy())
                 if own is None:
-                    del files[os.fspath(_JOURNALD)]
+                    del files[os.fspath(JOURNALD_DROP_IN)]
                 else:
-                    files[os.fspath(_JOURNALD)] = own
+                    files[os.fspath(JOURNALD_DROP_IN)] = own
                 files["/var/log/journal"] = ""
                 output = self.recorded_journald()
                 if own is not None:
-                    output += f"# {_JOURNALD}\n{own}"
+                    output += f"# {JOURNALD_DROP_IN}\n{own}"
                 output += f"# {later}\n[Journal]\nSystemMaxUse=7G\n"
                 host = self.setting_host(
                     files=files, commands={_JOURNALD_CAT: completed(_JOURNALD_CAT, output)}
@@ -3326,7 +3342,7 @@ class DockerStepTests(unittest.TestCase):
                 self.assertIn(f"journald's SystemMaxUse is set by {later}", checked.detail)
                 host.calls.clear()
                 DockerEngineStep().apply(context(host))
-                self.assertEqual(host.files.get(os.fspath(_JOURNALD)), own)
+                self.assertEqual(host.files.get(os.fspath(JOURNALD_DROP_IN)), own)
                 self.assertFalse(any(call[0] == "write_text" for call in host.calls))
                 self.assertNotIn(
                     ("run", (("systemctl", "restart", "systemd-journald"), True)), host.calls
@@ -3334,7 +3350,7 @@ class DockerStepTests(unittest.TestCase):
 
     def test_recorded_journald_comments_do_not_open_a_file(self) -> None:
         files = docker_files(docker_policy())
-        del files[os.fspath(_JOURNALD)]
+        del files[os.fspath(JOURNALD_DROP_IN)]
         output = self.recorded_journald()
         self.assertIn("# /etc/ if the original file is shipped in /usr/)", output)
         output = output.replace("[Journal]\n", "[Journal]\nStorage=persistent\n", 1)
@@ -4282,6 +4298,25 @@ class NetworkStepTests(unittest.TestCase):
     UFW_STATUS = ("ufw", "status", "numbered")
     UFW_VERBOSE = ("ufw", "status", "verbose")
 
+    def test_without_block_preserves_other_firewall_text(self) -> None:
+        blocks = (
+            "# GIDEON BEGIN provision:firewall\n-A gideon-docker-user -j ACCEPT\n"
+            "# GIDEON END provision:firewall\n",
+            "# BEGIN gideon-provision docker-user\n-A gideon-docker-user -j ACCEPT\n"
+            "# END gideon-provision docker-user\n",
+        )
+        for block in blocks:
+            with self.subTest(block=block):
+                self.assertEqual(without_block(f"before\n\n{block}after\n"), "before\n\nafter\n")
+        self.assertEqual(without_block("before\n\nafter\n"), "before\n\nafter\n")
+
+    def test_ufw_active_handles_active_inactive_and_unreadable(self) -> None:
+        command = ("ufw", "status")
+        for stdout, expected in (("Status: active\n", True), ("Status: inactive\n", False)):
+            with self.subTest(stdout=stdout):
+                self.assertIs(ufw_active(FakeHost(commands={command: completed(command, stdout)})), expected)
+        self.assertIsNone(ufw_active(FakeHost()))
+
     def assert_firewall_refusal(self, host: FakeHost, *details: str) -> None:
         step = FirewallStep()
         reading = step.check(context(host))
@@ -4349,7 +4384,7 @@ class NetworkStepTests(unittest.TestCase):
         host = self.firewall_converged_host()
         host.commands[self.UFW_STATUS] = completed(self.UFW_STATUS, status)
         host.files["/etc/ufw/after.rules"] = UFW_AFTER_RULES
-        host.files.pop(os.fspath(_DOCKER_USER_UNIT))
+        host.files.pop(os.fspath(DOCKER_USER_UNIT))
         for command in (
             ("ufw", "--force", "delete", "8"),
             ("ufw", "allow", "proto", "tcp", "from", "192.0.2.0/24", "to", "any", "port", "443", "comment", "gideon-provision"),
@@ -4385,12 +4420,12 @@ class NetworkStepTests(unittest.TestCase):
             host.files["/etc/ufw/after.rules"],
             UFW_AFTER_RULES.rstrip("\n") + "\n\n" + expected_block,
         )
-        self.assertEqual(host.files[os.fspath(_DOCKER_USER_UNIT)], _DOCKER_USER_UNIT_TEXT)
-        self.assertIn((os.fspath(_DOCKER_USER_UNIT), 0o644), host.write_modes)
+        self.assertEqual(host.files[os.fspath(DOCKER_USER_UNIT)], _DOCKER_USER_UNIT_TEXT)
+        self.assertIn((os.fspath(DOCKER_USER_UNIT), 0o644), host.write_modes)
         ordered = [
             ("write_text", ("/etc/ufw/after.rules", host.files["/etc/ufw/after.rules"])),
             ("run", (("ufw", "reload"), True)),
-            ("write_text", (os.fspath(_DOCKER_USER_UNIT), _DOCKER_USER_UNIT_TEXT)),
+            ("write_text", (os.fspath(DOCKER_USER_UNIT), _DOCKER_USER_UNIT_TEXT)),
             ("run", (("systemctl", "daemon-reload"), True)),
             ("run", (("systemctl", "enable", "gideon-docker-user"), True)),
             ("run", (("systemctl", "start", "gideon-docker-user"), True)),
@@ -4445,7 +4480,7 @@ class NetworkStepTests(unittest.TestCase):
             },
             files={
                 "/etc/ufw/after.rules": UFW_AFTER_RULES + "\n" + _docker_user_block(["192.0.2.0/24"]),
-                os.fspath(_DOCKER_USER_UNIT): _DOCKER_USER_UNIT_TEXT,
+                os.fspath(DOCKER_USER_UNIT): _DOCKER_USER_UNIT_TEXT,
             },
         )
 
@@ -4565,7 +4600,7 @@ class NetworkStepTests(unittest.TestCase):
 
         class UnreadableUnitHost(FakeHost):
             def read_text(self, path: PathLike, *, encoding: str = "utf-8") -> str:
-                if os.fspath(path) == os.fspath(_DOCKER_USER_UNIT):
+                if os.fspath(path) == os.fspath(DOCKER_USER_UNIT):
                     raise PermissionError("fictitious unit refusal")
                 return super().read_text(path, encoding=encoding)
 
@@ -4585,7 +4620,7 @@ class NetworkStepTests(unittest.TestCase):
         unit_host = UnreadableUnitHost(commands=base.commands, files=base.files)
         reading = FirewallStep().check(context(unit_host))
         self.assertEqual(reading.disposition, Disposition.UNFIXABLE)
-        self.assertIn(os.fspath(_DOCKER_USER_UNIT), reading.detail)
+        self.assertIn(os.fspath(DOCKER_USER_UNIT), reading.detail)
         self.assertIn("Rewrite GIDEON's firewall block", reading.fix)
 
     def test_docker_user_rules_never_touch_container_egress_or_established_flows(self) -> None:
@@ -4709,7 +4744,7 @@ class NetworkStepTests(unittest.TestCase):
         for state in ("missing", "different", "disabled"):
             with self.subTest(state=state):
                 host = self.firewall_converged_host()
-                unit = os.fspath(_DOCKER_USER_UNIT)
+                unit = os.fspath(DOCKER_USER_UNIT)
                 if state == "missing":
                     host.files.pop(unit)
                 elif state == "different":
@@ -4764,7 +4799,7 @@ class NetworkStepTests(unittest.TestCase):
 class WaitOnlineStepTests(unittest.TestCase):
     """The boot-time network wait accepts any one link online."""
 
-    DROPIN = os.fspath(_WAIT_ONLINE_DROPIN)
+    DROPIN = os.fspath(WAIT_ONLINE_DROPIN)
 
     def test_drop_in_truth_table(self) -> None:
         cases = (
@@ -4800,7 +4835,7 @@ class WaitOnlineStepTests(unittest.TestCase):
         self.assertEqual(
             host.calls,
             [
-                ("mkdir", (os.fspath(_WAIT_ONLINE_DROPIN.parent), 0o755, True, True)),
+                ("mkdir", (os.fspath(WAIT_ONLINE_DROPIN.parent), 0o755, True, True)),
                 ("write_text", (self.DROPIN, _WAIT_ONLINE_TEXT)),
                 ("run", (reload, True)),
                 ("run", (reset, True)),
@@ -4978,7 +5013,7 @@ class TimezoneStepTests(unittest.TestCase):
 
 class MaintenanceStepTests(unittest.TestCase):
     PACKAGE = ("dpkg-query", "-W", "-f=${Status} ${Version}\\n", "unattended-upgrades")
-    DROP_IN = os.fspath(_DROP_IN)
+    DROP_IN = os.fspath(AUTO_UPGRADES_DROP_IN)
 
     def maintenance_host(
         self, *, values: Mapping[str, str] | None = None, drop_in: str | None = None

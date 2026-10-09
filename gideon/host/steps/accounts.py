@@ -23,7 +23,7 @@ _CSA_FIX = (
 )
 # sshd keeps the first value it reads; the installer's 50-cloud-init.conf
 # restates the default, so this name must sort ahead of it.
-_SSHD_POLICY = Path("/etc/ssh/sshd_config.d/00-gideon-key-only.conf")
+SSHD_POLICY = Path("/etc/ssh/sshd_config.d/00-gideon-key-only.conf")
 _SSHD_POLICY_RETIRED = Path("/etc/ssh/sshd_config.d/99-gideon-key-only.conf")
 _SSHD_POLICY_TEXT = "PasswordAuthentication no\nKbdInteractiveAuthentication no\n"
 _SSHD_EFFECTIVE = ("sshd", "-T")
@@ -171,23 +171,23 @@ class CsaAccountsStep(Step):
         rule = _ssh_login_rule(context)
         if isinstance(rule, CheckResult):
             return rule
-        present = context.host.exists(_SSHD_POLICY)
+        present = context.host.exists(SSHD_POLICY)
         retired = context.host.exists(_SSHD_POLICY_RETIRED)
         current = None
         if present:
             try:
-                current = context.host.read_text(_SSHD_POLICY)
+                current = context.host.read_text(SSHD_POLICY)
             except (OSError, UnicodeError) as exc:
                 return CheckResult(
                     Disposition.UNFIXABLE,
-                    f"cannot read {_SSHD_POLICY}: {exc}",
-                    f"Correct access to {_SSHD_POLICY}, then re-run provision.",
+                    f"cannot read {SSHD_POLICY}: {exc}",
+                    f"Correct access to {SSHD_POLICY}, then re-run provision.",
                 )
         if rule.password == "no" and rule.keyboard == "no":
             if current == _SSHD_POLICY_TEXT and not retired:
                 return CheckResult(
                     Disposition.CONVERGED,
-                    f"{_SSHD_POLICY} is current and key-only login is in effect; {detail}",
+                    f"{SSHD_POLICY} is current and key-only login is in effect; {detail}",
                     "",
                 )
             if not present and not retired:
@@ -205,7 +205,7 @@ class CsaAccountsStep(Step):
             return CheckResult(
                 Disposition.DRIFT,
                 f"GIDEON's drop-in is {state}; key-only login is in effect; {detail}",
-                f"Run provision, which writes {_SSHD_POLICY}.",
+                f"Run provision, which writes {SSHD_POLICY}.",
             )
         if current == _SSHD_POLICY_TEXT:
             found = " and ".join(
@@ -217,14 +217,14 @@ class CsaAccountsStep(Step):
             return CheckResult(
                 Disposition.UNFIXABLE,
                 box_wide_shortfall(
-                    self.settings[0], found, "no for both", source=f"a file ahead of {_SSHD_POLICY}"
+                    self.settings[0], found, "no for both", source=f"a file ahead of {SSHD_POLICY}"
                 ),
                 BOX_WIDE_SHORTFALL_FIX,
             )
         return CheckResult(
             Disposition.DRIFT,
             f"password login is allowed, the installed default; GIDEON sets key-only login; {detail}",
-            f"Run provision, which writes {_SSHD_POLICY} and reloads ssh.",
+            f"Run provision, which writes {SSHD_POLICY} and reloads ssh.",
         )
 
     def apply(self, context: ProvisionContext) -> None:
@@ -233,7 +233,7 @@ class CsaAccountsStep(Step):
             raise StepFailure(reading.detail, reading.fix)
         if reading.disposition is Disposition.CONVERGED:
             return
-        context.host.write_text(_SSHD_POLICY, _SSHD_POLICY_TEXT)
+        context.host.write_text(SSHD_POLICY, _SSHD_POLICY_TEXT)
         if context.host.exists(_SSHD_POLICY_RETIRED):
             context.host.unlink(_SSHD_POLICY_RETIRED, missing_ok=True)
         # Ubuntu's unit is ssh; the sshd alias only resolves while enabled.

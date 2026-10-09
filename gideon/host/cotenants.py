@@ -1,12 +1,13 @@
-"""Refuse a box-wide host change while another application's containers run.
+"""Read Docker ownership marks and guard shared host changes.
 
 GIDEON knows a co-tenant only as a running container without its ownership
-mark; the reader asks Docker for each container's name and Compose project
-label and nothing else, so no environment, mount, or command reaches a row.
+mark; the readers ask Docker for names and Compose project labels and nothing
+else, so no environment, mount, or command reaches a row.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
@@ -93,6 +94,54 @@ def network_ps_argv(network: str) -> tuple[str, ...]:
     return ("docker", "ps", "--filter", f"network={network}", "--format", _DOCKER_PS_FORMAT)
 
 
+def compose_projects_argv() -> tuple[str, ...]:
+    """Read every Compose project name from the daemon."""
+
+    return ("docker", "compose", "ls", "--all", "--format", "json")
+
+
+def parse_projects(stdout: str) -> tuple[str, ...] | None:
+    """Return project names, or None when Compose's JSON listing is malformed."""
+
+    try:
+        listing = json.loads(stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(listing, list):
+        return None
+    names: list[str] = []
+    for row in listing:
+        if not isinstance(row, dict) or not isinstance(row.get("Name"), str) or not row["Name"]:
+            return None
+        names.append(row["Name"])
+    return tuple(names)
+
+
+def network_ls_argv() -> tuple[str, ...]:
+    """Read network names from the daemon."""
+
+    return ("docker", "network", "ls", "--format", "{{.Name}}")
+
+
+def volume_ls_argv() -> tuple[str, ...]:
+    """Read every volume's name and Compose project label, in the container rows' columns.
+
+    Volumes outlive their project's containers, so a project gone from Compose's
+    own listing still names its volumes by this label.
+    """
+
+    return (
+        "docker", "volume", "ls", "--format",
+        '{{.Name}}\t{{.Label "com.docker.compose.project"}}',
+    )
+
+
+def parse_names(stdout: str) -> tuple[str, ...]:
+    """Return one network name per non-empty output line."""
+
+    return tuple(name for line in stdout.splitlines() if (name := line.strip()))
+
+
 def parse_rows(stdout: str) -> tuple[ContainerRow, ...]:
     """Return valid name and project rows, skipping malformed Docker lines."""
 
@@ -126,13 +175,19 @@ def running_containers(host: Host) -> ContainerListing:
     return ContainerListing(DaemonState.LISTED, parse_rows(result.stdout))
 
 
+def marked_name(name: str) -> bool:
+    """Whether a name carries GIDEON's ownership prefix."""
+
+    return name.startswith(OWNERSHIP_PREFIX)
+
+
 def is_marked(row: ContainerRow) -> bool:
     """Whether a row carries GIDEON's mark: its project begins with the prefix,
     or, with no project label, its name does."""
 
     if row.project is not None:
-        return row.project.startswith(OWNERSHIP_PREFIX)
-    return row.name.startswith(OWNERSHIP_PREFIX)
+        return marked_name(row.project)
+    return marked_name(row.name)
 
 
 def foreign(rows: Sequence[ContainerRow]) -> dict[str | None, list[str]]:

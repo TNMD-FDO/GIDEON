@@ -19,12 +19,12 @@ from gideon.host.steps import (
     passwd_entry,
 )
 
-_ROOT = Path("/etc/gideon")
-_SECRETS = _ROOT / "secrets"
+ETC_GIDEON = Path("/etc/gideon")
+_SECRETS = ETC_GIDEON / "secrets"
 _DIR_MODES = {
-    _ROOT: 0o755,
-    _ROOT / "tls": 0o755,
-    _ROOT / "rendered": 0o755,
+    ETC_GIDEON: 0o755,
+    ETC_GIDEON / "tls": 0o755,
+    ETC_GIDEON / "rendered": 0o755,
     _SECRETS: 0o700,
 }
 _BACKUP_KEY = _SECRETS / "backup_ssh_key"

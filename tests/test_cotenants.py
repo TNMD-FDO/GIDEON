@@ -15,14 +15,20 @@ from gideon.host.cotenants import (
     OWNERSHIP_PREFIX,
     ContainerRow,
     DaemonState,
+    compose_projects_argv,
     describe,
     foreign,
     guard,
     is_marked,
+    marked_name,
+    network_ls_argv,
     network_ps_argv,
+    parse_names,
+    parse_projects,
     parse_rows,
     publish_ps_argv,
     running_containers,
+    volume_ls_argv,
 )
 from gideon.host.lock import HostLock
 from gideon.host.render import ci, compose, drill
@@ -63,6 +69,27 @@ def context(host: RunHost, *, acknowledged: bool = False) -> ProvisionContext:
 
 
 class Reader(unittest.TestCase):
+    def test_marked_names_and_listing_commands(self) -> None:
+        self.assertTrue(marked_name("gideon_integration"))
+        self.assertTrue(marked_name("gideon-ci"))
+        self.assertFalse(marked_name("other_gideon"))
+        self.assertEqual(compose_projects_argv(), ("docker", "compose", "ls", "--all", "--format", "json"))
+        self.assertEqual(network_ls_argv(), ("docker", "network", "ls", "--format", "{{.Name}}"))
+        self.assertEqual(
+            volume_ls_argv(),
+            ("docker", "volume", "ls", "--format", '{{.Name}}\t{{.Label "com.docker.compose.project"}}'),
+        )
+
+    def test_project_and_network_listings(self) -> None:
+        self.assertEqual(
+            parse_projects('[{"Name":"gideon"},{"Name":"gideon-drill"}]'),
+            ("gideon", "gideon-drill"),
+        )
+        for malformed in ("not json", "{}", '[{"Name":42}]', '[{"Name":""}]'):
+            with self.subTest(malformed=malformed):
+                self.assertIsNone(parse_projects(malformed))
+        self.assertEqual(parse_names("gideon_integration\n\n other_network \n"), ("gideon_integration", "other_network"))
+
     def test_publish_read_filters_the_shared_name_and_project_format(self) -> None:
         self.assertEqual(
             publish_ps_argv(443),

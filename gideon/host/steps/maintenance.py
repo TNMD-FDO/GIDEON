@@ -18,15 +18,15 @@ from gideon.host.steps import (
     stderr_first_line,
 )
 
-_DROP_IN = Path("/etc/apt/apt.conf.d/52gideon-auto-upgrades")
+AUTO_UPGRADES_DROP_IN = Path("/etc/apt/apt.conf.d/52gideon-auto-upgrades")
 _PERIODIC = ("apt-config", "dump", "APT::Periodic")
 _KEYS = ("Update-Package-Lists", "Unattended-Upgrade")
 _PERIODIC_LINE = re.compile(r'^APT::Periodic::([A-Za-z-]+) "([^"]*)";$')
 _PERIODIC_READ_FIX = (
     "Repair apt's configuration (apt-config dump names the error), then re-run provision."
 )
-_DROP_IN_READ_FIX = f"Repair access to {_DROP_IN}, then re-run provision."
-_DROP_IN_WRITE_FIX = f"Write {_DROP_IN}, then re-run provision."
+_DROP_IN_READ_FIX = f"Repair access to {AUTO_UPGRADES_DROP_IN}, then re-run provision."
+_DROP_IN_WRITE_FIX = f"Write {AUTO_UPGRADES_DROP_IN}, then re-run provision."
 
 
 @dataclass(frozen=True)
@@ -82,13 +82,13 @@ def _periodic_read(context: ProvisionContext) -> _PeriodicReading | CheckResult:
             values[match.group(1)] = match.group(2)
     own: frozenset[str] = frozenset()
     stale = False
-    if context.host.exists(_DROP_IN):
+    if context.host.exists(AUTO_UPGRADES_DROP_IN):
         try:
-            own, stale = _drop_in_keys(context.host.read_text(_DROP_IN))
+            own, stale = _drop_in_keys(context.host.read_text(AUTO_UPGRADES_DROP_IN))
         except (OSError, UnicodeError) as exc:
             return CheckResult(
                 Disposition.UNFIXABLE,
-                f"cannot read {_DROP_IN}: {exc}",
+                f"cannot read {AUTO_UPGRADES_DROP_IN}: {exc}",
                 _DROP_IN_READ_FIX,
             )
     return _PeriodicReading(tuple(values[key] for key in _KEYS), own, stale)
@@ -103,7 +103,7 @@ def _periodic_check(reading: _PeriodicReading, setting: BoxWideSetting) -> Check
         if reading.stale:
             return CheckResult(
                 Disposition.DRIFT,
-                f"{_DROP_IN} holds a line GIDEON does not write",
+                f"{AUTO_UPGRADES_DROP_IN} holds a line GIDEON does not write",
                 _DROP_IN_WRITE_FIX,
             )
         return CheckResult(
@@ -120,13 +120,13 @@ def _periodic_check(reading: _PeriodicReading, setting: BoxWideSetting) -> Check
     if unset is not None:
         return CheckResult(
             Disposition.DRIFT,
-            f"APT::Periodic::{unset} is unset; GIDEON writes {_DROP_IN}",
+            f"APT::Periodic::{unset} is unset; GIDEON writes {AUTO_UPGRADES_DROP_IN}",
             _DROP_IN_WRITE_FIX,
         )
     if reading.stale:
         return CheckResult(
             Disposition.DRIFT,
-            f"{_DROP_IN} holds a line GIDEON does not write",
+            f"{AUTO_UPGRADES_DROP_IN} holds a line GIDEON does not write",
             _DROP_IN_WRITE_FIX,
         )
     return CheckResult(
@@ -180,4 +180,4 @@ class UnattendedUpgradesStep(Step):
                 key for key, value in zip(_KEYS, reading.values, strict=True)
                 if value is None
             )
-            context.host.write_text(_DROP_IN, _drop_in_text(keys))
+            context.host.write_text(AUTO_UPGRADES_DROP_IN, _drop_in_text(keys))

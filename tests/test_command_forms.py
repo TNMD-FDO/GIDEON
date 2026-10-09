@@ -22,6 +22,7 @@ ENTRIES = {
     "gideon/host/report.py": "the renderer holds the command forms",
     "gideon/host/steps/command.py": "the wrapper's own text and its fallback fix name the command",
     "gideon/host/steps/site_dirs.py": "the backup keypair's name is the service account's, not a command",
+    "gideon/host/uninstall.py": "the run removes the installed wrapper, so its fixes name the long form from the checkout",
     "gideon/worker/settings.py": "a worker source: its refusals print inside the worker's container, where no run was invoked",
 }
 

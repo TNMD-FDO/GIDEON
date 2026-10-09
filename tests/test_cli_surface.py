@@ -15,7 +15,7 @@ from gideon.cli import SITUATIONS, _label_stub_groups, _stub, main, start_screen
 from gideon.host.steps import STEPS
 
 TOP_LEVEL = [
-    "host", "render", "apply", "preflight", "install", "upgrade", "tls",
+    "host", "render", "apply", "preflight", "install", "upgrade", "uninstall", "tls",
     "users", "secrets", "engine", "worker", "models", "corpus", "index", "registry", "eval", "proposals", "status",
     "backup", "restore", "audit", "retention", "alerts",
 ]
@@ -113,6 +113,16 @@ class Help(unittest.TestCase):
             "pass the disruption acknowledgment to the new release's host provision",
             help_text,
         )
+
+    def test_uninstall_help_names_purge_scope(self) -> None:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as ctx:
+            main(["uninstall", "--help"])
+        self.assertEqual(ctx.exception.code, 0)
+        help_text = collapsed(out.getvalue())
+        self.assertIn("--purge", help_text)
+        self.assertIn("remove /etc/gideon, GIDEON's /data directories, and its volumes", help_text)
+        self.assertIn("never /data itself", help_text)
 
     def test_corpus_help_names_the_watch(self) -> None:
         group = io.StringIO()

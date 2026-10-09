@@ -243,6 +243,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     upgrade.set_defaults(handler=host_cli.run_upgrade, command_path="upgrade")
 
+    uninstall = commands.add_parser(
+        "uninstall",
+        help=(
+            "remove GIDEON from this box: its projects, units, firewall chain, networks, "
+            "and command; configuration and data stay unless --purge"
+        ),
+    )
+    uninstall.add_argument(
+        "--purge",
+        action="store_true",
+        help=(
+            "also remove /etc/gideon, GIDEON's /data directories, and its volumes; "
+            "never /data itself"
+        ),
+    )
+    uninstall.set_defaults(handler=host_cli.run_uninstall, command_path="uninstall")
+
     tls = commands.add_parser("tls", help="TLS certificate operations")
     tls_sub = tls.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)
     tls_reload = tls_sub.add_parser("reload", help="pick up replaced certificate files")
