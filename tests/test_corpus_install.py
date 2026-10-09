@@ -87,6 +87,12 @@ class FakeHost(RealHost):
         self.caselaw_treatment_counts: dict[str, dict[str, object]] = {}
         self.interrupt_caselaw_job = False
         self.caselaw_events: list[tuple[str, str]] = []
+        self.agreement_jobs: dict[int, dict[str, Any]] = {}
+        self.agreement_deferred: list[dict[str, Any]] = []
+        self.agreement_failure: str | None = None
+        self.agreement_figures: dict[str, dict[str, int]] = {}
+        self.agreement_events: list[tuple[str, str]] = []
+        self.interrupt_agreement_job = False
         self.job_polls: dict[int, int] = {}
         self.next_job = 100
         self.unreadable_root = False
@@ -161,6 +167,35 @@ class FakeHost(RealHost):
                 json.dumps(self.stage_record(job, args))
             )
 
+    def _write_agreement(self, job: int, args: dict[str, Any]) -> None:
+        directory = staging.work_directory(
+            args["label"], args["snapshot"][:-staging.DATE_SUFFIX_LENGTH],
+            work_root=self.work,
+        )
+        court = args["court"]
+        if self.agreement_failure is not None:
+            (directory / f"{court}.{worker_identity.AGREEMENT_FAILURE_NAME}").write_text(
+                json.dumps({
+                    "schema": 1, "job": job, "court": court,
+                    "reason": self.agreement_failure, "table": None, "error": None,
+                    "at": NOW.isoformat(),
+                })
+            )
+            return
+        defaults = {
+            "documents": 1, "gideon_pairs": 4, "map_rows": 5,
+            "map_outside": 1, "map_pairs": 3, "agreed": 2,
+            "gideon_only": 2, "map_only_seen": 1, "map_only_missed": 0,
+        }
+        (directory / f"{court}.{worker_identity.AGREEMENT_RECORD_NAME}").write_text(
+            json.dumps({
+                "schema": 1, "label": args["label"], "snapshot": args["snapshot"],
+                "court": court, "job": job,
+                **(self.agreement_figures.get(court) or defaults),
+                "seconds": 0.5, "computed_at": NOW.isoformat(),
+            })
+        )
+
     def geteuid(self) -> int:
         return self.euid
 
@@ -224,6 +259,11 @@ class FakeHost(RealHost):
                                 "error": None, "at": NOW.isoformat(),
                             })
                         )
+                elif self._bound(input, "v_task") == worker_identity.AGREEMENT_TASK:
+                    self.agreement_jobs[job] = args
+                    self.agreement_deferred.append(args)
+                    self.agreement_events.append(("defer", args["court"]))
+                    self._write_agreement(job, args)
                 elif "snapshot" in args:
                     self.stage_jobs[job] = args
                     self.stage_deferred.append(args)
@@ -243,15 +283,21 @@ class FakeHost(RealHost):
                     raise KeyboardInterrupt
                 if self.interrupt_caselaw_job and job in self.caselaw_jobs:
                     raise KeyboardInterrupt
-                assert job in self.job_destinations or job in self.stage_jobs or job in self.caselaw_jobs
+                if self.interrupt_agreement_job and job in self.agreement_jobs:
+                    raise KeyboardInterrupt
+                assert (job in self.job_destinations or job in self.stage_jobs
+                        or job in self.caselaw_jobs or job in self.agreement_jobs)
                 if job in self.caselaw_jobs:
                     self.caselaw_events.append(("read", self.caselaw_jobs[job]["court"]))
+                if job in self.agreement_jobs:
+                    self.agreement_events.append(("read", self.agreement_jobs[job]["court"]))
                 polls = self.job_polls[job]
                 self.job_polls[job] += 1
                 status = (
                     "doing" if polls == 0 else
                     "failed" if (job in self.stage_jobs and self.stage_failure is not None)
                     or (job in self.caselaw_jobs and self.caselaw_failure is not None)
+                    or (job in self.agreement_jobs and self.agreement_failure is not None)
                     else "succeeded"
                 )
                 return subprocess.CompletedProcess(command, 0, f"{job}|{status}|1\n", "")
@@ -558,7 +604,7 @@ class Install(unittest.TestCase):
             lockfile = loaded.lockfile
             pin = lockfile.sources["example"]
             entries = list(pin.entries)
-            for table in worker_identity.STAGE_TABLES:
+            for table in (*worker_identity.STAGE_TABLES, worker_identity.AGREEMENT_TABLE):
                 if label == self.labels[0] and table == missing:
                     continue
                 name = data_file(table, pin.snapshot_date)
@@ -649,7 +695,8 @@ class Install(unittest.TestCase):
         self.assertEqual(err, "")
         self.assertLess(out.index("record: ok"), out.index("stage: ok"))
         self.assertLess(out.index("stage: ok"), out.index("ingest: ok"))
-        self.assertLess(out.index("ingest: ok"), out.index("retain: ok"))
+        self.assertLess(out.index("ingest: ok"), out.index("agreement: ok"))
+        self.assertLess(out.index("agreement: ok"), out.index("retain: ok"))
         self.assertIn("ca6: dockets 1, opinion-clusters 1, citations 1, opinions 1", out)
         self.assertIn("scotus: dockets 2, opinion-clusters 2, citations 2, opinions 2", out)
         self.assertIn("example: 2 courts staged, 15 records read, 8 seconds", out)
@@ -672,6 +719,20 @@ class Install(unittest.TestCase):
         self.assertTrue(all(
             args["courts"] == expected_geography for args in self.host.caselaw_deferred
         ))
+        self.assertEqual([args["court"] for args in self.host.agreement_deferred], ["ca6", "scotus"])
+        self.assertTrue(all(
+            set(args) == {"label", "snapshot", "court", "input"}
+            for args in self.host.agreement_deferred
+        ))
+        map_name = data_file(worker_identity.AGREEMENT_TABLE, "2099-01-02")
+        map_bytes = (self.snapshots / "example-2099-01-02" / map_name).read_bytes()
+        self.assertTrue(all(
+            args["input"] == {"path": map_name, "sha256": hashlib.sha256(map_bytes).hexdigest()}
+            for args in self.host.agreement_deferred
+        ))
+        self.assertEqual(
+            self.host.agreement_events[:2], [("defer", "ca6"), ("defer", "scotus")],
+        )
 
     def test_complete_matching_stage_prints_courts_and_defers_nothing(self) -> None:
         self._enable_stage()
@@ -699,7 +760,7 @@ class Install(unittest.TestCase):
 
         code, out, err = self.run_install(sleep=sleep, monotonic=lambda: now[0])
         self.assertEqual(code, 0, out + err)
-        self.assertEqual(sleeps, [1.0])
+        self.assertEqual(sleeps, [1.0, 1.0])
         self.assertIn(
             f"ingest: ok — caselaw: ingesting, 2 courts, {snapshots.HEARTBEAT_SECONDS} seconds",
             out,
@@ -715,6 +776,123 @@ class Install(unittest.TestCase):
              ("read", "ca6"), ("read", "scotus"),
              ("read", "ca6"), ("read", "scotus")],
         )
+
+    def test_agreement_prints_exact_court_rows_and_summary_without_count_gate(self) -> None:
+        self._enable_stage()
+        self._seed_complete_stage()
+        self.host.agreement_figures["scotus"] = {
+            "documents": 0, "gideon_pairs": 0, "map_rows": 7,
+            "map_outside": 7, "map_pairs": 0, "agreed": 0,
+            "gideon_only": 0, "map_only_seen": 0, "map_only_missed": 0,
+        }
+        code, out, err = self.run_install()
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(err, "")
+        self.assertEqual(
+            [line for line in out.splitlines() if line.startswith("agreement: ok — ")],
+            [
+                "agreement: ok — ca6 agreement: 1 documents; 4 GIDEON pairs, "
+                "3 map pairs, 1 map rows beyond the label; agreed 2 "
+                "(50 % of GIDEON's, 67 % of the map's); "
+                "map-only 1 seen unresolved, 0 missed",
+                "agreement: ok — scotus agreement: 0 documents; 0 GIDEON pairs, "
+                "0 map pairs, 7 map rows beyond the label; agreed 0 "
+                "(0 % of GIDEON's, 0 % of the map's); "
+                "map-only 0 seen unresolved, 0 missed",
+                "agreement: ok — caselaw: 2 courts measured, 0 seconds",
+            ],
+        )
+        self.assertEqual(self.host.agreement_events[:2],
+                         [("defer", "ca6"), ("defer", "scotus")])
+
+    def test_agreement_waits_once_per_round_and_reports_a_minute_heartbeat(self) -> None:
+        self._enable_stage()
+        self._seed_complete_stage()
+        now = [0.0]
+        sleeps: list[float] = []
+
+        def sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            now[0] += snapshots.HEARTBEAT_SECONDS
+
+        code, out, err = self.run_install(sleep=sleep, monotonic=lambda: now[0])
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(sleeps, [1.0, 1.0])
+        self.assertIn(
+            f"agreement: ok — caselaw: measuring, 2 courts, {snapshots.HEARTBEAT_SECONDS} seconds",
+            out,
+        )
+        self.assertIn(
+            f"agreement: ok — caselaw: 2 courts measured, {snapshots.HEARTBEAT_SECONDS} seconds",
+            out,
+        )
+        self.assertEqual(
+            self.host.agreement_events[:6],
+            [("defer", "ca6"), ("defer", "scotus"),
+             ("read", "ca6"), ("read", "scotus"),
+             ("read", "ca6"), ("read", "scotus")],
+        )
+
+    def test_failed_agreement_job_refuses_with_its_fix(self) -> None:
+        self._enable_stage()
+        self._seed_complete_stage()
+        self.host.agreement_failure = "database"
+        code, out, err = self.run_install()
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("agreement: refuse — ca6: agreement database failure", out)
+        for command in ("host provision", "apply", "corpus install"):
+            self.assertIn(report.command(command), out)
+        self.assertNotIn("retain: ok", out)
+
+    def test_agreement_problem_refuses_with_its_fix(self) -> None:
+        self._enable_stage()
+        self._seed_complete_stage()
+        issue = report.Problem("comparison read failed", "Run the fictitious fix.")
+        with patch.object(install.agreement, "read_agreement", return_value=issue):
+            code, out, err = self.run_install()
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("agreement: refuse — ca6: comparison read failed", out)
+        self.assertIn(issue.fix, out)
+        self.assertNotIn("retain: ok", out)
+
+    def test_missing_pinned_map_refuses_before_agreement_defer(self) -> None:
+        self._enable_stage(missing=worker_identity.AGREEMENT_TABLE)
+        self._seed_complete_stage()
+        code, out, err = self.run_install()
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("agreement: refuse", out)
+        self.assertIn(data_file(worker_identity.AGREEMENT_TABLE, "2099-01-02"), out)
+        self.assertIn(report.command("corpus cut"), out)
+        self.assertEqual(self.host.agreement_deferred, [])
+
+    def test_agreement_reads_stage_record_before_deferring(self) -> None:
+        self._enable_stage()
+        self._seed_complete_stage()
+        complete = staging.read_record(
+            self.host, self.labels[0], "example", work_root=self.work,
+            command_path=install.COMMAND_PATH,
+        )
+        assert isinstance(complete, staging.StageRecord)
+        for issue in (None, replace(complete, courts=["ca6"])):
+            with self.subTest(issue=issue):
+                self.host.agreement_deferred.clear()
+                with patch.object(install.staging, "read_record", side_effect=[complete, complete, issue]):
+                    code, out, err = self.run_install()
+                self.assertEqual(code, 1, out + err)
+                self.assertIn("agreement: refuse", out)
+                self.assertEqual(self.host.agreement_deferred, [])
+                self.assertIn(f"Remove {self.work / self.labels[0] / 'example'}", out)
+
+    def test_interrupt_during_agreement_reports_worker_continuation(self) -> None:
+        self._enable_stage()
+        self._seed_complete_stage()
+        self.host.interrupt_agreement_job = True
+        code, out, err = self.run_install()
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("agreement: refuse", out)
+        self.assertIn("interrupted; agreement jobs continue in the worker", out)
+        self.assertIn(report.command("corpus install"), out)
+        self.assertEqual(self.host.lock_releases, 1)
 
     def test_ingest_prints_exact_court_rows_and_summary(self) -> None:
         self._enable_stage()

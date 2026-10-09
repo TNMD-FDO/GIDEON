@@ -129,25 +129,29 @@ def _valid_courts(courts: object) -> bool:
     )
 
 
-def _valid_inputs(inputs: object, *, sizes: bool) -> bool:
-    if not isinstance(inputs, dict) or set(inputs) != set(STAGE_TABLES):
+def valid_input(item: object, *, sizes: bool = False) -> bool:
+    """Check one pinned input against the kept-fetch item grammar."""
+
+    if not isinstance(item, dict) or set(item) != ({"path", "sha256", "size"} if sizes else {"path", "sha256"}):
         return False
-    for item in inputs.values():
-        if not isinstance(item, dict) or set(item) != ({"path", "sha256", "size"} if sizes else {"path", "sha256"}):
-            return False
-        path = item["path"]
-        digest = item["sha256"]
-        if (
-            not isinstance(path, str)
-            or re.fullmatch(SEGMENT_PATTERN, path) is None
-            or path in {".", ".."} or path.endswith(fetch.RESERVED_SUFFIXES)
-            or not isinstance(digest, str)
-            or re.fullmatch(DIGEST_PATTERN, digest) is None
-        ):
-            return False
-        if sizes and (type(item["size"]) is not int or item["size"] < 0):
-            return False
-    return True
+    path = item["path"]
+    digest = item["sha256"]
+    if (
+        not isinstance(path, str)
+        or re.fullmatch(SEGMENT_PATTERN, path) is None
+        or path in {".", ".."} or path.endswith(fetch.RESERVED_SUFFIXES)
+        or not isinstance(digest, str)
+        or re.fullmatch(DIGEST_PATTERN, digest) is None
+    ):
+        return False
+    return not sizes or (type(item["size"]) is int and item["size"] >= 0)
+
+
+def _valid_inputs(inputs: object, *, sizes: bool) -> bool:
+    return (
+        isinstance(inputs, dict) and set(inputs) == set(STAGE_TABLES)
+        and all(valid_input(item, sizes=sizes) for item in inputs.values())
+    )
 
 
 def validate_arguments(
@@ -212,37 +216,44 @@ def input_records(
         raise StageFailure("invalid")
     result: dict[str, dict[str, str | int]] = {}
     for table in STAGE_TABLES:
-        item = inputs[table]
-        path = snapshot_dir / item["path"]
-        if path.is_symlink() or path.with_name(path.name + fetch.RECORD_SUFFIX).is_symlink():
-            raise StageFailure("invalid", table=table)
-        try:
-            record = fetch.read_record(path.with_name(path.name + fetch.RECORD_SUFFIX))
-        except fetch.FetchFailure as exc:
-            raise StageFailure("invalid", table=table, error=exc.error) from exc
-        if record is None or record.state != "whole" or not path.is_file():
-            raise StageFailure("missing-input", table=table)
-        # A whole record's size is validated as an int equal to its offset.
-        size = record.durable
-        if (
-            record.form != fetch.KEPT_FORM or record.sha256 != item["sha256"]
-            or path.stat().st_size != size
-        ):
-            raise StageFailure("input-mismatch", table=table)
-        result[table] = {"path": item["path"], "sha256": item["sha256"], "size": size}
+        result[table] = input_record(snapshot_dir, table, inputs[table])
     return result
 
 
+def input_record(snapshot_dir: Path, table: str, item: dict[str, str]) -> dict[str, str | int]:
+    """Read one whole kept fetch record and compare its pin and file size."""
+
+    if not valid_input(item):
+        raise StageFailure("invalid", table=table)
+    path = snapshot_dir / item["path"]
+    if path.is_symlink() or path.with_name(path.name + fetch.RECORD_SUFFIX).is_symlink():
+        raise StageFailure("invalid", table=table)
+    try:
+        record = fetch.read_record(path.with_name(path.name + fetch.RECORD_SUFFIX))
+    except fetch.FetchFailure as exc:
+        raise StageFailure("invalid", table=table, error=exc.error) from exc
+    if record is None or record.state != "whole" or not path.is_file():
+        raise StageFailure("missing-input", table=table)
+    # A whole record's size is validated as an int equal to its offset.
+    size = record.durable
+    if (
+        record.form != fetch.KEPT_FORM or record.sha256 != item["sha256"]
+        or path.stat().st_size != size
+    ):
+        raise StageFailure("input-mismatch", table=table)
+    return {"path": item["path"], "sha256": item["sha256"], "size": size}
+
+
 @contextmanager
-def lock_partial(path: Path) -> Iterator[None]:
-    """Hold the label's partial marker exclusively for a stage run."""
+def lock_partial(path: Path, *, waiting: bool = False) -> Iterator[None]:
+    """Hold a stable lock, optionally waiting for its current holder."""
 
     if path.is_symlink():
         raise StageFailure("invalid")
     descriptor = os.open(path, os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW, PARTIAL_MODE)
     try:
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(descriptor, fcntl.LOCK_EX | (0 if waiting else fcntl.LOCK_NB))
         except BlockingIOError as exc:
             raise StageFailure("busy") from exc
         os.fchmod(descriptor, PARTIAL_MODE)
@@ -429,19 +440,35 @@ def checked_rows(
         yield fields, lines
 
 
+@contextmanager
+def staged_rows(
+    path: Path, table: str, columns: tuple[str, ...],
+    on_row: Callable[[str], None] | None = None,
+) -> Iterator[tuple[dict[str, int], Iterator[tuple[list[str], list[str]]]]]:
+    """Read a staged CSV file with its required columns and row width checked."""
+
+    if path.is_symlink() or not path.is_file():
+        raise StageFailure("invalid", table=table)
+    rows = read_rows(path, table, open)
+    try:
+        positions, width, _ = read_header(rows, table, columns=columns)
+        yield positions, checked_rows(rows, width, table, on_row)
+    finally:
+        rows.close()
+
+
 def _make_directory(path: Path) -> None:
     path.mkdir(mode=DIR_MODE, exist_ok=True)
     os.chmod(path, DIR_MODE, follow_symlinks=False)
 
 
 @contextmanager
-def _outputs(directory: Path, courts: list[str], table: str) -> Iterator[list[BinaryIO]]:
+def _outputs(paths: list[Path]) -> Iterator[list[BinaryIO]]:
     """Create one exclusive file per court and flush each before closing."""
 
     opened: list[BinaryIO] = []
     try:
-        for court in courts:
-            path = directory / court / f"{table}.csv"
+        for path in paths:
             descriptor = os.open(
                 path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600,
             )
@@ -488,7 +515,8 @@ def _stream_related(
     rows = read_rows(path, table, bz2.open)
     try:
         columns, width, header = read_header(rows, table)
-        with _outputs(directory, courts, table) as outputs:
+        paths = [directory / court / f"{table}.csv" for court in courts]
+        with _outputs(paths) as outputs:
             for output in outputs:
                 output.write(header)
             for fields, lines in checked_rows(rows, width, table, progress.row):

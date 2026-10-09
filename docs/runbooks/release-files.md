@@ -124,6 +124,8 @@ Stopping the command with Ctrl-C is safe. Downloads already started continue in 
 
 Before that, the install stages the case law. The worker reads the snapshot's courts, dockets, opinion clusters, citations, and opinions files — the opinions file once — and writes each lockfile court's rows, unchanged and under each file's header, to `/data/work/<label>/caselaw/<court>/`, with a `stage.json` record beside them naming the inputs and the counts. One line per court gives its counts. This takes about two and a half hours for tranche 1. Running the command again finds the record whole and prints `complete; nothing deferred`. Stopping it with Ctrl-C is safe: the stage continues in the worker, and the same command joins it. `/data/work` is derived state outside every backup set.
 
+After the ingest, the install measures how far GIDEON's citation edges agree with CourtListener's citation map, one worker job per court. The first job stages the snapshot's `citation-map` file once for the label, writing each lockfile court's rows, unchanged and under the file's header, to `/data/work/<label>/caselaw/citation-map/<court>.csv` with a `map.json` record beside them; the other courts' jobs wait for it. Each job writes its figure to `/data/work/<label>/caselaw/<court>.agreement.json`. One line per court gives the `ready` documents measured, the pairs GIDEON found and the pairs the map found, the map's rows citing an opinion outside the label's courts, the agreed pairs as a share of each side, and the map-only pairs split into those GIDEON saw but left unresolved and those it missed. The figure is reported and never refuses the install. On a bounded run of 2,000 opinions per court the map's pass took about two minutes and each court's job about four and a half; running the command again finds the map whole and writes the figures again.
+
 The install's refusals and their fixes:
 
 - **Another corpus command is running**: wait for it to finish, then run the command again.
@@ -135,6 +137,9 @@ The install's refusals and their fixes:
 - **A stage input is missing or its digest is off the pin**: remove the named snapshot file and its `.fetch.json` record, then run the command again, which fetches and verifies it before staging.
 - **The stage record disagrees with the lockfile**: remove the named work directory, then run the command again.
 - **The worker cannot write the work directory**: run `host provision`, then `apply`, then the command again.
+- **The lockfile pins no `citation-map` file**: the label was cut before the map was pinned. Run `corpus cut` to pin it, then install the new label.
+- **The agreement's `citation-map` input is missing or off the pin**: remove the named snapshot file and its `.fetch.json` record, then run the command again, which fetches and verifies it.
+- **An agreement job fails as `invalid` or `malformed`**: the staged map directory disagrees with the stage, or a staged file or the map's record is damaged. Read the worker's logs the refusal names; removing `/data/work/<label>/caselaw/citation-map/` lets the next run stage the map again.
 
 ## 11. Adding courts: the derived cut
 

@@ -1,4 +1,4 @@
-"""Fetch, verify, record, stage, ingest, and retain a committed corpus lockfile."""
+"""Fetch, verify, record, stage, ingest, measure, and retain a corpus lockfile."""
 
 import argparse
 import sys
@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
-from gideon.host import backuplock, caselaw, report, stack, staging
+from gideon.host import agreement, backuplock, caselaw, report, stack, staging
 from gideon.host.corpus import artifacts, record, snapshots
 from gideon.host.corpus.lockfile import (
     LABEL,
@@ -19,6 +19,7 @@ from gideon.host.corpus.lockfile import (
 from gideon.host.corpus.sources import SOURCES, SourceDefinition, data_file
 from gideon.host.courts import CourtMap
 from gideon.host.render.worker import (
+    AGREEMENT_TABLE,
     CITE_FORMS,
     CITE_TYPES,
     NO_STATE_REASONS,
@@ -256,6 +257,10 @@ def _run_install_stages(
     ingested = _ingest(host, rendered_dir, work_root, lockfile, court_map, sleep, monotonic)
     if ingested:
         return ingested
+    active_stage[0] = "agreement"
+    measured = _agreement(host, rendered_dir, work_root, lockfile, sleep, monotonic)
+    if measured:
+        return measured
     active_stage[0] = "retain"
     return _retain(host, rendered_dir, snapshots_root)
 
@@ -587,6 +592,97 @@ def _ingest(
     return 0
 
 
+def _agreement(
+    host: CorpusHost, rendered_dir: PathLike, work_root: PathLike,
+    lockfile: Lockfile, sleep: Callable[[float], None],
+    monotonic: Callable[[], float],
+) -> int:
+    """Defer all court comparisons, wait once, and report their figures."""
+
+    started = heartbeat_at = monotonic()
+    courts: list[tuple[str, int]] = []
+    pending: dict[int, tuple[str, str]] = {}
+    records: dict[int, agreement.AgreementRecord] = {}
+    for name, pin in lockfile.sources.items():
+        if pin.courts is None:
+            continue
+        stage_record = staging.read_record(
+            host, lockfile.label, name, work_root=work_root, command_path=COMMAND_PATH,
+        )
+        if isinstance(stage_record, Problem):
+            return _refuse("agreement", f"{name}: {stage_record.problem}", stage_record.fix)
+        if stage_record is None:
+            return _refuse(
+                "agreement", f"{name}: stage record is missing",
+                _stage_removal_fix(lockfile.label, name, work_root),
+            )
+        if stage_record.courts != list(pin.courts):
+            return _refuse(
+                "agreement", f"{name}: stage record disagrees with the lockfile",
+                _stage_removal_fix(lockfile.label, name, work_root),
+            )
+        path = data_file(AGREEMENT_TABLE, pin.snapshot_date)
+        entry = next((item for item in pin.entries if item.path == path), None)
+        if entry is None:
+            return _refuse(
+                "agreement", f"{name}: pinned agreement input {path} is missing",
+                f"Run {report.command('corpus cut')} to pin {path}, then run "
+                f"{report.command(COMMAND_PATH)} with the new label.",
+            )
+        snapshot = f"{name}-{pin.snapshot_date}"
+        for court in pin.courts:
+            job = agreement.defer_agreement(
+                host, rendered_dir, label=lockfile.label, snapshot=snapshot,
+                court=court, input={"path": path, "sha256": entry.sha256},
+                command_path=COMMAND_PATH,
+            )
+            if isinstance(job, Problem):
+                return _refuse("agreement", f"{court}: {job.problem}", job.fix)
+            courts.append((court, job))
+            pending[job] = (snapshot, court)
+
+    while pending:
+        for job, (snapshot, court) in tuple(pending.items()):
+            outcome = agreement.read_agreement(
+                host, rendered_dir, job, label=lockfile.label, snapshot=snapshot,
+                court=court, work_root=work_root, command_path=COMMAND_PATH,
+            )
+            if isinstance(outcome, Problem):
+                return _refuse("agreement", f"{court}: {outcome.problem}", outcome.fix)
+            if outcome.failure is not None:
+                return _refuse("agreement", f"{court}: {outcome.failure.problem}", outcome.failure.fix)
+            if outcome.done:
+                assert outcome.record is not None
+                records[job] = outcome.record
+                del pending[job]
+        if not pending:
+            break
+        sleep(1.0)
+        now = monotonic()
+        if now - heartbeat_at >= snapshots.HEARTBEAT_SECONDS:
+            report.print_stage(StageResult(
+                "agreement", True,
+                f"caselaw: measuring, {len(courts)} courts, {round(now - started)} seconds", "",
+            ))
+            heartbeat_at = now
+
+    for court, job in courts:
+        figure = records[job]
+        report.print_stage(StageResult(
+            "agreement", True,
+            f"{court} agreement: {figure.documents} documents; "
+            f"{figure.gideon_pairs} GIDEON pairs, {figure.map_pairs} map pairs, "
+            f"{figure.map_outside} map rows beyond the label; agreed {figure.agreed} "
+            f"({figure.gideon_share()} % of GIDEON's, {figure.map_share()} % of the map's); "
+            f"map-only {figure.map_only_seen} seen unresolved, {figure.map_only_missed} missed", "",
+        ))
+    report.print_stage(StageResult(
+        "agreement", True,
+        f"caselaw: {len(courts)} courts measured, {round(monotonic() - started)} seconds", "",
+    ))
+    return 0
+
+
 def _retain(host: CorpusHost, rendered_dir: PathLike, snapshots_root: PathLike) -> int:
     rows = record.read_lockfiles(host, rendered_dir, command_path=COMMAND_PATH)
     if isinstance(rows, Problem):
@@ -668,7 +764,7 @@ def run_corpus_install(
     monotonic: Callable[[], float] = time.monotonic,
     sources: Sequence[SourceDefinition] = SOURCES,
 ) -> int:
-    """Run preconditions, fetch, verify, record, stage, ingest, and retain."""
+    """Run preconditions, fetch, verify, record, stage, ingest, agreement, and retain."""
     io = host if host is not None else RealHost()
     root = Path(checkout) if checkout is not None else Path(__file__).parents[3]
     active_stage = ["preconditions"]
@@ -700,6 +796,11 @@ def run_corpus_install(
             return _refuse(
                 "ingest", "interrupted; the ingest continues in the worker",
                 f"Run {report.command(COMMAND_PATH)} again to rejoin it.",
+            )
+        if active_stage[0] == "agreement":
+            return _refuse(
+                "agreement", "interrupted; agreement jobs continue in the worker",
+                f"Run {report.command(COMMAND_PATH)} again to rejoin them.",
             )
         if active_stage[0] == "retain":
             return _refuse(

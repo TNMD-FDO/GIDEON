@@ -649,22 +649,19 @@ def _table_rows(
     progress: _Progress,
 ) -> Iterator[tuple[dict[str, int], Iterator[tuple[list[str], list[str]]]]]:
     path = court_dir / f"{table}.csv"
-    if path.is_symlink() or not path.is_file():
-        raise CaselawFailure("stage-mismatch", table=table)
-    rows = staging.read_rows(path, table, open)
     try:
-        positions, width, _ = staging.read_header(rows, table, columns=columns)
-        yield positions, staging.checked_rows(
-            rows, width, table, lambda _table: _log_progress(progress),
-        )
+        with staging.staged_rows(
+            path, table, columns, lambda _table: _log_progress(progress),
+        ) as result:
+            yield result
     except staging.StageFailure as exc:
         raise CaselawFailure(
-            "malformed", table=table, error=exc.error or type(exc).__name__,
+            "stage-mismatch" if exc.reason == "invalid" else "malformed",
+            table=table,
+            error=None if exc.reason == "invalid" else exc.error or type(exc).__name__,
         ) from exc
     except OSError as exc:
         raise CaselawFailure("local", table=table, error=type(exc).__name__) from exc
-    finally:
-        rows.close()
 
 
 def _load_dockets(court_dir: Path, progress: _Progress) -> dict[int, _Docket]:

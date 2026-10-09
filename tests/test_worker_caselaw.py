@@ -870,6 +870,16 @@ class WorkerCaselaw(unittest.TestCase):
         assert opinion is not None
         self.assertEqual(opinion.docket, docket_number)
 
+    def test_shared_staged_reader_keeps_missing_file_reason(self) -> None:
+        self.stage()
+        path = self.court_dir / "dockets.csv"
+        path.unlink()
+        with self.assertRaises(caselaw.CaselawFailure) as raised:
+            self.run_ingest()
+        self.assertEqual((raised.exception.reason, raised.exception.table,
+                          raised.exception.error), ("stage-mismatch", "dockets", None))
+        self.assert_failure(raised.exception)
+
     def test_present_terminal_rows_are_skipped_without_writes(self) -> None:
         self.stage(opinions=[_opinion(str(index), "100", plain_text=f"Fiction {index}.")
                              for index in range(1, 4)])

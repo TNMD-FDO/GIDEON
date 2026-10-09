@@ -9,6 +9,7 @@ import logging
 import os
 import stat
 import tempfile
+import threading
 import unittest
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -316,6 +317,39 @@ class WorkerStaging(unittest.TestCase):
                          ("input-mismatch", table))
         self.assert_failure(raised.exception)
 
+    def test_one_input_record_uses_the_same_fetch_checks(self) -> None:
+        table = "citations"
+        item = self.inputs[table]
+        path = self.dump / item["path"]
+        self.assertEqual(staging.input_record(self.dump, table, item), {
+            "path": path.name, "sha256": item["sha256"], "size": path.stat().st_size,
+        })
+        with self.assertRaises(staging.StageFailure) as raised:
+            staging.input_record(self.dump, table, {**item, "sha256": "0" * 64})
+        self.assertEqual((raised.exception.reason, raised.exception.table),
+                         ("input-mismatch", table))
+
+    def test_outputs_accept_per_court_paths(self) -> None:
+        paths = [self.work_root / f"{court}.csv" for court in self.courts]
+        with staging._outputs(paths) as outputs:
+            for output, court in zip(outputs, self.courts, strict=True):
+                output.write(court.encode())
+        for path, court in zip(paths, self.courts, strict=True):
+            self.assertEqual(path.read_bytes(), court.encode())
+
+    def test_staged_rows_check_the_header_and_width(self) -> None:
+        self.run_stage()
+        path = self.work_root / "staged.csv"
+        path.write_bytes((self.whole / self.courts[0] / "dockets.csv").read_bytes())
+        with staging.staged_rows(path, "dockets", ("id", "court_id")) as (columns, rows):
+            self.assertEqual([fields[columns["id"]] for fields, _ in rows], ["d1", "d3"])
+        path.write_bytes(path.read_bytes() + b"extra\n")
+        with (staging.staged_rows(path, "dockets", ("id",)) as (_, rows),
+              self.assertRaises(staging.StageFailure) as raised):
+            list(rows)
+        self.assertEqual((raised.exception.reason, raised.exception.table),
+                         ("malformed", "dockets"))
+
     def test_unknown_court_names_first_absent_court(self) -> None:
         """The courts table must contain each requested court id."""
 
@@ -399,6 +433,32 @@ class WorkerStaging(unittest.TestCase):
                 self.assertFalse(self.whole.exists())
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    def test_waiting_lock_acquires_after_the_holder_releases(self) -> None:
+        self.lock.parent.mkdir()
+        started = threading.Event()
+        acquired = threading.Event()
+        failures: list[Exception] = []
+
+        def wait_for_lock() -> None:
+            try:
+                started.set()
+                with staging.lock_partial(self.lock, waiting=True):
+                    acquired.set()
+            except (staging.StageFailure, OSError) as exc:
+                failures.append(exc)
+
+        with self.lock.open("w") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            waiter = threading.Thread(target=wait_for_lock)
+            waiter.start()
+            self.assertTrue(started.wait(1))
+            self.assertFalse(acquired.wait(0.05))
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        waiter.join(1)
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual(failures, [])
+        self.assertTrue(acquired.is_set())
 
     def test_disagreeing_whole_stage_record_is_invalid(self) -> None:
         """An existing whole stage cannot be overwritten for different inputs."""

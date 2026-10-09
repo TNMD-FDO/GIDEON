@@ -134,6 +134,13 @@ class CaselawHost(unittest.TestCase):
             / f"{COURT}.{identity.CASELAW_FAILURE_NAME}"
         )
 
+    def test_public_court_check(self) -> None:
+        self.assertIsNone(caselaw.court_problem(COURT, "corpus install"))
+        problem = caselaw.court_problem("Court1", "corpus install")
+        assert isinstance(problem, report.Problem)
+        self.assertIn("caselaw court", problem.problem)
+        self.assertIn(report.command("corpus install"), problem.fix)
+
     def read_job(self) -> caselaw.CaselawRead | report.Problem:
         return caselaw.read_caselaw(
             self.host, RENDERED, JOB_ID, label=LABEL, snapshot=SNAPSHOT,

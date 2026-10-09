@@ -330,7 +330,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     watch.set_defaults(handler=host_cli.run_corpus_watch, command_path="corpus watch")
     corpus_install = corpus_sub.add_parser(
-        "install", help="fetch, verify, and stage each court's rows from a corpus lockfile"
+        "install", help="fetch, verify, stage, and ingest each court's rows, then measure its citation edges against the dump's map"
     )
     corpus_install.add_argument("label", help="lockfile label, e.g. corpus-2026-08-31")
     corpus_install.set_defaults(handler=host_cli.run_corpus_install, command_path="corpus install")

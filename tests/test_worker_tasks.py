@@ -20,7 +20,7 @@ from procrastinate.testing import InMemoryConnector
 
 from gideon.host import cas
 from gideon.host.render import worker
-from gideon.worker import caselaw, fetch, staging, tasks
+from gideon.worker import agreement, caselaw, fetch, staging, tasks
 
 
 class Unread(httpx.SyncByteStream):
@@ -60,7 +60,7 @@ class RecoveryTask(unittest.TestCase):
         self.assertEqual(
             {name for name in app.tasks if name.startswith("gideon.worker.tasks.")},
             {tasks.VERIFY_TASK, tasks.RECOVERY_TASK, fetch.FETCH_TASK,
-             staging.STAGE_TASK, caselaw.CASELAW_TASK},
+             staging.STAGE_TASK, caselaw.CASELAW_TASK, agreement.AGREEMENT_TASK},
         )
         fetching = app.tasks[fetch.FETCH_TASK]
         self.assertEqual(fetching.queue, fetch.FETCH_QUEUE)
@@ -72,6 +72,11 @@ class RecoveryTask(unittest.TestCase):
         self.assertTrue(staged.pass_context)
         self.assertIsNone(staged.queueing_lock)
         self.assertFalse(inspect.iscoroutinefunction(tasks.stage))
+        measured = app.tasks[agreement.AGREEMENT_TASK]
+        self.assertEqual(measured.queue, agreement.AGREEMENT_QUEUE)
+        self.assertTrue(measured.pass_context)
+        self.assertIsNone(measured.retry_strategy)
+        self.assertFalse(inspect.iscoroutinefunction(tasks.agreement))
 
     def test_caselaw_task_files_and_reraises_a_job_failure(self) -> None:
         app = procrastinate.App(connector=InMemoryConnector())
@@ -113,6 +118,59 @@ class RecoveryTask(unittest.TestCase):
         file_failure.assert_called_once_with(
             staging.WORK_ROOT, label, snapshot, court, job_id, failure,
         )
+
+    def test_agreement_job_runs_off_event_loop_and_files_failure(self) -> None:
+        label = "corpus-2099-01-01"
+        snapshot = "fictional-dump-2099-01-01"
+        court = "court1"
+        input = {"path": "citation-map.csv.bz2", "sha256": "0" * 64}
+        threads: list[bool] = []
+
+        def fail(*_args: object, **_kwargs: object) -> None:
+            threads.append(threading.current_thread() is threading.main_thread())
+            raise agreement.AgreementFailure("malformed", table=agreement.AGREEMENT_TABLE)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            work_root = Path(temporary) / "work"
+            (work_root / label / "fictional-dump").mkdir(parents=True)
+            app = procrastinate.App(connector=InMemoryConnector())
+            job_id = 77
+            context = procrastinate.JobContext(
+                app=app,
+                job=procrastinate.jobs.Job(
+                    id=job_id, queue=agreement.AGREEMENT_QUEUE, lock=None,
+                    queueing_lock=None, task_name=agreement.AGREEMENT_TASK,
+                ),
+                start_timestamp=0.0,
+                abort_reason=lambda: None,
+            )
+
+            failures: list[agreement.AgreementFailure] = []
+
+            def exercise() -> None:
+                try:
+                    tasks.agreement(context, label, snapshot, court, input)
+                except agreement.AgreementFailure as failure:
+                    failures.append(failure)
+
+            with (
+                patch.object(agreement, "agreement", side_effect=fail),
+                patch.object(agreement, "PsycopgEdges"),
+                patch.object(staging, "WORK_ROOT", work_root),
+            ):
+                thread = threading.Thread(target=exercise)
+                thread.start()
+                thread.join(2)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual([failure.reason for failure in failures], ["malformed"])
+            self.assertEqual(threads, [False])
+            failure_path = (
+                work_root / label / "fictional-dump"
+                / f"{court}.{agreement.AGREEMENT_FAILURE_NAME}"
+            )
+            value = json.loads(failure_path.read_text())
+            self.assertEqual((value["job"], value["court"], value["reason"], value["table"]),
+                             (job_id, court, "malformed", agreement.AGREEMENT_TABLE))
 
     def test_stage_jobs_run_off_the_event_loop_and_a_failure_is_filed(self) -> None:
         snapshot = "fictions-2099-01-02"

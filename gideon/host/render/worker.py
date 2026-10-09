@@ -34,6 +34,17 @@ STAGE_QUEUE: Final[str] = "stage"
 CASELAW_TASK: Final[str] = "gideon.worker.tasks.caselaw"
 CASELAW_QUEUE: Final[str] = "caselaw"
 CASELAW_FAILURE_NAME: Final[str] = "caselaw-failed.json"
+AGREEMENT_TASK: Final[str] = "gideon.worker.tasks.agreement"
+AGREEMENT_QUEUE: Final[str] = "caselaw"
+AGREEMENT_TABLE: Final[str] = "citation-map"
+AGREEMENT_MAP_DIRECTORY: Final[str] = "citation-map"
+AGREEMENT_MAP_RECORD_NAME: Final[str] = "map.json"
+AGREEMENT_RECORD_NAME: Final[str] = "agreement.json"
+AGREEMENT_FAILURE_NAME: Final[str] = "agreement-failed.json"
+AGREEMENT_FAILURE_REASONS: Final = frozenset({
+    "invalid", "missing-stage", "stage-mismatch", "missing-input",
+    "input-mismatch", "malformed", "database", "local", "busy",
+})
 CASELAW_FAILURE_REASONS: Final = frozenset({
     "invalid", "missing-stage", "stage-mismatch", "malformed", "store",
     "database", "local", "busy", "segmenter", "anchors", "text-mismatch",

@@ -319,11 +319,14 @@ def _logs_fix(rendered_dir: PathLike, command_path: str) -> str:
     )
 
 
-def _court_problem(court: object, command_path: str) -> Problem | None:
+def court_problem(
+    court: object, command_path: str, *, subject: str = "caselaw",
+) -> Problem | None:
+    """Validate a court id for a host job."""
     if isinstance(court, str) and re.fullmatch(COURT_PATTERN, court) is not None:
         return None
     return Problem(
-        "caselaw court is invalid",
+        f"{subject} court is invalid",
         "Use a lowercase court id of one to 32 letters or digits, then run "
         f"{report.command(command_path)} again.",
     )
@@ -390,7 +393,7 @@ def defer_caselaw(
     for problem in (
         staging.label_problem(label, command_path, subject="caselaw"),
         staging.snapshot_problem(snapshot, command_path, subject="caselaw"),
-        _court_problem(court, command_path),
+        court_problem(court, command_path),
         _limit_problem(limit, command_path),
         _courts_problem(court, courts, command_path),
     ):
@@ -495,7 +498,7 @@ def read_caselaw(
     for problem in (
         staging.label_problem(label, command_path, subject="caselaw"),
         staging.snapshot_problem(snapshot, command_path, subject="caselaw"),
-        _court_problem(court, command_path),
+        court_problem(court, command_path),
     ):
         if problem is not None:
             return problem
@@ -575,7 +578,7 @@ def _read_court_row(
             "caselaw snapshot date is invalid",
             f"Use a real YYYY-MM-DD date, then run {report.command(command_path)} again.",
         )
-    problem = _court_problem(court, command_path)
+    problem = court_problem(court, command_path)
     if problem is not None:
         return problem
     binds = [

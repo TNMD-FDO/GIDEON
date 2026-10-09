@@ -38,6 +38,7 @@ from gideon.host.render.services.worker import (
 )
 from gideon.host.stores import ROLE_SPECS
 from gideon.worker import (
+    agreement,
     anchors,
     caselaw,
     citations,
@@ -130,6 +131,23 @@ class WorkerIdentity(unittest.TestCase):
         self.assertEqual(worker.SIGNAL_SOURCES, treatment.SIGNAL_SOURCES)
         self.assertEqual(worker.TREATMENT_STATES, treatment.TREATMENT_STATES)
         self.assertEqual(worker.NO_STATE_REASONS, treatment.NO_STATE_REASONS)
+
+    def test_agreement_identity_matches_the_worker(self) -> None:
+        self.assertEqual(
+            (
+                worker.AGREEMENT_TASK, worker.AGREEMENT_QUEUE,
+                worker.AGREEMENT_TABLE, worker.AGREEMENT_MAP_DIRECTORY,
+                worker.AGREEMENT_MAP_RECORD_NAME, worker.AGREEMENT_RECORD_NAME,
+                worker.AGREEMENT_FAILURE_NAME, worker.AGREEMENT_FAILURE_REASONS,
+            ),
+            (
+                agreement.AGREEMENT_TASK, agreement.AGREEMENT_QUEUE,
+                agreement.AGREEMENT_TABLE, agreement.AGREEMENT_MAP_DIRECTORY,
+                agreement.AGREEMENT_MAP_RECORD_NAME, agreement.AGREEMENT_RECORD_NAME,
+                agreement.AGREEMENT_FAILURE_NAME, agreement.AGREEMENT_FAILURE_REASONS,
+            ),
+            "Fix: keep the host agreement names equal to the worker's values.",
+        )
 
     def test_role_matches_the_store_and_runtime_names_match_the_render(self) -> None:
         role = next(spec for spec in ROLE_SPECS if spec.name == worker.WORKER_ROLE)

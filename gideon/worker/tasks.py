@@ -1,4 +1,4 @@
-"""Queue worker tasks for verification, recovery, fetch, stage, and ingest."""
+"""Queue worker tasks for verification, recovery, fetch, stage, ingest, and agreement."""
 
 import asyncio
 import logging
@@ -10,6 +10,7 @@ from procrastinate.exceptions import UniqueViolation
 
 import gideon.host.cas
 
+from . import agreement as citation_agreement
 from . import caselaw as document_ingest
 from . import staging
 from .fetch import (
@@ -115,6 +116,27 @@ def caselaw(
         raise
 
 
+def agreement(
+    context: procrastinate.JobContext, label: str, snapshot: str,
+    court: str, input: dict[str, str],
+) -> None:
+    """Measure one staged court outside the worker's event loop."""
+
+    job_id = context.job.id
+    if job_id is None:
+        raise citation_agreement.AgreementFailure("invalid")
+    try:
+        citation_agreement.agreement(
+            SNAPSHOTS_ROOT, staging.WORK_ROOT, label, snapshot, court,
+            input, job_id, citation_agreement.PsycopgEdges(),
+        )
+    except citation_agreement.AgreementFailure as failure:
+        citation_agreement.write_job_failure(
+            staging.WORK_ROOT, label, snapshot, court, job_id, failure,
+        )
+        raise
+
+
 def register_tasks(app: procrastinate.App) -> None:
     """Register verification, recovery, and synchronous corpus jobs."""
 
@@ -144,3 +166,9 @@ def register_tasks(app: procrastinate.App) -> None:
         pass_context=True,
         retry=False,
     )(caselaw)
+    app.task(
+        name=citation_agreement.AGREEMENT_TASK,
+        queue=citation_agreement.AGREEMENT_QUEUE,
+        pass_context=True,
+        retry=False,
+    )(agreement)
