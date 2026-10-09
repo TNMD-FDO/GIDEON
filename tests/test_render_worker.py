@@ -37,6 +37,7 @@ from gideon.host.render.services.worker import (
 )
 from gideon.host.stores import ROLE_SPECS
 from gideon.worker import (
+    anchors,
     caselaw,
     fetch,
     metrics,
@@ -117,6 +118,7 @@ class WorkerIdentity(unittest.TestCase):
         )
         self.assertEqual(worker.SECTION_TYPES, sections.SECTION_TYPES)
         self.assertEqual(worker.SECTION_TYPED_BY, sections.TYPED_BY)
+        self.assertEqual(worker.ANCHOR_KINDS, anchors.ANCHOR_KINDS)
 
     def test_role_matches_the_store_and_runtime_names_match_the_render(self) -> None:
         role = next(spec for spec in ROLE_SPECS if spec.name == worker.WORKER_ROLE)

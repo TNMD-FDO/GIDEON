@@ -36,7 +36,7 @@ CASELAW_QUEUE: Final[str] = "caselaw"
 CASELAW_FAILURE_NAME: Final[str] = "caselaw-failed.json"
 CASELAW_FAILURE_REASONS: Final = frozenset({
     "invalid", "missing-stage", "stage-mismatch", "malformed", "store",
-    "database", "local", "busy", "segmenter", "text-mismatch",
+    "database", "local", "busy", "segmenter", "anchors", "text-mismatch",
 })
 DOCUMENT_FAILURE_REASONS: Final = frozenset({
     "no-text", "unparseable", "empty", "interrupted",
@@ -51,6 +51,10 @@ SECTION_TYPES: Final = (
     "order", "unknown",
 )
 SECTION_TYPED_BY: Final = ("row", "flag", "element", "line", "markup", "none")
+ANCHOR_KINDS: Final = (
+    "reporter_page", "pdf_page", "bates", "tr_page", "tr_line",
+    "uslm_id", "guideline_id",
+)
 PRECEDENTIAL_VALUES: Final = ("published", "unpublished", "unknown")
 # exempt: the bound limits a queue argument and exceeds any one court's rows.
 CASELAW_LIMIT_MAX: Final[int] = 10_000_000

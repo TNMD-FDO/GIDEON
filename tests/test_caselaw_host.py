@@ -88,6 +88,22 @@ def section_counts_for() -> dict[str, object]:
     }
 
 
+def anchor_counts_for() -> dict[str, object]:
+    return {
+        "ready": 2, "anchored": 2,
+        "by_text_source": {
+            "xml_harvard": {
+                "documents": 1, "with_anchors": 1,
+                "chars": 40, "anchored_chars": 30,
+            },
+            "plain_text": {
+                "documents": 1, "with_anchors": 0,
+                "chars": 5, "anchored_chars": 0,
+            },
+        },
+    }
+
+
 class CaselawHost(unittest.TestCase):
     """Queue arguments, durable failures, and count rows stay bounded and typed."""
 
@@ -112,6 +128,12 @@ class CaselawHost(unittest.TestCase):
 
     def read_section_counts(self) -> caselaw.SectionCounts | report.Problem:
         return caselaw.read_section_counts(
+            self.host, RENDERED, source=SOURCE,
+            snapshot_date="2099-01-02", court=COURT,
+        )
+
+    def read_anchor_counts(self) -> caselaw.AnchorCounts | report.Problem:
+        return caselaw.read_anchor_counts(
             self.host, RENDERED, source=SOURCE,
             snapshot_date="2099-01-02", court=COURT,
         )
@@ -195,6 +217,7 @@ class CaselawHost(unittest.TestCase):
             "busy": ("Wait", "corpus install"),
             "invalid": ("logs", "corpus install"),
             "segmenter": ("logs", "report the defect", "corpus install"),
+            "anchors": ("logs", "report the defect", "corpus install"),
             "text-mismatch": ("logs", "new corpus cut", "corpus cut", "corpus install"),
         }
         self.assertEqual(set(expected), identity.CASELAW_FAILURE_REASONS)
@@ -405,6 +428,109 @@ class CaselawHost(unittest.TestCase):
         self.host.code = 0
         self.host.run_error = FileNotFoundError("private executable path")
         result = self.read_section_counts()
+        self.assertIsInstance(result, report.Problem)
+        assert isinstance(result, report.Problem)
+        self.assertIn("FileNotFoundError", result.problem)
+        self.assertNotIn("private executable path", result.problem)
+
+    def test_read_anchor_counts_binds_values_and_parses_one_json_row(self) -> None:
+        self.host.counts_output = json.dumps(anchor_counts_for()) + "\n"
+        self.assertEqual(self.read_anchor_counts(), caselaw.AnchorCounts(
+            2, 2, {
+                "xml_harvard": caselaw.SourceCoverage(1, 1, 40, 30),
+                "plain_text": caselaw.SourceCoverage(1, 0, 5, 0),
+            },
+        ))
+        self.assertEqual(len(self.host.calls), 1)
+        argv, sql = self.host.calls[0]
+        self.assertEqual(argv, worker.psql_argv(RENDERED))
+        assert sql is not None
+        for name, expected in (("v_source", SOURCE),
+                               ("v_snapshot_date", "2099-01-02"),
+                               ("v_court", COURT)):
+            self.assertIn(worker.bind(name, expected), sql)
+            self.assertNotIn(expected, " ".join(argv))
+        self.assertIn(caselaw.ANCHOR_COUNTS_SQL, sql)
+        self.assertNotIn(caselaw.SECTION_COUNTS_SQL, sql)
+        self.assertNotIn(caselaw.CASELAW_COUNTS_SQL, sql)
+        self.assertIn("d.status = 'ready'", sql)
+        self.assertIn("WHERE anchored_at IS NOT NULL", sql)
+        self.assertIn("a.kind = 'reporter_page'", sql)
+        self.assertIn("a.attrs ->> 'scheme'", sql)
+        self.assertIn("max(chars)", sql)
+        self.assertIn("sum(COALESCE(a.chars, 0))", sql)
+
+    def test_read_anchor_counts_refuses_bad_rows_and_bounds(self) -> None:
+        base = anchor_counts_for()
+        cases: tuple[tuple[str, object], ...] = (
+            ("ready", -1), ("ready", True), ("ready", "2"),
+            ("anchored", -1), ("anchored", True), ("anchored", 3),
+            ("by_text_source", {"outside": {
+                "documents": 1, "with_anchors": 0, "chars": 5, "anchored_chars": 0,
+            }}),
+            ("by_text_source", []),
+        )
+        for field, bad in cases:
+            with self.subTest(field=field, bad=bad):
+                self.host.counts_output = json.dumps({**base, field: bad})
+                result = self.read_anchor_counts()
+                self.assertIsInstance(result, report.Problem)
+                assert isinstance(result, report.Problem)
+                self.assertIn("anchors row is invalid", result.problem)
+                self.assertIn("logs", result.fix)
+        for source_row in (
+            {"documents": -1, "with_anchors": 0, "chars": 5, "anchored_chars": 0},
+            {"documents": True, "with_anchors": 0, "chars": 5, "anchored_chars": 0},
+            {"documents": 1, "with_anchors": -1, "chars": 5, "anchored_chars": 0},
+            {"documents": 1, "with_anchors": True, "chars": 5, "anchored_chars": 0},
+            {"documents": 1, "with_anchors": 2, "chars": 5, "anchored_chars": 0},
+            {"documents": 1, "with_anchors": 0, "chars": -1, "anchored_chars": 0},
+            {"documents": 1, "with_anchors": 0, "chars": "5", "anchored_chars": 0},
+            {"documents": 1, "with_anchors": 0, "chars": 5, "anchored_chars": -1},
+            {"documents": 1, "with_anchors": 0, "chars": 5, "anchored_chars": True},
+            {"documents": 1, "with_anchors": 0, "chars": 5, "anchored_chars": 6},
+            {"documents": 1, "with_anchors": 0, "chars": 5},
+            {"documents": 1, "with_anchors": 0, "chars": 5,
+             "anchored_chars": 0, "extra": 1},
+        ):
+            with self.subTest(source_row=source_row):
+                self.host.counts_output = json.dumps({
+                    **base, "by_text_source": {"xml_harvard": source_row},
+                })
+                self.assertIsInstance(self.read_anchor_counts(), report.Problem)
+        for value in ({**base, "extra": 1},
+                      {key: item for key, item in base.items() if key != "ready"}):
+            self.host.counts_output = json.dumps(value)
+            self.assertIsInstance(self.read_anchor_counts(), report.Problem)
+        self.host.counts_output = "not json"
+        self.assertIsInstance(self.read_anchor_counts(), report.Problem)
+
+    def test_read_anchor_counts_refuses_bad_arguments_and_psql_outcomes(self) -> None:
+        for field, bad in (("source", "../outside"), ("snapshot_date", "2099-99-02"),
+                           ("snapshot_date", "20990102"), ("court", "Court1")):
+            with self.subTest(field=field):
+                args = {"source": SOURCE, "snapshot_date": "2099-01-02", "court": COURT}
+                args[field] = bad
+                self.host.calls.clear()
+                self.assertIsInstance(
+                    caselaw.read_anchor_counts(self.host, RENDERED, **args), report.Problem,
+                )
+                self.assertEqual(self.host.calls, [])
+        self.host.code = 127
+        result = self.read_anchor_counts()
+        self.assertIsInstance(result, report.Problem)
+        assert isinstance(result, report.Problem)
+        self.assertIn("unavailable", result.problem)
+        self.assertIn("host provision", result.fix)
+        self.host.code = 3
+        result = self.read_anchor_counts()
+        self.assertIsInstance(result, report.Problem)
+        assert isinstance(result, report.Problem)
+        self.assertIn("exit 3", result.problem)
+        self.assertIn(self.host.stderr, result.problem)
+        self.host.code = 0
+        self.host.run_error = FileNotFoundError("private executable path")
+        result = self.read_anchor_counts()
         self.assertIsInstance(result, report.Problem)
         assert isinstance(result, report.Problem)
         self.assertIn("FileNotFoundError", result.problem)

@@ -3,11 +3,12 @@
 import fcntl
 import hashlib
 import itertools
+import json
 import logging
 import os
 import re
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime
@@ -20,7 +21,7 @@ import gideon.host.cas
 from gideon.host.report import Problem
 from gideon.host.sysio import RealHost
 
-from . import fetch, opiniontext, sections, settings, staging
+from . import anchors, fetch, opiniontext, sections, settings, staging
 
 CASELAW_TASK: Final = "gideon.worker.tasks.caselaw"
 CASELAW_QUEUE: Final = "caselaw"
@@ -28,7 +29,7 @@ CASELAW_FAILURE_NAME: Final = "caselaw-failed.json"
 LOCK_SUFFIX: Final = ".caselaw.lock"
 CASELAW_FAILURE_REASONS: Final = frozenset({
     "invalid", "missing-stage", "stage-mismatch", "malformed", "store",
-    "database", "local", "busy", "segmenter", "text-mismatch",
+    "database", "local", "busy", "segmenter", "anchors", "text-mismatch",
 })
 DOCUMENT_FAILURE_REASONS: Final = frozenset({
     "no-text", "unparseable", "empty", "interrupted",
@@ -51,7 +52,8 @@ _ISO_DATE: Final = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 PRESENT_SQL: Final = (
     "SELECT o.opinion_id, d.doc_id, d.status, d.attempts, d.text_source, "
     "d.sha256, d.canonical_text_sha256, "
-    "EXISTS (SELECT 1 FROM sections WHERE doc_id = d.doc_id) AS sectioned "
+    "EXISTS (SELECT 1 FROM sections WHERE doc_id = d.doc_id) AS sectioned, "
+    "d.anchored_at IS NOT NULL AS anchored "
     "FROM opinions AS o JOIN documents AS d ON d.doc_id = o.doc_id "
     "WHERE d.source = %s AND d.source_snapshot = %s AND o.court = %s"
 )
@@ -70,7 +72,7 @@ GIVE_BACK_SQL: Final = (
 )
 FINISH_READY_SQL: Final = (
     "UPDATE documents SET status = 'ready', sha256 = %s, canonical_text_sha256 = %s, "
-    "ingested_at = %s WHERE doc_id = %s"
+    "ingested_at = %s, anchored_at = %s WHERE doc_id = %s"
 )
 FINISH_FAILED_SQL: Final = (
     "UPDATE documents SET status = 'failed', failure_reason = %s, sha256 = %s, "
@@ -81,6 +83,11 @@ SECTION_SQL: Final = (
     "char_start, char_end, label, ref_offset, parent_section_id) "
     "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
 )
+ANCHOR_SQL: Final = (
+    "INSERT INTO anchors (anchor_id, doc_id, kind, label, char_start, char_end, attrs) "
+    "VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)"
+)
+ANCHORED_SQL: Final = "UPDATE documents SET anchored_at = %s WHERE doc_id = %s"
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +134,7 @@ class PresentRow:
     sha256: str | None
     canonical_text_sha256: str | None
     sectioned: bool
+    anchored: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,6 +183,19 @@ class NewSection:
 
 
 @dataclass(frozen=True, slots=True)
+class NewAnchor:
+    """An immutable anchor row ready for the record."""
+
+    anchor_id: str
+    doc_id: str
+    kind: str
+    label: str
+    char_start: int
+    char_end: int
+    attrs: Mapping[str, str]
+
+
+@dataclass(frozen=True, slots=True)
 class IngestCounts:
     """Counts from one bounded or whole court stream."""
 
@@ -185,6 +206,9 @@ class IngestCounts:
     retried: int
     interrupted: int
     sectioned: int
+    anchored: int
+    pgmap_checked: int
+    pgmap_disagreeing: int
 
 
 class DocumentRecord(Protocol):
@@ -196,9 +220,12 @@ class DocumentRecord(Protocol):
     def give_back(self, doc_id: str) -> None: ...
     def finish_ready(
         self, doc_id: str, sha256: str, canonical_sha256: str, at: datetime,
-        sections: tuple[NewSection, ...],
+        sections: tuple[NewSection, ...], anchors: tuple[NewAnchor, ...],
     ) -> None: ...
     def write_sections(self, doc_id: str, sections: tuple[NewSection, ...]) -> None: ...
+    def write_anchors(
+        self, doc_id: str, anchors: tuple[NewAnchor, ...], at: datetime,
+    ) -> None: ...
     def finish_failed(
         self, doc_id: str, reason: str, at: datetime, sha256: str | None = None,
     ) -> None: ...
@@ -213,6 +240,18 @@ def _section_statements(
             row.section_id, doc_id, row.ordinal, row.section_type, row.typed_by,
             row.char_start, row.char_end, row.label, row.ref_offset,
             row.parent_section_id,
+        ))
+        for row in rows
+    )
+
+
+def _anchor_statements(
+    doc_id: str, rows: tuple[NewAnchor, ...],
+) -> tuple[tuple[str, tuple[object, ...]], ...]:
+    return tuple(
+        (ANCHOR_SQL, (
+            row.anchor_id, doc_id, row.kind, row.label, row.char_start, row.char_end,
+            json.dumps(dict(row.attrs), sort_keys=True),
         ))
         for row in rows
     )
@@ -269,10 +308,10 @@ class PsycopgRecord:
                 str(text_source) if text_source is not None else None,
                 str(sha256) if sha256 is not None else None,
                 str(canonical_sha256) if canonical_sha256 is not None else None,
-                bool(sectioned),
+                bool(sectioned), bool(anchored),
             )
             for opinion_id, doc_id, status, attempts, text_source, sha256,
-            canonical_sha256, sectioned in rows
+            canonical_sha256, sectioned, anchored in rows
         }
 
     def begin(self, document: NewDocument, opinion: NewOpinion) -> None:
@@ -303,17 +342,26 @@ class PsycopgRecord:
 
     def finish_ready(
         self, doc_id: str, sha256: str, canonical_sha256: str, at: datetime,
-        sections: tuple[NewSection, ...],
+        sections: tuple[NewSection, ...], anchors: tuple[NewAnchor, ...],
     ) -> None:
-        """Commit the ready document and its sections together."""
+        """Commit the ready document, sections, and anchors together."""
 
-        self._run(((FINISH_READY_SQL, (sha256, canonical_sha256, at, doc_id)),
-                   *_section_statements(doc_id, sections)))
+        self._run(((FINISH_READY_SQL, (sha256, canonical_sha256, at, at, doc_id)),
+                   *_section_statements(doc_id, sections),
+                   *_anchor_statements(doc_id, anchors)))
 
     def write_sections(self, doc_id: str, sections: tuple[NewSection, ...]) -> None:
         """Commit sections for an already ready document."""
 
         self._run(_section_statements(doc_id, sections))
+
+    def write_anchors(
+        self, doc_id: str, anchors: tuple[NewAnchor, ...], at: datetime,
+    ) -> None:
+        """Commit anchors and the anchoring mark for an already ready document."""
+
+        self._run((*_anchor_statements(doc_id, anchors),
+                   (ANCHORED_SQL, (at, doc_id))))
 
     def finish_failed(
         self, doc_id: str, reason: str, at: datetime, sha256: str | None = None,
@@ -365,22 +413,28 @@ class _Progress:
     retried: int = 0
     interrupted: int = 0
     sectioned: int = 0
+    anchored: int = 0
+    pgmap_checked: int = 0
+    pgmap_disagreeing: int = 0
     error: str = "-"
 
     def counts(self) -> IngestCounts:
         return IngestCounts(
             self.seen, self.present, self.ready, self.failed,
-            self.retried, self.interrupted, self.sectioned,
+            self.retried, self.interrupted, self.sectioned, self.anchored,
+            self.pgmap_checked, self.pgmap_disagreeing,
         )
 
 
 def _log(progress: _Progress, action: str) -> None:
     logger.info(
         "action=caselaw_%s job_id=%d label=%s court=%s seen=%d present=%d "
-        "ready=%d failed=%d retried=%d interrupted=%d sectioned=%d seconds=%.3f error=%s",
+        "ready=%d failed=%d retried=%d interrupted=%d sectioned=%d anchored=%d "
+        "pgmap_checked=%d pgmap_disagreeing=%d seconds=%.3f error=%s",
         action, progress.job, progress.label, progress.court, progress.seen,
         progress.present, progress.ready, progress.failed, progress.retried,
-        progress.interrupted, progress.sectioned,
+        progress.interrupted, progress.sectioned, progress.anchored,
+        progress.pgmap_checked, progress.pgmap_disagreeing,
         max(0.0, progress.monotonic() - progress.started),
         progress.error,
     )
@@ -516,17 +570,21 @@ def _section_id(doc_id: str, start: int, end: int) -> str:
     return hashlib.sha256(f"{doc_id}\n{start}\n{end}".encode()).hexdigest()
 
 
+def _anchor_id(doc_id: str, kind: str, scheme: str, start: int, end: int) -> str:
+    return hashlib.sha256(f"{doc_id}\n{kind}\n{scheme}\n{start}\n{end}".encode()).hexdigest()
+
+
 def _section_rows(
     doc_id: str, parsed: opiniontext.Parsed, *, opinion_type: str,
     per_curiam: bool, column: str,
-) -> tuple[NewSection, ...]:
+) -> tuple[tuple[NewSection, ...], tuple[sections.Section, ...]]:
     try:
         result = sections.segment(
             parsed, opinion_type=opinion_type, per_curiam=per_curiam, column=column,
         )
         ids = tuple(_section_id(doc_id, section.char_start, section.char_end)
                     for section in result)
-        return tuple(
+        rows = tuple(
             NewSection(
                 ids[ordinal], doc_id, ordinal, section.section_type,
                 section.typed_by, section.char_start, section.char_end,
@@ -535,8 +593,28 @@ def _section_rows(
             )
             for ordinal, section in enumerate(result)
         )
+        return rows, result
     except Exception as exc:  # any segmenter exception is a defect, filed by class.
         raise CaselawFailure("segmenter", error=type(exc).__name__) from exc
+
+
+def _anchor_rows(
+    doc_id: str, parsed: opiniontext.Parsed, section_result: tuple[sections.Section, ...],
+) -> tuple[tuple[NewAnchor, ...], int, int]:
+    try:
+        result = anchors.anchor(parsed, section_result)
+        rows = tuple(
+            NewAnchor(
+                _anchor_id(doc_id, item.kind, dict(item.attrs)["scheme"],
+                           item.char_start, item.char_end),
+                doc_id, item.kind, item.label, item.char_start, item.char_end,
+                dict(item.attrs),
+            )
+            for item in result.anchors
+        )
+        return rows, result.pgmap_checked, result.pgmap_disagreeing
+    except Exception as exc:  # an anchorer defect is filed by class before this opinion's write.
+        raise CaselawFailure("anchors", error=type(exc).__name__) from exc
 
 
 def _precedential(raw: str) -> str:
@@ -575,18 +653,23 @@ def _parse_opinion(
         record.finish_failed(doc_id, "unparseable", clock(), original)
         progress.failed += 1
         return
-    section_rows = _section_rows(
+    section_rows, section_result = _section_rows(
         doc_id, parsed, opinion_type=opinion_type,
         per_curiam=per_curiam, column=column,
     )
+    anchor_rows, checked, disagreeing = _anchor_rows(doc_id, parsed, section_result)
     canonical = _put(host, store_root, parsed.text)
-    record.finish_ready(doc_id, original, canonical, clock(), section_rows)
+    record.finish_ready(doc_id, original, canonical, clock(), section_rows, anchor_rows)
     progress.ready += 1
+    progress.anchored += 1
+    progress.pgmap_checked += checked
+    progress.pgmap_disagreeing += disagreeing
 
 
 def _backfill(
     record: DocumentRecord, host: RealHost, store_root: Path, present: PresentRow,
     *, opinion_type: str, per_curiam: bool, progress: _Progress,
+    clock: Callable[[], datetime],
 ) -> None:
     if (present.sha256 is None or present.canonical_text_sha256 is None
             or present.text_source is None):
@@ -600,12 +683,19 @@ def _backfill(
         raise CaselawFailure("text-mismatch", error=type(exc).__name__) from exc
     if hashlib.sha256(parsed.text.encode("utf-8")).hexdigest() != present.canonical_text_sha256:
         raise CaselawFailure("text-mismatch")
-    section_rows = _section_rows(
+    section_rows, section_result = _section_rows(
         present.doc_id, parsed, opinion_type=opinion_type,
         per_curiam=per_curiam, column=present.text_source,
     )
-    record.write_sections(present.doc_id, section_rows)
-    progress.sectioned += 1
+    anchor_rows, checked, disagreeing = _anchor_rows(present.doc_id, parsed, section_result)
+    if not present.sectioned:
+        record.write_sections(present.doc_id, section_rows)
+        progress.sectioned += 1
+    if not present.anchored:
+        record.write_anchors(present.doc_id, anchor_rows, clock())
+        progress.anchored += 1
+    progress.pgmap_checked += checked
+    progress.pgmap_disagreeing += disagreeing
 
 
 @contextmanager
@@ -681,11 +771,12 @@ def ingest(
                             name: fields[columns[name]] for name in opiniontext.TEXT_SOURCES
                         })
                         previous = present.get(opinion_id)
-                        if previous is not None and previous.status == "ready" and not previous.sectioned:
+                        if (previous is not None and previous.status == "ready"
+                                and (not previous.sectioned or not previous.anchored)):
                             _backfill(
                                 record, host, store_root, previous,
                                 opinion_type=opinion_type, per_curiam=per_curiam,
-                                progress=progress,
+                                progress=progress, clock=clock,
                             )
                             continue
                         # Only a processing row is unfinished; every other status is final here.
@@ -730,7 +821,7 @@ def ingest(
                             )
                         except CaselawFailure as exc:
                             if active_doc is not None and exc.reason in {
-                                "store", "database", "local", "segmenter",
+                                "store", "database", "local", "segmenter", "anchors",
                             }:
                                 with suppress(CaselawFailure, psycopg.Error):
                                     record.give_back(active_doc)

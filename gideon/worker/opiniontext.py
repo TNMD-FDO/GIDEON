@@ -15,8 +15,11 @@ TEXT_SOURCES: Final = (
 )
 
 MarkerKind = Literal["page", "footnote-mark", "editorial"]
-BlockKind = Literal["opinion", "author", "headmatter", "footnote", "heading", "quote"]
+BlockKind = Literal[
+    "opinion", "author", "headmatter", "footnote", "heading", "quote", "pagemap",
+]
 FailureReason = Literal["empty", "unparseable"]
+Attrs = tuple[tuple[str, str], ...]
 
 _XML_BLOCKS: Final = frozenset({
     "author", "p", "blockquote", "footnote", "pre", "judges", "attorneys",
@@ -34,11 +37,12 @@ _BRACKETED_LABEL: Final = re.compile(r"\[[^\[\]\s]+\]")
 
 @dataclass(frozen=True, slots=True)
 class Marker:
-    """A dropped locator: its kind, printed label, and code-point offset in the text."""
+    """A dropped locator with its printed label, text offset, and source attributes."""
 
     kind: MarkerKind
     label: str
     offset: int
+    attrs: Attrs = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,7 +83,8 @@ def choose(row: Mapping[str, str | None]) -> tuple[str, str] | None:
 
 
 def _normalized_segment(
-    raw: str, markers: list[tuple[int, MarkerKind, str]], preserve: bool,
+    raw: str, markers: list[tuple[int, MarkerKind, str, Attrs]],
+    preserve: bool,
     positions: list[int],
 ) -> tuple[str, list[Marker], list[int]]:
     """One line's text and normalized offsets for locators and block boundaries.
@@ -96,7 +101,8 @@ def _normalized_segment(
         def locate_preserved(pos: int) -> int:
             return len(unicodedata.normalize("NFC", raw[start:max(start, min(pos, end))]))
 
-        return (text, [Marker(kind, label, locate_preserved(pos)) for pos, kind, label in markers],
+        return (text, [Marker(kind, label, locate_preserved(pos), attrs)
+                       for pos, kind, label, attrs in markers],
                 [locate_preserved(pos) for pos in positions])
 
     words = list(_WORD.finditer(raw))
@@ -124,7 +130,8 @@ def _normalized_segment(
         return length
 
     return (" ".join(pieces),
-            [Marker(kind, label, locate_collapsed(pos)) for pos, kind, label in markers],
+            [Marker(kind, label, locate_collapsed(pos), attrs)
+             for pos, kind, label, attrs in markers],
             [locate_collapsed(pos) for pos in positions])
 
 
@@ -142,10 +149,10 @@ class _Builder:
     def __init__(self) -> None:
         self.parts: list[str] = []
         self.markers: list[Marker] = []
-        self.pending_markers: list[tuple[MarkerKind, str]] = []
+        self.pending_markers: list[tuple[MarkerKind, str, Attrs]] = []
         self.raw: list[str] = []
         self.raw_length = 0
-        self.raw_markers: list[tuple[int, MarkerKind, str]] = []
+        self.raw_markers: list[tuple[int, MarkerKind, str, Attrs]] = []
         self.length = 0
         self.breaks = 0
         self.preserve = False
@@ -166,8 +173,10 @@ class _Builder:
             self.raw.append(value)
             self.raw_length += len(value)
 
-    def marker(self, kind: MarkerKind, label: str) -> None:
-        self.raw_markers.append((self.raw_length, kind, label))
+    def marker(
+        self, kind: MarkerKind, label: str, attrs: Attrs,
+    ) -> None:
+        self.raw_markers.append((self.raw_length, kind, label, attrs))
 
     def flush(self) -> None:
         raw = "".join(self.raw)
@@ -197,12 +206,17 @@ class _Builder:
                 block.raw_start = 0
         self.pending_blocks = [block for block in pending if block.raw_start is not None]
         if not value:
-            self.pending_markers.extend((marker.kind, marker.label) for marker in markers)
+            self.pending_markers.extend(
+                (marker.kind, marker.label, marker.attrs) for marker in markers
+            )
             return
         self.parts.append(separator + value)
-        self.markers.extend(Marker(kind, label, base) for kind, label in self.pending_markers)
         self.markers.extend(
-            Marker(marker.kind, marker.label, base + marker.offset) for marker in markers
+            Marker(kind, label, base, attrs) for kind, label, attrs in self.pending_markers
+        )
+        self.markers.extend(
+            Marker(marker.kind, marker.label, base + marker.offset, marker.attrs)
+            for marker in markers
         )
         self.pending_markers = []
         self.length = base + len(value)
@@ -219,7 +233,8 @@ class _Builder:
     def finish(self) -> Parsed:
         self.flush()
         self.markers.extend(
-            Marker(kind, label, self.length) for kind, label in self.pending_markers
+            Marker(kind, label, self.length, attrs)
+            for kind, label, attrs in self.pending_markers
         )
         value = "".join(self.parts)
         if not value.strip():
@@ -236,7 +251,9 @@ def _tag(element: etree._Element) -> str:
     return element.tag.rsplit("}", 1)[-1].lower()
 
 
-def _marker(element: etree._Element, column: str) -> tuple[MarkerKind, str] | None:
+def _marker(
+    element: etree._Element, column: str,
+) -> tuple[MarkerKind, str, Attrs] | None:
     tag = _tag(element)
     classes = set((element.get("class") or "").split())
     if (
@@ -244,20 +261,34 @@ def _marker(element: etree._Element, column: str) -> tuple[MarkerKind, str] | No
         or tag == "span" and ("star-pagination" in classes or "ldml-pagenumber" in classes)
         or tag == "a" and "page-label" in classes
     ):
-        printed = "".join(element.itertext()).strip().lstrip("*").strip()
+        raw_label = "".join(element.itertext()).strip()
+        stars = len(raw_label) - len(raw_label.lstrip("*"))
+        printed = raw_label.lstrip("*").strip()
         if printed.lower().startswith("page "):
             printed = printed[5:].strip()
         label = printed or element.get("label") or element.get("data-label") or ""
-        return "page", label
+        attrs: list[tuple[str, str]] = []
+        # The CAP HTML form, data-citation-index, also appears inside xml_harvard.
+        citation_index = element.get("citation-index") or element.get("data-citation-index")
+        if citation_index is not None:
+            attrs.append(("citation_index", citation_index))
+        if column == "html_anon_2020":
+            for name in ("number", "pagescheme"):
+                value = element.get(name)
+                if value is not None:
+                    attrs.append((name, value))
+        if stars > 1:
+            attrs.append(("stars", str(stars)))
+        return "page", label, tuple(attrs)
     if (
         tag in {"footnotemark", "footnotereference"}
         or tag == "a" and (element.get("href") or "").startswith("#")
         or tag == "sup" and _BRACKETED_LABEL.fullmatch("".join(element.itertext()).strip())
         or tag == "span" and "MsoFootnoteReference" in classes
     ):
-        return "footnote-mark", "".join(element.itertext()).strip()
+        return "footnote-mark", "".join(element.itertext()).strip(), ()
     if tag == "bracketnum" or column == "html" and tag == "span" and "num" in classes:
-        return "editorial", "".join(element.itertext()).strip()
+        return "editorial", "".join(element.itertext()).strip(), ()
     return None
 
 
@@ -369,6 +400,8 @@ def _walk(
         builder.block_break()
     kind = _block_kind(element, column, header)
     opened = builder.open_block(*kind) if kind is not None else None
+    pagemap = element.get("pgmap") if column == "xml_harvard" else None
+    opened_pagemap = builder.open_block("pagemap", pagemap) if pagemap is not None else None
     previous_preserve = builder.preserve
     if tag == "pre":
         builder.preserve = True
@@ -378,6 +411,8 @@ def _walk(
         builder.text(child.tail)
     if opened is not None:
         builder.close_block(opened)
+    if opened_pagemap is not None:
+        builder.close_block(opened_pagemap)
     if block:
         builder.block_break()
     builder.preserve = previous_preserve

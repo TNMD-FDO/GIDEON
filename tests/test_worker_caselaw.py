@@ -22,7 +22,16 @@ import psycopg
 
 from gideon.host import cas
 from gideon.host.sysio import RealHost
-from gideon.worker import caselaw, fetch, logs, opiniontext, sections, settings, staging
+from gideon.worker import (
+    anchors,
+    caselaw,
+    fetch,
+    logs,
+    opiniontext,
+    sections,
+    settings,
+    staging,
+)
 
 DOCKET_COLUMNS = (
     "id", "date_created", "date_modified", "source", "appeal_from_str",
@@ -85,7 +94,9 @@ class _Row:
     canonical_text_sha256: str | None = None
     failure_reason: str | None = None
     ingested_at: datetime | None = None
+    anchored_at: datetime | None = None
     sections: tuple[caselaw.NewSection, ...] = field(default_factory=tuple)
+    anchors: tuple[caselaw.NewAnchor, ...] = field(default_factory=tuple)
 
 
 class _Record:
@@ -116,12 +127,15 @@ class _Record:
         if row.opinion is not None:
             assert row.opinion.doc_id == row.document.doc_id
         assert row.status == "ready" or not row.sections
+        assert row.status == "ready" or not row.anchors
+        assert row.anchored_at is None or row.status == "ready"
         assert all(section.doc_id == row.document.doc_id for section in row.sections)
+        assert all(anchor.doc_id == row.document.doc_id for anchor in row.anchors)
 
     def seed(
         self, opinion_id: int, status: str, attempts: int, *,
         court: str, source: str, snapshot: date, now: datetime,
-        sectioned: bool | None = None,
+        sectioned: bool | None = None, anchored: bool | None = None,
     ) -> _Row:
         document = caselaw.NewDocument(
             _doc_id(opinion_id, snapshot), "caselaw", source, snapshot, "plain_text", now,
@@ -132,6 +146,7 @@ class _Record:
             canonical_text_sha256="b" * 64 if status == "ready" else None,
             failure_reason="no-text" if status == "failed" else None,
             ingested_at=None if status == "processing" else now,
+            anchored_at=now if (status == "ready" and anchored is not False) else None,
         )
         if sectioned is None:
             sectioned = status == "ready"
@@ -152,6 +167,7 @@ class _Record:
             opinion_id: caselaw.PresentRow(
                 row.document.doc_id, row.status, row.attempts, row.document.text_source,
                 row.sha256, row.canonical_text_sha256, bool(row.sections),
+                row.anchored_at is not None,
             )
             for opinion_id, row in self.rows.items()
             if row.document.source == source
@@ -181,7 +197,7 @@ class _Record:
 
     def finish_ready(
         self, doc_id: str, sha256: str, canonical_sha256: str, at: datetime,
-        sections: tuple[caselaw.NewSection, ...],
+        sections: tuple[caselaw.NewSection, ...], anchor_rows: tuple[caselaw.NewAnchor, ...],
     ) -> None:
         row = self._row(doc_id)
         assert row.status == "processing"
@@ -189,7 +205,9 @@ class _Record:
         row.sha256 = sha256
         row.canonical_text_sha256 = canonical_sha256
         row.ingested_at = at
+        row.anchored_at = at
         row.sections = sections
+        row.anchors = anchor_rows
         self._check(row)
         self.events.append(("ready", doc_id))
 
@@ -201,6 +219,16 @@ class _Record:
         row.sections = sections
         self._check(row)
         self.events.append(("sectioned", doc_id))
+
+    def write_anchors(
+        self, doc_id: str, anchor_rows: tuple[caselaw.NewAnchor, ...], at: datetime,
+    ) -> None:
+        row = self._row(doc_id)
+        assert row.status == "ready" and row.anchored_at is None and not row.anchors
+        row.anchors = anchor_rows
+        row.anchored_at = at
+        self._check(row)
+        self.events.append(("anchored", doc_id))
 
     def finish_failed(
         self, doc_id: str, reason: str, at: datetime, sha256: str | None = None,
@@ -323,11 +351,15 @@ class WorkerCaselaw(unittest.TestCase):
     def _objects(self) -> set[str]:
         return {path.name for path in self.store_root.rglob("*") if path.is_file()}
 
-    def _ready_without_sections(self, raw: str, *, column: str = "plain_text") -> _Row:
+    def _ready_from_original(
+        self, raw: str, *, column: str = "plain_text", sectioned: bool = False,
+        anchored: bool = True,
+    ) -> _Row:
         self.stage(opinions=[_opinion("1", "100", **{column: raw})])
         row = self.record.seed(
             1, "ready", 1, court=self.court, source=self.source,
-            snapshot=self.snapshot_date, now=self.now, sectioned=False,
+            snapshot=self.snapshot_date, now=self.now, sectioned=sectioned,
+            anchored=anchored,
         )
         row.document = replace(row.document, text_source=column)
         original = cas.put(RealHost(), raw.encode(), root=self.store_root)
@@ -350,7 +382,7 @@ class WorkerCaselaw(unittest.TestCase):
         ])
         self.assertEqual(stat.S_IMODE(self.store_root.stat().st_mode), cas.DIRECTORY_MODE)
         counts = self.run_ingest()
-        self.assertEqual(counts, caselaw.IngestCounts(4, 0, 1, 3, 0, 0, 0))
+        self.assertEqual(counts, caselaw.IngestCounts(4, 0, 1, 3, 0, 0, 0, 1, 0, 0))
         self.assertEqual(self.record.present_calls, [(self.source, self.snapshot_date, self.court)])
         self.assertEqual(self.record.closed, 1)
 
@@ -359,8 +391,8 @@ class WorkerCaselaw(unittest.TestCase):
         self.assertEqual((ready.document.profile, ready.document.source,
                           ready.document.source_snapshot, ready.document.text_source),
                          ("caselaw", self.source, self.snapshot_date, "xml_harvard"))
-        self.assertEqual((ready.status, ready.attempts, ready.ingested_at),
-                         ("ready", 1, self.now))
+        self.assertEqual((ready.status, ready.attempts, ready.ingested_at, ready.anchored_at),
+                         ("ready", 1, self.now, self.now))
         self.assertEqual(cas.get(RealHost(), ready.sha256 or "", root=self.store_root), raw.encode())
         canonical = opiniontext.canonical_text("xml_harvard", raw).text.encode()
         self.assertEqual(canonical, "Café wins.".encode())
@@ -387,11 +419,27 @@ class WorkerCaselaw(unittest.TestCase):
                  ready.sections[section.parent].section_id
                  if section.parent is not None else None),
             )
+        parsed = opiniontext.canonical_text("xml_harvard", raw)
+        derived = anchors.anchor(parsed, expected)
+        self.assertEqual(len(ready.anchors), len(derived.anchors))
+        for written_anchor, derived_anchor in zip(ready.anchors, derived.anchors, strict=True):
+            scheme = dict(derived_anchor.attrs)["scheme"]
+            self.assertEqual(written_anchor.anchor_id, hashlib.sha256(
+                f"{ready.document.doc_id}\n{derived_anchor.kind}\n{scheme}\n"
+                f"{derived_anchor.char_start}\n{derived_anchor.char_end}".encode()
+            ).hexdigest())
+            self.assertEqual((written_anchor.doc_id, written_anchor.kind, written_anchor.label,
+                              written_anchor.char_start, written_anchor.char_end,
+                              dict(written_anchor.attrs)),
+                             (ready.document.doc_id, derived_anchor.kind, derived_anchor.label,
+                              derived_anchor.char_start, derived_anchor.char_end,
+                              dict(derived_anchor.attrs)))
 
         blank = self.record.rows[2]
         self.assertEqual((blank.status, blank.failure_reason, blank.document.text_source,
-                          blank.sha256, blank.canonical_text_sha256),
-                         ("failed", "no-text", None, None, None))
+                          blank.sha256, blank.canonical_text_sha256, blank.anchored_at,
+                          blank.anchors),
+                         ("failed", "no-text", None, None, None, None, ()))
         for opinion_id, original, reason in (
             (3, unparseable, "unparseable"), (4, empty, "empty"),
         ):
@@ -402,7 +450,7 @@ class WorkerCaselaw(unittest.TestCase):
                 self.assertEqual(row.sha256, hashlib.sha256(original.encode()).hexdigest())
                 self.assertEqual(cas.get(RealHost(), row.sha256 or "", root=self.store_root),
                                  original.encode())
-                self.assertEqual(row.sections, ())
+                self.assertEqual((row.sections, row.anchors, row.anchored_at), ((), (), None))
 
     def test_each_text_source_becomes_a_ready_document(self) -> None:
         examples = {
@@ -430,13 +478,17 @@ class WorkerCaselaw(unittest.TestCase):
                                  hashlib.sha256(canonical).hexdigest())
                 self.assertEqual(cas.get(RealHost(), row.canonical_text_sha256 or "",
                                          root=self.store_root), canonical)
+                self.assertEqual((row.anchored_at, row.anchors), (self.now, ()))
+        events = list(self.record.events)
+        self.assertEqual(self.run_ingest(), caselaw.IngestCounts(6, 6, 0, 0, 0, 0, 0, 0, 0, 0))
+        self.assertEqual(self.record.events, events)
 
     def test_unexpected_parse_exception_is_an_unparseable_document(self) -> None:
         raw = "<opinion><p>Fictitious body.</p></opinion>"
         self.stage(opinions=[_opinion("1", "100", xml_harvard=raw)])
         with patch.object(opiniontext, "canonical_text", side_effect=RecursionError("private text")):
             counts = self.run_ingest()
-        self.assertEqual(counts, caselaw.IngestCounts(1, 0, 0, 1, 0, 0, 0))
+        self.assertEqual(counts, caselaw.IngestCounts(1, 0, 0, 1, 0, 0, 0, 0, 0, 0))
         row = self.record.rows[1]
         self.assertEqual((row.status, row.failure_reason, row.canonical_text_sha256),
                          ("failed", "unparseable", None))
@@ -500,7 +552,7 @@ class WorkerCaselaw(unittest.TestCase):
             self.record.seed(index, status, 1, court=self.court, source=self.source,
                              snapshot=self.snapshot_date, now=self.now)
         counts = self.run_ingest()
-        self.assertEqual(counts, caselaw.IngestCounts(3, 3, 0, 0, 0, 0, 0))
+        self.assertEqual(counts, caselaw.IngestCounts(3, 3, 0, 0, 0, 0, 0, 0, 0, 0))
         self.assertEqual(self.record.events, [])
         self.assertEqual(self._objects(), set())
 
@@ -520,6 +572,22 @@ class WorkerCaselaw(unittest.TestCase):
         self.assertTrue(first.sections)
         self.assertNotEqual(first.sections[0].section_id, second.sections[0].section_id)
 
+    def test_anchor_ids_bind_document_and_scheme_for_equal_text(self) -> None:
+        raw = (
+            '<opinion><p>A<page-number>*8</page-number>'
+            '<page-number>**72</page-number>B</p></opinion>'
+        )
+        self.stage(opinions=[
+            _opinion("1", "100", xml_harvard=raw),
+            _opinion("2", "100", xml_harvard=raw),
+        ])
+        self.assertEqual(self.run_ingest().anchored, 2)
+        first, second = self.record.rows[1], self.record.rows[2]
+        self.assertEqual(first.canonical_text_sha256, second.canonical_text_sha256)
+        self.assertEqual([dict(row.attrs)["scheme"] for row in first.anchors], ["1", "2"])
+        self.assertEqual([row.char_start for row in first.anchors], [1, 1])
+        self.assertEqual(len({row.anchor_id for row in (*first.anchors, *second.anchors)}), 4)
+
     def test_footnote_section_writes_the_parent_id(self) -> None:
         raw = (
             '<opinion><p>Fictitious body<footnotemark>1</footnotemark>.</p>'
@@ -535,20 +603,57 @@ class WorkerCaselaw(unittest.TestCase):
                          opiniontext.canonical_text("xml_harvard", raw).text.index("body") + 4)
 
     def test_ready_backfill_reads_original_without_counting_an_attempt(self) -> None:
-        row = self._ready_without_sections("Fictitious recovered opinion.")
+        row = self._ready_from_original("Fictitious recovered opinion.")
         original_state = (row.status, row.attempts, row.sha256, row.canonical_text_sha256)
-        self.assertEqual(self.run_ingest(), caselaw.IngestCounts(1, 0, 0, 0, 0, 0, 1))
+        self.assertEqual(self.run_ingest(), caselaw.IngestCounts(1, 0, 0, 0, 0, 0, 1, 0, 0, 0))
         self.assertEqual(
             (row.status, row.attempts, row.sha256, row.canonical_text_sha256),
             original_state,
         )
         self.assertTrue(row.sections)
         self.assertEqual(self.record.events, [("sectioned", row.document.doc_id)])
-        self.assertEqual(self.run_ingest(), caselaw.IngestCounts(1, 1, 0, 0, 0, 0, 0))
+        self.assertEqual(self.run_ingest(), caselaw.IngestCounts(1, 1, 0, 0, 0, 0, 0, 0, 0, 0))
         self.assertEqual(self.record.events, [("sectioned", row.document.doc_id)])
 
+    def test_ready_backfill_writes_only_missing_anchors_and_counts_pgmap(self) -> None:
+        raw = '<opinion><p pgmap="1 2 3">A<page-number>*8</page-number>B</p></opinion>'
+        row = self._ready_from_original(raw, column="xml_harvard", sectioned=True,
+                                        anchored=False)
+        original_state = (row.status, row.attempts, row.sha256, row.canonical_text_sha256,
+                          row.sections)
+        with self.assertLogs(caselaw.logger, level="INFO") as logged:
+            counts = self.run_ingest()
+        self.assertEqual(counts, caselaw.IngestCounts(1, 0, 0, 0, 0, 0, 0, 1, 1, 1))
+        for token in ("anchored=1", "pgmap_checked=1", "pgmap_disagreeing=1"):
+            self.assertIn(token, logged.output[-1])
+        self.assertEqual((row.status, row.attempts, row.sha256, row.canonical_text_sha256,
+                          row.sections), original_state)
+        self.assertEqual(row.anchored_at, self.now)
+        self.assertEqual([(anchor.label, dict(anchor.attrs)["scheme"])
+                          for anchor in row.anchors], [("8", "1")])
+        self.assertEqual(self.record.events, [("anchored", row.document.doc_id)])
+        self.assertEqual(self.run_ingest(), caselaw.IngestCounts(1, 1, 0, 0, 0, 0, 0, 0, 0, 0))
+        self.assertEqual(self.record.events, [("anchored", row.document.doc_id)])
+
+    def test_ready_backfill_writes_sections_and_anchors_from_one_parse(self) -> None:
+        raw = '<opinion><p>A<page-number>*8</page-number>B</p></opinion>'
+        row = self._ready_from_original(raw, column="xml_harvard", anchored=False)
+        original_state = (row.status, row.attempts, row.sha256, row.canonical_text_sha256)
+        with patch.object(opiniontext, "canonical_text", wraps=opiniontext.canonical_text) as walk:
+            counts = self.run_ingest()
+        self.assertEqual(walk.call_count, 1)
+        self.assertEqual(counts, caselaw.IngestCounts(1, 0, 0, 0, 0, 0, 1, 1, 0, 0))
+        self.assertEqual((row.status, row.attempts, row.sha256, row.canonical_text_sha256),
+                         original_state)
+        self.assertTrue(row.sections)
+        self.assertTrue(row.anchors)
+        self.assertEqual(row.anchored_at, self.now)
+        self.assertEqual([event for event, _ in self.record.events], ["sectioned", "anchored"])
+        self.assertEqual(self.run_ingest(), caselaw.IngestCounts(1, 1, 0, 0, 0, 0, 0, 0, 0, 0))
+        self.assertEqual([event for event, _ in self.record.events], ["sectioned", "anchored"])
+
     def test_backfill_refuses_text_mismatch_and_missing_original(self) -> None:
-        row = self._ready_without_sections("Fictitious original opinion.")
+        row = self._ready_from_original("Fictitious original opinion.")
         altered = cas.put(
             RealHost(), b"Fictitious altered opinion.", root=self.store_root,
         )
@@ -588,7 +693,7 @@ class WorkerCaselaw(unittest.TestCase):
 
         second = _Record()
         self.record = second
-        backfill = self._ready_without_sections("Fictitious recovered opinion.")
+        backfill = self._ready_from_original("Fictitious recovered opinion.")
         with (patch.object(sections, "segment", side_effect=RuntimeError("private body")),
               self.assertRaises(caselaw.CaselawFailure) as refused):
             self.run_ingest()
@@ -597,6 +702,38 @@ class WorkerCaselaw(unittest.TestCase):
         self.assert_failure(refused.exception)
         self.assertEqual((backfill.status, backfill.attempts, backfill.sections),
                          ("ready", 1, ()))
+        self.assertEqual(self.record.events, [])
+
+    def test_anchorer_exception_refuses_before_writes_and_gives_back_attempt(self) -> None:
+        self.stage(opinions=[_opinion("1", "100", xml_harvard=(
+            '<opinion><p>A<page-number>*8</page-number>B</p></opinion>'
+        ))])
+        with (patch.object(anchors, "anchor", side_effect=RuntimeError("private body")),
+              self.assertLogs(caselaw.logger, level="INFO") as logged,
+              self.assertRaises(caselaw.CaselawFailure) as raised):
+            self.run_ingest()
+        self.assertEqual((raised.exception.reason, raised.exception.error),
+                         ("anchors", "RuntimeError"))
+        self.assert_failure(raised.exception)
+        row = self.record.rows[1]
+        self.assertEqual((row.status, row.attempts, row.sections, row.anchors, row.anchored_at),
+                         ("processing", 0, (), (), None))
+        self.assertEqual([event for event, _ in self.record.events], ["begin", "give_back"])
+        self.assertIn("action=caselaw_failed", logged.output[-1])
+        for token in ("anchored=0", "pgmap_checked=0", "pgmap_disagreeing=0"):
+            self.assertIn(token, logged.output[-1])
+        self.assertNotIn("private body", logged.output[-1])
+
+        self.record = _Record()
+        backfill = self._ready_from_original("Fictitious recovered opinion.", anchored=False)
+        with (patch.object(anchors, "anchor", side_effect=RuntimeError("private body")),
+              self.assertRaises(caselaw.CaselawFailure) as refused):
+            self.run_ingest()
+        self.assertEqual((refused.exception.reason, refused.exception.error),
+                         ("anchors", "RuntimeError"))
+        self.assertEqual((backfill.status, backfill.attempts, backfill.sections,
+                          backfill.anchors, backfill.anchored_at),
+                         ("ready", 1, (), (), None))
         self.assertEqual(self.record.events, [])
 
     def test_per_curiam_flag_is_read_and_bad_value_refuses_opinions(self) -> None:
@@ -622,7 +759,7 @@ class WorkerCaselaw(unittest.TestCase):
             self.record.seed(index, "processing", attempts, court=self.court,
                              source=self.source, snapshot=self.snapshot_date, now=self.now)
         counts = self.run_ingest()
-        self.assertEqual(counts, caselaw.IngestCounts(3, 0, 2, 1, 2, 1, 0))
+        self.assertEqual(counts, caselaw.IngestCounts(3, 0, 2, 1, 2, 1, 0, 2, 0, 0))
         self.assertEqual([(self.record.rows[index].status, self.record.rows[index].attempts)
                           for index in (1, 2)], [("ready", 1), ("ready", 2)])
         third = self.record.rows[3]
@@ -647,7 +784,7 @@ class WorkerCaselaw(unittest.TestCase):
         self.store_root.unlink()
         self.store_root.mkdir(mode=cas.DIRECTORY_MODE)
         self.store_root.chmod(cas.DIRECTORY_MODE)
-        self.assertEqual(self.run_ingest(), caselaw.IngestCounts(1, 0, 1, 0, 1, 0, 0))
+        self.assertEqual(self.run_ingest(), caselaw.IngestCounts(1, 0, 1, 0, 1, 0, 0, 1, 0, 0))
         self.assertEqual((first.status, first.attempts), ("ready", 1))
         self.assertEqual([event for event, _ in self.record.events],
                          ["begin", "give_back", "retry", "ready"])
@@ -656,10 +793,10 @@ class WorkerCaselaw(unittest.TestCase):
     def test_limit_counts_seen_rows_and_repeat_changes_nothing(self) -> None:
         self.stage(opinions=[_opinion(str(index), "100", plain_text=f"Fiction {index}.")
                              for index in range(1, 4)])
-        self.assertEqual(self.run_ingest(limit=2), caselaw.IngestCounts(2, 0, 2, 0, 0, 0, 0))
+        self.assertEqual(self.run_ingest(limit=2), caselaw.IngestCounts(2, 0, 2, 0, 0, 0, 0, 2, 0, 0))
         names = self._objects()
         events = list(self.record.events)
-        self.assertEqual(self.run_ingest(limit=2), caselaw.IngestCounts(2, 2, 0, 0, 0, 0, 0))
+        self.assertEqual(self.run_ingest(limit=2), caselaw.IngestCounts(2, 2, 0, 0, 0, 0, 0, 0, 0, 0))
         self.assertEqual(self._objects(), names)
         self.assertEqual(self.record.events, events)
         self.assertNotIn(3, self.record.rows)
@@ -815,6 +952,9 @@ class WorkerCaselaw(unittest.TestCase):
         for line in lines:
             self.assertNotIn(sentinel, line)
             self.assertIn("sectioned=", line)
+            self.assertIn("anchored=", line)
+            self.assertIn("pgmap_checked=", line)
+            self.assertIn("pgmap_disagreeing=", line)
 
 
 class _CapturedConnection:
@@ -890,28 +1030,34 @@ class PsycopgDocumentRecord(unittest.TestCase):
             "published", "Published", ("1 Example 2", "3 Example 4"), "020",
         )
         self.connection.rows = [(
-            91, document.doc_id, "processing", 0, "plain_text", None, None, False,
+            91, document.doc_id, "processing", 0, "plain_text", None, None, False, False,
         )]
         section = caselaw.NewSection(
             "d" * 64, document.doc_id, 0, "footnote", "markup", 4, 9,
             "1", 2, None,
         )
         backfilled = replace(section, section_id="e" * 64)
+        anchor = caselaw.NewAnchor(
+            "f" * 64, document.doc_id, "reporter_page", "72", 4, 9,
+            {"stars": "2", "scheme": "2"},
+        )
+        backfilled_anchor = replace(anchor, anchor_id="0" * 64)
         record = caselaw.PsycopgRecord(connect=self.connect, worker_settings=self.configuration)
         self.assertEqual(record.present(document.source, snapshot, opinion.court), {
             91: caselaw.PresentRow(
-                document.doc_id, "processing", 0, "plain_text", None, None, False,
+                document.doc_id, "processing", 0, "plain_text", None, None, False, False,
             ),
         })
         record.begin(document, opinion)
         record.retry(document.doc_id)
         record.give_back(document.doc_id)
-        record.finish_ready(document.doc_id, "b" * 64, "c" * 64, now, (section,))
+        record.finish_ready(document.doc_id, "b" * 64, "c" * 64, now, (section,), (anchor,))
         record.write_sections(document.doc_id, (backfilled,))
+        record.write_anchors(document.doc_id, (backfilled_anchor,), now)
         record.finish_failed(document.doc_id, "unparseable", now, "b" * 64)
         record.close()
         self.assertTrue(self.connection.closed)
-        self.assertEqual(self.connection.commits, 7)
+        self.assertEqual(self.connection.commits, 8)
         self.assertEqual(self.connection.rollbacks, 0)
         self.assertEqual(self.connection_kwargs, {
             **settings.connection_kwargs(self.configuration), "autocommit": False,
@@ -930,21 +1076,31 @@ class PsycopgDocumentRecord(unittest.TestCase):
             )),
             (caselaw.RETRY_SQL, (document.doc_id,)),
             (caselaw.GIVE_BACK_SQL, (document.doc_id,)),
-            (caselaw.FINISH_READY_SQL, ("b" * 64, "c" * 64, now, document.doc_id)),
+            (caselaw.FINISH_READY_SQL, ("b" * 64, "c" * 64, now, now, document.doc_id)),
             (caselaw.SECTION_SQL, (
                 section.section_id, document.doc_id, 0, "footnote", "markup",
                 4, 9, "1", 2, None,
+            )),
+            (caselaw.ANCHOR_SQL, (
+                anchor.anchor_id, document.doc_id, "reporter_page", "72", 4, 9,
+                '{"scheme": "2", "stars": "2"}',
             )),
             (caselaw.SECTION_SQL, (
                 backfilled.section_id, document.doc_id, 0, "footnote", "markup",
                 4, 9, "1", 2, None,
             )),
+            (caselaw.ANCHOR_SQL, (
+                backfilled_anchor.anchor_id, document.doc_id, "reporter_page", "72", 4, 9,
+                '{"scheme": "2", "stars": "2"}',
+            )),
+            (caselaw.ANCHORED_SQL, (now, document.doc_id)),
             (caselaw.FINISH_FAILED_SQL, ("unparseable", "b" * 64, now, document.doc_id)),
         ])
         for statement, parameters in self.connection.statements:
             self.assertNotIn("PRIVATE_CASELAW_SENTINEL", statement)
             self.assertIn("%s", statement)
             self.assertIsInstance(parameters, tuple)
+        self.assertIn("%s::jsonb", caselaw.ANCHOR_SQL)
 
     def test_psycopg_error_rolls_back_and_exposes_only_its_class(self) -> None:
         self.connection.fail_execute = True

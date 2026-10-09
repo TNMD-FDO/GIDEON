@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.106](docs/release-notes/v0.3.106.md) — 2026-10-08 — anchors: reporter pages
 - [v0.3.105](docs/release-notes/v0.3.105.md) — 2026-10-08 — the service's settings repr withholds its keys
 - [v0.3.103](docs/release-notes/v0.3.103.md) — 2026-10-08 — text the cutover left behind
 - [v0.3.102](docs/release-notes/v0.3.102.md) — 2026-10-08 — Docker's address pool from the site

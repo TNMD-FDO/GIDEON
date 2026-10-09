@@ -82,6 +82,7 @@ class FakeHost(RealHost):
         self.caselaw_failure: str | None = None
         self.caselaw_counts: dict[str, dict[str, object]] = {}
         self.caselaw_section_counts: dict[str, dict[str, object]] = {}
+        self.caselaw_anchor_counts: dict[str, dict[str, object]] = {}
         self.interrupt_caselaw_job = False
         self.caselaw_events: list[tuple[str, str]] = []
         self.job_polls: dict[int, int] = {}
@@ -252,6 +253,33 @@ class FakeHost(RealHost):
                     else "succeeded"
                 )
                 return subprocess.CompletedProcess(command, 0, f"{job}|{status}|1\n", "")
+            if "SELECT d.doc_id, COALESCE(d.text_source, '') AS text_source, d.anchored_at" in input:
+                court = self._bound(input, "v_court")
+                if court in self.caselaw_anchor_counts:
+                    counts = self.caselaw_anchor_counts[court]
+                else:
+                    by_status = self.caselaw_counts.get(court, {}).get("by_status")
+                    if isinstance(by_status, dict):
+                        ready = by_status.get("ready", 0)
+                    else:
+                        source = self._bound(input, "v_source")
+                        directory = staging.work_directory(
+                            self.current_label, source, work_root=self.work,
+                        )
+                        stage_record = json.loads(
+                            (directory / worker_identity.STAGE_RECORD_NAME).read_text()
+                        )
+                        ready = stage_record["counts"][court]["opinions"]
+                    counts = {
+                        "ready": ready, "anchored": ready,
+                        "by_text_source": {
+                            "xml_harvard": {
+                                "documents": ready, "with_anchors": ready,
+                                "chars": 10 * ready, "anchored_chars": 10 * ready,
+                            },
+                        } if ready else {},
+                    }
+                return subprocess.CompletedProcess(command, 0, json.dumps(counts) + "\n", "")
             if "WITH ready_documents AS" in input:
                 court = self._bound(input, "v_court")
                 if court in self.caselaw_section_counts:
@@ -654,6 +682,22 @@ class Install(unittest.TestCase):
                 "chars_by_type": {"majority": 12, "footnote": 8},
             },
         }
+        self.host.caselaw_anchor_counts = {
+            "ca6": {"ready": 0, "anchored": 0, "by_text_source": {}},
+            "scotus": {
+                "ready": 2, "anchored": 2,
+                "by_text_source": {
+                    "html_columbia": {
+                        "documents": 1, "with_anchors": 0,
+                        "chars": 0, "anchored_chars": 0,
+                    },
+                    "xml_harvard": {
+                        "documents": 1, "with_anchors": 1,
+                        "chars": 20, "anchored_chars": 13,
+                    },
+                },
+            },
+        }
         code, out, err = self.run_install()
         self.assertEqual(code, 0, out + err)
         section_shares = {"majority": "60 % (3)", "footnote": "40 % (1)"}
@@ -665,6 +709,7 @@ class Install(unittest.TestCase):
             "html 0, plain_text 0; published 0, unpublished 0, unknown 1",
             "ingest: ok — ca6 sections: 0 of 0 ready documents; "
             + ", ".join(f"{kind} 0 % (0)" for kind in worker_identity.SECTION_TYPES),
+            "ingest: ok — ca6 anchors: 0 of 0 ready documents anchored",
             "ingest: ok — scotus: 2 opinions; ready 2, failed 0 "
             "(no-text 0, unparseable 0, empty 0, interrupted 0); "
             "xml_harvard 1, html_columbia 1, html_lawbox 0, html_anon_2020 0, "
@@ -674,6 +719,9 @@ class Install(unittest.TestCase):
                 f"{kind} {section_shares.get(kind, '0 % (0)')}"
                 for kind in worker_identity.SECTION_TYPES
             ),
+            "ingest: ok — scotus anchors: 2 of 2 ready documents anchored; "
+            "xml_harvard 1 documents, 100 % with a page, 65 % of characters; "
+            "html_columbia 1 documents, 0 % with a page, 0 % of characters",
             "ingest: ok — caselaw: 2 courts, 3 opinions, 2 ready, 1 failed, 0 seconds",
         ])
         self.assertLess(out.index(rows[-1]), out.index("retain: ok"))
@@ -717,6 +765,36 @@ class Install(unittest.TestCase):
             code, out, err = self.run_install()
         self.assertEqual(code, 1, out + err)
         self.assertIn("ingest: refuse — ca6: section read failed", out)
+        self.assertIn(issue.fix, out)
+        self.assertNotIn("retain: ok", out)
+        read.assert_called_once_with(
+            self.host, RENDERED, source="example", snapshot_date="2099-01-02",
+            court="ca6", command_path=install.COMMAND_PATH,
+        )
+
+    def test_ingest_refuses_ready_documents_without_anchoring(self) -> None:
+        self._enable_stage()
+        self._seed_complete_stage()
+        self.host.caselaw_anchor_counts["ca6"] = {
+            "ready": 1, "anchored": 0, "by_text_source": {},
+        }
+        code, out, err = self.run_install()
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("ingest: refuse — ca6: 0 of 1 ready documents anchored", out)
+        self.assertIn(stack.logs_fix(RENDERED, worker_identity.WORKER_SERVICE_NAME), out)
+        self.assertIn(report.command("corpus install"), out)
+        self.assertNotIn("ca6 anchors:", out)
+        self.assertNotIn("caselaw: 2 courts,", out)
+        self.assertNotIn("retain: ok", out)
+
+    def test_ingest_anchor_count_problem_refuses_with_court_and_fix(self) -> None:
+        self._enable_stage()
+        self._seed_complete_stage()
+        issue = report.Problem("anchor read failed", "Run the fictitious fix.")
+        with patch.object(install.caselaw, "read_anchor_counts", return_value=issue) as read:
+            code, out, err = self.run_install()
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("ingest: refuse — ca6: anchor read failed", out)
         self.assertIn(issue.fix, out)
         self.assertNotIn("retain: ok", out)
         read.assert_called_once_with(

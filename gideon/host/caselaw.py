@@ -95,6 +95,51 @@ SELECT jsonb_build_object(
 );
 """
 
+ANCHOR_COUNTS_SQL = """WITH ready_documents AS (
+    SELECT d.doc_id, COALESCE(d.text_source, '') AS text_source, d.anchored_at
+    FROM public.documents AS d
+    JOIN public.opinions AS o ON o.doc_id = d.doc_id
+    WHERE d.source = :'v_source'
+      AND d.source_snapshot = :'v_snapshot_date'::date
+      AND o.court = :'v_court'
+      AND d.status = 'ready'
+), section_chars AS (
+    SELECT s.doc_id, sum(s.char_end - s.char_start) AS chars
+    FROM public.sections AS s
+    JOIN ready_documents AS d ON d.doc_id = s.doc_id
+    GROUP BY s.doc_id
+), scheme_chars AS (
+    SELECT a.doc_id, a.attrs ->> 'scheme' AS scheme,
+           sum(a.char_end - a.char_start) AS chars
+    FROM public.anchors AS a
+    JOIN ready_documents AS d ON d.doc_id = a.doc_id
+    WHERE a.kind = 'reporter_page'
+    GROUP BY a.doc_id, a.attrs ->> 'scheme'
+), anchor_chars AS (
+    SELECT doc_id, max(chars) AS chars
+    FROM scheme_chars
+    GROUP BY doc_id
+), by_source AS (
+    SELECT d.text_source, count(*) AS documents, count(a.doc_id) AS with_anchors,
+           sum(COALESCE(s.chars, 0)) AS chars,
+           sum(COALESCE(a.chars, 0)) AS anchored_chars
+    FROM ready_documents AS d
+    LEFT JOIN section_chars AS s ON s.doc_id = d.doc_id
+    LEFT JOIN anchor_chars AS a ON a.doc_id = d.doc_id
+    GROUP BY d.text_source
+)
+SELECT jsonb_build_object(
+    'ready', (SELECT count(*) FROM ready_documents),
+    'anchored', (SELECT count(*) FROM ready_documents WHERE anchored_at IS NOT NULL),
+    'by_text_source', COALESCE((
+        SELECT jsonb_object_agg(text_source, jsonb_build_object(
+            'documents', documents, 'with_anchors', with_anchors,
+            'chars', chars, 'anchored_chars', anchored_chars
+        )) FROM by_source
+    ), '{}'::jsonb)
+);
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class CaselawRead:
@@ -125,6 +170,25 @@ class SectionCounts:
     sectioned: int
     sections_by_type: dict[str, int]
     chars_by_type: dict[str, int]
+
+
+@dataclass(frozen=True, slots=True)
+class SourceCoverage:
+    """Ready document and reporter-page coverage for one text source."""
+
+    documents: int
+    with_anchors: int
+    chars: int
+    anchored_chars: int
+
+
+@dataclass(frozen=True, slots=True)
+class AnchorCounts:
+    """Ready and anchored document counts with coverage by text source."""
+
+    ready: int
+    anchored: int
+    by_text_source: dict[str, SourceCoverage]
 
 
 def _logs_fix(rendered_dir: PathLike, command_path: str) -> str:
@@ -233,9 +297,9 @@ def _failure_problem(
         )
     if reason == "busy":
         return Problem("caselaw is busy with another job", f"Wait, then run {install} again.")
-    if reason == "segmenter":
+    if reason in {"segmenter", "anchors"}:
         return Problem(
-            f"caselaw segmenter failure ({error or 'unknown error'})",
+            f"caselaw {reason} failure ({error or 'unknown error'})",
             f"Run {stack.logs_fix(rendered_dir, WORKER_SERVICE_NAME)}, report the defect, "
             f"then run {install} again after the fix.",
         )
@@ -422,4 +486,50 @@ def read_section_counts(
     counts = _section_counts_from_json(value)
     if counts is None:
         return Problem("caselaw sections row is invalid", _logs_fix(rendered_dir, command_path))
+    return counts
+
+
+def _anchor_counts_from_json(value: object) -> AnchorCounts | None:
+    if not isinstance(value, dict) or set(value) != {
+        "ready", "anchored", "by_text_source",
+    }:
+        return None
+    ready, anchored = value["ready"], value["anchored"]
+    if (type(ready) is not int or ready < 0 or type(anchored) is not int
+            or anchored < 0 or anchored > ready):
+        return None
+    sources = value["by_text_source"]
+    if not isinstance(sources, dict):
+        return None
+    coverage: dict[str, SourceCoverage] = {}
+    for source, row in sources.items():
+        if not isinstance(source, str) or source not in TEXT_SOURCES or not isinstance(row, dict):
+            return None
+        if set(row) != {"documents", "with_anchors", "chars", "anchored_chars"}:
+            return None
+        documents, with_anchors = row["documents"], row["with_anchors"]
+        chars, anchored_chars = row["chars"], row["anchored_chars"]
+        if any(type(number) is not int or number < 0 for number in (
+            documents, with_anchors, chars, anchored_chars,
+        )) or with_anchors > documents or anchored_chars > chars:
+            return None
+        coverage[source] = SourceCoverage(documents, with_anchors, chars, anchored_chars)
+    return AnchorCounts(ready, anchored, coverage)
+
+
+def read_anchor_counts(
+    host: Host, rendered_dir: PathLike, *, source: str, snapshot_date: str,
+    court: str, command_path: str = COMMAND_PATH,
+) -> AnchorCounts | Problem:
+    """Read ready document anchoring and reporter-page coverage for one court."""
+
+    value = _read_court_row(
+        host, rendered_dir, ANCHOR_COUNTS_SQL, "anchors", source=source,
+        snapshot_date=snapshot_date, court=court, command_path=command_path,
+    )
+    if isinstance(value, Problem):
+        return value
+    counts = _anchor_counts_from_json(value)
+    if counts is None:
+        return Problem("caselaw anchors row is invalid", _logs_fix(rendered_dir, command_path))
     return counts

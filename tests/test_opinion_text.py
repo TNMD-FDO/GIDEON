@@ -57,7 +57,7 @@ class OpinionText(unittest.TestCase):
         expected = "OneTwoThree.\n\nNote."
         self.assert_parsed("xml_harvard", raw, expected, (
             opiniontext.Marker("page", "8", len("One")),
-            opiniontext.Marker("page", "72", len("OneTwo")),
+            opiniontext.Marker("page", "72", len("OneTwo"), (("stars", "2"),)),
             opiniontext.Marker("footnote-mark", "1", len("OneTwoThree")),
             opiniontext.Marker("footnote-mark", "↩", expected.index("Note.")),
         ))
@@ -114,7 +114,10 @@ class OpinionText(unittest.TestCase):
         )
         expected = "Fiction Name\n\nWehold.\n\nFootnotes\n\n1. Note continues."
         self.assert_parsed("html_anon_2020", raw, expected, (
-            opiniontext.Marker("page", "242", expected.index("Wehold") + len("We")),
+            opiniontext.Marker(
+                "page", "242", expected.index("Wehold") + len("We"),
+                (("number", "23"), ("pagescheme", "Fiction")),
+            ),
             opiniontext.Marker("footnote-mark", "1", expected.index("Wehold") + len("Wehold")),
             opiniontext.Marker("footnote-mark", "↩", expected.index("1. Note") + len("1. Note")),
         ))
@@ -158,6 +161,58 @@ class OpinionText(unittest.TestCase):
         self.assert_parsed("xml_harvard", raw, "caféteria", (
             opiniontext.Marker("page", "9", len("café")),
         ))
+
+    def test_page_scheme_attributes_survive_normalization_and_deferred_marker(self) -> None:
+        raw = (
+            '<opinion><p>cafe\u0301<page-number citation-index="1">*9</page-number>'
+            'teria</p><p><page-number citation-index="2">**10</page-number>Next</p>'
+            '</opinion>'
+        )
+        self.assert_parsed("xml_harvard", raw, "caféteria\n\nNext", (
+            opiniontext.Marker("page", "9", len("café"), (("citation_index", "1"),)),
+            opiniontext.Marker(
+                "page", "10", len("caféteria\n\n"),
+                (("citation_index", "2"), ("stars", "2")),
+            ),
+        ))
+        for column in ("html", "xml_harvard"):
+            with self.subTest(column=column):
+                self.assert_parsed(
+                    column,
+                    '<p>One<a class="page-label" data-citation-index="2">**72</a>Two</p>',
+                    "OneTwo", (opiniontext.Marker(
+                        "page", "72", len("One"), (("citation_index", "2"), ("stars", "2")),
+                    ),),
+                )
+
+    def test_harvard_pagemap_block_keeps_structural_blocks_and_text(self) -> None:
+        raw = (
+            '<opinion><author pgmap="1 2">Judge <page-number>*2</page-number>A</author>'
+            '<blockquote pgmap="3 4"><p>Quote</p></blockquote>'
+            '<p pgmap="5 6">Body</p></opinion>'
+        )
+        parsed = self.assert_parsed("xml_harvard", raw, "Judge A\n\nQuote\n\nBody", (
+            opiniontext.Marker("page", "2", len("Judge ")),
+        ))
+        self.assertEqual(parsed.blocks, (
+            opiniontext.Block("opinion", "", 0, len(parsed.text)),
+            opiniontext.Block("author", "", 0, len("Judge A")),
+            opiniontext.Block("pagemap", "1 2", 0, len("Judge A")),
+            opiniontext.Block("quote", "", parsed.text.index("Quote"),
+                              parsed.text.index("Quote") + len("Quote")),
+            opiniontext.Block("pagemap", "3 4", parsed.text.index("Quote"),
+                              parsed.text.index("Quote") + len("Quote")),
+            opiniontext.Block("pagemap", "5 6", parsed.text.index("Body"),
+                              parsed.text.index("Body") + len("Body")),
+        ))
+        without_raw = raw.replace(' pgmap="1 2"', '').replace(' pgmap="3 4"', '')
+        without_raw = without_raw.replace(' pgmap="5 6"', '')
+        without = opiniontext.canonical_text("xml_harvard", without_raw)
+        self.assertEqual((without.text, without.markers), (parsed.text, parsed.markers))
+        self.assertEqual(
+            without.blocks,
+            tuple(block for block in parsed.blocks if block.kind != "pagemap"),
+        )
 
     def test_footnotereference_label_is_dropped_without_losing_its_tail(self) -> None:
         raw = (

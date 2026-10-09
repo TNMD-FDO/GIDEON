@@ -354,6 +354,10 @@ def _court_stage_rows(record: staging.StageRecord) -> None:
         ))
 
 
+def _percent(part: int, whole: int) -> int:
+    return round(100 * part / whole) if whole else 0
+
+
 def _ingest(
     host: CorpusHost, rendered_dir: PathLike, work_root: PathLike,
     lockfile: Lockfile, sleep: Callable[[float], None],
@@ -462,7 +466,7 @@ def _ingest(
         total_chars = sum(section_counts.chars_by_type.values())
         section_detail = ", ".join(
             f"{section_type} "
-            f"{round(100 * section_counts.chars_by_type.get(section_type, 0) / total_chars) if total_chars else 0} % "
+            f"{_percent(section_counts.chars_by_type.get(section_type, 0), total_chars)} % "
             f"({section_counts.sections_by_type.get(section_type, 0)})"
             for section_type in SECTION_TYPES
         )
@@ -470,6 +474,31 @@ def _ingest(
             "ingest", True,
             f"{court} sections: {section_counts.sectioned} of {section_counts.ready} "
             f"ready documents; {section_detail}", "",
+        ))
+        anchor_counts = caselaw.read_anchor_counts(
+            host, rendered_dir, source=source, snapshot_date=snapshot_date,
+            court=court, command_path=COMMAND_PATH,
+        )
+        if isinstance(anchor_counts, Problem):
+            return _refuse("ingest", f"{court}: {anchor_counts.problem}", anchor_counts.fix)
+        if anchor_counts.anchored < anchor_counts.ready:
+            return _refuse(
+                "ingest",
+                f"{court}: {anchor_counts.anchored} of {anchor_counts.ready} ready documents anchored",
+                f"Run {stack.logs_fix(rendered_dir, WORKER_SERVICE_NAME)}, then run "
+                f"{report.command(COMMAND_PATH)} again.",
+            )
+        anchor_detail = "; ".join(
+            f"{source_name} {coverage.documents} documents, "
+            f"{_percent(coverage.with_anchors, coverage.documents)} % with a page, "
+            f"{_percent(coverage.anchored_chars, coverage.chars)} % of characters"
+            for source_name in TEXT_SOURCES
+            if (coverage := anchor_counts.by_text_source.get(source_name)) is not None
+        )
+        report.print_stage(StageResult(
+            "ingest", True,
+            f"{court} anchors: {anchor_counts.anchored} of {anchor_counts.ready} "
+            f"ready documents anchored" + (f"; {anchor_detail}" if anchor_detail else ""), "",
         ))
         total += counts.opinions
         ready += counts.by_status.get("ready", 0)
