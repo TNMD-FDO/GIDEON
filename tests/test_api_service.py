@@ -43,6 +43,23 @@ class ApiService(unittest.TestCase):
             ENGINE_MODEL,
         )
 
+    def loaded_settings_environment(self, root: Path) -> dict[str, str]:
+        (root / "engine-key").write_text(ENGINE_KEY, encoding="utf-8")
+        (root / "api-key").write_text(API_KEY, encoding="utf-8")
+        (root / "instruction.txt").write_text(f" \n{INSTRUCTION}\n ", encoding="utf-8")
+        return {
+            "GIDEON_ENGINE_URL": ENGINE_URL,
+            "GIDEON_ENGINE_API_KEY_FILE": str(root / "engine-key"),
+            "GIDEON_API_KEY_FILE": str(root / "api-key"),
+            "GIDEON_API_PORT": "8000",
+            "GIDEON_SOURCE_HEADER": SOURCE_HEADER,
+            "GIDEON_CHAT_HEADER": CHAT_HEADER,
+            "GIDEON_EVAL_IDENTITY": EVAL_IDENTITY,
+            "GIDEON_INSTRUCTION_FILE": str(root / "instruction.txt"),
+            "GIDEON_MODEL_ID": MODEL_ID,
+            "GIDEON_ENGINE_MODEL": ENGINE_MODEL,
+        }
+
     def request(
         self,
         handler: httpx.MockTransport,
@@ -236,24 +253,7 @@ class ApiService(unittest.TestCase):
 
     def test_source_settings_are_loaded_from_required_environment(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "engine-key").write_text(ENGINE_KEY, encoding="utf-8")
-            (root / "api-key").write_text(API_KEY, encoding="utf-8")
-            (root / "instruction.txt").write_text(f" \n{INSTRUCTION}\n ", encoding="utf-8")
-            settings = load_settings(
-                {
-                    "GIDEON_ENGINE_URL": ENGINE_URL,
-                    "GIDEON_ENGINE_API_KEY_FILE": str(root / "engine-key"),
-                    "GIDEON_API_KEY_FILE": str(root / "api-key"),
-                    "GIDEON_API_PORT": "8000",
-                    "GIDEON_SOURCE_HEADER": SOURCE_HEADER,
-                    "GIDEON_CHAT_HEADER": CHAT_HEADER,
-                    "GIDEON_EVAL_IDENTITY": EVAL_IDENTITY,
-                    "GIDEON_INSTRUCTION_FILE": str(root / "instruction.txt"),
-                    "GIDEON_MODEL_ID": MODEL_ID,
-                    "GIDEON_ENGINE_MODEL": ENGINE_MODEL,
-                }
-            )
+            settings = load_settings(self.loaded_settings_environment(Path(directory)))
 
         self.assertEqual(settings.source_header, SOURCE_HEADER)
         self.assertEqual(settings.chat_header, CHAT_HEADER)
@@ -261,6 +261,19 @@ class ApiService(unittest.TestCase):
         self.assertEqual(settings.instruction, INSTRUCTION)
         self.assertEqual(settings.model_id, MODEL_ID)
         self.assertEqual(settings.engine_model, ENGINE_MODEL)
+
+    def test_loaded_settings_repr_and_str_withhold_both_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            environment = self.loaded_settings_environment(Path(directory))
+            settings = load_settings(environment)
+
+        settings_repr = repr(settings)
+        settings_str = str(settings)
+        for text in (settings_repr, settings_str):
+            self.assertNotIn(ENGINE_KEY, text)
+            self.assertNotIn(API_KEY, text)
+        self.assertIn(f"port={environment['GIDEON_API_PORT']}", settings_repr)
+        self.assertIn(MODEL_ID, settings_repr)
 
     def test_instruction_file_refuses_missing_variable_missing_file_and_empty_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

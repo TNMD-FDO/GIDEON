@@ -2,7 +2,7 @@
 
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -11,8 +11,8 @@ class Settings:
     """The immutable runtime settings and credentials for one service process."""
 
     engine_url: str  # the engine's OpenAI base URL, ending in /v1
-    engine_api_key: str
-    api_key: str
+    engine_api_key: str = field(repr=False)  # value withheld from the repr
+    api_key: str = field(repr=False)  # value withheld from the repr
     port: int
     source_header: str  # the forwarded header the trip's source is decided on
     chat_header: str  # the forwarded header holding the trip's chat id
