@@ -1,11 +1,13 @@
-"""The guardrail's lag window: ``StreamState`` and ``StreamCheck``, text in and
-released text out, a trip recorded through the writer.
+"""The guardrail's lag window: the typed ``StreamState``, ``StreamCheck``, text
+in and released text out, and ``record_stream_trip``, the one recorder the
+service calls for a trip on any path.
 
 Built over every module before it; General's service feeds it a stream.
 """
 
 import contextlib
 from collections.abc import Callable, Mapping
+from dataclasses import KW_ONLY, dataclass, field
 
 from gideon.guardrail.families import Trip
 from gideon.guardrail.grammar import (
@@ -14,118 +16,66 @@ from gideon.guardrail.grammar import (
     RESTATEMENT_LOOKAHEAD_CHARS,
 )
 from gideon.guardrail.judge import Constraint, judge_floor
-from gideon.guardrail.writer import record_trip
+from gideon.guardrail.writer import USER_SOURCE, record_trip
 
 
-def _new_text_state() -> dict[str, object]:
-    return {
-        "text": "",
-        "released": 0,
-        "decided": 0,
-        "constraints": [],
-        "finished": False,
-    }
+@dataclass(slots=True, repr=False, eq=False)
+class TextState:
+    """Accumulated text and release positions for one stream."""
 
-
-# The per-request state is the request's own in the service for its scope.
-class StreamState(dict[str, object]):
-    """The per-request stream state General's service keeps for one request.
-
-    A dict subclass whose ``repr`` and ``str`` are content-free: no character
-    of the stream or of the user's dates may reach a log. The content entry
-    holds its accumulated string, released length, decided length, and release
-    constraints. The state also holds the finished flag, the trip, supplied
-    figures and confirmation context, and the request's branch, source word,
-    and chat id, which the trip's row reads.
-    """
-
-    def __init__(
-        self,
-        supplied: Mapping[str, frozenset[str]],
-        confirmation: frozenset[str],
-        *,
-        branch: str | None = None,
-        source: str = "user",
-        chat_id: str | None = None,
-    ) -> None:
-        super().__init__(
-            {
-                "content": _new_text_state(),
-                "trip": None,
-                "finished": False,
-                "supplied": {
-                    name: sorted(figures) for name, figures in supplied.items()
-                },
-                "confirmation": sorted(confirmation),
-                "branch": branch,
-                "source": source,
-                "chat_id": chat_id,
-            }
-        )
+    text: str = ""
+    released: int = 0
+    decided: int = 0
+    constraints: list[Constraint] = field(default_factory=list)
+    finished: bool = False
 
     def __repr__(self) -> str:
-        entry = self.get("content")
-        if isinstance(entry, dict):
-            text = entry.get("text")
-            length = len(text) if isinstance(text, str) else 0
-            state = "finished" if entry.get("finished") else "open"
-            content = f"{length}/{entry.get('released')}/{entry.get('decided')}/{state}"
-        else:
-            content = "invalid"
+        status = "finished" if self.finished else "open"
+        return f"{len(self.text)}/{self.released}/{self.decided}/{status}"
+
+    __str__ = __repr__
+
+
+@dataclass(slots=True, repr=False, eq=False)
+class StreamState:
+    """The request's own state in General's service for its scope.
+
+    Supplied figures and confirmation context guide the judge; branch, source,
+    and chat id feed the trip row. Content, trip, and finished track release.
+    No character of the stream or of the user's dates may reach a log.
+    """
+
+    supplied: Mapping[str, frozenset[str]]
+    confirmation: frozenset[str]
+    _: KW_ONLY
+    branch: str | None = None
+    source: str = USER_SOURCE
+    chat_id: str | None = None
+    content: TextState = field(default_factory=TextState)
+    trip: Trip | None = None
+    finished: bool = False
+
+    def __repr__(self) -> str:
         return (
-            f"StreamState(content={content}, tripped={self.get('trip') is not None}, "
-            f"finished={self.get('finished')})"
+            f"StreamState(content={self.content!r}, tripped={self.trip is not None}, "
+            f"finished={self.finished})"
         )
 
     __str__ = __repr__
 
 
-def _stream_state(value: object) -> dict[str, object] | None:
-    """The value as the stream's state, or ``None`` when it is not one."""
-
-    keys = (
-        "content",
-        "trip",
-        "finished",
-        "supplied",
-        "confirmation",
-        "branch",
-        "source",
-        "chat_id",
-    )
-    if isinstance(value, dict) and all(key in value for key in keys):
-        return value
-    return None
-
-
-def _stream_entry(state: dict[str, object], field: str) -> dict[str, object]:
-    entry = state.get(field)
-    if not isinstance(entry, dict):
-        raise TypeError("invalid stream text state")
-    return entry
-
-
-def _record_stream_trip(state: dict[str, object], trip: Trip) -> None:
+def record_stream_trip(state: StreamState, trip: Trip) -> None:
     """Record the stream's trip once; the texts are discarded from here on."""
 
-    if state.get("trip") is not None:
+    if state.trip is not None:
         return
-    state["trip"] = {"family": trip.family, "pattern_id": trip.pattern_id}
-    branch = state.get("branch")
-    source = state.get("source")
-    chat_id = state.get("chat_id")
+    state.trip = trip
     # Trip recording cannot affect the refusal; its writer stays silent on any
     # failure so a logging problem never changes the judged response.
     with contextlib.suppress(Exception):
-        record_trip(
-            trip,
-            branch if isinstance(branch, str) else None,
-            source if isinstance(source, str) else "user",
-            chat_id if isinstance(chat_id, str) else None,
-        )
-    entry = _stream_entry(state, "content")
-    entry["text"] = ""
-    entry["constraints"] = []
+        record_trip(trip, state.branch, state.source, state.chat_id)
+    state.content.text = ""
+    state.content.constraints = []
 
 
 Judge = Callable[..., "Trip | tuple[Constraint, ...] | None"]
@@ -134,59 +84,15 @@ Judge = Callable[..., "Trip | tuple[Constraint, ...] | None"]
 class StreamCheck:
     """The bounded release of one streamed text: judge the window, release all but the tail.
 
-    The mechanism knows no family — the judge and the field are parameters —
+    The mechanism knows no family — the judge is a parameter —
     so another bounded-regex check (the citation stamp) can copy
     it.  A released hit always carries the context that exempted it: the lag
     point never lands inside a constraint the judge reported.
     """
 
-    def __init__(self, state: dict[str, object], field: str, *, judge: Judge) -> None:
+    def __init__(self, state: StreamState, *, judge: Judge) -> None:
         self.state = state
-        self.field = field
         self._judge_function = judge
-
-    def _supplied(self) -> dict[str, frozenset[str]]:
-        supplied = self.state.get("supplied")
-        if not isinstance(supplied, dict):
-            raise TypeError("invalid stream stash")
-        result: dict[str, frozenset[str]] = {}
-        for name, figures in supplied.items():
-            if not isinstance(name, str) or not isinstance(figures, list) or not all(
-                isinstance(figure, str) for figure in figures
-            ):
-                raise TypeError("invalid stream stash")
-            result[name] = frozenset(figures)
-        return result
-
-    def _confirmation(self) -> frozenset[str]:
-        confirmation = self.state.get("confirmation")
-        if not isinstance(confirmation, list) or not all(
-            isinstance(name, str) for name in confirmation
-        ):
-            raise TypeError("invalid stream confirmation")
-        return frozenset(confirmation)
-
-    def _entry(self) -> tuple[dict[str, object], str, int, int]:
-        entry = _stream_entry(self.state, self.field)
-        text, released, decided = (
-            entry.get("text"),
-            entry.get("released"),
-            entry.get("decided"),
-        )
-        if (
-            not isinstance(text, str)
-            or not isinstance(released, int)
-            or not isinstance(decided, int)
-        ):
-            raise TypeError("invalid stream text state")
-        return entry, text, released, decided
-
-    @staticmethod
-    def _constraints(entry: dict[str, object]) -> list[Constraint]:
-        stored = entry.get("constraints")
-        if not isinstance(stored, list):
-            raise TypeError("invalid stream constraints")
-        return [Constraint(int(item[0]), int(item[1])) for item in stored]
 
     def _judge(
         self, text: str, decided: int, *, prefix: bool
@@ -196,8 +102,8 @@ class StreamCheck:
         result = self._judge_function(
             (text[floor:],),
             opening,
-            self._supplied(),
-            self._confirmation(),
+            self.state.supplied,
+            self.state.confirmation,
             prefix=prefix,
             since=max(0, decided - floor),
         )
@@ -210,30 +116,30 @@ class StreamCheck:
     def append(self, delta: str) -> str:
         """Append generated text and return what may now be released."""
 
-        if self.state.get("trip") is not None:
+        if self.state.trip is not None:
             return ""
-        entry, text, _, _ = self._entry()
-        entry["text"] = text + delta
+        self.state.content.text += delta
         return self.judge()
 
     def judge(self) -> str:
         """Judge the bounded window and return the text that may now be released."""
 
-        if self.state.get("trip") is not None:
+        if self.state.trip is not None:
             return ""
-        entry, text, released, decided = self._entry()
+        entry = self.state.content
+        text, released, decided = entry.text, entry.released, entry.decided
         result = self._judge(text, decided, prefix=True)
         if isinstance(result, Trip):
-            _record_stream_trip(self.state, result)
+            record_stream_trip(self.state, result)
             return ""
         fresh = tuple(result) if isinstance(result, tuple) else ()
         # Constraints persist until release has passed them; a decided hit is
         # not re-judged, but its context still travels with it.
-        active = {(item.start, item.end): item for item in self._constraints(entry)}
+        active = {(item.start, item.end): item for item in entry.constraints}
         for item in fresh:
             active[(item.start, item.end)] = item
         constraints = [item for item in active.values() if item.end > released]
-        entry["decided"] = max(decided, len(text) - RESTATEMENT_LOOKAHEAD_CHARS)
+        entry.decided = max(decided, len(text) - RESTATEMENT_LOOKAHEAD_CHARS)
         target = max(0, len(text) - LAG_CHARS)
         moved = True
         while moved:
@@ -243,26 +149,25 @@ class StreamCheck:
                     target = max(released, item.start)
                     moved = True
         target = max(released, min(target, len(text)))
-        entry["constraints"] = [
-            [item.start, item.end] for item in constraints if item.end > target
-        ]
-        entry["released"] = target
+        entry.constraints = [item for item in constraints if item.end > target]
+        entry.released = target
         return text[released:target]
 
     def finish(self) -> str:
         """Judge the complete text in ordinary mode and return its held tail."""
 
-        if self.state.get("trip") is not None:
+        if self.state.trip is not None:
             return ""
-        entry, text, released, decided = self._entry()
-        if entry.get("finished"):
+        entry = self.state.content
+        text, released, decided = entry.text, entry.released, entry.decided
+        if entry.finished:
             return ""
         result = self._judge(text, decided, prefix=False)
         if isinstance(result, Trip):
-            _record_stream_trip(self.state, result)
+            record_stream_trip(self.state, result)
             return ""
-        entry["released"] = len(text)
-        entry["decided"] = len(text)
-        entry["constraints"] = []
-        entry["finished"] = True
+        entry.released = len(text)
+        entry.decided = len(text)
+        entry.constraints = []
+        entry.finished = True
         return text[released:]

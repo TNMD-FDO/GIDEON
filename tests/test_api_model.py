@@ -88,19 +88,29 @@ class Listing(unittest.TestCase):
 
 
 class ImportBoundary(unittest.TestCase):
-    """The pure model rule stays standard-library only."""
+    """The pure model rule uses the standard library and its error builder."""
 
     def test_imports_are_standard_library(self) -> None:
         source = Path(__file__).resolve().parents[1] / "gideon/api/model.py"
         tree = ast.parse(source.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.ImportFrom)
+                and node.level == 1
+                and node.module == "errors"
+                and len(node.names) == 1
+                and node.names[0].name == "error_body"
+                and node.names[0].asname is None
+            ):
+                continue
             names = (
                 [alias.name for alias in node.names] if isinstance(node, ast.Import)
                 else [node.module or ""] if isinstance(node, ast.ImportFrom)
                 else []
             )
             for name in names:
-                self.assertIn(
-                    name.split(".")[0], sys.stdlib_module_names,
-                    f"model.py imports non-standard module {name}; the rule stays a pure parse",
+                self.assertTrue(
+                    (not isinstance(node, ast.ImportFrom) or node.level == 0)
+                    and name.split(".")[0] in sys.stdlib_module_names,
+                    f"model.py imports disallowed module {name}; the rule stays a pure parse plus the service error builder",
                 )

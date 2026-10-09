@@ -1385,7 +1385,7 @@ class BrowserTurnIntegration(TestCase):
                     [{"role": "user", "content": prompt}, {"role": "assistant", "content": ""}], 1
                 )
                 state = guardrail.StreamState(supplied, contexts)
-                stream = guardrail.StreamCheck(state, "content", judge=guardrail.judge_rendered)
+                stream = guardrail.StreamCheck(state, judge=guardrail.judge_rendered)
                 releases = [
                     stream.append(answer[index : index + granularity])
                     for index in range(0, len(answer), granularity)
@@ -1398,7 +1398,7 @@ class BrowserTurnIntegration(TestCase):
                         painted += piece
                         frames.append(browser_frame(1000.0 + 10 * len(frames), painted))
                 self.assertEqual(painted, answer)
-                self.assertIsNone(state["trip"])
+                self.assertIsNone(state.trip)
                 whole = classify.whole_judge(guardrail, prompt)
                 whole_calls = 0
 

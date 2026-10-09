@@ -9,6 +9,7 @@ from typing import Final
 from gideon import guardrail
 
 from . import progress, stamp
+from .errors import error_body
 from .progress import REASONING_KEYS
 from .sse import DONE_EVENT
 
@@ -30,26 +31,27 @@ TEXT_KEYS: Final[tuple[str, ...]] = (*REASONING_KEYS, "content")
 # all the pinned frontend and the door read of a chunk.
 CHUNK_OBJECT: Final[str] = "chat.completion.chunk"
 UNJUDGED_ERROR_CODE: Final[str] = "completion_unjudged"
-UNJUDGED_ERROR: Final[dict[str, object]] = {
-    "error": {
-        "message": "The completion could not be judged.",
-        "type": "server_error",
-        "param": None,
-        "code": UNJUDGED_ERROR_CODE,
-    }
-}
+UNJUDGED_ERROR: Final[dict[str, dict[str, object]]] = error_body(
+    "The completion could not be judged.",
+    error_type="server_error",
+    code=UNJUDGED_ERROR_CODE,
+)
 
 
 def source_for_header(values: Sequence[str], eval_identity: str) -> str:
     """Return the content-free source word for one forwarded header."""
 
     if len(values) != 1:
-        return "user"
+        return guardrail.USER_SOURCE
     value = values[0].strip()
     identity = eval_identity.strip()
     if not value or not identity:
-        return "user"
-    return "eval" if value.casefold() == identity.casefold() else "user"
+        return guardrail.USER_SOURCE
+    return (
+        guardrail.EVAL_SOURCE
+        if value.casefold() == identity.casefold()
+        else guardrail.USER_SOURCE
+    )
 
 
 def chat_id_for_header(values: Sequence[str]) -> str | None:
@@ -109,7 +111,6 @@ def judge_completion(
         choices = parsed.get("choices")
         if not isinstance(choices, list):
             raise TypeError("completion choices are not a list")
-        supplied, contexts = _state_context(state)
         rebuilt_choices: list[dict[str, object]] = []
         for choice_value in choices:
             if not isinstance(choice_value, Mapping):
@@ -130,11 +131,11 @@ def judge_completion(
             }
             if isinstance(content, str):
                 result = guardrail.judge_rendered(
-                    (content,), content, supplied, contexts
+                    (content,), content, state.supplied, state.confirmation
                 )
                 if isinstance(result, guardrail.Trip):
-                    _record_trip(state, result)
-                    rebuilt_message["content"] = _refusal_for(result.family)
+                    guardrail.record_stream_trip(state, result)
+                    rebuilt_message["content"] = guardrail.refusal_for(result.family)
                 else:
                     rebuilt_message["content"] = content + stamp.tail_for(content)
             # The choice is rebuilt here as it is on the stream: a `logprobs`
@@ -155,57 +156,8 @@ def judge_completion(
         return None, type(exc).__name__
 
 
-def _state_context(
-    state: guardrail.StreamState,
-) -> tuple[Mapping[str, frozenset[str]], frozenset[str]]:
-    supplied_value = state.get("supplied")
-    confirmation_value = state.get("confirmation")
-    if not isinstance(supplied_value, Mapping) or not isinstance(
-        confirmation_value, list
-    ):
-        raise TypeError("invalid completion context")
-    supplied: dict[str, frozenset[str]] = {}
-    for name, figures in supplied_value.items():
-        if not isinstance(name, str) or not isinstance(figures, list):
-            raise TypeError("invalid completion stash")
-        if not all(isinstance(figure, str) for figure in figures):
-            raise TypeError("invalid completion stash")
-        supplied[name] = frozenset(figures)
-    if not all(isinstance(name, str) for name in confirmation_value):
-        raise TypeError("invalid completion context")
-    return supplied, frozenset(confirmation_value)
-
-
-def _refusal_for(family: object) -> str:
-    """The tripped family's refusal; the deadline family's when none is named."""
-
-    if not isinstance(family, str):
-        return guardrail.DEADLINE_FAMILY.refusal
-    return guardrail.REFUSAL_BY_FAMILY.get(family, guardrail.DEADLINE_FAMILY.refusal)
-
-
-def _record_trip(state: guardrail.StreamState, trip: guardrail.Trip) -> None:
-    if state.get("trip") is not None:
-        return
-    state["trip"] = {"family": trip.family, "pattern_id": trip.pattern_id}
-    branch = state.get("branch")
-    source = state.get("source")
-    chat_id = state.get("chat_id")
-    with suppress(Exception):
-        guardrail.record_trip(
-            trip,
-            branch if isinstance(branch, str) else None,
-            source if isinstance(source, str) else "user",
-            chat_id if isinstance(chat_id, str) else None,
-        )
-
-
 def _record_error_trip(state: guardrail.StreamState) -> None:
-    content = state.get("content")
-    if isinstance(content, dict):
-        content["text"] = ""
-        content["constraints"] = []
-    _record_trip(
+    guardrail.record_stream_trip(
         state,
         guardrail.Trip(guardrail.DEADLINE_FAMILY.name, guardrail.ERROR_PATTERN_ID),
     )
@@ -341,8 +293,8 @@ class StreamMechanics:
             raise TypeError("stream has ambiguous reasoning")
 
         self._last_envelope = envelope
-        was_finished = self.state.get("finished") is True
-        checker = guardrail.StreamCheck(self.state, "content", judge=guardrail.judge_rendered)
+        was_finished = self.state.finished
+        checker = guardrail.StreamCheck(self.state, judge=guardrail.judge_rendered)
         released = ""
         if "content" in texts:
             content_text = texts["content"]
@@ -353,7 +305,7 @@ class StreamMechanics:
         is_finished = finish_reason is not None
         if is_finished:
             released += checker.finish()
-            self.state["finished"] = True
+            self.state.finished = True
         progress_chunk: dict[str, object] | None = None
         if (
             self._tripped()
@@ -423,11 +375,11 @@ class StreamMechanics:
     ) -> list[dict[str, object] | str]:
         """Settle an unfinished answer, stamping only after its trip check passes."""
 
-        if self.state.get("finished") is True:
+        if self.state.finished:
             return []
-        checker = guardrail.StreamCheck(self.state, "content", judge=guardrail.judge_rendered)
+        checker = guardrail.StreamCheck(self.state, judge=guardrail.judge_rendered)
         tail = checker.finish()
-        self.state["finished"] = True
+        self.state.finished = True
         if self._tripped():
             return self._trip_payloads(envelope)
         tail += stamp.tail_for(self._finished_answer())
@@ -436,13 +388,9 @@ class StreamMechanics:
         return [self._content_chunk(envelope, tail)]
 
     def _finished_answer(self) -> str:
-        """Read the accumulated content text, or empty text for an unreadable state."""
+        """Read the accumulated content text."""
 
-        content = self.state.get("content")
-        if not isinstance(content, dict):
-            return ""
-        text = content.get("text")
-        return text if isinstance(text, str) else ""
+        return self.state.content.text
 
     @staticmethod
     def _envelope(event: Mapping[str, object]) -> dict[str, object]:
@@ -519,11 +467,9 @@ class StreamMechanics:
     def _trip_payloads(
         self, envelope: Mapping[str, object] | None
     ) -> list[dict[str, object] | str]:
-        content = self.state.get("content")
-        released = content.get("released") if isinstance(content, dict) else None
-        answer_released = isinstance(released, int) and released > 0
-        trip = self.state.get("trip")
-        refusal = _refusal_for(trip.get("family") if isinstance(trip, dict) else None)
+        answer_released = self.state.content.released > 0
+        trip = self.state.trip
+        refusal = guardrail.refusal_for(trip.family if trip is not None else None)
         if answer_released:
             refusal = guardrail.REFUSAL_SEPARATOR + refusal
         base = self._base(envelope)
@@ -552,4 +498,4 @@ class StreamMechanics:
         return ([closing] if closing is not None else []) + payloads, True
 
     def _tripped(self) -> bool:
-        return self.state.get("trip") is not None
+        return self.state.trip is not None

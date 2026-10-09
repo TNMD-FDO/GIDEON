@@ -11,15 +11,15 @@ The refusal names no id, so a caller's value never reaches a response.
 import json
 from typing import Final
 
+from .errors import error_body
+
 MODEL_NOT_FOUND_STATUS: Final[int] = 404
-MODEL_NOT_FOUND_ERROR: Final[dict[str, dict[str, str]]] = {
-    "error": {
-        "message": "The requested model was not found.",
-        "type": "invalid_request_error",
-        "param": "model",
-        "code": "model_not_found",
-    }
-}
+MODEL_NOT_FOUND_ERROR: Final[dict[str, dict[str, object]]] = error_body(
+    "The requested model was not found.",
+    error_type="invalid_request_error",
+    code="model_not_found",
+    param="model",
+)
 # The listed entry is the service's own, so no engine extra rides it.
 MODEL_OWNER: Final[str] = "gideon"
 

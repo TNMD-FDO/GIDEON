@@ -1,14 +1,21 @@
 """The pure ASGI bearer-key middleware for the service routes."""
 
+import json
 import secrets
 from collections.abc import Iterable
 
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-_UNAUTHORIZED_BODY = (
-    b'{"error":{"message":"Incorrect API key provided.",'
-    b'"type":"invalid_request_error","param":null,"code":"invalid_api_key"}}'
-)
+from .errors import error_body
+
+_UNAUTHORIZED_BODY = json.dumps(
+    error_body(
+        "Incorrect API key provided.",
+        error_type="invalid_request_error",
+        code="invalid_api_key",
+    ),
+    separators=(",", ":"),
+).encode("utf-8")
 
 
 class BearerAuthMiddleware:

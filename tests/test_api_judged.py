@@ -308,10 +308,10 @@ class ApiJudged(unittest.TestCase):
                         if not positive:
                             continue
                         self.assertEqual(signals, 1)
-                        trip = state.get("trip")
-                        self.assertIsInstance(trip, dict)
-                        assert isinstance(trip, dict)
-                        self.assertEqual(trip.get("family"), family)
+                        trip = state.trip
+                        self.assertIsInstance(trip, guardrail.Trip)
+                        assert isinstance(trip, guardrail.Trip)
+                        self.assertEqual(trip.family, family)
                         refusal = guardrail.REFUSAL_BY_FAMILY[family]
                         refusal_count = sum(
                             content_from_payload(item).count(refusal)
@@ -354,7 +354,7 @@ class ApiJudged(unittest.TestCase):
                         tripping_prefixes += 1
                 self.assertGreater(tripping_prefixes, 0)
                 self.assertEqual(signals, 0)
-                self.assertIsNone(state.get("trip"))
+                self.assertIsNone(state.trip)
                 self.assertEqual(released, answer + stamp.STAMP_TAIL)
                 self.assertIsNone(
                     guardrail.judge_rendered(
@@ -388,7 +388,7 @@ class ApiJudged(unittest.TestCase):
                         state, output, signals = self.run_payloads(
                             prompt, seed_chunks(thinking, answer, granularity)
                         )
-                        if state.get("trip") is not None:
+                        if state.trip is not None:
                             tripped.add(case.get("id"))
                             self.assertEqual(signals, 1)
                             self.assertEqual(
@@ -443,23 +443,18 @@ class ApiJudged(unittest.TestCase):
             "user",
         )
         supplied, contexts = guardrail.message_context(messages, len(messages))
-        self.assertEqual(state.get("branch"), "branch-from-body")
-        self.assertEqual(state.get("source"), "user")
-        self.assertEqual(
-            state.get("supplied"),
-            {name: sorted(figures) for name, figures in supplied.items()},
-        )
-        self.assertEqual(state.get("confirmation"), sorted(contexts))
+        self.assertEqual(state.branch, "branch-from-body")
+        self.assertEqual(state.source, "user")
+        self.assertEqual(state.supplied, supplied)
+        self.assertEqual(state.confirmation, contexts)
 
         for body in (b"[]", b'{"model":"fixture-model","messages":{}}', b"not-json"):
             with self.subTest(body=body):
                 fallback = stream_state_from_body(body, "user")
-                self.assertEqual(fallback.get("supplied"), {})
-                self.assertEqual(fallback.get("confirmation"), [])
+                self.assertEqual(fallback.supplied, {})
+                self.assertEqual(fallback.confirmation, frozenset())
         self.assertEqual(
-            stream_state_from_body(b'{"model":"fixture-model","messages":{}}', "user").get(
-                "branch"
-            ),
+            stream_state_from_body(b'{"model":"fixture-model","messages":{}}', "user").branch,
             "fixture-model",
         )
 
@@ -493,7 +488,7 @@ class ApiJudged(unittest.TestCase):
         )
         for body in bodies:
             with self.subTest(body=body):
-                self.assertEqual(stream_state_from_body(body, "eval")["source"], "eval")
+                self.assertEqual(stream_state_from_body(body, "eval").source, "eval")
 
     def test_chat_id_header_and_request_state_paths(self) -> None:
         cases = (
@@ -517,7 +512,7 @@ class ApiJudged(unittest.TestCase):
         for body in bodies:
             with self.subTest(body=body):
                 state = stream_state_from_body(body, "user", chat_id)
-                self.assertEqual(state.get("chat_id"), chat_id)
+                self.assertEqual(state.chat_id, chat_id)
 
     def test_whole_trips_record_once_and_clear_after_unjudgeable_choice(self) -> None:
         rows: list[object] = []
@@ -574,15 +569,15 @@ class ApiJudged(unittest.TestCase):
                     self.assertTrue(row_written.wait(1))
                     row_written.clear()
                     self.assertEqual(len(rows), 1)
-                    first_trip = first_state["trip"]
-                    self.assertIsInstance(first_trip, Mapping)
-                    assert isinstance(first_trip, Mapping)
+                    first_trip = first_state.trip
+                    self.assertIsInstance(first_trip, guardrail.Trip)
+                    assert isinstance(first_trip, guardrail.Trip)
                     self.assertEqual(
                         rows[0],
                         (
-                            first_state["branch"],
-                            first_trip["family"],
-                            first_trip["pattern_id"],
+                            first_state.branch,
+                            first_trip.family,
+                            first_trip.pattern_id,
                             "eval",
                             None,
                         ),
@@ -591,11 +586,9 @@ class ApiJudged(unittest.TestCase):
                     second_state = state_for_prompt(
                         "Explain another fictitious rule.", source="eval"
                     )
-                    content = second_state["content"]
-                    self.assertIsInstance(content, dict)
-                    assert isinstance(content, dict)
-                    content["text"] = "held fixture text"
-                    content["constraints"] = [[1, 4]]
+                    content = second_state.content
+                    content.text = "held fixture text"
+                    content.constraints = [guardrail.Constraint(1, 4)]
                     second_body = completion_body(
                         [
                             {
@@ -610,8 +603,8 @@ class ApiJudged(unittest.TestCase):
                     self.assertEqual(failure, "TypeError")
                     self.assertTrue(row_written.wait(1))
                     self.assertEqual(len(rows), 2)
-                    self.assertEqual(content["text"], "")
-                    self.assertEqual(content["constraints"], [])
+                    self.assertEqual(content.text, "")
+                    self.assertEqual(content.constraints, [])
             finally:
                 _DISPATCH_PATCH.start()
 
@@ -980,7 +973,7 @@ class ApiJudged(unittest.TestCase):
         self.assertEqual(
             "".join(content_from_payload(payload) for payload in output), answer
         )
-        self.assertIsNone(state.get("trip"))
+        self.assertIsNone(state.trip)
 
     def test_separator_is_literal_after_release_and_absent_before_release(self) -> None:
         released_answer = "neutral " * 100 + "The deadline is June 5, 2027."
@@ -990,14 +983,12 @@ class ApiJudged(unittest.TestCase):
             chunk({"content": released_answer}, finish_reason="stop")
         )
         self.assertTrue(tripped)
-        content_state = released_state.get("content")
-        self.assertIsInstance(content_state, dict)
-        assert isinstance(content_state, dict)
-        self.assertGreater(content_state["released"], 0)
-        released_trip = released_state["trip"]
-        self.assertIsInstance(released_trip, dict)
-        assert isinstance(released_trip, dict)
-        refusal = guardrail.REFUSAL_BY_FAMILY[released_trip["family"]]
+        content_state = released_state.content
+        self.assertGreater(content_state.released, 0)
+        released_trip = released_state.trip
+        self.assertIsInstance(released_trip, guardrail.Trip)
+        assert isinstance(released_trip, guardrail.Trip)
+        refusal = guardrail.REFUSAL_BY_FAMILY[released_trip.family]
         self.assertEqual(
             content_from_payload(emitted[0]),
             guardrail.REFUSAL_SEPARATOR + refusal,
@@ -1008,10 +999,10 @@ class ApiJudged(unittest.TestCase):
         held_mechanics.process(chunk({"content": "The deadline is June 5, 2027."}))
         emitted, tripped = held_mechanics.process(chunk({}, finish_reason="stop"))
         self.assertTrue(tripped)
-        held_trip = held_state["trip"]
-        self.assertIsInstance(held_trip, dict)
-        assert isinstance(held_trip, dict)
-        held_refusal = guardrail.REFUSAL_BY_FAMILY[held_trip["family"]]
+        held_trip = held_state.trip
+        self.assertIsInstance(held_trip, guardrail.Trip)
+        assert isinstance(held_trip, guardrail.Trip)
+        held_refusal = guardrail.REFUSAL_BY_FAMILY[held_trip.family]
         self.assertEqual(content_from_payload(emitted[0]), held_refusal)
         self.assertNotIn(guardrail.REFUSAL_SEPARATOR, content_from_payload(emitted[0]))
 
@@ -1042,17 +1033,11 @@ class ApiJudged(unittest.TestCase):
         # The window always holds a lag behind real text, so a settled tail of
         # nothing over a shaped answer is reachable only from a state whose
         # text was already released whole: the branch is written to directly.
-        content = state["content"]
-        self.assertIsInstance(content, dict)
-        assert isinstance(content, dict)
-        content.update(
-            {
-                "text": answer,
-                "released": len(answer),
-                "decided": len(answer),
-                "constraints": [],
-            }
-        )
+        content = state.content
+        content.text = answer
+        content.released = len(answer)
+        content.decided = len(answer)
+        content.constraints = []
         emitted, tripped = mechanics.process(DONE_EVENT)
 
         self.assertFalse(tripped)
@@ -1222,7 +1207,7 @@ class ApiJudged(unittest.TestCase):
                 self.assertFalse(tripped)
                 self.assertEqual(len(emitted), 1)
                 self.assertEqual(content_from_payload(emitted[0]), answer)
-                self.assertIsNone(state.get("trip"))
+                self.assertIsNone(state.trip)
 
     def test_unfinished_tripping_ends_drop_error_or_marker_after_trip(self) -> None:
         answer = "The deadline is June 5, 2027."
@@ -1233,13 +1218,13 @@ class ApiJudged(unittest.TestCase):
                 result = mechanics.process(error if end_name == "error" else "[DONE]")
                 self._assert_trip_ending(result, error if end_name == "error" else None)
                 self.assertNotIn(DONE_EVENT, result[0][:-1])
-                self.assertIsNotNone(state.get("trip"))
+                self.assertIsNotNone(state.trip)
         for end_name in ("clean body", "transport failure"):
             with self.subTest(end=end_name):
                 state, mechanics = self._held_stream(answer)
                 result = mechanics.finish()
                 self._assert_trip_ending(result)
-                self.assertIsNotNone(state.get("trip"))
+                self.assertIsNotNone(state.trip)
 
     def test_payloads_after_error_are_not_read_for_text_except_end_marker(self) -> None:
         state, mechanics = self._held_stream("A short fictitious explanation.")
@@ -1254,7 +1239,7 @@ class ApiJudged(unittest.TestCase):
         self.assertEqual(done, ["[DONE]"])
         self.assertFalse(tripped)
         self.assertNotIn("secret text after error", json.dumps(emitted + done))
-        self.assertIsNone(state.get("trip"))
+        self.assertIsNone(state.trip)
 
     def assert_first_error_trip(
         self, payload: Mapping[str, object] | str
@@ -1269,8 +1254,8 @@ class ApiJudged(unittest.TestCase):
             self.assertNotIn("created", item)
             self.assertNotIn("model", item)
         self.assertEqual(
-            state["trip"],
-            {"family": guardrail.DEADLINE_FAMILY.name, "pattern_id": guardrail.ERROR_PATTERN_ID},
+            state.trip,
+            guardrail.Trip(guardrail.DEADLINE_FAMILY.name, guardrail.ERROR_PATTERN_ID),
         )
 
     def test_error_shapes_fail_closed(self) -> None:
@@ -1309,8 +1294,8 @@ class ApiJudged(unittest.TestCase):
         for item in emitted[:2]:
             self.assertEqual(set(item), {"object", "choices"})
         self.assertEqual(
-            state["trip"],
-            {"family": guardrail.DEADLINE_FAMILY.name, "pattern_id": guardrail.ERROR_PATTERN_ID},
+            state.trip,
+            guardrail.Trip(guardrail.DEADLINE_FAMILY.name, guardrail.ERROR_PATTERN_ID),
         )
 
     def test_the_role_only_first_chunk_is_relayed_at_once(self) -> None:
@@ -1429,10 +1414,10 @@ class ApiJudged(unittest.TestCase):
             choice["message"]["content"], guardrail.DEADLINE_FAMILY.refusal
         )
         self.assertNotIn("June 5, 2027", output.decode())
-        trip = state.get("trip")
-        self.assertIsInstance(trip, dict)
-        assert isinstance(trip, dict)
-        self.assertEqual(trip["family"], guardrail.DEADLINE_FAMILY.name)
+        trip = state.trip
+        self.assertIsInstance(trip, guardrail.Trip)
+        assert isinstance(trip, guardrail.Trip)
+        self.assertEqual(trip.family, guardrail.DEADLINE_FAMILY.name)
 
     def test_whole_tripped_citation_shaped_choice_is_the_refusal_alone(self) -> None:
         """A trip wins over the stamp: the refusal carries no label of its own."""
@@ -1505,7 +1490,7 @@ class ApiJudged(unittest.TestCase):
         assert output is not None
         parsed = json.loads(output)
         self.assertEqual(parsed["choices"][0]["message"], message)
-        self.assertIsNone(state.get("trip"))
+        self.assertIsNone(state.trip)
 
     def test_whole_choices_are_judged_independently(self) -> None:
         shaped_answer = "The invented reporter is 17 F.3d 204."
@@ -1568,11 +1553,8 @@ class ApiJudged(unittest.TestCase):
                 self.assertIn(failure, {"TypeError", "JSONDecodeError"})
                 self.assertIsNone(output)
                 self.assertEqual(
-                    state["trip"],
-                    {
-                        "family": guardrail.DEADLINE_FAMILY.name,
-                        "pattern_id": guardrail.ERROR_PATTERN_ID,
-                    },
+                    state.trip,
+                    guardrail.Trip(guardrail.DEADLINE_FAMILY.name, guardrail.ERROR_PATTERN_ID),
                 )
 
     def test_task_shaped_body_uses_the_whole_path_without_a_special_branch(self) -> None:
@@ -1607,7 +1589,7 @@ class ApiJudged(unittest.TestCase):
             parsed["choices"][0]["message"]["content"],
             "A safe fictitious reply.",
         )
-        self.assertIsNone(state.get("branch"))
+        self.assertIsNone(state.branch)
 
     def test_whole_answer_already_ending_in_the_label_is_unchanged(self) -> None:
         answer = "The invented reporter is 17 F.3d 204." + stamp.STAMP_TAIL

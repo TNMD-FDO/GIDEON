@@ -13,8 +13,9 @@ from typing import Final
 
 from gideon.guardrail.families import Trip
 
-# The table and the source vocabulary have this one home: the improvement
-# report's guardrail section imports both to read the rows this module writes.
+# The table and the source vocabulary, the user and eval words its members, have
+# this one home: the improvement report's guardrail section imports both to read
+# the rows this module writes.
 GUARDRAIL_TRIPS_TABLE = "guardrail_trips"
 GUARDRAIL_TRIPS_PARTITION_FUNCTION = "guardrail_trips_ensure_partition"
 TRIP_DATABASE_HOST = "postgres"
@@ -25,7 +26,9 @@ TRIP_PASSWORD_PATH = "/run/secrets/postgres_gideon_audit_password"
 TRIP_CONNECT_TIMEOUT_SECONDS = 3
 TRIP_STATEMENT_TIMEOUT_MILLISECONDS = 3000
 TRIP_DRIVER_MODULE = "psycopg"
-SOURCE_VOCABULARY = ("user", "eval")
+USER_SOURCE: Final[str] = "user"
+EVAL_SOURCE: Final[str] = "eval"
+SOURCE_VOCABULARY = (USER_SOURCE, EVAL_SOURCE)
 UNKNOWN_BRANCH = "unknown"
 # A chat id is kept only in an id's shape, so a header's free text never reaches
 # the row or the reader that splits it on ``|``; the bound is a starting value.
@@ -89,7 +92,7 @@ def record_trip(
             branch if branch is not None else UNKNOWN_BRANCH,
             trip.family,
             trip.pattern_id,
-            source if source in SOURCE_VOCABULARY else SOURCE_VOCABULARY[0],
+            source if source in SOURCE_VOCABULARY else USER_SOURCE,
             chat_id
             if isinstance(chat_id, str) and TRIP_CHAT_ID_PATTERN.fullmatch(chat_id)
             else None,

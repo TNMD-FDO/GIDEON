@@ -13,6 +13,7 @@ from starlette.types import Receive, Scope, Send
 from gideon import guardrail
 
 from . import judged
+from .errors import error_body
 from .instruction import instruct_completion_body
 from .model import (
     MODEL_NOT_FOUND_ERROR,
@@ -20,33 +21,22 @@ from .model import (
     address_completion_body,
     admits_model,
 )
-from .sse import DONE_EVENT, EventReassembler
+from .settings import Settings
+from .sse import DONE_EVENT, EventReassembler, is_event_stream
 
 _RELAY_LOG = logging.getLogger("gideon.api.relay")
-UPSTREAM_ERROR = {
-    "error": {
-        "message": "The upstream engine is unavailable.",
-        "type": "server_error",
-        "param": None,
-        "code": "upstream_unavailable",
-    }
-}
+UPSTREAM_ERROR = error_body(
+    "The upstream engine is unavailable.",
+    error_type="server_error",
+    code="upstream_unavailable",
+)
 _UPSTREAM_ERROR_EVENT = (
     b"data: " + json.dumps(UPSTREAM_ERROR, separators=(",", ":")).encode("utf-8") + b"\n\n"
 )
-_STREAM_END = b"data: [DONE]\n\n"
 # Two newlines, not one: a failure that cut an event mid-line needs the line
 # ended before the blank line that closes the event.
 _EVENT_BREAK = b"\n\n"
-
-
-def _is_event_stream(content_type: str | None) -> bool:
-    """Return whether a content type has the event-stream media type."""
-
-    if content_type is None:
-        return False
-    media_type = content_type.partition(";")[0].strip()
-    return media_type.casefold() == "text/event-stream"
+_STREAM_END = b"data: " + DONE_EVENT.encode("utf-8") + _EVENT_BREAK
 
 
 async def _run_with_disconnect(work: Callable[[], Awaitable[None]], receive: Receive) -> bool:
@@ -84,16 +74,8 @@ class CompletionRelay:
     trip's branch on General's id while both see the same messages.
     """
 
-    def __init__(
-        self, source_header: str, chat_header: str, eval_identity: str,
-        instruction: str, model_id: str, engine_model: str,
-    ) -> None:
-        self._source_header = source_header
-        self._chat_header = chat_header
-        self._eval_identity = eval_identity
-        self._instruction = instruction
-        self._model_id = model_id
-        self._engine_model = engine_model
+    def __init__(self, settings: Settings) -> None:
+        self._settings = settings
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         request = Request(scope, receive)
@@ -105,18 +87,18 @@ class CompletionRelay:
         content_type = request.headers.get("content-type")
 
         async def work() -> None:
-            if not admits_model(body, self._model_id):
+            if not admits_model(body, self._settings.model_id):
                 await JSONResponse(
                     MODEL_NOT_FOUND_ERROR, status_code=MODEL_NOT_FOUND_STATUS
                 )(scope, receive, send)
                 return
-            instructed = instruct_completion_body(body, self._instruction)
+            instructed = instruct_completion_body(body, self._settings.instruction)
             source = judged.source_for_header(
-                request.headers.getlist(self._source_header), self._eval_identity
+                request.headers.getlist(self._settings.source_header), self._settings.eval_identity
             )
-            chat_id = judged.chat_id_for_header(request.headers.getlist(self._chat_header))
+            chat_id = judged.chat_id_for_header(request.headers.getlist(self._settings.chat_header))
             state = judged.stream_state_from_body(instructed, source, chat_id)
-            addressed = address_completion_body(instructed, self._engine_model)
+            addressed = address_completion_body(instructed, self._settings.engine_model)
             upstream = await request.app.state.engine.completion(addressed, content_type)
             if upstream is None:
                 await JSONResponse(UPSTREAM_ERROR, status_code=502)(scope, receive, send)
@@ -124,7 +106,7 @@ class CompletionRelay:
 
             try:
                 upstream_type = upstream.headers.get("content-type")
-                if upstream.status_code == 200 and _is_event_stream(upstream_type):
+                if upstream.status_code == 200 and is_event_stream(upstream_type):
                     await self._stream(upstream, upstream_type, state, send)
                     return
                 try:

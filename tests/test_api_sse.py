@@ -4,13 +4,27 @@ import unittest
 
 from gideon.api.sse import (
     DONE_EVENT,
+    EVENT_STREAM_MEDIA_TYPE,
     SSE_EVENT_BUFFER_LIMIT_BYTES,
     EventReassembler,
     SSEEventTooLargeError,
+    is_event_stream,
 )
 
 
 class ApiSSE(unittest.TestCase):
+    def test_event_stream_media_type_accepts_parameters_and_case(self) -> None:
+        cases = (
+            (EVENT_STREAM_MEDIA_TYPE, True),
+            (f"{EVENT_STREAM_MEDIA_TYPE}; charset=utf-8", True),
+            (EVENT_STREAM_MEDIA_TYPE.upper(), True),
+            (None, False),
+            ("application/json", False),
+        )
+        for content_type, expected in cases:
+            with self.subTest(content_type=content_type):
+                self.assertIs(is_event_stream(content_type), expected)
+
     def test_event_split_at_every_byte_offset(self) -> None:
         event = b'data: {"fixture":"answer"}\n\n'
 

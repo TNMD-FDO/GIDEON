@@ -3558,14 +3558,14 @@ class TurnHarness(TestCase):
         )
         state = self.guardrail.StreamState(supplied, contexts)
         stream = self.guardrail.StreamCheck(
-            state, "content", judge=self.guardrail.judge_rendered
+            state, judge=self.guardrail.judge_rendered
         )
         released = [stream.append(character) for character in answer]
         released.append(stream.finish())
         deltas = tuple(("content", piece) for piece in released if piece)
         self.assertGreater(len(deltas), 1)
         self.assertEqual("".join(piece for _, piece in deltas), answer)
-        self.assertIsNone(state["trip"])
+        self.assertIsNone(state.trip)
         verdict = classify.stream_verdict(self.guardrail, deltas, prompt)
         self.assertTrue(verdict.clean)
         self.assertEqual(

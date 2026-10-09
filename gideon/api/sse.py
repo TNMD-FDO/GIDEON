@@ -3,6 +3,8 @@
 The judged relay never assumes a raw chunk is one event, or that it ends on a
 character boundary: bytes are buffered until a blank line closes an event and
 decoded only once that event is complete.
+
+The stream's media type, end marker, and content-type predicate live here.
 """
 
 from typing import Final
@@ -11,6 +13,16 @@ from typing import Final
 # sends approaches it, and an upstream that never closes one is the error path.
 SSE_EVENT_BUFFER_LIMIT_BYTES: Final[int] = 1_048_576
 DONE_EVENT: Final[str] = "[DONE]"
+EVENT_STREAM_MEDIA_TYPE: Final[str] = "text/event-stream"
+
+
+def is_event_stream(content_type: str | None) -> bool:
+    """Return whether a content type has the event-stream media type."""
+
+    if content_type is None:
+        return False
+    media_type = content_type.partition(";")[0].strip()
+    return media_type.casefold() == EVENT_STREAM_MEDIA_TYPE
 
 
 class SSEEventTooLargeError(ValueError):

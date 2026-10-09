@@ -1106,7 +1106,7 @@ class SentenceCredit(unittest.TestCase):
         )
 
         state = FILTER.StreamState({}, frozenset())
-        stream = FILTER.StreamCheck(state, "content", judge=FILTER.judge_rendered)
+        stream = FILTER.StreamCheck(state, judge=FILTER.judge_rendered)
         released = ""
         released_lengths: list[int] = []
         for character in answer:
@@ -1602,6 +1602,38 @@ class TripWriter(unittest.TestCase):
         workers[0].join(1)
         self.assertFalse(workers[0].is_alive())
 
+    def test_record_stream_trip_writes_once_and_clears_held_content(self) -> None:
+        """A trip keeps its first row and discards held text."""
+
+        first_family, second_family = FILTER.FAMILIES[:2]
+        first = FILTER.Trip(first_family.name, first_family.patterns[0].pattern_id)
+        second = FILTER.Trip(second_family.name, second_family.patterns[0].pattern_id)
+        branch = "fictional-branch"
+        chat_id = "fictional-chat_42"
+        state = FILTER.StreamState(
+            {}, frozenset(), branch=branch, source=FILTER.EVAL_SOURCE, chat_id=chat_id
+        )
+        state.content.text = "Held text from a fictitious answer."
+        state.content.constraints = [FILTER.Constraint(1, 4)]
+        rows: list[FILTER.TripRow] = []
+
+        _DISPATCH_PATCH.stop()
+        try:
+            with patch.object(FILTER.writer, "dispatch_trip_row", side_effect=rows.append):
+                FILTER.record_stream_trip(state, first)
+                self.assertEqual(state.trip, first)
+                self.assertEqual(state.content.text, "")
+                self.assertEqual(state.content.constraints, [])
+                FILTER.record_stream_trip(state, second)
+        finally:
+            _DISPATCH_PATCH.start()
+
+        self.assertEqual(state.trip, first)
+        self.assertEqual(
+            rows,
+            [FILTER.TripRow(branch, first.family, first.pattern_id, FILTER.EVAL_SOURCE, chat_id)],
+        )
+
     def test_record_trip_keeps_only_a_bounded_id_shaped_chat_id(self) -> None:
         family = FILTER.FAMILIES[0]
         trip = FILTER.Trip(family.name, family.patterns[0].pattern_id)
@@ -1833,3 +1865,45 @@ class ModuleContract(unittest.TestCase):
             with self.subTest(refusal=refusal[:40]):
                 self.assertIsInstance(refusal, str)
                 self.assertTrue(refusal.strip())
+
+    def test_refusal_for_selects_the_family_or_deadline_default(self) -> None:
+        """Each family selects its refusal; other values use the deadline's."""
+
+        for family in FILTER.FAMILIES:
+            with self.subTest(family=family.name):
+                self.assertEqual(FILTER.refusal_for(family.name), family.refusal)
+        for value in ("unknown-family", None, 17):
+            with self.subTest(value=value):
+                self.assertEqual(FILTER.refusal_for(value), FILTER.DEADLINE_FAMILY.refusal)
+
+    def test_stream_state_repr_and_str_reveal_only_lengths_and_flags(self) -> None:
+        """A state formats without its text or request context."""
+
+        figure = "June 5, 2027"
+        branch = "fictional-branch-iguana"
+        text = f"The filing deadline is {figure} for the invented azure-otter matter."
+        state = FILTER.StreamState(
+            {FILTER.DEADLINE_FAMILY.name: frozenset({figure})},
+            frozenset(),
+            branch=branch,
+        )
+        state.content.text = text
+        state.content.released = 7
+        state.content.decided = 11
+
+        for content_finished, stream_finished, status in (
+            (False, False, "open"),
+            (True, True, "finished"),
+        ):
+            with self.subTest(status=status):
+                state.content.finished = content_finished
+                state.finished = stream_finished
+                rendered = repr(state)
+                self.assertEqual(str(state), rendered)
+                self.assertEqual(
+                    rendered,
+                    f"StreamState(content={len(text)}/7/11/{status}, "
+                    f"tripped=False, finished={stream_finished})",
+                )
+                for private_run in (text, "azure-otter", figure, branch, "iguana"):
+                    self.assertNotIn(private_run, rendered)

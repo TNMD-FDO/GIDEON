@@ -628,7 +628,9 @@ REFUSALS = tuple(family.refusal for family in FAMILIES)
 REFUSAL_BY_FAMILY = {family.name: family.refusal for family in FAMILIES}
 
 
-def _refusal_for(family_name: object) -> str:
+def refusal_for(family_name: object) -> str:
+    """The tripped family's refusal; the deadline family's when none is named."""
+
     if isinstance(family_name, str):
         return REFUSAL_BY_FAMILY.get(family_name, DEADLINE_REFUSAL)
     return DEADLINE_REFUSAL
