@@ -8,6 +8,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Final
 
+from gideon.host import report
 from gideon.host.images import (
     BuiltImagePin,
     ImageLock,
@@ -25,13 +26,6 @@ from gideon.host.site import SiteConfig, load_site
 from gideon.host.sysio import Host, PathLike, RealHost
 
 _SITE_PATH: Final = "/etc/gideon/site.yaml"
-_SKOPEO_FIX: Final = (
-    "Run sudo python3 -m gideon host provision --only host-tools, "
-    "then re-run registry mirror."
-)
-_DOCKER_FIX: Final = (
-    "Run gideon host provision --only docker-engine, then re-run registry mirror."
-)
 _DOCKER_ACCESS_FIX: Final = (
     "Run registry mirror as a user with Docker access (the docker group, or sudo), "
     "then re-run it."
@@ -50,6 +44,14 @@ _BUILD_FIX: Final = (
     "Build and push it with python3 -m tools.imagebuild {name} --to {registry} "
     "(it records the digest in images.lock), commit, then re-run registry mirror."
 )
+
+
+def _skopeo_fix() -> str:
+    return f"Run {report.command('host provision --only host-tools')}, then re-run registry mirror."
+
+
+def _docker_fix() -> str:
+    return f"Run {report.command('host provision --only docker-engine')}, then re-run registry mirror."
 
 
 class MirrorOutcome(StrEnum):
@@ -126,16 +128,16 @@ def _skopeo_available(io: Host) -> bool:
     try:
         result = io.run(["skopeo", "--version"])
     except OSError as exc:
-        print(_refusal(f"skopeo is unavailable: {exc}", _SKOPEO_FIX), file=sys.stderr)
+        print(_refusal(f"skopeo is unavailable: {exc}", _skopeo_fix()), file=sys.stderr)
         return False
     if result.returncode == 127:
-        print(_refusal("skopeo is not available", _SKOPEO_FIX), file=sys.stderr)
+        print(_refusal("skopeo is not available", _skopeo_fix()), file=sys.stderr)
         return False
     if result.returncode != 0:
         print(
             _refusal(
                 f"skopeo version check failed: {command_detail(result)}",
-                _SKOPEO_FIX,
+                _skopeo_fix(),
             ),
             file=sys.stderr,
         )
@@ -158,7 +160,7 @@ def _manifest_probe(
         print(
             _refusal(
                 f"Docker manifest probe could not run for {image_reference}: {exc}",
-                _DOCKER_FIX,
+                _docker_fix(),
             ),
             file=sys.stderr,
         )
@@ -167,7 +169,7 @@ def _manifest_probe(
         print(
             _refusal(
                 f"Docker manifest probe is unavailable for {image_reference}",
-                _DOCKER_FIX,
+                _docker_fix(),
             ),
             file=sys.stderr,
         )

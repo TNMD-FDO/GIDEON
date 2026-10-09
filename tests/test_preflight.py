@@ -8,6 +8,7 @@ import unittest
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
+from gideon.host import report
 from gideon.host.checks import (
     CHECKS,
     CheckReport,
@@ -305,6 +306,22 @@ class Refusals(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("root is required", error)
         self.assertIn("Fix:", error)
+
+    def test_root_fix_follows_the_invoked_form(self) -> None:
+        self.addCleanup(report.set_form_from_environment, os.environ.copy())
+        for installed in (False, True):
+            with self.subTest(installed=installed):
+                report.set_installed_form(installed)
+                code, output, error = preflight(host=FakeHost(euid=1000))
+                command = "gideon" if installed else "python3 -m gideon"
+                self.assertEqual(code, 1)
+                self.assertEqual(output, "")
+                self.assertEqual(
+                    error,
+                    f"gideon preflight: root is required Fix: Run {command} preflight as root, for example with sudo.\n",
+                )
+                if installed:
+                    self.assertNotIn("python3 -m gideon", error)
 
     def test_missing_site_file_refuses_with_fix(self) -> None:
         # A path that exists nowhere: FakeHost.exists falls through to the

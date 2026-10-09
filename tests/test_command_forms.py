@@ -10,25 +10,19 @@ from gideon.cli import build_parser
 
 ROOT = Path(__file__).resolve().parent.parent
 ENTRIES = {
-    "gideon/egress/__main__.py": "slice-3 ticket 80: egress service start fixes",
-    "gideon/egress/settings.py": "slice-3 ticket 80: egress service settings fixes",
-    "gideon/host/alerts.py": "front-door ticket 29: alerts test fixes",
-    "gideon/host/cas.py": "front-door ticket 29: content-addressed store fixes",
+    "gideon/egress/__main__.py": "an egress service source: its refusals print inside its container, where no run was invoked",
+    "gideon/egress/settings.py": "an egress service source: its refusals print inside its container, where no run was invoked",
+    "gideon/host/cas.py": "a worker source: its refusals print inside the worker's container, where no run was invoked",
     "gideon/host/gpus.py": "the GPU record's own text names the command that wrote it",
     "gideon/host/grafana.py": "the test alert's summary names the command that sent it",
     "gideon/host/nogpu.py": "the mode marker's own text names the declaring command",
-    "gideon/host/preflight.py": "front-door ticket 29: preflight fixes",
-    "gideon/host/provision.py": "front-door ticket 29: provision fixes",
-    "gideon/host/registry.py": "front-door ticket 29: registry mirror fixes",
     "gideon/host/render/grafana.py": "the page email tells an operator on the box what to run",
     "gideon/host/render/systemd.py": "the unit's ExecStart runs the long form from its WorkingDirectory",
     "gideon/host/render/yamlout.py": "the rendered file's own text names its command",
     "gideon/host/report.py": "the renderer holds the command forms",
     "gideon/host/steps/command.py": "the wrapper's own text and its fallback fix name the command",
-    "gideon/host/steps/site_dirs.py": "front-door ticket 29: provision step fixes",
-    "gideon/host/tls.py": "front-door ticket 29: TLS reload fixes",
-    "gideon/host/users.py": "front-door ticket 29: users reconcile fixes",
-    "gideon/worker/settings.py": "front-door ticket 29: worker settings fixes",
+    "gideon/host/steps/site_dirs.py": "the backup keypair's name is the service account's, not a command",
+    "gideon/worker/settings.py": "a worker source: its refusals print inside the worker's container, where no run was invoked",
 }
 
 
@@ -92,6 +86,15 @@ class _ImportTimeCommands(ast.NodeVisitor):
 
 
 class CommandForms(unittest.TestCase):
+    def test_entries_name_no_ticket(self) -> None:
+        findings = {
+            path: reason for path, reason in ENTRIES.items() if "ticket" in reason.lower()
+        }
+        self.assertFalse(
+            findings,
+            "\n".join(f"{path}: {reason}" for path, reason in findings.items()),
+        )
+
     def test_import_time_check_covers_class_bodies_and_defaults(self) -> None:
         tree = ast.parse(
             "fix = report.command('apply')\n"
@@ -130,7 +133,7 @@ class CommandForms(unittest.TestCase):
         missing = found - ENTRIES.keys()
         stale = ENTRIES.keys() - found
         findings = [
-            f"{path}: render the command through the report module or add an entry naming the ticket"
+            f"{path}: render the command through the report module or add an entry explaining why the text stands"
             for path in sorted(missing)
         ]
         findings.extend(

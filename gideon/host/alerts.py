@@ -10,17 +10,23 @@ from typing import Any, Final
 import yaml  # type: ignore[import-untyped]
 
 from gideon.host import audit as audit_module
-from gideon.host import grafana, site, stack
+from gideon.host import grafana, report, site, stack
 from gideon.host.report import Problem, StageResult, print_stage
 from gideon.host.sysio import Host, PathLike, RealHost
 
 _SITE_PATH: Final[str] = "/etc/gideon/site.yaml"
 _RENDERED_DIR: Final[str] = "/etc/gideon/rendered"
 _READY_ATTEMPTS: Final[int] = 12
-_ROOT_FIX: Final[str] = "Run sudo python3 -m gideon alerts test."
-_APPLY_FIX: Final[str] = "Run sudo python3 -m gideon apply, then retry."
 _AUDIT_FIX: Final[str] = stack.logs_fix(_RENDERED_DIR, "postgres")
 _GRAFANA_FIX: Final[str] = stack.logs_fix(_RENDERED_DIR, "grafana")
+
+
+def _root_fix() -> str:
+    return f"Run {report.command('alerts test')}."
+
+
+def _apply_fix() -> str:
+    return f"Run {report.command('apply')}, then retry."
 
 
 def _failed(name: str, detail: str, fix: str) -> StageResult:
@@ -86,7 +92,7 @@ def run_alerts_test(
     audit_api = audit if audit is not None else audit_module
 
     if io.geteuid() != 0:
-        print_stage(_failed("preconditions", "root privileges are required.", _ROOT_FIX))
+        print_stage(_failed("preconditions", "root privileges are required.", _root_fix()))
         return 1
 
     site_result = site.load_site(Path(site_path), host=io)
@@ -104,7 +110,7 @@ def run_alerts_test(
     rendered = _rendered_has_grafana(io, rendered_dir)
     if rendered is not True:
         detail = rendered if isinstance(rendered, str) else "rendered Compose has no grafana service."
-        print_stage(_failed("preconditions", detail, _APPLY_FIX))
+        print_stage(_failed("preconditions", detail, _apply_fix()))
         return 1
 
     admin = grafana.administrator(io, config.hostname, client_factory=client_factory)
@@ -154,7 +160,7 @@ def run_alerts_test(
                 False,
                 0,
                 "Grafana contact point 'page' is missing.",
-                _APPLY_FIX,
+                _apply_fix(),
             )
         else:
             email_integrations = tuple(
@@ -167,7 +173,7 @@ def run_alerts_test(
                     False,
                     0,
                     "Grafana contact point 'page' does not have exactly one email integration.",
-                    _APPLY_FIX,
+                    _apply_fix(),
                 )
             elif not _integration_matches_site(
                 email_integrations[0], config.alerts.recipients
@@ -176,7 +182,7 @@ def run_alerts_test(
                     False,
                     0,
                     "Grafana's page contact point does not match the site file.",
-                    _APPLY_FIX,
+                    _apply_fix(),
                 )
             else:
                 stored_recipients = _integration_recipients(email_integrations[0])

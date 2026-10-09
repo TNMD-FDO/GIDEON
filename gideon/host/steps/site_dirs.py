@@ -9,6 +9,7 @@ import stat
 from pathlib import Path
 from typing import Final
 
+from gideon.host import report
 from gideon.host.secrets import SERVICE_GROUP_PROBLEM, service_group_gid
 from gideon.host.steps import (
     CheckResult,
@@ -33,9 +34,12 @@ _FILE_MODES = {
     "backup_ssh_key.pub": 0o440,
 }
 _KEYPAIR_FIX = "Generate the gideon backup keypair with the required ownership and modes, then re-run provision."
-_SERVICE_GROUP_FIX = (
-    "Run gideon host provision --only service-user, then re-run provision."
-)
+
+
+def _service_group_fix() -> str:
+    return f"Run {report.command('host provision --only service-user')}, then re-run provision."
+
+
 AGE_RECIPIENT_PATH: Final = Path("/etc/gideon/backup_age_recipient")
 AGE_RECIPIENT: Final = re.compile(
     r"age1[023456789acdefghjklmnpqrstuvwxyz]{58}"
@@ -57,15 +61,19 @@ _AGE_RECIPIENT_FIX = (
     "Move /etc/gideon/backup_age_recipient aside to generate a new identity — "
     "every earlier tarball then needs the earlier identity from the office password manager."
 )
-_AGE_IDENTITY_STEP_FIX = (
-    "Run sudo python3 -m gideon host provision --only age-identity."
-)
-AGE_IDENTITY_FIX: Final = (
-    "Delete /etc/gideon/backup_age_identity, keeping no copy under /etc/gideon "
-    "(only that exact path is excluded from a backup set), and run "
-    "sudo python3 -m gideon host provision --only age-identity to mint a new one; "
-    "every earlier set then opens on this box with the office identity alone."
-)
+
+
+def _age_identity_step_fix() -> str:
+    return f"Run {report.command('host provision --only age-identity')}."
+
+
+def age_identity_fix() -> str:
+    return (
+        "Delete /etc/gideon/backup_age_identity, keeping no copy under /etc/gideon "
+        "(only that exact path is excluded from a backup set), and run "
+        f"{report.command('host provision --only age-identity')} to mint a new one; "
+        "every earlier set then opens on this box with the office identity alone."
+    )
 
 
 def _mode(path: Path, context: ProvisionContext) -> int | None:
@@ -93,7 +101,7 @@ class SecretsDirsStep(Step):
                 return CheckResult(Disposition.DRIFT, f"{path} mode is {actual:04o}, not {expected:04o}", f"Set {path} to mode {expected:04o}, then re-run provision.")
         service_gid = service_group_gid(context.host)
         if service_gid is None:
-            return CheckResult(Disposition.DRIFT, SERVICE_GROUP_PROBLEM, _SERVICE_GROUP_FIX)
+            return CheckResult(Disposition.DRIFT, SERVICE_GROUP_PROBLEM, _service_group_fix())
         try:
             names = context.host.listdir(_SECRETS)
         except OSError as exc:
@@ -126,7 +134,7 @@ class SecretsDirsStep(Step):
             context.host.chmod(path, expected)
         service_gid = service_group_gid(context.host)
         if service_gid is None:
-            raise RuntimeError(_SERVICE_GROUP_FIX)
+            raise RuntimeError(_service_group_fix())
         for name in context.host.listdir(_SECRETS):
             path = _SECRETS / name
             try:
@@ -283,7 +291,7 @@ class AgeIdentityStep(Step):
             return CheckResult(
                 Disposition.DRIFT,
                 f"{AGE_IDENTITY_PATH} is missing",
-                _AGE_IDENTITY_STEP_FIX,
+                _age_identity_step_fix(),
             )
         try:
             identity = context.host.read_text(AGE_IDENTITY_PATH).strip()
@@ -291,13 +299,13 @@ class AgeIdentityStep(Step):
             return CheckResult(
                 Disposition.UNFIXABLE,
                 f"cannot read {AGE_IDENTITY_PATH}: {exc}",
-                AGE_IDENTITY_FIX,
+                age_identity_fix(),
             )
         if AGE_IDENTITY.fullmatch(identity) is None:
             return CheckResult(
                 Disposition.UNFIXABLE,
                 f"{AGE_IDENTITY_PATH} is not a valid age identity",
-                AGE_IDENTITY_FIX,
+                age_identity_fix(),
             )
         try:
             details = context.host.stat(AGE_IDENTITY_PATH)
@@ -305,20 +313,20 @@ class AgeIdentityStep(Step):
             return CheckResult(
                 Disposition.UNFIXABLE,
                 f"cannot stat {AGE_IDENTITY_PATH}: {exc}",
-                AGE_IDENTITY_FIX,
+                age_identity_fix(),
             )
         actual_mode = stat.S_IMODE(details.st_mode)
         if actual_mode != AGE_IDENTITY_MODE:
             return CheckResult(
                 Disposition.DRIFT,
                 f"{AGE_IDENTITY_PATH} mode is {actual_mode:04o}, not {AGE_IDENTITY_MODE:04o}",
-                _AGE_IDENTITY_STEP_FIX,
+                _age_identity_step_fix(),
             )
         if details.st_uid != 0 or details.st_gid != 0:
             return CheckResult(
                 Disposition.DRIFT,
                 f"{AGE_IDENTITY_PATH} owner is {details.st_uid}:{details.st_gid}, not 0:0",
-                _AGE_IDENTITY_STEP_FIX,
+                _age_identity_step_fix(),
             )
         return CheckResult(
             Disposition.CONVERGED,

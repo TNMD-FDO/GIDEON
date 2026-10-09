@@ -8,6 +8,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Final
 
+from gideon.host import report
 from gideon.host.lock import HostLockLoadResult, load_host_lock, render_errors
 from gideon.host.models import load_models_lock
 from gideon.host.models import render_errors as render_models_errors
@@ -56,7 +57,10 @@ class _StepState:
 
 
 _SITE_PATH: Final = "/etc/gideon/site.yaml"
-_ROOT_FIX: Final = "Run gideon host provision as root, for example with sudo."
+
+
+def _root_fix() -> str:
+    return f"Run {report.command('host provision', sudo=False)} as root, for example with sudo."
 
 
 def _one_line(value: str) -> str:
@@ -407,7 +411,7 @@ def run_provision(
     io = host or RealHost()
     if io.geteuid() != 0:
         print(
-            refusal("host provision", "root is required", _ROOT_FIX),
+            refusal("host provision", "root is required", _root_fix()),
             file=sys.stderr,
         )
         return 1

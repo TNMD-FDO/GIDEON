@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
-from gideon.host import stack
+from gideon.host import report, stack
 from gideon.host.report import Problem, command_detail, refusal
 from gideon.host.site import load_site
 from gideon.host.site import render_errors as render_site_errors
@@ -19,12 +19,10 @@ from gideon.host.sysio import CompletedText, Host, PathLike, RealHost
 CERT_PATH: Final = "/etc/gideon/tls/cert.pem"
 KEY_PATH: Final = "/etc/gideon/secrets/tls_key"
 CA_PATH: Final = "/etc/gideon/ca.pem"
-_ROOT_FIX: Final = "Run gideon tls reload as root, for example with sudo."
 _OPENSSL_FIX: Final = (
     "openssl ships with Ubuntu Server; reinstall it with apt-get install -y openssl, "
     "then re-run tls reload."
 )
-_APPLY_FIX: Final = "Run gideon apply first, then re-run tls reload."
 _CADDY_FIX: Final = "docker compose -f /etc/gideon/rendered/compose.yaml logs caddy"
 # Exempt operational constants: one openssl invocation's bound, one
 # handshake's timeout, and how long a just-recreated Caddy is given to bind
@@ -40,6 +38,14 @@ _FINGERPRINT = re.compile(r"fingerprint\s*=\s*([0-9a-f:]+)", re.IGNORECASE)
 # The one served_fingerprint problem probe_ingress retries: a just-recreated
 # container needs a moment to bind 443; every other problem is final.
 HANDSHAKE_FAILED: Final = "HTTPS ingress handshake failed"
+
+
+def _root_fix() -> str:
+    return f"Run {report.command('tls reload', sudo=False)} as root, for example with sudo."
+
+
+def _apply_fix() -> str:
+    return f"Run {report.command('apply')} first, then re-run tls reload."
 
 
 @dataclass(frozen=True, slots=True)
@@ -411,7 +417,7 @@ def run_tls_reload(
     del args
     io = host or RealHost()
     if io.geteuid() != 0:
-        print(refusal("tls reload", "root is required.", _ROOT_FIX), file=sys.stderr)
+        print(refusal("tls reload", "root is required.", _root_fix()), file=sys.stderr)
         return 1
 
     site_result = load_site(Path(site_path), host=io)
@@ -422,7 +428,7 @@ def run_tls_reload(
     compose_path = output / "compose.yaml"
     if not io.exists(compose_path):
         print(
-            refusal("tls reload", f"rendered Compose file is missing: {compose_path}.", _APPLY_FIX),
+            refusal("tls reload", f"rendered Compose file is missing: {compose_path}.", _apply_fix()),
             file=sys.stderr,
         )
         return 1

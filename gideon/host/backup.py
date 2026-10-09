@@ -43,11 +43,11 @@ from gideon.host.report import (
 from gideon.host.site import SiteConfig
 from gideon.host.stages import aware_now, psql_argv, site_problem, table_parts
 from gideon.host.steps.site_dirs import (
-    AGE_IDENTITY_FIX,
     AGE_IDENTITY_MODE,
     AGE_IDENTITY_PATH,
     AGE_RECIPIENT,
     AGE_RECIPIENT_PATH,
+    age_identity_fix,
 )
 from gideon.host.sysio import Host, LockingHost, PathLike, RealHost
 
@@ -250,7 +250,7 @@ def _preconditions(
         _refuse(
             f"box identity cannot be read as an age identity: {AGE_IDENTITY_PATH} "
             f"(exit {exit_code}).",
-            AGE_IDENTITY_FIX,
+            age_identity_fix(),
         )
         return None
     if (
@@ -260,7 +260,7 @@ def _preconditions(
         _refuse(
             f"box identity cannot be read as an age identity: {AGE_IDENTITY_PATH} "
             f"(exit {derived.returncode}).",
-            AGE_IDENTITY_FIX,
+            age_identity_fix(),
         )
         return None
     box_recipient = derived.stdout.strip()

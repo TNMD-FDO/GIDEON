@@ -32,7 +32,7 @@ from gideon.host.models import load_models_lock
 from gideon.host.models import render_errors as render_models_errors
 from gideon.host.nogpu import NOT_BUILD_BOX_DETAIL
 from gideon.host.provision import check_step
-from gideon.host.report import refusal
+from gideon.host.report import command, refusal
 from gideon.host.site import load_site
 from gideon.host.site import render_errors as render_site_errors
 from gideon.host.steps import (
@@ -45,7 +45,10 @@ from gideon.host.steps import (
 from gideon.host.sysio import PathLike, ReadBytesHost, RealHost
 
 _SITE_PATH: Final = "/etc/gideon/site.yaml"
-_ROOT_FIX: Final = "Run gideon preflight as root, for example with sudo."
+
+
+def _root_fix() -> str:
+    return f"Run {command('preflight', sudo=False)} as root, for example with sudo."
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,7 +160,7 @@ def run_preflight(
     io = host or RealHost()
     if io.geteuid() != 0:
         print(
-            refusal("preflight", "root is required", _ROOT_FIX),
+            refusal("preflight", "root is required", _root_fix()),
             file=sys.stderr,
         )
         return 1

@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import io
 import json
+import os
 import subprocess
 import unittest
 from collections.abc import Mapping, Sequence
@@ -12,7 +13,7 @@ from typing import Any
 
 import yaml  # type: ignore[import-untyped]
 
-from gideon.host import alerts, audit, grafana, secrets
+from gideon.host import alerts, audit, grafana, report, secrets
 from gideon.host.render.grafana import GRAFANA_ADMIN_USER
 from gideon.host.site import load_site
 from gideon.host.sysio import Command, PathLike
@@ -263,6 +264,30 @@ class CommandTests(unittest.TestCase):
                 self.assertTrue(out.startswith("preconditions: refuse"))
                 self.assertIn(expected, out)
                 self.assertEqual(backend.rows, [])
+
+    def test_root_and_rendered_stack_fixes_follow_the_invoked_form(self) -> None:
+        self.addCleanup(report.set_form_from_environment, os.environ.copy())
+        for installed in (False, True):
+            with self.subTest(installed=installed):
+                report.set_installed_form(installed)
+                command = "gideon" if installed else "sudo python3 -m gideon"
+                for host, expected in (
+                    (
+                        FakeHost(euid=1000),
+                        f"preconditions: refuse — root privileges are required. Fix: Run {command} alerts test.\n",
+                    ),
+                    (
+                        FakeHost(compose="services: {}\n"),
+                        f"preconditions: refuse — rendered Compose has no grafana service. Fix: Run {command} apply, then retry.\n",
+                    ),
+                ):
+                    with self.subTest(row=expected):
+                        code, out, backend = self.run_command(host, FakeGrafana())
+                        self.assertEqual(code, 1)
+                        self.assertEqual(out, expected)
+                        self.assertEqual(backend.rows, [])
+                        if installed:
+                            self.assertNotIn("python3 -m gideon", out)
 
     def test_empty_secret_refuses_before_factory_and_audit(self) -> None:
         host = FakeHost(secret="")

@@ -4,12 +4,13 @@ import argparse
 import contextlib
 import io
 import json
+import os
 import subprocess
 import time
 import unittest
 from collections.abc import Callable, Mapping
 
-from gideon.host import stack, worker
+from gideon.host import report, stack, worker
 from gideon.host.render import worker as worker_identity
 from gideon.host.sysio import Command, PathLike, RealHost
 
@@ -105,6 +106,29 @@ def run_command(
 
 
 class WorkerVerify(unittest.TestCase):
+    def test_root_and_no_worker_fixes_follow_the_invoked_form(self) -> None:
+        self.addCleanup(report.set_form_from_environment, os.environ.copy())
+        for installed in (False, True):
+            with self.subTest(installed=installed):
+                report.set_installed_form(installed)
+                command = "gideon" if installed else "sudo python3 -m gideon"
+                for host, expected in (
+                    (
+                        FakeHost(euid=1000),
+                        f"preconditions: refuse — root privileges are required Fix: Run {command} worker verify, then retry.\n",
+                    ),
+                    (
+                        FakeHost(declared=False),
+                        f"preconditions: refuse — rendered stack has no worker Fix: Run {command} apply, then retry.\n",
+                    ),
+                ):
+                    with self.subTest(row=expected):
+                        code, out, err = run_command(host)
+                        self.assertEqual((code, out), (1, ""))
+                        self.assertEqual(err, expected)
+                        if installed:
+                            self.assertNotIn("python3 -m gideon", err)
+
     def test_success_reports_three_stages_and_uses_exact_commands(self) -> None:
         host = FakeHost(
             job_rows=(

@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import test_backup
 import test_backup_push
+import test_backuproots
 import test_backupset
 import test_drill
 import test_restore
@@ -19,12 +20,14 @@ from gideon.host import (
     backup,
     backuproots,
     backupset,
+    cas,
     drill,
     pgbackrest,
     report,
     restore,
 )
 from gideon.host.report import Problem
+from gideon.host.steps.site_dirs import AGE_IDENTITY_PATH, age_identity_fix
 from gideon.host.sysio import RealHost
 
 
@@ -88,6 +91,8 @@ class BackupForms(unittest.TestCase):
             ("drill set", drill._set_fix, "Run sudo python3 -m gideon backup run, then retry."),
             ("drill age", drill._age_fix, "Run sudo python3 -m gideon backup run, then retry."),
             ("physical", backuproots._physical_fix, "The fetched or restored tree does not match its manifest; re-run sudo python3 -m gideon backup push --verify-all on the source box, then retry restore."),
+            ("store root", backuproots._store_root_fix, "Run sudo python3 -m gideon host provision --only disk-layout, then retry."),
+            ("box identity", age_identity_fix, "Delete /etc/gideon/backup_age_identity, keeping no copy under /etc/gideon (only that exact path is excluded from a backup set), and run sudo python3 -m gideon host provision --only age-identity to mint a new one; every earlier set then opens on this box with the office identity alone."),
             ("stanza mismatch", pgbackrest._stanza_mismatch_fix, "Run sudo python3 -m gideon restore --from staging to restore the cluster this repository belongs to, or move /data/backup-staging/pgbackrest aside, then re-run apply."),
         )
         for installed in (False, True):
@@ -99,6 +104,57 @@ class BackupForms(unittest.TestCase):
                         if installed else long_sentence
                     )
                     self.assertEqual(render(), expected)
+
+    def test_store_root_long_sentence_matches_worker_copy(self) -> None:
+        report.set_installed_form(False)
+        self.assertEqual(backuproots._store_root_fix(), cas.PROVISION_FIX)
+
+    def test_backup_identity_refusal_and_held_store_problem_follow_the_form(self) -> None:
+        derive = ("age-keygen", "-y", os.fspath(AGE_IDENTITY_PATH))
+        for installed in (False, True):
+            with self.subTest(installed=installed):
+                report.set_installed_form(installed)
+                command = "gideon" if installed else "sudo python3 -m gideon"
+                identity_fix = (
+                    "Delete /etc/gideon/backup_age_identity, keeping no copy under /etc/gideon "
+                    "(only that exact path is excluded from a backup set), and run "
+                    f"{command} host provision --only age-identity to mint a new one; "
+                    "every earlier set then opens on this box with the office identity alone."
+                )
+                host = test_backup._host()
+                host.commands[derive] = [
+                    test_backup.result(derive, returncode=1, stderr="DERIVE-CHILD-ERROR")
+                ]
+                out, err = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    code = backup.run_backup_run(
+                        argparse.Namespace(), host=host, now=test_backup.NOW
+                    )
+                self.assertEqual(code, 1)
+                self.assertEqual(out.getvalue(), "")
+                self.assertEqual(
+                    err.getvalue(),
+                    f"gideon backup run: box identity cannot be read as an age identity: {AGE_IDENTITY_PATH} (exit 1). Fix: {identity_fix}\n",
+                )
+                self.assertNotIn("DERIVE-CHILD-ERROR", err.getvalue())
+
+                pin = backupset.ListingPin(f"{test_backuproots.ROOT}.listing", 0, "a" * 64, 0, 0)
+                store_host = test_backuproots.FakeHost()
+                root = test_backuproots.StoreRestore()._bound(store_host, pin)
+                problem = root.put_back(backupset.AccountIds(2000, 2000))
+                self.assertIsInstance(problem, Problem)
+                assert isinstance(problem, Problem)
+                self.assertEqual(
+                    problem.problem,
+                    f"content-addressed store root is missing: {test_backuproots.SOURCE}",
+                )
+                self.assertEqual(
+                    problem.fix,
+                    f"Run {command} host provision --only disk-layout, then retry.",
+                )
+                self.assertEqual(store_host.calls, [("exists", test_backuproots.SOURCE, {})])
+                if installed:
+                    self.assertNotIn("python3 -m gideon", err.getvalue() + problem.fix)
 
     def test_restore_entry_reads_both_forms_before_box_access(self) -> None:
         # The installed wrapper re-executes as root; its non-root refusal is

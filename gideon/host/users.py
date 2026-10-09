@@ -14,15 +14,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from gideon.host import audit, ldap, owui, secrets, site, stack, tls
+from gideon.host import audit, ldap, owui, report, secrets, site, stack, tls
 from gideon.host.render.owui import BREAK_GLASS, MACHINE_IDENTITIES
 from gideon.host.report import refusal
 from gideon.host.sysio import Host, PathLike, RealHost
 
 _SITE_PATH: Final[str] = "/etc/gideon/site.yaml"
 _RENDERED_DIR: Final[str] = "/etc/gideon/rendered"
-_ROOT_FIX: Final[str] = "Run gideon users reconcile as root, for example with sudo."
-_ADMIN_KEY_FIX: Final[str] = "Run sudo python3 -m gideon apply, then retry"
 _LDAP_FIX: Final[str] = (
     "Fix the LDAP bind account and group distinguished names per "
     "docs/runbooks/office-services-setup.md §1, then retry."
@@ -32,6 +30,14 @@ _FRONTEND_FIX: Final[str] = stack.logs_fix(_RENDERED_DIR, "open-webui")
 # Exempt operational constant: how long a reboot catch-up run waits for the
 # frontend (attempts × the readiness wait's 5 s) before refusing.
 _READY_ATTEMPTS: Final[int] = 12
+
+
+def _root_fix() -> str:
+    return f"Run {report.command('users reconcile', sudo=False)} as root, for example with sudo."
+
+
+def _admin_key_fix() -> str:
+    return f"Run {report.command('apply')}, then retry"
 
 
 @dataclass(frozen=True, slots=True)
@@ -312,7 +318,7 @@ def run_reconcile(
 
     io = host or RealHost()
     if io.geteuid() != 0:
-        return _refuse("root is required.", _ROOT_FIX)
+        return _refuse("root is required.", _root_fix())
 
     site_result = site.load_site(Path(site_path), host=io)
     if site_result.errors or site_result.config is None:
@@ -326,10 +332,10 @@ def run_reconcile(
     admin_secret = secrets.read_secret(io, "gideon_admin_api_key")
     if not admin_secret.ok or admin_secret.value is None:
         if admin_secret.missing:
-            return _refuse("the break-glass API key is missing.", _ADMIN_KEY_FIX)
+            return _refuse("the break-glass API key is missing.", _admin_key_fix())
         return _refuse(
             admin_secret.problem or "the break-glass API key is unavailable.",
-            admin_secret.fix or _ADMIN_KEY_FIX,
+            admin_secret.fix or _admin_key_fix(),
         )
 
     try:
@@ -462,7 +468,7 @@ def run_reconcile(
     if break_glass is None:
         return _refuse(
             "the break-glass administrator is missing.",
-            _ADMIN_KEY_FIX,
+            _admin_key_fix(),
         )
     actor_user_id = break_glass.id
     run_id = str(uuid.uuid4())

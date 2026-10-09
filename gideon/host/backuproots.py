@@ -41,6 +41,10 @@ def _physical_fix() -> str:
     )
 
 
+def _store_root_fix() -> str:
+    return f"Run {report.command('host provision --only disk-layout')}, then retry."
+
+
 def _object_relative(name: str) -> str:
     """An object's path under its store root: its two shard directories, then its name."""
 
@@ -357,7 +361,7 @@ class _TakingStore(TakingRoot):
         destination = self._copy()
         try:
             if not self.io.exists(self.source):
-                return Problem(f"content-addressed store root is missing: {self.source}", cas.PROVISION_FIX)
+                return Problem(f"content-addressed store root is missing: {self.source}", _store_root_fix())
             self.io.mkdir(destination, mode=0o750, parents=True, exist_ok=True)
         except OSError as exc:
             return Problem(f"store copy failed for {self.name}: {exc}", "")
@@ -1130,7 +1134,7 @@ class _HeldStore(HeldRoot):
             return PutBack((), (f"{self.name}: the set predates this root; the live store is left as it is",), Claims())
         try:
             if not self.io.exists(self.source):
-                return Problem(f"content-addressed store root is missing: {self.source}", cas.PROVISION_FIX)
+                return Problem(f"content-addressed store root is missing: {self.source}", _store_root_fix())
         except OSError as exc:
             return Problem(f"store root check for {self.name} failed: {exc}", "")
         live_listing = f"{backupset.STAGING}.live-{self.name}.listing"

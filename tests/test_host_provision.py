@@ -10,6 +10,7 @@ import unittest
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+from gideon.host import report
 from gideon.host.models import load_models_lock
 from gideon.host.models import render_errors as render_models_errors
 from gideon.host.nogpu import (
@@ -457,6 +458,22 @@ class RunnerTests(unittest.TestCase):
         code, _, error = self.run_steps([step], host=FakeHost(euid=1000))
         self.assertEqual(code, 1)
         self.assertIn("root is required", error)
+
+    def test_root_fix_follows_the_invoked_form(self) -> None:
+        self.addCleanup(report.set_form_from_environment, os.environ.copy())
+        for installed in (False, True):
+            with self.subTest(installed=installed):
+                report.set_installed_form(installed)
+                code, output, error = self.run_steps([], host=FakeHost(euid=1000))
+                command = "gideon" if installed else "python3 -m gideon"
+                self.assertEqual(code, 1)
+                self.assertEqual(output, "")
+                self.assertEqual(
+                    error,
+                    f"gideon host provision: root is required Fix: Run {command} host provision as root, for example with sudo.\n",
+                )
+                if installed:
+                    self.assertNotIn("python3 -m gideon", error)
 
     def test_a_failed_child_command_explains_itself_in_the_row(self) -> None:
         """An apply that raises CalledProcessError shows the child's text, not a class name."""

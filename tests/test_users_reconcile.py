@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from gideon.host import report
 from gideon.host.ldap import ldapsearch_argv
 from gideon.host.owui import Client, Response
 from gideon.host.render.owui import BREAK_GLASS, EVAL_IDENTITY
@@ -264,6 +265,34 @@ class Enforce(unittest.TestCase):
 
 
 class Refusals(unittest.TestCase):
+    def test_root_and_missing_key_fixes_follow_the_invoked_form(self) -> None:
+        self.addCleanup(report.set_form_from_environment, os.environ.copy())
+        for installed in (False, True):
+            with self.subTest(installed=installed):
+                report.set_installed_form(installed)
+                root_command = "gideon" if installed else "python3 -m gideon"
+                apply_command = "gideon" if installed else "sudo python3 -m gideon"
+
+                code, out, err = reconcile(
+                    FakeHost(directory(), files(), euid=1000), frontend(), now=False
+                )
+                self.assertEqual((code, out), (1, ""))
+                self.assertEqual(
+                    err,
+                    f"gideon users reconcile: root is required. Fix: Run {root_command} users reconcile as root, for example with sudo.\n",
+                )
+
+                code, out, err = reconcile(
+                    FakeHost(directory(), files(admin_key=False)), frontend(), now=False
+                )
+                self.assertEqual((code, out), (1, ""))
+                self.assertEqual(
+                    err,
+                    f"gideon users reconcile: the break-glass API key is missing. Fix: Run {apply_command} apply, then retry\n",
+                )
+                if installed:
+                    self.assertNotIn("python3 -m gideon", err)
+
     def test_root_required(self) -> None:
         code, _, err = reconcile(FakeHost(directory(), files(), euid=1000), frontend(), now=False)
         self.assertEqual(code, 1)

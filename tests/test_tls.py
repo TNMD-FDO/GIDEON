@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
-from gideon.host import tls
+from gideon.host import report, tls
 from gideon.host.stack import compose_argv
 from gideon.host.sysio import Command, PathLike
 
@@ -353,6 +353,30 @@ def reload_files(*, compose: bool = True) -> dict[str, str]:
 
 
 class Reload(unittest.TestCase):
+    def test_root_and_missing_compose_fixes_follow_the_invoked_form(self) -> None:
+        self.addCleanup(report.set_form_from_environment, os.environ.copy())
+        for installed in (False, True):
+            with self.subTest(installed=installed):
+                report.set_installed_form(installed)
+                root_command = "gideon" if installed else "python3 -m gideon"
+                apply_command = "gideon" if installed else "sudo python3 -m gideon"
+
+                code, out, err = reload(FakeHost({}, files=reload_files(), euid=1000))
+                self.assertEqual((code, out), (1, ""))
+                self.assertEqual(
+                    err,
+                    f"gideon tls reload: root is required. Fix: Run {root_command} tls reload as root, for example with sudo.\n",
+                )
+
+                code, out, err = reload(FakeHost({}, files=reload_files(compose=False)))
+                self.assertEqual((code, out), (1, ""))
+                self.assertEqual(
+                    err,
+                    f"gideon tls reload: rendered Compose file is missing: {RENDERED}/compose.yaml. Fix: Run {apply_command} apply first, then re-run tls reload.\n",
+                )
+                if installed:
+                    self.assertNotIn("python3 -m gideon", err)
+
     def test_root_required(self) -> None:
         code, _, err = reload(FakeHost({}, files=reload_files(), euid=1000))
         self.assertEqual(code, 1)

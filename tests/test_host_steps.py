@@ -19,7 +19,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 
-from gideon.host import dockerdaemon
+from gideon.host import dockerdaemon, report
 from gideon.host.checks import format_gb
 from gideon.host.cotenants import (
     DOCKER_ACTIVE_ARGV,
@@ -132,7 +132,6 @@ from gideon.host.steps.services import (
     acceptance_image_path,
 )
 from gideon.host.steps.site_dirs import (
-    AGE_IDENTITY_FIX,
     AGE_IDENTITY_LINE,
     AGE_IDENTITY_MODE,
     AGE_IDENTITY_PATH,
@@ -141,6 +140,7 @@ from gideon.host.steps.site_dirs import (
     AgeRecipientStep,
     BackupKeypairStep,
     SecretsDirsStep,
+    age_identity_fix,
 )
 from gideon.host.steps.timezone import TimezoneStep
 from gideon.host.steps.tools import HostToolsStep
@@ -5233,8 +5233,35 @@ class AgeIdentityStepTests(unittest.TestCase):
             )
         )
         self.assertEqual(result.disposition, Disposition.UNFIXABLE)
-        self.assertEqual(result.fix, AGE_IDENTITY_FIX)
+        self.assertEqual(result.fix, age_identity_fix())
         self.assertNotIn("not-an-identity", result.detail)
+
+    def test_missing_and_malformed_fixes_follow_the_invoked_form(self) -> None:
+        self.addCleanup(report.set_form_from_environment, os.environ.copy())
+        for installed in (False, True):
+            with self.subTest(installed=installed):
+                report.set_installed_form(installed)
+                command = "gideon" if installed else "sudo python3 -m gideon"
+                missing = AgeIdentityStep().check(context(FakeHost()))
+                malformed = AgeIdentityStep().check(
+                    context(FakeHost(files={os.fspath(AGE_IDENTITY_PATH): "not-an-identity\n"}))
+                )
+                self.assertEqual(missing.disposition, Disposition.DRIFT)
+                self.assertEqual(
+                    missing.fix,
+                    f"Run {command} host provision --only age-identity.",
+                )
+                self.assertEqual(malformed.disposition, Disposition.UNFIXABLE)
+                self.assertEqual(
+                    malformed.fix,
+                    "Delete /etc/gideon/backup_age_identity, keeping no copy under /etc/gideon "
+                    "(only that exact path is excluded from a backup set), and run "
+                    f"{command} host provision --only age-identity to mint a new one; "
+                    "every earlier set then opens on this box with the office identity alone.",
+                )
+                self.assertNotIn("not-an-identity", malformed.detail)
+                if installed:
+                    self.assertNotIn("python3 -m gideon", missing.fix + malformed.fix)
 
     def test_apply_mints_only_the_secret_line(self) -> None:
         command = ("age-keygen",)
@@ -5261,6 +5288,26 @@ class AgeIdentityStepTests(unittest.TestCase):
 
 
 class SecretsStepTests(unittest.TestCase):
+    def test_missing_service_group_fix_follows_the_invoked_form(self) -> None:
+        self.addCleanup(report.set_form_from_environment, os.environ.copy())
+        paths = ("/etc/gideon", "/etc/gideon/tls", "/etc/gideon/rendered", "/etc/gideon/secrets")
+        stats = {path: directory_stat(0o755) for path in paths[:-1]}
+        stats[paths[-1]] = directory_stat(0o700)
+        for installed in (False, True):
+            with self.subTest(installed=installed):
+                report.set_installed_form(installed)
+                host = FakeHost(stats=stats)
+                result = SecretsDirsStep().check(context(host))
+                command = "gideon" if installed else "sudo python3 -m gideon"
+                self.assertEqual(result.disposition, Disposition.DRIFT)
+                self.assertEqual(result.detail, "the gideon service group is missing or invalid")
+                self.assertEqual(
+                    result.fix,
+                    f"Run {command} host provision --only service-user, then re-run provision.",
+                )
+                if installed:
+                    self.assertNotIn("python3 -m gideon", result.fix)
+
     def test_secrets_dirs_requires_service_user_and_reports_group_drift(self) -> None:
         self.assertEqual(SecretsDirsStep.requires, ("service-user",))
         directory_paths = ("/etc/gideon", "/etc/gideon/tls", "/etc/gideon/rendered", "/etc/gideon/secrets")

@@ -9,6 +9,7 @@ import unittest
 from collections.abc import Mapping
 from pathlib import Path
 
+from gideon.host import report
 from gideon.host.images import BuiltImagePin, MirroredImagePin, load_image_lock
 from gideon.host.registry import run_registry_mirror
 from gideon.host.sysio import Command, PathLike
@@ -480,6 +481,37 @@ class Mirroring(unittest.TestCase):
 
 
 class Refusals(unittest.TestCase):
+    def test_skopeo_and_docker_probe_fixes_follow_the_invoked_form(self) -> None:
+        self.addCleanup(report.set_form_from_environment, os.environ.copy())
+        for installed in (False, True):
+            with self.subTest(installed=installed):
+                report.set_installed_form(installed)
+                command = "gideon" if installed else "sudo python3 -m gideon"
+
+                skopeo_host = FakeHost({}, files())
+                code, out, err = mirror(skopeo_host, to="127.0.0.1:5000")
+                self.assertEqual((code, out), (1, ""))
+                self.assertEqual(
+                    err,
+                    f"gideon registry mirror: skopeo is not available Fix: Run {command} host provision --only host-tools, then re-run registry mirror.\n",
+                )
+                self.assertEqual(argv_calls(skopeo_host), [SKOPEO_VERSION])
+
+                docker_host = FakeHost(
+                    {SKOPEO_VERSION: done(SKOPEO_VERSION)}, files()
+                )
+                code, out, err = mirror(docker_host, to="127.0.0.1:5000")
+                self.assertEqual((code, out), (1, ""))
+                self.assertIn("Docker manifest probe is unavailable", err)
+                self.assertIn(
+                    f"Fix: Run {command} host provision --only docker-engine, then re-run registry mirror.\n",
+                    err,
+                )
+                self.assertEqual(argv_calls(docker_host)[0], SKOPEO_VERSION)
+                self.assertEqual(argv_calls(docker_host)[1][:3], ("docker", "manifest", "inspect"))
+                if installed:
+                    self.assertNotIn("python3 -m gideon", err)
+
     def test_no_destination_without_a_site_file_asks_for_to(self) -> None:
         code, _, err = mirror(FakeHost({SKOPEO_VERSION: done(SKOPEO_VERSION)}, files(site=None)))
         self.assertEqual(code, 1)
