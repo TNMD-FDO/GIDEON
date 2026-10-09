@@ -1546,6 +1546,25 @@ class PsycopgDocumentRecord(unittest.TestCase):
             self.assertIsInstance(parameters, tuple)
         self.assertIn("%s::jsonb", caselaw.ANCHOR_SQL)
 
+    def test_footnote_parent_with_higher_ordinal_is_written_first(self) -> None:
+        now = datetime(2099, 1, 2, 12, 34, tzinfo=UTC)
+        doc_id = "a" * 64
+        footnote = caselaw.NewSection(
+            "d" * 64, doc_id, 0, "footnote", "markup", 0, 4, "1", 9, "f" * 64,
+        )
+        middle = caselaw.NewSection(
+            "e" * 64, doc_id, 1, "majority", "row", 4, 8, None, None, None,
+        )
+        parent = caselaw.NewSection(
+            "f" * 64, doc_id, 2, "concurrence", "line", 8, 12, None, None, None,
+        )
+        record = caselaw.PsycopgRecord(connect=self.connect, worker_settings=self.configuration)
+        record.finish_ready(doc_id, "b" * 64, "c" * 64, now, (footnote, middle, parent), (), (), ())
+        record.write_sections(doc_id, (footnote, middle, parent))
+        written = [parameters[0] for statement, parameters in self.connection.statements
+                   if statement == caselaw.SECTION_SQL]
+        self.assertEqual(written, [middle.section_id, parent.section_id, footnote.section_id] * 2)
+
     def test_psycopg_error_rolls_back_and_exposes_only_its_class(self) -> None:
         self.connection.fail_execute = True
         record = caselaw.PsycopgRecord(connect=self.connect, worker_settings=self.configuration)

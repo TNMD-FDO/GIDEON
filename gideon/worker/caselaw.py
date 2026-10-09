@@ -299,13 +299,14 @@ class DocumentRecord(Protocol):
 def _section_statements(
     doc_id: str, rows: tuple[NewSection, ...],
 ) -> tuple[tuple[str, tuple[object, ...]], ...]:
+    # The parent key is checked per row, and a footnote's parent may follow it.
     return tuple(
         (SECTION_SQL, (
             row.section_id, doc_id, row.ordinal, row.section_type, row.typed_by,
             row.char_start, row.char_end, row.label, row.ref_offset,
             row.parent_section_id,
         ))
-        for row in rows
+        for row in sorted(rows, key=lambda row: row.parent_section_id is not None)
     )
 
 
