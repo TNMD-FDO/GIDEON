@@ -23,7 +23,16 @@ from gideon.extraction import grammar
 from gideon.host.report import Problem
 from gideon.host.sysio import RealHost
 
-from . import anchors, citations, fetch, opiniontext, sections, settings, staging
+from . import (
+    anchors,
+    citations,
+    fetch,
+    opiniontext,
+    sections,
+    settings,
+    staging,
+    treatment,
+)
 
 CASELAW_TASK: Final = "gideon.worker.tasks.caselaw"
 CASELAW_QUEUE: Final = "caselaw"
@@ -32,7 +41,7 @@ LOCK_SUFFIX: Final = ".caselaw.lock"
 CASELAW_FAILURE_REASONS: Final = frozenset({
     "invalid", "missing-stage", "stage-mismatch", "malformed", "store",
     "database", "local", "busy", "segmenter", "anchors", "text-mismatch",
-    "citations",
+    "citations", "treatment",
 })
 DOCUMENT_FAILURE_REASONS: Final = frozenset({
     "no-text", "unparseable", "empty", "interrupted",
@@ -57,7 +66,8 @@ PRESENT_SQL: Final = (
     "d.sha256, d.canonical_text_sha256, "
     "EXISTS (SELECT 1 FROM sections WHERE doc_id = d.doc_id) AS sectioned, "
     "d.anchored_at IS NOT NULL AS anchored, "
-    "d.citations_parsed_at IS NOT NULL AS cited "
+    "d.citations_parsed_at IS NOT NULL AS cited, "
+    "d.treatment_pattern_set AS treated_under "
     "FROM opinions AS o JOIN documents AS d ON d.doc_id = o.doc_id "
     "WHERE d.source = %s AND d.source_snapshot = %s AND o.court = %s"
 )
@@ -76,7 +86,8 @@ GIVE_BACK_SQL: Final = (
 )
 FINISH_READY_SQL: Final = (
     "UPDATE documents SET status = 'ready', sha256 = %s, canonical_text_sha256 = %s, "
-    "ingested_at = %s, anchored_at = %s, citations_parsed_at = %s WHERE doc_id = %s"
+    "ingested_at = %s, anchored_at = %s, citations_parsed_at = %s, "
+    "treatment_pattern_set = %s, treated_at = %s WHERE doc_id = %s"
 )
 FINISH_FAILED_SQL: Final = (
     "UPDATE documents SET status = 'failed', failure_reason = %s, sha256 = %s, "
@@ -105,6 +116,20 @@ CITATION_SQL: Final = (
 )
 MARK_CITED_SQL: Final = (
     "UPDATE documents SET citations_parsed_at = %s WHERE doc_id = %s"
+)
+READ_CITATIONS_SQL: Final = (
+    "SELECT citation_id, doc_id, ordinal, char_start, char_end, section_id, "
+    "section_type, cite_type, cite_form, raw_cite, reporter_cite, pincite, "
+    "key, to_cluster, pattern_id FROM citations WHERE doc_id = %s ORDER BY ordinal"
+)
+SIGNAL_SQL: Final = (
+    "INSERT INTO citation_signals (signal_id, citation_id, doc_id, signal_source, "
+    "pattern_set, treatment_signal, qualifier, effective_section, state, "
+    "no_state_reason, char_start, char_end, found_at) "
+    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+)
+MARK_TREATED_SQL: Final = (
+    "UPDATE documents SET treatment_pattern_set = %s, treated_at = %s WHERE doc_id = %s"
 )
 
 logger = logging.getLogger(__name__)
@@ -154,6 +179,13 @@ class PresentRow:
     sectioned: bool
     anchored: bool
     cited: bool
+    treated_under: str | None
+
+    @property
+    def treated(self) -> bool:
+        """Whether the current pattern set completed for this document."""
+
+        return self.treated_under == treatment.PATTERN_SET_ID
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,6 +261,8 @@ class IngestCounts:
     pgmap_checked: int
     pgmap_disagreeing: int
     cited: int
+    treated: int
+    signalled: int
 
 
 class DocumentRecord(Protocol):
@@ -242,6 +276,7 @@ class DocumentRecord(Protocol):
         self, doc_id: str, sha256: str, canonical_sha256: str, at: datetime,
         sections: tuple[NewSection, ...], anchors: tuple[NewAnchor, ...],
         citation_rows: tuple[citations.NewCitation, ...],
+        signal_rows: tuple[treatment.NewSignal, ...],
     ) -> None: ...
     def write_sections(self, doc_id: str, sections: tuple[NewSection, ...]) -> None: ...
     def write_anchors(
@@ -250,6 +285,10 @@ class DocumentRecord(Protocol):
     def read_sections(self, doc_id: str) -> tuple[NewSection, ...]: ...
     def write_citations(
         self, doc_id: str, citation_rows: tuple[citations.NewCitation, ...], at: datetime,
+    ) -> None: ...
+    def read_citations(self, doc_id: str) -> tuple[citations.NewCitation, ...]: ...
+    def write_signals(
+        self, doc_id: str, signal_rows: tuple[treatment.NewSignal, ...], at: datetime,
     ) -> None: ...
     def finish_failed(
         self, doc_id: str, reason: str, at: datetime, sha256: str | None = None,
@@ -291,6 +330,20 @@ def _citation_statements(
             row.section_id, row.section_type, row.cite_type, row.cite_form,
             row.raw_cite, row.reporter_cite, row.pincite, row.key,
             row.to_cluster, row.pattern_id,
+        ))
+        for row in rows
+    )
+
+
+def _signal_statements(
+    doc_id: str, rows: tuple[treatment.NewSignal, ...], at: datetime,
+) -> tuple[tuple[str, tuple[object, ...]], ...]:
+    return tuple(
+        (SIGNAL_SQL, (
+            row.signal_id, row.citation_id, doc_id, row.signal_source,
+            row.pattern_set, row.treatment_signal, row.qualifier,
+            row.effective_section, row.state, row.no_state_reason,
+            row.char_start, row.char_end, at,
         ))
         for row in rows
     )
@@ -348,9 +401,10 @@ class PsycopgRecord:
                 str(sha256) if sha256 is not None else None,
                 str(canonical_sha256) if canonical_sha256 is not None else None,
                 bool(sectioned), bool(anchored), bool(cited),
+                str(treated_under) if treated_under is not None else None,
             )
             for opinion_id, doc_id, status, attempts, text_source, sha256,
-            canonical_sha256, sectioned, anchored, cited in rows
+            canonical_sha256, sectioned, anchored, cited, treated_under in rows
         }
 
     def begin(self, document: NewDocument, opinion: NewOpinion) -> None:
@@ -383,13 +437,18 @@ class PsycopgRecord:
         self, doc_id: str, sha256: str, canonical_sha256: str, at: datetime,
         sections: tuple[NewSection, ...], anchors: tuple[NewAnchor, ...],
         citation_rows: tuple[citations.NewCitation, ...],
+        signal_rows: tuple[treatment.NewSignal, ...],
     ) -> None:
-        """Commit the ready document with its sections, anchors, and citations."""
+        """Commit a ready document and all completed passes together."""
 
-        self._run(((FINISH_READY_SQL, (sha256, canonical_sha256, at, at, at, doc_id)),
+        self._run(((FINISH_READY_SQL, (
+                       sha256, canonical_sha256, at, at, at,
+                       treatment.PATTERN_SET_ID, at, doc_id,
+                   )),
                    *_section_statements(doc_id, sections),
                    *_anchor_statements(doc_id, anchors),
-                   *_citation_statements(doc_id, citation_rows)))
+                   *_citation_statements(doc_id, citation_rows),
+                   *_signal_statements(doc_id, signal_rows, at)))
 
     def write_sections(self, doc_id: str, sections: tuple[NewSection, ...]) -> None:
         """Commit sections for an already ready document."""
@@ -417,6 +476,20 @@ class PsycopgRecord:
 
         self._run((*_citation_statements(doc_id, citation_rows),
                    (MARK_CITED_SQL, (at, doc_id))))
+
+    def read_citations(self, doc_id: str) -> tuple[citations.NewCitation, ...]:
+        """Read recorded citation edges in ordinal order."""
+
+        rows = self._run(((READ_CITATIONS_SQL, (doc_id,)),), read=True)
+        return tuple(citations.NewCitation(*row) for row in rows)
+
+    def write_signals(
+        self, doc_id: str, signal_rows: tuple[treatment.NewSignal, ...], at: datetime,
+    ) -> None:
+        """Commit treatment findings and the pattern-set mark together."""
+
+        self._run((*_signal_statements(doc_id, signal_rows, at),
+                   (MARK_TREATED_SQL, (treatment.PATTERN_SET_ID, at, doc_id))))
 
     def finish_failed(
         self, doc_id: str, reason: str, at: datetime, sha256: str | None = None,
@@ -472,6 +545,8 @@ class _Progress:
     pgmap_checked: int = 0
     pgmap_disagreeing: int = 0
     cited: int = 0
+    treated: int = 0
+    signalled: int = 0
     ambiguous: int = 0
     error: str = "-"
 
@@ -480,6 +555,7 @@ class _Progress:
             self.seen, self.present, self.ready, self.failed,
             self.retried, self.interrupted, self.sectioned, self.anchored,
             self.pgmap_checked, self.pgmap_disagreeing, self.cited,
+            self.treated, self.signalled,
         )
 
 
@@ -487,11 +563,13 @@ def _log(progress: _Progress, action: str) -> None:
     logger.info(
         "action=caselaw_%s job_id=%d label=%s court=%s seen=%d present=%d "
         "ready=%d failed=%d retried=%d interrupted=%d sectioned=%d anchored=%d "
-        "pgmap_checked=%d pgmap_disagreeing=%d cited=%d ambiguous=%d seconds=%.3f error=%s",
+        "pgmap_checked=%d pgmap_disagreeing=%d cited=%d treated=%d "
+        "signalled=%d ambiguous=%d seconds=%.3f error=%s",
         action, progress.job, progress.label, progress.court, progress.seen,
         progress.present, progress.ready, progress.failed, progress.retried,
         progress.interrupted, progress.sectioned, progress.anchored,
         progress.pgmap_checked, progress.pgmap_disagreeing, progress.cited,
+        progress.treated, progress.signalled,
         progress.ambiguous,
         max(0.0, progress.monotonic() - progress.started),
         progress.error,
@@ -520,8 +598,9 @@ def _valid_dated_name(value: object, pattern: str) -> bool:
 
 def validate_arguments(
     label: object, snapshot: object, court: object, limit: object,
-) -> None:
-    """Refuse queue arguments outside the stage's name and court grammars."""
+    courts: Mapping[str, Mapping[str, object]] | None,
+) -> dict[str, treatment.Geography]:
+    """Refuse queue arguments outside the stage and geography grammars."""
 
     if (
         not _valid_dated_name(label, staging.LABEL_PATTERN)
@@ -529,8 +608,18 @@ def validate_arguments(
         or not isinstance(court, str)
         or re.fullmatch(staging.COURT_PATTERN, court) is None
         or limit is not None and (type(limit) is not int or not 1 <= limit <= LIMIT_MAX)
+        or not isinstance(courts, Mapping)
     ):
         raise CaselawFailure("invalid")
+    parsed: dict[str, treatment.Geography] = {}
+    for key, value in courts.items():
+        if not isinstance(key, str) or re.fullmatch(staging.COURT_PATTERN, key) is None:
+            raise CaselawFailure("invalid")
+        try:
+            parsed[key] = treatment.parse_geography(value)
+        except ValueError as exc:
+            raise CaselawFailure("invalid") from exc
+    return parsed
 
 
 def _positive_integer(value: str, table: str) -> int:
@@ -610,9 +699,12 @@ def _load_clusters(court_dir: Path, progress: _Progress) -> dict[int, _Cluster]:
 
 def _load_cite_map(
     whole: Path, courts: list[str], court: str, progress: _Progress,
-) -> tuple[dict[int, list[str]], dict[tuple[str, str, str], int | None]]:
+) -> tuple[
+    dict[int, list[str]], dict[tuple[str, str, str], int | None], dict[int, str],
+]:
     citing_court: dict[int, list[str]] = {}
     by_key: dict[tuple[str, str, str], int | None] = {}
+    cluster_court: dict[int, str] = {}
     table = "citations"
     for staged_court in courts:
         court_dir = whole / staged_court
@@ -621,6 +713,7 @@ def _load_cite_map(
         with _table_rows(court_dir, table, _CITATION_COLUMNS, progress) as (columns, rows):
             for fields, _ in rows:
                 cluster_id = _positive_integer(fields[columns["cluster_id"]], table)
+                cluster_court[cluster_id] = staged_court
                 key = (
                     fields[columns["volume"]], fields[columns["reporter"]],
                     fields[columns["page"]],
@@ -632,7 +725,7 @@ def _load_cite_map(
                 elif by_key[key] is not None and by_key[key] != cluster_id:
                     by_key[key] = None
                     progress.ambiguous += 1
-    return citing_court, by_key
+    return citing_court, by_key, cluster_court
 
 
 def _document_id(opinion_id: int, snapshot_date: date) -> str:
@@ -717,6 +810,21 @@ def _citation_rows(
         raise CaselawFailure("citations", error=type(exc).__name__) from exc
 
 
+def _signal_rows(
+    doc_id: str, text: str, section_rows: tuple[NewSection, ...],
+    citation_rows: tuple[citations.NewCitation, ...],
+    citing: treatment.Geography, cluster_court: Mapping[int, str],
+    geography: Mapping[str, treatment.Geography],
+) -> tuple[treatment.NewSignal, ...]:
+    try:
+        return treatment.signals(
+            doc_id, text, section_rows, citation_rows, citing,
+            cluster_court.get, geography.get,
+        )
+    except Exception as exc:  # a treatment defect fails the job, filed by class.
+        raise CaselawFailure("treatment", error=type(exc).__name__) from exc
+
+
 def _parse_opinion(
     record: DocumentRecord, host: RealHost, store_root: Path, doc_id: str,
     chosen: tuple[str, str] | None, opinion_type: str, per_curiam: bool,
@@ -724,6 +832,8 @@ def _parse_opinion(
     clock: Callable[[], datetime],
     find: Callable[[str], tuple[FoundCitation, ...]],
     resolve: citations.Resolver,
+    citing: treatment.Geography, cluster_court: Mapping[int, str],
+    geography: Mapping[str, treatment.Geography],
 ) -> None:
     if chosen is None:
         record.finish_failed(doc_id, "no-text", clock())
@@ -748,15 +858,22 @@ def _parse_opinion(
     )
     anchor_rows, checked, disagreeing = _anchor_rows(doc_id, parsed, section_result)
     citation_rows = _citation_rows(doc_id, parsed.text, section_rows, find, resolve)
+    signal_rows = _signal_rows(
+        doc_id, parsed.text, section_rows, citation_rows,
+        citing, cluster_court, geography,
+    )
     canonical = _put(host, store_root, parsed.text)
     record.finish_ready(
         doc_id, original, canonical, clock(), section_rows, anchor_rows, citation_rows,
+        signal_rows,
     )
     progress.ready += 1
     progress.anchored += 1
     progress.pgmap_checked += checked
     progress.pgmap_disagreeing += disagreeing
     progress.cited += 1
+    progress.treated += 1
+    progress.signalled += len(signal_rows)
 
 
 def _backfill(
@@ -765,6 +882,8 @@ def _backfill(
     clock: Callable[[], datetime],
     find: Callable[[str], tuple[FoundCitation, ...]],
     resolve: citations.Resolver,
+    citing: treatment.Geography, cluster_court: Mapping[int, str],
+    geography: Mapping[str, treatment.Geography],
 ) -> None:
     if present.canonical_text_sha256 is None:
         raise CaselawFailure("text-mismatch")
@@ -781,9 +900,21 @@ def _backfill(
         except UnicodeError as exc:
             raise CaselawFailure("text-mismatch", error=type(exc).__name__) from exc
         section_rows = record.read_sections(present.doc_id)
-        citation_rows = _citation_rows(present.doc_id, text, section_rows, find, resolve)
-        record.write_citations(present.doc_id, citation_rows, clock())
-        progress.cited += 1
+        citation_rows = (
+            record.read_citations(present.doc_id) if present.cited else
+            _citation_rows(present.doc_id, text, section_rows, find, resolve)
+        )
+        signal_rows = () if present.treated else _signal_rows(
+            present.doc_id, text, section_rows, citation_rows,
+            citing, cluster_court, geography,
+        )
+        if not present.cited:
+            record.write_citations(present.doc_id, citation_rows, clock())
+            progress.cited += 1
+        if not present.treated:
+            record.write_signals(present.doc_id, signal_rows, clock())
+            progress.treated += 1
+            progress.signalled += len(signal_rows)
         return
     if present.sha256 is None or present.text_source is None:
         raise CaselawFailure("text-mismatch")
@@ -801,10 +932,14 @@ def _backfill(
         per_curiam=per_curiam, column=present.text_source,
     )
     anchor_rows, checked, disagreeing = _anchor_rows(present.doc_id, parsed, section_result)
-    citation_rows = () if present.cited else _citation_rows(
-        present.doc_id, parsed.text,
-        record.read_sections(present.doc_id) if present.sectioned else section_rows,
-        find, resolve,
+    recorded_sections = record.read_sections(present.doc_id) if present.sectioned else section_rows
+    citation_rows = (
+        record.read_citations(present.doc_id) if present.cited else
+        _citation_rows(present.doc_id, parsed.text, recorded_sections, find, resolve)
+    )
+    signal_rows = () if present.treated else _signal_rows(
+        present.doc_id, parsed.text, recorded_sections, citation_rows,
+        citing, cluster_court, geography,
     )
     if not present.sectioned:
         record.write_sections(present.doc_id, section_rows)
@@ -817,6 +952,10 @@ def _backfill(
     if not present.cited:
         record.write_citations(present.doc_id, citation_rows, clock())
         progress.cited += 1
+    if not present.treated:
+        record.write_signals(present.doc_id, signal_rows, clock())
+        progress.treated += 1
+        progress.signalled += len(signal_rows)
 
 
 @contextmanager
@@ -841,7 +980,8 @@ def ingest(
     snapshots_root: Path, work_root: Path, store_root: Path,
     label: str, snapshot: str, court: str, limit: int | None, job: int,
     record: DocumentRecord,
-    *, clock: Callable[[], datetime] = _clock,
+    *, courts: Mapping[str, Mapping[str, object]] | None = None,
+    clock: Callable[[], datetime] = _clock,
     monotonic: Callable[[], float] = time.monotonic,
     find: Callable[[str], tuple[FoundCitation, ...]] | None = None,
 ) -> IngestCounts:
@@ -851,7 +991,7 @@ def ingest(
     started = monotonic()
     progress = _Progress(job, label, court, started, started, monotonic)
     try:
-        validate_arguments(label, snapshot, court, limit)
+        geography = validate_arguments(label, snapshot, court, limit, courts)
         try:
             whole = staging.work_path(work_root, label, snapshot)
             staged = staging.read_record(whole / staging.STAGE_RECORD_NAME)
@@ -860,7 +1000,8 @@ def ingest(
             raise CaselawFailure(reason, error=exc.error) from exc
         if staged is None or not whole.is_dir():
             raise CaselawFailure("missing-stage")
-        if staged.label != label or staged.snapshot != snapshot or court not in staged.courts:
+        if (staged.label != label or staged.snapshot != snapshot
+                or court not in staged.courts or set(geography) != set(staged.courts)):
             raise CaselawFailure("stage-mismatch")
         court_dir = whole / court
         if court_dir.is_symlink() or not court_dir.is_dir():
@@ -874,7 +1015,7 @@ def ingest(
             try:
                 dockets = _load_dockets(court_dir, progress)
                 clusters = _load_clusters(court_dir, progress)
-                reporter_cites, cite_map = _load_cite_map(
+                reporter_cites, cite_map, cluster_court = _load_cite_map(
                     whole, staged.courts, court, progress,
                 )
                 if find is None:
@@ -903,12 +1044,14 @@ def ingest(
                         previous = present.get(opinion_id)
                         if (previous is not None and previous.status == "ready"
                                 and not (previous.sectioned and previous.anchored
-                                         and previous.cited)):
+                                         and previous.cited and previous.treated)):
                             _backfill(
                                 record, host, store_root, previous,
                                 opinion_type=opinion_type, per_curiam=per_curiam,
                                 progress=progress, clock=clock, find=find,
                                 resolve=cite_map.get,
+                                citing=geography[court], cluster_court=cluster_court,
+                                geography=geography,
                             )
                             continue
                         # Only a processing row is unfinished; every other status is final here.
@@ -951,11 +1094,12 @@ def ingest(
                                 record, host, store_root, active_doc, chosen,
                                 opinion_type, per_curiam, progress, clock,
                                 find, cite_map.get,
+                                geography[court], cluster_court, geography,
                             )
                         except CaselawFailure as exc:
                             if active_doc is not None and exc.reason in {
                                 "store", "database", "local", "segmenter", "anchors",
-                                "citations",
+                                "citations", "treatment",
                             }:
                                 with suppress(CaselawFailure, psycopg.Error):
                                     record.give_back(active_doc)

@@ -34,6 +34,7 @@ from gideon.worker import (
     sections,
     settings,
     staging,
+    treatment,
 )
 
 DOCKET_COLUMNS = (
@@ -102,6 +103,9 @@ class _Row:
     anchors: tuple[caselaw.NewAnchor, ...] = field(default_factory=tuple)
     citations: tuple[citations.NewCitation, ...] = field(default_factory=tuple)
     cited_at: datetime | None = None
+    treatment_pattern_set: str | None = None
+    treated_at: datetime | None = None
+    signals: tuple[treatment.NewSignal, ...] = field(default_factory=tuple)
 
 
 class _Record:
@@ -135,9 +139,12 @@ class _Record:
         assert row.status == "ready" or not row.anchors
         assert row.anchored_at is None or row.status == "ready"
         assert row.cited_at is None or row.status == "ready"
+        assert (row.treatment_pattern_set is None) == (row.treated_at is None)
+        assert row.treated_at is None or row.cited_at is not None
         assert all(section.doc_id == row.document.doc_id for section in row.sections)
         assert all(anchor.doc_id == row.document.doc_id for anchor in row.anchors)
         assert all(citation.doc_id == row.document.doc_id for citation in row.citations)
+        assert all(signal.doc_id == row.document.doc_id for signal in row.signals)
 
     def seed(
         self, opinion_id: int, status: str, attempts: int, *,
@@ -162,6 +169,8 @@ class _Record:
             cited = status == "ready" and sectioned
         if cited:
             row.cited_at = now
+            row.treatment_pattern_set = treatment.PATTERN_SET_ID
+            row.treated_at = now
         if sectioned:
             row.sections = (caselaw.NewSection(
                 "c" * 64, document.doc_id, 0, "unknown", "none", 0, 1,
@@ -180,6 +189,7 @@ class _Record:
                 row.document.doc_id, row.status, row.attempts, row.document.text_source,
                 row.sha256, row.canonical_text_sha256, bool(row.sections),
                 row.anchored_at is not None, row.cited_at is not None,
+                row.treatment_pattern_set,
             )
             for opinion_id, row in self.rows.items()
             if row.document.source == source
@@ -211,6 +221,7 @@ class _Record:
         self, doc_id: str, sha256: str, canonical_sha256: str, at: datetime,
         sections: tuple[caselaw.NewSection, ...], anchor_rows: tuple[caselaw.NewAnchor, ...],
         citation_rows: tuple[citations.NewCitation, ...],
+        signal_rows: tuple[treatment.NewSignal, ...],
     ) -> None:
         row = self._row(doc_id)
         assert row.status == "processing"
@@ -223,6 +234,9 @@ class _Record:
         row.sections = sections
         row.anchors = anchor_rows
         row.citations = citation_rows
+        row.signals = signal_rows
+        row.treatment_pattern_set = treatment.PATTERN_SET_ID
+        row.treated_at = at
         self._check(row)
         self.events.append(("ready", doc_id))
 
@@ -257,6 +271,21 @@ class _Record:
         row.cited_at = at
         self._check(row)
         self.events.append(("cited", doc_id))
+
+    def read_citations(self, doc_id: str) -> tuple[citations.NewCitation, ...]:
+        return self._row(doc_id).citations
+
+    def write_signals(
+        self, doc_id: str, signal_rows: tuple[treatment.NewSignal, ...], at: datetime,
+    ) -> None:
+        row = self._row(doc_id)
+        assert row.status == "ready" and row.cited_at is not None
+        assert row.treatment_pattern_set != treatment.PATTERN_SET_ID
+        row.signals += signal_rows
+        row.treatment_pattern_set = treatment.PATTERN_SET_ID
+        row.treated_at = at
+        self._check(row)
+        self.events.append(("treated", doc_id))
 
     def finish_failed(
         self, doc_id: str, reason: str, at: datetime, sha256: str | None = None,
@@ -293,6 +322,7 @@ class WorkerCaselaw(unittest.TestCase):
         self.snapshot_date = date(2099, 1, 2)
         self.source = "fictional-dump"
         self.court = "court1"
+        self.staged_courts = [self.court]
         self.job = 41
         self.now = datetime(2099, 1, 2, 12, 34, tzinfo=UTC)
         self.whole = self.work_root / self.label / self.source
@@ -346,6 +376,7 @@ class WorkerCaselaw(unittest.TestCase):
             self._csv(table, columns, rows)
         counts = {table: len(rows) for table, (_, rows) in tables.items()}
         courts = [self.court] if record_courts is None else record_courts
+        self.staged_courts = courts
         staging.write_record(self.whole / staging.STAGE_RECORD_NAME, staging.StageRecord(
             self.label, self.source, self.snapshot, courts,
             {table: {"path": f"{table}.csv.bz2", "sha256": "a" * 64, "size": 1}
@@ -357,11 +388,16 @@ class WorkerCaselaw(unittest.TestCase):
 
     def run_ingest(self, *, limit: int | None = None, record: _Record | None = None,
                    monotonic: Callable[[], float] = time.monotonic,
-                   find: Callable[[str], tuple[FoundCitation, ...]] = lambda _text: ()) -> caselaw.IngestCounts:
+                   find: Callable[[str], tuple[FoundCitation, ...]] = lambda _text: (),
+                   courts: dict[str, dict[str, object]] | None = None) -> caselaw.IngestCounts:
+        if courts is None:
+            courts = {court: {"level": "circuit", "circuit": "ca6", "state": None}
+                      for court in self.staged_courts}
         return caselaw.ingest(
             self.snapshots_root, self.work_root, self.store_root,
             self.label, self.snapshot, self.court, limit, self.job,
             self.record if record is None else record,
+            courts=courts,
             clock=lambda: self.now, monotonic=monotonic, find=find,
         )
 
@@ -421,9 +457,9 @@ class WorkerCaselaw(unittest.TestCase):
         return row
 
     def test_new_document_citations_finish_with_the_mark_and_failed_has_none(self) -> None:
-        text = "Fictitious opinion cites 1 Example 2."
+        text = "We overruled 1 Example 2."
         self.stage(opinions=[
-            _opinion("1", "100", plain_text=text),
+            _opinion("1", "100", plain_text=text, type="020lead"),
             _opinion("2", "100"),
         ])
 
@@ -436,7 +472,8 @@ class WorkerCaselaw(unittest.TestCase):
             ),)
 
         counts = self.run_ingest(find=find)
-        self.assertEqual((counts.ready, counts.failed, counts.cited), (1, 1, 1))
+        self.assertEqual((counts.ready, counts.failed, counts.cited,
+                          counts.treated, counts.signalled), (1, 1, 1, 1, 1))
         ready, failed = self.record.rows[1], self.record.rows[2]
         self.assertEqual(ready.cited_at, self.now)
         self.assertEqual(len(ready.citations), 1)
@@ -444,13 +481,21 @@ class WorkerCaselaw(unittest.TestCase):
         self.assertEqual((edge.raw_cite, edge.to_cluster, edge.doc_id),
                          ("1 Example 2", 100, ready.document.doc_id))
         self.assertEqual(edge.section_id, ready.sections[0].section_id)
+        self.assertEqual(ready.treatment_pattern_set, treatment.PATTERN_SET_ID)
+        self.assertEqual(ready.treated_at, self.now)
+        self.assertEqual(len(ready.signals), 1)
+        self.assertEqual((ready.signals[0].citation_id, ready.signals[0].state),
+                         (edge.citation_id, "negative"))
+        self.assertEqual(text[ready.signals[0].char_start:ready.signals[0].char_end],
+                         "overruled")
         self.assertIsNone(failed.cited_at)
         self.assertEqual(failed.citations, ())
+        self.assertIsNone(failed.treated_at)
 
     def test_label_wide_map_resolves_other_court_and_counts_ambiguous_keys(self) -> None:
-        text = "Fictitious text cites 5 Other 6 and 7 Shared 8."
+        text = "We overruled 5 Other 6 and 7 Shared 8."
         self.stage(
-            opinions=[_opinion("1", "100", plain_text=text)],
+            opinions=[_opinion("1", "100", plain_text=text, type="020lead")],
             record_courts=[self.court, "court2"],
             citations=[{"id": "1", "cluster_id": "100", "volume": "7",
                         "reporter": "Shared", "page": "8"}],
@@ -477,9 +522,15 @@ class WorkerCaselaw(unittest.TestCase):
             )
 
         with self.assertLogs(caselaw.logger, level="INFO") as captured:
-            self.run_ingest(find=find)
+            self.run_ingest(find=find, courts={
+                self.court: {"level": "circuit", "circuit": "ca6", "state": None},
+                "court2": {"level": "circuit", "circuit": "ca5", "state": None},
+            })
         row = self.record.rows[1]
         self.assertEqual(tuple(edge.to_cluster for edge in row.citations), (200, None))
+        self.assertEqual(tuple((signal.state, signal.no_state_reason)
+                               for signal in row.signals),
+                         (("caution", None), (None, "unresolved")))
         self.assertEqual(row.opinion.reporter_cites if row.opinion else None,
                          ("7 Shared 8",))
         self.assertIn("ambiguous=1", captured.output[-1])
@@ -490,7 +541,7 @@ class WorkerCaselaw(unittest.TestCase):
         self.assertEqual(raised.exception.reason, "stage-mismatch")
 
     def test_citation_only_backfill_reads_canonical_without_rewalk(self) -> None:
-        text = "Fictitious text cites 1 Example 2."
+        text = "We overruled 1 Example 2."
         row = self._ready_without_citations(text)
 
         def find(source: str) -> tuple[FoundCitation, ...]:
@@ -505,11 +556,17 @@ class WorkerCaselaw(unittest.TestCase):
             counts = self.run_ingest(find=find)
         self.assertEqual((counts.sectioned, counts.anchored, counts.cited, row.attempts),
                          (0, 0, 1, 1))
-        self.assertEqual(self.record.events, [("cited", row.document.doc_id)])
+        self.assertEqual(self.record.events, [
+            ("cited", row.document.doc_id), ("treated", row.document.doc_id),
+        ])
         self.assertEqual(row.cited_at, self.now)
         self.assertEqual(row.citations[0].to_cluster, 100)
+        self.assertEqual((counts.treated, counts.signalled), (1, 1))
+        self.assertEqual(row.signals[0].citation_id, row.citations[0].citation_id)
         self.assertEqual(self.run_ingest(find=find).present, 1)
-        self.assertEqual(self.record.events, [("cited", row.document.doc_id)])
+        self.assertEqual(self.record.events, [
+            ("cited", row.document.doc_id), ("treated", row.document.doc_id),
+        ])
 
         second = _Record()
         self.record = second
@@ -521,10 +578,66 @@ class WorkerCaselaw(unittest.TestCase):
         self.assertIsNone(altered.cited_at)
         self.assertEqual(self.record.events, [])
 
+    def test_treatment_only_backfill_reads_recorded_edges_without_rewalk(self) -> None:
+        text = "We overruled 1 Example 2."
+        row = self._ready_from_original(text, sectioned=True)
+        canonical = cas.put(RealHost(), text.encode(), root=self.store_root)
+        assert isinstance(canonical, str)
+        row.canonical_text_sha256 = canonical
+        row.sections = (caselaw.NewSection(
+            "d" * 64, row.document.doc_id, 0, "majority", "line", 0, len(text),
+            None, None, None,
+        ),)
+        start = text.index("1 Example 2")
+        row.citations = (citations.NewCitation(
+            "e" * 64, row.document.doc_id, 0, start, start + len("1 Example 2"),
+            row.sections[0].section_id, "majority", "case_cite", "full",
+            "1 Example 2", "1 Example 2", None, None, 100,
+            "fictional-edges",
+        ),)
+        row.treatment_pattern_set = None
+        row.treated_at = None
+        before = (row.status, row.attempts, row.sha256, row.canonical_text_sha256)
+        with patch.object(opiniontext, "canonical_text", side_effect=AssertionError("rewalk")):
+            counts = self.run_ingest(find=lambda _text: self.fail("adapter used"))
+        self.assertEqual((counts.cited, counts.treated, counts.signalled), (0, 1, 1))
+        self.assertEqual((row.status, row.attempts, row.sha256,
+                          row.canonical_text_sha256), before)
+        self.assertEqual(self.record.events, [("treated", row.document.doc_id)])
+        self.assertEqual((row.signals[0].citation_id, row.signals[0].state),
+                         (row.citations[0].citation_id, "negative"))
+        self.assertEqual(self.run_ingest().present, 1)
+        self.assertEqual(self.record.events, [("treated", row.document.doc_id)])
+
+        row.treatment_pattern_set = "fictional-older-pattern"
+        row.treated_at = self.now
+        row.signals = ()
+        self.assertEqual(self.run_ingest().treated, 1)
+        self.assertEqual(row.treatment_pattern_set, treatment.PATTERN_SET_ID)
+
+    def test_treatment_defect_gives_back_and_files_only_its_class(self) -> None:
+        sentinel = "PRIVATE_TREATMENT_SENTINEL"
+        self.stage(opinions=[_opinion("1", "100", plain_text=sentinel)])
+        with (patch.object(treatment, "signals", side_effect=RuntimeError(sentinel)),
+              self.assertLogs(caselaw.logger, level="INFO") as logged,
+              self.assertRaises(caselaw.CaselawFailure) as raised):
+            self.run_ingest()
+        self.assertEqual((raised.exception.reason, raised.exception.error),
+                         ("treatment", "RuntimeError"))
+        self.assertEqual((self.record.rows[1].status, self.record.rows[1].attempts),
+                         ("processing", 0))
+        self.assertEqual([event for event, _ in self.record.events],
+                         ["begin", "give_back"])
+        self.assert_failure(raised.exception)
+        self.assertNotIn(sentinel, self.failure_path.read_text())
+        self.assertNotIn(sentinel, "\n".join(logged.output))
+
     def test_unanchored_backfill_cites_over_the_recorded_sections(self) -> None:
-        text = "Fictitious text cites 1 Example 2."
+        text = "We overruled 1 Example 2."
         row = self._ready_from_original(text, sectioned=True, anchored=False)
         row.cited_at = None
+        row.treatment_pattern_set = None
+        row.treated_at = None
         recorded = (caselaw.NewSection(
             "9" * 64, row.document.doc_id, 0, "majority", "line", 0, len(text),
             None, None, None,
@@ -540,13 +653,16 @@ class WorkerCaselaw(unittest.TestCase):
             ),)
 
         counts = self.run_ingest(find=find)
-        self.assertEqual((counts.sectioned, counts.anchored, counts.cited), (0, 1, 1))
+        self.assertEqual((counts.sectioned, counts.anchored, counts.cited,
+                          counts.treated, counts.signalled), (0, 1, 1, 1, 1))
         self.assertEqual(self.record.events, [
             ("anchored", row.document.doc_id), ("cited", row.document.doc_id),
+            ("treated", row.document.doc_id),
         ])
         self.assertEqual(row.sections, recorded)
         self.assertEqual(row.citations[0].section_id, recorded[0].section_id)
         self.assertEqual(row.citations[0].to_cluster, 100)
+        self.assertEqual(row.signals[0].state, "negative")
 
     def test_citation_defect_gives_back_and_missing_adapter_refuses_before_rows(self) -> None:
         sentinel = "PRIVATE_CITE_SENTINEL"
@@ -571,6 +687,7 @@ class WorkerCaselaw(unittest.TestCase):
             caselaw.ingest(
                 self.snapshots_root, self.work_root, self.store_root,
                 self.label, self.snapshot, self.court, None, self.job, fresh,
+                courts={self.court: {"level": "circuit", "circuit": "ca6", "state": None}},
                 clock=lambda: self.now,
             )
         self.assertEqual((missing.exception.reason, missing.exception.error),
@@ -590,7 +707,7 @@ class WorkerCaselaw(unittest.TestCase):
         ])
         self.assertEqual(stat.S_IMODE(self.store_root.stat().st_mode), cas.DIRECTORY_MODE)
         counts = self.run_ingest()
-        self.assertEqual(counts, caselaw.IngestCounts(4, 0, 1, 3, 0, 0, 0, 1, 0, 0, 1))
+        self.assertEqual(counts, caselaw.IngestCounts(4, 0, 1, 3, 0, 0, 0, 1, 0, 0, 1, 1, 0))
         self.assertEqual(self.record.present_calls, [(self.source, self.snapshot_date, self.court)])
         self.assertEqual(self.record.closed, 1)
 
@@ -688,7 +805,7 @@ class WorkerCaselaw(unittest.TestCase):
                                          root=self.store_root), canonical)
                 self.assertEqual((row.anchored_at, row.anchors), (self.now, ()))
         events = list(self.record.events)
-        self.assertEqual(self.run_ingest(), caselaw.IngestCounts(6, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+        self.assertEqual(self.run_ingest(), caselaw.IngestCounts(6, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
         self.assertEqual(self.record.events, events)
 
     def test_unexpected_parse_exception_is_an_unparseable_document(self) -> None:
@@ -696,7 +813,7 @@ class WorkerCaselaw(unittest.TestCase):
         self.stage(opinions=[_opinion("1", "100", xml_harvard=raw)])
         with patch.object(opiniontext, "canonical_text", side_effect=RecursionError("private text")):
             counts = self.run_ingest()
-        self.assertEqual(counts, caselaw.IngestCounts(1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0))
+        self.assertEqual(counts, caselaw.IngestCounts(1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0))
         row = self.record.rows[1]
         self.assertEqual((row.status, row.failure_reason, row.canonical_text_sha256),
                          ("failed", "unparseable", None))
@@ -760,7 +877,7 @@ class WorkerCaselaw(unittest.TestCase):
             self.record.seed(index, status, 1, court=self.court, source=self.source,
                              snapshot=self.snapshot_date, now=self.now)
         counts = self.run_ingest()
-        self.assertEqual(counts, caselaw.IngestCounts(3, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+        self.assertEqual(counts, caselaw.IngestCounts(3, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
         self.assertEqual(self.record.events, [])
         self.assertEqual(self._objects(), set())
 
@@ -813,16 +930,17 @@ class WorkerCaselaw(unittest.TestCase):
     def test_ready_backfill_reads_original_without_counting_an_attempt(self) -> None:
         row = self._ready_from_original("Fictitious recovered opinion.")
         original_state = (row.status, row.attempts, row.sha256, row.canonical_text_sha256)
-        self.assertEqual(self.run_ingest(), caselaw.IngestCounts(1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1))
+        self.assertEqual(self.run_ingest(), caselaw.IngestCounts(1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0))
         self.assertEqual(
             (row.status, row.attempts, row.sha256, row.canonical_text_sha256),
             original_state,
         )
         self.assertTrue(row.sections)
         self.assertEqual((row.cited_at, row.citations), (self.now, ()))
-        events = [("sectioned", row.document.doc_id), ("cited", row.document.doc_id)]
+        events = [("sectioned", row.document.doc_id), ("cited", row.document.doc_id),
+                  ("treated", row.document.doc_id)]
         self.assertEqual(self.record.events, events)
-        self.assertEqual(self.run_ingest(), caselaw.IngestCounts(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+        self.assertEqual(self.run_ingest(), caselaw.IngestCounts(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
         self.assertEqual(self.record.events, events)
 
     def test_ready_backfill_writes_only_missing_anchors_and_counts_pgmap(self) -> None:
@@ -833,7 +951,7 @@ class WorkerCaselaw(unittest.TestCase):
                           row.sections)
         with self.assertLogs(caselaw.logger, level="INFO") as logged:
             counts = self.run_ingest()
-        self.assertEqual(counts, caselaw.IngestCounts(1, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0))
+        self.assertEqual(counts, caselaw.IngestCounts(1, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0))
         for token in ("anchored=1", "pgmap_checked=1", "pgmap_disagreeing=1"):
             self.assertIn(token, logged.output[-1])
         self.assertEqual((row.status, row.attempts, row.sha256, row.canonical_text_sha256,
@@ -842,7 +960,7 @@ class WorkerCaselaw(unittest.TestCase):
         self.assertEqual([(anchor.label, dict(anchor.attrs)["scheme"])
                           for anchor in row.anchors], [("8", "1")])
         self.assertEqual(self.record.events, [("anchored", row.document.doc_id)])
-        self.assertEqual(self.run_ingest(), caselaw.IngestCounts(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+        self.assertEqual(self.run_ingest(), caselaw.IngestCounts(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
         self.assertEqual(self.record.events, [("anchored", row.document.doc_id)])
 
     def test_ready_backfill_writes_sections_and_anchors_from_one_parse(self) -> None:
@@ -852,15 +970,15 @@ class WorkerCaselaw(unittest.TestCase):
         with patch.object(opiniontext, "canonical_text", wraps=opiniontext.canonical_text) as walk:
             counts = self.run_ingest()
         self.assertEqual(walk.call_count, 1)
-        self.assertEqual(counts, caselaw.IngestCounts(1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1))
+        self.assertEqual(counts, caselaw.IngestCounts(1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 0))
         self.assertEqual((row.status, row.attempts, row.sha256, row.canonical_text_sha256),
                          original_state)
         self.assertTrue(row.sections)
         self.assertTrue(row.anchors)
         self.assertEqual(row.anchored_at, self.now)
-        events = ["sectioned", "anchored", "cited"]
+        events = ["sectioned", "anchored", "cited", "treated"]
         self.assertEqual([event for event, _ in self.record.events], events)
-        self.assertEqual(self.run_ingest(), caselaw.IngestCounts(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+        self.assertEqual(self.run_ingest(), caselaw.IngestCounts(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
         self.assertEqual([event for event, _ in self.record.events], events)
 
     def test_backfill_refuses_text_mismatch_and_missing_original(self) -> None:
@@ -970,7 +1088,7 @@ class WorkerCaselaw(unittest.TestCase):
             self.record.seed(index, "processing", attempts, court=self.court,
                              source=self.source, snapshot=self.snapshot_date, now=self.now)
         counts = self.run_ingest()
-        self.assertEqual(counts, caselaw.IngestCounts(3, 0, 2, 1, 2, 1, 0, 2, 0, 0, 2))
+        self.assertEqual(counts, caselaw.IngestCounts(3, 0, 2, 1, 2, 1, 0, 2, 0, 0, 2, 2, 0))
         self.assertEqual([(self.record.rows[index].status, self.record.rows[index].attempts)
                           for index in (1, 2)], [("ready", 1), ("ready", 2)])
         third = self.record.rows[3]
@@ -995,7 +1113,7 @@ class WorkerCaselaw(unittest.TestCase):
         self.store_root.unlink()
         self.store_root.mkdir(mode=cas.DIRECTORY_MODE)
         self.store_root.chmod(cas.DIRECTORY_MODE)
-        self.assertEqual(self.run_ingest(), caselaw.IngestCounts(1, 0, 1, 0, 1, 0, 0, 1, 0, 0, 1))
+        self.assertEqual(self.run_ingest(), caselaw.IngestCounts(1, 0, 1, 0, 1, 0, 0, 1, 0, 0, 1, 1, 0))
         self.assertEqual((first.status, first.attempts), ("ready", 1))
         self.assertEqual([event for event, _ in self.record.events],
                          ["begin", "give_back", "retry", "ready"])
@@ -1004,10 +1122,10 @@ class WorkerCaselaw(unittest.TestCase):
     def test_limit_counts_seen_rows_and_repeat_changes_nothing(self) -> None:
         self.stage(opinions=[_opinion(str(index), "100", plain_text=f"Fiction {index}.")
                              for index in range(1, 4)])
-        self.assertEqual(self.run_ingest(limit=2), caselaw.IngestCounts(2, 0, 2, 0, 0, 0, 0, 2, 0, 0, 2))
+        self.assertEqual(self.run_ingest(limit=2), caselaw.IngestCounts(2, 0, 2, 0, 0, 0, 0, 2, 0, 0, 2, 2, 0))
         names = self._objects()
         events = list(self.record.events)
-        self.assertEqual(self.run_ingest(limit=2), caselaw.IngestCounts(2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+        self.assertEqual(self.run_ingest(limit=2), caselaw.IngestCounts(2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
         self.assertEqual(self._objects(), names)
         self.assertEqual(self.record.events, events)
         self.assertNotIn(3, self.record.rows)
@@ -1036,6 +1154,35 @@ class WorkerCaselaw(unittest.TestCase):
             self.run_ingest()
         self.assertEqual(raised.exception.reason, "missing-stage")
         self.assert_failure(raised.exception)
+
+    def test_courts_argument_is_validated_before_record_access(self) -> None:
+        self.stage()
+        invalid_values: tuple[dict[str, dict[str, object]], ...] = (
+            {"Bad Court": {"level": "circuit", "circuit": "ca6", "state": None}},
+            {self.court: {"level": "imaginary", "circuit": None, "state": None}},
+            {self.court: {"level": "circuit", "circuit": "ca12", "state": None}},
+            {self.court: {"level": "circuit", "circuit": "ca6", "state": "ZZ"}},
+        )
+        for courts in invalid_values:
+            with self.subTest(courts=courts), self.assertRaises(caselaw.CaselawFailure) as raised:
+                self.run_ingest(courts=courts)
+            self.assertEqual(raised.exception.reason, "invalid")
+        for mapping, expected in ((None, "invalid"), ({}, "stage-mismatch")):
+            with self.subTest(courts=mapping), self.assertRaises(caselaw.CaselawFailure) as raised:
+                caselaw.ingest(
+                    self.snapshots_root, self.work_root, self.store_root,
+                    self.label, self.snapshot, self.court, None, self.job, self.record,
+                    courts=mapping,
+                )
+            self.assertEqual(raised.exception.reason, expected)
+        with self.assertRaises(caselaw.CaselawFailure) as raised:
+            self.run_ingest(courts={
+                self.court: {"level": "circuit", "circuit": "ca6", "state": None},
+                "court2": {"level": "circuit", "circuit": "ca5", "state": None},
+            })
+        self.assertEqual(raised.exception.reason, "stage-mismatch")
+        self.assertEqual(self.record.present_calls, [])
+        self.assertEqual(self.record.rows, {})
 
     def test_stage_chain_refusals_name_the_damaged_court(self) -> None:
         self.stage(record_courts=["othercourt"])
@@ -1173,6 +1320,8 @@ class WorkerCaselaw(unittest.TestCase):
             self.assertIn("pgmap_checked=", line)
             self.assertIn("pgmap_disagreeing=", line)
             self.assertIn("cited=", line)
+            self.assertIn("treated=", line)
+            self.assertIn("signalled=", line)
             self.assertIn("ambiguous=", line)
         self.assertEqual(self.record.rows[1].citations[0].raw_cite, sentinel)
 
@@ -1251,7 +1400,7 @@ class PsycopgDocumentRecord(unittest.TestCase):
         )
         self.connection.rows = [(
             91, document.doc_id, "processing", 0, "plain_text", None, None, False, False,
-            False,
+            False, None,
         )]
         section = caselaw.NewSection(
             "d" * 64, document.doc_id, 0, "footnote", "markup", 4, 9,
@@ -1271,11 +1420,19 @@ class PsycopgDocumentRecord(unittest.TestCase):
         backfilled_citation = replace(
             citation, citation_id="2" * 64, section_id=backfilled.section_id,
         )
+        signal = treatment.NewSignal(
+            "3" * 64, citation.citation_id, document.doc_id, "pattern",
+            treatment.PATTERN_SET_ID, "overruled", "none", "majority",
+            "negative", None, 1, 9,
+        )
+        backfilled_signal = replace(
+            signal, signal_id="4" * 64, citation_id=backfilled_citation.citation_id,
+        )
         record = caselaw.PsycopgRecord(connect=self.connect, worker_settings=self.configuration)
         self.assertEqual(record.present(document.source, snapshot, opinion.court), {
             91: caselaw.PresentRow(
                 document.doc_id, "processing", 0, "plain_text", None, None, False, False,
-                False,
+                False, None,
             ),
         })
         record.begin(document, opinion)
@@ -1283,16 +1440,20 @@ class PsycopgDocumentRecord(unittest.TestCase):
         record.give_back(document.doc_id)
         record.finish_ready(
             document.doc_id, "b" * 64, "c" * 64, now, (section,), (anchor,), (citation,),
+            (signal,),
         )
         record.write_sections(document.doc_id, (backfilled,))
         record.write_anchors(document.doc_id, (backfilled_anchor,), now)
         self.connection.rows = [astuple(section)]
         self.assertEqual(record.read_sections(document.doc_id), (section,))
         record.write_citations(document.doc_id, (backfilled_citation,), now)
+        self.connection.rows = [astuple(citation)]
+        self.assertEqual(record.read_citations(document.doc_id), (citation,))
+        record.write_signals(document.doc_id, (backfilled_signal,), now)
         record.finish_failed(document.doc_id, "unparseable", now, "b" * 64)
         record.close()
         self.assertTrue(self.connection.closed)
-        self.assertEqual(self.connection.commits, 10)
+        self.assertEqual(self.connection.commits, 12)
         self.assertEqual(self.connection.rollbacks, 0)
         self.assertEqual(self.connection_kwargs, {
             **settings.connection_kwargs(self.configuration), "autocommit": False,
@@ -1311,7 +1472,10 @@ class PsycopgDocumentRecord(unittest.TestCase):
             )),
             (caselaw.RETRY_SQL, (document.doc_id,)),
             (caselaw.GIVE_BACK_SQL, (document.doc_id,)),
-            (caselaw.FINISH_READY_SQL, ("b" * 64, "c" * 64, now, now, now, document.doc_id)),
+            (caselaw.FINISH_READY_SQL, (
+                "b" * 64, "c" * 64, now, now, now,
+                treatment.PATTERN_SET_ID, now, document.doc_id,
+            )),
             (caselaw.SECTION_SQL, (
                 section.section_id, document.doc_id, 0, "footnote", "markup",
                 4, 9, "1", 2, None,
@@ -1326,6 +1490,12 @@ class PsycopgDocumentRecord(unittest.TestCase):
                 citation.section_type, citation.cite_type, citation.cite_form,
                 citation.raw_cite, citation.reporter_cite, citation.pincite,
                 citation.key, citation.to_cluster, citation.pattern_id,
+            )),
+            (caselaw.SIGNAL_SQL, (
+                signal.signal_id, signal.citation_id, document.doc_id,
+                signal.signal_source, signal.pattern_set, signal.treatment_signal,
+                signal.qualifier, signal.effective_section, signal.state,
+                signal.no_state_reason, signal.char_start, signal.char_end, now,
             )),
             (caselaw.SECTION_SQL, (
                 backfilled.section_id, document.doc_id, 0, "footnote", "markup",
@@ -1348,6 +1518,16 @@ class PsycopgDocumentRecord(unittest.TestCase):
                 backfilled_citation.pattern_id,
             )),
             (caselaw.MARK_CITED_SQL, (now, document.doc_id)),
+            (caselaw.READ_CITATIONS_SQL, (document.doc_id,)),
+            (caselaw.SIGNAL_SQL, (
+                backfilled_signal.signal_id, backfilled_signal.citation_id,
+                document.doc_id, backfilled_signal.signal_source,
+                backfilled_signal.pattern_set, backfilled_signal.treatment_signal,
+                backfilled_signal.qualifier, backfilled_signal.effective_section,
+                backfilled_signal.state, backfilled_signal.no_state_reason,
+                backfilled_signal.char_start, backfilled_signal.char_end, now,
+            )),
+            (caselaw.MARK_TREATED_SQL, (treatment.PATTERN_SET_ID, now, document.doc_id)),
             (caselaw.FINISH_FAILED_SQL, ("unparseable", "b" * 64, now, document.doc_id)),
         ])
         for statement, parameters in self.connection.statements:

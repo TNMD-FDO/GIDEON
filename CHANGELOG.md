@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.112](docs/release-notes/v0.3.112.md) — 2026-10-09 — treatment patterns
 - [v0.3.111](docs/release-notes/v0.3.111.md) — 2026-10-09 — the engine's integration network
 - [v0.3.110](docs/release-notes/v0.3.110.md) — 2026-10-09 — the window's state typed
 - [v0.3.109](docs/release-notes/v0.3.109.md) — 2026-10-08 — two long checks skipped when moot

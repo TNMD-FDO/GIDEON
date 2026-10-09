@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from collections.abc import Mapping
 from typing import Final
 
 import procrastinate
@@ -94,6 +95,7 @@ def stage(
 def caselaw(
     context: procrastinate.JobContext, label: str, snapshot: str,
     court: str, limit: int | None = None,
+    courts: Mapping[str, Mapping[str, object]] | None = None,
 ) -> None:
     """Ingest one staged court outside the worker's event loop."""
 
@@ -104,6 +106,7 @@ def caselaw(
         document_ingest.ingest(
             SNAPSHOTS_ROOT, staging.WORK_ROOT, gideon.host.cas.ROOT,
             label, snapshot, court, limit, job_id, document_ingest.PsycopgRecord(),
+            courts=courts,
         )
     except document_ingest.CaselawFailure as failure:
         document_ingest.write_job_failure(

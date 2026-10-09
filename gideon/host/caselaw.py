@@ -4,10 +4,12 @@ import datetime
 import json
 import re
 import subprocess
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from gideon.host import report, stack, staging, worker
+from gideon.host.courts import CIRCUITS, LEVELS, STATE_CODES, CourtMap
 from gideon.host.render.worker import (
     CASELAW_FAILURE_NAME,
     CASELAW_FAILURE_REASONS,
@@ -18,11 +20,16 @@ from gideon.host.render.worker import (
     CITE_TYPES,
     COURT_PATTERN,
     DOCUMENT_FAILURE_REASONS,
+    NO_STATE_REASONS,
+    PATTERN_SET_ID,
     PRECEDENTIAL_VALUES,
+    QUALIFIERS,
     SECTION_TYPES,
     SEGMENT_PATTERN,
     STAGE_TABLES,
     TEXT_SOURCES,
+    TREATMENT_SIGNALS,
+    TREATMENT_STATES,
     WORK_ROOT,
     WORKER_SERVICE_NAME,
 )
@@ -176,6 +183,49 @@ SELECT jsonb_build_object(
 );
 """
 
+TREATMENT_COUNTS_SQL = """WITH ready_documents AS (
+    SELECT d.doc_id, d.treatment_pattern_set
+    FROM public.documents AS d
+    JOIN public.opinions AS o ON o.doc_id = d.doc_id
+    WHERE d.source = :'v_source'
+      AND d.source_snapshot = :'v_snapshot_date'::date
+      AND o.court = :'v_court'
+      AND d.status = 'ready'
+), signals AS (
+    SELECT s.treatment_signal, s.qualifier, s.effective_section,
+           COALESCE(s.state, s.no_state_reason) AS outcome
+    FROM public.citation_signals AS s
+    JOIN ready_documents AS d ON d.doc_id = s.doc_id
+    WHERE s.pattern_set = :'v_pattern_set'
+)
+SELECT jsonb_build_object(
+    'ready', (SELECT count(*) FROM ready_documents),
+    'treated', (SELECT count(*) FROM ready_documents
+                WHERE treatment_pattern_set = :'v_pattern_set'),
+    'signalled', (SELECT count(*) FROM signals),
+    'by_signal', COALESCE((
+        SELECT jsonb_object_agg(treatment_signal, n) FROM (
+            SELECT treatment_signal, count(*) AS n FROM signals GROUP BY treatment_signal
+        ) AS counts
+    ), '{}'::jsonb),
+    'by_outcome', COALESCE((
+        SELECT jsonb_object_agg(outcome, n) FROM (
+            SELECT outcome, count(*) AS n FROM signals GROUP BY outcome
+        ) AS counts
+    ), '{}'::jsonb),
+    'by_qualifier', COALESCE((
+        SELECT jsonb_object_agg(qualifier, n) FROM (
+            SELECT qualifier, count(*) AS n FROM signals GROUP BY qualifier
+        ) AS counts
+    ), '{}'::jsonb),
+    'by_effective_section', COALESCE((
+        SELECT jsonb_object_agg(effective_section, n) FROM (
+            SELECT effective_section, count(*) AS n FROM signals GROUP BY effective_section
+        ) AS counts
+    ), '{}'::jsonb)
+);
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class CaselawRead:
@@ -240,6 +290,28 @@ class CitationCounts:
     case_resolved: int
 
 
+@dataclass(frozen=True, slots=True)
+class CourtGeography:
+    """Geography passed to a court job from the release court map."""
+
+    level: str
+    circuit: str | None
+    state: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class TreatmentCounts:
+    """Current pattern set coverage and signal totals for one court."""
+
+    ready: int
+    treated: int
+    signalled: int
+    by_signal: dict[str, int]
+    by_outcome: dict[str, int]
+    by_qualifier: dict[str, int]
+    by_effective_section: dict[str, int]
+
+
 def _logs_fix(rendered_dir: PathLike, command_path: str) -> str:
     return (
         f"Run {stack.logs_fix(rendered_dir, WORKER_SERVICE_NAME)}, "
@@ -270,9 +342,48 @@ def _limit_problem(limit: object, command_path: str) -> Problem | None:
     )
 
 
+def court_geography(
+    court_map: CourtMap, ids: Sequence[str],
+) -> dict[str, CourtGeography] | Problem:
+    """Select the staged courts' geography from the release court map."""
+
+    result: dict[str, CourtGeography] = {}
+    for identifier in ids:
+        court = court_map.court(identifier)
+        if court is None:
+            return Problem(
+                f"court {identifier} is missing from the court map",
+                f"Run {report.command('corpus cut')} with the current court map, then "
+                f"run {report.command(COMMAND_PATH)} with the new label.",
+            )
+        result[identifier] = CourtGeography(court.level, court.circuit, court.state)
+    return result
+
+
+def _courts_problem(
+    court: str, courts: Mapping[str, CourtGeography], command_path: str,
+) -> Problem | None:
+    if not isinstance(courts, Mapping) or court not in courts or any(
+        not isinstance(identifier, str)
+        or re.fullmatch(COURT_PATTERN, identifier) is None
+        or not isinstance(value, CourtGeography)
+        or value.level not in LEVELS
+        or value.circuit is not None and value.circuit not in CIRCUITS
+        or value.state is not None and value.state not in STATE_CODES
+        for identifier, value in courts.items()
+    ):
+        return Problem(
+            "caselaw courts are invalid",
+            "Use court ids and geography from the court map, then run "
+            f"{report.command(command_path)} again.",
+        )
+    return None
+
+
 def defer_caselaw(
     host: Host, rendered_dir: PathLike, *, label: str, snapshot: str,
-    court: str, limit: int | None = None, command_path: str = COMMAND_PATH,
+    court: str, courts: Mapping[str, CourtGeography], limit: int | None = None,
+    command_path: str = COMMAND_PATH,
 ) -> int | Problem:
     """Validate one court job and defer it under its label and court lock."""
 
@@ -281,10 +392,17 @@ def defer_caselaw(
         staging.snapshot_problem(snapshot, command_path, subject="caselaw"),
         _court_problem(court, command_path),
         _limit_problem(limit, command_path),
+        _courts_problem(court, courts, command_path),
     ):
         if problem is not None:
             return problem
-    args: dict[str, object] = {"label": label, "snapshot": snapshot, "court": court}
+    args: dict[str, object] = {
+        "label": label, "snapshot": snapshot, "court": court,
+        "courts": {
+            identifier: {"level": value.level, "circuit": value.circuit, "state": value.state}
+            for identifier, value in courts.items()
+        },
+    }
     if limit is not None:
         args["limit"] = limit
     return worker.defer(
@@ -346,7 +464,7 @@ def _failure_problem(
         )
     if reason == "busy":
         return Problem("caselaw is busy with another job", f"Wait, then run {install} again.")
-    if reason in {"segmenter", "anchors"}:
+    if reason in {"segmenter", "anchors", "treatment"}:
         return Problem(
             f"caselaw {reason} failure ({error or 'unknown error'})",
             f"Run {stack.logs_fix(rendered_dir, WORKER_SERVICE_NAME)}, report the defect, "
@@ -444,6 +562,7 @@ def _counts_from_json(value: object) -> CourtCounts | None:
 def _read_court_row(
     host: Host, rendered_dir: PathLike, statement: str, noun: str, *, source: str,
     snapshot_date: str, court: str, command_path: str,
+    pattern_set: str | None = None,
 ) -> object | Problem:
     if not isinstance(source, str) or re.fullmatch(SEGMENT_PATTERN, source) is None:
         return Problem("caselaw source is invalid", f"Use one source name, then run {report.command(command_path)} again.")
@@ -459,11 +578,14 @@ def _read_court_row(
     problem = _court_problem(court, command_path)
     if problem is not None:
         return problem
-    sql = "\n".join((
+    binds = [
         worker.bind("v_source", source),
         worker.bind("v_snapshot_date", snapshot_date),
-        worker.bind("v_court", court), statement,
-    ))
+        worker.bind("v_court", court),
+    ]
+    if pattern_set is not None:
+        binds.append(worker.bind("v_pattern_set", pattern_set))
+    sql = "\n".join((*binds, statement))
     try:
         result = host.run(worker.psql_argv(rendered_dir), input=sql)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -626,4 +748,55 @@ def read_citation_counts(
     counts = _citation_counts_from_json(value)
     if counts is None:
         return Problem("caselaw citations row is invalid", _logs_fix(rendered_dir, command_path))
+    return counts
+
+
+def _treatment_counts_from_json(value: object) -> TreatmentCounts | None:
+    if not isinstance(value, dict) or set(value) != {
+        "ready", "treated", "signalled", "by_signal", "by_outcome",
+        "by_qualifier", "by_effective_section",
+    }:
+        return None
+    ready, treated, signalled = value["ready"], value["treated"], value["signalled"]
+    if (
+        any(type(count) is not int or count < 0 for count in (ready, treated, signalled))
+        or treated > ready
+    ):
+        return None
+    by_signal = _counts_map(value["by_signal"], frozenset(TREATMENT_SIGNALS))
+    by_outcome = _counts_map(
+        value["by_outcome"], frozenset((*TREATMENT_STATES, *NO_STATE_REASONS)),
+    )
+    by_qualifier = _counts_map(value["by_qualifier"], frozenset(QUALIFIERS))
+    by_effective_section = _counts_map(
+        value["by_effective_section"], frozenset(SECTION_TYPES),
+    )
+    if any(item is None for item in (
+        by_signal, by_outcome, by_qualifier, by_effective_section,
+    )):
+        return None
+    assert by_signal is not None and by_outcome is not None
+    assert by_qualifier is not None and by_effective_section is not None
+    return TreatmentCounts(
+        ready, treated, signalled, by_signal, by_outcome, by_qualifier,
+        by_effective_section,
+    )
+
+
+def read_treatment_counts(
+    host: Host, rendered_dir: PathLike, *, source: str, snapshot_date: str,
+    court: str, command_path: str = COMMAND_PATH,
+) -> TreatmentCounts | Problem:
+    """Read current pattern set coverage and signal totals for one court."""
+
+    value = _read_court_row(
+        host, rendered_dir, TREATMENT_COUNTS_SQL, "treatment", source=source,
+        snapshot_date=snapshot_date, court=court, command_path=command_path,
+        pattern_set=PATTERN_SET_ID,
+    )
+    if isinstance(value, Problem):
+        return value
+    counts = _treatment_counts_from_json(value)
+    if counts is None:
+        return Problem("caselaw treatment row is invalid", _logs_fix(rendered_dir, command_path))
     return counts

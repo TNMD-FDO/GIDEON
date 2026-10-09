@@ -6,7 +6,7 @@ import unittest
 from collections.abc import Mapping
 from pathlib import Path
 
-from gideon.host import caselaw, report, stack, staging, worker
+from gideon.host import caselaw, courts, report, stack, staging, worker
 from gideon.host.render import worker as identity
 from gideon.host.sysio import Command, PathLike, RealHost
 
@@ -17,6 +17,7 @@ SOURCE = "fictions"
 SNAPSHOT = "fictions-2099-01-02"
 COURT = "court1"
 JOB_ID = 31
+GEOGRAPHY = {COURT: caselaw.CourtGeography("circuit", "ca6", None)}
 
 
 class FakeHost(RealHost):
@@ -113,6 +114,16 @@ def citation_counts_for() -> dict[str, object]:
     }
 
 
+def treatment_counts_for() -> dict[str, object]:
+    return {
+        "ready": 2, "treated": 2, "signalled": 3,
+        "by_signal": {"overruled": 2, "vacated": 1},
+        "by_outcome": {"negative": 2, "lineage_unverified": 1},
+        "by_qualifier": {"none": 2, "in_part": 1},
+        "by_effective_section": {"majority": 3},
+    }
+
+
 class CaselawHost(unittest.TestCase):
     """Queue arguments, durable failures, and count rows stay bounded and typed."""
 
@@ -153,13 +164,19 @@ class CaselawHost(unittest.TestCase):
             snapshot_date="2099-01-02", court=COURT,
         )
 
+    def read_treatment_counts(self) -> caselaw.TreatmentCounts | report.Problem:
+        return caselaw.read_treatment_counts(
+            self.host, RENDERED, source=SOURCE,
+            snapshot_date="2099-01-02", court=COURT,
+        )
+
     def test_defer_binds_the_job_and_lock_on_stdin(self) -> None:
         for limit in (None, 7):
             with self.subTest(limit=limit):
                 self.host.calls.clear()
                 result = caselaw.defer_caselaw(
                     self.host, RENDERED, label=LABEL, snapshot=SNAPSHOT,
-                    court=COURT, limit=limit,
+                    court=COURT, courts=GEOGRAPHY, limit=limit,
                 )
                 self.assertEqual(result, JOB_ID)
                 self.assertEqual(len(self.host.calls), 1)
@@ -175,6 +192,7 @@ class CaselawHost(unittest.TestCase):
                 args = json.loads(sql.split("\\set v_args '", 1)[1].split("'\n", 1)[0])
                 expected: dict[str, object] = {
                     "label": LABEL, "snapshot": SNAPSHOT, "court": COURT,
+                    "courts": {COURT: {"level": "circuit", "circuit": "ca6", "state": None}},
                 }
                 if limit is not None:
                     expected["limit"] = limit
@@ -182,7 +200,8 @@ class CaselawHost(unittest.TestCase):
 
     def test_defer_refuses_each_argument_grammar_before_psql(self) -> None:
         base: dict[str, object] = {
-            "label": LABEL, "snapshot": SNAPSHOT, "court": COURT, "limit": None,
+            "label": LABEL, "snapshot": SNAPSHOT, "court": COURT,
+            "courts": GEOGRAPHY, "limit": None,
         }
         cases = (
             ("label", "../other", "corpus-YYYY-MM-DD"),
@@ -233,6 +252,7 @@ class CaselawHost(unittest.TestCase):
             "invalid": ("logs", "corpus install"),
             "segmenter": ("logs", "report the defect", "corpus install"),
             "anchors": ("logs", "report the defect", "corpus install"),
+            "treatment": ("logs", "report the defect", "corpus install"),
             "citations": ("python3 -m tools.imagebuild gideon --check", "logs", "corpus install"),
             "text-mismatch": ("logs", "new corpus cut", "corpus cut", "corpus install"),
         }
@@ -637,6 +657,109 @@ class CaselawHost(unittest.TestCase):
         assert isinstance(result, report.Problem)
         self.assertIn("FileNotFoundError", result.problem)
         self.assertNotIn("private executable path", result.problem)
+
+    def test_court_geography_uses_map_and_refuses_missing_ids(self) -> None:
+        source = courts.CourtSource("fictitious.csv", "2099-01-02", "0" * 64, 1, {})
+        court_map = courts.CourtMap(source, {
+            COURT: courts.Court(COURT, "ca6", None, "circuit", "Fictitious Court"),
+        })
+        self.assertEqual(caselaw.court_geography(court_map, (COURT,)), GEOGRAPHY)
+        missing = caselaw.court_geography(court_map, (COURT, "absent"))
+        self.assertIsInstance(missing, report.Problem)
+        assert isinstance(missing, report.Problem)
+        self.assertIn("court map", missing.problem)
+        self.assertIn("corpus cut", missing.fix)
+
+    def test_defer_refuses_invalid_geography_before_psql(self) -> None:
+        invalid: tuple[dict[str, caselaw.CourtGeography], ...] = (
+            {"Court1": GEOGRAPHY[COURT]},
+            {COURT: caselaw.CourtGeography("invented", "ca6", None)},
+            {COURT: caselaw.CourtGeography("circuit", "invalid", None)},
+            {COURT: caselaw.CourtGeography("circuit", "ca6", "ZZ")},
+            {"court2": GEOGRAPHY[COURT]},
+            {},
+        )
+        for geography in invalid:
+            with self.subTest(geography=geography):
+                self.host.calls.clear()
+                result = caselaw.defer_caselaw(
+                    self.host, RENDERED, label=LABEL, snapshot=SNAPSHOT,
+                    court=COURT, courts=geography,
+                )
+                self.assertIsInstance(result, report.Problem)
+                self.assertEqual(self.host.calls, [])
+
+    def test_read_treatment_counts_binds_set_and_parses_row(self) -> None:
+        self.host.counts_output = json.dumps(treatment_counts_for())
+        self.assertEqual(self.read_treatment_counts(), caselaw.TreatmentCounts(
+            2, 2, 3, {"overruled": 2, "vacated": 1},
+            {"negative": 2, "lineage_unverified": 1},
+            {"none": 2, "in_part": 1}, {"majority": 3},
+        ))
+        argv, sql = self.host.calls[-1]
+        assert sql is not None
+        self.assertEqual(argv, worker.psql_argv(RENDERED))
+        self.assertIn(worker.bind("v_pattern_set", identity.PATTERN_SET_ID), sql)
+        self.assertNotIn(identity.PATTERN_SET_ID, " ".join(argv))
+        self.assertEqual(sql.count(":'v_pattern_set'"), 2)
+        self.assertIn("FROM public.citation_signals", sql)
+        self.host.calls.clear()
+        self.host.counts_output = json.dumps(citation_counts_for())
+        self.read_citation_counts()
+        assert self.host.calls[0][1] is not None
+        self.assertNotIn("v_pattern_set", self.host.calls[0][1])
+
+    def test_read_treatment_counts_refuses_bad_rows_and_psql(self) -> None:
+        base = treatment_counts_for()
+        cases = (
+            ("ready", -1), ("ready", True), ("treated", 3),
+            ("signalled", -1), ("signalled", True),
+            ("by_signal", {"invented": 1}),
+            ("by_outcome", {"invented": 1}),
+            ("by_qualifier", {"invented": 1}),
+            ("by_effective_section", {"invented": 1}),
+        )
+        for field, bad in cases:
+            with self.subTest(field=field, bad=bad):
+                self.host.counts_output = json.dumps({**base, field: bad})
+                result = self.read_treatment_counts()
+                self.assertIsInstance(result, report.Problem)
+        for value in ({**base, "extra": 1},
+                      {key: item for key, item in base.items() if key != "ready"}):
+            self.host.counts_output = json.dumps(value)
+            self.assertIsInstance(self.read_treatment_counts(), report.Problem)
+        self.host.counts_output = "not json"
+        self.assertIsInstance(self.read_treatment_counts(), report.Problem)
+        for field, invalid_argument in (
+            ("source", "../outside"), ("snapshot_date", "2099-99-02"),
+            ("court", "Court1"),
+        ):
+            with self.subTest(field=field):
+                args: dict[str, str] = {
+                    "source": SOURCE, "snapshot_date": "2099-01-02", "court": COURT,
+                }
+                args[field] = invalid_argument
+                self.host.calls.clear()
+                self.assertIsInstance(
+                    caselaw.read_treatment_counts(self.host, RENDERED, **args), report.Problem,
+                )
+                self.assertEqual(self.host.calls, [])
+        self.host.code = 127
+        result = self.read_treatment_counts()
+        self.assertIsInstance(result, report.Problem)
+        assert isinstance(result, report.Problem)
+        self.assertIn("unavailable", result.problem)
+        self.host.code = 3
+        result = self.read_treatment_counts()
+        self.assertIsInstance(result, report.Problem)
+        assert isinstance(result, report.Problem)
+        self.assertIn("exit 3", result.problem)
+        self.host.code = 0
+        self.host.run_error = FileNotFoundError("private executable path")
+        result = self.read_treatment_counts()
+        self.assertIsInstance(result, report.Problem)
+        assert isinstance(result, report.Problem)
+        self.assertIn("FileNotFoundError", result.problem)
 
 
 if __name__ == "__main__":

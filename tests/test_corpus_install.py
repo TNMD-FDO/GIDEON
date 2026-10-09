@@ -19,7 +19,7 @@ from typing import Any
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
-from gideon.host import backuplock, fetch, report, stack, staging, worker
+from gideon.host import backuplock, courts, fetch, report, stack, staging, worker
 from gideon.host.corpus import install, snapshots
 from gideon.host.corpus.lockfile import (
     IndexDocument,
@@ -84,6 +84,7 @@ class FakeHost(RealHost):
         self.caselaw_section_counts: dict[str, dict[str, object]] = {}
         self.caselaw_anchor_counts: dict[str, dict[str, object]] = {}
         self.caselaw_citation_counts: dict[str, dict[str, object]] = {}
+        self.caselaw_treatment_counts: dict[str, dict[str, object]] = {}
         self.interrupt_caselaw_job = False
         self.caselaw_events: list[tuple[str, str]] = []
         self.job_polls: dict[int, int] = {}
@@ -279,6 +280,30 @@ class FakeHost(RealHost):
                                 "chars": 10 * ready, "anchored_chars": 10 * ready,
                             },
                         } if ready else {},
+                    }
+                return subprocess.CompletedProcess(command, 0, json.dumps(counts) + "\n", "")
+            if "FROM public.citation_signals AS s" in input:
+                court = self._bound(input, "v_court")
+                self._bound(input, "v_pattern_set")
+                if court in self.caselaw_treatment_counts:
+                    counts = self.caselaw_treatment_counts[court]
+                else:
+                    by_status = self.caselaw_counts.get(court, {}).get("by_status")
+                    if isinstance(by_status, dict):
+                        ready = by_status.get("ready", 0)
+                    else:
+                        source = self._bound(input, "v_source")
+                        directory = staging.work_directory(
+                            self.current_label, source, work_root=self.work,
+                        )
+                        stage_record = json.loads(
+                            (directory / worker_identity.STAGE_RECORD_NAME).read_text()
+                        )
+                        ready = stage_record["counts"][court]["opinions"]
+                    counts = {
+                        "ready": ready, "treated": ready, "signalled": 0,
+                        "by_signal": {}, "by_outcome": {}, "by_qualifier": {},
+                        "by_effective_section": {},
                     }
                 return subprocess.CompletedProcess(command, 0, json.dumps(counts) + "\n", "")
             if "FROM public.citations AS c" in input:
@@ -633,8 +658,20 @@ class Install(unittest.TestCase):
         self.assertEqual(tuple(self.host.stage_deferred[0]["inputs"]), worker_identity.STAGE_TABLES)
         self.assertEqual([args["court"] for args in self.host.caselaw_deferred], ["ca6", "scotus"])
         self.assertEqual(self.host.caselaw_events[:2], [("defer", "ca6"), ("defer", "scotus")])
-        self.assertTrue(all(set(args) == {"label", "snapshot", "court"}
+        self.assertTrue(all(set(args) == {"label", "snapshot", "court", "courts"}
                             for args in self.host.caselaw_deferred))
+        loaded = courts.load_court_map(self.checkout / "courts.yaml")
+        assert loaded.court_map is not None
+        expected_geography = {
+            identifier: {
+                "level": item.level, "circuit": item.circuit, "state": item.state,
+            }
+            for identifier in self.host.stage_deferred[0]["courts"]
+            if (item := loaded.court_map.court(identifier)) is not None
+        }
+        self.assertTrue(all(
+            args["courts"] == expected_geography for args in self.host.caselaw_deferred
+        ))
 
     def test_complete_matching_stage_prints_courts_and_defers_nothing(self) -> None:
         self._enable_stage()
@@ -735,6 +772,23 @@ class Install(unittest.TestCase):
                 "case_rows": 3, "case_resolved": 2,
             },
         }
+        treatment_signals = {"overruled": 2, "vacated": 1}
+        treatment_outcomes = {"negative": 1, "caution": 1, "lineage_unverified": 1}
+        treatment_qualifiers = {"none": 2, "in_part": 1}
+        self.host.caselaw_treatment_counts = {
+            "ca6": {
+                "ready": 0, "treated": 0, "signalled": 0,
+                "by_signal": {}, "by_outcome": {}, "by_qualifier": {},
+                "by_effective_section": {},
+            },
+            "scotus": {
+                "ready": 2, "treated": 2, "signalled": 3,
+                "by_signal": treatment_signals,
+                "by_outcome": treatment_outcomes,
+                "by_qualifier": treatment_qualifiers,
+                "by_effective_section": {"majority": 3},
+            },
+        }
         code, out, err = self.run_install()
         self.assertEqual(code, 0, out + err)
         section_shares = {"majority": "60 % (3)", "footnote": "40 % (1)"}
@@ -752,6 +806,13 @@ class Install(unittest.TestCase):
             + ", ".join(f"{form} 0" for form in worker_identity.CITE_FORMS)
             + "); "
             + ", ".join(f"{kind} 0" for kind in worker_identity.CITE_TYPES if kind != "case_cite"),
+            "ingest: ok — ca6 treatment: 0 of 0 ready documents under "
+            + worker_identity.PATTERN_SET_ID + "; 0 signalled edges; "
+            + ", ".join(f"{kind} 0" for kind in worker_identity.TREATMENT_SIGNALS) + "; "
+            + ", ".join(f"{kind} 0" for kind in (
+                *worker_identity.TREATMENT_STATES, *worker_identity.NO_STATE_REASONS,
+            )) + "; "
+            + ", ".join(f"{kind} 0" for kind in worker_identity.QUALIFIERS),
             "ingest: ok — scotus: 2 opinions; ready 2, failed 0 "
             "(no-text 0, unparseable 0, empty 0, interrupted 0); "
             "xml_harvard 1, html_columbia 1, html_lawbox 0, html_anon_2020 0, "
@@ -773,6 +834,20 @@ class Install(unittest.TestCase):
             + ", ".join(
                 f"{kind} {cite_types.get(kind, 0)}"
                 for kind in worker_identity.CITE_TYPES if kind != "case_cite"
+            ),
+            "ingest: ok — scotus treatment: 2 of 2 ready documents under "
+            + worker_identity.PATTERN_SET_ID + "; 3 signalled edges; "
+            + ", ".join(
+                f"{kind} {treatment_signals.get(kind, 0)}"
+                for kind in worker_identity.TREATMENT_SIGNALS
+            ) + "; "
+            + ", ".join(
+                f"{kind} {treatment_outcomes.get(kind, 0)}"
+                for kind in (*worker_identity.TREATMENT_STATES, *worker_identity.NO_STATE_REASONS)
+            ) + "; "
+            + ", ".join(
+                f"{kind} {treatment_qualifiers.get(kind, 0)}"
+                for kind in worker_identity.QUALIFIERS
             ),
             "ingest: ok — caselaw: 2 courts, 3 opinions, 2 ready, 1 failed, 0 seconds",
         ])
@@ -853,6 +928,22 @@ class Install(unittest.TestCase):
             self.host, RENDERED, source="example", snapshot_date="2099-01-02",
             court="ca6", command_path=install.COMMAND_PATH,
         )
+
+    def test_ingest_refuses_ready_documents_without_treatment_pass(self) -> None:
+        self._enable_stage()
+        self._seed_complete_stage()
+        self.host.caselaw_treatment_counts["ca6"] = {
+            "ready": 1, "treated": 0, "signalled": 0,
+            "by_signal": {}, "by_outcome": {}, "by_qualifier": {},
+            "by_effective_section": {},
+        }
+        code, out, err = self.run_install()
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("ingest: refuse — ca6: 0 of 1 ready documents treated under", out)
+        self.assertIn(stack.logs_fix(RENDERED, worker_identity.WORKER_SERVICE_NAME), out)
+        self.assertIn(report.command("corpus install"), out)
+        self.assertNotIn("ca6 treatment:", out)
+        self.assertNotIn("retain: ok", out)
 
     def test_ingest_refuses_ready_documents_without_citation_pass(self) -> None:
         self._enable_stage()

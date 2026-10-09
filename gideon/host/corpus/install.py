@@ -17,15 +17,21 @@ from gideon.host.corpus.lockfile import (
     check_egress_hosts,
 )
 from gideon.host.corpus.sources import SOURCES, SourceDefinition, data_file
+from gideon.host.courts import CourtMap
 from gideon.host.render.worker import (
     CITE_FORMS,
     CITE_TYPES,
+    NO_STATE_REASONS,
+    PATTERN_SET_ID,
     PRECEDENTIAL_VALUES,
+    QUALIFIERS,
     RESOLVE_DIR,
     SECTION_TYPES,
     SNAPSHOTS_ROOT,
     STAGE_TABLES,
     TEXT_SOURCES,
+    TREATMENT_SIGNALS,
+    TREATMENT_STATES,
     WORK_ROOT,
     WORKER_SERVICE_NAME,
 )
@@ -67,18 +73,18 @@ def _preconditions(
     checkout: Path,
     registry: Sequence[SourceDefinition],
     clock: Callable[[], datetime],
-) -> tuple[StageResult, Lockfile | None, backuplock.Claim | None]:
+) -> tuple[StageResult, Lockfile | None, CourtMap | None, backuplock.Claim | None]:
     label = args.label
     if LABEL.fullmatch(label) is None:
         return StageResult(
             "preconditions", False, f"lockfile label {label!r} has the wrong form",
             f"Use a label in the form corpus-YYYY-MM-DD, then run {report.command(COMMAND_PATH)} again.",
-        ), None, None
+        ), None, None, None
     if host.geteuid() != 0:
         return StageResult(
             "preconditions", False, "root privileges are required",
             f"Run {report.command(COMMAND_PATH)}, then retry.",
-        ), None, None
+        ), None, None, None
     claim = backuplock.claim(
         host, command=report.command_name(COMMAND_PATH), now=clock(),
         lock=backuplock.CORPUS_LOCK,
@@ -86,18 +92,20 @@ def _preconditions(
     if claim.refusal is not None:
         return StageResult(
             "preconditions", False, claim.refusal.detail, _retry_fix(claim.refusal.fix),
-        ), None, None
+        ), None, None, None
     if not claim.taken:
         return StageResult(
             "preconditions", False, "a corpus command is already running in this process",
             f"Wait for it to finish, then run {report.command(COMMAND_PATH)} again.",
-        ), None, None
+        ), None, None, None
     try:
-        stage, lockfile = _artifact_preconditions(host, rendered_dir, checkout, registry, label)
+        stage, lockfile, court_map = _artifact_preconditions(
+            host, rendered_dir, checkout, registry, label,
+        )
     except BaseException:
         backuplock.release_claim(host, claim, lock=backuplock.CORPUS_LOCK)
         raise
-    return stage, lockfile, claim
+    return stage, lockfile, court_map, claim
 
 
 def _artifact_preconditions(
@@ -106,12 +114,12 @@ def _artifact_preconditions(
     checkout: Path,
     registry: Sequence[SourceDefinition],
     label: str,
-) -> tuple[StageResult, Lockfile | None]:
+) -> tuple[StageResult, Lockfile | None, CourtMap | None]:
     loaded, issue = artifacts.load_artifacts(
         host, rendered_dir, checkout, registry, command_path=COMMAND_PATH,
     )
     if issue is not None:
-        return issue, None
+        return issue, None, None
     assert loaded is not None
     lockfile = next((item for item in loaded.directory.lockfiles if item.label == label), None)
     if lockfile is None:
@@ -120,32 +128,32 @@ def _artifact_preconditions(
             "preconditions", False, f"lockfile label {label} is not committed",
             f"Use a committed label from corpus/lockfiles/: {labels}; then run "
             f"{report.command(COMMAND_PATH)} again.",
-        ), None
+        ), None, None
     issue = artifacts.artifact_problem(
         check_courts(lockfile, loaded.court_map), label, command_path=COMMAND_PATH,
     )
     if issue is not None:
-        return issue, None
+        return issue, None, None
     issue = artifacts.artifact_problem(
         check_egress_hosts(lockfile, loaded.allowlist), label, command_path=COMMAND_PATH,
     )
     if issue is not None:
-        return issue, None
+        return issue, None, None
     row = record.read_cut(host, rendered_dir, label, command_path=COMMAND_PATH)
     if isinstance(row, Problem):
-        return StageResult("preconditions", False, row.problem, row.fix), None
+        return StageResult("preconditions", False, row.problem, row.fix), None, None
     if row is not None and row.state == "superseded":
         newest = loaded.directory.newest
         assert newest is not None
         return StageResult(
             "preconditions", False, f"lockfile label {label} is superseded",
             f"Run {report.command(f'{COMMAND_PATH} {newest.label}')} instead.",
-        ), None
+        ), None, None
     base_text = ""
     if lockfile.base is not None:
         base_row = record.read_cut(host, rendered_dir, lockfile.base, command_path=COMMAND_PATH)
         if isinstance(base_row, Problem):
-            return StageResult("preconditions", False, base_row.problem, base_row.fix), None
+            return StageResult("preconditions", False, base_row.problem, base_row.fix), None, None
         if base_row is None:
             # The record's base column is a foreign key, so a derived lockfile
             # follows its base onto a box, and the refusal comes before any fetch.
@@ -154,7 +162,7 @@ def _artifact_preconditions(
                 f"base {lockfile.base} of lockfile {label} is not recorded on this box",
                 f"Run {report.command(f'{COMMAND_PATH} {lockfile.base}')}, then run "
                 f"{report.command(f'{COMMAND_PATH} {label}')} again.",
-            ), None
+            ), None, None
         base_text = f"; base {lockfile.base} {base_row.state}"
     snapshots_text = ", ".join(
         f"{name} {pin.snapshot_date}" for name, pin in lockfile.sources.items()
@@ -162,7 +170,7 @@ def _artifact_preconditions(
     state = row.state if row is not None else "not yet recorded"
     return StageResult(
         "preconditions", True, f"{label}: {snapshots_text}; {state}{base_text}", "",
-    ), lockfile
+    ), lockfile, loaded.court_map
 
 
 def _run_install_stages(
@@ -171,6 +179,7 @@ def _run_install_stages(
     snapshots_root: PathLike,
     work_root: PathLike,
     lockfile: Lockfile,
+    court_map: CourtMap,
     clock: Callable[[], datetime],
     sleep: Callable[[float], None],
     monotonic: Callable[[], float],
@@ -244,7 +253,7 @@ def _run_install_stages(
     if staged:
         return staged
     active_stage[0] = "ingest"
-    ingested = _ingest(host, rendered_dir, work_root, lockfile, sleep, monotonic)
+    ingested = _ingest(host, rendered_dir, work_root, lockfile, court_map, sleep, monotonic)
     if ingested:
         return ingested
     active_stage[0] = "retain"
@@ -362,7 +371,7 @@ def _percent(part: int, whole: int) -> int:
 
 def _ingest(
     host: CorpusHost, rendered_dir: PathLike, work_root: PathLike,
-    lockfile: Lockfile, sleep: Callable[[float], None],
+    lockfile: Lockfile, court_map: CourtMap, sleep: Callable[[float], None],
     monotonic: Callable[[], float],
 ) -> int:
     """Defer every court, wait for the jobs, and compare their recorded counts."""
@@ -386,11 +395,14 @@ def _ingest(
         if stage_record.courts != list(pin.courts):
             return _refuse("ingest", f"{name}: stage record disagrees with the lockfile",
                            _stage_removal_fix(lockfile.label, name, work_root))
+        geography = caselaw.court_geography(court_map, pin.courts)
+        if isinstance(geography, Problem):
+            return _refuse("ingest", f"{name}: {geography.problem}", geography.fix)
         snapshot = f"{name}-{pin.snapshot_date}"
         for court in pin.courts:
             job = caselaw.defer_caselaw(
                 host, rendered_dir, label=lockfile.label, snapshot=snapshot,
-                court=court, command_path=COMMAND_PATH,
+                court=court, courts=geography, command_path=COMMAND_PATH,
             )
             if isinstance(job, Problem):
                 return _refuse("ingest", f"{court}: {job.problem}", job.fix)
@@ -531,6 +543,39 @@ def _ingest(
             f"case_cite {citation_counts.case_rows} ({resolved_share} % resolved; {case_forms}); "
             f"{other_types}", "",
         ))
+        treatment_counts = caselaw.read_treatment_counts(
+            host, rendered_dir, source=source, snapshot_date=snapshot_date,
+            court=court, command_path=COMMAND_PATH,
+        )
+        if isinstance(treatment_counts, Problem):
+            return _refuse("ingest", f"{court}: {treatment_counts.problem}", treatment_counts.fix)
+        if treatment_counts.treated < treatment_counts.ready:
+            return _refuse(
+                "ingest",
+                f"{court}: {treatment_counts.treated} of {treatment_counts.ready} ready documents treated under {PATTERN_SET_ID}",
+                f"Run {stack.logs_fix(rendered_dir, WORKER_SERVICE_NAME)}, then run "
+                f"{report.command(COMMAND_PATH)} again.",
+            )
+        treatment_detail = "; ".join((
+            ", ".join(
+                f"{signal} {treatment_counts.by_signal.get(signal, 0)}"
+                for signal in TREATMENT_SIGNALS
+            ),
+            ", ".join(
+                f"{outcome} {treatment_counts.by_outcome.get(outcome, 0)}"
+                for outcome in (*TREATMENT_STATES, *NO_STATE_REASONS)
+            ),
+            ", ".join(
+                f"{qualifier} {treatment_counts.by_qualifier.get(qualifier, 0)}"
+                for qualifier in QUALIFIERS
+            ),
+        ))
+        report.print_stage(StageResult(
+            "ingest", True,
+            f"{court} treatment: {treatment_counts.treated} of {treatment_counts.ready} "
+            f"ready documents under {PATTERN_SET_ID}; "
+            f"{treatment_counts.signalled} signalled edges; {treatment_detail}", "",
+        ))
         total += counts.opinions
         ready += counts.by_status.get("ready", 0)
         failed += counts.by_status.get("failed", 0)
@@ -629,13 +674,15 @@ def run_corpus_install(
     active_stage = ["preconditions"]
     lock_claim: backuplock.Claim | None = None
     try:
-        stage, lockfile, lock_claim = _preconditions(args, io, rendered_dir, root, sources, clock)
+        stage, lockfile, court_map, lock_claim = _preconditions(
+            args, io, rendered_dir, root, sources, clock,
+        )
         if not stage.ok:
             return _refuse("preconditions", stage.detail, stage.fix)
-        assert lockfile is not None
+        assert lockfile is not None and court_map is not None
         report.print_stage(stage)
         return _run_install_stages(
-            io, rendered_dir, snapshots_root, work_root, lockfile,
+            io, rendered_dir, snapshots_root, work_root, lockfile, court_map,
             clock, sleep, monotonic, active_stage,
         )
     except KeyboardInterrupt:

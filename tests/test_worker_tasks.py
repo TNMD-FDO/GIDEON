@@ -86,6 +86,7 @@ class RecoveryTask(unittest.TestCase):
         label = "corpus-2099-01-01"
         snapshot = "fiction-2099-01-02"
         court = "fictioncourt"
+        courts = {court: {"level": "circuit", "circuit": "ca6", "state": None}}
         context = procrastinate.JobContext(
             app=app,
             job=procrastinate.jobs.Job(
@@ -102,11 +103,12 @@ class RecoveryTask(unittest.TestCase):
             patch.object(caselaw, "write_job_failure") as file_failure,
             self.assertRaises(caselaw.CaselawFailure) as raised,
         ):
-            tasks.caselaw(context, label, snapshot, court)
+            tasks.caselaw(context, label, snapshot, court, courts=courts)
         self.assertIs(raised.exception, failure)
         ingest.assert_called_once_with(
             tasks.SNAPSHOTS_ROOT, staging.WORK_ROOT, cas.ROOT,
             label, snapshot, court, None, job_id, record_factory.return_value,
+            courts=courts,
         )
         file_failure.assert_called_once_with(
             staging.WORK_ROOT, label, snapshot, court, job_id, failure,

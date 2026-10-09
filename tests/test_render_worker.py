@@ -48,6 +48,7 @@ from gideon.worker import (
     settings,
     staging,
     tasks,
+    treatment,
 )
 
 
@@ -123,6 +124,12 @@ class WorkerIdentity(unittest.TestCase):
         self.assertEqual(worker.ANCHOR_KINDS, anchors.ANCHOR_KINDS)
         self.assertEqual(worker.CITE_TYPES, citations.CITE_TYPES)
         self.assertEqual(worker.CITE_FORMS, CITE_FORMS)
+        self.assertEqual(worker.PATTERN_SET_ID, treatment.PATTERN_SET_ID)
+        self.assertEqual(worker.TREATMENT_SIGNALS, treatment.TREATMENT_SIGNALS)
+        self.assertEqual(worker.QUALIFIERS, treatment.QUALIFIERS)
+        self.assertEqual(worker.SIGNAL_SOURCES, treatment.SIGNAL_SOURCES)
+        self.assertEqual(worker.TREATMENT_STATES, treatment.TREATMENT_STATES)
+        self.assertEqual(worker.NO_STATE_REASONS, treatment.NO_STATE_REASONS)
 
     def test_role_matches_the_store_and_runtime_names_match_the_render(self) -> None:
         role = next(spec for spec in ROLE_SPECS if spec.name == worker.WORKER_ROLE)
