@@ -14,6 +14,8 @@ from gideon.host.render.worker import (
     CASELAW_LIMIT_MAX,
     CASELAW_QUEUE,
     CASELAW_TASK,
+    CITE_FORMS,
+    CITE_TYPES,
     COURT_PATTERN,
     DOCUMENT_FAILURE_REASONS,
     PRECEDENTIAL_VALUES,
@@ -140,6 +142,40 @@ SELECT jsonb_build_object(
 );
 """
 
+CITATION_COUNTS_SQL = """WITH ready_documents AS (
+    SELECT d.doc_id, d.citations_parsed_at
+    FROM public.documents AS d
+    JOIN public.opinions AS o ON o.doc_id = d.doc_id
+    WHERE d.source = :'v_source'
+      AND d.source_snapshot = :'v_snapshot_date'::date
+      AND o.court = :'v_court'
+      AND d.status = 'ready'
+), edges AS (
+    SELECT c.cite_type, c.cite_form, c.to_cluster
+    FROM public.citations AS c
+    JOIN ready_documents AS d ON d.doc_id = c.doc_id
+)
+SELECT jsonb_build_object(
+    'ready', (SELECT count(*) FROM ready_documents),
+    'cited', (SELECT count(*) FROM ready_documents WHERE citations_parsed_at IS NOT NULL),
+    'edges', (SELECT count(*) FROM edges),
+    'by_type', COALESCE((
+        SELECT jsonb_object_agg(cite_type, n) FROM (
+            SELECT cite_type, count(*) AS n FROM edges GROUP BY cite_type
+        ) AS counts
+    ), '{}'::jsonb),
+    'by_form', COALESCE((
+        SELECT jsonb_object_agg(cite_form, n) FROM (
+            SELECT cite_form, count(*) AS n FROM edges
+            WHERE cite_type = 'case_cite' GROUP BY cite_form
+        ) AS counts
+    ), '{}'::jsonb),
+    'case_rows', (SELECT count(*) FROM edges WHERE cite_type = 'case_cite'),
+    'case_resolved', (SELECT count(*) FROM edges
+                     WHERE cite_type = 'case_cite' AND to_cluster IS NOT NULL)
+);
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class CaselawRead:
@@ -189,6 +225,19 @@ class AnchorCounts:
     ready: int
     anchored: int
     by_text_source: dict[str, SourceCoverage]
+
+
+@dataclass(frozen=True, slots=True)
+class CitationCounts:
+    """Ready document coverage and citation totals for one court."""
+
+    ready: int
+    cited: int
+    edges: int
+    by_type: dict[str, int]
+    by_form: dict[str, int]
+    case_rows: int
+    case_resolved: int
 
 
 def _logs_fix(rendered_dir: PathLike, command_path: str) -> str:
@@ -302,6 +351,12 @@ def _failure_problem(
             f"caselaw {reason} failure ({error or 'unknown error'})",
             f"Run {stack.logs_fix(rendered_dir, WORKER_SERVICE_NAME)}, report the defect, "
             f"then run {install} again after the fix.",
+        )
+    if reason == "citations":
+        return Problem(
+            f"caselaw citations failure ({error or 'unknown error'})",
+            "Run python3 -m tools.imagebuild gideon --check and "
+            f"{stack.logs_fix(rendered_dir, WORKER_SERVICE_NAME)}, then run {install} again.",
         )
     if reason == "text-mismatch":
         return Problem(
@@ -532,4 +587,43 @@ def read_anchor_counts(
     counts = _anchor_counts_from_json(value)
     if counts is None:
         return Problem("caselaw anchors row is invalid", _logs_fix(rendered_dir, command_path))
+    return counts
+
+
+def _citation_counts_from_json(value: object) -> CitationCounts | None:
+    if not isinstance(value, dict) or set(value) != {
+        "ready", "cited", "edges", "by_type", "by_form", "case_rows", "case_resolved",
+    }:
+        return None
+    ready, cited, edges = value["ready"], value["cited"], value["edges"]
+    case_rows, case_resolved = value["case_rows"], value["case_resolved"]
+    if (
+        any(type(count) is not int or count < 0 for count in (
+            ready, cited, edges, case_rows, case_resolved,
+        ))
+        or cited > ready or case_resolved > case_rows
+    ):
+        return None
+    by_type = _counts_map(value["by_type"], frozenset(CITE_TYPES))
+    by_form = _counts_map(value["by_form"], frozenset(CITE_FORMS))
+    if by_type is None or by_form is None:
+        return None
+    return CitationCounts(ready, cited, edges, by_type, by_form, case_rows, case_resolved)
+
+
+def read_citation_counts(
+    host: Host, rendered_dir: PathLike, *, source: str, snapshot_date: str,
+    court: str, command_path: str = COMMAND_PATH,
+) -> CitationCounts | Problem:
+    """Read ready document coverage and citation totals for one court."""
+
+    value = _read_court_row(
+        host, rendered_dir, CITATION_COUNTS_SQL, "citations", source=source,
+        snapshot_date=snapshot_date, court=court, command_path=command_path,
+    )
+    if isinstance(value, Problem):
+        return value
+    counts = _citation_counts_from_json(value)
+    if counts is None:
+        return Problem("caselaw citations row is invalid", _logs_fix(rendered_dir, command_path))
     return counts

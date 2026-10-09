@@ -7,7 +7,9 @@ from collections.abc import Mapping
 from typing import TextIO
 
 _SAFE_NAME = re.compile(r"[A-Za-z0-9_.:-]+\Z")
-_DROPPED_LOGGERS = frozenset({"httpx", "httpcore"})
+_DROPPED_LOGGERS = frozenset({
+    "httpx", "httpcore", "eyecite", "reporters_db", "courts_db",
+})
 _DROPPED_PREFIXES = tuple(f"{name}." for name in sorted(_DROPPED_LOGGERS))
 
 
@@ -22,7 +24,7 @@ class QueueLogFilter(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         name = record.name
-        # The HTTP client logs each request's whole URL, query included.
+        # HTTP clients can log URLs; citation libraries can log cite reprs.
         if name in _DROPPED_LOGGERS or name.startswith(_DROPPED_PREFIXES):
             return False
         if name != "procrastinate" and not name.startswith("procrastinate."):

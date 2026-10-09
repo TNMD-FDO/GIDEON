@@ -14,6 +14,7 @@ from types import ModuleType
 from unittest.mock import patch
 
 from gideon.casecite.__main__ import main
+from gideon.casecite.found import EDGE_PATTERN_ID, FoundCitation
 from gideon.extraction.contract import ExactObject, object_from_wire
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -51,19 +52,23 @@ class Package(unittest.TestCase):
                         f"{path}: import outside the adapter boundary: {name}",
                     )
 
-    def test_pattern_id_is_versioned_without_importing_eyecite(self) -> None:
-        tree = ast.parse((PACKAGE / "adapter.py").read_text(encoding="utf-8"))
-        pattern_ids = [
-            node.value.value
-            for node in tree.body
-            if isinstance(node, ast.AnnAssign)
-            and isinstance(node.target, ast.Name)
-            and node.target.id == "PATTERN_ID"
-            and isinstance(node.value, ast.Constant)
-            and isinstance(node.value.value, str)
-        ]
-        self.assertEqual(len(pattern_ids), 1)
-        self.assertIsNotNone(re.fullmatch(r"eyecite/[a-z-]+@[1-9][0-9]*", pattern_ids[0]))
+    def test_pattern_ids_are_versioned_without_importing_eyecite(self) -> None:
+        for path, name in (("adapter.py", "PATTERN_ID"), ("found.py", "EDGE_PATTERN_ID")):
+            tree = ast.parse((PACKAGE / path).read_text(encoding="utf-8"))
+            pattern_ids = [
+                node.value.value
+                for node in tree.body
+                if isinstance(node, ast.AnnAssign)
+                and isinstance(node.target, ast.Name)
+                and node.target.id == name
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)
+            ]
+            self.assertEqual(len(pattern_ids), 1)
+            self.assertIsNotNone(
+                re.fullmatch(r"eyecite/[a-z-]+@[1-9][0-9]*", pattern_ids[0])
+            )
+        self.assertEqual(EDGE_PATTERN_ID, pattern_ids[0])
 
 
 class Entry(unittest.TestCase):
@@ -231,3 +236,96 @@ class EyeciteAdapter(unittest.TestCase):
             tuple(obj.text for obj in extract_case_cites(source)),
             ("466 U.S. 668", "104 S. Ct. 2052"),
         )
+
+    def test_find_citations_over_fictitious_opinion(self) -> None:
+        from gideon.casecite.adapter import find_citations
+
+        source = (
+            "[FICTIONAL TEST OPINION] Strickland v. Washington, "
+            "466 U.S. 668, 687 (1984). Id. at 690. "
+            "Strickland, 466 U.S. at 691. Strickland, supra, at 692. "
+            "466 U.S. 668. 104 S. Ct. 2052. "
+            "18 U.S.C. § 922(g)(1). Id. at 5. § 3553."
+        )
+        found = find_citations(source)
+        self.assertEqual(found, find_citations(source))
+        self.assertTrue(all(isinstance(cite, FoundCitation) for cite in found))
+        self.assertTrue(all(source[cite.start:cite.end] for cite in found))
+        self.assertEqual(tuple(cite.start for cite in found), tuple(sorted(cite.start for cite in found)))
+
+        def citation(fragment: str, occurrence: int = 0) -> FoundCitation:
+            start = source.index(fragment)
+            if occurrence:
+                start = source.index(fragment, start + len(fragment))
+            end = start + len(fragment)
+            return next(cite for cite in found if cite.start < end and start < cite.end)
+
+        full = citation("466 U.S. 668")
+        self.assertEqual((full.form, full.kind), ("full", "case"))
+        self.assertEqual(full.resource, found.index(full))
+        self.assertEqual((full.volume, full.reporter, full.page), ("466", "U.S.", "668"))
+        self.assertEqual(full.reporter_cite, "466 U.S. 668")
+        self.assertEqual(full.pincite, "687")
+
+        for fragment, form in (
+            ("Id. at 690", "id"),
+            ("466 U.S. at 691", "short"),
+            ("supra, at 692", "supra"),
+        ):
+            with self.subTest(fragment=fragment):
+                cite = citation(fragment)
+                self.assertEqual((cite.form, cite.kind), (form, "case"))
+                self.assertEqual(cite.resource, full.resource)
+                self.assertEqual(
+                    (cite.volume, cite.reporter, cite.page),
+                    (full.volume, full.reporter, full.page),
+                )
+
+        repeated = citation("466 U.S. 668", 1)
+        parallel = citation("104 S. Ct. 2052")
+        self.assertEqual(repeated.resource, found.index(repeated))
+        self.assertEqual(parallel.resource, found.index(parallel))
+        self.assertNotEqual(full.resource, repeated.resource)
+        self.assertNotEqual(parallel.resource, full.resource)
+        law = citation("18 U.S.C. § 922(g)(1)")
+        self.assertEqual((law.form, law.kind), ("full", "law"))
+        self.assertIsNone(law.reporter_cite)
+        law_id = citation("Id. at 5")
+        self.assertEqual((law_id.form, law_id.kind), ("id", "law"))
+        self.assertEqual(law_id.resource, law.resource)
+        bare = source.index("§ 3553")
+        self.assertFalse(any(cite.start <= bare < cite.end for cite in found))
+
+    def test_unresolved_short_order_reference_and_canned_reply(self) -> None:
+        from gideon.casecite.adapter import find_citations
+
+        after_unknown = find_citations("[FICTIONAL TEST ONLY] § 3553. 466 U.S. 668")
+        self.assertEqual(len(after_unknown), 1)
+        self.assertEqual(after_unknown[0].resource, 0)
+
+        short = find_citations("[FICTIONAL TEST ONLY] 466 U.S. at 690")
+        self.assertEqual(len(short), 1)
+        self.assertEqual((short[0].form, short[0].kind, short[0].resource),
+                         ("short", "case", None))
+        self.assertEqual((short[0].volume, short[0].reporter, short[0].page),
+                         (None, None, None))
+        self.assertIsNotNone(short[0].reporter_cite)
+
+        # The library lists the bare section sign after the full cite; read
+        # out of order, the sign would leave the Id. unresolved.
+        ordered = find_citations("[FICTIONAL TEST ONLY] § 924(e)(1). 466 U.S. 668. Id.")
+        self.assertEqual(tuple((cite.form, cite.kind, cite.resource) for cite in ordered),
+                         (("full", "case", 0), ("id", "case", 0)))
+
+        reference_text = "Wong Sun v. United States, 371 U.S. 471 (1963); Wong Sun at 485."
+        reference = find_citations(reference_text)
+        self.assertEqual(
+            tuple((reference_text[cite.start:cite.end], cite.form, cite.kind, cite.resource)
+                  for cite in reference),
+            (("371 U.S. 471", "full", "case", 0),
+             ("Wong Sun at 485", "reference", "case", 0)),
+        )
+        self.assertEqual(reference[1].reporter_cite, "371 U.S. 471")
+
+        # The canned reply to the library's own name spans past the text.
+        self.assertEqual(find_citations("eyecite"), ())

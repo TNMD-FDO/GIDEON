@@ -7,6 +7,7 @@ from dataclasses import replace
 
 from test_render import EXAMPLE, ROOT, SECOND, DirHost, declared_source_files, inputs
 
+from gideon.casecite.found import CITE_FORMS
 from gideon.host import cas
 from gideon.host.images import parse_registry, reference
 from gideon.host.models import GIGABYTE
@@ -39,6 +40,7 @@ from gideon.host.stores import ROLE_SPECS
 from gideon.worker import (
     anchors,
     caselaw,
+    citations,
     fetch,
     metrics,
     opiniontext,
@@ -119,6 +121,8 @@ class WorkerIdentity(unittest.TestCase):
         self.assertEqual(worker.SECTION_TYPES, sections.SECTION_TYPES)
         self.assertEqual(worker.SECTION_TYPED_BY, sections.TYPED_BY)
         self.assertEqual(worker.ANCHOR_KINDS, anchors.ANCHOR_KINDS)
+        self.assertEqual(worker.CITE_TYPES, citations.CITE_TYPES)
+        self.assertEqual(worker.CITE_FORMS, CITE_FORMS)
 
     def test_role_matches_the_store_and_runtime_names_match_the_render(self) -> None:
         role = next(spec for spec in ROLE_SPECS if spec.name == worker.WORKER_ROLE)
@@ -194,7 +198,7 @@ class WorkerBlock(unittest.TestCase):
             definition.sources,
             (
                 "gideon/worker", "gideon/host/cas.py", "gideon/host/sysio.py",
-                "gideon/host/report.py",
+                "gideon/host/report.py", "gideon/casecite", "gideon/extraction",
             ),
             "Fix: declare the worker package and its store dependencies.",
         )

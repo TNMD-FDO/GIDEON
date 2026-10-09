@@ -18,6 +18,8 @@ from gideon.host.corpus.lockfile import (
 )
 from gideon.host.corpus.sources import SOURCES, SourceDefinition, data_file
 from gideon.host.render.worker import (
+    CITE_FORMS,
+    CITE_TYPES,
     PRECEDENTIAL_VALUES,
     RESOLVE_DIR,
     SECTION_TYPES,
@@ -499,6 +501,35 @@ def _ingest(
             "ingest", True,
             f"{court} anchors: {anchor_counts.anchored} of {anchor_counts.ready} "
             f"ready documents anchored" + (f"; {anchor_detail}" if anchor_detail else ""), "",
+        ))
+        citation_counts = caselaw.read_citation_counts(
+            host, rendered_dir, source=source, snapshot_date=snapshot_date,
+            court=court, command_path=COMMAND_PATH,
+        )
+        if isinstance(citation_counts, Problem):
+            return _refuse("ingest", f"{court}: {citation_counts.problem}", citation_counts.fix)
+        if citation_counts.cited < citation_counts.ready:
+            return _refuse(
+                "ingest",
+                f"{court}: {citation_counts.cited} of {citation_counts.ready} ready documents have citations parsed",
+                f"Run {stack.logs_fix(rendered_dir, WORKER_SERVICE_NAME)}, then run "
+                f"{report.command(COMMAND_PATH)} again.",
+            )
+        edge_rate = citation_counts.edges / citation_counts.ready if citation_counts.ready else 0
+        resolved_share = round(100 * citation_counts.case_resolved / citation_counts.case_rows) if citation_counts.case_rows else 0
+        case_forms = ", ".join(
+            f"{form} {citation_counts.by_form.get(form, 0)}" for form in CITE_FORMS
+        )
+        other_types = ", ".join(
+            f"{kind} {citation_counts.by_type.get(kind, 0)}"
+            for kind in CITE_TYPES if kind != "case_cite"
+        )
+        report.print_stage(StageResult(
+            "ingest", True,
+            f"{court} citations: {citation_counts.cited} of {citation_counts.ready} "
+            f"ready documents; {citation_counts.edges} edges, {edge_rate:.1f} per document; "
+            f"case_cite {citation_counts.case_rows} ({resolved_share} % resolved; {case_forms}); "
+            f"{other_types}", "",
         ))
         total += counts.opinions
         ready += counts.by_status.get("ready", 0)

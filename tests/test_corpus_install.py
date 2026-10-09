@@ -83,6 +83,7 @@ class FakeHost(RealHost):
         self.caselaw_counts: dict[str, dict[str, object]] = {}
         self.caselaw_section_counts: dict[str, dict[str, object]] = {}
         self.caselaw_anchor_counts: dict[str, dict[str, object]] = {}
+        self.caselaw_citation_counts: dict[str, dict[str, object]] = {}
         self.interrupt_caselaw_job = False
         self.caselaw_events: list[tuple[str, str]] = []
         self.job_polls: dict[int, int] = {}
@@ -278,6 +279,29 @@ class FakeHost(RealHost):
                                 "chars": 10 * ready, "anchored_chars": 10 * ready,
                             },
                         } if ready else {},
+                    }
+                return subprocess.CompletedProcess(command, 0, json.dumps(counts) + "\n", "")
+            if "FROM public.citations AS c" in input:
+                court = self._bound(input, "v_court")
+                if court in self.caselaw_citation_counts:
+                    counts = self.caselaw_citation_counts[court]
+                else:
+                    by_status = self.caselaw_counts.get(court, {}).get("by_status")
+                    if isinstance(by_status, dict):
+                        ready = by_status.get("ready", 0)
+                    else:
+                        source = self._bound(input, "v_source")
+                        directory = staging.work_directory(
+                            self.current_label, source, work_root=self.work,
+                        )
+                        stage_record = json.loads(
+                            (directory / worker_identity.STAGE_RECORD_NAME).read_text()
+                        )
+                        ready = stage_record["counts"][court]["opinions"]
+                    counts = {
+                        "ready": ready, "cited": ready, "edges": 0,
+                        "by_type": {}, "by_form": {},
+                        "case_rows": 0, "case_resolved": 0,
                     }
                 return subprocess.CompletedProcess(command, 0, json.dumps(counts) + "\n", "")
             if "WITH ready_documents AS" in input:
@@ -658,6 +682,8 @@ class Install(unittest.TestCase):
     def test_ingest_prints_exact_court_rows_and_summary(self) -> None:
         self._enable_stage()
         self._seed_complete_stage()
+        cite_types = {"case_cite": 3, "statute": 1, "court_rule": 1}
+        cite_forms = {"full": 2, "short": 1}
         self.host.caselaw_counts = {
             "ca6": {
                 "opinions": 1, "by_status": {"failed": 1},
@@ -698,6 +724,17 @@ class Install(unittest.TestCase):
                 },
             },
         }
+        self.host.caselaw_citation_counts = {
+            "ca6": {
+                "ready": 0, "cited": 0, "edges": 0,
+                "by_type": {}, "by_form": {}, "case_rows": 0, "case_resolved": 0,
+            },
+            "scotus": {
+                "ready": 2, "cited": 2, "edges": 5,
+                "by_type": cite_types, "by_form": cite_forms,
+                "case_rows": 3, "case_resolved": 2,
+            },
+        }
         code, out, err = self.run_install()
         self.assertEqual(code, 0, out + err)
         section_shares = {"majority": "60 % (3)", "footnote": "40 % (1)"}
@@ -710,6 +747,11 @@ class Install(unittest.TestCase):
             "ingest: ok — ca6 sections: 0 of 0 ready documents; "
             + ", ".join(f"{kind} 0 % (0)" for kind in worker_identity.SECTION_TYPES),
             "ingest: ok — ca6 anchors: 0 of 0 ready documents anchored",
+            "ingest: ok — ca6 citations: 0 of 0 ready documents; "
+            "0 edges, 0.0 per document; case_cite 0 (0 % resolved; "
+            + ", ".join(f"{form} 0" for form in worker_identity.CITE_FORMS)
+            + "); "
+            + ", ".join(f"{kind} 0" for kind in worker_identity.CITE_TYPES if kind != "case_cite"),
             "ingest: ok — scotus: 2 opinions; ready 2, failed 0 "
             "(no-text 0, unparseable 0, empty 0, interrupted 0); "
             "xml_harvard 1, html_columbia 1, html_lawbox 0, html_anon_2020 0, "
@@ -722,6 +764,16 @@ class Install(unittest.TestCase):
             "ingest: ok — scotus anchors: 2 of 2 ready documents anchored; "
             "xml_harvard 1 documents, 100 % with a page, 65 % of characters; "
             "html_columbia 1 documents, 0 % with a page, 0 % of characters",
+            "ingest: ok — scotus citations: 2 of 2 ready documents; "
+            "5 edges, 2.5 per document; case_cite 3 (67 % resolved; "
+            + ", ".join(
+                f"{form} {cite_forms.get(form, 0)}"
+                for form in worker_identity.CITE_FORMS
+            ) + "); "
+            + ", ".join(
+                f"{kind} {cite_types.get(kind, 0)}"
+                for kind in worker_identity.CITE_TYPES if kind != "case_cite"
+            ),
             "ingest: ok — caselaw: 2 courts, 3 opinions, 2 ready, 1 failed, 0 seconds",
         ])
         self.assertLess(out.index(rows[-1]), out.index("retain: ok"))
@@ -795,6 +847,39 @@ class Install(unittest.TestCase):
             code, out, err = self.run_install()
         self.assertEqual(code, 1, out + err)
         self.assertIn("ingest: refuse — ca6: anchor read failed", out)
+        self.assertIn(issue.fix, out)
+        self.assertNotIn("retain: ok", out)
+        read.assert_called_once_with(
+            self.host, RENDERED, source="example", snapshot_date="2099-01-02",
+            court="ca6", command_path=install.COMMAND_PATH,
+        )
+
+    def test_ingest_refuses_ready_documents_without_citation_pass(self) -> None:
+        self._enable_stage()
+        self._seed_complete_stage()
+        self.host.caselaw_citation_counts["ca6"] = {
+            "ready": 1, "cited": 0, "edges": 0,
+            "by_type": {}, "by_form": {}, "case_rows": 0, "case_resolved": 0,
+        }
+        code, out, err = self.run_install()
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("ingest: refuse — ca6: 0 of 1 ready documents have citations parsed", out)
+        self.assertIn(stack.logs_fix(RENDERED, worker_identity.WORKER_SERVICE_NAME), out)
+        self.assertIn(report.command("corpus install"), out)
+        self.assertIn("ca6 sections:", out)
+        self.assertIn("ca6 anchors:", out)
+        self.assertNotIn("ca6 citations:", out)
+        self.assertNotIn("caselaw: 2 courts,", out)
+        self.assertNotIn("retain: ok", out)
+
+    def test_ingest_citation_count_problem_refuses_with_court_and_fix(self) -> None:
+        self._enable_stage()
+        self._seed_complete_stage()
+        issue = report.Problem("citation read failed", "Run the fictitious fix.")
+        with patch.object(install.caselaw, "read_citation_counts", return_value=issue) as read:
+            code, out, err = self.run_install()
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("ingest: refuse — ca6: citation read failed", out)
         self.assertIn(issue.fix, out)
         self.assertNotIn("retain: ok", out)
         read.assert_called_once_with(

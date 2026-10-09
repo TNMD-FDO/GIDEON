@@ -18,10 +18,12 @@ from typing import Any, Final, Protocol
 import psycopg
 
 import gideon.host.cas
+from gideon.casecite.found import FoundCitation
+from gideon.extraction import grammar
 from gideon.host.report import Problem
 from gideon.host.sysio import RealHost
 
-from . import anchors, fetch, opiniontext, sections, settings, staging
+from . import anchors, citations, fetch, opiniontext, sections, settings, staging
 
 CASELAW_TASK: Final = "gideon.worker.tasks.caselaw"
 CASELAW_QUEUE: Final = "caselaw"
@@ -30,6 +32,7 @@ LOCK_SUFFIX: Final = ".caselaw.lock"
 CASELAW_FAILURE_REASONS: Final = frozenset({
     "invalid", "missing-stage", "stage-mismatch", "malformed", "store",
     "database", "local", "busy", "segmenter", "anchors", "text-mismatch",
+    "citations",
 })
 DOCUMENT_FAILURE_REASONS: Final = frozenset({
     "no-text", "unparseable", "empty", "interrupted",
@@ -53,7 +56,8 @@ PRESENT_SQL: Final = (
     "SELECT o.opinion_id, d.doc_id, d.status, d.attempts, d.text_source, "
     "d.sha256, d.canonical_text_sha256, "
     "EXISTS (SELECT 1 FROM sections WHERE doc_id = d.doc_id) AS sectioned, "
-    "d.anchored_at IS NOT NULL AS anchored "
+    "d.anchored_at IS NOT NULL AS anchored, "
+    "d.citations_parsed_at IS NOT NULL AS cited "
     "FROM opinions AS o JOIN documents AS d ON d.doc_id = o.doc_id "
     "WHERE d.source = %s AND d.source_snapshot = %s AND o.court = %s"
 )
@@ -72,7 +76,7 @@ GIVE_BACK_SQL: Final = (
 )
 FINISH_READY_SQL: Final = (
     "UPDATE documents SET status = 'ready', sha256 = %s, canonical_text_sha256 = %s, "
-    "ingested_at = %s, anchored_at = %s WHERE doc_id = %s"
+    "ingested_at = %s, anchored_at = %s, citations_parsed_at = %s WHERE doc_id = %s"
 )
 FINISH_FAILED_SQL: Final = (
     "UPDATE documents SET status = 'failed', failure_reason = %s, sha256 = %s, "
@@ -88,6 +92,20 @@ ANCHOR_SQL: Final = (
     "VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)"
 )
 ANCHORED_SQL: Final = "UPDATE documents SET anchored_at = %s WHERE doc_id = %s"
+READ_SECTIONS_SQL: Final = (
+    "SELECT section_id, doc_id, ordinal, section_type, typed_by, char_start, "
+    "char_end, label, ref_offset, parent_section_id FROM sections "
+    "WHERE doc_id = %s ORDER BY ordinal"
+)
+CITATION_SQL: Final = (
+    "INSERT INTO citations (citation_id, doc_id, ordinal, char_start, char_end, "
+    "section_id, section_type, cite_type, cite_form, raw_cite, reporter_cite, "
+    "pincite, key, to_cluster, pattern_id) "
+    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+)
+MARK_CITED_SQL: Final = (
+    "UPDATE documents SET citations_parsed_at = %s WHERE doc_id = %s"
+)
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +153,7 @@ class PresentRow:
     canonical_text_sha256: str | None
     sectioned: bool
     anchored: bool
+    cited: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +228,7 @@ class IngestCounts:
     anchored: int
     pgmap_checked: int
     pgmap_disagreeing: int
+    cited: int
 
 
 class DocumentRecord(Protocol):
@@ -221,10 +241,15 @@ class DocumentRecord(Protocol):
     def finish_ready(
         self, doc_id: str, sha256: str, canonical_sha256: str, at: datetime,
         sections: tuple[NewSection, ...], anchors: tuple[NewAnchor, ...],
+        citation_rows: tuple[citations.NewCitation, ...],
     ) -> None: ...
     def write_sections(self, doc_id: str, sections: tuple[NewSection, ...]) -> None: ...
     def write_anchors(
         self, doc_id: str, anchors: tuple[NewAnchor, ...], at: datetime,
+    ) -> None: ...
+    def read_sections(self, doc_id: str) -> tuple[NewSection, ...]: ...
+    def write_citations(
+        self, doc_id: str, citation_rows: tuple[citations.NewCitation, ...], at: datetime,
     ) -> None: ...
     def finish_failed(
         self, doc_id: str, reason: str, at: datetime, sha256: str | None = None,
@@ -252,6 +277,20 @@ def _anchor_statements(
         (ANCHOR_SQL, (
             row.anchor_id, doc_id, row.kind, row.label, row.char_start, row.char_end,
             json.dumps(dict(row.attrs), sort_keys=True),
+        ))
+        for row in rows
+    )
+
+
+def _citation_statements(
+    doc_id: str, rows: tuple[citations.NewCitation, ...],
+) -> tuple[tuple[str, tuple[object, ...]], ...]:
+    return tuple(
+        (CITATION_SQL, (
+            row.citation_id, doc_id, row.ordinal, row.char_start, row.char_end,
+            row.section_id, row.section_type, row.cite_type, row.cite_form,
+            row.raw_cite, row.reporter_cite, row.pincite, row.key,
+            row.to_cluster, row.pattern_id,
         ))
         for row in rows
     )
@@ -308,10 +347,10 @@ class PsycopgRecord:
                 str(text_source) if text_source is not None else None,
                 str(sha256) if sha256 is not None else None,
                 str(canonical_sha256) if canonical_sha256 is not None else None,
-                bool(sectioned), bool(anchored),
+                bool(sectioned), bool(anchored), bool(cited),
             )
             for opinion_id, doc_id, status, attempts, text_source, sha256,
-            canonical_sha256, sectioned, anchored in rows
+            canonical_sha256, sectioned, anchored, cited in rows
         }
 
     def begin(self, document: NewDocument, opinion: NewOpinion) -> None:
@@ -343,12 +382,14 @@ class PsycopgRecord:
     def finish_ready(
         self, doc_id: str, sha256: str, canonical_sha256: str, at: datetime,
         sections: tuple[NewSection, ...], anchors: tuple[NewAnchor, ...],
+        citation_rows: tuple[citations.NewCitation, ...],
     ) -> None:
-        """Commit the ready document, sections, and anchors together."""
+        """Commit the ready document with its sections, anchors, and citations."""
 
-        self._run(((FINISH_READY_SQL, (sha256, canonical_sha256, at, at, doc_id)),
+        self._run(((FINISH_READY_SQL, (sha256, canonical_sha256, at, at, at, doc_id)),
                    *_section_statements(doc_id, sections),
-                   *_anchor_statements(doc_id, anchors)))
+                   *_anchor_statements(doc_id, anchors),
+                   *_citation_statements(doc_id, citation_rows)))
 
     def write_sections(self, doc_id: str, sections: tuple[NewSection, ...]) -> None:
         """Commit sections for an already ready document."""
@@ -362,6 +403,20 @@ class PsycopgRecord:
 
         self._run((*_anchor_statements(doc_id, anchors),
                    (ANCHORED_SQL, (at, doc_id))))
+
+    def read_sections(self, doc_id: str) -> tuple[NewSection, ...]:
+        """Read a ready document's recorded sections in ordinal order."""
+
+        rows = self._run(((READ_SECTIONS_SQL, (doc_id,)),), read=True)
+        return tuple(NewSection(*row) for row in rows)
+
+    def write_citations(
+        self, doc_id: str, citation_rows: tuple[citations.NewCitation, ...], at: datetime,
+    ) -> None:
+        """Commit a ready document's citations and completed mark together."""
+
+        self._run((*_citation_statements(doc_id, citation_rows),
+                   (MARK_CITED_SQL, (at, doc_id))))
 
     def finish_failed(
         self, doc_id: str, reason: str, at: datetime, sha256: str | None = None,
@@ -416,13 +471,15 @@ class _Progress:
     anchored: int = 0
     pgmap_checked: int = 0
     pgmap_disagreeing: int = 0
+    cited: int = 0
+    ambiguous: int = 0
     error: str = "-"
 
     def counts(self) -> IngestCounts:
         return IngestCounts(
             self.seen, self.present, self.ready, self.failed,
             self.retried, self.interrupted, self.sectioned, self.anchored,
-            self.pgmap_checked, self.pgmap_disagreeing,
+            self.pgmap_checked, self.pgmap_disagreeing, self.cited,
         )
 
 
@@ -430,11 +487,12 @@ def _log(progress: _Progress, action: str) -> None:
     logger.info(
         "action=caselaw_%s job_id=%d label=%s court=%s seen=%d present=%d "
         "ready=%d failed=%d retried=%d interrupted=%d sectioned=%d anchored=%d "
-        "pgmap_checked=%d pgmap_disagreeing=%d seconds=%.3f error=%s",
+        "pgmap_checked=%d pgmap_disagreeing=%d cited=%d ambiguous=%d seconds=%.3f error=%s",
         action, progress.job, progress.label, progress.court, progress.seen,
         progress.present, progress.ready, progress.failed, progress.retried,
         progress.interrupted, progress.sectioned, progress.anchored,
-        progress.pgmap_checked, progress.pgmap_disagreeing,
+        progress.pgmap_checked, progress.pgmap_disagreeing, progress.cited,
+        progress.ambiguous,
         max(0.0, progress.monotonic() - progress.started),
         progress.error,
     )
@@ -550,15 +608,31 @@ def _load_clusters(court_dir: Path, progress: _Progress) -> dict[int, _Cluster]:
     return clusters
 
 
-def _load_citations(court_dir: Path, progress: _Progress) -> dict[int, list[str]]:
-    citations: dict[int, list[str]] = {}
+def _load_cite_map(
+    whole: Path, courts: list[str], court: str, progress: _Progress,
+) -> tuple[dict[int, list[str]], dict[tuple[str, str, str], int | None]]:
+    citing_court: dict[int, list[str]] = {}
+    by_key: dict[tuple[str, str, str], int | None] = {}
     table = "citations"
-    with _table_rows(court_dir, table, _CITATION_COLUMNS, progress) as (columns, rows):
-        for fields, _ in rows:
-            cluster_id = _positive_integer(fields[columns["cluster_id"]], table)
-            cite = " ".join(fields[columns[name]] for name in ("volume", "reporter", "page"))
-            citations.setdefault(cluster_id, []).append(cite)
-    return citations
+    for staged_court in courts:
+        court_dir = whole / staged_court
+        if court_dir.is_symlink() or not court_dir.is_dir():
+            raise CaselawFailure("stage-mismatch", table=table)
+        with _table_rows(court_dir, table, _CITATION_COLUMNS, progress) as (columns, rows):
+            for fields, _ in rows:
+                cluster_id = _positive_integer(fields[columns["cluster_id"]], table)
+                key = (
+                    fields[columns["volume"]], fields[columns["reporter"]],
+                    fields[columns["page"]],
+                )
+                if staged_court == court:
+                    citing_court.setdefault(cluster_id, []).append(" ".join(key))
+                if key not in by_key:
+                    by_key[key] = cluster_id
+                elif by_key[key] is not None and by_key[key] != cluster_id:
+                    by_key[key] = None
+                    progress.ambiguous += 1
+    return citing_court, by_key
 
 
 def _document_id(opinion_id: int, snapshot_date: date) -> str:
@@ -630,11 +704,26 @@ def _put(host: RealHost, root: Path, text: str) -> str:
     return stored
 
 
+def _citation_rows(
+    doc_id: str, text: str, section_rows: tuple[NewSection, ...],
+    find: Callable[[str], tuple[FoundCitation, ...]],
+    resolve: citations.Resolver,
+) -> tuple[citations.NewCitation, ...]:
+    try:
+        return citations.edges(
+            doc_id, text, section_rows, find(text), grammar.extract(text), resolve,
+        )
+    except Exception as exc:  # a citation defect fails the job.
+        raise CaselawFailure("citations", error=type(exc).__name__) from exc
+
+
 def _parse_opinion(
     record: DocumentRecord, host: RealHost, store_root: Path, doc_id: str,
     chosen: tuple[str, str] | None, opinion_type: str, per_curiam: bool,
     progress: _Progress,
     clock: Callable[[], datetime],
+    find: Callable[[str], tuple[FoundCitation, ...]],
+    resolve: citations.Resolver,
 ) -> None:
     if chosen is None:
         record.finish_failed(doc_id, "no-text", clock())
@@ -658,21 +747,45 @@ def _parse_opinion(
         per_curiam=per_curiam, column=column,
     )
     anchor_rows, checked, disagreeing = _anchor_rows(doc_id, parsed, section_result)
+    citation_rows = _citation_rows(doc_id, parsed.text, section_rows, find, resolve)
     canonical = _put(host, store_root, parsed.text)
-    record.finish_ready(doc_id, original, canonical, clock(), section_rows, anchor_rows)
+    record.finish_ready(
+        doc_id, original, canonical, clock(), section_rows, anchor_rows, citation_rows,
+    )
     progress.ready += 1
     progress.anchored += 1
     progress.pgmap_checked += checked
     progress.pgmap_disagreeing += disagreeing
+    progress.cited += 1
 
 
 def _backfill(
     record: DocumentRecord, host: RealHost, store_root: Path, present: PresentRow,
     *, opinion_type: str, per_curiam: bool, progress: _Progress,
     clock: Callable[[], datetime],
+    find: Callable[[str], tuple[FoundCitation, ...]],
+    resolve: citations.Resolver,
 ) -> None:
-    if (present.sha256 is None or present.canonical_text_sha256 is None
-            or present.text_source is None):
+    if present.canonical_text_sha256 is None:
+        raise CaselawFailure("text-mismatch")
+    if present.sectioned and present.anchored:
+        canonical = gideon.host.cas.get(
+            host, present.canonical_text_sha256, root=store_root,
+        )
+        if isinstance(canonical, Problem):
+            raise CaselawFailure("store")
+        if hashlib.sha256(canonical).hexdigest() != present.canonical_text_sha256:
+            raise CaselawFailure("text-mismatch")
+        try:
+            text = canonical.decode("utf-8")
+        except UnicodeError as exc:
+            raise CaselawFailure("text-mismatch", error=type(exc).__name__) from exc
+        section_rows = record.read_sections(present.doc_id)
+        citation_rows = _citation_rows(present.doc_id, text, section_rows, find, resolve)
+        record.write_citations(present.doc_id, citation_rows, clock())
+        progress.cited += 1
+        return
+    if present.sha256 is None or present.text_source is None:
         raise CaselawFailure("text-mismatch")
     original = gideon.host.cas.get(host, present.sha256, root=store_root)
     if isinstance(original, Problem):
@@ -688,6 +801,11 @@ def _backfill(
         per_curiam=per_curiam, column=present.text_source,
     )
     anchor_rows, checked, disagreeing = _anchor_rows(present.doc_id, parsed, section_result)
+    citation_rows = () if present.cited else _citation_rows(
+        present.doc_id, parsed.text,
+        record.read_sections(present.doc_id) if present.sectioned else section_rows,
+        find, resolve,
+    )
     if not present.sectioned:
         record.write_sections(present.doc_id, section_rows)
         progress.sectioned += 1
@@ -696,6 +814,9 @@ def _backfill(
         progress.anchored += 1
     progress.pgmap_checked += checked
     progress.pgmap_disagreeing += disagreeing
+    if not present.cited:
+        record.write_citations(present.doc_id, citation_rows, clock())
+        progress.cited += 1
 
 
 @contextmanager
@@ -722,6 +843,7 @@ def ingest(
     record: DocumentRecord,
     *, clock: Callable[[], datetime] = _clock,
     monotonic: Callable[[], float] = time.monotonic,
+    find: Callable[[str], tuple[FoundCitation, ...]] | None = None,
 ) -> IngestCounts:
     """Stream one staged court into document rows and stored text objects."""
 
@@ -752,7 +874,15 @@ def ingest(
             try:
                 dockets = _load_dockets(court_dir, progress)
                 clusters = _load_clusters(court_dir, progress)
-                citations = _load_citations(court_dir, progress)
+                reporter_cites, cite_map = _load_cite_map(
+                    whole, staged.courts, court, progress,
+                )
+                if find is None:
+                    try:
+                        from gideon.casecite.adapter import find_citations
+                    except ImportError as exc:
+                        raise CaselawFailure("citations", error="ImportError") from exc
+                    find = find_citations
                 snapshot_date = date.fromisoformat(snapshot[-10:])
                 source = snapshot[:-staging.DATE_SUFFIX_LENGTH]
                 present = record.present(source, snapshot_date, court)
@@ -772,11 +902,13 @@ def ingest(
                         })
                         previous = present.get(opinion_id)
                         if (previous is not None and previous.status == "ready"
-                                and (not previous.sectioned or not previous.anchored)):
+                                and not (previous.sectioned and previous.anchored
+                                         and previous.cited)):
                             _backfill(
                                 record, host, store_root, previous,
                                 opinion_type=opinion_type, per_curiam=per_curiam,
-                                progress=progress, clock=clock,
+                                progress=progress, clock=clock, find=find,
+                                resolve=cite_map.get,
                             )
                             continue
                         # Only a processing row is unfinished; every other status is final here.
@@ -810,7 +942,7 @@ def ingest(
                                         cluster.decided_date, cluster.approximate,
                                         _precedential(cluster.precedential_raw),
                                         cluster.precedential_raw,
-                                        tuple(citations.get(cluster_id, ())),
+                                        tuple(reporter_cites.get(cluster_id, ())),
                                         opinion_type,
                                     ),
                                 )
@@ -818,10 +950,12 @@ def ingest(
                             _parse_opinion(
                                 record, host, store_root, active_doc, chosen,
                                 opinion_type, per_curiam, progress, clock,
+                                find, cite_map.get,
                             )
                         except CaselawFailure as exc:
                             if active_doc is not None and exc.reason in {
                                 "store", "database", "local", "segmenter", "anchors",
+                                "citations",
                             }:
                                 with suppress(CaselawFailure, psycopg.Error):
                                     record.give_back(active_doc)

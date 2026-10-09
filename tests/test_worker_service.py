@@ -415,13 +415,17 @@ class WorkerSettings(unittest.TestCase):
             root.setLevel(level)
         self.assertIn("action=job_success job_id=3", output.getvalue())
 
-    def test_handler_drops_both_http_client_loggers_at_every_level(self) -> None:
+    def test_handler_drops_http_and_citation_loggers_at_every_level(self) -> None:
         output = io.StringIO()
         root = logging.getLogger()
         handlers, level = root.handlers[:], root.level
         try:
             handler = logs.install_handler(output)
-            for name in ("httpx", "httpx._client", "httpcore", "httpcore.connection"):
+            for name in (
+                "httpx", "httpx._client", "httpcore", "httpcore.connection",
+                "eyecite", "eyecite.find", "reporters_db", "reporters_db.data",
+                "courts_db", "courts_db.data",
+            ):
                 for severity in (logging.DEBUG, logging.INFO, logging.WARNING, logging.ERROR):
                     record = logging.LogRecord(name, severity, __file__, 1,
                                                "SECRET_URL_SENTINEL", (), None)

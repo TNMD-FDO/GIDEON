@@ -53,7 +53,7 @@ class WorkerService(ServiceDefinition):
     name = WORKER_SERVICE_NAME
     sources = (
         "gideon/worker", "gideon/host/cas.py", "gideon/host/sysio.py",
-        "gideon/host/report.py",
+        "gideon/host/report.py", "gideon/casecite", "gideon/extraction",
     )
 
     def block(

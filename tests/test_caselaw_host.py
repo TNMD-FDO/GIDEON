@@ -6,7 +6,7 @@ import unittest
 from collections.abc import Mapping
 from pathlib import Path
 
-from gideon.host import caselaw, report, staging, worker
+from gideon.host import caselaw, report, stack, staging, worker
 from gideon.host.render import worker as identity
 from gideon.host.sysio import Command, PathLike, RealHost
 
@@ -104,6 +104,15 @@ def anchor_counts_for() -> dict[str, object]:
     }
 
 
+def citation_counts_for() -> dict[str, object]:
+    return {
+        "ready": 2, "cited": 2, "edges": 5,
+        "by_type": {"case_cite": 3, "statute": 2},
+        "by_form": {"full": 2, "short": 1},
+        "case_rows": 3, "case_resolved": 2,
+    }
+
+
 class CaselawHost(unittest.TestCase):
     """Queue arguments, durable failures, and count rows stay bounded and typed."""
 
@@ -134,6 +143,12 @@ class CaselawHost(unittest.TestCase):
 
     def read_anchor_counts(self) -> caselaw.AnchorCounts | report.Problem:
         return caselaw.read_anchor_counts(
+            self.host, RENDERED, source=SOURCE,
+            snapshot_date="2099-01-02", court=COURT,
+        )
+
+    def read_citation_counts(self) -> caselaw.CitationCounts | report.Problem:
+        return caselaw.read_citation_counts(
             self.host, RENDERED, source=SOURCE,
             snapshot_date="2099-01-02", court=COURT,
         )
@@ -218,6 +233,7 @@ class CaselawHost(unittest.TestCase):
             "invalid": ("logs", "corpus install"),
             "segmenter": ("logs", "report the defect", "corpus install"),
             "anchors": ("logs", "report the defect", "corpus install"),
+            "citations": ("python3 -m tools.imagebuild gideon --check", "logs", "corpus install"),
             "text-mismatch": ("logs", "new corpus cut", "corpus cut", "corpus install"),
         }
         self.assertEqual(set(expected), identity.CASELAW_FAILURE_REASONS)
@@ -234,6 +250,13 @@ class CaselawHost(unittest.TestCase):
                     self.assertIn(part, result.failure.fix)
                 if reason in {"missing-stage", "stage-mismatch"}:
                     self.assertIn("Remove", result.failure.fix)
+                if reason == "citations":
+                    self.assertEqual(
+                        result.failure.fix,
+                        "Run python3 -m tools.imagebuild gideon --check and "
+                        f"{stack.logs_fix(RENDERED, identity.WORKER_SERVICE_NAME)}, "
+                        f"then run {report.command('corpus install')} again.",
+                    )
 
     def test_terminal_status_without_this_jobs_file_is_local(self) -> None:
         for status in ("failed", "aborted", "cancelled"):
@@ -531,6 +554,85 @@ class CaselawHost(unittest.TestCase):
         self.host.code = 0
         self.host.run_error = FileNotFoundError("private executable path")
         result = self.read_anchor_counts()
+        self.assertIsInstance(result, report.Problem)
+        assert isinstance(result, report.Problem)
+        self.assertIn("FileNotFoundError", result.problem)
+        self.assertNotIn("private executable path", result.problem)
+
+    def test_read_citation_counts_binds_values_and_parses_one_json_row(self) -> None:
+        self.host.counts_output = json.dumps(citation_counts_for()) + "\n"
+        self.assertEqual(self.read_citation_counts(), caselaw.CitationCounts(
+            2, 2, 5, {"case_cite": 3, "statute": 2},
+            {"full": 2, "short": 1}, 3, 2,
+        ))
+        self.assertEqual(len(self.host.calls), 1)
+        argv, sql = self.host.calls[0]
+        self.assertEqual(argv, worker.psql_argv(RENDERED))
+        assert sql is not None
+        for name, expected in (("v_source", SOURCE),
+                               ("v_snapshot_date", "2099-01-02"),
+                               ("v_court", COURT)):
+            self.assertIn(worker.bind(name, expected), sql)
+            self.assertNotIn(expected, " ".join(argv))
+        self.assertIn(caselaw.CITATION_COUNTS_SQL, sql)
+        self.assertNotIn(caselaw.ANCHOR_COUNTS_SQL, sql)
+        self.assertIn("public.citations", sql)
+        self.assertIn("citations_parsed_at IS NOT NULL", sql)
+        self.assertIn("to_cluster IS NOT NULL", sql)
+
+    def test_read_citation_counts_refuses_bad_rows(self) -> None:
+        base = citation_counts_for()
+        cases = (
+            ("ready", -1), ("ready", True), ("ready", "2"),
+            ("cited", -1), ("cited", True), ("cited", 3),
+            ("edges", -1), ("edges", True),
+            ("by_type", {"invented": 1}), ("by_type", {"statute": -1}),
+            ("by_type", {"statute": True}),
+            ("by_form", {"invented": 1}), ("by_form", {"full": "2"}),
+            ("case_rows", -1), ("case_rows", True),
+            ("case_resolved", -1), ("case_resolved", True),
+            ("case_resolved", 4),
+        )
+        for field, bad in cases:
+            with self.subTest(field=field, bad=bad):
+                self.host.counts_output = json.dumps({**base, field: bad})
+                result = self.read_citation_counts()
+                self.assertIsInstance(result, report.Problem)
+                assert isinstance(result, report.Problem)
+                self.assertIn("citations row is invalid", result.problem)
+        for value in ({**base, "extra": 1},
+                      {key: item for key, item in base.items() if key != "ready"}):
+            self.host.counts_output = json.dumps(value)
+            self.assertIsInstance(self.read_citation_counts(), report.Problem)
+        self.host.counts_output = "not json"
+        self.assertIsInstance(self.read_citation_counts(), report.Problem)
+
+    def test_read_citation_counts_refuses_bad_arguments_and_psql_outcomes(self) -> None:
+        for field, bad in (("source", "../outside"), ("snapshot_date", "2099-99-02"),
+                           ("snapshot_date", "20990102"), ("court", "Court1")):
+            with self.subTest(field=field):
+                args = {"source": SOURCE, "snapshot_date": "2099-01-02", "court": COURT}
+                args[field] = bad
+                self.host.calls.clear()
+                self.assertIsInstance(
+                    caselaw.read_citation_counts(self.host, RENDERED, **args), report.Problem,
+                )
+                self.assertEqual(self.host.calls, [])
+        self.host.code = 127
+        result = self.read_citation_counts()
+        self.assertIsInstance(result, report.Problem)
+        assert isinstance(result, report.Problem)
+        self.assertIn("unavailable", result.problem)
+        self.assertIn("host provision", result.fix)
+        self.host.code = 3
+        result = self.read_citation_counts()
+        self.assertIsInstance(result, report.Problem)
+        assert isinstance(result, report.Problem)
+        self.assertIn("exit 3", result.problem)
+        self.assertIn(self.host.stderr, result.problem)
+        self.host.code = 0
+        self.host.run_error = FileNotFoundError("private executable path")
+        result = self.read_citation_counts()
         self.assertIsInstance(result, report.Problem)
         assert isinstance(result, report.Problem)
         self.assertIn("FileNotFoundError", result.problem)

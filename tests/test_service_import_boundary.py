@@ -9,13 +9,17 @@ from pathlib import Path
 from gideon import guardrail
 from gideon.host.render.api import API_SERVICE_NAME
 from gideon.host.render.services import declared_sources
+from gideon.host.render.worker import WORKER_SERVICE_NAME
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PARENT_INITIALIZER = REPO_ROOT / "gideon/__init__.py"
 ALLOWED_DEPENDENCIES = frozenset(
-    {"starlette", "uvicorn", "httpx", "anyio", "procrastinate", "lxml",
+    {"starlette", "uvicorn", "httpx", "anyio", "procrastinate", "lxml", "eyecite",
      guardrail.TRIP_DRIVER_MODULE}
 )
+# The adapter imports a library the image carries and the dev venv does not, so
+# its callers import it where it is used and refuse by name when it is missing.
+DEFERRED_MODULES = frozenset({"gideon.casecite.adapter"})
 _FIX = (
     "Keep service imports at module level and limited to the standard library, "
     "the image dependencies, or the service's declared sources."
@@ -118,7 +122,7 @@ def _internal_import_error(
             f"`{dotted}` is outside the service's declared sources or is a bare "
             "gideon package name.",
         )
-    if not module_level:
+    if not module_level and dotted not in DEFERRED_MODULES:
         return _error(path, node, f"`{dotted}` is a deferred import inside gideon.")
     return None
 
@@ -207,6 +211,16 @@ class ServiceImportBoundary(unittest.TestCase):
         self.assertEqual(
             initializer_violations(PARENT_INITIALIZER, PARENT_INITIALIZER.read_text()), []
         )
+
+    def test_only_the_image_only_adapter_may_be_imported_where_used(self) -> None:
+        path = REPO_ROOT / "gideon/worker/caselaw.py"
+        modules = declared_modules(declared_sources()[WORKER_SERVICE_NAME])
+        allowed = "def deferred() -> None:\n    from gideon.casecite.adapter import find_citations\n"
+        self.assertEqual(import_violations(path, allowed, modules), [])
+        refused = "def deferred() -> None:\n    from gideon.casecite.found import FoundCitation\n"
+        errors = import_violations(path, refused, modules)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("deferred import", errors[0])
 
     def test_unlisted_import_at_module_and_function_scope_is_rejected(self) -> None:
         path = REPO_ROOT / "gideon/api/app.py"

@@ -84,7 +84,7 @@ class Registry(unittest.TestCase):
                 API_SERVICE_NAME: ("gideon/api", "gideon/guardrail"),
                 WORKER_SERVICE_NAME: (
                     "gideon/worker", "gideon/host/cas.py", "gideon/host/sysio.py",
-                    "gideon/host/report.py",
+                    "gideon/host/report.py", "gideon/casecite", "gideon/extraction",
                 ),
                 EGRESS_SERVICE_NAME: ("gideon/egress",),
             },
