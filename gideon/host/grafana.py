@@ -44,6 +44,21 @@ def _administrator_secret_fix(*, missing: bool) -> str:
     return fix
 
 
+def administrator_rotation_route() -> str:
+    """The by-hand route for the administrator's seeded password, unpunctuated.
+
+    The rotate refusal and the board check's sign-in fix both print it, so the two
+    name one route in the same words.
+    """
+
+    return (
+        "Change it in Grafana first: PUT /grafana/api/user/password through the ingress "
+        f"as {GRAFANA_ADMIN_USER} with the old and new value in the request body carried "
+        "on stdin (curl -K -), then rewrite "
+        f"{secrets.secret_path(_ADMIN_SECRET)} in place — the install runbook's rotation step"
+    )
+
+
 class GrafanaError(Exception):
     """A safe, fix-bearing Grafana failure."""
 

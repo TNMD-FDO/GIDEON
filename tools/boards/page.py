@@ -14,7 +14,7 @@ from typing import Final, Literal, Protocol
 from urllib.parse import quote, urlsplit
 
 from gideon.evaluation.turns.browser import PageError
-from gideon.host import secrets
+from gideon.host import grafana, secrets
 from gideon.host.render.grafana import GRAFANA_SUB_PATH
 from gideon.host.report import Problem, one_line
 from tools.boards.inventory import Board, CollapsedRow, ExpectedPanel
@@ -102,12 +102,16 @@ class PanelReading:
     detail: str = ""
 
 
-_SIGNIN_FIX: Final = (
-    f"Check {secrets.secret_path('grafana_admin_password')}; run "
-    "`sudo python3 -m gideon secrets rotate grafana_admin_password` if it is wrong; "
-    "after repeated failures wait five minutes for Grafana's login lockout, then retry."
-)
 _PAGE_FIX: Final = "Check the Grafana ingress and browser request log, then retry."
+
+
+def _signin_fix() -> str:
+    return (
+        f"Rewrite {secrets.secret_path('grafana_admin_password')} in place from the office "
+        "password manager if the file is wrong. If Grafana's stored password is what "
+        f"differs: {grafana.administrator_rotation_route()}. After repeated failures "
+        "wait five minutes for Grafana's login lockout, then retry."
+    )
 
 
 def _login_page(page: BoardPage) -> bool:
@@ -137,9 +141,9 @@ def sign_in(
             timeout,
         )
         if page.count(LOGIN_ERROR_SELECTOR) > 0:
-            return Problem("Grafana refused the break-glass sign-in", _SIGNIN_FIX)
+            return Problem("Grafana refused the break-glass sign-in", _signin_fix())
         if _login_page(page):
-            return Problem("Grafana sign-in did not finish", _SIGNIN_FIX)
+            return Problem("Grafana sign-in did not finish", _signin_fix())
         return None
     except PageError as exc:
         if exc.certificate:

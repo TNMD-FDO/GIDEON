@@ -16,7 +16,7 @@ from urllib.parse import unquote, urlsplit
 
 from gideon.evaluation.turns import chromium
 from gideon.evaluation.turns.browser import PageError
-from gideon.host import grafana, site, tls
+from gideon.host import grafana, report, site, tls
 from gideon.host.render import ARTIFACTS
 from gideon.host.render.grafana import GRAFANA_ADMIN_USER
 from gideon.host.report import Problem
@@ -304,6 +304,8 @@ class FakePage:
             return
         if self.login_mode == "failed":
             self.login_error = True
+            return
+        if self.login_mode == "stalled":
             return
         self.current_url = "/grafana/"
 
@@ -746,17 +748,51 @@ class BoardRows(unittest.TestCase):
         self.assertEqual(browser_page.click_selectors, [page.LOGIN_SELECTOR])
 
     def test_failed_sign_in_alert_has_a_fix(self) -> None:
+        rows = []
+        try:
+            for installed in (False, True):
+                with self.subTest(installed=installed):
+                    report.set_installed_form(installed)
+                    host = FakeHost(board_document("example-board", [("Figure", "timeseries")]))
+                    browser_page = FakePage(host, [], login_mode="failed")
+                    code, stdout, stderr = self.invoke(host, browser_page)
+                    self.assertEqual(code, 1)
+                    self.assertEqual(stderr, "")
+                    row = next(line for line in stdout.splitlines() if line.startswith("signin: refuse"))
+                    self.assertIn("Grafana refused the break-glass sign-in Fix: ", row)
+                    self.assertIn(
+                        f"Rewrite {secret_path('grafana_admin_password')} in place from the office password manager",
+                        row,
+                    )
+                    self.assertIn("the install runbook's rotation step", row)
+                    self.assertIn("wait five minutes for Grafana's login lockout", row)
+                    self.assertNotIn("secrets rotate", row)
+                    self.assertNotIn("python3 -m gideon", row)
+                    self.assertNotIn(PASSWORD, stdout + stderr)
+                    rows.append(row)
+        finally:
+            report.set_installed_form(False)
+        self.assertEqual(rows[0], rows[1])
+
+    def test_sign_in_that_does_not_finish_has_a_fix(self) -> None:
         host = FakeHost(board_document("example-board", [("Figure", "timeseries")]))
-        browser_page = FakePage(host, [], login_mode="failed")
+        browser_page = FakePage(host, [], login_mode="stalled")
         code, stdout, stderr = self.invoke(host, browser_page)
         self.assertEqual(code, 1)
         self.assertEqual(stderr, "")
+        row = next(line for line in stdout.splitlines() if line.startswith("signin: refuse"))
+        self.assertIn("Grafana sign-in did not finish Fix: ", row)
         self.assertIn(
-            "signin: refuse — Grafana refused the break-glass sign-in", stdout
+            f"Rewrite {secret_path('grafana_admin_password')} in place from the office password manager",
+            row,
         )
-        self.assertIn("Fix: ", stdout)
-        self.assertIn("secrets rotate grafana_admin_password", stdout)
-        self.assertNotIn(PASSWORD, stdout)
+        self.assertIn("the install runbook's rotation step", row)
+        self.assertIn("wait five minutes for Grafana's login lockout", row)
+        self.assertNotIn("secrets rotate", row)
+        self.assertNotIn(PASSWORD, stdout + stderr)
+        self.assertEqual(browser_page.fill_selectors.count(page.USERNAME_SELECTOR), 1)
+        self.assertEqual(browser_page.fill_selectors.count(page.PASSWORD_SELECTOR), 1)
+        self.assertEqual(browser_page.click_selectors, [page.LOGIN_SELECTOR])
 
     def test_certificate_page_error_has_trust_ca_fix(self) -> None:
         host = FakeHost(board_document("example-board", [("Figure", "timeseries")]))

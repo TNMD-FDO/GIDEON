@@ -45,6 +45,24 @@ class _SecretHost:
 class AdministratorAccess(unittest.TestCase):
     """The break-glass administrator's access, read once, and its secret file's refusals."""
 
+    def test_rotation_route_names_the_administrator_and_is_command_form_independent(self) -> None:
+        routes = []
+        try:
+            for installed in (False, True):
+                with self.subTest(installed=installed):
+                    report.set_installed_form(installed)
+                    route = grafana.administrator_rotation_route()
+                    self.assertIn(GRAFANA_ADMIN_USER, route)
+                    self.assertIn(str(secrets.secret_path("grafana_admin_password")), route)
+                    self.assertIn("/grafana/api/user/password", route)
+                    self.assertIn("the install runbook's rotation step", route)
+                    self.assertNotIn("python3 -m gideon", route)
+                    self.assertNotIn("gideon ", route)
+                    routes.append(route)
+        finally:
+            report.set_installed_form(False)
+        self.assertEqual(routes[0], routes[1])
+
     def test_available_secret_opens_injected_client_without_exposing_password(self) -> None:
         password = "fictitious-grafana-password"
         host = _SecretHost(password + "\n")

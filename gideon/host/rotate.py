@@ -19,7 +19,6 @@ from gideon.host.render import RenderedSet, RenderInputs, render_all
 from gideon.host.render import command as render_command
 from gideon.host.render.compose import service_names
 from gideon.host.render.consumers import SecretConsumers, consumers_of
-from gideon.host.render.grafana import GRAFANA_ADMIN_USER
 from gideon.host.render.owui import BREAK_GLASS, EVAL_IDENTITY
 from gideon.host.render.services import slow_start_services
 from gideon.host.report import StageResult, print_stage, refusal
@@ -100,13 +99,8 @@ def _account_fix(name: str, login: str) -> str:
     )
 
 
-def _seeded_fix(name: str) -> str:
-    return (
-        f"Change it in Grafana first: PUT /grafana/api/user/password through the ingress "
-        f"as {GRAFANA_ADMIN_USER} with the old and new value in the request body carried "
-        f"on stdin (curl -K -), then rewrite {secret_path(name)} in place — the install "
-        f"runbook's rotation step; a ticket of its own — {_ONLY_HOME_RULE}."
-    )
+def _seeded_fix() -> str:
+    return f"{grafana.administrator_rotation_route()}; a ticket of its own — {_ONLY_HOME_RULE}."
 
 
 def _pre_run_refusal(name: str) -> int | None:
@@ -149,7 +143,7 @@ def _pre_run_refusal(name: str) -> int | None:
     return _refuse(
         f"{name} also lives in Grafana's stored admin user, seeded from the file at "
         "first start only.",
-        _seeded_fix(name),
+        _seeded_fix(),
     )
 
 
