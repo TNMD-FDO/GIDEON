@@ -15,6 +15,9 @@ The landed types are an argument: the caller passes the types the grammar's
 registry declares, never the types an extraction returned, so a family that
 emits nothing stays gated and fails on recall.  A gated type with no active
 label fails too.  Findings name a case id, a type, and offsets, never text.
+Callers raise ``ExtractionResidualWarning`` for allowed residuals; defining it
+here lets any process rebuild a warning from its category's dotted name, while
+this module raises none.
 """
 
 from collections.abc import Iterable, Mapping, Sequence
@@ -66,6 +69,10 @@ class SetScore:
     misses: tuple[Finding, ...]
     false_hits: tuple[Finding, ...]
     verdict: bool
+
+
+class ExtractionResidualWarning(UserWarning):
+    """An allowed scorer residual, identified without question text."""
 
 
 @dataclass

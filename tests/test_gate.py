@@ -15,6 +15,7 @@ from unittest import mock
 from tools import gate, mask
 
 ROOT = Path(__file__).resolve().parent.parent
+FIXED_CPUS = 4
 
 
 class RecordingRunner:
@@ -88,22 +89,36 @@ def run_gate(
     argv: Sequence[str],
     runner: RecordingRunner,
     fake: RecordingMask | None = None,
+    cpu_reader: gate.CPUReader | None = None,
 ) -> tuple[int, str]:
     if fake is None:
         fake = fake_mask()
     stdout = io.StringIO()
     with contextlib.redirect_stdout(stdout):
-        code = gate.main(argv, runner=runner, mask=mask_seam(fake))
+        code = gate.main(
+            argv,
+            runner=runner,
+            mask=mask_seam(fake),
+            cpu_reader=cpu_reader or (lambda: FIXED_CPUS),
+        )
     return code, stdout.getvalue()
 
 
 def run_gate_with_stderr(
-    argv: Sequence[str], runner: RecordingRunner, fake: RecordingMask
+    argv: Sequence[str],
+    runner: RecordingRunner,
+    fake: RecordingMask,
+    cpu_reader: gate.CPUReader | None = None,
 ) -> tuple[int, str, str]:
     stdout = io.StringIO()
     stderr = io.StringIO()
     with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-        code = gate.main(argv, runner=runner, mask=mask_seam(fake))
+        code = gate.main(
+            argv,
+            runner=runner,
+            mask=mask_seam(fake),
+            cpu_reader=cpu_reader or (lambda: FIXED_CPUS),
+        )
     return code, stdout.getvalue(), stderr.getvalue()
 
 
@@ -120,12 +135,12 @@ class Gate(unittest.TestCase):
         )
         self.assertEqual(runner.commands[1][1:], ("check", "."))
         self.assertEqual(runner.commands[2][1:], ("gideon", "tests", "tools"))
-        self.assertEqual(runner.commands[3][1:], ("-x", "-m", "not slow"))
+        self.assertEqual(runner.commands[3][1:], ("-x", "-n", "4", "-m", "not slow"))
         lines = output.splitlines()
         self.assertEqual(len(lines), 1)
         self.assertRegex(
             lines[0],
-            r"^gate: green in \d+\.\d+s \(environment, ruff, mypy, pytest; slow cases skipped, --all runs them; unmasked\)$",
+            r"^gate: green in \d+\.\d+s \(environment, ruff, mypy, pytest; slow cases skipped, --all runs them; unmasked; 4 workers\)$",
         )
 
     def test_test_paths_pass_through_to_pytest_alone(self) -> None:
@@ -136,18 +151,66 @@ class Gate(unittest.TestCase):
         self.assertEqual(runner.commands[2][1:], ("gideon", "tests", "tools"))
         self.assertEqual(
             runner.commands[3][1:],
-            ("-x", "-m", "not slow", "tests/test_gate.py", "tests/test_tracker.py"),
+            ("-x", "-n", "4", "-m", "not slow", "tests/test_gate.py", "tests/test_tracker.py"),
         )
 
     def test_all_drops_the_slow_filter_and_says_so(self) -> None:
         runner = RecordingRunner([0, 0, 0, 0])
         code, output = run_gate(["--all", "tests/test_gate.py"], runner)
         self.assertEqual(code, 0)
-        self.assertEqual(runner.commands[3][1:], ("-x", "tests/test_gate.py"))
+        self.assertEqual(runner.commands[3][1:], ("-x", "-n", "4", "tests/test_gate.py"))
         self.assertRegex(
             output.splitlines()[0],
-            r"^gate: green in \d+\.\d+s \(environment, ruff, mypy, pytest; all cases; unmasked\)$",
+            r"^gate: green in \d+\.\d+s \(environment, ruff, mypy, pytest; all cases; unmasked; 4 workers\)$",
         )
+
+    def test_worker_count_stops_at_the_cap(self) -> None:
+        runner = RecordingRunner([0, 0, 0, 0])
+        code, output = run_gate(
+            [], runner, cpu_reader=lambda: gate.WORKER_CAP + 8
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(runner.commands[3][1:4], ("-x", "-n", str(gate.WORKER_CAP)))
+        self.assertIn(f"; {gate.WORKER_CAP} workers)", output)
+
+    def test_worker_count_uses_the_smaller_cpu_figure_with_one_path(self) -> None:
+        runner = RecordingRunner([0, 0, 0, 0])
+        code, output = run_gate(
+            ["tests/test_gate.py"], runner, cpu_reader=lambda: 3
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            runner.commands[3][1:],
+            ("-x", "-n", "3", "-m", "not slow", "tests/test_gate.py"),
+        )
+        self.assertIn("; 3 workers)", output)
+
+    def test_one_cpu_uses_the_singular_summary_word(self) -> None:
+        runner = RecordingRunner([0, 0, 0, 0])
+        code, output = run_gate([], runner, cpu_reader=lambda: 1)
+        self.assertEqual(code, 0)
+        self.assertEqual(runner.commands[3][1:4], ("-x", "-n", "1"))
+        self.assertIn("; 1 worker)", output)
+        self.assertEqual(gate.worker_count(0), 1)
+
+    def test_cpu_reader_runs_once_before_environment_comparison(self) -> None:
+        events: list[str] = []
+
+        def cpu_reader() -> int:
+            events.append("cpu")
+            return 6
+
+        def comparison() -> tuple[str, ...]:
+            events.append("comparison")
+            return ("environment",)
+
+        runner = RecordingRunner([0, 0, 0, 0])
+        with mock.patch.object(gate, "environment_command", side_effect=comparison):
+            code, output = run_gate([], runner, cpu_reader=cpu_reader)
+        self.assertEqual(code, 0)
+        self.assertEqual(events, ["cpu", "comparison"])
+        self.assertEqual(runner.commands[3][1:4], ("-x", "-n", "6"))
+        self.assertIn("; 6 workers)", output)
 
     def test_red_tool_stops_the_gate_with_its_exit_code(self) -> None:
         runner = RecordingRunner([0, 0, 2, 0])
@@ -156,7 +219,7 @@ class Gate(unittest.TestCase):
         self.assertEqual(len(runner.commands), 3)
         lines = output.splitlines()
         self.assertEqual(len(lines), 1)
-        self.assertRegex(lines[0], r"^gate: red at mypy \(exit 2\) after \d+\.\d+s \(unmasked\)$")
+        self.assertRegex(lines[0], r"^gate: red at mypy \(exit 2\) after \d+\.\d+s \(unmasked; 4 workers\)$")
 
     def test_present_paths_without_flag_observe_only_and_stay_unmasked(self) -> None:
         present = ("/etc/gideon", "/data")
@@ -169,8 +232,8 @@ class Gate(unittest.TestCase):
         self.assertEqual(fake.wrap_calls, [])
         self.assertEqual(runner.commands[1][1:], ("check", "."))
         self.assertEqual(runner.commands[2][1:], ("gideon", "tests", "tools"))
-        self.assertEqual(runner.commands[3][1:], ("-x", "-m", "not slow"))
-        self.assertIn("; unmasked)", output)
+        self.assertEqual(runner.commands[3][1:], ("-x", "-n", "4", "-m", "not slow"))
+        self.assertIn("; unmasked; 4 workers)", output)
 
     def test_masked_wraps_pytest_alone_and_trials_before_each_phase(self) -> None:
         present = ("/etc/gideon", "/data")
@@ -183,9 +246,10 @@ class Gate(unittest.TestCase):
         runner = RecordingRunner([0, 0, 0, 0])
         code, output = run_gate(["--masked", "tests/test_gate.py"], runner, fake)
         self.assertEqual(code, 0)
-        self.assertIn("; masked)", output)
+        self.assertIn("; masked; 4 workers)", output)
         self.assertEqual(len(fake.probe_commands), 2)
         self.assertEqual(fake.probe_commands[0], fake.probe_commands[1])
+        self.assertEqual(fake.probe_commands[0][1:4], ("-x", "-n", "4"))
         self.assertEqual(fake.wrap_calls, [(fake.probe_commands[1], present)])
         self.assertEqual(runner.commands[1][1:], ("check", "."))
         self.assertEqual(runner.commands[2][1:], ("gideon", "tests", "tools"))
@@ -210,7 +274,7 @@ class Gate(unittest.TestCase):
         self.assertEqual(refusal.problem, "the probe refused")
         self.assertEqual(refusal.fix, "repair the mask")
         self.assertEqual(error, "mask: the probe refused. Fix: repair the mask\n")
-        self.assertRegex(output, r"^gate: red at mask \(exit 1\) after \d+\.\d+s \(mask refused\)$")
+        self.assertRegex(output, r"^gate: red at mask \(exit 1\) after \d+\.\d+s \(mask refused; 4 workers\)$")
 
     def test_second_trial_refusal_runs_no_pytest(self) -> None:
         observed = observation(mask.ProbeState.READY, ("/data",))
@@ -230,7 +294,7 @@ class Gate(unittest.TestCase):
         self.assertEqual(refusal.problem, "the credential expired")
         self.assertEqual(refusal.fix, "log in again")
         self.assertEqual(error, "mask: the credential expired. Fix: log in again\n")
-        self.assertRegex(output, r"^gate: red at mask \(exit 1\) after \d+\.\d+s \(mask refused\)$")
+        self.assertRegex(output, r"^gate: red at mask \(exit 1\) after \d+\.\d+s \(mask refused; 4 workers\)$")
 
     def test_mask_exit_codes_are_reported_as_mask_failures(self) -> None:
         observed = observation(mask.ProbeState.READY, ("/data",))
@@ -246,7 +310,7 @@ class Gate(unittest.TestCase):
                 self.assertEqual(actual, code)
                 self.assertRegex(
                     output,
-                    rf"^gate: red at mask \(exit {code}\) after \d+\.\d+s \(mask failed\)$",
+                    rf"^gate: red at mask \(exit {code}\) after \d+\.\d+s \(mask failed; 4 workers\)$",
                 )
 
     def test_wrapped_pytest_exit_one_is_reported_as_pytest(self) -> None:
@@ -259,7 +323,7 @@ class Gate(unittest.TestCase):
         runner = RecordingRunner([0, 0, 0, 1])
         code, output = run_gate(["--masked"], runner, fake)
         self.assertEqual(code, 1)
-        self.assertRegex(output, r"^gate: red at pytest \(exit 1\) after \d+\.\d+s \(masked\)$")
+        self.assertRegex(output, r"^gate: red at pytest \(exit 1\) after \d+\.\d+s \(masked; 4 workers\)$")
 
     def test_inside_mask_with_or_without_flag_does_not_probe_or_wrap(self) -> None:
         for argv in ([], ["--masked"]):
@@ -270,7 +334,7 @@ class Gate(unittest.TestCase):
                 self.assertEqual(code, 0)
                 self.assertEqual(fake.probe_commands, [])
                 self.assertEqual(fake.wrap_calls, [])
-                self.assertIn("; masked by the caller)", output)
+                self.assertIn("; masked by the caller; 4 workers)", output)
 
     def test_masked_with_no_paths_says_it_proceeds_unmasked(self) -> None:
         fake = fake_mask(mask.ProbeState.ABSENT)
@@ -279,7 +343,7 @@ class Gate(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(fake.probe_commands, [])
         self.assertEqual(fake.wrap_calls, [])
-        self.assertIn("; mask asked, no listed path on this host)", output)
+        self.assertIn("; mask asked, no listed path on this host; 4 workers)", output)
 
     def test_environment_red_stops_before_tools_and_the_first_mask_trial(self) -> None:
         fake = fake_mask(mask.ProbeState.READY, ("/data",))
@@ -293,7 +357,7 @@ class Gate(unittest.TestCase):
         self.assertEqual(error, "")
         self.assertRegex(
             output,
-            r"^gate: red at environment \(exit 23\) after \d+\.\d+s \(masked\)$",
+            r"^gate: red at environment \(exit 23\) after \d+\.\d+s \(masked; 4 workers\)$",
         )
 
     def test_environment_command_uses_shared_tool_directory_and_python_first(self) -> None:
@@ -362,7 +426,7 @@ class Gate(unittest.TestCase):
                     self.assertIn("Fix:", error)
                     self.assertRegex(
                         output,
-                        r"^gate: red at environment \(exit 1\) after \d+\.\d+s \(masked\)$",
+                        r"^gate: red at environment \(exit 1\) after \d+\.\d+s \(masked; 4 workers\)$",
                     )
 
     def test_resolve_falls_back_to_the_venv_then_the_bare_name(self) -> None:

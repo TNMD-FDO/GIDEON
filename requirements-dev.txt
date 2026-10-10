@@ -8,6 +8,10 @@
 ruff==0.16.8
 mypy==2.3.1
 pytest==9.1.1
+# The gate's pytest step runs across worker processes, capped in tools/gate.py.
+# Its one dependency, execnet, is admitted by the environment comparison's closure
+# and pinned nowhere, as pytest's own dependencies are; it moves like the three above.
+pytest-xdist==3.8.0
 # PyYAML stands in for the box's python3-yaml (the bare-host path's one non-stdlib
 # import). pin-watch.yml pins it alone for the watch; the test holds that copy equal.
 PyYAML==6.0.3

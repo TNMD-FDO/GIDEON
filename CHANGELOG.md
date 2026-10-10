@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.120](docs/release-notes/v0.3.120.md) — 2026-10-10 — the gate runs its tests across worker processes, in about a fifth of the time
 - [v0.3.119](docs/release-notes/v0.3.119.md) — 2026-10-10 — the acceptance run beside a synthetic co-tenant, in either order
 - [v0.3.118](docs/release-notes/v0.3.118.md) — 2026-10-10 — the board check's sign-in fix names no refused rotate
 - [v0.3.117](docs/release-notes/v0.3.117.md) — 2026-10-10 — tracker commits under the release lock

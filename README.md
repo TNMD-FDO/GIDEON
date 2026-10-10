@@ -8,7 +8,7 @@ assistant, on one box the office controls. Built by TNMD-FDO (the Office of
 the Federal Public Defender, Middle District of Tennessee) and designed from
 day one for distribution: clone a tag, edit `site.yaml`, run one script.
 
-**Status:** 0.x — slice 0 (platform) complete at `v0.1.0`, the clean-VM acceptance at minor tags its standing proof; slice 1 (General) complete at `v0.2.0`, with no user on the box until go-live; slice 2 (eval harness) complete at `v0.3.0`; slice 3 (corpus machinery and tranche 1) next; this tree is `v0.3.119`.
+**Status:** 0.x — slice 0 (platform) complete at `v0.1.0`, the clean-VM acceptance at minor tags its standing proof; slice 1 (General) complete at `v0.2.0`, with no user on the box until go-live; slice 2 (eval harness) complete at `v0.3.0`; slice 3 (corpus machinery and tranche 1) next; this tree is `v0.3.120`.
 What each release changed is in [`CHANGELOG.md`](CHANGELOG.md), one line per release; from `v0.2.0` each line links its release note. Later-slice commands still print "not implemented".
 
 ## Install
@@ -84,7 +84,7 @@ python3 -m gideon --help
 
 `gideon host …`, `preflight`, `render`, `apply`, `secrets rotate`, `tls reload`, `registry mirror`, and `users reconcile` run from the checkout on a bare Ubuntu Server install using only the standard library and `python3-yaml`, because render runs before any image is pulled — a boundary CI enforces. `render`, `apply`, `secrets rotate`, `tls reload`, `users reconcile`, and `status` need root; `registry mirror` needs Docker access; `alerts test` and `worker verify` need root and a converged `apply`. `apply`, `secrets rotate`, and `engine verify` take the engine lock and refuse while an evaluation holds it. `status` reads firing pages, office proposals, and host facts, plus the developer block on the build box, without writing. The installed `gideon` command runs every command as root. A host without a GPU is provisioned once with `sudo python3 -m gideon host provision --no-gpu`; every later command reads that declaration. `users reconcile` reports until given `--now`, and a rendered systemd timer runs it nightly.
 
-The development toolchain is `requirements-dev.txt` — the five toolchain pins and, beside them, a copy of the `gideon` image's dependency set so mypy and the unit suite see the service's imports; never the product's path, which installs nothing from PyPI — in an untracked project venv:
+The development toolchain is `requirements-dev.txt` — the six toolchain pins and, beside them, a copy of the `gideon` image's dependency set so mypy and the unit suite see the service's imports; never the product's path, which installs nothing from PyPI — in an untracked project venv:
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt

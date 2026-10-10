@@ -21,7 +21,13 @@ from gideon.extraction import (
 )
 from gideon.extraction.contract import EYECITE_TYPES
 from gideon.extraction.grammar import registry_types
-from gideon.extraction.scoring import SetScore, active_cases, build_report, score
+from gideon.extraction.scoring import (
+    ExtractionResidualWarning,
+    SetScore,
+    active_cases,
+    build_report,
+    score,
+)
 from tools.exportboundary import absent_from_export
 from tools.variants.axes import AXES
 
@@ -55,10 +61,6 @@ INVENTED_VARIANTS_PINNED_PREFIXES: Final[tuple[tuple[int, str], ...]] = (
     (218, "cbdbec3e0ff9464f844d4c82d29e9c86ce2fb7c31687a2c58885ec0e65398156"),  # CSA-1 2026-09-19
 )
 AXIS_IDS: Final[frozenset[str]] = frozenset(axis.axis_id for axis in AXES)
-
-
-class ExtractionResidualWarning(UserWarning):
-    """An allowed scorer residual, identified without question text."""
 
 
 def _warn_residuals(result: SetScore) -> None:
