@@ -1,0 +1,6 @@
+[Unit]
+Description=Touch the cotenant tick marker
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/touch /data/cotenant/last-tick

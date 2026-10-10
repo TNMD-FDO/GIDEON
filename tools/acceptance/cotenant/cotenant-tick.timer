@@ -1,0 +1,9 @@
+[Unit]
+Description=Run the cotenant tick daily
+
+[Timer]
+OnCalendar=daily
+Persistent=false
+
+[Install]
+WantedBy=timers.target

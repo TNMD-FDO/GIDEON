@@ -14,7 +14,16 @@ from gideon.host.report import StageResult, print_stage, stage_line
 from gideon.host.stages import site_problem
 from gideon.host.steps.services import acceptance_image_path
 from gideon.host.sysio import Host
-from tools.acceptance import domain, fullrestore, image, rehearsal, seed, services, vm
+from tools.acceptance import (
+    cotenant,
+    domain,
+    fullrestore,
+    image,
+    rehearsal,
+    seed,
+    services,
+    vm,
+)
 from tools.acceptance.context import (
     ACCEPTANCE_REGISTRY_AUTHORITY,
     HARNESS_ROOT,
@@ -225,6 +234,14 @@ def _second_provision(ctx: HarnessContext) -> StageResult:
     return vm.provision(ctx, allow_blocked=False)
 
 
+def _before_first_provision(ctx: HarnessContext) -> StageResult:
+    return vm.provision(ctx, allow_blocked=True, acknowledge=True)
+
+
+def _before_second_provision(ctx: HarnessContext) -> StageResult:
+    return vm.provision(ctx, allow_blocked=False, acknowledge=True)
+
+
 def _site_stage(ctx: HarnessContext) -> StageResult:
     return services.install_site(ctx)
 
@@ -416,6 +433,78 @@ FULL_RESTORE_STAGES: Final[tuple[Stage, ...]] = (
 FULL_RESTORE_IDENTIFIERS: Final[tuple[str, ...]] = tuple(
     stage.identifier for stage in FULL_RESTORE_STAGES
 )
+
+_STAGE_BY_IDENTIFIER: Final = {stage.identifier: stage for stage in STAGES}
+COTENANT_BEFORE_STAGES: Final[tuple[Stage, ...]] = (
+    _STAGE_BY_IDENTIFIER["preconditions"],
+    _STAGE_BY_IDENTIFIER["image"],
+    _STAGE_BY_IDENTIFIER["seed"],
+    _STAGE_BY_IDENTIFIER["services"],
+    _STAGE_BY_IDENTIFIER["boot"],
+    _STAGE_BY_IDENTIFIER["clone"],
+    Stage("refuse-data", cotenant.refuse_data, cotenant.REFUSAL_FIX),
+    Stage("cotenant", cotenant.arrive, cotenant.COTENANT_FIX),
+    Stage("provision", _before_first_provision, vm.VM_FIX),
+    _STAGE_BY_IDENTIFIER["reboot"],
+    Stage("intact", cotenant.intact, cotenant.INTACT_FIX, key="intact-provision"),
+    _STAGE_BY_IDENTIFIER["site"],
+    Stage("provision", _before_second_provision, vm.VM_FIX, key="provision-2"),
+    Stage("intact", cotenant.intact, cotenant.INTACT_FIX, key="intact-provision-2"),
+    Stage("refuse-source", cotenant.refuse_source, cotenant.REFUSAL_FIX),
+    _STAGE_BY_IDENTIFIER["authorize"],
+    _STAGE_BY_IDENTIFIER["preflight"],
+    _STAGE_BY_IDENTIFIER["install"],
+    Stage("intact", cotenant.intact, cotenant.INTACT_FIX, key="intact-install"),
+    Stage("upgrade", cotenant.upgrade, cotenant.UPGRADE_FIX),
+    Stage("intact", cotenant.intact, cotenant.INTACT_FIX, key="intact-upgrade"),
+    Stage("uninstall", cotenant.uninstall, cotenant.UNINSTALL_FIX),
+    Stage("intact", cotenant.intact, cotenant.INTACT_FIX, key="intact-uninstall"),
+    Stage("purge", cotenant.purge, cotenant.UNINSTALL_FIX),
+    Stage("intact", cotenant.intact, cotenant.INTACT_FIX, key="intact-purge"),
+    _STAGE_BY_IDENTIFIER["teardown"],
+)
+COTENANT_BEFORE_IDENTIFIERS: Final[tuple[str, ...]] = tuple(
+    stage.identifier for stage in COTENANT_BEFORE_STAGES
+)
+COTENANT_AFTER_STAGES: Final[tuple[Stage, ...]] = (
+    _STAGE_BY_IDENTIFIER["preconditions"],
+    _STAGE_BY_IDENTIFIER["image"],
+    _STAGE_BY_IDENTIFIER["seed"],
+    _STAGE_BY_IDENTIFIER["services"],
+    _STAGE_BY_IDENTIFIER["boot"],
+    _STAGE_BY_IDENTIFIER["clone"],
+    _STAGE_BY_IDENTIFIER["provision"],
+    _STAGE_BY_IDENTIFIER["reboot"],
+    _STAGE_BY_IDENTIFIER["site"],
+    _STAGE_BY_IDENTIFIER["provision-2"],
+    _STAGE_BY_IDENTIFIER["authorize"],
+    _STAGE_BY_IDENTIFIER["preflight"],
+    _STAGE_BY_IDENTIFIER["install"],
+    Stage("cotenant", cotenant.arrive, cotenant.COTENANT_FIX),
+    Stage("intact", cotenant.intact, cotenant.INTACT_FIX, key="intact-arrival"),
+    Stage("upgrade", cotenant.upgrade, cotenant.UPGRADE_FIX),
+    Stage("intact", cotenant.intact, cotenant.INTACT_FIX, key="intact-upgrade"),
+    Stage("uninstall", cotenant.uninstall, cotenant.UNINSTALL_FIX),
+    Stage("intact", cotenant.intact, cotenant.INTACT_FIX, key="intact-uninstall"),
+    Stage("purge", cotenant.purge, cotenant.UNINSTALL_FIX),
+    Stage("intact", cotenant.intact, cotenant.INTACT_FIX, key="intact-purge"),
+    _STAGE_BY_IDENTIFIER["teardown"],
+)
+COTENANT_AFTER_IDENTIFIERS: Final[tuple[str, ...]] = tuple(
+    stage.identifier for stage in COTENANT_AFTER_STAGES
+)
+
+
+def form_stages(spec: RunSpec) -> tuple[Stage, ...]:
+    """Return the stages for the selected acceptance form."""
+
+    if spec.full_restore:
+        return FULL_RESTORE_STAGES
+    if spec.cotenant == "before":
+        return COTENANT_BEFORE_STAGES
+    if spec.cotenant == "after":
+        return COTENANT_AFTER_STAGES
+    return STAGES
 
 
 def run(

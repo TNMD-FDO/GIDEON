@@ -252,7 +252,9 @@ def prepare(ctx: HarnessContext) -> StageResult:
     except OSError as exc:
         return StageResult("services", False, f"could not create the certificate directory: {exc}", SERVICE_FIX)
     hostname = seed.hostname_for(ctx.spec.vm_name)
-    root_subject = f"/CN=GIDEON acceptance CA {ctx.run_id}"
+    # The fixed words sit in O, so the 64-character CN holds the run id alone
+    # (the VM name and the commit), whatever the form's VM name.
+    root_subject = f"/O=GIDEON acceptance CA/CN={ctx.run_id}"
 
     commands: tuple[tuple[tuple[str, ...], str], ...] = (
         (

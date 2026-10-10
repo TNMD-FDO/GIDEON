@@ -26,6 +26,10 @@ from tools.pinwatch.fetch import Fetcher
 HARNESS_ROOT: Final = Path("/data/acceptance")
 DEFAULT_VM_NAME: Final = "gideon-acceptance"
 DEFAULT_RESTORE_VM_NAME: Final = "gideon-acceptance-restore"
+DEFAULT_COTENANT_VM_NAMES: Final[Mapping[str, str]] = {
+    "before": "gideon-acceptance-cotenant-before",
+    "after": "gideon-acceptance-cotenant-after",
+}
 DEFAULT_SITE_PATH: Final = Path("/etc/gideon/site.yaml")
 # The first usable address on libvirt's default bridge is where both the
 # provisioned registry and this run's SMTP sink are reachable from the VM.
@@ -49,6 +53,7 @@ class RunSpec:
     # mirror-only acceptance-<sha12> tag the image stage makes.
     clone_ref: str = ""
     full_restore: bool = False
+    cotenant: str = ""
 
 
 StageCallable = Callable[["HarnessContext"], StageResult]
@@ -141,6 +146,9 @@ class HarnessContext:
     box_recipient: str | None = None
     services_listing: str | None = None
     applied_record: Mapping[str, object] | None = None
+    cotenant_arrived: bool = False
+    dropins_before: Mapping[str, bool] | None = None
+    volumes_before: tuple[str, ...] | None = None
 
 
 def authenticated_messages(ctx: "HarnessContext") -> tuple[SinkMessageLike, ...]:

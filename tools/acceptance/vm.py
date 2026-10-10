@@ -14,7 +14,7 @@ import time
 from collections.abc import Callable, Sequence
 from typing import Final
 
-from gideon.host import stages
+from gideon.host import cotenants, stages
 from gideon.host.report import StageResult, command_detail
 from gideon.host.sysio import Host, PathLike
 from tools.acceptance import domain
@@ -382,7 +382,7 @@ def row_details(text: str) -> dict[str, tuple[str, str]]:
     return details
 
 
-def provision(ctx: HarnessContext, *, allow_blocked: bool) -> StageResult:
+def provision(ctx: HarnessContext, *, allow_blocked: bool, acknowledge: bool = False) -> StageResult:
     """``host provision --no-gpu`` in the VM, honouring ``reboot-required`` at most twice.
 
     Before the site file the site-dependent steps are ``blocked`` by design
@@ -395,7 +395,10 @@ def provision(ctx: HarnessContext, *, allow_blocked: bool) -> StageResult:
             ctx,
             "provision",
             f"provision{suffix}.txt",
-            ["python3", "-m", "gideon", "host", "provision", "--no-gpu"],
+            [
+                "python3", "-m", "gideon", "host", "provision", "--no-gpu",
+                *([cotenants.ACKNOWLEDGE_DISRUPTION_FLAG] if acknowledge else []),
+            ],
             timeout=PROVISION_TIMEOUT_SECONDS,
         )
         if not result.ok:

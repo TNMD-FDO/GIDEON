@@ -162,8 +162,8 @@ def _build_rc(ctx: HarnessContext, worktree: Path, version: str, tag: str) -> St
     return None
 
 
-def _make_tag(ctx: HarnessContext, version: str, tag: str) -> StageResult | None:
-    """Make the throwaway rc tag in a worktree of the mirror; the worktree goes on every path.
+def make_tag(ctx: HarnessContext, version: str, tag: str) -> StageResult | None:
+    """Shared entry for making the throwaway rc tag in a mirror worktree.
 
     The checkout on the box is never touched: the worktree hangs off the run's
     root-owned mirror.
@@ -196,7 +196,7 @@ def rehearse(ctx: HarnessContext) -> StageResult:
         tag = rc_tag(parsed)
     except ValueError as exc:
         return StageResult("rehearse", False, str(exc), REHEARSAL_FIX)
-    made = _make_tag(ctx, parsed, tag)
+    made = make_tag(ctx, parsed, tag)
     if made is not None:
         return made
     ctx.base_version = parsed

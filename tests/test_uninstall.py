@@ -2,6 +2,7 @@
 
 import argparse
 import contextlib
+import fnmatch
 import io
 import json
 import os
@@ -122,7 +123,15 @@ class FakeHost:
             self.networks.remove(command[3])
             return completed(command)
         if command[:2] == ("systemctl", "list-unit-files"):
-            return completed(command, stdout="".join(f"{unit} enabled\n" for unit in self.unit_files))
+            # As systemd does: patterns that match no unit file exit 1, silently.
+            patterns = [word for word in command[2:] if not word.startswith("-")]
+            listed = [
+                unit for unit in self.unit_files
+                if not patterns or any(fnmatch.fnmatchcase(unit, pattern) for pattern in patterns)
+            ]
+            if patterns and not listed:
+                return completed(command, returncode=1)
+            return completed(command, stdout="".join(f"{unit} enabled\n" for unit in listed))
         if command[:3] == ("systemctl", "disable", "--now"):
             unit = command[3]
             if unit in self.unit_files:

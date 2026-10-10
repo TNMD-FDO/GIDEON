@@ -11,6 +11,7 @@ from typing import cast
 from gideon.host.sysio import Host, PathLike, RealHost
 from tools.acceptance import smtpsink
 from tools.acceptance.context import (
+    DEFAULT_COTENANT_VM_NAMES,
     DEFAULT_RESTORE_VM_NAME,
     DEFAULT_SITE_PATH,
     DEFAULT_VM_NAME,
@@ -19,10 +20,11 @@ from tools.acceptance.context import (
     SinkFactory,
 )
 from tools.acceptance.run import (
+    COTENANT_AFTER_IDENTIFIERS,
+    COTENANT_BEFORE_IDENTIFIERS,
     FULL_RESTORE_IDENTIFIERS,
-    FULL_RESTORE_STAGES,
     STAGE_IDENTIFIERS,
-    STAGES,
+    form_stages,
     run,
 )
 from tools.pinwatch.fetch import Fetcher, UrllibFetcher
@@ -34,13 +36,32 @@ def _parser() -> argparse.ArgumentParser:
         description="Build and drive the GIDEON clean-VM acceptance run.",
     )
     parser.add_argument("ref")
-    parser.add_argument("--full-restore", action="store_true", help="restore the box's newest set into a clean VM")
+    form = parser.add_mutually_exclusive_group()
+    form.add_argument(
+        "--full-restore",
+        action="store_true",
+        help="restore the box's newest set into a clean VM",
+    )
+    form.add_argument(
+        "--cotenant",
+        choices=("before", "after"),
+        help="run with a synthetic co-tenant arriving before or after GIDEON",
+    )
     parser.add_argument("--name", default=None, metavar="VM")
     parser.add_argument("--out", metavar="DIR")
     parser.add_argument("--keep", action="store_true")
     parser.add_argument(
         "--until",
-        choices=tuple(dict.fromkeys((*STAGE_IDENTIFIERS, *FULL_RESTORE_IDENTIFIERS))),
+        choices=tuple(
+            dict.fromkeys(
+                (
+                    *STAGE_IDENTIFIERS,
+                    *FULL_RESTORE_IDENTIFIERS,
+                    *COTENANT_BEFORE_IDENTIFIERS,
+                    *COTENANT_AFTER_IDENTIFIERS,
+                )
+            )
+        ),
         help="stop after this stage (use provision-2 for the second provision)",
     )
     parser.add_argument("--dry-run", action="store_true")
@@ -62,9 +83,14 @@ def default_out(ref: str, name: str) -> Path:
 
 
 def _plan(spec: RunSpec) -> None:
-    stages = FULL_RESTORE_STAGES if spec.full_restore else STAGES
+    stages = form_stages(spec)
     identifiers = ", ".join(stage.identifier for stage in stages)
-    form = " (full restore)" if spec.full_restore else ""
+    if spec.full_restore:
+        form = " (full restore)"
+    elif spec.cotenant:
+        form = f" (co-tenant {spec.cotenant})"
+    else:
+        form = ""
     print(f"Acceptance dry run{form}:")
     print(f"stages: {identifiers}")
     print(f"run directory: {spec.run_dir}")
@@ -88,11 +114,23 @@ def main(
     """Parse and run the acceptance harness over injectable box seams."""
 
     options = _parser().parse_args(argv)
-    selected_identifiers = (
-        FULL_RESTORE_IDENTIFIERS if options.full_restore else STAGE_IDENTIFIERS
-    )
+    if options.full_restore:
+        selected_identifiers = FULL_RESTORE_IDENTIFIERS
+    elif options.cotenant == "before":
+        selected_identifiers = COTENANT_BEFORE_IDENTIFIERS
+    elif options.cotenant == "after":
+        selected_identifiers = COTENANT_AFTER_IDENTIFIERS
+    else:
+        selected_identifiers = STAGE_IDENTIFIERS
     if options.until is not None and options.until not in selected_identifiers:
-        other_flag = "--full-restore" if not options.full_restore else "omit --full-restore"
+        if options.until in STAGE_IDENTIFIERS:
+            other_flag = "omit --full-restore" if options.full_restore else "omit --cotenant"
+        elif options.until in FULL_RESTORE_IDENTIFIERS:
+            other_flag = "--full-restore"
+        elif options.until in COTENANT_BEFORE_IDENTIFIERS:
+            other_flag = "--cotenant before"
+        else:
+            other_flag = "--cotenant after"
         print(
             f"tools.acceptance: --until {options.until} is not valid for this form. "
             f"Fix: {other_flag} to use that stage.",
@@ -101,9 +139,14 @@ def main(
         return 1
     checkout = root or Path(__file__).resolve().parents[2]
     io = host or RealHost()
-    vm_name = options.name if options.name is not None else (
-        DEFAULT_RESTORE_VM_NAME if options.full_restore else DEFAULT_VM_NAME
-    )
+    if options.name is not None:
+        vm_name = options.name
+    elif options.full_restore:
+        vm_name = DEFAULT_RESTORE_VM_NAME
+    elif options.cotenant:
+        vm_name = DEFAULT_COTENANT_VM_NAMES[options.cotenant]
+    else:
+        vm_name = DEFAULT_VM_NAME
     # Absolute whatever the caller typed: libvirt opens the console log by path
     # from its own working directory, and the workflow names --out relative to
     # the runner's workspace (the v0.1.0 tag run refused at boot on it).
@@ -141,12 +184,12 @@ def main(
         keep=options.keep,
         until=options.until,
         full_restore=options.full_restore,
+        cotenant=options.cotenant or "",
     )
     if options.dry_run:
         _plan(spec)
         return 0
     chosen_sink_factory = cast(SinkFactory, sink_factory or smtpsink.SmtpSink)
-    selected_stages = FULL_RESTORE_STAGES if options.full_restore else STAGES
     return run(
         spec,
         host=io,
@@ -156,5 +199,5 @@ def main(
         template_path=checkout / "tools/acceptance/domain.xml.tmpl",
         sleep=sleep,
         sink_factory=chosen_sink_factory,
-        stages=selected_stages,
+        stages=form_stages(spec),
     )

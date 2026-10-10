@@ -1672,7 +1672,7 @@ class ServicesContracts(unittest.TestCase):
 
         self.assertEqual(len(openssl), 5)
         self.assertEqual(openssl[0][0:7], ("openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1"))
-        self.assertEqual(openssl[0][openssl[0].index("-subj") + 1], f"/CN=GIDEON acceptance CA {ctx.run_id}")
+        self.assertEqual(openssl[0][openssl[0].index("-subj") + 1], f"/O=GIDEON acceptance CA/CN={ctx.run_id}")
         self.assertIn("basicConstraints=critical,CA:TRUE", openssl[0])
         # Strict X.509 (Python 3.13+'s default context): the CA carries key usage
         # and a subject key id, each leaf its usages and the server-auth purpose.

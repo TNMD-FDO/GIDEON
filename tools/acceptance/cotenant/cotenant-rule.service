@@ -1,0 +1,11 @@
+[Unit]
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'iptables -w -C DOCKER-USER -s 192.0.2.0/24 -m comment --comment cotenant -j RETURN || iptables -w -A DOCKER-USER -s 192.0.2.0/24 -m comment --comment cotenant -j RETURN'
+
+[Install]
+WantedBy=multi-user.target

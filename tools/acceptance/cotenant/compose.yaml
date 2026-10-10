@@ -1,0 +1,8 @@
+name: cotenant
+services:
+  app:
+    image: cotenant:local
+    container_name: cotenant-app
+    command: ["/bin/busybox", "sleep", "infinity"]
+    restart: unless-stopped
+    volumes: ["/data/cotenant:/data"]

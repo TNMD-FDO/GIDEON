@@ -198,10 +198,11 @@ def _attached(io: LockingHost, reading: _Reading) -> StageResult:
 
 def _units(io: LockingHost, reading: _Reading) -> StageResult:
     fix = _rerun(reading.purge, reading.checkout)
+    # Unfiltered, the mark judged below: a pattern matching no unit file exits 1,
+    # which would fail the re-run that finds the units already gone.
     listed = _read(
-        io, "units",
-        ["systemctl", "list-unit-files", "--no-legend", "--plain", "gideon-*.service", "gideon-*.timer"],
-        "GIDEON unit files", fix,
+        io, "units", ["systemctl", "list-unit-files", "--no-legend", "--plain"],
+        "unit files", fix,
     )
     if isinstance(listed, StageResult):
         return listed
