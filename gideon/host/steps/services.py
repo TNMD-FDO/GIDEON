@@ -2,7 +2,9 @@
 
 import json
 import os
+import re
 import stat
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -29,12 +31,40 @@ _REGISTRY_TAG = "gideon-registry"
 REGISTRY_UNIT = Path("/etc/systemd/system/gideon-registry.service")
 _RUNNER_USER = "gh-runner"
 _RUNNER_HOME = Path("/home/gh-runner")
-_RUNNER_DIR = Path("/opt/gh-runner")
-_RUNNER_MANIFEST = _RUNNER_DIR / "bin/Runner.Listener.deps.json"
-_RUNNER_SETTINGS_FILE = _RUNNER_DIR / ".runner"
-# The runner's server-refreshed copy of its settings; the listener loads it first.
-_RUNNER_MIGRATED_SETTINGS = _RUNNER_DIR / ".runner_migrated"
-_RUNNER_SERVICE = _RUNNER_DIR / ".service"
+
+
+@dataclass(frozen=True, slots=True)
+class RunnerInstance:
+    """One registered runner and the files owned by its installation."""
+
+    name: str
+    directory: Path
+    labels: tuple[str, ...]
+
+    def archive(self, version: str) -> Path:
+        return self.directory / f"actions-runner-linux-x64-{version}.tar.gz"
+
+    @property
+    def manifest(self) -> Path:
+        return self.directory / "bin/Runner.Listener.deps.json"
+
+    @property
+    def settings_file(self) -> Path:
+        return self.directory / ".runner"
+
+    @property
+    def migrated_settings(self) -> Path:
+        return self.directory / ".runner_migrated"
+
+    @property
+    def service_file(self) -> Path:
+        return self.directory / ".service"
+
+
+RUNNER_INSTANCES = (
+    RunnerInstance("gideon", Path("/opt/gh-runner"), ("self-hosted", "linux", "x64", "gpu", "dl385-gen11")),
+    RunnerInstance("gideon-checks", Path("/opt/gh-runner-checks"), ("self-hosted", "linux", "x64", "checks")),
+)
 _RUNNER_TOKEN = Path("/etc/gideon/secrets/gh_runner_token")
 RUNNER_SUDOERS = Path("/etc/sudoers.d/gideon-acceptance")
 _RUNNER_SUDOERS_CANDIDATE = Path("/etc/sudoers.d/gideon-acceptance.candidate")
@@ -44,7 +74,6 @@ _RUNNER_PACKAGE = "python3-venv"
 # is therefore the exact form.
 _RUNNER_TOKEN_VARIABLE = "ACTIONS_RUNNER_INPUT_token"
 _RUNNER_URL = "https://github.com/TNMD-FDO"  # The product's GitHub organization.
-_RUNNER_LABELS = "self-hosted,linux,x64,gpu,dl385-gen11"  # The build box's runner labels.
 _KVM_FIX = "Install and repair the libvirt KVM prerequisites, then re-run provision."
 _IMAGE_FIX = "Download the lock-pinned acceptance VM image, then re-run provision."
 _REGISTRY_FIX = "Repair the provision-owned registry service, then re-run provision."
@@ -58,14 +87,6 @@ _RUNNER_PROCPS_FIX = "Install procps so job state can be checked, then re-run pr
 _RUNNER_FRESH_TOKEN_FIX = (
     "Place a fresh registration token (they expire after one hour) in "
     "/etc/gideon/secrets/gh_runner_token, then re-run provision."
-)
-_RUNNER_SETTINGS_FIX = (
-    "Run /opt/gh-runner/config.sh remove --local as gh-runner, place a fresh "
-    "registration token, then re-run provision."
-)
-_RUNNER_MANIFEST_FIX = (
-    "Inspect /opt/gh-runner/bin/Runner.Listener.deps.json and run "
-    "/opt/gh-runner/bin/Runner.Listener --version, then re-run provision."
 )
 _RUNNER_EXTRACT_FIX = "Extract the lock-pinned GitHub runner, then re-run provision."
 _RUNNER_VERSION_FIX = "Install the lock-pinned GitHub runner, then re-run provision."
@@ -83,10 +104,6 @@ _RUNNER_USER_FIX = (
 )
 _RUNNER_GROUP_FIX = "Add gh-runner to the docker group, then re-run provision."
 _RUNNER_PACKAGE_FIX = "Run apt-get install -y python3-venv, then re-run provision."
-_RUNNER_DIR_FIX = "Create /opt/gh-runner for gh-runner, then re-run provision."
-_RUNNER_OWNERSHIP_FIX = (
-    "Set /opt/gh-runner ownership to gh-runner, then re-run provision."
-)
 _RUNNER_DOWNLOAD_FIX = "Download the lock-pinned GitHub runner, then re-run provision."
 _RUNNER_CHECKSUM_FIX = (
     "Re-download the lock-pinned GitHub runner, then re-run provision."
@@ -97,6 +114,28 @@ _RUNNER_REREGISTERED_ANNOUNCEMENT = (
     "it, bring the checkout to the merged commit, and re-run host provision within "
     "30 days of the release."
 )
+
+
+def _runner_settings_fix(instance: RunnerInstance) -> str:
+    return (
+        f"Run {instance.directory / 'config.sh'} remove --local as gh-runner, place a fresh "
+        "registration token, then re-run provision."
+    )
+
+
+def _runner_manifest_fix(instance: RunnerInstance) -> str:
+    return (
+        f"Inspect {instance.manifest} and run "
+        f"{instance.directory / 'bin/Runner.Listener'} --version, then re-run provision."
+    )
+
+
+def _runner_dir_fix(instance: RunnerInstance) -> str:
+    return f"Create {instance.directory} for gh-runner, then re-run provision."
+
+
+def _runner_ownership_fix(instance: RunnerInstance) -> str:
+    return f"Set {instance.directory} ownership to gh-runner, then re-run provision."
 
 
 # qemu-system-x86, not the qemu-kvm virtual package: dpkg-query only sees real
@@ -303,26 +342,22 @@ def _runner_in_docker_group(context: ProvisionContext) -> bool:
     )
 
 
-def _runner_archive(context: ProvisionContext) -> Path:
-    return _RUNNER_DIR / f"actions-runner-linux-x64-{context.lock.gh_runner.version}.tar.gz"
-
-
-def _runner_ready(context: ProvisionContext, uid: int, gid: int) -> CheckResult | None:
-    if not context.host.exists(_RUNNER_DIR):
-        return CheckResult(Disposition.DRIFT, f"{_RUNNER_DIR} is missing", _RUNNER_DIR_FIX)
+def _runner_ready(context: ProvisionContext, instance: RunnerInstance, uid: int, gid: int) -> CheckResult | None:
+    if not context.host.exists(instance.directory):
+        return CheckResult(Disposition.DRIFT, f"{instance.directory} is missing", _runner_dir_fix(instance))
     try:
-        details = context.host.stat(_RUNNER_DIR)
+        details = context.host.stat(instance.directory)
     except OSError as exc:
-        return CheckResult(Disposition.UNFIXABLE, f"cannot stat {_RUNNER_DIR}: {exc}", _RUNNER_FIX)
+        return CheckResult(Disposition.UNFIXABLE, f"cannot stat {instance.directory}: {exc}", _runner_dir_fix(instance))
     if not stat.S_ISDIR(details.st_mode) or details.st_uid != uid or details.st_gid != gid:
-        return CheckResult(Disposition.DRIFT, f"{_RUNNER_DIR} is not owned by gh-runner", _RUNNER_OWNERSHIP_FIX)
-    archive = _runner_archive(context)
+        return CheckResult(Disposition.DRIFT, f"{instance.directory} is not owned by gh-runner", _runner_ownership_fix(instance))
+    archive = instance.archive(context.lock.gh_runner.version)
     if not context.host.exists(archive):
         return CheckResult(Disposition.DRIFT, f"{archive} is missing", _RUNNER_DOWNLOAD_FIX)
     if not checksum_matches(context, str(archive), context.lock.gh_runner.sha256):
         return CheckResult(Disposition.DRIFT, f"{archive} has a checksum mismatch", _RUNNER_CHECKSUM_FIX)
-    if not context.host.exists(_RUNNER_DIR / "config.sh"):
-        return CheckResult(Disposition.DRIFT, "the GitHub runner release is not extracted", _RUNNER_EXTRACT_FIX)
+    if not context.host.exists(instance.directory / "config.sh"):
+        return CheckResult(Disposition.DRIFT, f"{instance.directory} runner release is not extracted", _RUNNER_EXTRACT_FIX)
     return None
 
 
@@ -338,10 +373,11 @@ def _runner_token(context: ProvisionContext) -> str | None | CheckResult:
     return token or None
 
 
-def _runner_busy(context: ProvisionContext) -> bool | CheckResult:
-    """Whether a job is running: the worker process exists under gh-runner."""
+def _runner_busy(context: ProvisionContext, instance: RunnerInstance) -> bool | CheckResult:
+    """Whether this instance's worker process is running under gh-runner."""
 
-    result = context.host.run(["pgrep", "-u", _RUNNER_USER, "-x", "Runner.Worker"])
+    pattern = rf"^{re.escape(str(instance.directory / 'bin/Runner.Worker'))}( |$)"
+    result = context.host.run(["pgrep", "-u", _RUNNER_USER, "-f", pattern])
     if result.returncode == 0:
         return True
     if result.returncode == 1:
@@ -351,22 +387,22 @@ def _runner_busy(context: ProvisionContext) -> bool | CheckResult:
     )
 
 
-def _runner_installed_version(context: ProvisionContext) -> str | CheckResult:
+def _runner_installed_version(context: ProvisionContext, instance: RunnerInstance) -> str | CheckResult:
     """The installed listener's version, from the .NET dependency manifest it ships.
 
     The manifest names the assembly ``Runner.Listener/<version>`` under its
     targets; reading it is a file read, never an execution of the runner.
     """
 
-    if not context.host.exists(_RUNNER_MANIFEST):
+    if not context.host.exists(instance.manifest):
         return CheckResult(
-            Disposition.DRIFT, "the installed runner's manifest is missing", _RUNNER_EXTRACT_FIX
+            Disposition.DRIFT, f"{instance.manifest} is missing", _RUNNER_EXTRACT_FIX
         )
     try:
-        document = json.loads(context.host.read_text(_RUNNER_MANIFEST))
+        document = json.loads(context.host.read_text(instance.manifest))
     except (OSError, UnicodeError, ValueError) as exc:
         return CheckResult(
-            Disposition.UNFIXABLE, f"cannot read {_RUNNER_MANIFEST}: {exc}", _RUNNER_MANIFEST_FIX
+            Disposition.UNFIXABLE, f"cannot read {instance.manifest}: {exc}", _runner_manifest_fix(instance)
         )
     targets = document.get("targets") if isinstance(document, dict) else None
     for target in (targets.values() if isinstance(targets, dict) else ()):
@@ -379,48 +415,51 @@ def _runner_installed_version(context: ProvisionContext) -> str | CheckResult:
                     return version
     return CheckResult(
         Disposition.UNFIXABLE,
-        f"{_RUNNER_MANIFEST} names no Runner.Listener version",
-        _RUNNER_MANIFEST_FIX,
+        f"{instance.manifest} names no Runner.Listener version",
+        _runner_manifest_fix(instance),
     )
 
 
-def _runner_settings(context: ProvisionContext) -> list[dict[str, object]] | CheckResult:
+def _runner_settings(context: ProvisionContext, instance: RunnerInstance) -> list[dict[str, object]] | CheckResult:
     """Every runner settings file present, parsed (the runner writes a UTF-8 BOM)."""
 
     settings: list[dict[str, object]] = []
-    for path in (_RUNNER_SETTINGS_FILE, _RUNNER_MIGRATED_SETTINGS):
+    for path in (instance.settings_file, instance.migrated_settings):
         if not context.host.exists(path):
             continue
         try:
             document = json.loads(context.host.read_text(path).removeprefix("\ufeff"))
         except (OSError, UnicodeError, ValueError) as exc:
             return CheckResult(
-                Disposition.UNFIXABLE, f"{path} is not valid runner settings JSON: {exc}", _RUNNER_SETTINGS_FIX
+                Disposition.UNFIXABLE, f"{path} is not valid runner settings JSON: {exc}", _runner_settings_fix(instance)
             )
         if not isinstance(document, dict):
             return CheckResult(
-                Disposition.UNFIXABLE, f"{path} is not a runner settings object", _RUNNER_SETTINGS_FIX
+                Disposition.UNFIXABLE, f"{path} is not a runner settings object", _runner_settings_fix(instance)
             )
         settings.append(document)
     return settings
 
 
-def _runner_updates_disabled(settings: list[dict[str, object]]) -> bool:
+def _runner_updates_disabled(context: ProvisionContext, instance: RunnerInstance) -> bool | CheckResult:
     """True iff every settings file present carries the flag --disableupdate writes.
 
     RunnerSettings.DisableUpdate is omitted when false, so an absent key means
     updates are on.
     """
 
+    settings = _runner_settings(context, instance)
+    if isinstance(settings, CheckResult):
+        return settings
     return bool(settings) and all(document.get("disableUpdate") is True for document in settings)
 
 
-def _runner_release_stale(context: ProvisionContext) -> bool:
+def _runner_release_stale(context: ProvisionContext, instance: RunnerInstance) -> bool:
     """Whether the extracted release is missing or is not the pinned version."""
 
-    if not context.host.exists(_RUNNER_DIR / "config.sh"):
+    if not context.host.exists(instance.directory / "config.sh"):
         return True
-    version = _runner_installed_version(context)
+    version = _runner_installed_version(context, instance)
     if isinstance(version, CheckResult):
         if version.disposition is Disposition.UNFIXABLE:
             raise StepFailure(version.detail, version.fix)
@@ -428,39 +467,39 @@ def _runner_release_stale(context: ProvisionContext) -> bool:
     return version != context.lock.gh_runner.version
 
 
-def _refuse_when_busy(context: ProvisionContext) -> None:
+def _refuse_when_busy(context: ProvisionContext, instance: RunnerInstance) -> None:
     """Never stop a runner with a job in flight."""
 
-    busy = _runner_busy(context)
+    busy = _runner_busy(context, instance)
     if isinstance(busy, CheckResult):
         raise StepFailure(busy.detail, busy.fix)
     if busy:
-        raise StepFailure("a job is running on the runner", _RUNNER_WAIT_FIX)
+        raise StepFailure(f"a job is running on {instance.name}", _RUNNER_WAIT_FIX)
 
 
-def _refresh_service_wrapper(context: ProvisionContext) -> None:
+def _refresh_service_wrapper(context: ProvisionContext, instance: RunnerInstance) -> None:
     """Copy a new release's runsvc.sh over the one the unit runs, as svc.sh install did."""
 
     try:
-        current = context.host.read_text(_RUNNER_DIR / "runsvc.sh")
-        incoming = context.host.read_text(_RUNNER_DIR / "bin/runsvc.sh")
+        current = context.host.read_text(instance.directory / "runsvc.sh")
+        incoming = context.host.read_text(instance.directory / "bin/runsvc.sh")
     except OSError:
         current, incoming = "", "unreadable"
     if current != incoming:
-        context.host.run(["cp", "./bin/runsvc.sh", "./runsvc.sh"], cwd=_RUNNER_DIR, check=True)
+        context.host.run(["cp", "./bin/runsvc.sh", "./runsvc.sh"], cwd=instance.directory, check=True)
 
 
-def _remove_superseded_archives(context: ProvisionContext, archive: Path) -> None:
-    for name in sorted(context.host.listdir(_RUNNER_DIR)):
+def _remove_superseded_archives(context: ProvisionContext, instance: RunnerInstance, archive: Path) -> None:
+    for name in sorted(context.host.listdir(instance.directory)):
         if (
             name.startswith("actions-runner-linux-x64-")
             and name.endswith(".tar.gz")
             and name != archive.name
         ):
-            context.host.unlink(_RUNNER_DIR / name)
+            context.host.unlink(instance.directory / name)
 
 
-def _register(context: ProvisionContext, token: str) -> None:
+def _register(context: ProvisionContext, instance: RunnerInstance, token: str) -> None:
     """Register the runner, taking over the organization's record of the same name.
 
     The token rides in the child's environment, never argv; the environment is
@@ -479,10 +518,12 @@ def _register(context: ProvisionContext, token: str) -> None:
             "--disableupdate",
             "--url",
             _RUNNER_URL,
+            "--name",
+            instance.name,
             "--labels",
-            _RUNNER_LABELS,
+            ",".join(instance.labels),
         ],
-        cwd=_RUNNER_DIR,
+        cwd=instance.directory,
         env={**os.environ, _RUNNER_TOKEN_VARIABLE: token},
     )
     if config.returncode != 0:
@@ -493,24 +534,18 @@ def _register(context: ProvisionContext, token: str) -> None:
         raise StepFailure(
             f"config.sh refused the registration: {diagnostic}", _RUNNER_FRESH_TOKEN_FIX
         )
-    # A registration token is single-purpose and lives an hour: consumed.
-    context.host.unlink(_RUNNER_TOKEN, missing_ok=True)
 
 
 class GhRunnerStep(Step):
-    """Install and optionally register the organization GitHub runner.
+    """Converge two organization runner instances under one user and sudoers file.
 
-    The runner is already root-equivalent through the docker group and never
-    runs pull-request code; hardening waits for the public repository flip.
-    The sudoers file admits the acceptance harness and the push smoke, whose
-    ``-B`` keeps root's bytecode out of the checkout. Its third line admits the
-    mask's root stage, which is shell text rather than a checkout module.
-    ``sudo-rs`` accepts only a trailing ``*`` here, so that line admits any
-    root shell text; the docker group already makes this runner root-equivalent.
+    A job on one instance never holds the other's release or registration.
+    Both share the gh-runner account and its sudoers rules for the acceptance
+    harness, push smoke, and masked root stage.
     """
 
     name = "gh-runner"
-    summary = "install and register the pinned GitHub Actions runner"
+    summary = "install and register the pinned GitHub Actions runner instances"
     build_box_only = True
     requires = ("docker-engine", "disk-layout")
 
@@ -569,25 +604,18 @@ class GhRunnerStep(Step):
             )
         return None
 
-    def check(self, context: ProvisionContext) -> CheckResult:
-        account = passwd_entry(context, _RUNNER_USER)
-        if account is None:
-            return CheckResult(Disposition.DRIFT, "gh-runner does not exist", _RUNNER_CREATE_FIX)
-        uid, gid, home = account.uid, account.gid, account.home
-        if uid >= 1000 or not home:
-            return CheckResult(Disposition.UNFIXABLE, "gh-runner is not a system user with a home", _RUNNER_USER_FIX)
-        if not _runner_in_docker_group(context):
-            return CheckResult(Disposition.DRIFT, "gh-runner is not in the docker group", _RUNNER_GROUP_FIX)
-        if not package_installed(context, _RUNNER_PACKAGE):
-            return CheckResult(
-                Disposition.DRIFT,
-                f"{_RUNNER_PACKAGE} is not installed",
-                _RUNNER_PACKAGE_FIX,
-            )
-        ready = _runner_ready(context, uid, gid)
+    def _check_instance(
+        self,
+        context: ProvisionContext,
+        instance: RunnerInstance,
+        uid: int,
+        gid: int,
+        token: str | None | CheckResult,
+    ) -> CheckResult:
+        ready = _runner_ready(context, instance, uid, gid)
         if ready is not None:
             return ready
-        version = _runner_installed_version(context)
+        version = _runner_installed_version(context, instance)
         if isinstance(version, CheckResult):
             return version
         if version != context.lock.gh_runner.version:
@@ -597,8 +625,7 @@ class GhRunnerStep(Step):
                 f"lock version {context.lock.gh_runner.version}",
                 _RUNNER_VERSION_FIX,
             )
-        if not context.host.exists(_RUNNER_SETTINGS_FILE):
-            token = _runner_token(context)
+        if not context.host.exists(instance.settings_file):
             if isinstance(token, CheckResult):
                 return token
             if token is None:
@@ -608,24 +635,23 @@ class GhRunnerStep(Step):
                 "installed, unregistered; registration token is available",
                 _RUNNER_REGISTER_FIX,
             )
-        settings = _runner_settings(context)
-        if isinstance(settings, CheckResult):
-            return settings
-        if not _runner_updates_disabled(settings):
-            token = _runner_token(context)
+        updates_disabled = _runner_updates_disabled(context, instance)
+        if isinstance(updates_disabled, CheckResult):
+            return updates_disabled
+        if not updates_disabled:
             if isinstance(token, CheckResult):
                 return token
             if token is None:
                 return CheckResult(
                     Disposition.PENDING_INPUT, "registered with automatic updates on", _RUNNER_FIX
                 )
-            busy = _runner_busy(context)
+            busy = _runner_busy(context, instance)
             if isinstance(busy, CheckResult):
                 return busy
             if busy:
                 return CheckResult(
                     Disposition.PENDING_INPUT,
-                    "registered with automatic updates on; a job is running",
+                    f"registered with automatic updates on; a job is running on {instance.name}",
                     _RUNNER_WAIT_FIX,
                 )
             return CheckResult(
@@ -634,18 +660,18 @@ class GhRunnerStep(Step):
                 _RUNNER_REREGISTER_FIX,
             )
 
-        if not context.host.exists(_RUNNER_SERVICE):
+        if not context.host.exists(instance.service_file):
             return CheckResult(
                 Disposition.DRIFT,
                 "the GitHub runner service is not installed",
                 _RUNNER_SERVICE_FIX,
             )
         try:
-            unit = context.host.read_text(_RUNNER_SERVICE).strip()
+            unit = context.host.read_text(instance.service_file).strip()
         except (OSError, UnicodeError) as exc:
             return CheckResult(
                 Disposition.UNFIXABLE,
-                f"cannot read {_RUNNER_SERVICE}: {exc}",
+                f"cannot read {instance.service_file}: {exc}",
                 _RUNNER_SERVICE_FIX,
             )
         enabled = context.host.run(["systemctl", "is-enabled", unit])
@@ -656,14 +682,45 @@ class GhRunnerStep(Step):
                 "the GitHub runner service is not enabled and active",
                 _RUNNER_SERVICE_FIX,
             )
-        sudoers = self._sudoers_check(context)
-        if sudoers is not None:
-            return sudoers
         return CheckResult(
             Disposition.CONVERGED,
-            "GitHub runner is registered with updates disabled and active",
+            "converged",
             "",
         )
+
+    def check(self, context: ProvisionContext) -> CheckResult:
+        account = passwd_entry(context, _RUNNER_USER)
+        if account is None:
+            return CheckResult(Disposition.DRIFT, "gh-runner does not exist", _RUNNER_CREATE_FIX)
+        uid, gid, home = account.uid, account.gid, account.home
+        if uid >= 1000 or not home:
+            return CheckResult(Disposition.UNFIXABLE, "gh-runner is not a system user with a home", _RUNNER_USER_FIX)
+        if not _runner_in_docker_group(context):
+            return CheckResult(Disposition.DRIFT, "gh-runner is not in the docker group", _RUNNER_GROUP_FIX)
+        if not package_installed(context, _RUNNER_PACKAGE):
+            return CheckResult(Disposition.DRIFT, f"{_RUNNER_PACKAGE} is not installed", _RUNNER_PACKAGE_FIX)
+
+        token = _runner_token(context)
+        findings = [
+            (instance.name, self._check_instance(context, instance, uid, gid, token))
+            for instance in RUNNER_INSTANCES
+        ]
+        sudoers = self._sudoers_check(context)
+        if sudoers is not None:
+            findings.append(("sudoers", sudoers))
+        if all(finding.disposition is Disposition.CONVERGED for _, finding in findings):
+            names = " and ".join(instance.name for instance in RUNNER_INSTANCES)
+            return CheckResult(
+                Disposition.CONVERGED,
+                f"runners {names} registered with updates disabled and active",
+                "",
+            )
+        detail = "; ".join(f"{name}: {finding.detail}" for name, finding in findings)
+        for disposition in (Disposition.DRIFT, Disposition.UNFIXABLE, Disposition.PENDING_INPUT):
+            for _, finding in findings:
+                if finding.disposition is disposition:
+                    return CheckResult(disposition, detail, finding.fix)
+        raise AssertionError("unexpected runner finding")
 
     def apply(self, context: ProvisionContext) -> str | None:
         account = passwd_entry(context, _RUNNER_USER)
@@ -685,8 +742,40 @@ class GhRunnerStep(Step):
             context.host.run(["usermod", "-aG", "docker", _RUNNER_USER], check=True)
         if not package_installed(context, _RUNNER_PACKAGE):
             apt_install(context, [_RUNNER_PACKAGE])
-        context.host.mkdir(_RUNNER_DIR, mode=0o755, parents=True, exist_ok=True)
-        archive = _runner_archive(context)
+        self._ensure_sudoers(context)
+        token = _runner_token(context)
+        failures: list[tuple[str, StepFailure]] = []
+        registered_any = False
+        registration_refused = False
+        replaced_any = False
+        for instance in RUNNER_INSTANCES:
+            try:
+                if account is not None and self._check_instance(
+                    context, instance, account.uid, account.gid, token
+                ).disposition is Disposition.CONVERGED:
+                    continue
+                replaced, registered = self._apply_instance(context, instance, token)
+                replaced_any |= replaced
+                registered_any |= registered
+            except StepFailure as exc:
+                failures.append((instance.name, exc))
+                if exc.fix == _RUNNER_FRESH_TOKEN_FIX:
+                    registration_refused = True
+        if registered_any and not registration_refused:
+            context.host.unlink(_RUNNER_TOKEN, missing_ok=True)
+        if failures:
+            detail = "; ".join(f"{name}: {failure.detail}" for name, failure in failures)
+            raise StepFailure(detail, failures[0][1].fix)
+        return _RUNNER_REREGISTERED_ANNOUNCEMENT if replaced_any else None
+
+    def _apply_instance(
+        self,
+        context: ProvisionContext,
+        instance: RunnerInstance,
+        token: str | None | CheckResult,
+    ) -> tuple[bool, bool]:
+        context.host.mkdir(instance.directory, mode=0o755, parents=True, exist_ok=True)
+        archive = instance.archive(context.lock.gh_runner.version)
         archive_changed = False
         if not context.host.exists(archive) or not checksum_matches(
             context, str(archive), context.lock.gh_runner.sha256
@@ -699,66 +788,57 @@ class GhRunnerStep(Step):
             )
             context.host.run(wget_argv(context, str(archive), url), check=True)
             if not checksum_matches(context, str(archive), context.lock.gh_runner.sha256):
-                raise RuntimeError("GitHub runner checksum mismatch after download")
+                raise StepFailure(f"{archive} has a checksum mismatch after download", _RUNNER_CHECKSUM_FIX)
 
-        service_installed = context.host.exists(_RUNNER_SERVICE)
-        registered = context.host.exists(_RUNNER_SETTINGS_FILE)
+        service_installed = context.host.exists(instance.service_file)
+        registered = context.host.exists(instance.settings_file)
         reregister = False
         if registered:
-            settings = _runner_settings(context)
-            if isinstance(settings, CheckResult):
-                raise StepFailure(settings.detail, settings.fix)
-            reregister = not _runner_updates_disabled(settings)
-        # The token is an optional manual input, resolved before anything stops:
-        # without one the release still moves and the service still restarts, and
-        # the re-check reports pending-input, never an offline runner.
-        token: str | None = None
-        if reregister or not registered:
-            token_on_disk = _runner_token(context)
-            if isinstance(token_on_disk, CheckResult):
-                raise StepFailure(token_on_disk.detail, token_on_disk.fix)
-            token = token_on_disk
+            updates_disabled = _runner_updates_disabled(context, instance)
+            if isinstance(updates_disabled, CheckResult):
+                raise StepFailure(updates_disabled.detail, updates_disabled.fix)
+            reregister = not updates_disabled
+        if (reregister or not registered) and isinstance(token, CheckResult):
+            raise StepFailure(token.detail, token.fix)
 
-        if archive_changed or _runner_release_stale(context):
+        if archive_changed or _runner_release_stale(context, instance):
             if service_installed:
-                _refuse_when_busy(context)
-                context.host.run(["./svc.sh", "stop"], cwd=_RUNNER_DIR, check=True)
-            context.host.run(["tar", "-xzf", str(archive)], cwd=_RUNNER_DIR, check=True)
+                _refuse_when_busy(context, instance)
+                context.host.run(["./svc.sh", "stop"], cwd=instance.directory, check=True)
+            context.host.run(["tar", "-xzf", str(archive)], cwd=instance.directory, check=True)
             if service_installed:
-                _refresh_service_wrapper(context)
-            _remove_superseded_archives(context, archive)
-        context.host.run(["chown", "-R", f"{_RUNNER_USER}:{_RUNNER_USER}", str(_RUNNER_DIR)], check=True)
-        # The sudoers line is host state independent of registration: an
-        # installed, unregistered runner still gets it.
-        self._ensure_sudoers(context)
+                _refresh_service_wrapper(context, instance)
+            _remove_superseded_archives(context, instance, archive)
+        context.host.run(["chown", "-R", f"{_RUNNER_USER}:{_RUNNER_USER}", str(instance.directory)], check=True)
 
-        replaced = reregister and token is not None
+        replaced = reregister and isinstance(token, str)
         if replaced:
-            _refuse_when_busy(context)
+            _refuse_when_busy(context, instance)
             if service_installed:
-                context.host.run(["./svc.sh", "stop"], cwd=_RUNNER_DIR, check=True)
-                context.host.run(["./svc.sh", "uninstall"], cwd=_RUNNER_DIR, check=True)
+                context.host.run(["./svc.sh", "stop"], cwd=instance.directory, check=True)
+                context.host.run(["./svc.sh", "uninstall"], cwd=instance.directory, check=True)
                 service_installed = False
             context.host.run(
                 ["runuser", "-u", _RUNNER_USER, "--", "./config.sh", "remove", "--local"],
-                cwd=_RUNNER_DIR,
+                cwd=instance.directory,
                 check=True,
             )
             registered = False
-        if not registered and token is not None:
-            _register(context, token)
+        registered_now = False
+        if not registered and isinstance(token, str):
+            _register(context, instance, token)
             registered = True
+            registered_now = True
         if not registered:
-            # Installed, unregistered, no token: nothing to run yet.
-            return None
+            return False, False
         # svc.sh records its unit name in .service; a second install refuses.
         if not service_installed:
-            context.host.run(["./svc.sh", "install", _RUNNER_USER], cwd=_RUNNER_DIR, check=True)
+            context.host.run(["./svc.sh", "install", _RUNNER_USER], cwd=instance.directory, check=True)
         # svc.sh start never enables the unit; a unit someone disabled is enabled here.
-        unit = context.host.read_text(_RUNNER_SERVICE).strip()
+        unit = context.host.read_text(instance.service_file).strip()
         context.host.run(["systemctl", "enable", unit], check=True)
-        context.host.run(["./svc.sh", "start"], cwd=_RUNNER_DIR, check=True)
-        return _RUNNER_REREGISTERED_ANNOUNCEMENT if replaced else None
+        context.host.run(["./svc.sh", "start"], cwd=instance.directory, check=True)
+        return replaced, registered_now
 
     def _ensure_sudoers(self, context: ProvisionContext) -> None:
         """Validate the acceptance runner's sudoers rule as a candidate, then promote it."""

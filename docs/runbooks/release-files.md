@@ -78,7 +78,7 @@ The maintaining office reviews the open pin-watch and Dependabot pull requests o
 | `images.postgres`, `images.gideon`, and their build arguments | Leave open for a cycle. Checks stay red until the image is rebuilt on the box (`built-images.md` §2). Postgres is user-facing. |
 | `images.opensearch` | A new digest under the same tag (upstream refreshes a version's operating-system packages): merge when green. A new version: leave open for a release cycle. |
 | `host.registry_image`, `host.acceptance_vm_image` | Merge when green. The registry moves at the next provision; the VM image at the next acceptance run. |
-| `host.gh_runner` | Merge when green, then provision the box within thirty days to update its runner. |
+| `host.gh_runner` | Merge when green, then provision the box within thirty days to update both its runner instances. |
 | `host.driver.branch`, `host.minimums.*` proposals | Leave open until the box runs the new version. Merging first makes preflight and provision refuse until the box is upgraded by `docs/runbooks/install-upgrade.md §9`. Close a version you decide to skip. |
 | `skills.matt-pocock` proposal | A maintainer completes the skill refresh on the proposal branch, then merges when green. Nothing on the box moves. |
 

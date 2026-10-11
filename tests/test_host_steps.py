@@ -5479,6 +5479,9 @@ def kvm_commands() -> dict[tuple[str, ...], subprocess.CompletedProcess[str]]:
 
 
 RUNNER_UNIT = "actions.runner.TNMD-FDO.gideon.service"
+RUNNER_CHECKS_UNIT = "actions.runner.TNMD-FDO.gideon-checks.service"
+RUNNER_PGREP = ("pgrep", "-u", "gh-runner", "-f", r"^/opt/gh\-runner/bin/Runner\.Worker( |$)")
+RUNNER_CHECKS_PGREP = ("pgrep", "-u", "gh-runner", "-f", r"^/opt/gh\-runner\-checks/bin/Runner\.Worker( |$)")
 RUNNER_FIXTURES = ROOT / "tests/fixtures/host/gh-runner"
 
 
@@ -5501,8 +5504,13 @@ RUNNER_VENV_QUERY = ("dpkg-query", "-W", "-f=${Status} ${Version}\\n", "python3-
 RUNNER_VENV_INSTALL = ("apt-get", "install", "-y", "python3-venv")
 RUNNER_CONFIG_ARGV = (
     "runuser", "-u", "gh-runner", "--", "./config.sh", "--unattended", "--replace",
-    "--disableupdate", "--url", "https://github.com/TNMD-FDO", "--labels",
+    "--disableupdate", "--url", "https://github.com/TNMD-FDO", "--name", "gideon", "--labels",
     "self-hosted,linux,x64,gpu,dl385-gen11",
+)
+RUNNER_CHECKS_CONFIG_ARGV = (
+    "runuser", "-u", "gh-runner", "--", "./config.sh", "--unattended", "--replace",
+    "--disableupdate", "--url", "https://github.com/TNMD-FDO", "--name", "gideon-checks", "--labels",
+    "self-hosted,linux,x64,checks",
 )
 
 
@@ -5524,15 +5532,17 @@ class RunnerFakeHost(FakeHost):
         command = tuple(argv)
         if result.returncode != 0:
             return result
+        directory = os.fspath(cwd) if cwd is not None else ""
         if command == ("./svc.sh", "install", "gh-runner"):
-            self.files["/opt/gh-runner/.service"] = RUNNER_UNIT + "\n"
+            unit = RUNNER_UNIT if directory == "/opt/gh-runner" else RUNNER_CHECKS_UNIT
+            self.files[f"{directory}/.service"] = unit + "\n"
         elif command == ("./svc.sh", "uninstall"):
-            self.files.pop("/opt/gh-runner/.service", None)
+            self.files.pop(f"{directory}/.service", None)
         elif command == RUNNER_REMOVE_ARGV:
-            self.files.pop("/opt/gh-runner/.runner", None)
-            self.files.pop("/opt/gh-runner/.runner_migrated", None)
-        elif command == RUNNER_CONFIG_ARGV:
-            self.files["/opt/gh-runner/.runner"] = runner_settings_fixture("off")
+            self.files.pop(f"{directory}/.runner", None)
+            self.files.pop(f"{directory}/.runner_migrated", None)
+        elif command in (RUNNER_CONFIG_ARGV, RUNNER_CHECKS_CONFIG_ARGV):
+            self.files[f"{directory}/.runner"] = runner_settings_fixture("off")
         elif command == ("mv", "-f", RUNNER_SUDOERS_CANDIDATE, RUNNER_SUDOERS):
             self.files[RUNNER_SUDOERS] = self.files.pop(RUNNER_SUDOERS_CANDIDATE)
             self.stats[RUNNER_SUDOERS] = file_stat(0o440, 0, 0)
@@ -5609,78 +5619,24 @@ class ServiceStepTests(unittest.TestCase):
         service_enabled: bool = True,
         service_active: bool = True,
         manifest: bool = True,
+        checks_registered: bool | str = "off",
+        checks_service: bool = True,
+        checks_installed_version: str | None = None,
+        checks_service_enabled: bool = True,
+        checks_service_active: bool = True,
+        checks_busy: bool = False,
     ) -> FakeHost:
-        image = f"/opt/gh-runner/actions-runner-linux-x64-{HOST_LOCK.gh_runner.version}.tar.gz"
-        files = {
-            image: "archive",
-            "/opt/gh-runner/config.sh": "#!/bin/sh\n",
-        }
-        if registered:
-            files["/opt/gh-runner/.runner"] = runner_settings_fixture(registered)
-        if runner_migrated:
-            files["/opt/gh-runner/.runner_migrated"] = runner_settings_fixture(
-                registered if runner_migrated is True else runner_migrated
-            )
+        files: dict[str, str] = {}
         if token:
             files["/etc/gideon/secrets/gh_runner_token"] = "token\n"
-        if manifest:
-            version = installed_version or HOST_LOCK.gh_runner.version
-            files["/opt/gh-runner/bin/Runner.Listener.deps.json"] = json.dumps(
-                {"targets": {"runner": {f"Runner.Listener/{version}": {}}}}
-            )
-        if service:
-            files["/opt/gh-runner/.service"] = RUNNER_UNIT + "\n"
         files[RUNNER_SUDOERS] = RUNNER_SUDOERS_TEXT
-        tar = ("tar", "-xzf", image)
-        stop = ("./svc.sh", "stop")
-        uninstall = ("./svc.sh", "uninstall")
-        remove = RUNNER_REMOVE_ARGV
-        config = RUNNER_CONFIG_ARGV
-        install = ("./svc.sh", "install", "gh-runner")
-        enable = ("systemctl", "enable", RUNNER_UNIT)
-        start = ("./svc.sh", "start")
-        commands = {
+        commands: dict[tuple[str, ...], subprocess.CompletedProcess[str]] = {
             ("getent", "passwd", "gh-runner"): completed(("getent", "passwd", "gh-runner"), "gh-runner:x:997:997::/home/gh-runner:/usr/sbin/nologin\n"),
             ("getent", "group", "docker"): completed(("getent", "group", "docker"), "docker:x:999:gh-runner\n"),
             RUNNER_VENV_QUERY: completed(RUNNER_VENV_QUERY, "install ok installed 1\n"),
-            ("sha256sum", image): completed(
-                ("sha256sum", image), HOST_LOCK.gh_runner.sha256 + "  " + image + "\n"
-            ),
-            ("pgrep", "-u", "gh-runner", "-x", "Runner.Worker"): subprocess.CompletedProcess(
-                ["pgrep", "-u", "gh-runner", "-x", "Runner.Worker"],
-                0 if busy else 1,
-                "",
-                "",
-            ),
-            ("systemctl", "is-enabled", RUNNER_UNIT): subprocess.CompletedProcess(
-                ["systemctl", "is-enabled", RUNNER_UNIT],
-                0 if service_enabled else 1,
-                "",
-                "",
-            ),
-            ("systemctl", "is-active", RUNNER_UNIT): subprocess.CompletedProcess(
-                ["systemctl", "is-active", RUNNER_UNIT],
-                0 if service_active else 1,
-                "",
-                "",
-            ),
-            tar: completed(tar),
             ("cp", "./bin/runsvc.sh", "./runsvc.sh"): completed(
                 ("cp", "./bin/runsvc.sh", "./runsvc.sh")
             ),
-            stop: completed(stop),
-            uninstall: completed(uninstall),
-            remove: completed(remove),
-            config: completed(config),
-            install: completed(install),
-            enable: completed(enable),
-            start: completed(start),
-            (
-                "chown",
-                "-R",
-                "gh-runner:gh-runner",
-                "/opt/gh-runner",
-            ): completed(("chown", "-R")),
             ("visudo", "-c", "-f", RUNNER_SUDOERS_CANDIDATE): completed(
                 ("visudo", "-c", "-f", RUNNER_SUDOERS_CANDIDATE)
             ),
@@ -5690,9 +5646,54 @@ class ServiceStepTests(unittest.TestCase):
         }
         commands.update(dict(apt_command_results(["python3-venv"])))
         stats = {
-            "/opt/gh-runner": directory_stat(0o755, 997, 997),
             RUNNER_SUDOERS: file_stat(0o440, 0, 0),
         }
+        instances = (
+            ("/opt/gh-runner", RUNNER_UNIT, RUNNER_PGREP, RUNNER_CONFIG_ARGV,
+             registered, runner_migrated, installed_version, service,
+             service_enabled, service_active, busy, manifest),
+            ("/opt/gh-runner-checks", RUNNER_CHECKS_UNIT, RUNNER_CHECKS_PGREP,
+             RUNNER_CHECKS_CONFIG_ARGV, checks_registered, False,
+             checks_installed_version, checks_service, checks_service_enabled,
+             checks_service_active, checks_busy, True),
+        )
+        for (
+            directory, unit, pgrep, config, registration, migrated, version,
+            has_service, enabled, active, is_busy, has_manifest,
+        ) in instances:
+            image = f"{directory}/actions-runner-linux-x64-{HOST_LOCK.gh_runner.version}.tar.gz"
+            files[image] = "archive"
+            files[f"{directory}/config.sh"] = "#!/bin/sh\n"
+            if registration:
+                files[f"{directory}/.runner"] = runner_settings_fixture(registration)
+            if migrated:
+                files[f"{directory}/.runner_migrated"] = runner_settings_fixture(
+                    registration if migrated is True else migrated
+                )
+            if has_manifest:
+                files[f"{directory}/bin/Runner.Listener.deps.json"] = json.dumps(
+                    {"targets": {"runner": {f"Runner.Listener/{version or HOST_LOCK.gh_runner.version}": {}}}}
+                )
+            if has_service:
+                files[f"{directory}/.service"] = unit + "\n"
+            stats[directory] = directory_stat(0o755, 997, 997)
+            commands[("sha256sum", image)] = completed(
+                ("sha256sum", image), HOST_LOCK.gh_runner.sha256 + "  " + image + "\n"
+            )
+            commands[pgrep] = subprocess.CompletedProcess(list(pgrep), 0 if is_busy else 1, "", "")
+            for action, good in (("is-enabled", enabled), ("is-active", active)):
+                query = ("systemctl", action, unit)
+                commands[query] = subprocess.CompletedProcess(list(query), 0 if good else 1, "", "")
+            tar = ("tar", "-xzf", image)
+            commands[tar] = completed(tar)
+            commands[config] = completed(config)
+            chown = ("chown", "-R", "gh-runner:gh-runner", directory)
+            commands[chown] = completed(chown)
+            commands[("systemctl", "enable", unit)] = completed(("systemctl", "enable", unit))
+        for script in (("./svc.sh", "stop"), ("./svc.sh", "uninstall"),
+                       RUNNER_REMOVE_ARGV, ("./svc.sh", "install", "gh-runner"),
+                       ("./svc.sh", "start")):
+            commands[script] = completed(script)
         return RunnerFakeHost(files=files, stats=stats, commands=commands)
 
     def test_gh_runner_without_token_is_pending_input(self) -> None:
@@ -5869,7 +5870,7 @@ class ServiceStepTests(unittest.TestCase):
             result,
             CheckResult(
                 Disposition.CONVERGED,
-                "GitHub runner is registered with updates disabled and active",
+                "runners gideon and gideon-checks registered with updates disabled and active",
                 "",
             ),
         )
@@ -6077,7 +6078,10 @@ class ServiceStepTests(unittest.TestCase):
     def test_registered_runner_without_a_service_drifts(self) -> None:
         result = GhRunnerStep().check(context(self._runner_host(registered="off")))
         self.assertEqual(result.disposition, Disposition.DRIFT)
-        self.assertEqual(result.detail, "the GitHub runner service is not installed")
+        self.assertEqual(
+            result.detail,
+            "gideon: the GitHub runner service is not installed; gideon-checks: converged",
+        )
 
     def test_registered_runner_with_active_but_disabled_service_drifts(self) -> None:
         result = GhRunnerStep().check(
@@ -6103,7 +6107,7 @@ class ServiceStepTests(unittest.TestCase):
             context(self._runner_host(manifest=False))
         )
         self.assertEqual(result.disposition, Disposition.DRIFT)
-        self.assertIn("manifest is missing", result.detail)
+        self.assertIn("/opt/gh-runner/bin/Runner.Listener.deps.json is missing", result.detail)
         self.assertIn("Extract", result.fix)
 
     def test_runner_manifest_without_listener_entry_is_unfixable(self) -> None:
@@ -6140,12 +6144,235 @@ class ServiceStepTests(unittest.TestCase):
 
     def test_busy_probe_failure_is_unfixable(self) -> None:
         host = self._runner_host(registered=True, token=True)
-        pgrep = ("pgrep", "-u", "gh-runner", "-x", "Runner.Worker")
+        pgrep = RUNNER_PGREP
         host.commands[pgrep] = subprocess.CompletedProcess(list(pgrep), 2, "", "error")
         result = GhRunnerStep().check(context(host))
         self.assertEqual(result.disposition, Disposition.UNFIXABLE)
         self.assertIn("cannot tell whether a job is running", result.detail)
         self.assertIn("procps", result.fix)
+
+    def test_missing_checks_folder_drifts_beside_converged_first_runner(self) -> None:
+        host = self._runner_host(registered="off", service=True)
+        host.stats.pop("/opt/gh-runner-checks")
+        for path in list(host.files):
+            if path.startswith("/opt/gh-runner-checks/"):
+                del host.files[path]
+
+        result = GhRunnerStep().check(context(host))
+
+        self.assertEqual(result.disposition, Disposition.DRIFT)
+        self.assertIn("gideon: converged", result.detail)
+        self.assertIn("gideon-checks: /opt/gh-runner-checks is missing", result.detail)
+        self.assertIn("Create /opt/gh-runner-checks", result.fix)
+
+    def test_checks_registration_uses_its_name_and_leaves_first_untouched(self) -> None:
+        host = self._runner_host(registered="off", service=True, checks_registered=False,
+                                 checks_service=False, token=True)
+        step = GhRunnerStep()
+
+        self.assertEqual(step.check(context(host)).disposition, Disposition.DRIFT)
+        self.assertIsNone(step.apply(context(host)))
+
+        registrations = [run for run in host.runs if run[0] in (RUNNER_CONFIG_ARGV, RUNNER_CHECKS_CONFIG_ARGV)]
+        self.assertEqual(len(registrations), 1)
+        command, cwd, env = registrations[0]
+        self.assertEqual(command, RUNNER_CHECKS_CONFIG_ARGV)
+        self.assertEqual(cwd, Path("/opt/gh-runner-checks"))
+        assert env is not None
+        self.assertEqual(env[_RUNNER_TOKEN_VARIABLE], "token")
+        self.assertFalse(any("token" in word for argv, _, _ in host.runs for word in argv))
+        self.assertEqual(host.files["/opt/gh-runner-checks/.runner"], runner_settings_fixture("off"))
+        self.assertNotIn("/etc/gideon/secrets/gh_runner_token", host.files)
+        self.assertFalse(any(
+            cwd == Path("/opt/gh-runner") for command, cwd, _ in host.runs
+            if command[0] in {"./svc.sh", "chown", "tar", "runuser"}
+        ))
+
+    def test_two_registrations_share_one_token_until_the_last_succeeds(self) -> None:
+        host = self._runner_host(token=True, checks_registered=False, checks_service=False)
+
+        self.assertIsNone(GhRunnerStep().apply(context(host)))
+
+        registrations = [argv for argv, _, _ in host.runs
+                         if argv in (RUNNER_CONFIG_ARGV, RUNNER_CHECKS_CONFIG_ARGV)]
+        self.assertEqual(registrations, [RUNNER_CONFIG_ARGV, RUNNER_CHECKS_CONFIG_ARGV])
+        token_unlinks = [index for index, call in enumerate(host.calls)
+                         if call == ("unlink", "/etc/gideon/secrets/gh_runner_token")]
+        self.assertEqual(len(token_unlinks), 1)
+        self.assertEqual(
+            host.calls.count(("read_text", "/etc/gideon/secrets/gh_runner_token")), 1
+        )
+        second_config = host.calls.index(("run", (RUNNER_CHECKS_CONFIG_ARGV, False)))
+        self.assertGreater(token_unlinks[0], second_config)
+        self.assertNotIn("/etc/gideon/secrets/gh_runner_token", host.files)
+
+    def test_refused_second_registration_keeps_first_and_the_token(self) -> None:
+        host = self._runner_host(token=True, checks_registered=False, checks_service=False)
+        host.commands[RUNNER_CHECKS_CONFIG_ARGV] = subprocess.CompletedProcess(
+            list(RUNNER_CHECKS_CONFIG_ARGV), 1, "", "registration token expired\n"
+        )
+
+        with self.assertRaises(StepFailure) as raised:
+            GhRunnerStep().apply(context(host))
+
+        self.assertIn("gideon-checks", raised.exception.detail)
+        self.assertIn("registration token expired", raised.exception.detail)
+        self.assertEqual(raised.exception.fix, _RUNNER_FRESH_TOKEN_FIX)
+        self.assertIn("/opt/gh-runner/.runner", host.files)
+        self.assertNotIn("/opt/gh-runner-checks/.runner", host.files)
+        self.assertIn("/etc/gideon/secrets/gh_runner_token", host.files)
+        self.assertNotIn(("unlink", "/etc/gideon/secrets/gh_runner_token"), host.calls)
+
+    def test_busy_other_instance_does_not_block_extract(self) -> None:
+        cases = (
+            ("gideon", True, False, None, "0.0.0", "/opt/gh-runner-checks"),
+            ("gideon-checks", False, True, "0.0.0", None, "/opt/gh-runner"),
+        )
+        for busy_name, first_busy, checks_busy, first_version, checks_version, moved_directory in cases:
+            with self.subTest(busy=busy_name):
+                host = self._runner_host(
+                    registered="off", service=True, busy=first_busy, checks_busy=checks_busy,
+                    installed_version=first_version, checks_installed_version=checks_version,
+                )
+
+                self.assertIsNone(GhRunnerStep().apply(context(host)))
+
+                extracted = [(argv, cwd) for argv, cwd, _ in host.runs if argv[0] == "tar"]
+                self.assertEqual(len(extracted), 1)
+                self.assertEqual(extracted[0][1], Path(moved_directory))
+                self.assertFalse(any(
+                    argv == ("./svc.sh", "stop") and cwd != Path(moved_directory)
+                    for argv, cwd, _ in host.runs
+                ))
+
+    def test_busy_first_runner_still_moves_stale_checks_runner(self) -> None:
+        host = self._runner_host(
+            registered="off", service=True, installed_version="0.0.0", busy=True,
+            checks_installed_version="0.0.0",
+        )
+
+        with self.assertRaises(StepFailure) as raised:
+            GhRunnerStep().apply(context(host))
+
+        self.assertEqual(raised.exception.fix, _RUNNER_WAIT_FIX)
+        self.assertIn("gideon", raised.exception.detail)
+        self.assertIn("job is running", raised.exception.detail)
+        self.assertNotIn(("./svc.sh", "stop"), [argv for argv, cwd, _ in host.runs
+                                                if cwd == Path("/opt/gh-runner")])
+        self.assertIn(
+            (("./svc.sh", "stop"), Path("/opt/gh-runner-checks")),
+            [(argv, cwd) for argv, cwd, _ in host.runs],
+        )
+        self.assertTrue(any(argv[0] == "tar" and cwd == Path("/opt/gh-runner-checks")
+                            for argv, cwd, _ in host.runs))
+
+    def test_pending_first_registration_does_not_hide_stopped_checks_service(self) -> None:
+        host = self._runner_host(checks_service_active=False)
+        step = GhRunnerStep()
+
+        self.assertEqual(step.check(context(host)).disposition, Disposition.DRIFT)
+        self.assertIsNone(step.apply(context(host)))
+
+        starts = [cwd for argv, cwd, _ in host.runs if argv == ("./svc.sh", "start")]
+        self.assertEqual(starts, [Path("/opt/gh-runner-checks")])
+        host.commands[("systemctl", "is-active", RUNNER_CHECKS_UNIT)] = completed(
+            ("systemctl", "is-active", RUNNER_CHECKS_UNIT)
+        )
+        result = step.check(context(host))
+        self.assertEqual(result.disposition, Disposition.PENDING_INPUT)
+        self.assertIn("gideon: installed, unregistered", result.detail)
+        self.assertIn("gideon-checks: converged", result.detail)
+        self.assertIn("gh_runner_token", result.fix)
+
+    def test_unreadable_checks_settings_do_not_hide_first_runner_repair(self) -> None:
+        host = self._runner_host(registered="off", service=True, service_active=False)
+        host.files["/opt/gh-runner-checks/.runner"] = "not json"
+        step = GhRunnerStep()
+        self.assertEqual(step.check(context(host)).disposition, Disposition.DRIFT)
+
+        with self.assertRaises(StepFailure) as raised:
+            step.apply(context(host))
+
+        self.assertIn("gideon-checks", raised.exception.detail)
+        self.assertIn("/opt/gh-runner-checks/config.sh remove --local", raised.exception.fix)
+        self.assertIn(
+            (("./svc.sh", "start"), Path("/opt/gh-runner")),
+            [(argv, cwd) for argv, cwd, _ in host.runs],
+        )
+        self.assertFalse(any(argv == ("./svc.sh", "start") and cwd == Path("/opt/gh-runner-checks")
+                             for argv, cwd, _ in host.runs))
+
+    def test_checks_folder_manifest_and_ownership_fixes_name_its_folder(self) -> None:
+        for fault in ("folder", "manifest", "ownership"):
+            with self.subTest(fault=fault):
+                host = self._runner_host(registered="off", service=True)
+                if fault == "folder":
+                    host.stats.pop("/opt/gh-runner-checks")
+                    for path in list(host.files):
+                        if path.startswith("/opt/gh-runner-checks/"):
+                            del host.files[path]
+                elif fault == "manifest":
+                    host.files["/opt/gh-runner-checks/bin/Runner.Listener.deps.json"] = "{}"
+                else:
+                    host.stats["/opt/gh-runner-checks"] = directory_stat(0o755, 0, 0)
+
+                result = GhRunnerStep().check(context(host))
+
+                self.assertIn("gideon: converged", result.detail)
+                self.assertIn("gideon-checks:", result.detail)
+                self.assertIn("/opt/gh-runner-checks", result.fix)
+
+    def test_sudoers_is_promoted_before_either_runner_extracts(self) -> None:
+        host = self._runner_host(
+            registered="off", service=True, installed_version="0.0.0",
+            checks_installed_version="0.0.0",
+        )
+        host.files[RUNNER_SUDOERS] = "old rules\n"
+
+        self.assertIsNone(GhRunnerStep().apply(context(host)))
+
+        promotion = host.calls.index((
+            "run", (("mv", "-f", RUNNER_SUDOERS_CANDIDATE, RUNNER_SUDOERS), True)
+        ))
+        extractions = [index for index, call in enumerate(host.calls)
+                       if call[0] == "run" and isinstance(call[1], tuple)
+                       and call[1][0][0] == "tar"]
+        self.assertEqual(len(extractions), 2)
+        self.assertLess(promotion, extractions[0])
+
+    def test_runner_details_name_both_in_ok_and_would_apply_rows(self) -> None:
+        host = self._runner_host(registered="off", service=True)
+        step = GhRunnerStep()
+        self.assertEqual(step.check(context(host)).disposition, Disposition.CONVERGED)
+        self.assertIn("gideon and gideon-checks", step.check(context(host)).detail)
+        host.files.pop("/opt/gh-runner-checks/.service")
+        host.files["/etc/gideon/build-box"] = "build box\n"
+        host.files[str(LOCK)] = LOCK.read_text(encoding="utf-8")
+        host.files[str(MODELS)] = MODELS.read_text(encoding="utf-8")
+
+        class DockerPrerequisite(Step):
+            name = "docker-engine"
+
+            def check(self, context: ProvisionContext) -> CheckResult:
+                return CheckResult(Disposition.CONVERGED, "ready", "")
+
+            def apply(self, context: ProvisionContext) -> None:
+                return None
+
+        class DiskPrerequisite(DockerPrerequisite):
+            name = "disk-layout"
+
+        args = type("Arguments", (), {"only": "gh-runner", "dry_run": True, "list": False})()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = run_provision(
+                args, host=host, lock_path=LOCK,
+                steps=[DockerPrerequisite(), DiskPrerequisite(), step],
+            )
+        self.assertEqual(code, 0)
+        self.assertIn("gh-runner: would-apply", output.getvalue())
+        self.assertIn("gideon: converged", output.getvalue())
+        self.assertIn("gideon-checks:", output.getvalue())
 
 
 class BaselineCheckPass(unittest.TestCase):

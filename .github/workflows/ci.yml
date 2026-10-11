@@ -12,7 +12,8 @@ jobs:
     # code never runs on the persistent runner, and the public export stays
     # hosted because its repository is not private. Each step carries an if on
     # the runner's kind, so no step can run on the wrong one.
-    runs-on: ${{ github.event_name == 'push' && github.event.repository.private && fromJSON('["self-hosted", "linux", "x64", "gpu", "dl385-gen11"]') || 'ubuntu-latest' }}
+    # The gate uses the box's second runner instance, leaving the previous run's box jobs free.
+    runs-on: ${{ github.event_name == 'push' && github.event.repository.private && fromJSON('["self-hosted", "linux", "x64", "checks"]') || 'ubuntu-latest' }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7

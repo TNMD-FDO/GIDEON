@@ -11,6 +11,8 @@ from typing import Any
 
 import yaml  # type: ignore[import-untyped]
 
+from gideon.host.steps.services import RUNNER_INSTANCES
+
 WORKFLOW = Path(__file__).resolve().parent.parent / ".github/workflows/ci.yml"
 _PRIVATE_PUSH = re.compile(
     r"github\.event_name\s*==\s*'push'\s*&&\s*github\.event\.repository\.private"
@@ -30,6 +32,12 @@ def _can_name_box(runner: object) -> bool:
     if isinstance(runner, str):
         return runner == "self-hosted" or _BOX_LABEL.search(runner) is not None
     return False
+
+
+def _label_set(runner: object) -> set[str] | None:
+    if not isinstance(runner, list) or not all(isinstance(label, str) for label in runner):
+        return None
+    return {label.casefold() for label in runner}
 
 
 def workflow_findings(workflow: dict[str, Any]) -> list[str]:
@@ -54,17 +62,32 @@ def workflow_findings(workflow: dict[str, Any]) -> list[str]:
         labels = json.loads(label_match.group(1)) if label_match else None
     except json.JSONDecodeError:
         labels = None
-    box_labels = [
-        job["runs-on"]
+    checks_labels = _label_set(labels)
+    box_labels = {
+        name: _label_set(job["runs-on"])
         for name, job in jobs.items()
-        if name != "checks"
-        and isinstance(job["runs-on"], list)
-        and "self-hosted" in job["runs-on"]
-    ]
-    if not box_labels or not isinstance(labels, list) or any(
-        labels != box_runner for box_runner in box_labels
+        if name != "checks" and _can_name_box(job["runs-on"])
+    }
+    if (
+        not box_labels
+        or checks_labels is None
+        or "self-hosted" not in checks_labels
+        or any(
+            job_labels is None
+            or "self-hosted" not in job_labels
+            or not checks_labels - job_labels
+            or not job_labels - checks_labels
+            for job_labels in box_labels.values()
+        )
     ):
         findings.append("checks: box labels")
+    first_labels = {label.casefold() for label in RUNNER_INSTANCES[0].labels}
+    checks_instance_labels = {label.casefold() for label in RUNNER_INSTANCES[-1].labels}
+    if checks_labels is None or not checks_labels <= checks_instance_labels or checks_labels <= first_labels:
+        findings.append("checks: routing")
+    for name, job_labels in box_labels.items():
+        if job_labels is None or not job_labels <= first_labels or job_labels <= checks_instance_labels:
+            findings.append(f"{name}: routing")
     if not isinstance(checks.get("timeout-minutes"), int) or checks["timeout-minutes"] <= 0:
         findings.append("checks: timeout")
 
@@ -111,10 +134,10 @@ class CiWorkflowTests(unittest.TestCase):
         checks["runs-on"] = checks["runs-on"].replace(match.group(0), "true")
         self.assertIn("checks: private push guard", self.seeded_findings(seed))
 
-    def test_seeded_checks_runner_requires_hosted_fallback_and_box_labels(self) -> None:
+    def test_seeded_checks_runner_requires_hosted_fallback_and_instance_routing(self) -> None:
         for case, finding in (
             ("fallback", "checks: hosted fallback"),
-            ("labels", "checks: box labels"),
+            ("labels", "checks: routing"),
         ):
             with self.subTest(case=case):
                 seed = copy.deepcopy(self.workflow)
@@ -129,7 +152,38 @@ class CiWorkflowTests(unittest.TestCase):
                     labels = json.loads(match.group(1))
                     labels.append("test-only-label")
                     checks["runs-on"] = runner.replace(match.group(1), json.dumps(labels))
-                self.assertIn(finding, self.seeded_findings(seed))
+                findings = self.seeded_findings(seed)
+                self.assertIn(finding, findings)
+                if case == "labels":
+                    self.assertNotIn("checks: box labels", findings)
+
+    def test_seeded_checks_shared_labels_fail_separation_and_routing(self) -> None:
+        seed = copy.deepcopy(self.workflow)
+        runner = seed["jobs"]["checks"]["runs-on"]
+        match = _FROM_JSON.search(runner)
+        self.assertIsNotNone(match)
+        assert match is not None
+        seed["jobs"]["checks"]["runs-on"] = runner.replace(
+            match.group(1), json.dumps(["self-hosted", "linux", "x64"])
+        )
+
+        findings = self.seeded_findings(seed)
+
+        self.assertIn("checks: box labels", findings)
+        self.assertIn("checks: routing", findings)
+
+    def test_seeded_box_job_shared_labels_fail_separation_and_routing(self) -> None:
+        for name in self.workflow["jobs"]:
+            if name == "checks":
+                continue
+            with self.subTest(job=name):
+                seed = copy.deepcopy(self.workflow)
+                seed["jobs"][name]["runs-on"] = ["self-hosted", "linux", "x64"]
+
+                findings = self.seeded_findings(seed)
+
+                self.assertIn("checks: box labels", findings)
+                self.assertIn(f"{name}: routing", findings)
 
     def test_seeded_checks_requires_timeout(self) -> None:
         seed = copy.deepcopy(self.workflow)
