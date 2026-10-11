@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.125](docs/release-notes/v0.3.125.md) — 2026-10-11 — the next-listing test reads git once
 - [v0.3.124](docs/release-notes/v0.3.124.md) — 2026-10-11 — turning search on is recorded
 - [v0.3.123](docs/release-notes/v0.3.123.md) — 2026-10-11 — the release-files runbook lists what the hardware profile sizes and how each value moves on a smaller box
 - [v0.3.122](docs/release-notes/v0.3.122.md) — 2026-10-10 — the pin watch reads python-dateutil's index
