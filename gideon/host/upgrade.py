@@ -110,7 +110,7 @@ def _rollback_fix() -> str:
 
 
 def _rollback_fetch_fix() -> str:
-    return f"Run git fetch --tags origin in the checkout as its owner, then re-run {_rollback()}."
+    return f"Run git fetch --tags --force origin in the checkout as its owner, then re-run {_rollback()}."
 
 
 def _rollback_by_hand_fix() -> str:
@@ -443,7 +443,7 @@ def _resolve_tag(
 
 def _manual_fetch_fix(checkout: Path, owner: _CheckoutOwner, tag: str) -> str:
     return (
-        f"Run git fetch --tags origin in {checkout} as {owner.name}, then re-run "
+        f"Run git fetch --tags --force origin in {checkout} as {owner.name}, then re-run "
         f"{_upgrade()} {tag}."
     )
 
@@ -455,8 +455,9 @@ def _fetch_stage(
     owner: _CheckoutOwner,
     tag: str,
 ) -> tuple[StageResult, str | None, str | None]:
+    before, _ = _resolve_tag(io, checkout, owner, tag)
     try:
-        fetched = _run_git(io, checkout, owner, ("fetch", "--tags", "origin"))
+        fetched = _run_git(io, checkout, owner, ("fetch", "--tags", "--force", "origin"))
     except (OSError, subprocess.SubprocessError) as exc:
         fetched = subprocess.CompletedProcess([], 1, "", str(exc))
     target_commit, resolve_problem = _resolve_tag(io, checkout, owner, tag)
@@ -512,6 +513,8 @@ def _fetch_stage(
         detail = f"fetch failed; tag {tag} was already present at {target_commit}, continuing"
     else:
         detail = f"fetched tags; {tag} resolves to {target_commit}"
+    if before is not None and before != target_commit:
+        detail += f"; moved from {before} by this fetch"
     return StageResult("fetch", True, detail, ""), target_commit, from_commit
 
 

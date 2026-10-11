@@ -1,4 +1,4 @@
-"""The upgrade command's contracts: the forward path over a fake Host."""
+"""Upgrade and rollback contracts over fake hosts and a temporary Git clone."""
 
 import argparse
 import ast
@@ -12,11 +12,12 @@ import unittest
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, cast
 from unittest.mock import patch
 
 import gideon
-from gideon.host import audit, backupset, nogpu, report, upgrade
+from gideon.host import audit, backupset, nogpu, report, sysio, upgrade
 from gideon.host.checks import CheckReport, PreflightCheck, PreflightContext, Severity
 from gideon.host.cotenants import ACKNOWLEDGE_DISRUPTION_FLAG
 from gideon.host.site import load_site
@@ -146,6 +147,7 @@ class FakeHost:
         dirty: bool = False,
         fetch_ok: bool = True,
         tag_present: bool = True,
+        cached_commit: str | None = None,
         head: str = FROM_COMMIT,
         tree_version: str | None = None,
         notes: Mapping[str, str] | None = None,
@@ -168,6 +170,8 @@ class FakeHost:
         self.dirty = dirty
         self.fetch_ok = fetch_ok
         self.tag_present = tag_present
+        self.cached_commit = cached_commit
+        self.fetched = False
         self.head = head
         self.tree_version = tree_version
         self.notes = dict(notes or {})
@@ -265,14 +269,16 @@ class FakeHost:
             return completed(command, stdout="true\n")
         if arguments == ("status", "--porcelain", "--untracked-files=no"):
             return completed(command, stdout=" M gideon/cli.py\n" if self.dirty else "")
-        if arguments == ("fetch", "--tags", "origin"):
+        if arguments == ("fetch", "--tags", "--force", "origin"):
+            self.fetched = True
             return completed(command, returncode=int(not self.fetch_ok))
         if arguments == ("rev-parse", "HEAD"):
             return completed(command, stdout=f"{self.head}\n")
         if arguments[0] == "rev-parse" and arguments[1].endswith("^{commit}"):
             if not self.tag_present:
                 return completed(command, returncode=128)
-            return completed(command, stdout=f"{TARGET_COMMIT}\n")
+            commit = TARGET_COMMIT if self.fetched else self.cached_commit or TARGET_COMMIT
+            return completed(command, stdout=f"{commit}\n")
         if arguments[0] == "show" and arguments[1].endswith(":gideon/__init__.py"):
             self.tag = arguments[1].split(":", 1)[0]
             version = self.tree_version or self.tag.removeprefix("v")
@@ -385,6 +391,13 @@ def rows_of(text: str) -> list[str]:
 
 def git_as_owner(*arguments: str) -> tuple[str, ...]:
     return ("sudo", "-u", OWNER, "git", *arguments)
+
+
+def git(root: Path, *arguments: str) -> str:
+    result = subprocess.run(["git", *arguments], cwd=root, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        raise AssertionError(f"git {' '.join(arguments)} failed: {result.stderr}")
+    return result.stdout.strip()
 
 
 def release_note_path(tag: str) -> str:
@@ -659,7 +672,8 @@ class UpgradeTests(CommandRunner):
             [
                 git_as_owner("rev-parse", "--is-inside-work-tree"),
                 git_as_owner("status", "--porcelain", "--untracked-files=no"),
-                git_as_owner("fetch", "--tags", "origin"),
+                git_as_owner("rev-parse", f"{HIGHER}^{{commit}}"),
+                git_as_owner("fetch", "--tags", "--force", "origin"),
                 git_as_owner("rev-parse", f"{HIGHER}^{{commit}}"),
                 git_as_owner("rev-parse", "HEAD"),
                 git_as_owner("show", f"{HIGHER}:gideon/__init__.py"),
@@ -977,16 +991,48 @@ class UpgradeTests(CommandRunner):
         present = FakeHost(fetch_ok=False, applied_release=HIGHER.removeprefix("v"))
         code, out, _, _, _ = self.run_upgrade(present)
         self.assertEqual(code, 0, out)
-        self.assertIn(f"fetch: ok — fetch failed; tag {HIGHER} was already present at {TARGET_COMMIT}, continuing", out)
+        self.assertIn(
+            f"fetch: ok — fetch failed; tag {HIGHER} was already present at {TARGET_COMMIT}, continuing\n",
+            out,
+        )
 
         absent = FakeHost(fetch_ok=False, tag_present=False)
         code, out, _, runners, _ = self.run_upgrade(absent)
         self.assertEqual(code, 1)
         self.assertIn(
-            f"fetch: refuse — fetch failed and tag {HIGHER} is not present Fix: Run git fetch --tags origin in {CHECKOUT} as {OWNER}, then re-run sudo python3 -m gideon upgrade {HIGHER}.",
+            f"fetch: refuse — fetch failed and tag {HIGHER} is not present Fix: Run git fetch --tags --force origin in {CHECKOUT} as {OWNER}, then re-run sudo python3 -m gideon upgrade {HIGHER}.",
             out,
         )
         self.assertEqual(runners.calls, [])
+
+        cached = "c" * 40
+        moved = FakeHost(
+            fetch_ok=False,
+            cached_commit=cached,
+            applied_release=HIGHER.removeprefix("v"),
+        )
+        code, out, _, _, _ = self.run_upgrade(moved)
+        self.assertEqual(code, 0, out)
+        self.assertIn(
+            f"fetch: ok — fetch failed; tag {HIGHER} was already present at {TARGET_COMMIT}, "
+            f"continuing; moved from {cached} by this fetch\n",
+            out,
+        )
+
+    def test_fetch_names_a_moved_tag_and_checks_out_its_new_commit(self) -> None:
+        cached = "c" * 40
+        host = FakeHost(cached_commit=cached, applied_release=HIGHER.removeprefix("v"))
+
+        code, out, _, _, backend = self.run_upgrade(host)
+
+        self.assertEqual(code, 0, out)
+        self.assertIn(
+            f"fetch: ok — fetched tags; {HIGHER} resolves to {TARGET_COMMIT}; "
+            f"moved from {cached} by this fetch\n",
+            out,
+        )
+        self.assertEqual(backend.rows[0].detail["to_commit"], TARGET_COMMIT)
+        self.assertIn(git_as_owner("checkout", "--detach", HIGHER), host.git_calls())
 
     def test_a_dirty_checkout_refuses_before_anything_else(self) -> None:
         host = FakeHost(dirty=True)
@@ -1052,6 +1098,62 @@ class ModuleShape(unittest.TestCase):
             if isinstance(node, (ast.Import, ast.ImportFrom)) and node not in tree.body
         ]
         self.assertEqual(nested, [])
+
+
+class RealCloneFetchTests(unittest.TestCase):
+    """A moved tag in a real clone reaches the commit at origin."""
+
+    def test_fetch_moves_a_cached_tag_to_origins_commit(self) -> None:
+        tag = "v9.9.9"
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            origin = root / "origin"
+            checkout = root / "checkout"
+            origin.mkdir()
+            git(origin, "init", "-q")
+            git(origin, "config", "user.name", "Fixture Author")
+            git(origin, "config", "user.email", "fixture@example.invalid")
+            payload = origin / "payload.txt"
+            payload.write_text("first\n", encoding="utf-8")
+            git(origin, "add", "payload.txt")
+            git(origin, "commit", "-qm", "first")
+            git(origin, "tag", tag)
+            first_commit = git(origin, "rev-parse", f"{tag}^{{commit}}")
+            git(root, "clone", "-q", str(origin), str(checkout))
+            clone_head = git(checkout, "rev-parse", "HEAD")
+            self.assertEqual(clone_head, first_commit)
+
+            payload.write_text("second\n", encoding="utf-8")
+            git(origin, "commit", "-qam", "second")
+            git(origin, "tag", "-f", tag)
+            origin_commit = git(origin, "rev-parse", f"{tag}^{{commit}}")
+            self.assertNotEqual(origin_commit, first_commit)
+
+            plain_fetch = subprocess.run(
+                ["git", "fetch", "--tags", "origin"],
+                cwd=checkout,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(plain_fetch.returncode, 0, plain_fetch.stderr)
+            self.assertEqual(git(checkout, "rev-parse", f"{tag}^{{commit}}"), first_commit)
+
+            row, target_commit, from_commit = upgrade._fetch_stage(
+                sysio.RealHost(),
+                checkout=checkout,
+                owner=upgrade._CheckoutOwner("root", 0),
+                tag=tag,
+            )
+            self.assertTrue(row.ok, row.detail)
+            self.assertEqual(
+                row.detail,
+                f"fetched tags; {tag} resolves to {origin_commit}; "
+                f"moved from {first_commit} by this fetch",
+            )
+            self.assertEqual(target_commit, origin_commit)
+            self.assertEqual(from_commit, clone_head)
+            self.assertEqual(git(checkout, "rev-parse", f"{tag}^{{commit}}"), origin_commit)
 
 
 def rollback_host(**kwargs: Any) -> FakeHost:
@@ -1266,7 +1368,7 @@ class RollbackTests(CommandRunner):
         gone = rollback_host(commit_present=False)
         code, out, _, _, _ = self.run_rollback(gone)
         self.assertEqual(code, 1)
-        self.assertIn(f"select: refuse — set pre-{HIGHER} names commit {FROM_COMMIT}, which is not in the checkout Fix: Run git fetch --tags origin in the checkout as its owner, then re-run sudo python3 -m gideon upgrade --rollback.", out)
+        self.assertIn(f"select: refuse — set pre-{HIGHER} names commit {FROM_COMMIT}, which is not in the checkout Fix: Run git fetch --tags --force origin in the checkout as its owner, then re-run sudo python3 -m gideon upgrade --rollback.", out)
         self.assertFalse(any(command[-1] == "down" for command, _, _ in gone.calls))
 
     def test_a_rollback_stopped_after_its_checkout_resumes_from_the_previous_tree(self) -> None:
