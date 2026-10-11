@@ -1476,6 +1476,44 @@ class TripWriter(unittest.TestCase):
         self.assertEqual(stdout.getvalue(), "")
         self.assertEqual(stderr.getvalue(), "")
 
+    def test_event_writer_uses_the_named_partition_table_and_columns(self) -> None:
+        calls: list[tuple[str, object]] = []
+
+        class Connection:
+            def __enter__(self) -> Self:
+                return self
+
+            def __exit__(self, *args: object) -> Literal[False]:
+                return False
+
+            def execute(self, statement: str, parameters: object = None) -> None:
+                calls.append((statement, parameters))
+
+        with tempfile.TemporaryDirectory() as directory:
+            password_path = Path(directory) / "password"
+            password_path.write_text("temporary-event-password\n", encoding="utf-8")
+            with patch.object(FILTER.writer, "TRIP_PASSWORD_PATH", str(password_path)):
+                self.assert_silent(
+                    lambda: FILTER.write_event_row(
+                        "fixture_events",
+                        "fixture_events_ensure_partition",
+                        ("user_id", "chat_id", "source"),
+                        ("fictional-user", None, "eval"),
+                        connect=lambda **kwargs: Connection(),
+                    )
+                )
+        self.assertEqual(
+            calls,
+            [
+                ("SELECT fixture_events_ensure_partition(now())", None),
+                (
+                    "INSERT INTO fixture_events (user_id, chat_id, source) "
+                    "VALUES (%s, %s, %s)",
+                    ("fictional-user", None, "eval"),
+                ),
+            ],
+        )
+
     def test_writer_reads_stripped_password_and_binds_one_transaction(self) -> None:
         row = self._row()
 
@@ -1523,11 +1561,16 @@ class TripWriter(unittest.TestCase):
         )
         self.assertEqual(len(connection.calls), 2)
         self.assertTrue(all(call[2:] == (1, 0) for call in connection.calls))
-        self.assertIn(
-            f"SELECT {FILTER.GUARDRAIL_TRIPS_PARTITION_FUNCTION}(now())",
+        self.assertEqual(
             connection.calls[0][0],
+            f"SELECT {FILTER.GUARDRAIL_TRIPS_PARTITION_FUNCTION}(now())",
         )
-        self.assertIn(f"INSERT INTO {FILTER.GUARDRAIL_TRIPS_TABLE}", connection.calls[1][0])
+        self.assertEqual(
+            connection.calls[1][0],
+            f"INSERT INTO {FILTER.GUARDRAIL_TRIPS_TABLE} "
+            "(branch, family, pattern_id, source, chat_id) "
+            "VALUES (%s, %s, %s, %s, %s)",
+        )
         self.assertEqual(
             connection.calls[1][1],
             (row.branch, row.family, row.pattern_id, row.source, row.chat_id),
@@ -1544,16 +1587,33 @@ class TripWriter(unittest.TestCase):
             missing_path = Path(directory) / "missing"
             with patch.object(FILTER.writer, "TRIP_PASSWORD_PATH", str(missing_path)):
                 self.assert_silent(lambda: FILTER.write_trip_row(row, connect=lambda **kwargs: None))
+                self.assert_silent(
+                    lambda: FILTER.write_event_row(
+                        "fixture_events", "fixture_partition", ("source",), ("user",),
+                        connect=lambda **kwargs: None,
+                    )
+                )
             with patch.object(FILTER.writer, "TRIP_PASSWORD_PATH", str(password_path)), patch.dict(
                 sys.modules, {FILTER.TRIP_DRIVER_MODULE: None}
             ):
                 self.assert_silent(lambda: FILTER.write_trip_row(row))
+                self.assert_silent(
+                    lambda: FILTER.write_event_row(
+                        "fixture_events", "fixture_partition", ("source",), ("user",)
+                    )
+                )
 
             def raising_connect(**kwargs: object) -> object:
                 raise RuntimeError("connection refused")
 
             with patch.object(FILTER.writer, "TRIP_PASSWORD_PATH", str(password_path)):
                 self.assert_silent(lambda: FILTER.write_trip_row(row, connect=raising_connect))
+                self.assert_silent(
+                    lambda: FILTER.write_event_row(
+                        "fixture_events", "fixture_partition", ("source",), ("user",),
+                        connect=raising_connect,
+                    )
+                )
 
             class FailingConnection:
                 def __enter__(self) -> Self:
@@ -1569,6 +1629,20 @@ class TripWriter(unittest.TestCase):
                 self.assert_silent(
                     lambda: FILTER.write_trip_row(row, connect=lambda **kwargs: FailingConnection())
                 )
+                self.assert_silent(
+                    lambda: FILTER.write_event_row(
+                        "fixture_events", "fixture_partition", ("source",), ("user",),
+                        connect=lambda **kwargs: FailingConnection(),
+                    )
+                )
+
+    def test_bounded_id_keeps_only_the_shared_id_shape(self) -> None:
+        maximum = int(FILTER.TRIP_CHAT_ID_PATTERN.pattern.split(",")[-1].rstrip("}"))
+        accepted = "fictional-id_42"
+        self.assertEqual(FILTER.bounded_id(accepted), accepted)
+        for value in ("free text", "x" * (maximum + 1), "", None, 42):
+            with self.subTest(value=value):
+                self.assertIsNone(FILTER.bounded_id(value))
 
     def test_record_trip_swallowing_and_daemon_dispatch(self) -> None:
         trip = FILTER.Trip(FILTER.FAMILIES[0].name, FILTER.FAMILIES[0].patterns[0].pattern_id)

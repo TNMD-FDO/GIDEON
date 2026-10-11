@@ -20,6 +20,7 @@ API_KEY = "fixture-api-key"
 ENGINE_KEY = "fixture-engine-key"
 SOURCE_HEADER = "X-Fixture-Source"
 CHAT_HEADER = "X-Fixture-Chat"
+USER_HEADER = "X-Fixture-User"
 EVAL_IDENTITY = "eval@example.invalid"
 INSTRUCTION = "Fictitious General instruction."
 MODEL_ID = "fixture-general"
@@ -310,6 +311,7 @@ class ApiRelaySockets(unittest.TestCase):
             0,
             SOURCE_HEADER,
             CHAT_HEADER,
+            USER_HEADER,
             EVAL_IDENTITY,
             INSTRUCTION,
             MODEL_ID,

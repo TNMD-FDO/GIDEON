@@ -54,8 +54,8 @@ def source_for_header(values: Sequence[str], eval_identity: str) -> str:
     )
 
 
-def chat_id_for_header(values: Sequence[str]) -> str | None:
-    """Return the one non-empty forwarded chat id, or ``None``."""
+def id_for_header(values: Sequence[str]) -> str | None:
+    """Return the one non-empty forwarded id, or ``None``."""
 
     if len(values) != 1:
         return None

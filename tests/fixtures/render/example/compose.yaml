@@ -535,6 +535,7 @@ services:
       GIDEON_SOURCE_HEADER: "X-OpenWebUI-User-Email"
       GIDEON_EVAL_IDENTITY: "gideon-eval@gideon.invalid"
       GIDEON_CHAT_HEADER: "X-OpenWebUI-Chat-Id"
+      GIDEON_USER_HEADER: "X-OpenWebUI-User-Id"
       GIDEON_MODEL_ID: "gideon-general"
       GIDEON_ENGINE_MODEL: "gideon-generator"
       TZ: "America/Chicago"

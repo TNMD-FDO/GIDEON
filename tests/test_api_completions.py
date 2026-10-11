@@ -20,7 +20,7 @@ import httpx
 from starlette.types import Message, Scope
 
 from gideon import guardrail
-from gideon.api import judged, progress, stamp
+from gideon.api import judged, progress, searchturn, stamp
 from gideon.api.app import create_app
 from gideon.api.relay import UPSTREAM_ERROR
 from gideon.api.settings import Settings
@@ -32,6 +32,7 @@ from gideon.api.upstream import (
 from gideon.host.render.api import (
     API_CHAT_HEADER,
     API_USER_EMAIL_HEADER,
+    API_USER_ID_HEADER,
     API_USER_NAME_HEADER,
     API_USER_ROLE_HEADER,
 )
@@ -138,7 +139,7 @@ _SENTINEL_HEADERS = {
     API_USER_NAME_HEADER: "sentinel-name-7f3c",
     API_USER_EMAIL_HEADER: "sentinel-email-7f3c@example.invalid",
     API_USER_ROLE_HEADER: "sentinel-role-7f3c",
-    "X-OpenWebUI-User-Id": "sentinel-user-id-7f3c",
+    API_USER_ID_HEADER: "sentinel-user-id-7f3c",
     API_CHAT_HEADER: "sentinel-chat-id-7f3c",
 }
 
@@ -250,15 +251,17 @@ class GatedStream(httpx.AsyncByteStream):
 
 
 class TripConnection:
-    """Record the writer's insert without making the API wait for it."""
+    """Record each event under its table without making the API wait for it."""
 
     def __init__(
         self,
         rows: list[tuple[str, str, str, str, str | None]],
         row_written: threading.Event,
+        search_rows: list[tuple[str | None, str | None, str]] | None = None,
     ) -> None:
         self.rows = rows
         self.row_written = row_written
+        self.search_rows = search_rows
 
     def __enter__(self) -> "TripConnection":
         return self
@@ -267,19 +270,32 @@ class TripConnection:
         return False
 
     def execute(self, statement: str, parameters: object = None) -> None:
-        del statement
         if parameters is None:
             return
-        if (
-            not isinstance(parameters, tuple)
-            or len(parameters) != 5
-            or not all(
-                isinstance(value, str) or (index == 4 and value is None)
-                for index, value in enumerate(parameters)
-            )
-        ):
-            raise AssertionError("writer parameters are not one content-free row")
-        self.rows.append(cast(tuple[str, str, str, str, str | None], parameters))
+        if statement.startswith(f"INSERT INTO {guardrail.GUARDRAIL_TRIPS_TABLE} "):
+            if (
+                not isinstance(parameters, tuple)
+                or len(parameters) != 5
+                or not all(
+                    isinstance(value, str) or (index == 4 and value is None)
+                    for index, value in enumerate(parameters)
+                )
+            ):
+                raise AssertionError("trip parameters are not one content-free row")
+            self.rows.append(cast(tuple[str, str, str, str, str | None], parameters))
+        elif statement.startswith(f"INSERT INTO {searchturn.SEARCH_TURNS_TABLE} "):
+            if (
+                not isinstance(parameters, tuple)
+                or len(parameters) != 3
+                or not all(value is None or isinstance(value, str) for value in parameters[:2])
+                or not isinstance(parameters[2], str)
+            ):
+                raise AssertionError("search parameters are not one content-free row")
+            if self.search_rows is None:
+                raise AssertionError("search row has no recording table")
+            self.search_rows.append(cast(tuple[str | None, str | None, str], parameters))
+        else:
+            raise AssertionError(f"unexpected event table in {statement}")
         self.row_written.set()
 
 
@@ -522,6 +538,7 @@ class ApiCompletions(unittest.TestCase):
             8000,
             self.source_header,
             self.chat_header,
+            API_USER_ID_HEADER,
             EVAL_IDENTITY,
             INSTRUCTION,
             MODEL_ID,
@@ -662,11 +679,13 @@ class ApiCompletions(unittest.TestCase):
 
     @staticmethod
     def recording_connect(
-        rows: list[tuple[str, str, str, str, str | None]], row_written: threading.Event
+        rows: list[tuple[str, str, str, str, str | None]],
+        row_written: threading.Event,
+        search_rows: list[tuple[str | None, str | None, str]] | None = None,
     ) -> Callable[..., object]:
         def connect(**kwargs: object) -> TripConnection:
             del kwargs
-            return TripConnection(rows, row_written)
+            return TripConnection(rows, row_written, search_rows)
 
         return connect
 
@@ -841,6 +860,7 @@ class ApiCompletions(unittest.TestCase):
     def test_forwarded_header_sentinels_stay_out_of_logs_rows_responses_and_engine(self) -> None:
         calls: list[httpx.Request] = []
         rows: list[tuple[str, str, str, str, str | None]] = []
+        search_rows: list[tuple[str | None, str | None, str]] = []
         row_written = threading.Event()
 
         def engine(request: httpx.Request) -> httpx.Response:
@@ -869,7 +889,7 @@ class ApiCompletions(unittest.TestCase):
             # header, so the sentinel under it is a value the relay really reads
             # and the leak paths below are exercised rather than vacuous.
             patch.object(self, "source_header", API_USER_EMAIL_HEADER),
-            trip_driver(self.recording_connect(rows, row_written)),
+            trip_driver(self.recording_connect(rows, row_written, search_rows)),
             capture_logs() as captured,
         ):
             responses = [
@@ -890,6 +910,7 @@ class ApiCompletions(unittest.TestCase):
 
         self.assertEqual([response.status_code for response in responses], [200, 200, 502, 502])
         self.assertEqual(len(rows), 2)
+        self.assertEqual(search_rows, [])
         chat_sentinel = _SENTINEL_HEADERS[API_CHAT_HEADER]
         self.assertEqual([row[4] for row in rows], [chat_sentinel, chat_sentinel])
         for header, sentinel in _SENTINEL_HEADERS.items():
@@ -916,6 +937,77 @@ class ApiCompletions(unittest.TestCase):
         for record in captured.records:
             self.assertNotIn(chat_sentinel, record.getMessage())
             self.assertNotIn(chat_sentinel, logging.Formatter().format(record))
+
+    def test_search_query_task_records_only_bounded_ids_and_source(self) -> None:
+        body_sentinel = "sentinel-query-text-7f3c"
+
+        def body(content: str, model: str = MODEL_ID) -> bytes:
+            return json.dumps(
+                {"model": model, "messages": [{"role": "user", "content": content}]}
+            ).encode()
+
+        query_body = body(searchturn.SEARCH_QUERY_TELL + "\n" + body_sentinel)
+        chat_body = body("Fictitious chat.\n" + searchturn.SEARCH_QUERY_TELL)
+        title_body = body("### Task:\nGenerate a fictional title.")
+        refused_body = body(searchturn.SEARCH_QUERY_TELL, "fixture-other-model")
+        headers = [("Authorization", f"Bearer {API_KEY}"), *_SENTINEL_HEADERS.items()]
+        calls: list[httpx.Request] = []
+        trip_rows: list[tuple[str, str, str, str, str | None]] = []
+        search_rows: list[tuple[str | None, str | None, str]] = []
+        row_written = threading.Event()
+
+        def engine(request: httpx.Request) -> httpx.Response:
+            calls.append(request)
+            return httpx.Response(200, content=whole_completion([]), request=request)
+
+        def failing_engine(request: httpx.Request) -> httpx.Response:
+            calls.append(request)
+            raise httpx.ConnectError("fixture engine failure", request=request)
+
+        with capture_logs() as captured, trip_driver(
+            self.recording_connect(trip_rows, row_written, search_rows)
+        ), patch.object(self, "source_header", API_USER_EMAIL_HEADER):
+            success = self.request(httpx.MockTransport(engine), body=query_body, headers=headers)
+            self.assertTrue(row_written.wait(_ASGI_WAIT_SECONDS))
+            self.assertEqual(
+                search_rows,
+                [
+                    (
+                        _SENTINEL_HEADERS[API_USER_ID_HEADER],
+                        _SENTINEL_HEADERS[API_CHAT_HEADER],
+                        guardrail.USER_SOURCE,
+                    )
+                ],
+            )
+            row_written.clear()
+            failure = self.request(
+                httpx.MockTransport(failing_engine), body=query_body, headers=headers
+            )
+            self.assertTrue(row_written.wait(_ASGI_WAIT_SECONDS))
+            self.assertEqual(len(search_rows), 2)
+            chat = self.request(httpx.MockTransport(engine), body=chat_body, headers=headers)
+            title = self.request(httpx.MockTransport(engine), body=title_body, headers=headers)
+            refused = self.request(httpx.MockTransport(engine), body=refused_body, headers=headers)
+
+        self.assertEqual(
+            [reply.status_code for reply in (success, failure, chat, title, refused)],
+            [200, 502, 200, 200, 404],
+        )
+        self.assertEqual(len(search_rows), 2)
+        self.assertEqual(search_rows[0], search_rows[1])
+        self.assertEqual(trip_rows, [])
+        self.assertEqual(len(calls), 4)
+        for row in search_rows:
+            self.assertNotIn(body_sentinel, repr(row))
+        for record in captured.records:
+            formatted = logging.Formatter().format(record)
+            self.assertNotIn(body_sentinel, formatted)
+            for sentinel in _SENTINEL_HEADERS.values():
+                self.assertNotIn(sentinel, formatted)
+        for call in calls:
+            for sentinel in _SENTINEL_HEADERS.values():
+                self.assertNotIn(sentinel.encode(), call.content)
+                self.assertNotIn(sentinel, "\n".join(call.headers.values()))
 
     def test_stream_is_relayed_in_order_before_next_upstream_chunk(self) -> None:
         with self.assertLogs("gideon.api.request", level="INFO") as captured:

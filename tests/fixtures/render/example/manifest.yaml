@@ -15,7 +15,7 @@ inputs:
   build_box: true
 files:
   compose.yaml:
-    sha256: "52a21659628d9df34361272ccec6310d034acd2ca3e10cbd229451c9e407bef6"
+    sha256: "a7321da332637c3b9ef85574b42707830fe15ee218910d17f6f56467b80c0ee7"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
@@ -234,7 +234,7 @@ services:
   open-webui: "9dc1fb53125475a642df4f51e262fdf36c5714029cdf9dc31497e296f2cfb1ea"
   gideon-generator: "f073db87bb4e63398ea71f84d3d8e53ea874fb480e8f26790583b6849393fbda"
   gideon-embed: "c5aed2d953e92ac812520d91825693de687e8352c2f19d36c44e6547d0ae75b3"
-  gideon-api: "c77dcecdfd67080967e78aa848a702e9a0ff3172194d9de52a6a5c575c3f4aa0"
+  gideon-api: "cf7725b85374f568e44fcd708f8a930218474799b47192705cc594f99110975b"
   gideon-worker: "1ebaa6d467063a2d5041efefe9bd724c0220c2408ddbae429da884384d150af0"
   gideon-egress: "e675d5f59c4e789a0d873e3c64263e48d483c7b2881eebcad95349de22ed95fe"
   searxng: "790f3d23c5a48d8b2e3c02d12c6615884bb4073095bdf7faa51ccee49aa51c2c"

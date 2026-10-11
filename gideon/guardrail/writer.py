@@ -1,6 +1,6 @@
-"""The guardrail trip's content-free row and its silent writer: the connection
-facts and vocabulary, ``TripRow``, and ``record_trip``, whose Postgres driver is
-imported inside ``write_trip_row`` alone.
+"""Content-free event rows and their silent writer: the connection facts,
+source vocabulary, ``TripRow``, and ``record_trip``. The Postgres driver is
+imported inside ``write_event_row`` alone, which no host path calls.
 
 Built over ``families``; ``window`` calls ``record_trip`` on a stream's trip.
 """
@@ -26,6 +26,13 @@ TRIP_PASSWORD_PATH = "/run/secrets/postgres_gideon_audit_password"
 TRIP_CONNECT_TIMEOUT_SECONDS = 3
 TRIP_STATEMENT_TIMEOUT_MILLISECONDS = 3000
 TRIP_DRIVER_MODULE = "psycopg"
+TRIP_COLUMNS: Final[tuple[str, ...]] = (
+    "branch",
+    "family",
+    "pattern_id",
+    "source",
+    "chat_id",
+)
 USER_SOURCE: Final[str] = "user"
 EVAL_SOURCE: Final[str] = "eval"
 SOURCE_VOCABULARY = (USER_SOURCE, EVAL_SOURCE)
@@ -52,8 +59,29 @@ def dispatch_trip_row(row: TripRow) -> None:
     Thread(target=write_trip_row, args=(row,), daemon=True).start()
 
 
-def write_trip_row(row: TripRow, connect: Callable[..., object] | None = None) -> None:
-    """Write one trip row, dropping every local or database failure."""
+def dispatch_event_row(
+    table: str,
+    partition_function: str,
+    columns: tuple[str, ...],
+    values: tuple[object, ...],
+) -> None:
+    """Start an event writer without making the response wait for the database."""
+
+    Thread(
+        target=write_event_row,
+        args=(table, partition_function, columns, values),
+        daemon=True,
+    ).start()
+
+
+def write_event_row(
+    table: str,
+    partition_function: str,
+    columns: tuple[str, ...],
+    values: tuple[object, ...],
+    connect: Callable[..., object] | None = None,
+) -> None:
+    """Write one event row, dropping every local or database failure."""
 
     try:
         with open(TRIP_PASSWORD_PATH, encoding="utf-8") as password_file:
@@ -71,15 +99,33 @@ def write_trip_row(row: TripRow, connect: Callable[..., object] | None = None) -
             connect_timeout=TRIP_CONNECT_TIMEOUT_SECONDS,
             options=f"-c statement_timeout={TRIP_STATEMENT_TIMEOUT_MILLISECONDS}",
         ) as connection:
-            connection.execute(f"SELECT {GUARDRAIL_TRIPS_PARTITION_FUNCTION}(now())")
+            connection.execute(f"SELECT {partition_function}(now())")
             connection.execute(
-                f"INSERT INTO {GUARDRAIL_TRIPS_TABLE} "
-                "(branch, family, pattern_id, source, chat_id) "
-                "VALUES (%s, %s, %s, %s, %s)",
-                (row.branch, row.family, row.pattern_id, row.source, row.chat_id),
+                f"INSERT INTO {table} "
+                f"({', '.join(columns)}) "
+                f"VALUES ({', '.join(('%s',) * len(columns))})",
+                values,
             )
     except Exception:  # noqa: BLE001 - the writer is intentionally silent and never raises.
         return
+
+
+def write_trip_row(row: TripRow, connect: Callable[..., object] | None = None) -> None:
+    """Write one trip row through the shared silent event writer."""
+
+    write_event_row(
+        GUARDRAIL_TRIPS_TABLE,
+        GUARDRAIL_TRIPS_PARTITION_FUNCTION,
+        TRIP_COLUMNS,
+        (row.branch, row.family, row.pattern_id, row.source, row.chat_id),
+        connect,
+    )
+
+
+def bounded_id(value: object) -> str | None:
+    """Keep an id of the one bounded shape, so a header's free text never reaches a row."""
+
+    return value if isinstance(value, str) and TRIP_CHAT_ID_PATTERN.fullmatch(value) else None
 
 
 def record_trip(
@@ -93,9 +139,7 @@ def record_trip(
             trip.family,
             trip.pattern_id,
             source if source in SOURCE_VOCABULARY else USER_SOURCE,
-            chat_id
-            if isinstance(chat_id, str) and TRIP_CHAT_ID_PATTERN.fullmatch(chat_id)
-            else None,
+            bounded_id(chat_id),
         )
         dispatch_trip_row(row)
     except Exception:  # noqa: BLE001 - trip recording cannot affect the refusal.

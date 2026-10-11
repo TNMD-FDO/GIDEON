@@ -23,7 +23,7 @@ from gideon.api import progress, stamp
 from gideon.api.judged import (
     CHUNK_OBJECT,
     StreamMechanics,
-    chat_id_for_header,
+    id_for_header,
     judge_completion,
     source_for_header,
     stream_state_from_body,
@@ -500,7 +500,7 @@ class ApiJudged(unittest.TestCase):
         )
         for values, expected in cases:
             with self.subTest(values=values):
-                self.assertEqual(chat_id_for_header(values), expected)
+                self.assertEqual(id_for_header(values), expected)
 
         chat_id = "fictional-chat-id-42"
         bodies = (

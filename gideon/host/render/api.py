@@ -5,9 +5,9 @@ The Compose block in ``render/services/api.py``, the blackbox job in
 these names, as ``render/engine.py`` holds the engine's, so neither observer
 imports the document builder. The service listens on the engine's port number
 and the frontend's connection names the service by hostname alone.
-The API Compose block reads the email header name through ``API_SOURCE_HEADER``
-for the source word and the chat id through ``API_CHAT_HEADER`` for the trip row;
-it is the one rendered artifact that reads forwarded header names.
+The API Compose block reads three forwarded header names: the email for the
+source word, the chat id for both rows, and the user id for the search turn row.
+It is the one rendered artifact that reads forwarded header names.
 General's instruction reaches the container as a rendered file at a fixed
 mount, the one non-secret file beside its secret mounts.
 """
@@ -24,6 +24,7 @@ API_HEALTH_PATH: Final[str] = "/health"
 API_USER_NAME_HEADER: Final[str] = "X-OpenWebUI-User-Name"
 API_USER_EMAIL_HEADER: Final[str] = "X-OpenWebUI-User-Email"
 API_USER_ROLE_HEADER: Final[str] = "X-OpenWebUI-User-Role"
+API_USER_ID_HEADER: Final[str] = "X-OpenWebUI-User-Id"
 API_SOURCE_HEADER: Final[str] = API_USER_EMAIL_HEADER
 API_CHAT_HEADER: Final[str] = "X-OpenWebUI-Chat-Id"
 API_MOUNT_TARGET: Final[str] = "/opt/gideon-src/gideon"

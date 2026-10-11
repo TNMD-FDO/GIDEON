@@ -12,7 +12,7 @@ from starlette.types import Receive, Scope, Send
 
 from gideon import guardrail
 
-from . import judged
+from . import judged, searchturn
 from .errors import error_body
 from .instruction import instruct_completion_body
 from .model import (
@@ -72,6 +72,7 @@ class CompletionRelay:
     Admission precedes instruction and judging. The judged state reads the
     instructed body before its model is addressed to the engine, keeping the
     trip's branch on General's id while both see the same messages.
+    A search-query task call's row is recorded after admission.
     """
 
     def __init__(self, settings: Settings) -> None:
@@ -92,11 +93,14 @@ class CompletionRelay:
                     MODEL_NOT_FOUND_ERROR, status_code=MODEL_NOT_FOUND_STATUS
                 )(scope, receive, send)
                 return
-            instructed = instruct_completion_body(body, self._settings.instruction)
             source = judged.source_for_header(
                 request.headers.getlist(self._settings.source_header), self._settings.eval_identity
             )
-            chat_id = judged.chat_id_for_header(request.headers.getlist(self._settings.chat_header))
+            chat_id = judged.id_for_header(request.headers.getlist(self._settings.chat_header))
+            user_id = judged.id_for_header(request.headers.getlist(self._settings.user_header))
+            if searchturn.is_search_query_call(body):
+                searchturn.record_search_turn(user_id, chat_id, source)
+            instructed = instruct_completion_body(body, self._settings.instruction)
             state = judged.stream_state_from_body(instructed, source, chat_id)
             addressed = address_completion_body(instructed, self._settings.engine_model)
             upstream = await request.app.state.engine.completion(addressed, content_type)

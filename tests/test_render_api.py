@@ -22,6 +22,7 @@ from gideon.host.render.api import (
     API_SERVICE_NAME,
     API_SOURCE_HEADER,
     API_USER_EMAIL_HEADER,
+    API_USER_ID_HEADER,
 )
 from gideon.host.render.command import (
     AppliedManifest,
@@ -71,6 +72,7 @@ class ApiRender(unittest.TestCase):
         )
         self.assertEqual(api["environment"]["GIDEON_SOURCE_HEADER"], API_SOURCE_HEADER)
         self.assertEqual(api["environment"]["GIDEON_CHAT_HEADER"], API_CHAT_HEADER)
+        self.assertEqual(api["environment"]["GIDEON_USER_HEADER"], API_USER_ID_HEADER)
         self.assertEqual(api["environment"]["GIDEON_EVAL_IDENTITY"], EVAL_IDENTITY.email)
         self.assertEqual(api["environment"]["GIDEON_INSTRUCTION_FILE"], API_INSTRUCTION_MOUNT)
         generator = gpu.profile.model("generator")
@@ -205,6 +207,22 @@ class ApiRender(unittest.TestCase):
             patch("gideon.host.render.services.api.API_CHAT_HEADER", "X-Moved-Chat"),
             patch("gideon.host.render.services.api.EVAL_IDENTITY", moved_identity),
         ):
+            moved = render_all(original)
+            judgment = recreate_judgment(
+                moved,
+                applied,
+                service_names(original),
+                compose_digests(original),
+            )
+        self.assertEqual(judgment.services, (API_SERVICE_NAME,))
+        self.assertEqual(judgment.block, (API_SERVICE_NAME,))
+        self.assertEqual(judgment.files, ())
+        self.assertEqual(judgment.top_level, ())
+
+    def test_moving_user_header_recreates_only_the_api_service_block(self) -> None:
+        original = inputs()
+        applied = applied_record(original)
+        with patch("gideon.host.render.services.api.API_USER_ID_HEADER", "X-Moved-User"):
             moved = render_all(original)
             judgment = recreate_judgment(
                 moved,

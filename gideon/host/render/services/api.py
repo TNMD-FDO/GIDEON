@@ -15,6 +15,7 @@ from gideon.host.render.api import (
     API_SECRET_NAME,
     API_SERVICE_NAME,
     API_SOURCE_HEADER,
+    API_USER_ID_HEADER,
     API_WORKING_DIRECTORY,
     api_enabled,
 )
@@ -74,6 +75,7 @@ def api_service(
             "GIDEON_SOURCE_HEADER": API_SOURCE_HEADER,
             "GIDEON_EVAL_IDENTITY": EVAL_IDENTITY.email,
             "GIDEON_CHAT_HEADER": API_CHAT_HEADER,
+            "GIDEON_USER_HEADER": API_USER_ID_HEADER,
             "GIDEON_MODEL_ID": GENERAL_MODEL_ID,
             "GIDEON_ENGINE_MODEL": generator_pin(inputs).serve.served_name,
             "TZ": inputs.site.office.timezone,

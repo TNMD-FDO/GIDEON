@@ -16,6 +16,7 @@ ENGINE_KEY = "fixture-engine-key"
 ENGINE_URL = "http://fixture-engine/v1"
 SOURCE_HEADER = "X-Fixture-Source"
 CHAT_HEADER = "X-Fixture-Chat"
+USER_HEADER = "X-Fixture-User"
 EVAL_IDENTITY = "eval@example.invalid"
 INSTRUCTION = "Fictitious General instruction."
 MODEL_ID = "fixture-general"
@@ -37,6 +38,7 @@ class ApiService(unittest.TestCase):
             8000,
             SOURCE_HEADER,
             CHAT_HEADER,
+            USER_HEADER,
             EVAL_IDENTITY,
             INSTRUCTION,
             MODEL_ID,
@@ -54,6 +56,7 @@ class ApiService(unittest.TestCase):
             "GIDEON_API_PORT": "8000",
             "GIDEON_SOURCE_HEADER": SOURCE_HEADER,
             "GIDEON_CHAT_HEADER": CHAT_HEADER,
+            "GIDEON_USER_HEADER": USER_HEADER,
             "GIDEON_EVAL_IDENTITY": EVAL_IDENTITY,
             "GIDEON_INSTRUCTION_FILE": str(root / "instruction.txt"),
             "GIDEON_MODEL_ID": MODEL_ID,
@@ -239,6 +242,7 @@ class ApiService(unittest.TestCase):
                 "GIDEON_API_PORT": "8000",
                 "GIDEON_SOURCE_HEADER": SOURCE_HEADER,
                 "GIDEON_CHAT_HEADER": CHAT_HEADER,
+                "GIDEON_USER_HEADER": USER_HEADER,
                 "GIDEON_EVAL_IDENTITY": EVAL_IDENTITY,
                 "GIDEON_MODEL_ID": MODEL_ID,
                 "GIDEON_ENGINE_MODEL": ENGINE_MODEL,
@@ -257,6 +261,7 @@ class ApiService(unittest.TestCase):
 
         self.assertEqual(settings.source_header, SOURCE_HEADER)
         self.assertEqual(settings.chat_header, CHAT_HEADER)
+        self.assertEqual(settings.user_header, USER_HEADER)
         self.assertEqual(settings.eval_identity, EVAL_IDENTITY)
         self.assertEqual(settings.instruction, INSTRUCTION)
         self.assertEqual(settings.model_id, MODEL_ID)
@@ -289,6 +294,7 @@ class ApiService(unittest.TestCase):
                 "GIDEON_API_PORT": "8000",
                 "GIDEON_SOURCE_HEADER": SOURCE_HEADER,
                 "GIDEON_CHAT_HEADER": CHAT_HEADER,
+                "GIDEON_USER_HEADER": USER_HEADER,
                 "GIDEON_EVAL_IDENTITY": EVAL_IDENTITY,
                 "GIDEON_MODEL_ID": MODEL_ID,
                 "GIDEON_ENGINE_MODEL": ENGINE_MODEL,
@@ -314,6 +320,7 @@ class ApiService(unittest.TestCase):
                 "GIDEON_API_PORT": "8000",
                 "GIDEON_SOURCE_HEADER": SOURCE_HEADER,
                 "GIDEON_CHAT_HEADER": CHAT_HEADER,
+                "GIDEON_USER_HEADER": USER_HEADER,
                 "GIDEON_EVAL_IDENTITY": EVAL_IDENTITY,
                 "GIDEON_MODEL_ID": MODEL_ID,
                 "GIDEON_ENGINE_MODEL": ENGINE_MODEL,
@@ -322,6 +329,7 @@ class ApiService(unittest.TestCase):
             for variable in (
                 "GIDEON_SOURCE_HEADER",
                 "GIDEON_CHAT_HEADER",
+                "GIDEON_USER_HEADER",
                 "GIDEON_EVAL_IDENTITY",
                 "GIDEON_MODEL_ID",
                 "GIDEON_ENGINE_MODEL",
