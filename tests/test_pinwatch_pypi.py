@@ -11,6 +11,9 @@ from tools.pinwatch.fetch import FetchError, Response
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURE = ROOT / "tests" / "fixtures" / "pinwatch" / "pypi" / "starlette.json"
+DATEUTIL_FIXTURE = (
+    ROOT / "tests" / "fixtures" / "pinwatch" / "pypi" / "python-dateutil.json"
+)
 PROJECT = "fictitious-project"
 
 
@@ -195,6 +198,93 @@ class IndexReaderContracts(unittest.TestCase):
                 self.assertNotIn(answer, excluded)
         self.assertIsNone(pypi.pypi_version(fetcher, project, expected))
 
+    def test_dateutil_fixture_replay_derives_the_unlisted_threshold(self) -> None:
+        """Replay 2026-10-10's reply with its Accept header and kept keys.
+
+        The header is ``application/vnd.pypi.simple.v1+json``; the kept keys
+        are ``meta``, ``name``, ``project-status``, ``versions``, and
+        ``files`` with ``filename``, ``yanked``, and ``upload-time``.
+        """
+
+        document = cast(dict[str, object], json.loads(DATEUTIL_FIXTURE.read_text()))
+        project = cast(str, document["name"])
+        versions = cast(list[str], document["versions"])
+        files = cast(list[dict[str, object]], document["files"])
+        listed: dict[str, pypi.StableVersion] = {}
+        for listed_text in versions:
+            listed_stable = pypi.StableVersion.parse(listed_text)
+            if listed_stable is not None:
+                listed[listed_text] = listed_stable
+        self.assertTrue(listed)
+        newest = max(listed.values())
+
+        file_versions: list[tuple[str, pypi.StableVersion, bool]] = []
+        for item in files:
+            filename = cast(str, item["filename"])
+            file_text = pypi.version_from_filename(filename, project)
+            assert file_text is not None, filename
+            file_stable = pypi.StableVersion.parse(file_text)
+            assert file_stable is not None, filename
+            file_versions.append((filename, file_stable, bool(item["yanked"])))
+
+        unlisted_versions = {
+            observed_stable
+            for _, observed_stable, _yanked in file_versions
+            if all(
+                observed_stable != candidate_stable
+                for candidate_stable in listed.values()
+            )
+        }
+        self.assertTrue(unlisted_versions)
+        self.assertTrue(all(version <= newest for version in unlisted_versions))
+        threshold = max(unlisted_versions)
+        installable = [
+            candidate_text
+            for candidate_text, candidate_stable in listed.items()
+            if any(
+                observed_stable == candidate_stable and not yanked
+                for _, observed_stable, yanked in file_versions
+            )
+        ]
+
+        url = f"{pypi.PYPI_INDEX_ROOT}/{project}/"
+        fetcher = DictFetcher({url: response(document)})
+        for current_text, current_stable in listed.items():
+            with self.subTest(current=current_text):
+                if current_stable < threshold:
+                    with self.assertRaises(FetchError) as caught:
+                        pypi.pypi_version(fetcher, project, current_text)
+                    self.assertTrue(
+                        any(
+                            filename in caught.exception.reason
+                            for filename, observed_stable, _yanked in file_versions
+                            if observed_stable in unlisted_versions
+                            and observed_stable > current_stable
+                        )
+                    )
+                else:
+                    candidates = [
+                        candidate_text
+                        for candidate_text in installable
+                        if listed[candidate_text] > current_stable
+                    ]
+                    expected = (
+                        max(candidates, key=lambda candidate_text: listed[candidate_text])
+                        if candidates
+                        else None
+                    )
+                    answer = pypi.pypi_version(fetcher, project, current_text)
+                    self.assertEqual(answer, expected)
+                    if answer is not None:
+                        self.assertIn(answer, listed)
+
+        newest_text = max(listed, key=lambda candidate_text: listed[candidate_text])
+        self.assertIsNone(pypi.pypi_version(fetcher, project, newest_text))
+        self.assertEqual(
+            fetcher.calls,
+            [(url, {"Accept": pypi.PYPI_ACCEPT}, "GET")] * (len(listed) + 1),
+        )
+
     def test_newest_prerelease_is_ignored(self) -> None:
         reply = index_reply(
             ["9000.0", "9001.0rc1"],
@@ -274,6 +364,29 @@ class IndexReaderContracts(unittest.TestCase):
         with self.assertRaises(FetchError) as caught:
             self._resolve(reply)
         self.assertIn("9000.1", caught.exception.reason)
+
+    def test_stable_files_at_or_below_current_are_set_aside(self) -> None:
+        below_current = file_entry("8999.9")
+        files: list[object] = [
+            file_entry("9000.1"),
+            below_current,
+            file_entry("9000.0.0"),
+        ]
+        reply = index_reply(["9000.1", "9000.2"], files)
+        result, _fetcher = self._resolve(reply, current="9000.0")
+        self.assertEqual(result, "9000.1")
+
+        above_current = file_entry("9000.1.post1")
+        with self.assertRaises(FetchError) as caught:
+            self._resolve(
+                index_reply(["9000.1", "9000.2"], [*files, above_current]),
+                current="9000.0",
+            )
+        self.assertIn(above_current["filename"], caught.exception.reason)
+        self.assertNotIn(below_current["filename"], caught.exception.reason)
+
+        result, _fetcher = self._resolve(reply, current="9000.1")
+        self.assertIsNone(result)
 
     def test_quarantine_and_api_version_rules(self) -> None:
         quarantined = index_reply(

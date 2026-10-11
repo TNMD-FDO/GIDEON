@@ -5,7 +5,9 @@ field is deprecated.  The reader follows PEP 440's Appendix B parser, PEP 503's
 normalized project names, PEP 592's per-file yanks, PEP 629's API versioning,
 PEP 691's JSON representation, PEP 700's separate file/version lists, and
 PEP 792's quarantined-project status, as described in the verified research
-note.
+note. A file whose filename's stable version is at or below the current value
+is set aside before attribution, as with a legacy upload filed under an older
+release.
 """
 
 import json
@@ -307,6 +309,9 @@ def pypi_version(fetcher: Fetcher, project: str, current: str) -> str | None:
         version = version_from_filename(file.filename, project)
         if version is None:
             unattributed.append(file.filename)
+            continue
+        filed = StableVersion.parse(version)
+        if filed is not None and filed <= current_version:
             continue
         identity = _version_identity(version)
         if identity not in listed:

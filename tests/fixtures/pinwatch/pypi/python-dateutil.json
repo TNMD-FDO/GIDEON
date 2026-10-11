@@ -1,0 +1,310 @@
+{
+ "meta": {
+  "_last-serial": 22120696,
+  "api-version": "1.4"
+ },
+ "name": "python-dateutil",
+ "project-status": {
+  "status": "active"
+ },
+ "versions": [
+  "1.4",
+  "1.4.1",
+  "1.5",
+  "2.1",
+  "2.2",
+  "2.3",
+  "2.4.0",
+  "2.4.1",
+  "2.4.2",
+  "2.5.0",
+  "2.5.1",
+  "2.5.2",
+  "2.5.3",
+  "2.6.0",
+  "2.6.1",
+  "2.7.0",
+  "2.7.1",
+  "2.7.2",
+  "2.7.3",
+  "2.7.4",
+  "2.7.5",
+  "2.8.0",
+  "2.8.1",
+  "2.8.2",
+  "2.9.0",
+  "2.9.0.post0"
+ ],
+ "files": [
+  {
+   "filename": "python-dateutil-1.4.tar.gz",
+   "yanked": false,
+   "upload-time": "2008-08-06T19:11:48Z"
+  },
+  {
+   "filename": "python-dateutil-1.4.1.tar.gz",
+   "yanked": false,
+   "upload-time": "2008-08-06T23:49:27Z"
+  },
+  {
+   "filename": "python-dateutil-1.5.tar.gz",
+   "yanked": false,
+   "upload-time": "2010-11-08T17:10:36.749661Z"
+  },
+  {
+   "filename": "python-dateutil-2.1.tar.gz",
+   "yanked": false,
+   "upload-time": "2012-03-28T18:03:09.506738Z"
+  },
+  {
+   "filename": "python-dateutil-2.2.tar.gz",
+   "yanked": false,
+   "upload-time": "2013-11-01T08:34:21.223464Z"
+  },
+  {
+   "filename": "python-dateutil-2.3.tar.gz",
+   "yanked": false,
+   "upload-time": "2014-12-01T20:20:12.191844Z"
+  },
+  {
+   "filename": "python_dateutil-2.3-py2.py3-none-any.whl",
+   "yanked": false,
+   "upload-time": "2014-12-01T20:20:17.613865Z"
+  },
+  {
+   "filename": "python-dateutil-2.4.0.tar.gz",
+   "yanked": false,
+   "upload-time": "2015-01-05T17:53:19.145245Z"
+  },
+  {
+   "filename": "python_dateutil-2.4.0-py2.py3-none-any.whl",
+   "yanked": false,
+   "upload-time": "2015-01-05T17:53:12.637600Z"
+  },
+  {
+   "filename": "python-dateutil-2.4.1.post1.tar.gz",
+   "yanked": false,
+   "upload-time": "2015-03-29T18:40:53.130071Z"
+  },
+  {
+   "filename": "python-dateutil-2.4.1.post1.zip",
+   "yanked": false,
+   "upload-time": "2015-03-29T18:41:20.580673Z"
+  },
+  {
+   "filename": "python-dateutil-2.4.1.tar.bz2",
+   "yanked": false,
+   "upload-time": "2015-03-27T19:18:47.248395Z"
+  },
+  {
+   "filename": "python_dateutil-2.4.1-py2.py3-none-any.whl",
+   "yanked": false,
+   "upload-time": "2015-03-05T18:53:55.758193Z"
+  },
+  {
+   "filename": "python-dateutil-2.4.2.tar.gz",
+   "yanked": false,
+   "upload-time": "2015-03-31T19:40:54.687285Z"
+  },
+  {
+   "filename": "python_dateutil-2.4.2-py2.py3-none-any.whl",
+   "yanked": false,
+   "upload-time": "2015-03-31T19:41:17.629565Z"
+  },
+  {
+   "filename": "python-dateutil-2.5.0.tar.gz",
+   "yanked": false,
+   "upload-time": "2016-02-28T21:39:09.485465Z"
+  },
+  {
+   "filename": "python-dateutil-2.5.0.zip",
+   "yanked": false,
+   "upload-time": "2016-02-28T21:38:10.047297Z"
+  },
+  {
+   "filename": "python_dateutil-2.5.0-py2.py3-none-any.whl",
+   "yanked": false,
+   "upload-time": "2016-02-28T21:36:22.736902Z"
+  },
+  {
+   "filename": "python-dateutil-2.5.1.tar.gz",
+   "yanked": false,
+   "upload-time": "2016-03-17T18:14:35.007159Z"
+  },
+  {
+   "filename": "python-dateutil-2.5.1.zip",
+   "yanked": false,
+   "upload-time": "2016-03-17T18:14:51.885804Z"
+  },
+  {
+   "filename": "python_dateutil-2.5.1-py2.py3-none-any.whl",
+   "yanked": false,
+   "upload-time": "2016-03-17T18:14:00.621369Z"
+  },
+  {
+   "filename": "python-dateutil-2.5.2.tar.gz",
+   "yanked": false,
+   "upload-time": "2016-03-27T17:03:32.053991Z"
+  },
+  {
+   "filename": "python-dateutil-2.5.2.zip",
+   "yanked": false,
+   "upload-time": "2016-03-27T17:03:01.577736Z"
+  },
+  {
+   "filename": "python_dateutil-2.5.2-py2.py3-none-any.whl",
+   "yanked": false,
+   "upload-time": "2016-03-27T17:02:18.605996Z"
+  },
+  {
+   "filename": "python-dateutil-2.5.3.tar.gz",
+   "yanked": false,
+   "upload-time": "2016-04-21T00:54:47.196597Z"
+  },
+  {
+   "filename": "python-dateutil-2.5.3.zip",
+   "yanked": false,
+   "upload-time": "2016-04-21T00:55:31.587879Z"
+  },
+  {
+   "filename": "python_dateutil-2.5.3-py2.py3-none-any.whl",
+   "yanked": false,
+   "upload-time": "2016-04-21T00:54:11.985557Z"
+  },
+  {
+   "filename": "python-dateutil-2.6.0.tar.gz",
+   "yanked": false,
+   "upload-time": "2016-11-08T15:34:19.813142Z"
+  },
+  {
+   "filename": "python-dateutil-2.6.0.zip",
+   "yanked": false,
+   "upload-time": "2016-11-08T15:34:53.855230Z"
+  },
+  {
+   "filename": "python_dateutil-2.6.0-py2.py3-none-any.whl",
+   "yanked": false,
+   "upload-time": "2016-11-08T15:33:42.787049Z"
+  },
+  {
+   "filename": "python-dateutil-2.6.1.tar.gz",
+   "yanked": false,
+   "upload-time": "2017-07-10T18:37:10.465139Z"
+  },
+  {
+   "filename": "python_dateutil-2.6.1-py2.py3-none-any.whl",
+   "yanked": false,
+   "upload-time": "2017-07-10T18:37:07.583601Z"
+  },
+  {
+   "filename": "python-dateutil-2.7.0.tar.gz",
+   "yanked": false,
+   "upload-time": "2018-03-11T23:34:20.042949Z"
+  },
+  {
+   "filename": "python_dateutil-2.7.0-py2.py3-none-any.whl",
+   "yanked": false,
+   "upload-time": "2018-03-11T23:34:17.867960Z"
+  },
+  {
+   "filename": "python-dateutil-2.7.1.tar.gz",
+   "yanked": false,
+   "upload-time": "2018-03-24T19:08:09.782841Z"
+  },
+  {
+   "filename": "python_dateutil-2.7.1-py2.py3-none-any.whl",
+   "yanked": false,
+   "upload-time": "2018-03-24T19:08:08.004486Z"
+  },
+  {
+   "filename": "python-dateutil-2.7.2.tar.gz",
+   "yanked": false,
+   "upload-time": "2018-03-26T15:04:59.039583Z"
+  },
+  {
+   "filename": "python_dateutil-2.7.2-py2.py3-none-any.whl",
+   "yanked": false,
+   "upload-time": "2018-03-26T15:04:57.512396Z"
+  },
+  {
+   "filename": "python-dateutil-2.7.3.tar.gz",
+   "yanked": false,
+   "upload-time": "2018-05-10T12:02:18.124451Z"
+  },
+  {
+   "filename": "python_dateutil-2.7.3-py2.py3-none-any.whl",
+   "yanked": false,
+   "upload-time": "2018-05-10T12:02:16.089349Z"
+  },
+  {
+   "filename": "python-dateutil-2.7.4.tar.gz",
+   "yanked": false,
+   "upload-time": "2018-10-25T16:45:51.704897Z"
+  },
+  {
+   "filename": "python_dateutil-2.7.4-py2.py3-none-any.whl",
+   "yanked": false,
+   "upload-time": "2018-10-25T16:45:49.860869Z"
+  },
+  {
+   "filename": "python-dateutil-2.7.5.tar.gz",
+   "yanked": false,
+   "upload-time": "2018-10-27T18:14:36.106918Z"
+  },
+  {
+   "filename": "python_dateutil-2.7.5-py2.py3-none-any.whl",
+   "yanked": false,
+   "upload-time": "2018-10-27T18:14:34.218008Z"
+  },
+  {
+   "filename": "python-dateutil-2.8.0.tar.gz",
+   "yanked": false,
+   "upload-time": "2019-02-05T14:12:37.493781Z"
+  },
+  {
+   "filename": "python_dateutil-2.8.0-py2.py3-none-any.whl",
+   "yanked": false,
+   "upload-time": "2019-02-05T14:12:35.322871Z"
+  },
+  {
+   "filename": "python-dateutil-2.8.1.tar.gz",
+   "yanked": false,
+   "upload-time": "2019-11-03T05:42:03.923396Z"
+  },
+  {
+   "filename": "python_dateutil-2.8.1-py2.py3-none-any.whl",
+   "yanked": false,
+   "upload-time": "2019-11-03T05:42:01.643152Z"
+  },
+  {
+   "filename": "python-dateutil-2.8.2.tar.gz",
+   "yanked": false,
+   "upload-time": "2021-07-14T08:19:19.783256Z"
+  },
+  {
+   "filename": "python_dateutil-2.8.2-py2.py3-none-any.whl",
+   "yanked": false,
+   "upload-time": "2021-07-14T08:19:18.161589Z"
+  },
+  {
+   "filename": "python-dateutil-2.9.0.tar.gz",
+   "yanked": false,
+   "upload-time": "2024-03-01T03:52:54.963234Z"
+  },
+  {
+   "filename": "python_dateutil-2.9.0-py2.py3-none-any.whl",
+   "yanked": false,
+   "upload-time": "2024-03-01T03:52:51.479771Z"
+  },
+  {
+   "filename": "python-dateutil-2.9.0.post0.tar.gz",
+   "yanked": false,
+   "upload-time": "2024-03-01T18:36:20.211056Z"
+  },
+  {
+   "filename": "python_dateutil-2.9.0.post0-py2.py3-none-any.whl",
+   "yanked": false,
+   "upload-time": "2024-03-01T18:36:18.570437Z"
+  }
+ ]
+}
