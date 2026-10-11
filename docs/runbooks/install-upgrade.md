@@ -450,6 +450,22 @@ cannot reach the engine until GIDEON upgrades back or the client's operator
 moves it back to `gideon_gideon`. Announce that consequence and the hour with
 the rollback, and announce the return the same way.
 
+A rollback by `upgrade --rollback` or `restore` to a tag before the release
+that taught `models pull` to record a candidate (`v0.3.50`) refuses at the
+older tree's `models` stage while the build box's pull record,
+`/data/models/gideon/pulls.yaml`, holds a `candidates:` map: the older parser
+accepts the four slots alone and names them in its refusal. Only the build
+box meets this, since a shipped lock carries no candidate. Delete the
+`candidates:` map from the record by hand, leaving the four slots as they
+stand, then re-run the rollback, which resumes where it stopped (the `select`
+and `plan` rows above), or the `apply` a by-hand `restore` printed. The
+refusal also offers removing the whole record; do not, since a removed record
+forgets which sets are complete, and the older tree's next pull keeps every
+tree it finds, the previous set's among them. The older tree leaves the
+candidate's folder alone as one it does not know, and the next
+`models pull <candidate>` on a tree at or above that release records the
+folder again and fetches nothing.
+
 ## 4. Re-runs and refusals
 
 - `install` again on a live box: a no-op apply, an incremental set, a drill,

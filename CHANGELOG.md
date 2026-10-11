@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.123](docs/release-notes/v0.3.123.md) — 2026-10-11 — the release-files runbook lists what the hardware profile sizes and how each value moves on a smaller box
 - [v0.3.122](docs/release-notes/v0.3.122.md) — 2026-10-10 — the pin watch reads python-dateutil's index
 - [v0.3.121](docs/release-notes/v0.3.121.md) — 2026-10-10 — the push-time gate runs on a second runner instance of its own, never holding the previous run's box jobs
 - [v0.3.120](docs/release-notes/v0.3.120.md) — 2026-10-10 — the gate runs its tests across worker processes, in about a fifth of the time
