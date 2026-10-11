@@ -51,11 +51,16 @@ from gideon.host.checks.capacity import (
     read_prometheus_low,
 )
 from gideon.host.checks.network import (
+    DOCKER_NETWORK_TIMEOUT_SECONDS,
+    GETENT_TIMEOUT_SECONDS,
+    NETWORK_LS_ARGV,
     PROBE_TIMEOUT_SECONDS,
+    DockerNetworksCheck,
     EgressCheck,
     HostnameCheck,
     NtpCheck,
     PortsCheck,
+    network_inspect_argv,
 )
 from gideon.host.checks.services import BackupSshCheck, LdapCheck, SmtpCheck
 from gideon.host.corpus.lockfile import (
@@ -71,7 +76,7 @@ from gideon.host.ldap import ldapsearch_argv
 from gideon.host.lock import load_host_lock
 from gideon.host.models import GIGABYTE, ModelPin, ModelsLock, load_models_lock
 from gideon.host.render.services.prometheus import PROMETHEUS_LOOPBACK_ADDRESS
-from gideon.host.site import load_site, render_errors
+from gideon.host.site import SiteConfig, load_site, render_errors
 from gideon.host.sshtarget import BACKUP_PROBE_SHA256
 from gideon.host.steps.nvidia import _LOADED_VERSION
 from gideon.host.sysio import Command, PathLike
@@ -348,6 +353,7 @@ class Registry(unittest.TestCase):
                 "ports",
                 "hostname",
                 "ntp",
+                "docker-networks",
                 "ldap",
                 "backup-ssh",
                 "smtp",
@@ -663,6 +669,276 @@ class Ports(unittest.TestCase):
     def test_ss_failure_refuses(self) -> None:
         report = self.report("", returncode=1)
         self.assertEqual(report.severity, Severity.REFUSE)
+
+
+class DockerNetworks(unittest.TestCase):
+    """Docker network subnets are judged against named site hosts and LAN ranges."""
+
+    ADDRESSES: Mapping[str, tuple[str, ...]] = {
+        "gideon.test": ("198.51.100.10",),
+        "ad.test": ("198.51.100.11",),
+        "nas.test": ("198.51.100.12",),
+        "smtp.test": ("198.51.100.13",),
+        "registry.test": ("198.51.100.14",),
+        "proxy.test": ("198.51.100.15",),
+    }
+
+    class TimedHost(FakeHost):
+        """Record each bound and expire one chosen command."""
+
+        def __init__(
+            self,
+            commands: Mapping[tuple[str, ...], subprocess.CompletedProcess[str]],
+            expire: tuple[str, ...] | None = None,
+        ) -> None:
+            super().__init__(commands=commands)
+            self.expire = expire
+            self.timeouts: list[tuple[tuple[str, ...], float | None]] = []
+
+        def run(
+            self,
+            argv: Command,
+            *,
+            check: bool = False,
+            input: str | None = None,
+            cwd: PathLike | None = None,
+            env: Mapping[str, str] | None = None,
+            timeout: float | None = None,
+            passthrough: bool = False,
+        ) -> subprocess.CompletedProcess[str]:
+            command = tuple(argv)
+            self.timeouts.append((command, timeout))
+            if command == self.expire:
+                assert timeout is not None
+                raise subprocess.TimeoutExpired(command, timeout)
+            return super().run(
+                argv,
+                check=check,
+                input=input,
+                cwd=cwd,
+                env=env,
+                timeout=timeout,
+                passthrough=passthrough,
+            )
+
+    def network_host(
+        self,
+        rows: tuple[str, ...] = ("shared\tother\t203.0.113.0/24",),
+        *,
+        addresses: Mapping[str, tuple[str, ...]] | None = None,
+        unresolved: Collection[str] = (),
+        proxy: bool = False,
+        listing_code: int = 0,
+        inspect_code: int = 0,
+    ) -> tuple[FakeHost, SiteConfig]:
+        extra = "registry: registry.test/example\n"
+        if proxy:
+            extra += "egress_proxy: http://proxy.test:3128\n"
+        site = make_site(extra=extra)
+        ids = tuple(f"network-{index}" for index in range(len(rows)))
+        commands: dict[tuple[str, ...], subprocess.CompletedProcess[str]] = {
+            NETWORK_LS_ARGV: completed(
+                NETWORK_LS_ARGV, "".join(f"{network_id}\n" for network_id in ids), listing_code
+            )
+        }
+        if ids:
+            argv = network_inspect_argv(ids)
+            commands[argv] = completed(argv, "".join(f"{row}\n" for row in rows), inspect_code)
+        answers = dict(self.ADDRESSES)
+        if addresses is not None:
+            answers.update(addresses)
+        for host, values in answers.items():
+            argv = ("getent", "ahosts", host)
+            stdout = "".join(f"{value} STREAM {host}\n" for value in values)
+            commands[argv] = completed(argv, stdout, 2 if host in unresolved else 0)
+        return FakeHost(commands=commands), site
+
+    def report(
+        self,
+        rows: tuple[str, ...],
+        *,
+        addresses: Mapping[str, tuple[str, ...]] | None = None,
+        unresolved: Collection[str] = (),
+        proxy: bool = False,
+        listing_code: int = 0,
+        inspect_code: int = 0,
+    ) -> tuple[CheckReport, FakeHost]:
+        host, site = self.network_host(
+            rows,
+            addresses=addresses,
+            unresolved=unresolved,
+            proxy=proxy,
+            listing_code=listing_code,
+            inspect_code=inspect_code,
+        )
+        return DockerNetworksCheck().run(context(host, site=site)), host
+
+    def assert_read_fix(self, report: CheckReport, command: str) -> None:
+        self.assertEqual(report.severity, Severity.REFUSE)
+        self.assertIn(f"Repair docker network {command}", report.fix)
+
+    def assert_bounds(self, host: TimedHost) -> None:
+        for argv, timeout in host.timeouts:
+            if argv[:2] == ("getent", "ahosts"):
+                expected = GETENT_TIMEOUT_SECONDS
+            else:
+                self.assertEqual(argv[:2], ("docker", "network"))
+                expected = DOCKER_NETWORK_TIMEOUT_SECONDS
+            self.assertEqual(timeout, expected, argv)
+
+    def test_relay_cover_names_network_project_and_key_without_addresses(self) -> None:
+        subnet = "198.51.100.13/32"
+        address = self.ADDRESSES["smtp.test"][0]
+        report, _ = self.report((f"relay-bridge\ttranscribe\t{subnet}",))
+        self.assertEqual(report.severity, Severity.REFUSE)
+        self.assertIn("relay-bridge (project transcribe) covers", report.detail)
+        self.assertIn("alerts.smtp.host", report.detail)
+        for value in (
+            subnet,
+            "192.0.2.0/24",
+            address,
+            *(item for values in self.ADDRESSES.values() for item in values),
+        ):
+            self.assertNotIn(value, report.detail)
+            self.assertNotIn(value, report.fix)
+
+    def test_cover_without_label_names_no_compose_project(self) -> None:
+        report, _ = self.report(("bridge\t\t198.51.100.0/24",))
+        self.assertEqual(report.severity, Severity.REFUSE)
+        self.assertIn("bridge (no Compose project)", report.detail)
+
+    def test_directory_host_checks_all_three_addresses(self) -> None:
+        addresses = {
+            "ad.test": ("203.0.113.10", "198.51.100.11", "203.0.113.11")
+        }
+        report, _ = self.report(
+            ("directory-bridge\tother\t198.51.100.11/32",), addresses=addresses
+        )
+        self.assertEqual(report.severity, Severity.REFUSE)
+        self.assertIn("auth.ldap.host", report.detail)
+
+    def test_gideon_project_is_named_on_cover(self) -> None:
+        report, _ = self.report(("gideon-bridge\tgideon\t198.51.100.10/32",))
+        self.assertEqual(report.severity, Severity.REFUSE)
+        self.assertIn("gideon-bridge (project gideon)", report.detail)
+
+    def test_lan_range_overlap_names_its_index(self) -> None:
+        report, _ = self.report(("lan-bridge\tother\t192.0.2.128/25",))
+        self.assertEqual(report.severity, Severity.REFUSE)
+        self.assertIn("lan_cidrs[0]", report.detail)
+
+    def test_unresolved_host_keeps_pass_text(self) -> None:
+        rows = ("clear\tother\t203.0.113.0/24",)
+        resolved, _ = self.report(rows)
+        unresolved, _ = self.report(rows, unresolved=("smtp.test",))
+        self.assertEqual(resolved.severity, Severity.PASS)
+        self.assertEqual(unresolved.severity, Severity.PASS)
+        self.assertEqual(unresolved.detail, resolved.detail)
+
+    def test_failed_listing_refuses_with_read_fix(self) -> None:
+        report, _ = self.report((), listing_code=127)
+        self.assert_read_fix(report, "ls")
+
+    def test_failed_inspect_refuses_with_read_fix(self) -> None:
+        report, _ = self.report(("clear\tother\t203.0.113.0/24",), inspect_code=1)
+        self.assert_read_fix(report, "inspect")
+
+    def test_inspect_line_with_too_few_tabs_refuses(self) -> None:
+        report, _ = self.report(("broken\tother",))
+        self.assert_read_fix(report, "inspect")
+
+    def test_inspect_line_with_bad_subnet_refuses(self) -> None:
+        report, _ = self.report(("broken\tother\tnot-a-subnet",))
+        self.assert_read_fix(report, "inspect")
+
+    def test_host_and_none_networks_without_subnets_pass(self) -> None:
+        report, _ = self.report(("host\t\t", "none\t\t"))
+        self.assertEqual(report.severity, Severity.PASS, report.detail)
+        self.assertIn("2 Docker networks", report.detail)
+
+    def test_ipv6_subnet_does_not_cover_ipv4_addresses(self) -> None:
+        report, _ = self.report(("ipv6\tother\t2001:db8::/64",))
+        self.assertEqual(report.severity, Severity.PASS, report.detail)
+
+    def test_proxy_host_is_resolved_and_judged_when_set(self) -> None:
+        report, host = self.report(
+            ("proxy-bridge\tother\t203.0.113.0/24",),
+            proxy=True,
+            addresses={"proxy.test": ("203.0.113.15",)},
+        )
+        self.assertEqual(report.severity, Severity.REFUSE)
+        self.assertIn("egress_proxy", report.detail)
+        self.assertEqual(host.calls.count(("run", ("getent", "ahosts", "proxy.test"))), 1)
+
+    def test_proxy_host_is_not_resolved_when_unset(self) -> None:
+        report, host = self.report(("clear\tother\t203.0.113.0/24",))
+        self.assertEqual(report.severity, Severity.PASS)
+        self.assertNotIn(("run", ("getent", "ahosts", "proxy.test")), host.calls)
+
+    def test_registry_host_is_judged(self) -> None:
+        report, host = self.report(
+            ("registry-bridge\tother\t203.0.113.0/24",),
+            addresses={"registry.test": ("203.0.113.14",)},
+        )
+        self.assertEqual(report.severity, Severity.REFUSE)
+        self.assertIn("covers registry", report.detail)
+        self.assertEqual(host.calls.count(("run", ("getent", "ahosts", "registry.test"))), 1)
+
+    def test_two_keys_on_one_host_resolve_once_and_both_are_named(self) -> None:
+        host, site = self.network_host(("shared\tother\t198.51.100.11/32",))
+        smtp = dataclasses.replace(site.alerts.smtp, host="ad.test")
+        site = dataclasses.replace(site, alerts=dataclasses.replace(site.alerts, smtp=smtp))
+        report = DockerNetworksCheck().run(context(host, site=site))
+        self.assertEqual(report.severity, Severity.REFUSE)
+        self.assertIn("auth.ldap.host", report.detail)
+        self.assertIn("alerts.smtp.host", report.detail)
+        self.assertEqual(host.calls.count(("run", ("getent", "ahosts", "ad.test"))), 1)
+
+    def test_empty_listing_passes_without_inspect(self) -> None:
+        report, host = self.report(())
+        self.assertEqual(report.severity, Severity.PASS)
+        self.assertIn("0 Docker networks", report.detail)
+        self.assertFalse(
+            any(
+                call[0] == "run"
+                and isinstance(call[1], tuple)
+                and call[1][:3] == ("docker", "network", "inspect")
+                for call in host.calls
+            )
+        )
+
+    def test_clear_network_reports_judged_counts(self) -> None:
+        report, _ = self.report(("clear\tother\t203.0.113.0/24",))
+        self.assertEqual(report.severity, Severity.PASS)
+        self.assertIn("1 Docker networks", report.detail)
+        self.assertIn("5 site hosts", report.detail)
+        self.assertIn("1 LAN ranges", report.detail)
+
+    def test_expired_listing_refuses_with_bound_and_read_fix(self) -> None:
+        base, site = self.network_host(("clear\tother\t203.0.113.0/24",))
+        host = self.TimedHost(base.commands, NETWORK_LS_ARGV)
+        report = DockerNetworksCheck().run(context(host, site=site))
+        self.assert_read_fix(report, "ls")
+        self.assertIn("timed out", report.detail)
+        self.assert_bounds(host)
+
+    def test_expired_inspect_refuses_with_bound_and_read_fix(self) -> None:
+        base, site = self.network_host(("clear\tother\t203.0.113.0/24",))
+        argv = network_inspect_argv(("network-0",))
+        host = self.TimedHost(base.commands, argv)
+        report = DockerNetworksCheck().run(context(host, site=site))
+        self.assert_read_fix(report, "inspect")
+        self.assertIn("timed out", report.detail)
+        self.assert_bounds(host)
+
+    def test_expired_lookup_keeps_pass_text_and_all_bounds(self) -> None:
+        base, site = self.network_host(("clear\tother\t203.0.113.0/24",))
+        passing = DockerNetworksCheck().run(context(base, site=site))
+        host = self.TimedHost(base.commands, ("getent", "ahosts", "smtp.test"))
+        report = DockerNetworksCheck().run(context(host, site=site))
+        self.assertEqual(report.severity, Severity.PASS)
+        self.assertEqual(report.detail, passing.detail)
+        self.assert_bounds(host)
 
 
 class Hostname(unittest.TestCase):

@@ -113,6 +113,7 @@ def _registered_checks() -> tuple[PreflightCheck, ...]:
         HostMemoryCheck,
     )
     from gideon.host.checks.network import (
+        DockerNetworksCheck,
         EgressCheck,
         HostnameCheck,
         NtpCheck,
@@ -125,6 +126,7 @@ def _registered_checks() -> tuple[PreflightCheck, ...]:
         PortsCheck(),
         HostnameCheck(),
         NtpCheck(),
+        DockerNetworksCheck(),
         LdapCheck(),
         BackupSshCheck(),
         SmtpCheck(),

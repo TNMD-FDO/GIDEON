@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.128](docs/release-notes/v0.3.128.md) — 2026-10-11 — preflight names a Docker network that covers an office host
 - [v0.3.127](docs/release-notes/v0.3.127.md) — 2026-10-11 — the upgrade's fetch follows a moved tag
 - [v0.3.126](docs/release-notes/v0.3.126.md) — 2026-10-11 — box jobs carry no concurrency group
 - [v0.3.125](docs/release-notes/v0.3.125.md) — 2026-10-11 — the next-listing test reads git once

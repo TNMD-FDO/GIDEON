@@ -69,6 +69,9 @@ same command is run again after the fix.
    window for every container on the box. A network made before the restart
    keeps its subnet until it is removed, so pause anything that makes networks,
    such as a CI runner, from just before that provision until it finishes.
+   Preflight's `docker-networks` row refuses while any Docker network's subnet
+   covers a host the site file names or a `lan_cidrs` range, naming the network
+   and its Compose project.
 4. **Provision again**. The
    site-dependent steps — `egress-proxy`, `firewall`, `time-sync`, and
    `timezone` — are blocked until the site file exists, and preflight refuses

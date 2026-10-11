@@ -1,6 +1,10 @@
 """Network checks for the host preflight."""
 
+import ipaddress
 import re
+import subprocess
+from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 from gideon.host import cotenants
 from gideon.host.checks import (
@@ -15,6 +19,22 @@ from gideon.host.steps import ProvisionContext, temporary_wgetrc, wget_argv
 
 PROBE_TIMEOUT_SECONDS = 10
 """Fixed wget connect/read timeout; operational, not a tuned product value."""
+DOCKER_NETWORK_TIMEOUT_SECONDS = 10
+"""Bound on each Docker network read; the client has no request timeout."""
+GETENT_TIMEOUT_SECONDS = 5
+"""Bound on each host lookup; a resolver with a dead upstream retries long."""
+
+NETWORK_LS_ARGV = ("docker", "network", "ls", "--format", "{{.ID}}")
+
+
+def network_inspect_argv(ids: tuple[str, ...]) -> tuple[str, ...]:
+    """Inspect the listed network ids in one read, one tab-separated line each."""
+
+    template = (
+        '{{.Name}}\t{{with index .Labels "com.docker.compose.project"}}'
+        '{{.}}{{end}}\t{{range .IPAM.Config}}{{.Subnet}} {{end}}'
+    )
+    return ("docker", "network", "inspect", "--format", template, *ids)
 
 _EGRESS_FIX = (
     "Allow the listed hosts through the firewall or configure egress_proxy "
@@ -28,6 +48,20 @@ _DOCKER_FIX = (
     "Repair docker ps so the container publishing the port can be listed, "
     "then re-run preflight."
 )
+_NETWORK_COVER_FIX = (
+    "Wait for the named project to end, set docker_address_pool clear of the "
+    "office's networks per docs/runbooks/install-upgrade.md §1 and re-run "
+    "provision, or agree another subnet with the network's owner per "
+    "docs/runbooks/install-upgrade.md §10; then re-run preflight."
+)
+_NETWORK_LS_FIX = (
+    "Repair docker network ls so the daemon's networks can be read, "
+    "then re-run preflight."
+)
+_NETWORK_INSPECT_FIX = (
+    "Repair docker network inspect so the daemon's networks can be read, "
+    "then re-run preflight."
+)
 _HOSTNAME_FIX = (
     "Create the site hostname's DNS record per "
     "docs/runbooks/office-services-setup.md §2, then re-run preflight."
@@ -37,6 +71,89 @@ _NTP_FIX = (
     "preflight."
 )
 _PROCESS_RE = re.compile(r'users:\(\("([^"]+)"')
+
+
+@dataclass(frozen=True, slots=True)
+class NetworkRow:
+    """A Docker network's identity and IPAM subnets."""
+
+    name: str
+    project: str | None
+    subnets: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]
+
+
+def parse_network_rows(stdout: str) -> tuple[NetworkRow, ...] | None:
+    """Read inspect's tab-separated rows, refusing malformed output."""
+
+    rows: list[NetworkRow] = []
+    for line in stdout.splitlines():
+        fields = line.split("\t")
+        if len(fields) != 3 or not fields[0]:
+            return None
+        try:
+            subnets = tuple(ipaddress.ip_network(value) for value in fields[2].split())
+        except ValueError:
+            return None
+        rows.append(NetworkRow(fields[0], fields[1] or None, subnets))
+    return tuple(rows)
+
+
+_Address = ipaddress.IPv4Address | ipaddress.IPv6Address
+
+
+def _addresses(context: PreflightContext, host: str) -> tuple[_Address, ...]:
+    """Every address ``getent ahosts`` gives, none when it fails or stalls."""
+
+    try:
+        result = context.host.run(
+            ("getent", "ahosts", host), timeout=GETENT_TIMEOUT_SECONDS
+        )
+    except subprocess.TimeoutExpired:
+        return ()
+    if result.returncode != 0:
+        return ()
+    addresses: dict[_Address, None] = {}
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if not fields:
+            continue
+        try:
+            addresses[ipaddress.ip_address(fields[0])] = None
+        except ValueError:
+            continue
+    return tuple(addresses)
+
+
+def _resolved_hosts(
+    context: PreflightContext,
+) -> list[tuple[str, tuple[_Address, ...]]]:
+    """Each judged site key with its host's addresses, every host resolved once."""
+
+    site = context.site
+    hosts = [
+        ("hostname", site.hostname),
+        ("auth.ldap.host", site.auth.ldap.host),
+        ("backup.target.host", site.backup.target.host),
+        ("alerts.smtp.host", site.alerts.smtp.host),
+    ]
+    if site.egress_proxy:
+        try:
+            proxy_host = urlsplit(site.egress_proxy).hostname
+        except ValueError:
+            proxy_host = None
+        if proxy_host:
+            hosts.append(("egress_proxy", proxy_host))
+    registry = parse_registry(site.registry)
+    if registry is not None:
+        registry_host = urlsplit(f"//{registry.authority}").hostname
+        if registry_host:
+            hosts.append(("registry", registry_host))
+
+    cache: dict[str, tuple[_Address, ...]] = {}
+    for _, host in hosts:
+        if host not in cache:
+            cache[host] = _addresses(context, host)
+    return [(key, cache[host]) for key, host in hosts]
 
 
 def _egress_hosts(context: PreflightContext) -> list[EgressHost] | None:
@@ -238,6 +355,91 @@ class PortsCheck(PreflightCheck):
             return CheckReport(Severity.REFUSE, "; ".join(unexpected), " ".join(fixes))
         detail = ", ".join(details[port] for port in sorted(details))
         return CheckReport(Severity.PASS, detail)
+
+
+class DockerNetworksCheck(PreflightCheck):
+    """Find Docker subnets that cover a site host or LAN range."""
+
+    name = "docker-networks"
+    summary = "check no Docker network's subnet covers a site host or LAN range"
+
+    def run(self, context: PreflightContext) -> CheckReport:
+        try:
+            listing = context.host.run(
+                NETWORK_LS_ARGV, timeout=DOCKER_NETWORK_TIMEOUT_SECONDS
+            )
+        except subprocess.TimeoutExpired:
+            return CheckReport(
+                Severity.REFUSE, "docker network ls timed out", _NETWORK_LS_FIX
+            )
+        if listing.returncode != 0:
+            return CheckReport(
+                Severity.REFUSE, "could not list Docker networks", _NETWORK_LS_FIX
+            )
+
+        ids = tuple(listing.stdout.split())
+        rows: tuple[NetworkRow, ...] = ()
+        if ids:
+            try:
+                inspected = context.host.run(
+                    network_inspect_argv(ids), timeout=DOCKER_NETWORK_TIMEOUT_SECONDS
+                )
+            except subprocess.TimeoutExpired:
+                return CheckReport(
+                    Severity.REFUSE,
+                    "docker network inspect timed out",
+                    _NETWORK_INSPECT_FIX,
+                )
+            if inspected.returncode != 0:
+                return CheckReport(
+                    Severity.REFUSE,
+                    "could not inspect Docker networks",
+                    _NETWORK_INSPECT_FIX,
+                )
+            parsed = parse_network_rows(inspected.stdout)
+            if parsed is None or len(parsed) != len(ids):
+                return CheckReport(
+                    Severity.REFUSE,
+                    "could not read Docker network inspect output",
+                    _NETWORK_INSPECT_FIX,
+                )
+            rows = parsed
+
+        hosts = _resolved_hosts(context)
+        lan_ranges = tuple(ipaddress.ip_network(cidr) for cidr in context.site.lan_cidrs)
+        covering: list[str] = []
+        for row in rows:
+            keys = [
+                key
+                for key, addresses in hosts
+                if any(address in subnet for address in addresses for subnet in row.subnets)
+            ]
+            keys.extend(
+                f"lan_cidrs[{index}]"
+                for index, lan_range in enumerate(lan_ranges)
+                if any(
+                    lan_range.version == subnet.version and lan_range.overlaps(subnet)
+                    for subnet in row.subnets
+                )
+            )
+            if keys:
+                project = (
+                    "no Compose project"
+                    if row.project is None
+                    else f"project {row.project}"
+                )
+                covering.append(
+                    f"network {row.name} ({project}) covers {', '.join(keys)}"
+                )
+        if covering:
+            return CheckReport(
+                Severity.REFUSE, "; ".join(covering), _NETWORK_COVER_FIX
+            )
+        return CheckReport(
+            Severity.PASS,
+            f"judged {len(rows)} Docker networks, {len(hosts)} site hosts, "
+            f"and {len(lan_ranges)} LAN ranges",
+        )
 
 
 class HostnameCheck(PreflightCheck):
