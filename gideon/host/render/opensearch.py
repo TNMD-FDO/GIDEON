@@ -21,6 +21,9 @@ OPENSEARCH_JOB_NAME: Final = "opensearch"
 OPENSEARCH_HEALTH_PATH: Final = "/_plugins/_security/health"
 OPENSEARCH_DATA_ROOT: Final = "/data/fast/opensearch"
 OPENSEARCH_DATA_MOUNT: Final = "/usr/share/opensearch/data"
+OPENSEARCH_SNAPSHOTS_ROOT: Final = "/data/fast/opensearch-snapshots"
+OPENSEARCH_SNAPSHOTS_MOUNT: Final = "/usr/share/opensearch/snapshots"
+OPENSEARCH_REPOSITORY: Final = "gideon"
 OPENSEARCH_UID: Final = 1000
 OPENSEARCH_GID: Final = 1000
 OPENSEARCH_SETTINGS_PATH: Final = "/usr/share/opensearch/config/opensearch.yml"
@@ -57,6 +60,8 @@ def opensearch_settings_document() -> Mapping[str, object]:
         "network.host": "0.0.0.0",
         # There is no peer from which to discover another node.
         "discovery.type": "single-node",
+        # An fs repository may only be registered under this directory.
+        "path.repo": [OPENSEARCH_SNAPSHOTS_MOUNT],
         # REST is plaintext only inside the Compose network; transport keeps TLS.
         "plugins.security.ssl.http.enabled": False,
         # The transport listener requires a certificate and its private key.

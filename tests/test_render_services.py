@@ -472,6 +472,7 @@ class Registry(unittest.TestCase):
 
     def test_store_members_apply_on_every_host(self) -> None:
         stores = store_services()
+        self.assertEqual(stores, ("postgres", "qdrant", "opensearch"))
         self.assertEqual(stores, STORE_SERVICES)
         for rendered_inputs in host_inputs():
             with self.subTest(

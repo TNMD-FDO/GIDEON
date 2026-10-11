@@ -26,6 +26,7 @@ from gideon.host import (
     backuplock,
     backuproots,
     backupset,
+    derivedstores,
     pgbackrest,
     report,
     secrets,
@@ -581,17 +582,33 @@ def _backup_type(
     return "full" if now - finished > timedelta(days=7) else "incr"
 
 
+def _indexes_stage(
+    io: Host,
+    rendered_dir: PathLike,
+    *,
+    backup_type: str,
+    pre_restore: bool,
+    now: datetime,
+) -> tuple[StageResult, tuple[derivedstores.StoreSnapshot, derivedstores.StoreSnapshot] | None]:
+    if pre_restore:
+        return StageResult("indexes", True, derivedstores.INDEXES_PRE_RESTORE_DETAIL, ""), None
+    if backup_type == "incr":
+        return StageResult("indexes", True, derivedstores.INDEXES_INCREMENTAL_DETAIL, ""), None
+    snapshots = derivedstores.snapshot_all(io, rendered_dir, now=now)
+    if isinstance(snapshots, Problem):
+        return StageResult("indexes", False, snapshots.problem, snapshots.fix), None
+    return StageResult("indexes", True, derivedstores.snapshot_detail(snapshots), ""), snapshots
+
+
 def _postgres_stage(
     io: Host,
     rendered_dir: PathLike,
     *,
-    info: pgbackrest.InfoResult,
-    full_requested: bool,
+    backup_type: str,
     kind: backupset.Kind,
     now: datetime,
     now_was_supplied: bool,
 ) -> tuple[StageResult, _PostgresStage | None]:
-    backup_type = _backup_type(info.infos, full_requested=full_requested, now=now)
     try:
         backup_result = io.run(
             pgbackrest.backup_argv(
@@ -901,6 +918,8 @@ def _applied_stage(
     links: backupset.LinkVerdict,
     pruned: int,
     stage_seconds: Mapping[str, float],
+    indexes: StageResult,
+    snapshots: tuple[derivedstores.StoreSnapshot, derivedstores.StoreSnapshot] | None,
 ) -> StageResult:
     files = {
         name: sum(entry.kind == "f" for entry in entries)
@@ -924,6 +943,10 @@ def _applied_stage(
             "archive_through": pg.archive_through.isoformat(),
             "duration_s": duration,
             "stage_seconds": dict(stage_seconds),
+            "indexes": (
+                derivedstores.snapshot_audit(snapshots)
+                if snapshots is not None else {"skipped": indexes.detail}
+            ),
             "set_bytes": set_bytes,
             "files": files,
             "hard_links": {"sampled": links.sampled, "linked": links.linked},
@@ -956,7 +979,7 @@ def run_backup_run(
     now: datetime | None = None,
     pre_restore: bool = False,
 ) -> int:
-    """Run the nine ordered stages that create one local backup set."""
+    """Run the ten ordered stages that create one local backup set."""
 
     io = host or RealHost()
     if io.geteuid() != 0:
@@ -1018,6 +1041,12 @@ def _backup_run_body(
     if chosen is None:
         return 1
     label, kind = chosen
+    full_requested = (
+        pre_restore
+        or bool(getattr(args, "full", False))
+        or getattr(args, "label", None) is not None
+    )
+    backup_type = _backup_type(info.infos, full_requested=full_requested, now=started)
     previous = next((ref for ref in sets if ref.complete), None)
     checkout = Path(__file__).parents[2] if root is None else Path(root)
     checkout_text = os.fspath(checkout)
@@ -1040,6 +1069,14 @@ def _backup_run_body(
     if not intent.ok:
         return 1
 
+    with _timed(stage_seconds, "indexes", measured=measured):
+        indexes, snapshots = _indexes_stage(
+            io, rendered_dir, backup_type=backup_type, pre_restore=pre_restore, now=started
+        )
+    print_stage(indexes)
+    if not indexes.ok:
+        return 1
+
     roots = backuproots.taking(io, backupset.inventory_roots(checkout_text), partial, previous)
     with _timed(stage_seconds, "files", measured=measured):
         files, links = _files_stage(
@@ -1057,17 +1094,11 @@ def _backup_run_body(
     if not secrets_result.ok or secrets_stage is None:
         return 1
 
-    full_requested = (
-        pre_restore
-        or bool(getattr(args, "full", False))
-        or getattr(args, "label", None) is not None
-    )
     with _timed(stage_seconds, "postgres", measured=measured):
         postgres_result, pg = _postgres_stage(
             io,
             rendered_dir,
-            info=info,
-            full_requested=full_requested,
+            backup_type=backup_type,
             kind=kind,
             now=started,
             now_was_supplied=now_was_supplied,
@@ -1140,6 +1171,8 @@ def _backup_run_body(
         links=links,
         pruned=pruned,
         stage_seconds=stage_seconds,
+        indexes=indexes,
+        snapshots=snapshots,
     )
     print_stage(applied)
     return int(not applied.ok)

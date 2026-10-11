@@ -35,13 +35,15 @@ from gideon.host.render.opensearch import (
     OPENSEARCH_SECURITY_PATH,
     OPENSEARCH_SERVICE_NAME,
     OPENSEARCH_SETTINGS_PATH,
+    OPENSEARCH_SNAPSHOTS_MOUNT,
+    OPENSEARCH_SNAPSHOTS_ROOT,
     OPENSEARCH_USER,
     opensearch_health_url,
     opensearch_heap_mib,
 )
 from gideon.host.render.prometheus import PrometheusConfigArtifact
 from gideon.host.render.services import MountedSecret, secret_wrapper
-from gideon.host.render.services.opensearch import opensearch_service
+from gideon.host.render.services.opensearch import OpensearchService, opensearch_service
 
 HOSTS = (inputs(EXAMPLE), inputs(SECOND), inputs(EXAMPLE, no_gpu=True))
 SECURITY_FILES = (
@@ -58,6 +60,9 @@ PATHS = ("opensearch/opensearch.yml",) + tuple(
 
 
 class Block(unittest.TestCase):
+    def test_definition_joins_the_store_tier(self) -> None:
+        self.assertTrue(OpensearchService.store)
+
     def test_builder_uses_supplied_limit_without_profile_row(self) -> None:
         rendered_inputs = inputs()
         target = parse_registry(rendered_inputs.site.registry)
@@ -142,6 +147,7 @@ class Block(unittest.TestCase):
                     block["volumes"],
                     [
                         f"{OPENSEARCH_DATA_ROOT}:{OPENSEARCH_DATA_MOUNT}",
+                        f"{OPENSEARCH_SNAPSHOTS_ROOT}:{OPENSEARCH_SNAPSHOTS_MOUNT}",
                         f"/etc/gideon/rendered/opensearch/opensearch.yml:{OPENSEARCH_SETTINGS_PATH}:ro",
                         f"/etc/gideon/rendered/opensearch/security:{OPENSEARCH_SECURITY_PATH}:ro",
                     ],
@@ -259,6 +265,7 @@ class Files(unittest.TestCase):
             "cluster.name": "gideon",
             "network.host": "0.0.0.0",
             "discovery.type": "single-node",
+            "path.repo": [OPENSEARCH_SNAPSHOTS_MOUNT],
             "plugins.security.ssl.http.enabled": False,
             "plugins.security.ssl.transport.pemcert_filepath": f"/run/secrets/{OPENSEARCH_CERT_SECRET_NAME}",
             "plugins.security.ssl.transport.pemkey_filepath": f"/run/secrets/{OPENSEARCH_KEY_SECRET_NAME}",

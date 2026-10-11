@@ -15,6 +15,12 @@ QDRANT_READ_ONLY_SECRET_NAME: Final = "qdrant_read_only_api_key"
 QDRANT_JOB_NAME: Final = "qdrant"
 QDRANT_DATA_ROOT: Final = "/data/fast/qdrant"
 QDRANT_STORAGE_MOUNT: Final = "/qdrant/storage"
+QDRANT_SNAPSHOTS_ROOT: Final = "/data/fast/qdrant-snapshots"
+QDRANT_SNAPSHOTS_MOUNT: Final = "/qdrant/snapshots"
+# The server builds a snapshot under "<temp path>/tmp" and renames it into the
+# snapshots directory, so both sit on one mount and no copy crosses filesystems.
+QDRANT_TEMP_PATH: Final = QDRANT_SNAPSHOTS_MOUNT
+QDRANT_SNAPSHOTS_TEMP_DIR: Final = "tmp"
 
 
 def qdrant_metrics_target() -> str:

@@ -4,7 +4,6 @@ import argparse
 import contextlib
 import io
 import os
-import unittest
 from dataclasses import replace
 from unittest.mock import patch
 
@@ -12,6 +11,7 @@ import test_backup
 import test_backup_push
 import test_backuproots
 import test_backupset
+import test_derivedstores
 import test_drill
 import test_restore
 
@@ -21,20 +21,23 @@ from gideon.host import (
     backuproots,
     backupset,
     cas,
+    derivedstores,
     drill,
     pgbackrest,
     report,
     restore,
 )
+from gideon.host.render.qdrant import QDRANT_SECRET_NAME
 from gideon.host.report import Problem
 from gideon.host.steps.site_dirs import AGE_IDENTITY_PATH, age_identity_fix
 from gideon.host.sysio import RealHost
 
 
-class BackupForms(unittest.TestCase):
+class BackupForms(test_restore.RenderedRestoreCase):
     """A fix uses the form selected for the current CLI run."""
 
     def setUp(self) -> None:
+        super().setUp()
         self.addCleanup(report.set_form_from_environment, os.environ.copy())
 
     def test_sentences_keep_their_long_form_words(self) -> None:
@@ -58,6 +61,13 @@ class BackupForms(unittest.TestCase):
                 closing_lines=(),
             )
             return lines[-1]
+
+        def derived_missing_secret_fix() -> str:
+            value = derivedstores._secret(
+                test_derivedstores.FakeHost([], secrets_present=False), QDRANT_SECRET_NAME
+            )
+            assert isinstance(value, Problem)
+            return value.fix
 
         cases = (
             ("rehash", backupset._rehash_fix, "Re-run sudo python3 -m gideon backup run to regenerate the inventory hashes."),
@@ -92,6 +102,8 @@ class BackupForms(unittest.TestCase):
             ("drill age", drill._age_fix, "Run sudo python3 -m gideon backup run, then retry."),
             ("physical", backuproots._physical_fix, "The fetched or restored tree does not match its manifest; re-run sudo python3 -m gideon backup push --verify-all on the source box, then retry restore."),
             ("store root", backuproots._store_root_fix, "Run sudo python3 -m gideon host provision --only disk-layout, then retry."),
+            ("derived provision", derivedstores._provision_fix, "Run sudo python3 -m gideon host provision --only disk-layout, then retry."),
+            ("derived apply", derived_missing_secret_fix, "Run sudo python3 -m gideon apply, then retry."),
             ("box identity", age_identity_fix, "Delete /etc/gideon/backup_age_identity, keeping no copy under /etc/gideon (only that exact path is excluded from a backup set), and run sudo python3 -m gideon host provision --only age-identity to mint a new one; every earlier set then opens on this box with the office identity alone."),
             ("stanza mismatch", pgbackrest._stanza_mismatch_fix, "Run sudo python3 -m gideon restore --from staging to restore the cluster this repository belongs to, or move /data/backup-staging/pgbackrest aside, then re-run apply."),
         )

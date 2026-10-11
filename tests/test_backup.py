@@ -13,17 +13,23 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from unittest import mock
 
+from derivedstores_fake import empty_store_result, empty_store_secrets
+
 from gideon.host import (
     backup,
     backuplock,
     backuproots,
     backupset,
     cas,
+    derivedstores,
     pgbackrest,
     secrets,
     stack,
     stages,
 )
+from gideon.host.render.opensearch import OPENSEARCH_SNAPSHOTS_ROOT
+from gideon.host.render.qdrant import QDRANT_SNAPSHOTS_ROOT
+from gideon.host.report import StageResult
 from gideon.host.steps.site_dirs import AGE_IDENTITY_PATH, AGE_RECIPIENT_PATH
 from gideon.host.sysio import Command, PathLike
 
@@ -184,6 +190,9 @@ class FakeHost:
         )
         if prefix_queue is not None:
             return prefix_queue.pop(0)
+        store_reply = empty_store_result(command, input, RENDERED)
+        if store_reply is not None:
+            return store_reply
         return result(command)
 
     def read_text(self, path: PathLike, *, encoding: str = "utf-8") -> str:
@@ -369,6 +378,7 @@ def _commands(*, old: backupset.Manifest | None = None) -> dict[tuple[str, ...],
 
 def _host(*, previous: bool = False, euid: int = 0) -> FakeHost:
     files = {
+        **empty_store_secrets(),
         SITE_PATH: SITE,
         f"{RENDERED}/compose.yaml": "services: {}\n",
         os.fspath(AGE_RECIPIENT_PATH): RECIPIENT + "\n",
@@ -567,8 +577,10 @@ class BackupRun(unittest.TestCase):
         self.assertNotIn(backuplock.BACKUP_LOCK.path, host.locks)
         self.assertEqual(
             [line.split(":", 1)[0] for line in out.getvalue().splitlines()],
-            ["intent", "files", "secrets", "postgres", "complete", "counts", "manifest", "prune", "applied"],
+            ["intent", "indexes", "files", "secrets", "postgres", "complete", "counts", "manifest", "prune", "applied"],
         )
+        self.assertIn("indexes: ok — qdrant: 0 collection(s) in ", out.getvalue())
+        self.assertIn("; opensearch: 0 index(es) in ", out.getvalue())
         self.assertIn("complete: ok — completed 2 root(s); data-bulk-openwebui: 0 file(s), data-bulk-cas: 0 object(s) arrived since the first pass", out.getvalue())
         manifest_path = os.path.join(backupset.set_dir("20260902T120000Z"), backupset.MANIFEST_NAME)
         parsed = backupset.parse_manifest(host.files[manifest_path])
@@ -594,7 +606,7 @@ class BackupRun(unittest.TestCase):
         )
         self.assertEqual(parsed.row_counts, {"gideon": {"public.users": 3}, "openwebui": {"main.chats": 4}})
         rsync = [call[0] for call in host.calls if call[0][0] == "rsync"]
-        self.assertEqual(len(rsync), 7)
+        self.assertEqual(len(rsync), 9)
         etc = next(argv for argv in rsync if any("/etc-gideon/" in value for value in argv))
         self.assertIn("--exclude=secrets/", etc)
         self.assertNotIn("--link-dest=/data/backup-staging/sets/", " ".join(etc))
@@ -638,6 +650,14 @@ class BackupRun(unittest.TestCase):
                 f"{backupset.partial_dir('20260902T120000Z')}/files/data-bulk-openwebui/",
             ),
             (
+                "rsync", "-a", "--exclude=/tmp/", QDRANT_SNAPSHOTS_ROOT + "/",
+                f"{backupset.partial_dir('20260902T120000Z')}/files/data-fast-qdrant-snapshots/",
+            ),
+            (
+                "rsync", "-a", "--exclude=/tests-*/", OPENSEARCH_SNAPSHOTS_ROOT + "/",
+                f"{backupset.partial_dir('20260902T120000Z')}/files/data-fast-opensearch-snapshots/",
+            ),
+            (
                 "rsync",
                 "-a", "--stats",
                 "/data/bulk/openwebui/",
@@ -662,7 +682,12 @@ class BackupRun(unittest.TestCase):
         self.assertIn('"phase": "applied"', audit_inputs[2] or "")
         applied_line = next(line for line in (audit_inputs[2] or "").splitlines() if line.startswith("\\set v_detail '"))
         applied_detail = json.loads(applied_line.removeprefix("\\set v_detail '").removesuffix("'"))
-        self.assertEqual(applied_detail["stage_seconds"], dict.fromkeys(("intent", "files", "secrets", "postgres", "complete", "counts", "manifest", "prune"), 0.0))
+        self.assertEqual(applied_detail["stage_seconds"], dict.fromkeys(("intent", "indexes", "files", "secrets", "postgres", "complete", "counts", "manifest", "prune"), 0.0))
+        self.assertEqual(set(applied_detail["indexes"]), {"qdrant", "opensearch"})
+        self.assertEqual(applied_detail["indexes"]["qdrant"]["names"], [])
+        self.assertEqual(applied_detail["indexes"]["qdrant"]["bytes"], 0)
+        self.assertEqual(applied_detail["indexes"]["opensearch"]["names"], [])
+        self.assertIsNone(applied_detail["indexes"]["opensearch"]["bytes"])
         self.assertEqual(applied_detail["files"][store.name], parsed.listings[store.name].objects)
         psql_inputs = [
             call[1]
@@ -838,7 +863,7 @@ class BackupRun(unittest.TestCase):
             code = backup.run_backup_run(argparse.Namespace(full=True, label=None), host=host, root=CHECKOUT, now=NOW)
         self.assertEqual(code, 1)
         self.assertEqual([line.split(":", 1)[0] for line in out.getvalue().splitlines()], [
-            "intent", "files", "secrets", "postgres", "complete",
+            "intent", "indexes", "files", "secrets", "postgres", "complete",
         ])
         self.assertIn("complete: refuse", out.getvalue())
         self.assertIn("disk full", out.getvalue())
@@ -861,31 +886,85 @@ class BackupRun(unittest.TestCase):
             host.stats[path] = stat_result(7)
         # The default FakeHost reports all other commands successful; this
         # test focuses on the generated rsync and pgBackRest argv.
-        code = backup.run_backup_run(
-            argparse.Namespace(full=False, label=None),
-            host=host,
-            root=CHECKOUT,
-            now=NOW,
-        )
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), mock.patch.object(
+            backup, "_backup_type", wraps=backup._backup_type
+        ) as decide:
+            code = backup.run_backup_run(
+                argparse.Namespace(full=False, label=None),
+                host=host,
+                root=CHECKOUT,
+                now=NOW,
+            )
         self.assertEqual(code, 0)
+        decide.assert_called_once()
+        self.assertIn(f"indexes: ok — {derivedstores.INDEXES_INCREMENTAL_DETAIL}", out.getvalue())
+        self.assertFalse(any("qdrant" in call[0] or "opensearch" in call[0] for call in host.calls))
         rsync = [call[0] for call in host.calls if call[0][0] == "rsync"]
         self.assertTrue(any("--link-dest=/data/backup-staging/sets/20260901T120000Z" in value for value in rsync[0]))
         self.assertTrue(any("--type=incr" in call[0] for call in host.calls if call[0][0] == "docker" and "pgbackrest" in call[0]))
+        audit_inputs = [
+            request for argv, request, _ in host.calls
+            if "gideon_audit" in argv and request is not None
+        ]
+        applied_line = next(
+            line for line in audit_inputs[-1].splitlines() if line.startswith("\\set v_detail '")
+        )
+        applied_detail = json.loads(applied_line.removeprefix("\\set v_detail '").removesuffix("'"))
+        self.assertEqual(
+            applied_detail["indexes"], {"skipped": derivedstores.INDEXES_INCREMENTAL_DETAIL}
+        )
+
+    def test_pre_restore_skips_store_snapshot_before_files(self) -> None:
+        host = _host()
+        out = io.StringIO()
+        with (
+            mock.patch.object(
+                backup, "_files_stage",
+                return_value=(StageResult("files", False, "stopped", ""), backupset.LinkVerdict(0, 0)),
+            ),
+            contextlib.redirect_stdout(out),
+        ):
+            code = backup.run_backup_run(
+                argparse.Namespace(full=True, label=None), host=host, root=CHECKOUT,
+                now=NOW, pre_restore=True,
+            )
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            [line.split(":", 1)[0] for line in out.getvalue().splitlines()],
+            ["intent", "indexes", "files"],
+        )
+        self.assertIn(f"indexes: ok — {derivedstores.INDEXES_PRE_RESTORE_DETAIL}", out.getvalue())
+        self.assertFalse(any("qdrant" in argv or "opensearch" in argv for argv, _, _ in host.calls))
+
+    def test_snapshot_refusal_stops_before_files_with_store_fix(self) -> None:
+        host = _host()
+        body = json.dumps({"status": {"error": "snapshot refused"}})
+        reply = f"HTTP/1.0 403 Forbidden\r\ncontent-length: {len(body)}\r\n\r\n{body}"
+        qdrant_exec = tuple(stack.exec_argv(RENDERED, "qdrant"))
+        host.commands[qdrant_exec] = [result(qdrant_exec, stdout=reply)]
+        out = io.StringIO()
+
+        with contextlib.redirect_stdout(out):
+            code = backup.run_backup_run(
+                argparse.Namespace(full=True, label=None), host=host, root=CHECKOUT, now=NOW
+            )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            [line.split(":", 1)[0] for line in out.getvalue().splitlines()],
+            ["intent", "indexes"],
+        )
+        self.assertIn("snapshot refused", out.getvalue())
+        self.assertIn(stack.logs_fix(RENDERED, "qdrant"), out.getvalue())
+        self.assertFalse(any(argv[0] == "rsync" for argv, _, _ in host.calls))
 
     def test_labelled_postgres_backup_is_full_and_disables_expire_auto(self) -> None:
         host = _host()
-        info = pgbackrest.InfoResult(
-            infos=(
-                pgbackrest.BackupInfo(
-                    "old-full", "full", (NOW - timedelta(days=3)).timestamp()
-                ),
-            )
-        )
         stage, backup_stage = backup._postgres_stage(
             host,
             RENDERED,
-            info=info,
-            full_requested=True,
+            backup_type="full",
             kind=backupset.Kind.LABELLED,
             now=NOW,
             now_was_supplied=True,
@@ -903,27 +982,19 @@ class BackupRun(unittest.TestCase):
         )
 
     def test_postgres_commits_after_boundary_before_archive_check(self) -> None:
-        info = pgbackrest.InfoResult(
-            infos=(
-                pgbackrest.BackupInfo(
-                    "old-full", "full", (NOW - timedelta(days=3)).timestamp()
-                ),
-            )
-        )
         psql = tuple(stages.psql_argv(RENDERED, "gideon", on_error_stop=True))
         self.assertEqual(psql[-4:], ("-v", "ON_ERROR_STOP=1", "-f", "-"))
         check = tuple(pgbackrest.exec_argv(RENDERED, "check"))
-        for kind, full_requested, backup_type, expire_auto in (
-            (backupset.Kind.NIGHTLY, False, "incr", True),
-            (backupset.Kind.LABELLED, True, "full", False),
+        for kind, backup_type, expire_auto in (
+            (backupset.Kind.NIGHTLY, "incr", True),
+            (backupset.Kind.LABELLED, "full", False),
         ):
             with self.subTest(kind=kind):
                 host = _host()
                 stage, backup_stage = backup._postgres_stage(
                     host,
                     RENDERED,
-                    info=info,
-                    full_requested=full_requested,
+                    backup_type=backup_type,
                     kind=kind,
                     now=NOW,
                     now_was_supplied=True,
@@ -955,8 +1026,7 @@ class BackupRun(unittest.TestCase):
         stage, backup_stage = backup._postgres_stage(
             host,
             RENDERED,
-            info=pgbackrest.InfoResult(infos=()),
-            full_requested=False,
+            backup_type="full",
             kind=backupset.Kind.NIGHTLY,
             now=NOW,
             now_was_supplied=True,

@@ -27,6 +27,7 @@ _OBJECT_NAME: Final = re.compile(r"[0-9a-f]{64}")
 _OBJECT_REGEX: Final =r"\./\([0-9a-f]\{2\}\)/\([0-9a-f]\{2\}\)/\1\2[0-9a-f]\{60\}"
 _REGULAR_TRANSFER = re.compile(r"^Number of regular files transferred:\s*([0-9][0-9,]*)\s*$", re.MULTILINE)
 NOTHING_LEFT_OUT_DETAIL: Final = "0 left out"
+PREDATES_ROOT_CLAUSE: Final = "{name}: the set predates this root; the live directory is left as it is"
 # Lines per sha256sum -c batch on stdin, and names in a closing line: display
 # and memory bounds, not thresholds.
 _HASH_BATCH: Final = 1000
@@ -947,6 +948,12 @@ class HeldRoot:
     entries: tuple[backupset.Entry, ...]
     manifest: backupset.Manifest
 
+    @property
+    def present(self) -> bool:
+        """Whether restore treats this bound root as present in the set."""
+
+        return True
+
     def verify(self) -> Problem | None:
         raise NotImplementedError
 
@@ -965,6 +972,11 @@ class _HeldSnapshot(HeldRoot):
     restore_in_place: bool
     user_written: bool
     later: tuple[backupset.SetRef, ...]
+    absent: bool = False
+
+    @property
+    def present(self) -> bool:
+        return not self.absent
 
     def _later_copies(self) -> tuple[tuple[str, backupset.Manifest, str], ...]:
         """The later sets' copies of this root an overlay applies, oldest first."""
@@ -978,6 +990,8 @@ class _HeldSnapshot(HeldRoot):
         )
 
     def verify(self) -> Problem | None:
+        if self.absent:
+            return None
         walked = _validate_physical(self.io, base=self.copy, entries=self.entries, exact=True)
         if walked is not None:
             return walked
@@ -998,6 +1012,8 @@ class _HeldSnapshot(HeldRoot):
         return None
 
     def put_back(self, host_ids: backupset.AccountIds) -> PutBack | Problem:
+        if self.absent:
+            return PutBack((), (PREDATES_ROOT_CLAUSE.format(name=self.name),), Claims())
         claims = Claims()
         if not self.restore_in_place:
             return PutBack(
@@ -1282,6 +1298,7 @@ def held(
                     row.restore_in_place,
                     row.user_written,
                     later,
+                    row.set_may_predate and row.name not in set_ref.manifest.inventory,
                 )
             )
         elif row.kind is backupset.RootKind.STORE:

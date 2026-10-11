@@ -12,7 +12,10 @@ from gideon.host.render.qdrant import (
     QDRANT_REST_PORT,
     QDRANT_SECRET_NAME,
     QDRANT_SERVICE_NAME,
+    QDRANT_SNAPSHOTS_MOUNT,
+    QDRANT_SNAPSHOTS_ROOT,
     QDRANT_STORAGE_MOUNT,
+    QDRANT_TEMP_PATH,
 )
 from gideon.host.render.services import (
     MountedSecret,
@@ -46,6 +49,7 @@ class QdrantService(ServiceDefinition):
 
     name = QDRANT_SERVICE_NAME
     swap = False
+    store = True
 
     def block(
         self, inputs: RenderInputs, target: RegistryTarget
@@ -57,6 +61,8 @@ class QdrantService(ServiceDefinition):
                 "QDRANT__TELEMETRY_DISABLED": "true",
                 "QDRANT__SERVICE__ENABLE_STATIC_CONTENT": "false",
                 "QDRANT__SERVICE__METRICS_PORT": str(QDRANT_METRICS_PORT),
+                "QDRANT__STORAGE__SNAPSHOTS_PATH": QDRANT_SNAPSHOTS_MOUNT,
+                "QDRANT__STORAGE__TEMP_PATH": QDRANT_TEMP_PATH,
                 "TZ": inputs.site.office.timezone,
             },
             # The server reads an empty read-only key as unset, which would
@@ -78,7 +84,10 @@ class QdrantService(ServiceDefinition):
                 "./qdrant",
                 self.name,
             ),
-            "volumes": [f"{QDRANT_DATA_ROOT}:{QDRANT_STORAGE_MOUNT}"],
+            "volumes": [
+                f"{QDRANT_DATA_ROOT}:{QDRANT_STORAGE_MOUNT}",
+                f"{QDRANT_SNAPSHOTS_ROOT}:{QDRANT_SNAPSHOTS_MOUNT}",
+            ],
             "secrets": [QDRANT_SECRET_NAME, QDRANT_READ_ONLY_SECRET_NAME],
             "healthcheck": dict(QDRANT_HEALTHCHECK),
             "networks": ["gideon"],

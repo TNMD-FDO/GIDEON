@@ -33,9 +33,10 @@ from gideon.host.render import worker
 from gideon.host.render.opensearch import (
     OPENSEARCH_DATA_ROOT,
     OPENSEARCH_GID,
+    OPENSEARCH_SNAPSHOTS_ROOT,
     OPENSEARCH_UID,
 )
-from gideon.host.render.qdrant import QDRANT_DATA_ROOT
+from gideon.host.render.qdrant import QDRANT_DATA_ROOT, QDRANT_SNAPSHOTS_ROOT
 from gideon.host.report import Problem
 from gideon.host.site import SiteConfig, load_site
 from gideon.host.steps import (
@@ -931,6 +932,16 @@ class DiskLayoutStepTests(unittest.TestCase):
              "backup-staging", "acceptance", "observability"),
         )
         self.assertEqual(len(names), len(set(names)))
+        managed = tuple(directory.relative_path for directory in _DATA_DIRS)
+        self.assertEqual(
+            managed[1:5],
+            (
+                "fast/qdrant",
+                "fast/qdrant-snapshots",
+                "fast/opensearch",
+                "fast/opensearch-snapshots",
+            ),
+        )
 
     def test_occupied_unmounted_data_refuses_with_sorted_top_level_names(self) -> None:
         names = ("omega", ".local", "alpha")
@@ -1515,7 +1526,11 @@ class DiskLayoutStepTests(unittest.TestCase):
         stats[QDRANT_DATA_ROOT] = os.stat_result(
             (0o40750, 0, 0, 0, 998, 998, 0, 0, 0, 0, 0)
         )
+        stats[QDRANT_SNAPSHOTS_ROOT] = directory_stat(0o750, 998, 998)
         stats[OPENSEARCH_DATA_ROOT] = directory_stat(
+            0o700, OPENSEARCH_UID, OPENSEARCH_GID
+        )
+        stats[OPENSEARCH_SNAPSHOTS_ROOT] = directory_stat(
             0o700, OPENSEARCH_UID, OPENSEARCH_GID
         )
         stats["/data/observability/prometheus"] = os.stat_result(
@@ -1558,10 +1573,19 @@ class DiskLayoutStepTests(unittest.TestCase):
         )
         self.assertIn(("chmod", (QDRANT_DATA_ROOT, 0o750)), host.calls)
         self.assertIn(("chown", (QDRANT_DATA_ROOT, 998, 998)), host.calls)
+        self.assertIn(("mkdir", (QDRANT_SNAPSHOTS_ROOT, 0o750, False, True)), host.calls)
+        self.assertIn(("chmod", (QDRANT_SNAPSHOTS_ROOT, 0o750)), host.calls)
+        self.assertIn(("chown", (QDRANT_SNAPSHOTS_ROOT, 998, 998)), host.calls)
         self.assertIn(("mkdir", (OPENSEARCH_DATA_ROOT, 0o700, False, True)), host.calls)
         self.assertIn(("chmod", (OPENSEARCH_DATA_ROOT, 0o700)), host.calls)
         self.assertIn(
             ("chown", (OPENSEARCH_DATA_ROOT, OPENSEARCH_UID, OPENSEARCH_GID)),
+            host.calls,
+        )
+        self.assertIn(("mkdir", (OPENSEARCH_SNAPSHOTS_ROOT, 0o700, False, True)), host.calls)
+        self.assertIn(("chmod", (OPENSEARCH_SNAPSHOTS_ROOT, 0o700)), host.calls)
+        self.assertIn(
+            ("chown", (OPENSEARCH_SNAPSHOTS_ROOT, OPENSEARCH_UID, OPENSEARCH_GID)),
             host.calls,
         )
         correct_qdrant = host.stats.pop(QDRANT_DATA_ROOT)
@@ -1573,6 +1597,15 @@ class DiskLayoutStepTests(unittest.TestCase):
         self.assertEqual(wrong_qdrant_mode.disposition, Disposition.DRIFT)
         self.assertIn("0750", wrong_qdrant_mode.detail)
         host.stats[QDRANT_DATA_ROOT] = correct_qdrant
+        correct_qdrant_snapshots = host.stats.pop(QDRANT_SNAPSHOTS_ROOT)
+        missing_qdrant_snapshots = step.check(context(host))
+        self.assertEqual(missing_qdrant_snapshots.disposition, Disposition.DRIFT)
+        self.assertIn(QDRANT_SNAPSHOTS_ROOT, missing_qdrant_snapshots.detail)
+        host.stats[QDRANT_SNAPSHOTS_ROOT] = directory_stat(0o755, 998, 998)
+        wrong_qdrant_snapshots_mode = step.check(context(host))
+        self.assertEqual(wrong_qdrant_snapshots_mode.disposition, Disposition.DRIFT)
+        self.assertIn("0750", wrong_qdrant_snapshots_mode.detail)
+        host.stats[QDRANT_SNAPSHOTS_ROOT] = correct_qdrant_snapshots
         correct_opensearch = host.stats.pop(OPENSEARCH_DATA_ROOT)
         missing_opensearch = step.check(context(host))
         self.assertEqual(missing_opensearch.disposition, Disposition.DRIFT)
@@ -1588,6 +1621,21 @@ class DiskLayoutStepTests(unittest.TestCase):
         self.assertEqual(wrong_opensearch_owner.disposition, Disposition.DRIFT)
         self.assertIn(OPENSEARCH_DATA_ROOT, wrong_opensearch_owner.detail)
         host.stats[OPENSEARCH_DATA_ROOT] = correct_opensearch
+        correct_opensearch_snapshots = host.stats.pop(OPENSEARCH_SNAPSHOTS_ROOT)
+        missing_opensearch_snapshots = step.check(context(host))
+        self.assertEqual(missing_opensearch_snapshots.disposition, Disposition.DRIFT)
+        self.assertIn(OPENSEARCH_SNAPSHOTS_ROOT, missing_opensearch_snapshots.detail)
+        host.stats[OPENSEARCH_SNAPSHOTS_ROOT] = directory_stat(
+            0o755, OPENSEARCH_UID, OPENSEARCH_GID
+        )
+        wrong_opensearch_snapshots_mode = step.check(context(host))
+        self.assertEqual(wrong_opensearch_snapshots_mode.disposition, Disposition.DRIFT)
+        self.assertIn("0700", wrong_opensearch_snapshots_mode.detail)
+        host.stats[OPENSEARCH_SNAPSHOTS_ROOT] = directory_stat(0o700, 998, 998)
+        wrong_opensearch_snapshots_owner = step.check(context(host))
+        self.assertEqual(wrong_opensearch_snapshots_owner.disposition, Disposition.DRIFT)
+        self.assertIn(OPENSEARCH_SNAPSHOTS_ROOT, wrong_opensearch_snapshots_owner.detail)
+        host.stats[OPENSEARCH_SNAPSHOTS_ROOT] = correct_opensearch_snapshots
         cas_path = "/data/bulk/cas"
         bulk_chown = host.calls.index(("chown", ("/data/bulk", 998, 998)))
         self.assertEqual(
@@ -6446,7 +6494,11 @@ class BaselineCheckPass(unittest.TestCase):
         host.stats[str(worker.SNAPSHOTS_ROOT)] = directory_stat(worker.DIR_MODE, 998, 998)
         host.stats[str(worker.WORK_ROOT)] = directory_stat(worker.DIR_MODE, 998, 998)
         host.stats[QDRANT_DATA_ROOT] = directory_stat(0o750, 998, 998)
+        host.stats[QDRANT_SNAPSHOTS_ROOT] = directory_stat(0o750, 998, 998)
         host.stats[OPENSEARCH_DATA_ROOT] = directory_stat(
+            0o700, OPENSEARCH_UID, OPENSEARCH_GID
+        )
+        host.stats[OPENSEARCH_SNAPSHOTS_ROOT] = directory_stat(
             0o700, OPENSEARCH_UID, OPENSEARCH_GID
         )
         result = DiskLayoutStep().check(context(host))

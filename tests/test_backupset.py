@@ -12,8 +12,15 @@ from zoneinfo import ZoneInfo
 
 from gideon.host import backupset, cas
 from gideon.host.render.ci import CI_ROOT
-from gideon.host.render.opensearch import OPENSEARCH_DATA_ROOT
-from gideon.host.render.qdrant import QDRANT_DATA_ROOT
+from gideon.host.render.opensearch import (
+    OPENSEARCH_DATA_ROOT,
+    OPENSEARCH_SNAPSHOTS_ROOT,
+)
+from gideon.host.render.qdrant import (
+    QDRANT_DATA_ROOT,
+    QDRANT_SNAPSHOTS_ROOT,
+    QDRANT_SNAPSHOTS_TEMP_DIR,
+)
 from gideon.host.sysio import Command, PathLike
 
 
@@ -155,6 +162,8 @@ class LayoutAndLabels(unittest.TestCase):
                 "checkout",
                 "data-registry",
                 "data-bulk-openwebui",
+                "data-fast-qdrant-snapshots",
+                "data-fast-opensearch-snapshots",
                 "data-bulk-cas",
                 "pgbackrest",
             ],
@@ -174,6 +183,10 @@ class LayoutAndLabels(unittest.TestCase):
         self.assertEqual(roots[1].source, "/work/GIDEON")
         self.assertEqual(roots[1].exclusions, backupset.CHECKOUT_EXCLUSIONS)
         self.assertIn(".venv/", roots[1].exclusions)
+        self.assertEqual(roots[4].source, QDRANT_SNAPSHOTS_ROOT)
+        self.assertEqual(roots[4].exclusions, (f"/{QDRANT_SNAPSHOTS_TEMP_DIR}/",))
+        self.assertEqual(roots[5].source, OPENSEARCH_SNAPSHOTS_ROOT)
+        self.assertEqual(roots[5].exclusions, ("/tests-*/",))
         self.assertEqual(roots[-2].source, os.fspath(cas.ROOT))
         self.assertEqual(roots[-2].exclusions, (".*",))
         self.assertEqual(roots[-1].source, backupset.REPOSITORY_PATH)
@@ -184,19 +197,23 @@ class LayoutAndLabels(unittest.TestCase):
                 backupset.RootKind.SNAPSHOT,
                 backupset.RootKind.SNAPSHOT,
                 backupset.RootKind.SNAPSHOT,
+                backupset.RootKind.SNAPSHOT,
+                backupset.RootKind.SNAPSHOT,
                 backupset.RootKind.STORE,
                 backupset.RootKind.REPOSITORY,
             ),
         )
         self.assertEqual(
-            [(root.snapshotted, root.restore_in_place, root.user_written) for root in roots],
+            [(root.snapshotted, root.restore_in_place, root.user_written, root.set_may_predate) for root in roots],
             [
-                (True, True, False),
-                (True, False, False),
-                (True, True, False),
-                (True, True, True),
-                (False, False, False),
-                (False, False, False),
+                (True, True, False, False),
+                (True, False, False, False),
+                (True, True, False, False),
+                (True, True, True, False),
+                (True, True, False, True),
+                (True, True, False, True),
+                (False, False, False, False),
+                (False, False, False, False),
             ],
         )
         self.assertEqual(

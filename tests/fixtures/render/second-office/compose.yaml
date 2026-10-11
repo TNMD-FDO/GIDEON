@@ -155,6 +155,8 @@ services:
       QDRANT__TELEMETRY_DISABLED: "true"
       QDRANT__SERVICE__ENABLE_STATIC_CONTENT: "false"
       QDRANT__SERVICE__METRICS_PORT: "6336"
+      QDRANT__STORAGE__SNAPSHOTS_PATH: "/qdrant/snapshots"
+      QDRANT__STORAGE__TEMP_PATH: "/qdrant/snapshots"
       TZ: "America/Denver"
     entrypoint:
       - "sh"
@@ -163,6 +165,7 @@ services:
       - "qdrant"
     volumes:
       - "/data/fast/qdrant:/qdrant/storage"
+      - "/data/fast/qdrant-snapshots:/qdrant/snapshots"
     secrets:
       - "qdrant_api_key"
       - "qdrant_read_only_api_key"
@@ -197,6 +200,7 @@ services:
       - "opensearch"
     volumes:
       - "/data/fast/opensearch:/usr/share/opensearch/data"
+      - "/data/fast/opensearch-snapshots:/usr/share/opensearch/snapshots"
       - "/etc/gideon/rendered/opensearch/opensearch.yml:/usr/share/opensearch/config/opensearch.yml:ro"
       - "/etc/gideon/rendered/opensearch/security:/usr/share/opensearch/config/opensearch-security:ro"
     secrets:

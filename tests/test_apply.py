@@ -24,9 +24,11 @@ from gideon.host.apply import (
     _VERIFY_ATTEMPTS,
     _VERIFY_SLEEP_SECONDS,
     PRINT_ONCE_LINE,
+    STORE_TIER_WAIT_SECONDS,
     PullModels,
     preconditions,
     run_apply,
+    wait_for_store_tier,
 )
 from gideon.host.cotenants import network_ps_argv
 from gideon.host.egress import EgressAllowlist, load_egress_allowlist
@@ -84,7 +86,7 @@ PULL = tuple(compose_argv(RENDERED, "pull"))
 RECREATE_CADDY = tuple(compose_argv(RENDERED, "up", "-d", "--no-deps", "--force-recreate", "caddy"))
 RECREATE_POSTGRES = tuple(compose_argv(RENDERED, "up", "-d", "--no-deps", "--force-recreate", "postgres"))
 RECREATE_OPEN_WEBUI = tuple(compose_argv(RENDERED, "up", "-d", "--no-deps", "--force-recreate", "open-webui"))
-STORE_UP = tuple(compose_argv(RENDERED, "up", "-d", "postgres"))
+STORE_UP = tuple(compose_argv(RENDERED, "up", "-d", *store_services()))
 UP = tuple(compose_argv(RENDERED, "up", "-d", "--remove-orphans"))
 PS = tuple(compose_argv(RENDERED, "ps", "--all", "--format", "json"))
 INTEGRATION_READ = network_ps_argv(network_name(INTEGRATION_NETWORK_NAME))
@@ -737,7 +739,9 @@ class HappyPath(unittest.TestCase):
         self.assertIn("network: ok — no network definition moved", out)
         self.assertNotIn(INTEGRATION_READ, argv_calls(host))
         self.assertNotIn(PROJECT_READ, argv_calls(host))
-        self.assertIn("recreate: ok — recreated postgres: first apply", out)
+        self.assertIn(
+            f"recreate: ok — recreated {', '.join(store_services())}: first apply", out
+        )
         self.assertIn("engine_api_key", out)
         self.assertIn(SYSTEMCTL_LINK_PROPOSALS, argv_calls(host))
         self.assertIn(SYSTEMCTL_ENABLE_PROPOSALS, argv_calls(host))
@@ -850,7 +854,10 @@ class HappyPath(unittest.TestCase):
         code, out, err = apply(host)
 
         self.assertEqual((code, err), (0, ""), out)
-        self.assertIn("recreate: ok — recreated postgres: changed compose block", out)
+        self.assertIn(
+            f"recreate: ok — recreated {', '.join(store_services())}: changed compose block",
+            out,
+        )
         self.assertIn(f"start: ok — recreated {started}: changed compose block", out)
         for service in service_names(_EXAMPLE_INPUTS):
             recreate = tuple(
@@ -1060,7 +1067,7 @@ class NetworkChanges(unittest.TestCase):
             out,
         )
         self.assertIn(
-            f"recreate: ok — stopped network members before recreate: {ENGINE_SERVICE_NAME}; recreated postgres: changed compose top-level",
+            f"recreate: ok — stopped network members before recreate: {ENGINE_SERVICE_NAME}; recreated {', '.join(store_services())}: changed compose top-level",
             out,
         )
         self.assertEqual(argv_calls(host).count(INTEGRATION_STOP), 1)
@@ -1309,7 +1316,7 @@ class Refusals(unittest.TestCase):
         code, out, _ = apply(host)
         self.assertEqual(code, 1)
         self.assertIn("stores: refuse", out)
-        self.assertIn("missing service(s): postgres", out)
+        self.assertIn(f"missing service(s): {', '.join(sorted(store_services()))}", out)
         self.assertNotIn(f"{RENDERED}/applied.yaml", host.files)
 
     def test_stopped_service_names_it_with_the_logs_fix(self) -> None:
@@ -1889,3 +1896,20 @@ class NewStages(unittest.TestCase):
         code, out, _ = apply(host)
         self.assertEqual(code, 0, out)
         self.assertIn("stores: ok — created roles: openwebui, gideon, gideon_audit, gideon_ro_metrics, gideon_eval, gideon_worker; created databases: openwebui, gideon; applied migrations: 0001_audit_log", out)
+
+    def test_store_tier_wait_uses_the_release_bound(self) -> None:
+        rows = [json.loads(line) for line in running_rows().splitlines()]
+        for row in rows:
+            if row["Service"] == "qdrant":
+                row["Health"] = "starting"
+        host = ApplyHost({PS: done(PS, stdout=ps_rows(*rows))}, base_files())
+        sleeps: list[float] = []
+
+        ready, detail, service = wait_for_store_tier(host, RENDERED, sleeps.append)
+
+        attempts = math.ceil(STORE_TIER_WAIT_SECONDS / _VERIFY_SLEEP_SECONDS)
+        self.assertFalse(ready)
+        self.assertIn("qdrant", detail)
+        self.assertEqual(service, "qdrant")
+        self.assertEqual(argv_calls(host).count(PS), attempts)
+        self.assertEqual(sleeps, [_VERIFY_SLEEP_SECONDS] * (attempts - 1))

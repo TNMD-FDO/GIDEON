@@ -10,10 +10,14 @@ import unittest
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
 from unittest.mock import patch
 
+from derivedstores_fake import empty_store_secrets, recovery_store_result
+
 from gideon.host import (
+    apply,
     backuplock,
     backuproots,
     backupset,
@@ -23,9 +27,13 @@ from gideon.host import (
     secrets,
     site,
     sshtarget,
+    stack,
 )
+from gideon.host.render import RenderedSet, RenderInputs
+from gideon.host.render.command import RenderOutcome
+from gideon.host.render.compose import STORE_SERVICES
 from gideon.host.steps.site_dirs import AGE_RECIPIENT_PATH
-from gideon.host.sysio import Command, PathLike
+from gideon.host.sysio import Command, Host, PathLike
 
 RENDERED = "/etc/gideon/rendered"
 SITE_PATH = "/etc/gideon/site.yaml"
@@ -45,6 +53,9 @@ assert _fingerprint is not None
 FINGERPRINT: str = _fingerprint
 STORE_ROOT = next(root for root in backupset.inventory_roots("/work/GIDEON") if root.kind is backupset.RootKind.STORE)
 UPLOADS_ROOT = next(root for root in backupset.inventory_roots("/work/GIDEON") if root.user_written)
+DERIVED_ROOTS = tuple(
+    root for root in backupset.inventory_roots("/work/GIDEON") if root.set_may_predate
+)
 
 SITE = """\
 office:
@@ -138,6 +149,13 @@ def manifest_with_store(sizes: Mapping[str, int]) -> tuple[backupset.Manifest, s
     return replace(manifest(), listings={STORE_ROOT.name: pin}), listing
 
 
+def manifest_with_snapshots(*roots: backupset.InventoryRoot) -> backupset.Manifest:
+    """A set that holds the requested derived roots, including empty copies."""
+
+    value = manifest()
+    return replace(value, inventory={**value.inventory, **{root.name: () for root in roots}})
+
+
 class FakeHost:
     """A recording Host with independent local and fetched set listings."""
 
@@ -169,6 +187,10 @@ class FakeHost:
         store_listing: str | None = None,
         store_live: Mapping[str, int] | None = None,
         store_damaged: Sequence[str] = (),
+        qdrant_files: Sequence[str] = (),
+        opensearch_snapshots: Sequence[Mapping[str, object]] = (),
+        qdrant_status: int = 200,
+        restore_failed: int = 0,
     ) -> None:
         value = manifest_value or manifest()
         self.manifest_value = value
@@ -181,6 +203,10 @@ class FakeHost:
         self.fail_gideon_ids = fail_gideon_ids
         self.store_live = None if store_live is None else dict(store_live)
         self.store_damaged = set(store_damaged)
+        self.qdrant_files = tuple(qdrant_files)
+        self.opensearch_snapshots = tuple(opensearch_snapshots)
+        self.qdrant_status = qdrant_status
+        self.restore_failed = restore_failed
         self.running = running
         self.target = target
         self.source = source
@@ -197,7 +223,12 @@ class FakeHost:
         self.info_has_label = info_has_label
         self.fail_identity_exec = fail_identity_exec
         self.calls: list[tuple[tuple[str, ...], str | None, str | None, float | None]] = []
+        self.events: list[str] = []
+        self.render_calls: list[dict[str, object]] = []
+        self.render_outcome: RenderOutcome | None = None
+        self.render_error: Exception | None = None
         self.files: dict[str, str] = {
+            **empty_store_secrets(),
             SITE_PATH: SITE,
             os.fspath(AGE_RECIPIENT_PATH): RECIPIENT + "\n",
             os.path.join(RENDERED, "compose.yaml"): "services: {}\n",
@@ -247,6 +278,10 @@ class FakeHost:
         del check, env
         command = tuple(argv)
         self.calls.append((command, input, None if cwd is None else os.fspath(cwd), timeout))
+        if command == ("systemctl", "start", "gideon-registry"):
+            self.events.append("registry-start")
+        if command == tuple(stack.compose_argv(RENDERED, "up", "-d", *STORE_SERVICES)):
+            self.events.append("store-up")
         if command == ("getent", "passwd", backupset.SERVICE_ACCOUNT):
             if self.fail_gideon_ids:
                 return completed(command, returncode=1)
@@ -265,6 +300,7 @@ class FakeHost:
             return completed(command, returncode=1)
         if command[:2] == ("docker", "compose") and "up" in command:
             self.running = True
+            self.partial = False
         if command[:2] == ("docker", "compose") and command[-1] == "down":
             self.running = False
         if "exec" in command and "id" in command:
@@ -407,9 +443,20 @@ class FakeHost:
                 return completed(command, stdout="[]")
             return completed(
                 command,
-                stdout='[{"Service":"postgres","State":"running","Health":"healthy"}]',
+                stdout=(
+                    '[{"Service":"postgres","State":"running","Health":"healthy"},'
+                    '{"Service":"qdrant","State":"running","Health":"healthy"},'
+                    '{"Service":"opensearch","State":"running","Health":"healthy"}]'
+                ),
             )
-        return completed(command)
+        recovery_reply = recovery_store_result(
+            command, input, RENDERED,
+            qdrant_files=self.qdrant_files,
+            opensearch_snapshots=self.opensearch_snapshots,
+            qdrant_status=self.qdrant_status,
+            restore_failed=self.restore_failed,
+        )
+        return recovery_reply if recovery_reply is not None else completed(command)
 
     def read_text(self, path: PathLike, *, encoding: str = "utf-8") -> str:
         del encoding
@@ -490,7 +537,28 @@ def make_host(**kwargs: Any) -> FakeHost:
     return FakeHost(**kwargs)
 
 
-class RestoreContracts(unittest.TestCase):
+class RenderedRestoreCase(unittest.TestCase):
+    def setUp(self) -> None:
+        super().setUp()
+
+        def render(io: Host, **kwargs: object) -> RenderOutcome:
+            assert isinstance(io, FakeHost)
+            io.events.append("render")
+            io.render_calls.append(kwargs)
+            if io.render_error is not None:
+                raise io.render_error
+            return io.render_outcome or RenderOutcome(
+                rendered=cast(RenderedSet, object()),
+                inputs=cast(RenderInputs, object()),
+                exit_code=0,
+            )
+
+        patcher = patch.object(restore, "render_to_disk", side_effect=render)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+
+class RestoreContracts(RenderedRestoreCase):
     def test_refuses_while_a_foreign_holder_has_the_lock(self) -> None:
         fake = make_host()
         holder = backuplock.Record("backup push", os.getpid() + 1, NOW)
@@ -540,7 +608,7 @@ class RestoreContracts(unittest.TestCase):
         self.assertIn("Next: sudo python3 -m gideon host provision", out.getvalue())
         self.assertIn("stop: ok — stopped the host registry", out.getvalue())
         self.assertIn(
-            "stores: ok — frontend and ingress down; the store tier and the host registry running",
+            "stores: ok — frontend and ingress down; the store tier running; qdrant: no snapshot in the set; opensearch: no snapshot in the set; the host registry running",
             out.getvalue(),
         )
         self.assertIn(
@@ -549,6 +617,65 @@ class RestoreContracts(unittest.TestCase):
         )
         self.assertIn(("systemctl", "stop", "gideon-registry"), [call[0] for call in fake.calls])
         self.assertIn(("systemctl", "start", "gideon-registry"), [call[0] for call in fake.calls])
+
+    def test_stores_render_this_hosts_inputs_before_starting_the_tier(self) -> None:
+        fake = make_host()
+        fake.files[os.fspath(nogpu.BUILD_BOX_PATH)] = "declared\n"
+        checkout = Path("/work/GIDEON")
+        lock = checkout / "input-host.lock"
+        images = checkout / "input-images.lock"
+        models = checkout / "input-models.lock"
+        out = io.StringIO()
+
+        with contextlib.redirect_stdout(out):
+            code = restore.run_restore(
+                argparse.Namespace(source="staging", at=None), host=fake, now=NOW,
+                root=checkout, lock_path=lock, images_path=images, models_path=models,
+            )
+
+        self.assertEqual(code, 0, out.getvalue())
+        self.assertEqual(fake.events, ["registry-start", "render", "store-up"])
+        self.assertEqual(fake.render_calls, [{
+            "rendered_dir": RENDERED,
+            "site_path": SITE_PATH,
+            "lock_path": lock,
+            "images_path": images,
+            "models_path": models,
+            "root": checkout,
+            "diff": False,
+            "command": "restore",
+        }])
+
+    def test_stores_refuse_a_render_failure_before_starting_the_tier(self) -> None:
+        cases: tuple[tuple[RenderOutcome | Exception, str], ...] = (
+            (
+                RenderOutcome(
+                    rendered=cast(RenderedSet, object()),
+                    inputs=cast(RenderInputs, object()),
+                    exit_code=2,
+                ),
+                "render inputs were refused",
+            ),
+            (RenderOutcome(exit_code=0), "render inputs were refused"),
+            (RuntimeError("fictitious render failure"), "render for this host failed"),
+        )
+        for outcome, detail in cases:
+            with self.subTest(outcome=outcome):
+                fake = make_host()
+                if isinstance(outcome, Exception):
+                    fake.render_error = outcome
+                else:
+                    fake.render_outcome = outcome
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    code = restore.run_restore(
+                        argparse.Namespace(source="staging", at=None), host=fake, now=NOW,
+                    )
+                self.assertEqual(code, 1, out.getvalue())
+                self.assertIn(f"stores: refuse — {detail}", out.getvalue())
+                self.assertIn(apply.RENDER_FIX, out.getvalue())
+                self.assertEqual(fake.events, ["render"])
+                self.assertFalse(any("up" in argv for argv, _, _, _ in fake.calls))
 
     def test_undeclared_host_skips_host_registry_and_names_build_box(self) -> None:
         fake = make_host()
@@ -561,6 +688,11 @@ class RestoreContracts(unittest.TestCase):
             )
 
         self.assertEqual(code, 0, out.getvalue())
+        checkout = Path(restore.__file__).parents[2]
+        self.assertEqual(fake.render_calls[0]["root"], checkout)
+        self.assertEqual(fake.render_calls[0]["lock_path"], checkout / "host.lock")
+        self.assertEqual(fake.render_calls[0]["images_path"], checkout / "images.lock")
+        self.assertEqual(fake.render_calls[0]["models_path"], checkout / "models.lock")
         calls = [call[0] for call in fake.calls]
         self.assertNotIn(("systemctl", "stop", "gideon-registry"), calls)
         self.assertNotIn(("systemctl", "start", "gideon-registry"), calls)
@@ -570,7 +702,7 @@ class RestoreContracts(unittest.TestCase):
             output,
         )
         self.assertIn(
-            "stores: ok — frontend and ingress down; the store tier running; no host registry: not the build box",
+            "stores: ok — frontend and ingress down; the store tier running; qdrant: no snapshot in the set; opensearch: no snapshot in the set; no host registry: not the build box",
             output,
         )
         self.assertIn(
@@ -599,13 +731,148 @@ class RestoreContracts(unittest.TestCase):
             output,
         )
         self.assertIn(
-            "stores: ok — frontend and ingress down; the store tier running; no host registry: not the build box",
+            "stores: ok — frontend and ingress down; the store tier running; qdrant: no snapshot in the set; opensearch: no snapshot in the set; no host registry: not the build box",
             output,
         )
         self.assertIn(
             "next: ok — frontend and ingress down; the store tier running; no host registry: not the build box",
             output,
         )
+
+    def test_present_derived_roots_recover_before_restore_audit(self) -> None:
+        qdrant, opensearch = DERIVED_ROOTS
+        fake = make_host(
+            manifest_value=manifest_with_snapshots(qdrant, opensearch),
+            qdrant_files=("alpha/alpha-20260902t110000z.snapshot",),
+            opensearch_snapshots=(
+                {"snapshot": "set-snapshot", "start_time_in_millis": 100, "state": "SUCCESS", "shards": {"failed": 0}, "indices": ["search"]},
+            ),
+        )
+        out = io.StringIO()
+
+        with contextlib.redirect_stdout(out):
+            code = restore.run_restore(
+                argparse.Namespace(source="staging", at=None), host=fake, now=NOW,
+            )
+
+        self.assertEqual(code, 0, out.getvalue())
+        stores_line = next(line for line in out.getvalue().splitlines() if line.startswith("stores:"))
+        self.assertRegex(stores_line, r"qdrant: 1 collection\(s\) recovered in \d+\.\d s")
+        self.assertRegex(stores_line, r"opensearch: 1 index\(es\) restored in \d+\.\d s")
+        self.assertIn("; no host registry: not the build box", stores_line)
+        self.assertIn(
+            "next: ok — frontend and ingress down; the store tier running; no host registry: not the build box",
+            out.getvalue(),
+        )
+        commands = [argv for argv, _, _, _ in fake.calls]
+        qdrant_call = next(i for i, argv in enumerate(commands) if "exec" in argv and "qdrant" in argv)
+        opensearch_call = next(i for i, argv in enumerate(commands) if "exec" in argv and "opensearch" in argv)
+        audit_call = next(i for i, (_, request, _, _) in enumerate(fake.calls) if request and '"indexes"' in request)
+        self.assertLess(qdrant_call, opensearch_call)
+        self.assertLess(opensearch_call, audit_call)
+        audit_text = fake.calls[audit_call][1]
+        assert audit_text is not None
+        self.assertIn('"indexes": {', audit_text)
+        self.assertIn('"qdrant": {"names": ["alpha"]', audit_text)
+        self.assertIn('"opensearch": {"names": ["search"]', audit_text)
+        self.assertTrue(fake.running)
+
+    def test_older_set_skips_both_derived_roots_without_store_children(self) -> None:
+        fake = make_host()
+        out = io.StringIO()
+
+        with contextlib.redirect_stdout(out):
+            code = restore.run_restore(
+                argparse.Namespace(source="staging", at=None), host=fake, now=NOW,
+            )
+
+        self.assertEqual(code, 0)
+        self.assertIn("qdrant: no snapshot in the set; opensearch: no snapshot in the set", out.getvalue())
+        self.assertFalse(any(
+            "exec" in argv and ("qdrant" in argv or "opensearch" in argv)
+            for argv, _, _, _ in fake.calls
+        ))
+        self.assertFalse(any(
+            argv[:2] == ("find", DERIVED_ROOTS[0].source) and "*.snapshot" in argv
+            for argv, _, _, _ in fake.calls
+        ))
+        audit_text = "\n".join(request or "" for _, request, _, _ in fake.calls)
+        self.assertIn('"indexes": {', audit_text)
+        self.assertIn('"qdrant": {"skipped": "no snapshot in the set"}', audit_text)
+        self.assertIn('"opensearch": {"skipped": "no snapshot in the set"}', audit_text)
+
+    def test_one_present_root_and_an_empty_directory_keep_the_other_skipped(self) -> None:
+        qdrant, _ = DERIVED_ROOTS
+        for files, expected in (
+            (("alpha/alpha-20260902t110000z.snapshot",), "qdrant: 1 collection(s) recovered in "),
+            ((), "qdrant: no snapshot in the set"),
+        ):
+            with self.subTest(files=files):
+                fake = make_host(
+                    manifest_value=manifest_with_snapshots(qdrant), qdrant_files=files,
+                )
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    code = restore.run_restore(
+                        argparse.Namespace(source="staging", at=None), host=fake, now=NOW,
+                    )
+                self.assertEqual(code, 0, out.getvalue())
+                self.assertIn(expected, out.getvalue())
+                self.assertIn("opensearch: no snapshot in the set", out.getvalue())
+                self.assertFalse(any("exec" in argv and "opensearch" in argv for argv, _, _, _ in fake.calls))
+                self.assertIn(
+                    ("find", qdrant.source, "-mindepth", "2", "-maxdepth", "2", "-type", "f", "-name", "*.snapshot", "-printf", "%P\\0"),
+                    [argv for argv, _, _, _ in fake.calls],
+                )
+
+    def test_refused_derived_recovery_leaves_the_tier_running_without_audit(self) -> None:
+        qdrant, _ = DERIVED_ROOTS
+        fake = make_host(
+            manifest_value=manifest_with_snapshots(qdrant),
+            qdrant_files=("alpha/alpha-20260902t110000z.snapshot",),
+            qdrant_status=403,
+        )
+        out = io.StringIO()
+
+        with contextlib.redirect_stdout(out):
+            code = restore.run_restore(
+                argparse.Namespace(source="staging", at=None), host=fake, now=NOW,
+            )
+
+        self.assertEqual(code, 1)
+        self.assertTrue(fake.running)
+        self.assertIn("stores: refuse", out.getvalue())
+        self.assertIn("recovery refused", out.getvalue())
+        self.assertIn(stack.logs_fix(RENDERED, "qdrant"), out.getvalue())
+        self.assertNotIn("next:", out.getvalue())
+        commands = [argv for argv, _, _, _ in fake.calls]
+        tier_up = next(i for i, argv in enumerate(commands) if "up" in argv and "qdrant" in argv)
+        self.assertFalse(any(argv[-1] == "down" for argv in commands[tier_up + 1:]))
+        self.assertFalse(any(
+            request and '"indexes"' in request for _, request, _, _ in fake.calls
+        ))
+
+    def test_refused_derived_recovery_keeps_the_replaced_staging(self) -> None:
+        qdrant, _ = DERIVED_ROOTS
+        fake = make_host(
+            source="target",
+            remote_listing=f"{REMOTE_SNAPSHOT}\t1\n",
+            manifest_value=manifest_with_snapshots(qdrant),
+            qdrant_files=("alpha/alpha-20260902t110000z.snapshot",),
+            qdrant_status=403,
+        )
+        out = io.StringIO()
+
+        with contextlib.redirect_stdout(out):
+            code = restore.run_restore(
+                argparse.Namespace(source="target", at=None), host=fake, now=NOW,
+            )
+
+        self.assertEqual(code, 1, out.getvalue())
+        self.assertIn("stores: refuse", out.getvalue())
+        replaced = f"{backupset.STAGING}.replaced-{REMOTE_SNAPSHOT}"
+        self.assertTrue(any(argv[0] == "mv" and argv[-1] == replaced for argv, _, _, _ in fake.calls))
+        self.assertFalse(any(argv == ("rm", "-rf", replaced) for argv, _, _, _ in fake.calls))
 
     def test_active_registry_on_an_undeclared_host_refuses_before_any_stage(self) -> None:
         fake = make_host(registry_active=True)
@@ -1482,7 +1749,7 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class StoreRestoreCommands(unittest.TestCase):
+class StoreRestoreCommands(RenderedRestoreCase):
     def _run(self, fake: FakeHost, source: str, *, at: datetime | None = None) -> tuple[int, str]:
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
@@ -1717,7 +1984,7 @@ class StoreRestoreCommands(unittest.TestCase):
                 self.assertFalse(any(call[0][-1] == "down" for call in fake.calls))
 
 
-class RestoreBySetLabel(unittest.TestCase):
+class RestoreBySetLabel(RenderedRestoreCase):
     """``--set <label>`` selects the named set and restores it to its own archive boundary."""
 
     def run_restore(self, fake: FakeHost, **args: Any) -> tuple[int, str, str]:

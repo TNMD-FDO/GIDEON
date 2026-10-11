@@ -869,7 +869,7 @@ class ComposeShape(unittest.TestCase):
             service_names(inputs()),
             tuple(fixture["services"]),
         )
-        self.assertEqual(STORE_SERVICES, ("postgres",))
+        self.assertEqual(STORE_SERVICES, ("postgres", "qdrant", "opensearch"))
 
     def test_compose_document_wires_the_frontend_to_its_dependencies(self) -> None:
         rendered = render_all(inputs())

@@ -15,7 +15,9 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from gideon.host import cas, nogpu, report
 from gideon.host.render import ARTIFACTS
+from gideon.host.render.opensearch import OPENSEARCH_SNAPSHOTS_ROOT
 from gideon.host.render.pgbackrest import REPOSITORY_PATH
+from gideon.host.render.qdrant import QDRANT_SNAPSHOTS_ROOT, QDRANT_SNAPSHOTS_TEMP_DIR
 from gideon.host.report import Problem
 from gideon.host.steps.site_dirs import AGE_IDENTITY_PATH
 from gideon.host.sysio import Host, PathLike
@@ -64,6 +66,8 @@ class InventoryRoot:
     ``user_written`` marks a root users write at any hour: the set completes
     its copy after the archive boundary, and a point-in-time restore overlays
     it from the sets after the selected one.
+    ``set_may_predate`` lets a set made before the root existed restore with
+    the root named and the live directory left as it is, without refusal.
     """
 
     name: str
@@ -72,6 +76,7 @@ class InventoryRoot:
     kind: RootKind
     restore_in_place: bool
     user_written: bool = False
+    set_may_predate: bool = False
 
     @property
     def snapshotted(self) -> bool:
@@ -113,15 +118,26 @@ def etc_gideon_exclusions() -> tuple[str, ...]:
 def inventory_roots(checkout: str) -> tuple[InventoryRoot, ...]:
     """Return the ordered backup-root registry."""
 
-    # A root a container writes under an id of its image's own would carry
-    # its ownership policy here, beside restore_in_place; none does today.
-    # restore_in_place and user_written are per-root policies read by the snapshot kind.
+    # The two derived-store roots are written under their containers' own ids;
+    # OwnerMap carries those ids through, and older sets may predate the roots.
     return (
         InventoryRoot("etc-gideon", "/etc/gideon", etc_gideon_exclusions(), RootKind.SNAPSHOT, True, False),
         InventoryRoot("checkout", checkout, CHECKOUT_EXCLUSIONS, RootKind.SNAPSHOT, False, False),
         InventoryRoot("data-registry", "/data/registry", (), RootKind.SNAPSHOT, True, False),
         InventoryRoot(
             "data-bulk-openwebui", FRONTEND_UPLOADS, (), RootKind.SNAPSHOT, True, True
+        ),
+        # Anchor the server's temporary directory at this root alone.
+        InventoryRoot(
+            "data-fast-qdrant-snapshots", QDRANT_SNAPSHOTS_ROOT,
+            (f"/{QDRANT_SNAPSHOTS_TEMP_DIR}/",), RootKind.SNAPSHOT, True, False,
+            set_may_predate=True,
+        ),
+        # Anchor repository verification scratch at this root alone.
+        InventoryRoot(
+            "data-fast-opensearch-snapshots", OPENSEARCH_SNAPSHOTS_ROOT,
+            ("/tests-*/",), RootKind.SNAPSHOT, True, False,
+            set_may_predate=True,
         ),
         InventoryRoot("data-bulk-cas", os.fspath(cas.ROOT), (".*",), RootKind.STORE, False, False),
         InventoryRoot("pgbackrest", REPOSITORY_PATH, (), RootKind.REPOSITORY, False, False),

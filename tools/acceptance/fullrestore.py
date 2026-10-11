@@ -9,9 +9,23 @@ from typing import Final
 
 import yaml  # type: ignore[import-untyped]
 
-from gideon.host import backuproots, backupset, cas, nogpu, restore, stack, stages
+from gideon.host import (
+    backuproots,
+    backupset,
+    cas,
+    derivedstores,
+    nogpu,
+    restore,
+    stack,
+    stages,
+)
 from gideon.host.backup import parse_rsync_stats
 from gideon.host.render.engine import MODEL_SERVERS
+from gideon.host.render.opensearch import (
+    OPENSEARCH_SERVICE_NAME,
+    OPENSEARCH_SNAPSHOTS_ROOT,
+)
+from gideon.host.render.qdrant import QDRANT_SERVICE_NAME, QDRANT_SNAPSHOTS_ROOT
 from gideon.host.report import Problem, StageResult, command_detail
 from gideon.host.steps.site_dirs import AGE_IDENTITY_PATH
 from gideon.host.sysio import Host
@@ -350,6 +364,22 @@ def restore_target(ctx: HarnessContext) -> StageResult:
         )
         if not any(clause.fullmatch(part) for part in files[1].split("; ")):
             return _restore_failure(ctx, "files row does not carry the store clause with nothing left out")
+    recovered = details.get("stores")
+    clauses = () if recovered is None else tuple(recovered[1].split("; "))
+    patterns = derivedstores.recovery_clause_patterns()
+    store_clauses = {
+        QDRANT_SNAPSHOTS_ROOT: (QDRANT_SERVICE_NAME, patterns[0]),
+        OPENSEARCH_SNAPSHOTS_ROOT: (OPENSEARCH_SERVICE_NAME, patterns[1]),
+    }
+    for root in backupset.inventory_roots(manifest.checkout):
+        if not root.set_may_predate or root.name not in manifest.inventory:
+            continue
+        store_name, pattern = store_clauses[root.source]
+        if not any(
+            pattern.fullmatch(clause) or clause == derivedstores.no_snapshot_clause(store_name)
+            for clause in clauses
+        ):
+            return _restore_failure(ctx, f"stores row does not carry the {store_name} recovery clause")
     next_row = details.get("next")
     if next_row is None or next_row[0] != "ok":
         return _restore_failure(ctx, "next row is not ok")

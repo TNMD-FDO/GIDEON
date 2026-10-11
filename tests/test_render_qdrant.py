@@ -20,14 +20,22 @@ from gideon.host.render.qdrant import (
     QDRANT_READ_ONLY_SECRET_NAME,
     QDRANT_SECRET_NAME,
     QDRANT_SERVICE_NAME,
+    QDRANT_SNAPSHOTS_MOUNT,
+    QDRANT_SNAPSHOTS_ROOT,
+    QDRANT_SNAPSHOTS_TEMP_DIR,
     QDRANT_STORAGE_MOUNT,
+    QDRANT_TEMP_PATH,
     qdrant_metrics_target,
     qdrant_rest_url,
 )
 from gideon.host.render.services import MountedSecret, secret_wrapper
+from gideon.host.render.services.qdrant import QdrantService
 
 
 class QdrantRender(unittest.TestCase):
+    def test_definition_joins_the_store_tier(self) -> None:
+        self.assertTrue(QdrantService.store)
+
     def test_rest_address_has_http_scheme_and_store_port(self) -> None:
         self.assertEqual(qdrant_rest_url(), "http://qdrant:6333")
 
@@ -80,6 +88,8 @@ class QdrantRender(unittest.TestCase):
                         "QDRANT__TELEMETRY_DISABLED": "true",
                         "QDRANT__SERVICE__ENABLE_STATIC_CONTENT": "false",
                         "QDRANT__SERVICE__METRICS_PORT": str(QDRANT_METRICS_PORT),
+                        "QDRANT__STORAGE__SNAPSHOTS_PATH": QDRANT_SNAPSHOTS_MOUNT,
+                        "QDRANT__STORAGE__TEMP_PATH": QDRANT_TEMP_PATH,
                         "TZ": rendered_inputs.site.office.timezone,
                     },
                 )
@@ -97,8 +107,14 @@ class QdrantRender(unittest.TestCase):
                 self.assertIn("QDRANT__SERVICE__READ_ONLY_API_KEY=$(cat", entrypoint[2])
                 self.assertIn('exec ./qdrant "$@"', entrypoint[2])
                 self.assertEqual(
-                    block["volumes"], [f"{QDRANT_DATA_ROOT}:{QDRANT_STORAGE_MOUNT}"]
+                    block["volumes"],
+                    [
+                        f"{QDRANT_DATA_ROOT}:{QDRANT_STORAGE_MOUNT}",
+                        f"{QDRANT_SNAPSHOTS_ROOT}:{QDRANT_SNAPSHOTS_MOUNT}",
+                    ],
                 )
+                self.assertEqual(QDRANT_TEMP_PATH, QDRANT_SNAPSHOTS_MOUNT)
+                self.assertEqual(QDRANT_SNAPSHOTS_TEMP_DIR, "tmp")
                 self.assertEqual(block["secrets"], [QDRANT_SECRET_NAME, QDRANT_READ_ONLY_SECRET_NAME])
                 self.assertEqual(block["networks"], ["gideon"])
                 self.assertIn("healthcheck", block)

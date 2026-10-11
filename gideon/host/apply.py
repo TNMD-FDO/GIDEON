@@ -64,7 +64,7 @@ _PULL_FIX: Final = (
     "Check the registry and the images.lock digests "
     "(docker compose -f /etc/gideon/rendered/compose.yaml pull), then re-run apply."
 )
-_RENDER_FIX: Final = "Correct the render inputs, then re-run apply."
+RENDER_FIX: Final = "Correct the render inputs, then re-run apply."
 _MANIFEST_FIX: Final = (
     "Correct /etc/gideon/rendered/open-webui/manifest.yaml, then re-run apply."
 )
@@ -73,6 +73,8 @@ _PS_FORMAT: Final = "json"
 _VERIFY_ATTEMPTS: Final = 30
 _VERIFY_SLEEP_SECONDS: Final = 2.0
 _READY_ATTEMPTS: Final = 60
+# exempt: a bound, not a threshold; the proof's seconds correct it.
+STORE_TIER_WAIT_SECONDS: Final = 300
 
 
 def _root_fix() -> str:
@@ -207,13 +209,13 @@ def _render_stage(
                 "render",
                 False,
                 f"render failed: {type(exc).__name__}: {exc}",
-                _RENDER_FIX,
+                RENDER_FIX,
             ),
             None,
         )
     if outcome.exit_code != 0 or outcome.rendered is None or outcome.inputs is None:
         return (
-            StageResult("render", False, "render inputs were refused", _RENDER_FIX),
+            StageResult("render", False, "render inputs were refused", RENDER_FIX),
             None,
         )
 
@@ -774,15 +776,29 @@ def wait_for_services(
     return False, last_detail, last_service
 
 
+def wait_for_store_tier(
+    io: Host, rendered_dir: PathLike, sleep: Callable[[float], None]
+) -> tuple[bool, str, str]:
+    """Wait for every store service to report healthy."""
+
+    return wait_for_services(
+        io,
+        rendered_dir,
+        STORE_SERVICES,
+        sleep,
+        exact=False,
+        require_healthy=True,
+        attempts=math.ceil(STORE_TIER_WAIT_SECONDS / _VERIFY_SLEEP_SECONDS),
+    )
+
+
 def _stores_stage(
     io: Host,
     rendered_dir: PathLike,
     context: _ApplyContext,
     sleep: Callable[[float], None],
 ) -> StageResult:
-    ready, detail, service = wait_for_services(
-        io, rendered_dir, STORE_SERVICES, sleep, exact=False, require_healthy=True
-    )
+    ready, detail, service = wait_for_store_tier(io, rendered_dir, sleep)
     if not ready:
         return StageResult("stores", False, detail, _logs_fix(rendered_dir, service))
     try:

@@ -19,9 +19,10 @@ from gideon.host.render import worker
 from gideon.host.render.opensearch import (
     OPENSEARCH_DATA_ROOT,
     OPENSEARCH_GID,
+    OPENSEARCH_SNAPSHOTS_ROOT,
     OPENSEARCH_UID,
 )
-from gideon.host.render.qdrant import QDRANT_DATA_ROOT
+from gideon.host.render.qdrant import QDRANT_DATA_ROOT, QDRANT_SNAPSHOTS_ROOT
 from gideon.host.report import Problem
 from gideon.host.steps import (
     BOX_WIDE_SHORTFALL_FIX,
@@ -76,7 +77,15 @@ _DATA_DIRS: Final[tuple[_DataDirectory, ...]] = (
         str(Path(QDRANT_DATA_ROOT).relative_to(DATA_MOUNT)), "gideon", 0o750
     ),
     _DataDirectory(
+        str(Path(QDRANT_SNAPSHOTS_ROOT).relative_to(DATA_MOUNT)), "gideon", 0o750
+    ),
+    _DataDirectory(
         str(Path(OPENSEARCH_DATA_ROOT).relative_to(DATA_MOUNT)), "opensearch", 0o700
+    ),
+    _DataDirectory(
+        str(Path(OPENSEARCH_SNAPSHOTS_ROOT).relative_to(DATA_MOUNT)),
+        "opensearch",
+        0o700,
     ),
     _DataDirectory("bulk", "gideon", 0o755),
     _DataDirectory(

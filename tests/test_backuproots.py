@@ -1245,6 +1245,92 @@ class Fetch(unittest.TestCase):
 
 
 class HeldRoots(unittest.TestCase):
+    def test_older_set_leaves_absent_derived_snapshots_live(self) -> None:
+        rows = tuple(
+            root for root in backupset.inventory_roots("/example/checkout")
+            if root.set_may_predate
+        )
+        selected = replace(previous(), manifest=manifest_with({}))
+        host = FakeHost()
+
+        bound = backuproots.held(cast(Host, host), rows, selected)
+
+        self.assertEqual(len(bound), 2)
+        for root in bound:
+            with self.subTest(root=root.name):
+                self.assertFalse(root.present)
+                self.assertIsNone(root.verify())
+                self.assertIsNone(root.prove("/example/rendered"))
+                self.assertEqual(
+                    root.put_back(backupset.AccountIds(2000, 2000)),
+                    backuproots.PutBack(
+                        (),
+                        (backuproots.PREDATES_ROOT_CLAUSE.format(name=root.name),),
+                        backuproots.Claims(),
+                    ),
+                )
+        self.assertEqual(host.calls, [])
+
+    def test_present_derived_snapshots_restore_with_anchored_exclusions(self) -> None:
+        rows = tuple(
+            root for root in backupset.inventory_roots("/example/checkout")
+            if root.set_may_predate
+        )
+        file = entry("collection/snapshot")
+        inventory = {row.name: (file,) for row in rows}
+        manifest = replace(
+            manifest_with(inventory),
+            gideon_ids=backupset.AccountIds(3000, 3000),
+        )
+        selected = replace(previous(), manifest=manifest)
+        responses: list[subprocess.CompletedProcess[str]] = []
+        expected_calls: list[tuple[str, object, object]] = []
+        for row in rows:
+            copy = os.path.join(backupset.files_dir(selected.path), row.name)
+            argv = (
+                "rsync", "-a", "--delete", *(f"--exclude={pattern}" for pattern in row.exclusions),
+                copy + "/", row.source + "/",
+            )
+            find_argv = ("find", row.source, "-printf", backupset.FIND_FORMAT)
+            responses.extend((completed(argv), completed(find_argv, stdout=listing(file))))
+            expected_calls.extend((
+                ("stat", row.source, {}),
+                ("run", argv, {"input": None, "timeout": None}),
+                ("run", find_argv, {}),
+            ))
+        host = FakeHost(responses)
+
+        bound = backuproots.held(cast(Host, host), rows, selected)
+
+        for root in bound:
+            with self.subTest(root=root.name):
+                self.assertTrue(root.present)
+                outcome = root.put_back(backupset.AccountIds(2000, 2000))
+                self.assertIsInstance(outcome, backuproots.PutBack)
+                assert isinstance(outcome, backuproots.PutBack)
+                self.assertEqual(outcome.restored, (root.name,))
+                self.assertEqual(
+                    outcome.claims.owners,
+                    {(1000, 1000, False): [os.path.join(root.source, file.path)]},
+                )
+        self.assertEqual(host.calls, expected_calls)
+
+    def test_older_root_without_predate_policy_refuses_missing_copy(self) -> None:
+        row = backupset.InventoryRoot(ROOT, SOURCE, (), backupset.RootKind.SNAPSHOT, True)
+        selected = replace(previous(), manifest=manifest_with({}))
+        copy = os.path.join(backupset.files_dir(selected.path), ROOT)
+        find_argv = ("find", copy, "-printf", backupset.FIND_FORMAT)
+        host = FakeHost((OSError("missing copy"),))
+
+        (root,) = backuproots.held(cast(Host, host), (row,), selected)
+
+        self.assertTrue(root.present)
+        problem = root.verify()
+        self.assertIsInstance(problem, Problem)
+        assert isinstance(problem, Problem)
+        self.assertEqual(problem.problem, f"cannot list {copy}: missing copy")
+        self.assertEqual(host.calls, [("run", find_argv, {})])
+
     def test_supplies_requires_a_store_pin_or_user_written_in_place_inventory(self) -> None:
         store = backupset.InventoryRoot("store", SOURCE, (), backupset.RootKind.STORE, False)
         snapshot = backupset.InventoryRoot(ROOT, SOURCE, (), backupset.RootKind.SNAPSHOT, True, True)
@@ -1273,6 +1359,8 @@ class HeldRoots(unittest.TestCase):
         self.assertIsInstance(store_root, backuproots._HeldStore)
         assert isinstance(snapshot_root, backuproots._HeldSnapshot)
         assert isinstance(store_root, backuproots._HeldStore)
+        self.assertTrue(snapshot_root.present)
+        self.assertTrue(store_root.present)
         self.assertEqual(snapshot_root.later, (first, second, uploads_only))
         self.assertIs(store_root.later, second)
 
@@ -1679,6 +1767,7 @@ class HeldRoots(unittest.TestCase):
         roots = backuproots.held(cast(Host, host), (row,), ref)
 
         self.assertEqual(tuple(root.name for root in roots), (ROOT,))
+        self.assertTrue(roots[0].present)
         self.assertEqual(roots[0].entries, ())
         self.assertIsNone(roots[0].verify())
         self.assertEqual(host.calls, [("run", find_argv, {})])
@@ -1692,6 +1781,7 @@ class HeldRoots(unittest.TestCase):
         (root,) = backuproots.held(cast(Host, host), (row,), ref)
 
         self.assertEqual(root.entries, ())
+        self.assertTrue(root.present)
         self.assertIsNone(root.verify())
         self.assertIsNone(root.prove("/example/rendered"))
         self.assertEqual(host.calls, [("run", verify_argv, {"timeout": 3600.0})])

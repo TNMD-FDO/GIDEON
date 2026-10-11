@@ -1857,6 +1857,22 @@ class RenderCommand(unittest.TestCase):
             out,
         )
 
+    def test_diff_names_the_store_blocks_and_settings_file(self) -> None:
+        host = DirHost(checkout_files())
+        self.assertEqual(render(host)[0], 0)
+        applied = yaml.safe_load(host.files[f"{RENDERED}/manifest.yaml"])
+        applied["services"]["qdrant"] = "0" * 64
+        applied["services"]["opensearch"] = "0" * 64
+        applied["files"]["opensearch/opensearch.yml"]["sha256"] = "0" * 64
+        host.files[f"{RENDERED}/applied.yaml"] = yaml.safe_dump(applied, sort_keys=False)
+        host.files[f"{RENDERED}/opensearch/opensearch.yml"] += "# stale\n"
+
+        code, out, err = render(host, diff=True)
+
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("Services apply would recreate: qdrant, opensearch", out)
+        self.assertIn("opensearch/opensearch.yml", out)
+
     def test_diff_reason_lines_for_first_apply_mapless_record_and_clean_record(self) -> None:
         """The unchanged recreate row is followed only by reasons that name services."""
 

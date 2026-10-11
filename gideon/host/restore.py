@@ -23,6 +23,7 @@ from gideon.host import (
     backuplock,
     backuproots,
     backupset,
+    derivedstores,
     nogpu,
     pgbackrest,
     report,
@@ -31,6 +32,7 @@ from gideon.host import (
     sshtarget,
     stack,
 )
+from gideon.host.render.command import render_to_disk
 from gideon.host.render.compose import STORE_SERVICES
 from gideon.host.report import (
     Problem,
@@ -759,15 +761,16 @@ def _restore_files_stage(
     selected: backupset.SetRef,
     gideon_ids: backupset.AccountIds,
     later: tuple[backupset.SetRef, ...] = (),
-) -> tuple[StageResult, tuple[str, ...], int, Mapping[str, backuproots.StoreCounts], Mapping[str, int], tuple[str, ...]]:
+) -> tuple[StageResult, tuple[str, ...], int, Mapping[str, backuproots.StoreCounts], Mapping[str, int], tuple[str, ...], frozenset[str]]:
     if selected.manifest is None:
-        return StageResult("files", False, "selected set has no manifest", _set_fix()), (), 0, {}, {}, ()
+        return StageResult("files", False, "selected set has no manifest", _set_fix()), (), 0, {}, {}, (), frozenset()
     roots = backuproots.held(
         io,
         backupset.inventory_roots(selected.manifest.checkout),
         selected,
         later,
     )
+    present_sources = frozenset(root.source for root in roots if root.present)
     restored: list[str] = []
     clauses: list[str] = []
     counts: dict[str, backuproots.StoreCounts] = {}
@@ -789,6 +792,7 @@ def _restore_files_stage(
                 counts,
                 added,
                 tuple(closing_lines),
+                present_sources,
             )
         restored.extend(outcome.restored)
         clauses.extend(outcome.clauses)
@@ -810,6 +814,7 @@ def _restore_files_stage(
             counts,
             added,
             tuple(closing_lines),
+            present_sources,
         )
     owner_map = backupset.OwnerMap(selected.manifest.gideon_ids, gideon_ids)
     ownership = (
@@ -830,6 +835,7 @@ def _restore_files_stage(
         counts,
         added,
         tuple(closing_lines),
+        present_sources,
     )
 
 
@@ -903,6 +909,11 @@ def _stores_stage(
     io: Host,
     rendered_dir: PathLike,
     *,
+    site_path: PathLike,
+    lock_path: PathLike,
+    images_path: PathLike,
+    models_path: PathLike,
+    root: Path,
     sleep: Callable[[float], None],
     source: str,
     selected: backupset.SetRef,
@@ -917,6 +928,7 @@ def _stores_stage(
     replaced: str | None,
     run_id: str,
     build_box: bool,
+    present_sources: frozenset[str],
 ) -> StageResult:
     # Only the build box runs the registry step, so only it has a unit to start.
     if build_box:
@@ -929,6 +941,28 @@ def _stores_stage(
         )
         if not started.ok:
             return started
+    # The restored render is the making host's: a store started from it would
+    # reserve that host's memory, so the tier starts from this host's render.
+    try:
+        outcome = render_to_disk(
+            io,
+            rendered_dir=rendered_dir,
+            site_path=site_path,
+            lock_path=lock_path,
+            images_path=images_path,
+            models_path=models_path,
+            root=root,
+            diff=False,
+            command="restore",
+        )
+    except Exception as exc:  # noqa: BLE001  # command boundary must not traceback
+        return StageResult(
+            "stores", False,
+            f"render for this host failed: {type(exc).__name__}: {exc}",
+            apply.RENDER_FIX,
+        )
+    if outcome.exit_code != 0 or outcome.rendered is None or outcome.inputs is None:
+        return StageResult("stores", False, "render inputs were refused", apply.RENDER_FIX)
     up = run_stage(
         io,
         "stores",
@@ -938,14 +972,7 @@ def _stores_stage(
     )
     if not up.ok:
         return up
-    ready, detail, service = apply.wait_for_services(
-        io,
-        rendered_dir,
-        STORE_SERVICES,
-        sleep,
-        exact=False,
-        require_healthy=True,
-    )
+    ready, detail, service = apply.wait_for_store_tier(io, rendered_dir, sleep)
     if not ready:
         return StageResult(
             "stores",
@@ -953,6 +980,14 @@ def _stores_stage(
             detail,
             stack.logs_fix(rendered_dir, service),
         )
+
+    # The replaced staging directory is the local fallback while the indexes
+    # are put back, so it goes only after the recovery succeeds.
+    recovered = derivedstores.recover_all(
+        io, rendered_dir, present_sources=present_sources
+    )
+    if isinstance(recovered, Problem):
+        return StageResult("stores", False, recovered.problem, recovered.fix)
 
     replaced_removed = False
     if replaced is not None:
@@ -981,6 +1016,7 @@ def _stores_stage(
         "added": dict(added),
         "reowned": reowned,
         "replaced_removed": replaced_removed,
+        "indexes": derivedstores.recovery_audit(recovered),
     }
     row = audit.AuditRow(
         run_id,
@@ -999,14 +1035,16 @@ def _stores_stage(
             f"restore audit write failed: {problem}",
             stack.logs_fix(rendered_dir, "postgres"),
         )
+    clauses = "; ".join(derivedstores.recovery_clause(result) for result in recovered)
     return StageResult(
         "stores",
         True,
         (
-            "frontend and ingress down; the store tier running; no host registry: "
-            "not the build box"
+            f"frontend and ingress down; the store tier running; {clauses}; "
+            "no host registry: not the build box"
             if not build_box
-            else "frontend and ingress down; the store tier and the host registry running"
+            else f"frontend and ingress down; the store tier running; {clauses}; "
+            "the host registry running"
         ),
         "",
     )
@@ -1086,6 +1124,9 @@ def run_restore(
     host: LockingHost | None = None,
     rendered_dir: PathLike = _RENDERED_DIR,
     site_path: PathLike = _SITE_PATH,
+    lock_path: PathLike | None = None,
+    images_path: PathLike | None = None,
+    models_path: PathLike | None = None,
     root: PathLike | None = None,
     now: datetime | None = None,
     sleep: Callable[[float], None] = time.sleep,
@@ -1104,13 +1145,20 @@ def run_restore(
     outcome = backuplock.take(io, command="restore", now=effective_now)
     if outcome.problem is not None:
         return _refuse(outcome.problem.problem, outcome.problem.fix)
+    checkout = Path(__file__).parents[2] if root is None else Path(root)
+    actual_lock = checkout / "host.lock" if lock_path is None else lock_path
+    actual_images = checkout / "images.lock" if images_path is None else images_path
+    actual_models = checkout / "models.lock" if models_path is None else models_path
     try:
         return _restore_body(
             args,
             io=io,
             rendered_dir=rendered_dir,
             site_path=site_path,
-            root=root,
+            lock_path=actual_lock,
+            images_path=actual_images,
+            models_path=actual_models,
+            root=checkout,
             effective_now=effective_now,
             sleep=sleep,
         )
@@ -1126,7 +1174,10 @@ def _restore_body(
     io: LockingHost,
     rendered_dir: PathLike,
     site_path: PathLike,
-    root: PathLike | None,
+    lock_path: PathLike,
+    images_path: PathLike,
+    models_path: PathLike,
+    root: Path,
     effective_now: datetime,
     sleep: Callable[[float], None],
 ) -> int:
@@ -1173,8 +1224,7 @@ def _restore_body(
     selected = selection.set_ref
     if source == "target":
         assert selection.snapshot is not None
-        checkout = Path(__file__).parents[2] if root is None else Path(root)
-        roots = backupset.inventory_roots(os.fspath(checkout))
+        roots = backupset.inventory_roots(os.fspath(root))
         fetch_result, fetched = _fetch_stage(
             io,
             config,
@@ -1242,7 +1292,7 @@ def _restore_body(
     else:
         print_stage(StageResult("swap", True, "skipped (staging source)", ""))
 
-    files_result, roots_restored, file_reowned, store_counts, added, closing_lines = _restore_files_stage(
+    files_result, roots_restored, file_reowned, store_counts, added, closing_lines, present_sources = _restore_files_stage(
         io,
         selected=selected,
         gideon_ids=gideon_ids,
@@ -1270,6 +1320,11 @@ def _restore_body(
     stores_result = _stores_stage(
         io,
         rendered_dir,
+        site_path=site_path,
+        lock_path=lock_path,
+        images_path=images_path,
+        models_path=models_path,
+        root=root,
         sleep=sleep,
         source=source,
         selected=selected,
@@ -1284,6 +1339,7 @@ def _restore_body(
         replaced=fetched.replaced if fetched is not None else None,
         run_id=str(uuid.uuid4()),
         build_box=build_box,
+        present_sources=present_sources,
     )
     print_stage(stores_result)
     if not stores_result.ok:

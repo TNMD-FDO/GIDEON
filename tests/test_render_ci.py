@@ -69,6 +69,7 @@ from gideon.host.render.opensearch import (
     OPENSEARCH_SECURITY_PATH,
     OPENSEARCH_SERVICE_NAME,
     OPENSEARCH_SETTINGS_PATH,
+    OPENSEARCH_SNAPSHOTS_ROOT,
     opensearch_heap_mib,
 )
 from gideon.host.render.owui import (
@@ -76,7 +77,11 @@ from gideon.host.render.owui import (
     owui_environment,
     owui_secret_names,
 )
-from gideon.host.render.qdrant import QDRANT_SERVICE_NAME, QDRANT_STORAGE_MOUNT
+from gideon.host.render.qdrant import (
+    QDRANT_SERVICE_NAME,
+    QDRANT_SNAPSHOTS_ROOT,
+    QDRANT_STORAGE_MOUNT,
+)
 from gideon.host.render.services import declared_sources
 from gideon.host.render.services.open_webui import OpenWebuiService
 from gideon.host.render.services.opensearch import OpensearchService
@@ -230,6 +235,7 @@ class Compose(unittest.TestCase):
 
         qdrant = mapping(services[QDRANT_SERVICE_NAME])
         self.assertEqual(qdrant["volumes"], [f"{CI_QDRANT_DATA_ROOT}:{QDRANT_STORAGE_MOUNT}"])
+        self.assertNotIn(QDRANT_SNAPSHOTS_ROOT, str(qdrant["volumes"]))
 
         opensearch = mapping(services[OPENSEARCH_SERVICE_NAME])
         self.assertEqual(
@@ -240,6 +246,7 @@ class Compose(unittest.TestCase):
                 f"{CI_OPENSEARCH_RENDERED_DIR}/security:{OPENSEARCH_SECURITY_PATH}:ro",
             ],
         )
+        self.assertNotIn(OPENSEARCH_SNAPSHOTS_ROOT, str(opensearch["volumes"]))
         production_environment = mapping(
             OpensearchService().block(render_inputs, target)["environment"]
         )

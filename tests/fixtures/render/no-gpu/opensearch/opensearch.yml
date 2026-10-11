@@ -2,6 +2,8 @@
 cluster.name: "gideon"
 network.host: "0.0.0.0"
 discovery.type: "single-node"
+path.repo:
+  - "/usr/share/opensearch/snapshots"
 plugins.security.ssl.http.enabled: false
 plugins.security.ssl.transport.pemcert_filepath: "/run/secrets/opensearch_transport_cert"
 plugins.security.ssl.transport.pemkey_filepath: "/run/secrets/opensearch_transport_key"

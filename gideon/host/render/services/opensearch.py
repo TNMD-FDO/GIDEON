@@ -17,6 +17,8 @@ from gideon.host.render.opensearch import (
     OPENSEARCH_SECURITY_PATH,
     OPENSEARCH_SERVICE_NAME,
     OPENSEARCH_SETTINGS_PATH,
+    OPENSEARCH_SNAPSHOTS_MOUNT,
+    OPENSEARCH_SNAPSHOTS_ROOT,
     opensearch_health_url,
     opensearch_heap_mib,
 )
@@ -101,6 +103,7 @@ def opensearch_service(
         "command": ["opensearch"],
         "volumes": [
             f"{OPENSEARCH_DATA_ROOT}:{OPENSEARCH_DATA_MOUNT}",
+            f"{OPENSEARCH_SNAPSHOTS_ROOT}:{OPENSEARCH_SNAPSHOTS_MOUNT}",
             f"/etc/gideon/rendered/opensearch/opensearch.yml:{OPENSEARCH_SETTINGS_PATH}:ro",
             f"/etc/gideon/rendered/opensearch/security:{OPENSEARCH_SECURITY_PATH}:ro",
         ],
@@ -117,10 +120,11 @@ def opensearch_service(
 
 
 class OpensearchService(ServiceDefinition):
-    """The network-only lexical store, outside apply's record-store tier."""
+    """The network-only lexical store."""
 
     name = OPENSEARCH_SERVICE_NAME
     swap = False
+    store = True
 
     def block(
         self, inputs: RenderInputs, target: RegistryTarget

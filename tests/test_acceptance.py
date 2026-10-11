@@ -19,7 +19,7 @@ from unittest.mock import patch
 
 import yaml  # type: ignore[import-untyped]
 
-from gideon.host import backuproots, backupset, cas, stack, stages
+from gideon.host import backuproots, backupset, cas, derivedstores, stack, stages
 from gideon.host import install as host_install
 from gideon.host import restore as host_restore
 from gideon.host import site as host_site
@@ -1155,6 +1155,61 @@ class FullRestoreContracts(unittest.TestCase):
         forward = restore_argv.index("-R")
         self.assertEqual(restore_argv[forward + 1], "127.0.0.1:5000:127.0.0.1:5000")
         self.assertIn("ExitOnForwardFailure=yes", restore_argv)
+
+    def test_restore_requires_recovery_clauses_for_roots_in_the_set(self) -> None:
+        host, ctx, manifest = restore_context()
+        ctx.snapshot_label = "20260917T020000Z"
+        roots = tuple(
+            root for root in backupset.inventory_roots(manifest.checkout)
+            if root.set_may_predate
+        )
+        self.assertEqual(len(roots), 2)
+        clauses = tuple(
+            derivedstores.recovery_clause(result)
+            for result in (
+                derivedstores.StoreRecovery("qdrant", ("example",), 1.2, False),
+                derivedstores.StoreRecovery("opensearch", ("example",), 3.4, False),
+            )
+        )
+        skipped = tuple(
+            derivedstores.no_snapshot_clause(store)
+            for store in ("qdrant", "opensearch")
+        )
+        command = vm_product_argv(
+            ctx, ["python3", "-m", "gideon", "restore", "--from", "target"],
+            "restore.txt", forwards=(fullrestore.REGISTRY_FORWARD,),
+        )
+        base = (
+            f"select: ok — snapshot={ctx.snapshot_label}\n"
+            f"pre-restore: ok — {host_restore.FRESH_STACK_SKIPPED_DETAIL}\n"
+            f"fetch: ok — selected set {manifest.label}\n"
+            f"files: ok — {host_restore.REOWN_MAPPED_DETAIL}\n"
+        )
+        ending = "next: ok — restored\nSecrets: a rebuilt box\n"
+        cases = (
+            ((roots[0].name, roots[1].name), clauses, True, ""),
+            ((roots[0].name, roots[1].name), (clauses[0],), False, "opensearch"),
+            ((roots[0].name, roots[1].name), (clauses[1],), False, "qdrant"),
+            ((roots[0].name, roots[1].name), skipped, True, ""),
+            ((), (), True, ""),
+        )
+        for held, row_clauses, expected, missing in cases:
+            with self.subTest(held=held, clauses=row_clauses):
+                inventory = {
+                    **manifest.inventory,
+                    **dict.fromkeys(held, ()),
+                }
+                selected = replace(manifest, inventory=inventory)
+                assert ctx.restore_set is not None
+                ctx.restore_set = replace(ctx.restore_set, manifest=selected)
+                stores_row = (
+                    f"stores: ok — {'; '.join(row_clauses)}\n" if row_clauses else ""
+                )
+                host.commands[command] = completed(command, stdout=base + stores_row + ending)
+                result = fullrestore.restore_target(ctx)
+                self.assertEqual(result.ok, expected, result.detail)
+                if missing:
+                    self.assertIn(missing, result.detail)
 
     def test_restore_requires_the_pinned_store_clause_ending_with_nothing_left_out(self) -> None:
         host, ctx, value, _name = restore_context_with_store()

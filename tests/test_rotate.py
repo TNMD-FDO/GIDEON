@@ -43,7 +43,7 @@ from gideon.host.render.api import API_SERVICE_NAME
 from gideon.host.render.command import run_render
 from gideon.host.render.compose import service_blocks
 from gideon.host.render.engine import EMBED_SERVICE_NAME, ENGINE_SERVICE_NAME
-from gideon.host.render.services import all_service_names
+from gideon.host.render.services import all_service_names, store_services
 from gideon.host.secrets import SECRET_REGISTRY, SECRETS_DIR
 from gideon.host.site import SiteConfig, load_site
 from gideon.host.stack import compose_argv, exec_argv
@@ -68,7 +68,7 @@ SMI = ("nvidia-smi", "-L")
 SERVICE_GROUP = ("getent", "group", "gideon")
 VERSION = ("docker", "compose", "version")
 PULL = tuple(compose_argv(RENDERED, "pull"))
-STORE_UP = tuple(compose_argv(RENDERED, "up", "-d", "postgres"))
+STORE_UP = tuple(compose_argv(RENDERED, "up", "-d", *store_services()))
 UP = tuple(compose_argv(RENDERED, "up", "-d", "--remove-orphans"))
 PS = tuple(compose_argv(RENDERED, "ps", "--all", "--format", "json"))
 PSQL_POSTGRES_QUERY = tuple(

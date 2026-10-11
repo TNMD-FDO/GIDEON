@@ -46,11 +46,19 @@ says afterwards which ran.
 refuses before any stage, naming the running command, when it started, and its
 pid, and a refused nightly fails its unit like any other failure.
 
-The four file roots in a set are `/etc/gideon` (minus `secrets/` and the
+The six file roots in a set are `/etc/gideon` (minus `secrets/` and the
 frontend's rendered env file — both carry secrets), the checkout the command ran
-from, `/data/registry`, and `/data/bulk/openwebui`. The two stores' directories,
-`/data/fast/qdrant` and `/data/fast/opensearch`, are derived indexes and in no
-set. The content-addressed store at `/data/bulk/cas` is another root: the run
+from, `/data/registry`, `/data/bulk/openwebui`, and the two derived stores' own
+snapshot directories, `/data/fast/qdrant-snapshots` and
+`/data/fast/opensearch-snapshots`. A run that takes a full Postgres backup — the
+weekly full, `--full`, a labelled set — first asks each store, through its own
+API, for a snapshot of everything it holds (OpenSearch's own dot-named indices
+excepted) into its directory, keeping the newest snapshot per Qdrant collection
+and one OpenSearch repository snapshot; the other nights carry the unchanged
+files by hard link. The stores' live data directories, `/data/fast/qdrant` and
+`/data/fast/opensearch`, are in no set: a restore puts the indexes back from the
+snapshots, so losing one costs hours rather than the days a re-embed takes. The
+content-addressed store at `/data/bulk/cas` is another root: the run
 copies its objects twice, links unchanged objects to the previous set's copy,
 and pins the copy's sorted names and sizes in `data-bulk-cas.listing` beside
 `manifest.json`. The secrets ride only as
@@ -91,7 +99,13 @@ nothing older is recoverable, and there is no monthly tier.
 
 ## 3. Reading the rows
 
-- **`backup run`** — `intent`, `files` (`linked n of m sampled`: the hard-link
+- **`backup run`** — `intent`, `indexes` (on a full run each store's count
+  and seconds, `qdrant: N collection(s) in S s; opensearch: N index(es) in S s`;
+  on an incremental night `skipped (incremental run; …)`, and in a restore's
+  own safety set `skipped (pre-restore run; …)`, the live snapshot directories
+  riding as they stand; a store that cannot be reached or refuses fails the run
+  with its logs command, and a repository directory the store cannot write fails
+  it with `host provision --only disk-layout`), `files` (`linked n of m sampled`: the hard-link
   verdict against the previous set — zero links with a previous set is a
   failure, because a full copy would hide a retention overrun), `secrets`,
   `postgres` (`full` or `incr`, then the archive boundary and one commit past
@@ -146,7 +160,8 @@ owned to this box's `gideon` read by name, every other id kept — a set made
 before `v0.1.79` records no ids, is re-owned by the numbers it holds, and its
 `Next:` line then names `host provision` before the apply, because provision
 re-owns the managed `/data` directories; restores Postgres; brings the store
-tier back to prove the cluster promotes and to write its row. It ends with **the frontend
+tier — Postgres and the two derived stores — back to prove the cluster promotes,
+puts the stores' indexes back from their snapshots, and writes its row. It ends with **the frontend
 and ingress down and the store tier running, and on the build box the host
 registry**. On a host that is not the build box but whose `gideon-registry` is
 still active (a former build box), it refuses before any stage: stop and disable
@@ -190,6 +205,22 @@ LC_ALL=C join -t $'\t' -j 1 -v 1 "$listing" "$live" | cut -f1
 SH
 ```
 
+For the two derived stores, the `files:` row puts their snapshot directories
+back as the set holds them, and once the store tier is healthy the `stores:` row
+recovers each Qdrant collection from its newest snapshot file (an absent
+collection is created, a present one overwritten) and restores each OpenSearch
+index from the newest repository snapshot over any live index of the same name:
+`qdrant: N collection(s) recovered in S s; opensearch: N index(es) restored in S s`.
+A store whose directory in the set holds no snapshot reads `<store>: no snapshot
+in the set`. A set made before the directories joined the set reads, in the
+`files:` row, `data-fast-qdrant-snapshots: the set predates this root; the live
+directory is left as it is` (and the same for OpenSearch's), and nothing is
+recovered for that store. The restored indexes are those of the set's last full
+run, so they may be up to a week older than the restored database: a document
+stored since that run is in the database and not yet in the indexes, and a
+Qdrant collection's aliases are not in its snapshot. A refused recovery fails the
+row with the store's logs command and leaves the tier running.
+
 A set made before a secret rotation restores the older value: after that
 `apply`, run `sudo python3 -m gideon secrets rotate <name>` for every secret
 rotated since the set was made (the install runbook's rotation step, `v0.1.40`).
@@ -215,7 +246,9 @@ rotated since the set was made (the install runbook's rotation step, `v0.1.40`).
    not fresh, so its pre-restore push refuses against the office's earlier
    snapshots and the stack must first be stopped with `sudo docker compose
    --project-directory /etc/gideon/rendered -f
-   /etc/gideon/rendered/compose.yaml down`.
+   /etc/gideon/rendered/compose.yaml down`. Its `stores:` row puts the
+   derived stores' indexes back from the set's snapshots, so they return with
+   the restore rather than by a rebuild.
 5. Decrypt the set's tarball over the fresh secrets with the **old** identity
    from the password manager (the restored databases carry the old role
    passwords, so the old secrets must be back before anything connects).
@@ -241,7 +274,8 @@ that never crossed the checkout left the plain label behind — and `sudo
 `restore --from staging --set <label>` and re-applies the previous release
 (`install-upgrade.md`). The `--set` form addresses a set by its
 label and restores Postgres from that set's own backup to that set's own
-archive boundary, which no `--at` can express once the set is the newest one;
+archive boundary (and, since the set is a full one, the derived stores' indexes
+from the snapshots it took before the upgrade), which no `--at` can express once the set is the newest one;
 it is refused with `--at` or `--from target`. After a rollback, Postgres runs
 on a new timeline, and an `--at` earlier than the rollback's boundary may name
 a point on the old one that pgBackRest's auto-selected backup cannot reach;
