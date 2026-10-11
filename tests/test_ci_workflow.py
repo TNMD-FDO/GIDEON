@@ -1,4 +1,4 @@
-"""Contract checks for CI runner selection and guarded workflow steps."""
+"""Check CI runner routing, box label equality, concurrency, and guarded steps."""
 
 from __future__ import annotations
 
@@ -41,12 +41,16 @@ def _label_set(runner: object) -> set[str] | None:
 
 
 def workflow_findings(workflow: dict[str, Any]) -> list[str]:
-    """Name each runner or step contract the parsed workflow violates."""
+    """Name each workflow, runner, or step contract the parsed workflow violates."""
 
     findings: list[str] = []
     jobs = workflow["jobs"]
     checks = jobs["checks"]
+    if "concurrency" in workflow:
+        findings.append("workflow: concurrency")
     for name, job in jobs.items():
+        if "concurrency" in job:
+            findings.append(f"{name}: concurrency")
         runner = job["runs-on"]
         guarded = _PRIVATE_PUSH.search(str(job.get("if", ""))) or _PRIVATE_PUSH.search(
             str(runner)
@@ -68,6 +72,12 @@ def workflow_findings(workflow: dict[str, Any]) -> list[str]:
         for name, job in jobs.items()
         if name != "checks" and _can_name_box(job["runs-on"])
     }
+    if box_labels:
+        label_sets = list(box_labels.values())
+        common_labels = max(label_sets, key=label_sets.count)
+        for name, job_labels in box_labels.items():
+            if job_labels != common_labels:
+                findings.append(f"{name}: box label set")
     if (
         not box_labels
         or checks_labels is None
@@ -119,6 +129,30 @@ class CiWorkflowTests(unittest.TestCase):
 
     def test_checked_in_workflow_follows_runner_contract(self) -> None:
         self.assertEqual(workflow_findings(self.workflow), [])
+
+    def test_seeded_workflow_concurrency_is_rejected(self) -> None:
+        seed = copy.deepcopy(self.workflow)
+        seed["concurrency"] = {"group": "seeded", "cancel-in-progress": False}
+        self.assertIn("workflow: concurrency", self.seeded_findings(seed))
+
+    def test_seeded_box_job_concurrency_is_rejected(self) -> None:
+        seed = copy.deepcopy(self.workflow)
+        seed["jobs"]["smoke"]["concurrency"] = "seeded"
+        self.assertIn("smoke: concurrency", self.seeded_findings(seed))
+
+    def test_seeded_box_job_label_drop_fails_equality_alone(self) -> None:
+        seed = copy.deepcopy(self.workflow)
+        label_to_drop = next(
+            label for label in RUNNER_INSTANCES[0].labels if label.casefold() != "self-hosted"
+        )
+        seed["jobs"]["smoke"]["runs-on"].remove(label_to_drop)
+
+        findings = self.seeded_findings(seed)
+
+        self.assertIn("smoke: box label set", findings)
+        self.assertNotIn("smoke: routing", findings)
+        self.assertNotIn("checks: routing", findings)
+        self.assertNotIn("checks: box labels", findings)
 
     def test_seeded_box_job_requires_private_push(self) -> None:
         seed = copy.deepcopy(self.workflow)

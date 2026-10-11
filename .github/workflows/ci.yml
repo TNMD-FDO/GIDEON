@@ -56,10 +56,13 @@ jobs:
     # the runner is persistent and holds Docker access, and untrusted PR code
     # could compromise it (runner hardening is deferred to the public flip; the
     # private flag keeps the box jobs off the public export).
+    # One runner instance takes all four box jobs, one at a time. A box job from
+    # another run queues behind this run's jobs and waits its turn; the shared
+    # loopback port and Docker socket are never held by two jobs. No concurrency
+    # group is needed; a group would cancel a queued job instead.
     if: github.event_name == 'push' && github.event.repository.private
     needs: checks
     runs-on: [self-hosted, linux, x64, gpu, dl385-gen11]
-    concurrency: mirror-images
     steps:
       - uses: actions/checkout@v7
       - name: Mirror images.lock into the release registry
@@ -81,7 +84,6 @@ jobs:
     if: github.event_name == 'push' && github.event.repository.private
     needs: mirror-images
     runs-on: [self-hosted, linux, x64, gpu, dl385-gen11]
-    concurrency: frontend-contract
     steps:
       - uses: actions/checkout@v7
       - name: Frontend contract (stdlib unittest, no pip)
@@ -90,11 +92,11 @@ jobs:
   search-sentinel:
     # The search sentinel proves the query marker is absent from every log the
     # throwaway stack writes. It shares the frontend contract's loopback port
-    # and concurrency group; pytest never collects this module on either runner.
+    # on the one runner instance; pytest never collects this module on either
+    # runner.
     if: github.event_name == 'push' && github.event.repository.private
     needs: frontend-contract
     runs-on: [self-hosted, linux, x64, gpu, dl385-gen11]
-    concurrency: frontend-contract
     steps:
       - uses: actions/checkout@v7
       - name: Search sentinel contract (stdlib unittest, no pip)
@@ -114,7 +116,6 @@ jobs:
     if: github.event_name == 'push' && github.event.repository.private
     needs: search-sentinel
     runs-on: [self-hosted, linux, x64, gpu, dl385-gen11]
-    concurrency: frontend-contract
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
