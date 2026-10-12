@@ -59,6 +59,8 @@ _RENDER_FIX: Final = "Correct the render inputs, then re-run render."
 _MANIFEST_NAME: Final = "manifest.yaml"
 _APPLIED_NAME: Final = "applied.yaml"
 _SECRET_LINE_FIX: Final = "Correct the secret file, then retry."
+_GENERATED_SECRET_PLACEHOLDER: Final = "render-diff-placeholder-not-a-secret"
+GENERATED_SECRETS_LABEL: Final = "generated secrets apply would create"
 _SMTP_PASSWORD_NAME: Final = "smtp_password"
 _SMTP_PASSWORD_MISSING_FIX: Final = (
     "Place the secret in /etc/gideon/secrets/smtp_password, or clear "
@@ -74,15 +76,21 @@ def _generated_secret_fix() -> str:
     return f"Run {report.command('apply')} (it generates missing secrets), then retry."
 
 
-def _render_secret(io: Host, name: str, command: str) -> str | None:
-    """One secret's value for the render inputs, or None after printing the refusal.
+def _render_secret(
+    io: Host, name: str, command: str, *, placeholder_missing: bool = False
+) -> tuple[str, bool] | None:
+    """One secret's value and substitution flag, or None after a refusal.
 
-    A generated secret that is merely absent names apply (which creates it); a
-    supplied one names its path.  The raw env-file format is line-based, so a
+    A generated secret that is merely absent names apply (which creates it), or
+    under ``placeholder_missing`` takes the placeholder and the flag, since a
+    diff writes nothing and shows no secret file's contents; a supplied one
+    names its path.  The raw env-file format is line-based, so a
     value carrying a line break or NUL refuses rather than rendering.
     """
 
     result = read_secret(io, name)
+    if placeholder_missing and result.missing and is_generated(name):
+        return _GENERATED_SECRET_PLACEHOLDER, True
     if not result.ok or result.value is None:
         fix = _generated_secret_fix() if result.missing and is_generated(name) else result.fix
         problem = result.problem or f"Secret is unavailable: {name}."
@@ -92,7 +100,7 @@ def _render_secret(io: Host, name: str, command: str) -> str | None:
         problem = f"Secret value contains CR, LF, or NUL: {secret_path(name)}."
         print(_refusal(problem, _SECRET_LINE_FIX, command), file=sys.stderr)
         return None
-    return result.value
+    return result.value, False
 
 
 class FileChange(StrEnum):
@@ -667,6 +675,8 @@ def _print_diff(
     classifications: list[tuple[str, FileChange, str]],
     judgment: RecreateJudgment,
     stale: set[str],
+    *,
+    substituted_names: tuple[str, ...] = (),
 ) -> None:
     for relative_path, change, existing in classifications:
         if change not in (FileChange.NEW, FileChange.CHANGED):
@@ -695,6 +705,8 @@ def _print_diff(
             f"{key} ({network_name(key)})" for key in judgment.networks
         )
         print(f"  networks recreated, their members stopped first: {moved}")
+    if substituted_names:
+        print(f"  {GENERATED_SECRETS_LABEL}: {', '.join(substituted_names)}")
     _print_summary(classifications, stale)
 
 
@@ -721,12 +733,14 @@ def load_render_inputs(
     root: Path,
     command: str,
     secret_names: Sequence[str] | None = None,
-) -> tuple[RenderInputs, str, str, str, str] | None:
+    placeholder_missing: bool = False,
+) -> tuple[RenderInputs, str, str, str, str, tuple[str, ...]] | None:
     """Load and validate every render input, or print the refusals and return None.
 
     ``secret_names`` replaces the production artifacts' declared set with an
     exact list, read from the selected secrets directory — the ``gideon-ci``
     sibling's env file reads three names and no supplied secret.
+    ``placeholder_missing`` is for ``render --diff`` alone.
     """
 
     site_result = load_site(Path(site_path), host=io)
@@ -768,6 +782,7 @@ def load_render_inputs(
         print(_refusal(exc, _SOURCE_FIX, command), file=sys.stderr)
         return None
     secrets: dict[str, str] = {}
+    substituted_names: list[str] = []
     if secret_names is not None:
         names = list(secret_names)
     else:
@@ -789,10 +804,13 @@ def load_render_inputs(
                 file=sys.stderr,
             )
             return None
-        value = _render_secret(io, name, command)
-        if value is None:
+        secret = _render_secret(io, name, command, placeholder_missing=placeholder_missing)
+        if secret is None:
             return None
+        value, substituted = secret
         secrets[name] = value
+        if substituted:
+            substituted_names.append(name)
     try:
         site_text = io.read_text(site_path)
         lock_text = io.read_text(lock_path)
@@ -835,6 +853,7 @@ def load_render_inputs(
         lock_text,
         models_lock_text,
         egress_text,
+        tuple(substituted_names),
     )
 
 
@@ -861,10 +880,11 @@ def render_to_disk(
         models_path=models_path,
         root=checkout,
         command=command,
+        placeholder_missing=diff,
     )
     if loaded is None:
         return RenderOutcome()
-    inputs, site_text, lock_text, models_lock_text, egress_text = loaded
+    inputs, site_text, lock_text, models_lock_text, egress_text, substituted_names = loaded
     try:
         rendered = render_all(inputs)
     except Exception as exc:  # noqa: BLE001  # command boundary must not traceback
@@ -928,7 +948,10 @@ def render_to_disk(
         judgment = recreate_judgment(
             rendered, applied, service_names(inputs), digests
         )
-        _print_diff(output, rendered, classifications, judgment, stale)
+        _print_diff(
+            output, rendered, classifications, judgment, stale,
+            substituted_names=substituted_names,
+        )
         return RenderOutcome(
             rendered=rendered,
             inputs=inputs,

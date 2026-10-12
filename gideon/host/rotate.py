@@ -204,7 +204,7 @@ def _preconditions(
             StageResult("preconditions", False, "render inputs were refused", _INPUTS_FIX),
             None,
         )
-    inputs, _, _, _, _ = loaded
+    inputs = loaded[0]
     try:
         rendered_set = render_all(inputs)
         digests = render_command.compose_digests(inputs)

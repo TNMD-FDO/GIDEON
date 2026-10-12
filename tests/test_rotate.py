@@ -1135,6 +1135,28 @@ class Preconditions(RealStack):
         self.assertEqual(host.lock_log, [])
         assert_no_secret_text(self, out + err)
 
+    def test_missing_carried_secret_refuses_rotation_before_write_or_compose(self) -> None:
+        """A rotation keeps the apply refusal for an absent carried secret."""
+
+        host = self.applied_host()
+        del host.files[f"{SECRETS_DIR}/qdrant_read_only_api_key"]
+        before = dict(host.files)
+        host.calls.clear()
+        host.writes.clear()
+        host.lock_log.clear()
+
+        code, out, err = run_rotate(host, "engine_api_key")
+
+        self.assertEqual(code, 1)
+        self.assertIn("preconditions: refuse", out)
+        self.assertIn("render inputs were refused", out)
+        self.assertIn("Fix: Run sudo python3 -m gideon apply", err)
+        self.assertEqual(host.files, before)
+        self.assertEqual(host.writes, [])
+        self.assertEqual(argv_calls(host), [VERSION])
+        self.assertEqual(host.lock_log, [])
+        assert_no_secret_text(self, out + err)
+
     def test_pending_secret_entry_change_names_its_mounters(self) -> None:
         """A changed entry is named in the pending-change refusal."""
 

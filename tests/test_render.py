@@ -43,6 +43,8 @@ from gideon.host.render.api import (
 )
 from gideon.host.render.caddy import CaddyfileArtifact
 from gideon.host.render.command import (
+    _GENERATED_SECRET_PLACEHOLDER,
+    GENERATED_SECRETS_LABEL,
     AppliedManifest,
     RecreateJudgment,
     SecretPart,
@@ -1832,6 +1834,109 @@ class RenderCommand(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertNotIn("+++ ", out)
         self.assertIn(f"Summary: {len(render_all(inputs()).files)} unchanged.", out)
+
+    def test_diff_previews_a_missing_carried_generated_secret(self) -> None:
+        """An absent generated secret previews its carrier, the placeholder nowhere."""
+
+        host = DirHost(checkout_files())
+        self.assertEqual(render(host)[0], 0)
+        host.files[f"{RENDERED}/applied.yaml"] = host.files[f"{RENDERED}/manifest.yaml"]
+        del host.files["/etc/gideon/secrets/qdrant_read_only_api_key"]
+        before = dict(host.files)
+        host.writes.clear()
+
+        code, out, err = render(host, diff=True)
+
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("open-webui/env: changed (secret; contents not shown)", out)
+        lines = out.splitlines()
+        row = "Services apply would recreate: open-webui"
+        self.assertIn(row, lines)
+        self.assertEqual(lines[lines.index(row) + 1], "  changed rendered files: open-webui")
+        self.assertEqual(
+            lines[-2],
+            f"  {GENERATED_SECRETS_LABEL}: qdrant_read_only_api_key",
+        )
+        self.assertTrue(lines[-1].startswith("Summary:"))
+        self.assertTrue(all(path == os.fspath(gpus.GPU_RECORD_PATH) for path in host.writes))
+        self.assertEqual(
+            {path: value for path, value in host.files.items() if path != os.fspath(gpus.GPU_RECORD_PATH)},
+            {path: value for path, value in before.items() if path != os.fspath(gpus.GPU_RECORD_PATH)},
+        )
+        self.assertNotIn(_GENERATED_SECRET_PLACEHOLDER, out + err)
+        for value in host.files.values():
+            self.assertNotIn(_GENERATED_SECRET_PLACEHOLDER, value)
+
+    def test_diff_previews_a_new_compose_secret_entry(self) -> None:
+        """A new secret entry names its mounter beside the changed carrier."""
+
+        host = DirHost(checkout_files())
+        self.assertEqual(render(host)[0], 0)
+        applied = yaml.safe_load(host.files[f"{RENDERED}/manifest.yaml"])
+        applied["top_level_parts"]["secrets"].pop("qdrant_read_only_api_key")
+        applied["top_level"] = "0" * 64
+        host.files[f"{RENDERED}/applied.yaml"] = yaml.safe_dump(applied, sort_keys=False)
+        del host.files["/etc/gideon/secrets/qdrant_read_only_api_key"]
+
+        code, out, err = render(host, diff=True)
+
+        self.assertEqual((code, err), (0, ""))
+        lines = out.splitlines()
+        row = "Services apply would recreate: qdrant, open-webui"
+        self.assertIn(row, lines)
+        self.assertEqual(lines[lines.index(row) + 1], "  changed rendered files: open-webui")
+        self.assertEqual(
+            lines[lines.index(row) + 2],
+            "  changed compose secrets (qdrant_read_only_api_key): qdrant",
+        )
+        self.assertEqual(
+            lines[-2],
+            f"  {GENERATED_SECRETS_LABEL}: qdrant_read_only_api_key",
+        )
+        self.assertTrue(lines[-1].startswith("Summary:"))
+
+    def test_diff_keeps_supplied_and_malformed_secret_refusals(self) -> None:
+        """A diff still names the repair for an absent supplied or malformed file."""
+
+        cases = (
+            ("ldap_bind_password", None, "Place the secret in /etc/gideon/secrets/ldap_bind_password"),
+            ("qdrant_read_only_api_key", "broken\nvalue\n", "Correct the secret file, then retry."),
+        )
+        for name, value, fix in cases:
+            with self.subTest(name=name):
+                files = checkout_files()
+                path = f"/etc/gideon/secrets/{name}"
+                if value is None:
+                    del files[path]
+                else:
+                    files[path] = value
+                host = DirHost(files)
+
+                code, out, err = render(host, diff=True)
+
+                self.assertEqual(code, 1)
+                self.assertEqual(out, "")
+                self.assertIn(f"Fix: {fix}", err)
+                self.assertNotIn("Services apply would recreate:", out + err)
+                self.assertEqual(host.writes, [])
+
+    def test_diff_names_two_missing_generated_secrets_in_declared_order(self) -> None:
+        """One final line lists every substituted name in declared order."""
+
+        files = checkout_files()
+        del files["/etc/gideon/secrets/qdrant_read_only_api_key"]
+        del files["/etc/gideon/secrets/searxng_secret_key"]
+
+        code, out, err = render(DirHost(files), diff=True)
+
+        self.assertEqual((code, err), (0, ""))
+        lines = out.splitlines()
+        self.assertEqual(
+            lines[-2],
+            f"  {GENERATED_SECRETS_LABEL}: qdrant_read_only_api_key, searxng_secret_key",
+        )
+        self.assertEqual(sum(GENERATED_SECRETS_LABEL in line for line in lines), 1)
+        self.assertTrue(lines[-1].startswith("Summary:"))
 
     def test_corrupt_applied_manifest_refuses_under_diff(self) -> None:
         host = DirHost(checkout_files())
