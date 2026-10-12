@@ -6,7 +6,15 @@ from collections.abc import Mapping
 from dataclasses import replace
 from urllib.parse import unquote, urlsplit
 
-from test_render import EXAMPLE, ROOT, SECOND, DirHost, declared_source_files, inputs
+from test_render import (
+    EXAMPLE,
+    ROOT,
+    SECOND,
+    DirHost,
+    artifact_source_files,
+    declared_source_files,
+    inputs,
+)
 
 from gideon.egress import settings
 from gideon.host.images import parse_registry, reference
@@ -184,7 +192,7 @@ class RecreateBoundary(unittest.TestCase):
         self.assertEqual(judgment.reasons(), (("changed compose block", (EGRESS_SERVICE_NAME,)),))
 
     def test_egress_source_change_recreates_only_egress(self) -> None:
-        files = declared_source_files()
+        files = {**declared_source_files(), **artifact_source_files()}
         previous_digests = gather_source_digests(DirHost(files), ROOT)
         previous_inputs = replace(inputs(), source_digests=previous_digests)
         changed_files = dict(files)

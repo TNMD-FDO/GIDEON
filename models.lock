@@ -152,8 +152,10 @@ profiles:
         # else is a decision. Render adds what is host-, secret-, or
         # image-derived: the GPU by UUID through CDI; the API key as VLLM_API_KEY
         # read inside the container from the Compose secret, never as --api-key;
-        # the access-log filter for the tier's two probes. No value moves from
-        # this lock. The image comes from images.lock.
+        # the access-log filter for the tier's two probes; the route guard's
+        # rendered module, mounted read-only at a fixed path and named by
+        # --middleware, with PYTHONPATH naming its directory. No value moves
+        # from this lock. The image comes from images.lock.
         serve:
           served_name: gideon-generator
           env:

@@ -32,13 +32,18 @@ class RenderInputs:
 
 
 class Artifact:
-    """Base class for one deterministic rendered file."""
+    """Base class for one deterministic rendered file.
+
+    ``template_paths`` name files under ``compose/``; ``source_paths`` name
+    checkout-relative release files read into ``RenderInputs.templates``.
+    """
 
     name: str = ""
     relative_path: str = ""
     mode: int = 0o644
     owners: tuple[str, ...] = ()
     template_paths: tuple[str, ...] = ()
+    source_paths: tuple[str, ...] = ()
     secret: bool = False
 
     def applies(self, inputs: RenderInputs) -> bool:
@@ -191,6 +196,7 @@ def _registered_artifacts() -> tuple[Artifact, ...]:
         DcgmCountersArtifact,
         PrometheusConfigArtifact,
     )
+    from gideon.host.render.routeguard import RouteGuardArtifact
     from gideon.host.render.searxng import (
         SearxngEnvArtifact,
         SearxngLoggingArtifact,
@@ -234,6 +240,7 @@ def _registered_artifacts() -> tuple[Artifact, ...]:
         OwuiEnvArtifact(),
         ApplyManifestArtifact(),
         ApiInstructionArtifact(),
+        RouteGuardArtifact(),
         SearxngSettingsArtifact(),
         SearxngEnvArtifact(),
         EgressEnvArtifact(),

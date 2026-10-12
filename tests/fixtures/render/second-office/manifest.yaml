@@ -3,7 +3,7 @@ release: "fixture"
 inputs:
   site_sha256: "3032cbc05ff6133992600e2f7b9f12e8488f068b2a747e88a45159753d250cb1"
   host_lock_sha256: "c487a5a60259c393ac20649336ff45b24747e8155aa0e4d5afe84e51e8424680"
-  models_lock_sha256: "8c970d102a9d88cfe1fea4bb82cc26eb8f72078005bde98649343aed72db852e"
+  models_lock_sha256: "811671444ebd009594179947eb077f84bfef335392ab6057b04d03716dc8b7b0"
   egress_sha256: "d41c0ffb68aef4e1e677f53cca1fbe102e1f61c17e41e2173226b1db993064f8"
   hardware_profile: "2x96v-256d"
   images_lock_version: 1
@@ -15,7 +15,7 @@ inputs:
   build_box: false
 files:
   compose.yaml:
-    sha256: "7fe6ac8ef6777a4cf41e6aac2e742c3ab55ac1e0729230bb3000938d131eda9e"
+    sha256: "b1e8a1f6be9e7c137dda5c17b90b5ce60f948bbd43926b8993bdda5d385d68c6"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
@@ -112,6 +112,12 @@ files:
     mode: "0644"
     owners:
       - "gideon-api"
+  "model-servers/gideon_route_guard.py":
+    sha256: "a963d5fcfbea6d118f01a79c79e7722cbbb1f41ab120cc7105bd5ea364bdf6c0"
+    mode: "0644"
+    owners:
+      - "gideon-generator"
+      - "gideon-embed"
   "gideon-egress/env":
     sha256: "a18d727666e4d2d64cee7e9671c1dad695bdf40817401028418f69a5ce3cd1c3"
     mode: "0600"
@@ -222,8 +228,8 @@ services:
   qdrant: "a9d3665d4760688564d7c20a7c525a09eb8f5a2418a56514bd3c323b50f2efdc"
   opensearch: "7902e93c4287e0f4f988683d4487145b3f9b428d3e71bcd29c66b7e401d1c915"
   open-webui: "afd3ec2b31ba2950037ad572b7e0c7235b9ccccdb56eb249236e4e0ae7444075"
-  gideon-generator: "84079f1b7d3e982523b147ec321f76cfdd3059213f4eba877d26cdc59b6e3912"
-  gideon-embed: "a1799c9ceff0b6159be9b8588da119879ef38280aaeb577c6a3542828eb20d8e"
+  gideon-generator: "4c80fd0ba4f007e832667070ec3a95d1096c652a7dfdc80610bab1ecbeb7f863"
+  gideon-embed: "95823e7f4a4ca391ea750015c20d48548a51be00f487b79cc482da70305b051e"
   gideon-api: "26d7a80f5c3a695041e02bb6cf56832f607158a700c299dc7393f8c077abcdf6"
   gideon-worker: "bc8b45e0b0e4cda17c10579ae541f17534e48813d0b3b1a03d8878f03a01e5b2"
   gideon-egress: "a424143f2db41ae9819ace634cf9a95d1f959483bb3c40836336d62e8fc81100"

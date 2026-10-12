@@ -5,7 +5,15 @@ import unittest
 from collections.abc import Mapping
 from dataclasses import replace
 
-from test_render import EXAMPLE, ROOT, SECOND, DirHost, declared_source_files, inputs
+from test_render import (
+    EXAMPLE,
+    ROOT,
+    SECOND,
+    DirHost,
+    artifact_source_files,
+    declared_source_files,
+    inputs,
+)
 
 from gideon.casecite.found import CITE_FORMS
 from gideon.host import cas
@@ -332,7 +340,7 @@ class WorkerBlock(unittest.TestCase):
                     )
 
     def test_worker_source_change_recreates_only_the_worker(self) -> None:
-        files = declared_source_files()
+        files = {**declared_source_files(), **artifact_source_files()}
         previous_digests = gather_source_digests(DirHost(files), ROOT)
         previous_inputs = replace(inputs(), source_digests=previous_digests)
         previous = render_all(previous_inputs)

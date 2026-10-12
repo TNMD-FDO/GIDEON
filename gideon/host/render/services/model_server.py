@@ -12,6 +12,11 @@ from gideon.host.render.engine import (
     INTEGRATION_NETWORK_NAME,
     ModelServerMember,
 )
+from gideon.host.render.routeguard import (
+    ROUTE_GUARD_MOUNT_DIR,
+    route_guard_import_path,
+    route_guard_mount,
+)
 from gideon.host.render.services import (
     MountedSecret,
     ServiceDefinition,
@@ -31,7 +36,8 @@ ENGINE_USAGE_SWITCHES: Final[Mapping[str, str]] = {
 # Prometheus's default metrics path — are the lines vLLM's access log excludes:
 # render provisions both probes, so render silences what it causes, and a
 # request's own line keeps its shape. The option takes one comma-separated
-# string on v0.27.1, never two arguments.
+# string on v0.27.1, never two arguments. Render also mounts the route guard
+# and names it with --middleware beside this access-log filter.
 # exempt: no figure — a decision.
 ENGINE_HEALTH_PATH: Final = "/health"
 ENGINE_ACCESS_LOG_EXCLUDED_PATHS: Final[tuple[str, ...]] = (
@@ -95,6 +101,8 @@ def model_command(pin: ModelPin, member: ModelServerMember) -> list[str]:
         str(member.port),
         "--disable-access-log-for-endpoints",
         ",".join(ENGINE_ACCESS_LOG_EXCLUDED_PATHS),
+        "--middleware",
+        route_guard_import_path(),
     ]
     for name, value in pin.serve.flags.items():
         command.append(f"--{name}")
@@ -140,6 +148,7 @@ def model_service(
         environment[name] = value
     environment.pop("TZ", None)
     environment["TZ"] = inputs.site.office.timezone
+    environment["PYTHONPATH"] = ROUTE_GUARD_MOUNT_DIR
     networks = ["gideon"]
     if member.joins_integration_network:
         networks.append(INTEGRATION_NETWORK_NAME)
@@ -152,7 +161,7 @@ def model_service(
         ),
         "command": model_command(model, member),
         "devices": [f"nvidia.com/gpu={inputs.facts.gpu_uuids[model.gpu]}"],
-        "volumes": [f"{weights.MODELS_ROOT}:{hf_home}:ro"],
+        "volumes": [f"{weights.MODELS_ROOT}:{hf_home}:ro", route_guard_mount()],
         "secrets": [member.secret_name],
         "healthcheck": dict(model_healthcheck(member)),
         "networks": networks,

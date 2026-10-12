@@ -24,8 +24,18 @@ from gideon.host.render.engine import (
 )
 from gideon.host.render.facts import HostFacts
 from gideon.host.render.prometheus import PrometheusConfigArtifact
+from gideon.host.render.routeguard import (
+    ROUTE_GUARD_MOUNT_DIR,
+    route_guard_import_path,
+    route_guard_mount,
+)
 from gideon.host.render.services import image_pin
-from gideon.host.render.services.model_server import model_command, model_service
+from gideon.host.render.services.model_server import (
+    ENGINE_ACCESS_LOG_EXCLUDED_PATHS,
+    ModelServerService,
+    model_command,
+    model_service,
+)
 
 
 class Family(unittest.TestCase):
@@ -136,12 +146,13 @@ class EmbedRender(unittest.TestCase):
                 self.assertNotIn("ports", block)
                 self.assertEqual(
                     block["volumes"],
-                    [f"{weights.MODELS_ROOT}:{pin.serve.env['HF_HOME']}:ro"],
+                    [f"{weights.MODELS_ROOT}:{pin.serve.env['HF_HOME']}:ro", route_guard_mount()],
                 )
                 self.assertEqual(block["secrets"], [EMBED.secret_name])
                 environment = block["environment"]
                 assert isinstance(environment, Mapping)
                 self.assertNotIn("VLLM_API_KEY", environment)
+                self.assertEqual(environment["PYTHONPATH"], ROUTE_GUARD_MOUNT_DIR)
                 self.assertNotIn(rendered_inputs.secrets[EMBED.secret_name], str(block))
 
                 command = block["command"]
@@ -164,6 +175,46 @@ class EmbedRender(unittest.TestCase):
                 assert isinstance(healthcheck, Mapping)
                 self.assertEqual(healthcheck["start_period"], f"{EMBED.ready_seconds}s")
                 self.assertEqual(block["mem_limit"], row.gb * GIGABYTE)
+
+    def test_each_member_uses_the_same_guard_additions(self) -> None:
+        rendered_inputs = inputs(EXAMPLE)
+        blocks = service_blocks(rendered_inputs)
+        for member in MODEL_SERVERS:
+            with self.subTest(role=member.role):
+                block = blocks[member.service_name]
+                assert isinstance(block, Mapping)
+                pin = rendered_inputs.profile.model(member.role)
+                assert pin is not None
+                volumes = block["volumes"]
+                environment = block["environment"]
+                command = block["command"]
+                assert isinstance(volumes, list)
+                assert isinstance(environment, Mapping)
+                assert isinstance(command, list)
+                self.assertEqual(len(volumes), 2)
+                self.assertEqual(volumes[1], route_guard_mount())
+                self.assertEqual(environment["PYTHONPATH"], ROUTE_GUARD_MOUNT_DIR)
+                self.assertNotIn("VLLM_API_KEY", environment)
+                self.assertNotIn("labels", block)
+                self.assertEqual(ModelServerService(member).sources, ())
+                self.assertEqual(command.count("--middleware"), 1)
+                self.assertEqual(command.count(route_guard_import_path()), 1)
+                filter_index = command.index("--disable-access-log-for-endpoints")
+                self.assertEqual(
+                    command[filter_index : filter_index + 4],
+                    [
+                        "--disable-access-log-for-endpoints",
+                        ",".join(ENGINE_ACCESS_LOG_EXCLUDED_PATHS),
+                        "--middleware",
+                        route_guard_import_path(),
+                    ],
+                )
+                expected_flags: list[str] = []
+                for name, value in pin.serve.flags.items():
+                    expected_flags.append(f"--{name}")
+                    if value is not True:
+                        expected_flags.append(str(value))
+                self.assertEqual(command[-len(expected_flags) :], expected_flags)
 
     def test_yaml_round_trip_preserves_the_json_flag_arguments(self) -> None:
         for site in (EXAMPLE, SECOND):

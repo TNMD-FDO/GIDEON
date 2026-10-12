@@ -88,6 +88,7 @@ from gideon.host.render.engine import (
     ENGINE_SECRET_NAME,
     ENGINE_SERVICE_NAME,
     INTEGRATION_NETWORK_NAME,
+    MODEL_SERVERS,
     engine_metrics_target,
 )
 from gideon.host.render.facts import FactsError, HostFacts, gather_facts
@@ -119,6 +120,12 @@ from gideon.host.render.prometheus import (
     BlackboxConfigArtifact,
     PrometheusConfigArtifact,
 )
+from gideon.host.render.routeguard import (
+    ROUTE_GUARD_MOUNT_DIR,
+    ROUTE_GUARD_RENDERED_PATH,
+    route_guard_import_path,
+    route_guard_mount,
+)
 from gideon.host.render.searxng import SEARXNG_JOB_NAME, searxng_health_url
 from gideon.host.render.services import declared_sources
 from gideon.host.render.worker import WORKER_SERVICE_NAME
@@ -139,6 +146,32 @@ PG_BACKREST_TEMPLATE = "postgres/pgbackrest.conf.tmpl"
 TEMPLATE_PATHS = tuple(
     dict.fromkeys(path for artifact in ARTIFACTS for path in artifact.template_paths)
 )
+SOURCE_PATHS = tuple(
+    dict.fromkeys(path for artifact in ARTIFACTS for path in artifact.source_paths)
+)
+
+
+def artifact_source_texts() -> dict[str, str]:
+    """Read declared artifact sources under the checkout root."""
+
+    return {path: (ROOT / path).read_text() for path in SOURCE_PATHS}
+
+
+def render_templates() -> dict[str, str]:
+    """Build the render input map from templates and declared sources."""
+
+    return {
+        **{path: (ROOT / "compose" / path).read_text() for path in TEMPLATE_PATHS},
+        **artifact_source_texts(),
+    }
+
+
+def artifact_source_files() -> dict[str, str]:
+    """Seed a fake checkout with the artifact sources it declares."""
+
+    return {str(ROOT / path): text for path, text in artifact_source_texts().items()}
+
+
 FACTS = HostFacts(
     ("GPU-11111111-1111-1111-1111-111111111111", "GPU-22222222-2222-2222-2222-222222222222"),
     service_gid=4242,
@@ -241,9 +274,7 @@ def inputs(site_path: Path = EXAMPLE, **overrides: object) -> RenderInputs:
         images=images,
         facts=FACTS,
         profile=profile,
-        templates={
-            path: (ROOT / "compose" / path).read_text() for path in TEMPLATE_PATHS
-        },
+        templates=render_templates(),
         release="fixture",
         secrets={
             "ldap_bind_password": "bind-$-'\"#password",
@@ -410,6 +441,7 @@ class Registry(unittest.TestCase):
                 "open-webui/env",
                 "open-webui/manifest.yaml",
                 "gideon-api/instruction.txt",
+                "model-servers/gideon_route_guard.py",
                 "searxng/settings.yml",
                 "searxng/env",
                 "gideon-egress/env",
@@ -465,19 +497,24 @@ class Registry(unittest.TestCase):
         self.assertEqual(ARTIFACTS[19].owners, (API_SERVICE_NAME,))
         self.assertEqual(ARTIFACTS[19].mode, 0o644)
         self.assertFalse(ARTIFACTS[19].secret)
-        self.assertEqual(ARTIFACTS[20].owners, ("searxng",))
+        self.assertEqual(
+            ARTIFACTS[20].owners,
+            tuple(member.service_name for member in MODEL_SERVERS),
+        )
         self.assertEqual(ARTIFACTS[20].mode, 0o644)
         self.assertEqual(ARTIFACTS[21].owners, ("searxng",))
-        self.assertTrue(ARTIFACTS[21].secret)
-        self.assertEqual(ARTIFACTS[21].mode, 0o600)
-        self.assertEqual(ARTIFACTS[22].relative_path, "gideon-egress/env")
-        self.assertEqual(ARTIFACTS[22].owners, ("gideon-egress",))
+        self.assertEqual(ARTIFACTS[21].mode, 0o644)
+        self.assertEqual(ARTIFACTS[22].owners, ("searxng",))
         self.assertTrue(ARTIFACTS[22].secret)
         self.assertEqual(ARTIFACTS[22].mode, 0o600)
-        self.assertEqual(ARTIFACTS[23].relative_path, "searxng/logging.json")
-        self.assertEqual(ARTIFACTS[23].owners, ("searxng",))
-        self.assertFalse(ARTIFACTS[23].secret)
-        self.assertEqual(ARTIFACTS[23].mode, 0o644)
+        self.assertEqual(ARTIFACTS[23].relative_path, "gideon-egress/env")
+        self.assertEqual(ARTIFACTS[23].owners, ("gideon-egress",))
+        self.assertTrue(ARTIFACTS[23].secret)
+        self.assertEqual(ARTIFACTS[23].mode, 0o600)
+        self.assertEqual(ARTIFACTS[24].relative_path, "searxng/logging.json")
+        self.assertEqual(ARTIFACTS[24].owners, ("searxng",))
+        self.assertFalse(ARTIFACTS[24].secret)
+        self.assertEqual(ARTIFACTS[24].mode, 0o644)
         self.assertEqual(ARTIFACTS[-1].owners, ("dcgm-exporter",))
         self.assertEqual(ARTIFACTS[-1].mode, 0o644)
         self.assertTrue(
@@ -717,6 +754,8 @@ class Engine(unittest.TestCase):
             str(ENGINE_PORT),
             "--disable-access-log-for-endpoints",
             ",".join(ENGINE_ACCESS_LOG_EXCLUDED_PATHS),
+            "--middleware",
+            route_guard_import_path(),
         ]
         for name, value in model.serve.flags.items():
             expected_command.append(f"--{name}")
@@ -741,6 +780,7 @@ class Engine(unittest.TestCase):
         expected_environment = dict(model.serve.env)
         expected_environment.update(ENGINE_USAGE_SWITCHES)
         expected_environment["TZ"] = rendered_inputs.site.office.timezone
+        expected_environment["PYTHONPATH"] = ROUTE_GUARD_MOUNT_DIR
         self.assertEqual(service["environment"], expected_environment)
         self.assertNotIn("VLLM_API_KEY", expected_environment)
         self.assertEqual(
@@ -749,7 +789,7 @@ class Engine(unittest.TestCase):
         )
         self.assertEqual(
             service["volumes"],
-            [f"{weights.MODELS_ROOT}:{model.serve.env['HF_HOME']}:ro"],
+            [f"{weights.MODELS_ROOT}:{model.serve.env['HF_HOME']}:ro", route_guard_mount()],
         )
         self.assertEqual(service["secrets"], [ENGINE_SECRET_NAME])
         self.assertNotIn("ports", service)
@@ -1224,7 +1264,7 @@ class Core(unittest.TestCase):
         )
         self.assertEqual(
             [artifact.name for artifact in ARTIFACTS if not artifact.applies(no_gpu)],
-            ["grafana-gpu", "grafana-eval", "api-instruction", "gideon-egress-env", "gideon-eval-nightly-service", "gideon-eval-nightly-timer", "dcgm-counters"],
+            ["grafana-gpu", "grafana-eval", "api-instruction", "model-servers-route-guard", "gideon-egress-env", "gideon-eval-nightly-service", "gideon-eval-nightly-timer", "dcgm-counters"],
         )
 
     def test_nightly_units_are_zoned_bounded_and_carry_no_secrets(self) -> None:
@@ -1354,6 +1394,13 @@ class Core(unittest.TestCase):
                 )
                 self.assertEqual(document["inputs"]["no_gpu"], no_gpu)
                 self.assertEqual(document["inputs"]["build_box"], build_box)
+                if no_gpu:
+                    self.assertNotIn(ROUTE_GUARD_RENDERED_PATH, document["files"])
+                else:
+                    self.assertEqual(
+                        document["files"][ROUTE_GUARD_RENDERED_PATH]["owners"],
+                        [member.service_name for member in MODEL_SERVERS],
+                    )
                 self.assertEqual(
                     document["inputs"]["models_lock_sha256"],
                     hashlib.sha256((ROOT / "models.lock").read_bytes()).hexdigest(),
@@ -1394,6 +1441,7 @@ class Core(unittest.TestCase):
                 "open-webui/env",
                 "open-webui/manifest.yaml",
                 "gideon-api/instruction.txt",
+                "model-servers/gideon_route_guard.py",
                 "searxng/settings.yml",
                 "searxng/env",
                 "searxng/logging.json",
@@ -1427,6 +1475,10 @@ class Core(unittest.TestCase):
         self.assertEqual(first.by_path["grafana/ldap.toml"].owners, ("grafana",))
         self.assertEqual(first.by_path["grafana/dashboards/overview.json"].owners, ("grafana",))
         self.assertEqual(first.by_path["gideon-api/instruction.txt"].owners, (API_SERVICE_NAME,))
+        self.assertEqual(
+            first.by_path[ROUTE_GUARD_RENDERED_PATH].owners,
+            tuple(member.service_name for member in MODEL_SERVERS),
+        )
         self.assertEqual(
             first.by_path["postgres/pgbackrest.conf"].owners, ("postgres",)
         )
@@ -1544,6 +1596,7 @@ def checkout_files() -> dict[str, str]:
             str(ROOT / "compose" / path): (ROOT / "compose" / path).read_text()
             for path in TEMPLATE_PATHS
         },
+        **artifact_source_files(),
         SITE: EXAMPLE.read_text(),
         **declared_source_files(),
         "/etc/gideon/secrets/ldap_bind_password": "bind-$-'\"#password",
@@ -1776,22 +1829,27 @@ class RenderCommand(unittest.TestCase):
         code, out, err = render(host)
         self.assertEqual((code, err), (0, ""))
         self.assertIn("grafana/dashboards/gpu.json: stale", out)
+        self.assertIn(f"{ROUTE_GUARD_RENDERED_PATH}: stale", out)
         self.assertIn(f"{DCGM_COUNTERS_PATH}: stale", out)
         self.assertIn("compose.yaml: changed", out)
         self.assertIn("prometheus/prometheus.yml: changed", out)
         self.assertNotIn(f"{RENDERED}/grafana/dashboards/gpu.json", host.files)
+        self.assertNotIn(f"{RENDERED}/{ROUTE_GUARD_RENDERED_PATH}", host.files)
         self.assertNotIn(f"{RENDERED}/{DCGM_COUNTERS_PATH}", host.files)
         self.assertNotIn(Facts.SMI, host.calls)
         no_gpu_manifest = yaml.safe_load(host.files[f"{RENDERED}/manifest.yaml"])
         self.assertNotIn("grafana/dashboards/gpu.json", no_gpu_manifest["files"])
+        self.assertNotIn(ROUTE_GUARD_RENDERED_PATH, no_gpu_manifest["files"])
         self.assertNotIn(DCGM_COUNTERS_PATH, no_gpu_manifest["files"])
 
         del host.files["/etc/gideon/no-gpu"]
         code, out, err = render(host)
         self.assertEqual((code, err), (0, ""))
         self.assertIn("grafana/dashboards/gpu.json: new", out)
+        self.assertIn(f"{ROUTE_GUARD_RENDERED_PATH}: new", out)
         self.assertIn(f"{DCGM_COUNTERS_PATH}: new", out)
         self.assertIn(f"{RENDERED}/grafana/dashboards/gpu.json", host.files)
+        self.assertIn(f"{RENDERED}/{ROUTE_GUARD_RENDERED_PATH}", host.files)
         self.assertIn(f"{RENDERED}/{DCGM_COUNTERS_PATH}", host.files)
 
     def test_a_registered_artifact_left_behind_is_stale_never_foreign(self) -> None:

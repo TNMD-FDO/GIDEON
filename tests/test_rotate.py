@@ -14,7 +14,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import yaml  # type: ignore[import-untyped]
-from test_render import declared_source_files, inputs
+from test_render import artifact_source_files, declared_source_files, inputs
 from test_secrets import (
     PAIR_CERT_TEXT,
     PAIR_KEY_TEXT,
@@ -578,6 +578,7 @@ def base_files(site: Path = EXAMPLE) -> dict[str, str]:
             str(ROOT / "compose" / path): (ROOT / "compose" / path).read_text()
             for path in TEMPLATE_PATHS
         },
+        **artifact_source_files(),
         str(ROOT / "migrations" / "0001_audit_log.sql"): (
             ROOT / "migrations" / "0001_audit_log.sql"
         ).read_text(),

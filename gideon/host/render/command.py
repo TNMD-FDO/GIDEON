@@ -128,8 +128,12 @@ def _refusal(problem: object, fix: str, command: str = "render") -> str:
     return refusal(command, problem, fix)
 
 
+class RenderSourceError(ValueError):
+    """A declared artifact source could not be read from the checkout."""
+
+
 def load_templates(host: Host, root: PathLike) -> Mapping[str, str]:
-    """Load every template declared by the ordered artifact registry."""
+    """Load every template and release source declared by the artifact registry."""
 
     checkout = Path(root)
     templates: dict[str, str] = {}
@@ -147,6 +151,21 @@ def load_templates(host: Host, root: PathLike) -> Mapping[str, str]:
             except (OSError, UnicodeError) as exc:
                 raise ValueError(
                     f"Render template is unreadable: {relative_path} ({exc})"
+                ) from exc
+    for artifact in ARTIFACTS:
+        for relative_path in artifact.source_paths:
+            if relative_path in templates:
+                continue
+            source_path = checkout / relative_path
+            try:
+                templates[relative_path] = host.read_text(source_path)
+            except FileNotFoundError as exc:
+                raise RenderSourceError(
+                    f"Render source is missing: {relative_path}"
+                ) from exc
+            except (OSError, UnicodeError) as exc:
+                raise RenderSourceError(
+                    f"Render source is unreadable: {relative_path} ({exc})"
                 ) from exc
     return templates
 
@@ -824,6 +843,9 @@ def load_render_inputs(
         return None
     try:
         templates = load_templates(io, root)
+    except RenderSourceError as exc:
+        print(_refusal(exc, _SOURCE_FIX, command), file=sys.stderr)
+        return None
     except ValueError as exc:
         print(_refusal(exc, _TEMPLATE_FIX, command), file=sys.stderr)
         return None

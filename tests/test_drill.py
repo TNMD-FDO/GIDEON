@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import cast
 
 import yaml  # type: ignore[import-untyped]
+from test_render import artifact_source_files
 
 from gideon.host import backupset, drill, owui, stack
 from gideon.host.render import ARTIFACTS
@@ -177,6 +178,7 @@ class FakeHost:
         for relative in TEMPLATE_PATHS:
             path = ROOT / "compose" / relative
             self.files[os.fspath(path)] = path.read_text(encoding="utf-8")
+        self.files.update(artifact_source_files())
 
     def run(
         self,

@@ -146,7 +146,10 @@ same command is run again after the fix.
    them. The engine's API
    key is the generated secret `/etc/gideon/secrets/engine_api_key`, created
    absent-only by the `secrets` stage and read inside the container — never
-   in the Compose file, argv, or a row. The start-up log (the `GPU KV cache
+   in the Compose file, argv, or a row. Each model server requires its key
+   on every route but `/health` and `/metrics`, through a GIDEON middleware
+   the engine loads from a rendered file, so a client without the key sees
+   401 on any other route. The start-up log (the `GPU KV cache
    size` and `Maximum concurrency` lines) is in the journal at every boot:
    `sudo journalctl CONTAINER_NAME=gideon-gideon-generator-1 -b`. A vLLM image
    or model pin bump restarts the engine inside apply after the `models`

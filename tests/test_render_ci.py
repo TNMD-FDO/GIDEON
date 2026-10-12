@@ -8,6 +8,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import yaml  # type: ignore[import-untyped]
+from test_render import render_templates
 from test_secrets import FakeHost
 
 from gideon.host.egress import load_egress_allowlist
@@ -19,7 +20,7 @@ from gideon.host.models import (
     load_models_lock,
     select_profile,
 )
-from gideon.host.render import ARTIFACTS, RenderInputs
+from gideon.host.render import RenderInputs
 from gideon.host.render.api import (
     API_INSTRUCTION_MOUNT,
     API_INSTRUCTION_PATH,
@@ -98,9 +99,6 @@ from gideon.host.site import load_site
 
 ROOT = Path(__file__).resolve().parent.parent
 EXAMPLE = ROOT / "config/site.example.yaml"
-TEMPLATE_PATHS = tuple(
-    dict.fromkeys(path for artifact in ARTIFACTS for path in artifact.template_paths)
-)
 
 
 def inputs(**overrides: object) -> RenderInputs:
@@ -118,7 +116,7 @@ def inputs(**overrides: object) -> RenderInputs:
         images=images,
         facts=HostFacts(("GPU-a", "GPU-b"), service_gid=4242),
         profile=profile,
-        templates={name: (ROOT / "compose" / name).read_text() for name in TEMPLATE_PATHS},
+        templates=render_templates(),
         release="fixture",
         secrets={
             "ldap_bind_password": "fixture-ldap-bind",

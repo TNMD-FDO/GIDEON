@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
+from test_render import artifact_source_files
 from test_render_ci import inputs
 
 from gideon.host import nogpu, owui
@@ -87,6 +88,7 @@ class FakeHost:
         for relative in ("host.lock", "images.lock", "models.lock"):
             path = ROOT / relative
             self.files[os.fspath(path)] = path.read_text(encoding="utf-8")
+        self.files.update(artifact_source_files())
 
     def run(
         self,

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml  # type: ignore[import-untyped]
+from test_render import render_templates
 
 from gideon.host.corpus import record
 from gideon.host.egress import load_egress_allowlist
@@ -80,11 +81,7 @@ def inputs(site_path: Path = EXAMPLE, **overrides: object) -> RenderInputs:
     assert site is not None and lock is not None and images is not None and models is not None and egress is not None
     profile = select_profile(models, site.hardware_profile)
     assert isinstance(profile, HardwareProfile)
-    templates = {
-        path: (ROOT / "compose" / path).read_text(encoding="utf-8")
-        for artifact in ARTIFACTS
-        for path in artifact.template_paths
-    }
+    templates = render_templates()
     base = RenderInputs(
         site=site,
         lock=lock,

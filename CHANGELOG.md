@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.139](docs/release-notes/v0.3.139.md) — 2026-10-12 — the model servers' routes take the key
 - [v0.3.138](docs/release-notes/v0.3.138.md) — 2026-10-12 — the store's metrics reach Prometheus
 - [v0.3.137](docs/release-notes/v0.3.137.md) — 2026-10-12 — the runbooks say gideon
 - [v0.3.136](docs/release-notes/v0.3.136.md) — 2026-10-12 — the chat frontend loads no embedding model, reaches no model hub, and offers no microphone

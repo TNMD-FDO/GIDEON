@@ -16,7 +16,7 @@ from unittest.mock import patch
 from urllib.parse import unquote
 
 import yaml  # type: ignore[import-untyped]
-from test_render import declared_source_files, inputs
+from test_render import artifact_source_files, declared_source_files, inputs
 from test_secrets import answer_pair_command
 
 from gideon.host import backuplock, grafana, nogpu, owui, pgbackrest, report, weights
@@ -486,6 +486,7 @@ def base_files(site: Path = EXAMPLE) -> dict[str, str]:
             str(ROOT / "compose" / path): (ROOT / "compose" / path).read_text()
             for path in TEMPLATE_PATHS
         },
+        **artifact_source_files(),
         str(ROOT / "migrations" / "0001_audit_log.sql"): (ROOT / "migrations" / "0001_audit_log.sql").read_text(),
         SITE: site.read_text(),
         **declared_source_files(),

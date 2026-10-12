@@ -3,7 +3,7 @@ release: "fixture"
 inputs:
   site_sha256: "0193b145520c2f0c0171a5c991fedbba99b9b32736b55785e97b63d308b95aa5"
   host_lock_sha256: "c487a5a60259c393ac20649336ff45b24747e8155aa0e4d5afe84e51e8424680"
-  models_lock_sha256: "8c970d102a9d88cfe1fea4bb82cc26eb8f72078005bde98649343aed72db852e"
+  models_lock_sha256: "811671444ebd009594179947eb077f84bfef335392ab6057b04d03716dc8b7b0"
   egress_sha256: "d41c0ffb68aef4e1e677f53cca1fbe102e1f61c17e41e2173226b1db993064f8"
   hardware_profile: "2x96v-256d"
   images_lock_version: 1
@@ -15,7 +15,7 @@ inputs:
   build_box: true
 files:
   compose.yaml:
-    sha256: "321cc872088cb33adf602f64c543ffb05bc4242d47296024a0ece5fdc46c4f06"
+    sha256: "9890209d38ee33a522c8527ca0c3c0087d904222aba395d6584d032054325931"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
@@ -112,6 +112,12 @@ files:
     mode: "0644"
     owners:
       - "gideon-api"
+  "model-servers/gideon_route_guard.py":
+    sha256: "a963d5fcfbea6d118f01a79c79e7722cbbb1f41ab120cc7105bd5ea364bdf6c0"
+    mode: "0644"
+    owners:
+      - "gideon-generator"
+      - "gideon-embed"
   "searxng/settings.yml":
     sha256: "ae506e34c5ba6b3d89b9eeb1b3041962892c3f51fe8e46473705403d1eb02080"
     mode: "0644"
@@ -232,8 +238,8 @@ services:
   qdrant: "9805052fb17cdd7d0ed62a918188530c830b0061ef50b4f4174011809315d154"
   opensearch: "b0cd2678617a28c98eea88d6ca0ce41e338c86dbfada6fb3a2306e4c8f0f4193"
   open-webui: "c77cd90569cc978835d67284a3d9eac17dc5e2e65303fffa50b27798f512452a"
-  gideon-generator: "f073db87bb4e63398ea71f84d3d8e53ea874fb480e8f26790583b6849393fbda"
-  gideon-embed: "c5aed2d953e92ac812520d91825693de687e8352c2f19d36c44e6547d0ae75b3"
+  gideon-generator: "820e1625abe32da4d6e61c41de06cfe8c503d1cb6073100e42f51ba986ae48d8"
+  gideon-embed: "2c0d136da5b6086d55c0b292a625c6979f5ba0945913ca8caba0358004f6465a"
   gideon-api: "cf7725b85374f568e44fcd708f8a930218474799b47192705cc594f99110975b"
   gideon-worker: "1ebaa6d467063a2d5041efefe9bd724c0220c2408ddbae429da884384d150af0"
   gideon-egress: "e675d5f59c4e789a0d873e3c64263e48d483c7b2881eebcad95349de22ed95fe"

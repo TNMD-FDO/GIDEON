@@ -12,11 +12,13 @@ from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 
+from test_render import render_templates
+
 from gideon.host.egress import load_egress_allowlist
 from gideon.host.images import load_image_lock
 from gideon.host.lock import load_host_lock
 from gideon.host.models import HardwareProfile, load_models_lock, select_profile
-from gideon.host.render import ARTIFACTS, RenderInputs, render_all
+from gideon.host.render import RenderInputs, render_all
 from gideon.host.render.api import API_SERVICE_NAME
 from gideon.host.render.command import (
     AppliedManifest,
@@ -56,9 +58,6 @@ from gideon.host.site import WEB_ENGINE_VALUES, load_site
 ROOT = Path(__file__).resolve().parent.parent
 EXAMPLE = ROOT / "config/site.example.yaml"
 SECOND = ROOT / "tests/fixtures/site/second-office.yaml"
-TEMPLATE_PATHS = tuple(
-    dict.fromkeys(path for artifact in ARTIFACTS for path in artifact.template_paths)
-)
 SECRETS = {
     "ldap_bind_password": "bind-password",
     "postgres_openwebui_password": "postgres-password",
@@ -86,7 +85,7 @@ def inputs(site_path: Path = EXAMPLE, **overrides: object) -> RenderInputs:
         images=images,
         facts=HostFacts(("GPU-a", "GPU-b"), service_gid=4242),
         profile=profile,
-        templates={name: (ROOT / "compose" / name).read_text() for name in TEMPLATE_PATHS},
+        templates=render_templates(),
         release="fixture",
         secrets=dict(SECRETS),
         checkout="/opt/gideon",

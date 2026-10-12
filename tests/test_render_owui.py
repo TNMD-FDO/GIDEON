@@ -9,7 +9,7 @@ from string import Template
 from typing import cast
 
 import yaml  # type: ignore[import-untyped]
-from test_render import declared_source_files
+from test_render import artifact_source_files, declared_source_files, render_templates
 
 from gideon.host.egress import load_egress_allowlist
 from gideon.host.images import load_image_lock
@@ -125,7 +125,7 @@ def inputs(site_path: Path = EXAMPLE, **overrides: object) -> RenderInputs:
         images=images,
         facts=HostFacts(("GPU-a", "GPU-b"), service_gid=4242),
         profile=profile,
-        templates={name: (ROOT / "compose" / name).read_text() for name in TEMPLATE_PATHS},
+        templates=render_templates(),
         release="fixture",
         secrets=dict(SECRETS),
         checkout="/opt/gideon",
@@ -1036,6 +1036,7 @@ class CommandSecrets(unittest.TestCase):
             str(ROOT / "config/egress.yaml"): (ROOT / "config/egress.yaml").read_text(),
             "/etc/gideon/site.yaml": EXAMPLE.read_text(),
             **declared_source_files(),
+            **artifact_source_files(),
         }
         for name in TEMPLATE_PATHS:
             files[str(ROOT / "compose" / name)] = (ROOT / "compose" / name).read_text()
