@@ -130,6 +130,21 @@ SYSTEMCTL_ACTIVE_PROPOSALS = ("systemctl", "is-active", "gideon-proposals-tally.
 SYSTEMCTL_LINK_UPSTREAM_WATCH = ("systemctl", "link", f"{RENDERED}/systemd/gideon-upstream-watch.service")
 SYSTEMCTL_ENABLE_UPSTREAM_WATCH = ("systemctl", "enable", "--now", f"{RENDERED}/systemd/gideon-upstream-watch.timer")
 SYSTEMCTL_ACTIVE_UPSTREAM_WATCH = ("systemctl", "is-active", "gideon-upstream-watch.timer")
+TIMER_STARTS = (
+    (SYSTEMCTL_ENABLE, SYSTEMCTL_ACTIVE),
+    (SYSTEMCTL_ENABLE_BACKUP, SYSTEMCTL_ACTIVE_BACKUP),
+    (SYSTEMCTL_ENABLE_DRILL, SYSTEMCTL_ACTIVE_DRILL),
+    (SYSTEMCTL_ENABLE_VERIFY, SYSTEMCTL_ACTIVE_VERIFY),
+    (SYSTEMCTL_ENABLE_NIGHTLY, SYSTEMCTL_ACTIVE_NIGHTLY),
+    (SYSTEMCTL_ENABLE_PROPOSALS, SYSTEMCTL_ACTIVE_PROPOSALS),
+    (SYSTEMCTL_ENABLE_UPSTREAM_WATCH, SYSTEMCTL_ACTIVE_UPSTREAM_WATCH),
+)
+
+
+def timer_show(unit: str) -> tuple[str, ...]:
+    return ("systemctl", "show", "--property=ActiveState,UnitFileState,InactiveEnterTimestamp", unit)
+
+
 CERT = CERT_PATH
 HANDSHAKE = ("openssl", "s_client", "-connect", "127.0.0.1:443", "-servername", "gideon.example.org", "-verify_hostname", "gideon.example.org", "-CAfile", CA_PATH, "-verify_return_error")
 SERVED_FP = ("openssl", "x509", "-noout", "-fingerprint", "-sha256")
@@ -544,6 +559,11 @@ def healthy_commands(
         PROJECT_STOP: done(PROJECT_STOP),
         **healthy_ingress(),
     }
+    for _, active in TIMER_STARTS:
+        show = timer_show(active[-1])
+        commands[show] = done(
+            show, stdout="ActiveState=active\nUnitFileState=enabled\nInactiveEnterTimestamp=\n"
+        )
     # Both tiers' force-recreate commands need answers on every host, so the
     # fake covers every definition, including ones that do not apply here.
     for service in all_service_names():
@@ -1852,6 +1872,73 @@ class NewStages(unittest.TestCase):
         calls = argv_calls(host)
         self.assertLess(calls.index(SYSTEMCTL_RELOAD), calls.index(SYSTEMCTL_LINK_SERVICE))
         self.assertLess(calls.index(SYSTEMCTL_LINK_SERVICE), calls.index(SYSTEMCTL_ENABLE))
+
+    def test_person_stopped_timer_stays_stopped_and_is_reported(self) -> None:
+        commands = healthy_commands()
+        show = timer_show("gideon-eval-nightly.timer")
+        commands[show] = done(
+            show,
+            stdout=(
+                "ActiveState=inactive\nUnitFileState=enabled\n"
+                "InactiveEnterTimestamp=Tue 2026-10-06 20:49:17 CDT\n"
+            ),
+        )
+        enable = ("systemctl", "enable", f"{RENDERED}/systemd/gideon-eval-nightly.timer")
+        commands[enable] = done(enable)
+        host = ApplyHost(commands, base_files())
+        code, out, _ = apply(host)
+        self.assertEqual(code, 0, out)
+        calls = argv_calls(host)
+        self.assertIn(show, calls)
+        self.assertIn(enable, calls)
+        self.assertNotIn(SYSTEMCTL_ENABLE_NIGHTLY, calls)
+        self.assertNotIn(SYSTEMCTL_ACTIVE_NIGHTLY, calls)
+        self.assertIn(
+            "left stopped: gideon-eval-nightly.timer (stopped 2026-10-06 20:49; "
+            "resume: sudo systemctl start gideon-eval-nightly.timer)", out,
+        )
+        self.assertEqual(host.files[f"{RENDERED}/applied.yaml"], host.files[f"{RENDERED}/manifest.yaml"])
+        for enabled, active in TIMER_STARTS:
+            if enabled == SYSTEMCTL_ENABLE_NIGHTLY:
+                continue
+            self.assertIn(timer_show(active[-1]), calls)
+            self.assertIn(enabled, calls)
+            self.assertIn(active, calls)
+
+    def test_person_stopped_timer_without_timestamp_reports_unknown_time(self) -> None:
+        commands = healthy_commands()
+        show = timer_show("gideon-eval-nightly.timer")
+        commands[show] = done(
+            show, stdout="ActiveState=inactive\nUnitFileState=enabled\nInactiveEnterTimestamp=\n"
+        )
+        enable = ("systemctl", "enable", f"{RENDERED}/systemd/gideon-eval-nightly.timer")
+        commands[enable] = done(enable)
+        host = ApplyHost(commands, base_files())
+        code, out, _ = apply(host)
+        self.assertEqual(code, 0, out)
+        self.assertIn("left stopped: gideon-eval-nightly.timer (stopped time unknown;", out)
+        self.assertNotIn(SYSTEMCTL_ACTIVE_NIGHTLY, argv_calls(host))
+
+    def test_unreadable_timer_show_uses_existing_start_path(self) -> None:
+        commands = healthy_commands()
+        show = timer_show("gideon-eval-nightly.timer")
+        commands[show] = done(show, 127)
+        host = ApplyHost(commands, base_files())
+        code, out, _ = apply(host)
+        self.assertEqual(code, 0, out)
+        calls = argv_calls(host)
+        self.assertLess(calls.index(show), calls.index(SYSTEMCTL_ENABLE_NIGHTLY))
+        self.assertIn(SYSTEMCTL_ACTIVE_NIGHTLY, calls)
+        self.assertNotIn("left stopped:", out)
+
+    def test_active_timers_keep_their_enable_and_is_active_calls(self) -> None:
+        host = ApplyHost(healthy_commands(), base_files())
+        code, out, _ = apply(host)
+        self.assertEqual(code, 0, out)
+        calls = argv_calls(host)
+        for enabled, active in TIMER_STARTS:
+            self.assertLess(calls.index(timer_show(active[-1])), calls.index(enabled))
+            self.assertLess(calls.index(enabled), calls.index(active))
 
     def test_verify_requires_the_frontend_to_report_ready(self) -> None:
         host = ApplyHost(healthy_commands(), base_files())

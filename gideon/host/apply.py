@@ -1081,10 +1081,43 @@ def _never_loaded(io: Host, unit: str) -> bool:
     return result.returncode == 0 and result.stdout.strip() == "not-found"
 
 
+@dataclass(frozen=True)
+class _TimerState:
+    active: str
+    unit_file: str
+    inactive_since: str
+
+
+def _timer_state(io: Host, unit: str) -> _TimerState | None:
+    """A timer's activity, enablement, and stop time, or None when unreadable."""
+
+    try:
+        result = io.run([
+            "systemctl", "show", "--property=ActiveState,UnitFileState,InactiveEnterTimestamp", unit
+        ])
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    properties: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        if "=" not in line:
+            return None
+        key, value = line.split("=", 1)
+        if key in properties:
+            return None
+        properties[key] = value
+    if not {"ActiveState", "UnitFileState", "InactiveEnterTimestamp"} <= properties.keys():
+        return None
+    return _TimerState(
+        properties["ActiveState"], properties["UnitFileState"], properties["InactiveEnterTimestamp"]
+    )
+
+
 def _timers_stage(
     io: Host, rendered_dir: PathLike, context: _ApplyContext
 ) -> StageResult:
-    """Link the rendered service units, then enable and start the rendered timers.
+    """Link the rendered service units, then enable the rendered timers and start each one not stopped by a person.
 
     A timer refuses to start unless the service it triggers is a loaded unit,
     so services are linked (``systemctl link`` is idempotent) before any timer
@@ -1093,6 +1126,11 @@ def _timers_stage(
     record restored from a host of another kind names units this host never
     linked — counts as disabled; any other disable failure refuses.  An
     absolute path to ``enable`` links and enables in one idempotent call.
+    Each timer is read before it is started: one enabled and inactive is a
+    person's stop, and starting it would fire the run it skipped at once, so
+    it is enabled without starting — its unit file kept current — and the row
+    names it with the command that resumes it.  Any other state, an unreadable
+    one included, is enabled and started, so a failed timer still refuses.
     """
 
     service_paths = _rendered_units(context, ".service")
@@ -1131,8 +1169,23 @@ def _timers_stage(
         if failure is not None:
             return failure
     enabled: list[str] = []
+    stopped: list[str] = []
     for relative_path in timer_paths:
         unit = Path(relative_path).name
+        state = _timer_state(io, unit)
+        if state is not None and state.active == "inactive" and state.unit_file == "enabled":
+            failure = run_systemctl(
+                ["systemctl", "enable", os.fspath(rendered_root / relative_path)],
+                unit,
+                "enable",
+                f"journalctl -u {unit}",
+            )
+            if failure is not None:
+                return failure
+            match = re.search(r"\b\d{4}-\d{2}-\d{2} \d{2}:\d{2}\b", state.inactive_since)
+            stop_time = match.group() if match is not None else "time unknown"
+            stopped.append(f"{unit} (stopped {stop_time}; resume: sudo systemctl start {unit})")
+            continue
         failure = run_systemctl(
             ["systemctl", "enable", "--now", os.fspath(rendered_root / relative_path)],
             unit,
@@ -1145,7 +1198,11 @@ def _timers_stage(
         if failure is not None:
             return failure
         enabled.append(unit)
-    detail = f"enabled timers: {', '.join(enabled)}" if enabled else "timers are current"
+    details: list[str] = []
+    if enabled:
+        details.append(f"enabled timers: {', '.join(enabled)}")
+    details.extend(f"left stopped: {item}" for item in stopped)
+    detail = "; ".join(details) if details else "timers are current"
     return StageResult("timers", True, detail, "")
 
 
