@@ -397,6 +397,18 @@ def owui_environment(
         # This governs the search path and the attach route's HTML branch;
         # General uses neither vectors nor embeddings.
         "BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL": "true",
+        # The pinned frontend loads an in-process SentenceTransformer at start
+        # for any non-empty model name, the image's baked default among them,
+        # fetching it from the hub with its update check on. An empty name
+        # makes get_ef import and load nothing, so a flipped bypass fails at
+        # its first embedding with the frontend's own message instead of
+        # writing 384-dimension vectors the store refuses. The hub switch, the
+        # one the model servers carry in models.lock, closes every remaining
+        # huggingface_hub path (whisper's retry among them) without
+        # OFFLINE_MODE's wider reach. The engine key keeps its default, the
+        # in-process engine, so nothing points the frontend at gideon-embed.
+        "RAG_EMBEDDING_MODEL": "",
+        "HF_HUB_OFFLINE": "1",
         "STORAGE_PROVIDER": "local",
         "ENABLE_OLLAMA_API": "false",
         "ENABLE_OPENAI_API": "false",
@@ -511,7 +523,7 @@ def owui_environment(
             # toggles).  The Admin → Evaluations page stays.
             "ENABLE_EVALUATION_ARENA_MODELS": "false",
             # No egress off the allowlist and no self-update nudge: releases are
-            # digest-pinned, so the frontend never phones home for versions.
+            # digest-pinned, so the frontend never phones home for versions or models.
             "ENABLE_VERSION_UPDATE_CHECK": "false",
             "CONTENT_SECURITY_POLICY": CONTENT_SECURITY_POLICY,
             "TZ": inputs.site.office.timezone,

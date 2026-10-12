@@ -43,6 +43,12 @@ services:
       API_KEYS_ALLOWED_ENDPOINTS: "${ALLOWED_ENDPOINTS}"
       USER_PERMISSIONS_FEATURES_API_KEYS: "false"
       BYPASS_EMBEDDING_AND_RETRIEVAL: "true"
+      # A static template: the renderer's three self-update switches are
+      # mirrored here by hand, since the self-update table reads the render
+      # fixtures and never this file.
+      RAG_EMBEDDING_MODEL: ""
+      HF_HUB_OFFLINE: "1"
+      ENABLE_VERSION_UPDATE_CHECK: "false"
       ENABLE_OLLAMA_API: "false"
       ENABLE_OPENAI_API: "true"
       OPENAI_API_BASE_URLS: "http://stub:8000/v1"

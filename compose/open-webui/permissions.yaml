@@ -62,9 +62,17 @@ chat:
   share: false # plan rule: no chat share links
   export: true # product value
   import: true # upstream default
-  stt: true # upstream default
-  tts: true # upstream default
-  call: true # upstream default
+  # Speech input stays off: the frontend's CPU whisper was never chosen;
+  # speech-to-text is a GPU supporting model when a slice needs it. A first
+  # mic press would fetch Systran/faster-whisper-base into the uploads root.
+  # The pinned frontend gates the mic and call buttons on these leaves, but
+  # a signed-in direct call can still reach transcription below the UI. That
+  # is the accepted gate class; HF_HUB_OFFLINE makes its load refuse rather
+  # than fetch. The frontend's admins bypass these leaves by design.
+  # exempt: policy toggles.
+  stt: false # product decision; upstream default: true
+  tts: true # the read-aloud button uses browser speech synthesis, no model on the box
+  call: false # product decision; upstream default: true
   multiple_models: false # product value
   temporary: true # upstream default
   temporary_enforced: false # upstream default

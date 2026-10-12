@@ -283,6 +283,10 @@ class Environment(unittest.TestCase):
         for name in ("OPENAI_API_CONFIGS", "TASK_MODEL", "TASK_MODEL_PARAMS", "TEMPERATURE"):
             self.assertNotIn(name, env)
         self.assertEqual(env["ENABLE_VERSION_UPDATE_CHECK"], "false")
+        self.assertEqual(env["RAG_EMBEDDING_MODEL"], "")
+        self.assertEqual(env["HF_HUB_OFFLINE"], "1")
+        for name in ("RAG_EMBEDDING_ENGINE", "OFFLINE_MODE", "RAG_EMBEDDING_MODEL_AUTO_UPDATE"):
+            self.assertNotIn(name, env)
         self.assertEqual(env["CONTENT_SECURITY_POLICY"], "img-src 'self' data: blob:")
         self.assertNotIn("NO_PROXY", env)
         for value in env.values():
@@ -305,6 +309,8 @@ class Environment(unittest.TestCase):
             "ENABLE_OTEL_LOGS": "false",
             "ENABLE_QUERIES_CACHE": "false",
             "LOGURU_DIAGNOSE": "false",
+            "RAG_EMBEDDING_MODEL": "",
+            "HF_HUB_OFFLINE": "1",
             "CONTENT_SECURITY_POLICY": "img-src 'self' data: blob:",
         }
         drill = drill_compose_document(inputs())
@@ -407,6 +413,9 @@ class Environment(unittest.TestCase):
         self.assertEqual(env["USER_PERMISSIONS_FEATURES_WEB_SEARCH"], "true")
         self.assertEqual(env["USER_PERMISSIONS_CHAT_CONTROLS"], "false")
         self.assertEqual(env["USER_PERMISSIONS_CHAT_WEB_UPLOAD"], "false")
+        self.assertEqual(env["USER_PERMISSIONS_CHAT_STT"], "false")
+        self.assertEqual(env["USER_PERMISSIONS_CHAT_CALL"], "false")
+        self.assertEqual(env["USER_PERMISSIONS_CHAT_TTS"], "true")
         self.assertEqual(env["USER_PERMISSIONS_CHAT_MULTIPLE_MODELS"], "false")
         self.assertEqual(env["USER_PERMISSIONS_SHARING_PROMPTS"], "true")
         for name, value in env.items():

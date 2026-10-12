@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.136](docs/release-notes/v0.3.136.md) — 2026-10-12 — the chat frontend loads no embedding model, reaches no model hub, and offers no microphone
 - [v0.3.135](docs/release-notes/v0.3.135.md) — 2026-10-12 — ten directions to Gideon Transcribe
 - [v0.3.134](docs/release-notes/v0.3.134.md) — 2026-10-12 — tranche 1 installed and ingested
 - [v0.3.133](docs/release-notes/v0.3.133.md) — 2026-10-12 — render --diff before a minted secret

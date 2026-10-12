@@ -52,9 +52,9 @@ groups:
         share: false
         export: true
         import: true
-        stt: true
+        stt: false
         tts: true
-        call: true
+        call: false
         multiple_models: false
         temporary: true
         temporary_enforced: false
@@ -125,9 +125,9 @@ groups:
         share: false
         export: true
         import: true
-        stt: true
+        stt: false
         tts: true
-        call: true
+        call: false
         multiple_models: false
         temporary: true
         temporary_enforced: false
@@ -200,9 +200,9 @@ groups:
         share: false
         export: true
         import: true
-        stt: true
+        stt: false
         tts: true
-        call: true
+        call: false
         multiple_models: false
         temporary: true
         temporary_enforced: false

@@ -10,6 +10,8 @@ One OpenAI-compatible connection, with no guardrail and no stamp of GIDEON's lef
 
 The frontend is also given `VECTOR_DB=qdrant` at `http://qdrant:6333`, the collection prefix `owui`, multitenancy mode on, and a read-only key in its env file. In that mode its client names five shared collections under the prefix and distinguishes each frontend collection by a `tenant_id` on every point. A General turn takes nothing from the store. In ordinary use a file's deletion is the one action that asks it for an existence check; when the store is down, that check fails after the file is already gone. The store refuses every write under the frontend's key. A second frontend is given none of these settings or the key.
 
+The frontend is given no embedding model and no hub: `RAG_EMBEDDING_MODEL` is empty and `HF_HUB_OFFLINE=1` on every frontend. The pinned image is the full build, but the data mount hides its baked models, so a start had fetched the model's repository (888 MB) into the uploads root behind one hub request answered 200. With the name empty, startup imports and loads nothing; a flipped bypass fails at its first embedding with the frontend's own message. `chat.stt` and `chat.call` are off because the frontend's CPU whisper was never chosen — speech-to-text is a GPU supporting model when a slice wants it — while `chat.tts` stays on as the browser's synthesis. A second frontend is given none of this.
+
 ## 2. What General takes from the frontend
 
 | # | Dependency | What GIDEON relies on | If it changes |

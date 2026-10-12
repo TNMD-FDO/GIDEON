@@ -49,7 +49,13 @@ SELF_UPDATE_SWITCHES: Mapping[str, Mapping[str, str]] = {
     },
     # OpenSearch's image has no update check; nothing in it updates itself.
     "opensearch": {},
-    "open-webui": {"ENABLE_VERSION_UPDATE_CHECK": "false"},
+    # The version check is off; no embedding model is named, so start loads
+    # and fetches none; hub offline closes paths below the UI too.
+    "open-webui": {
+        "ENABLE_VERSION_UPDATE_CHECK": "false",
+        "RAG_EMBEDDING_MODEL": "",
+        "HF_HUB_OFFLINE": "1",
+    },
     "gideon-generator": {
         "VLLM_NO_USAGE_STATS": "1",
         "DO_NOT_TRACK": "1",
@@ -161,16 +167,36 @@ class SelfUpdateContracts(unittest.TestCase):
 
     def test_missing_or_enabled_frontend_switch_names_the_registry(self) -> None:
         missing: dict[str, Any] = {"services": {"open-webui": {"environment": {}}}}
+        expected = SELF_UPDATE_SWITCHES["open-webui"]
         enabled: dict[str, Any] = {
             "services": {
-                "open-webui": {"environment": {"ENABLE_VERSION_UPDATE_CHECK": "true"}}
+                "open-webui": {
+                    "environment": {**expected, "ENABLE_VERSION_UPDATE_CHECK": "true"}
+                }
             }
         }
-        for project in (missing, enabled):
-            with self.subTest(project=project):
-                errors = check_self_update_switches(project)
-                self.assertEqual(len(errors), 1)
-                self.assertIn("SELF_UPDATE_SWITCHES", errors[0])
+        errors = check_self_update_switches(missing)
+        self.assertEqual(len(errors), len(expected))
+        for switch in expected:
+            self.assertTrue(any(switch in error and "SELF_UPDATE_SWITCHES" in error for error in errors))
+        errors = check_self_update_switches(enabled)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("ENABLE_VERSION_UPDATE_CHECK", errors[0])
+        self.assertIn("SELF_UPDATE_SWITCHES", errors[0])
+        default_model: dict[str, Any] = {
+            "services": {
+                "open-webui": {
+                    "environment": {
+                        **expected,
+                        "RAG_EMBEDDING_MODEL": "sentence-transformers/all-MiniLM-L6-v2",
+                    }
+                }
+            }
+        }
+        errors = check_self_update_switches(default_model)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("RAG_EMBEDDING_MODEL", errors[0])
+        self.assertIn("SELF_UPDATE_SWITCHES", errors[0])
 
     def test_table_names_match_registry(self) -> None:
         self.assertEqual(check_self_update_service_names(all_service_names()), [])
