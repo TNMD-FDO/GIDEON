@@ -4260,9 +4260,9 @@ class DockerDaemonLeafTests(unittest.TestCase):
     def test_leaf_table_names_exactly_the_owned_keys(self) -> None:
         """The leaf table and OWNED_KEYS move together, and the parse bites."""
 
-        if absent_from_export("docs/archi/host.md", ROOT):
+        if absent_from_export("docs/archi/provision.md", ROOT):
             self.skipTest("the architecture leaf is absent from this exported tree")
-        leaf = (ROOT / "docs/archi/host.md").read_text()
+        leaf = (ROOT / "docs/archi/provision.md").read_text()
         names = {key.name for key in dockerdaemon.OWNED_KEYS}
         self.assertEqual(self._table_names(leaf), names)
 
@@ -4274,9 +4274,9 @@ class DockerDaemonLeafTests(unittest.TestCase):
     def test_address_pool_row_states_default_need_and_site_condition(self) -> None:
         """The leaf gives the pool's default, one-entry need, and site condition."""
 
-        if absent_from_export("docs/archi/host.md", ROOT):
+        if absent_from_export("docs/archi/provision.md", ROOT):
             self.skipTest("the architecture leaf is absent from this exported tree")
-        leaf = (ROOT / "docs/archi/host.md").read_text()
+        leaf = (ROOT / "docs/archi/provision.md").read_text()
         rows = [
             line for line in leaf.splitlines()
             if line.startswith("| `default-address-pools` |")
@@ -4316,9 +4316,9 @@ class BoxWideSettingsLeafTests(unittest.TestCase):
         return pairs
 
     def test_leaf_table_pairs_match_step_settings(self) -> None:
-        if absent_from_export("docs/archi/host.md", ROOT):
+        if absent_from_export("docs/archi/provision.md", ROOT):
             self.skipTest("the architecture leaf is absent from this exported tree")
-        leaf = (ROOT / "docs/archi/host.md").read_text()
+        leaf = (ROOT / "docs/archi/provision.md").read_text()
         pairs = {(setting.name, step.name) for step in STEPS for setting in step.settings}
         self.assertEqual(self._table_pairs(leaf), pairs)
 

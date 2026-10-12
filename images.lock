@@ -52,14 +52,22 @@ images:
   qdrant:
     source: docker.io/qdrant/qdrant:v1.19.1
     digest: sha256:12364fe851b9f17356fc88189fc06d1b521262e04659ec7345975b00c9246a10
-  # The lexical index: OpenSearch's default image, resolved on the box with
-  # `skopeo inspect --raw` on 2026-10-05. Upstream re-pushes a
-  # version tag with refreshed operating-system packages, so the digest moves
-  # under one tag. A version move waits for the service to be healthy and green
-  # on the box; nothing in the image updates itself.
+  # OpenSearch's base and its digest move as every built base does. The plugin
+  # version equals the base tag plus .0; its release has no published checksum,
+  # so the lock records the asset's SHA-256 for the Dockerfile to compare.
+  # A base bump needs the matching plugin version and release digest typed by
+  # hand, then the box build; without that release, the build fails. Neither
+  # plugin argument has an upstream watch.
   opensearch:
-    source: docker.io/opensearchproject/opensearch:3.8.0
-    digest: sha256:fafe3fc3587088674669235575aa166228c48bdb940294a8cdbbc1da75236a40
+    build: images/opensearch
+    base: docker.io/opensearchproject/opensearch:3.8.0
+    base_digest: sha256:fafe3fc3587088674669235575aa166228c48bdb940294a8cdbbc1da75236a40
+    build_args:
+      PROMETHEUS_EXPORTER_VERSION: 3.8.0.0
+      PROMETHEUS_EXPORTER_SHA256: c9e74cacd000299627be8a3b132600fa21e6b4e7912f0e6e3409528d3d44cd6a
+    watch: {}
+    inputs_digest: sha256:036ddbb265fe11677582466cf570b9e0b98ad356bb617ebaf84301644cceb62f
+    digest: sha256:a227e338a5f2920119167cf70b39dcf0a920e407df67e1c1f6f7f64bc27b0e8c
   # The observability tier: seven mirrored
   # pins resolved on the box with `skopeo inspect --raw` on 2026-09-03. Docker
   # Hub wherever the upstream publishes there; the DCGM exporter is nvcr.io

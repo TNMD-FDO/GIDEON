@@ -60,6 +60,12 @@ _GIDEON_SMOKE_SCRIPT: Final[str] = (
 
 SMOKE: Final[Mapping[str, Smoke]] = {
     "postgres": Smoke(("pgbackrest", "version"), ("PGBACKREST_VERSION",)),
+    # The OpenSearch smoke reads the installed plugin's descriptor without
+    # starting the node; the generic check finds its version there.
+    "opensearch": Smoke(
+        ("cat", "/usr/share/opensearch/plugins/prometheus-exporter/plugin-descriptor.properties"),
+        ("PROMETHEUS_EXPORTER_VERSION",),
+    ),
     "gideon": Smoke(("python", "-c", _GIDEON_SMOKE_SCRIPT), (
         "STARLETTE_VERSION",
         "UVICORN_VERSION",

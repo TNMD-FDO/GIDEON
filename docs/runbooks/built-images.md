@@ -1,7 +1,7 @@
 # Building a GIDEON image (CSA runbook material)
 
-GIDEON's own images — `postgres`, Postgres 18 plus pgBackRest, and
-`gideon`, the Python service image —
+GIDEON's own images — `postgres`, Postgres 18 plus pgBackRest;
+`gideon`, the Python service image; and `opensearch`, the server with its metrics plugin —
 are built **on the box, never by CI**: a build is not byte-reproducible, so
 `images.lock` records the digest that was actually pushed, and the hosted checks
 prove the lock is self-consistent (`inputs_digest` recomputed from the base
@@ -21,6 +21,10 @@ does not rebuild.
 - A change under `images/<name>/` — the Dockerfile is a build input, so the
   lock's `inputs_digest` stops matching and the hosted checks go red.
 - A new built pin, written with `digest: unbuilt` and `inputs_digest: unbuilt`.
+
+For `images.opensearch`, pin-watch proposes a base move but watches neither
+plugin build argument. Type the matching plugin version (the base tag plus `.0`)
+and the release page's asset digest into the lock by hand before building.
 
 A pin-watch pull request on a model pin is not an image build. Decide it with
 `docs/runbooks/model-upgrade.md` before merging it.
@@ -70,7 +74,14 @@ interpreter and dependency set of `gideon-api`, `gideon-worker`, and
 containers. A Procrastinate
 bump carries more than the rebuild: §6.
 
-The Dockerfile builds `fast-diff-match-patch` from its pinned source in a builder
+The `opensearch` build also follows steps 1–5. Run `sudo python3 -m
+tools.imagebuild opensearch --to 127.0.0.1:5000`, then `sudo python3 -m
+tools.imagebuild opensearch --to 127.0.0.1:5000 --check`. Its smoke uses
+`cat` as the entrypoint to read
+`/usr/share/opensearch/plugins/prometheus-exporter/plugin-descriptor.properties`
+and checks the installed plugin version without starting the node.
+
+The `gideon` Dockerfile builds `fast-diff-match-patch` from its pinned source in a builder
 stage because upstream has no CPython 3.14 wheel. The final stage installs that
 wheel with the other pinned binary packages. Hosted checks do not compile it;
 the box build and smoke check prove it. Remove the builder stage when upstream
@@ -100,7 +111,10 @@ once, one pull request each. Complete them with one build:
 - `postgres: present` — the built digest the lock names is in the registry.
 - `gideon/base: present | mirrored` and `gideon: present` have the same
   meanings for the service image and its built digest.
-- `postgres: failed — … Fix: Build and push it with …` — build per §2, or,
+- `opensearch/base: present | mirrored` and `opensearch: present` have the same
+  meanings for the server image and its built digest.
+- `postgres: failed — … Fix: Build and push it with …` or the same row for
+  `opensearch` — build as above, or,
   after a `/data/registry` loss, restore the registry from the backup set
   (`gideon restore --from staging`, or `--from target`;
   `/data/registry` is one of the set's file roots, so restoring the set brings
@@ -114,8 +128,10 @@ once, one pull request each. Complete them with one build:
 ## 4. Egress
 
 The bases come from the loopback registry. Inside the builds, apt reaches
-`apt.postgresql.org` and `deb.debian.org`, and the `gideon` build reaches
-`pypi.org` and `files.pythonhosted.org` — the allowlist's `image-build` group
+`apt.postgresql.org` and `deb.debian.org`, the `gideon` build reaches
+`pypi.org` and `files.pythonhosted.org`, and the `opensearch` build reaches
+`github.com` and `release-assets.githubusercontent.com` for the plugin zip and
+its redirect — the allowlist's `image-build` group
 (`config/egress.yaml`), probed by the tool before it builds and never by
 preflight, because an office never builds. Behind `egress_proxy` the tool
 passes Docker's predefined proxy build arguments, which Docker keeps out of

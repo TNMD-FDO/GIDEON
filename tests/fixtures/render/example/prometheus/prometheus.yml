@@ -46,6 +46,13 @@ scrape_configs:
         target_label: instance
       - target_label: __address__
         replacement: blackbox-exporter:9115
+  - job_name: opensearch-metrics
+    metrics_path: /_prometheus/metrics
+    basic_auth:
+      username: metrics
+      password_file: /run/secrets/opensearch_metrics_password
+    static_configs:
+      - targets: [opensearch:9200]
   - job_name: cadvisor
     static_configs:
       - targets: [cadvisor:8080]

@@ -8,7 +8,7 @@ assistant, on one box the office controls. Built by TNMD-FDO (the Office of
 the Federal Public Defender, Middle District of Tennessee) and designed from
 day one for distribution: clone a tag, edit `site.yaml`, run one script.
 
-**Status:** 0.x — slice 0 (platform) complete at `v0.1.0`, the clean-VM acceptance at minor tags its standing proof; slice 1 (General) complete at `v0.2.0`, with no user on the box until go-live; slice 2 (eval harness) complete at `v0.3.0`; slice 3 (corpus machinery and tranche 1) next; this tree is `v0.3.137`.
+**Status:** 0.x — slice 0 (platform) complete at `v0.1.0`, the clean-VM acceptance at minor tags its standing proof; slice 1 (General) complete at `v0.2.0`, with no user on the box until go-live; slice 2 (eval harness) complete at `v0.3.0`; slice 3 (corpus machinery and tranche 1) next; this tree is `v0.3.138`.
 What each release changed is in [`CHANGELOG.md`](CHANGELOG.md), one line per release; from `v0.2.0` each line links its release note. Later-slice commands still print "not implemented".
 
 ## Install
@@ -113,7 +113,7 @@ python3 -m tools.gate
 | Image pins (mirrored: source + digest; built: base + inputs + pushed digest) | [`images.lock`](images.lock) |
 | The development toolchain, and a copy of the `gideon` image's set for mypy and the unit suite (what a fresh `.venv` and the `checks` job install, on either runner; the product on a box uses neither) | [`requirements-dev.txt`](requirements-dev.txt) |
 | Model pins and hardware profiles (per profile: the `requires` minimums, the model set by Hugging Face repo + revision + per-file sha256 and size, the engine baseline the model is served with) | [`models.lock`](models.lock) |
-| GIDEON-built images (`postgres` and `gideon`; Dockerfiles with no pin in them; `python3 -m tools.imagebuild <name>` on the box builds, records, and `--check`s) | [`images/`](images/) · [`tools/imagebuild/`](tools/imagebuild/) · [`docs/runbooks/built-images.md`](docs/runbooks/built-images.md) |
+| GIDEON-built images (`postgres`, `gideon`, and `opensearch`; Dockerfiles with no pin in them; `python3 -m tools.imagebuild <name>` on the box builds, records, and `--check`s) | [`images/`](images/) · [`tools/imagebuild/`](tools/imagebuild/) · [`docs/runbooks/built-images.md`](docs/runbooks/built-images.md) |
 | The pin watch (one pull request per pin bump across the three product locks, the model pins and the skills' record included; `python3 -m tools.pinwatch --dry-run` from a checkout; `python3 -m tools.pinwatch.hub <repo>` prints a model's files block by hand; `python3 -m tools.pinwatch.bumped` generates the release note's "What was bumped" section) | [`tools/pinwatch/`](tools/pinwatch/) |
 | Rendered-config templates (Caddyfile, the frontend's permission set and General's texts, `pgbackrest.conf`, the reconcile, backup, drill, and verify-all units, the Prometheus and probe configuration, Grafana's LDAP, provisioning, alert rules — the search probe's among them — the four boards, and the GPU exporter's counters file; SearXNG's settings are built in code from the site file) | [`compose/`](compose/) |
 | Release notes (the user-facing note every tag from `v0.2.0` ships, written from the template at version 3, its "What was bumped" section pasted from the generator, and its `## Breaking` section at a major) | [`docs/release-notes/`](docs/release-notes/) |

@@ -4,7 +4,7 @@ inputs:
   site_sha256: "3032cbc05ff6133992600e2f7b9f12e8488f068b2a747e88a45159753d250cb1"
   host_lock_sha256: "c487a5a60259c393ac20649336ff45b24747e8155aa0e4d5afe84e51e8424680"
   models_lock_sha256: "8c970d102a9d88cfe1fea4bb82cc26eb8f72078005bde98649343aed72db852e"
-  egress_sha256: "dd0a3a046aa33ebbf1c2d740e6e7c254d0e15bc9fddb1ea886be90158aeb0c35"
+  egress_sha256: "d41c0ffb68aef4e1e677f53cca1fbe102e1f61c17e41e2173226b1db993064f8"
   hardware_profile: "2x96v-256d"
   images_lock_version: 1
   source_digests:
@@ -15,11 +15,11 @@ inputs:
   build_box: false
 files:
   compose.yaml:
-    sha256: "9e901b4f3feb5b39e4905a2ac94cbfe11c89a7b239171ed94b6c6d8e234419e0"
+    sha256: "7fe6ac8ef6777a4cf41e6aac2e742c3ab55ac1e0729230bb3000938d131eda9e"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
-    sha256: "812cb9c8aef88c2b5fad67af6b3f9a6952b5ee57089309989c75981084c868e8"
+    sha256: "38d7786c479923f7eefe9fa83e684b9d3dc3d130ab50f45eb1e60e18f7d4630c"
     mode: "0644"
     owners:
       - "prometheus"
@@ -118,7 +118,7 @@ files:
     owners:
       - "gideon-egress"
   "opensearch/opensearch.yml":
-    sha256: "dd8b64053e055cac789d176cf574384179712b63baed683484a8f0a1d1bdabfa"
+    sha256: "ff57e954789640c0d34468802f4daa7a16b40057dfd92e34077c0508dcc3ca2a"
     mode: "0644"
     owners:
       - "opensearch"
@@ -128,17 +128,17 @@ files:
     owners:
       - "opensearch"
   "opensearch/security/internal_users.yml":
-    sha256: "2cf335fa389e65166f022e18100e74706a8483647c6802f2f996efee43b5ae32"
+    sha256: "ed3ca6d06a9d9211aad9a180b2f6dc6f570d209c79f6a95c6ac6c2e13a77f434"
     mode: "0644"
     owners:
       - "opensearch"
   "opensearch/security/roles_mapping.yml":
-    sha256: "21d243aebe9625546b4866baf991ada95deb4df9d87cc618bf51941891585ca5"
+    sha256: "1819e1f0df25f1ad1854c9c26b7ff42fd9d2fac8b82ac8ed02fb528475d64a0a"
     mode: "0644"
     owners:
       - "opensearch"
   "opensearch/security/roles.yml":
-    sha256: "e16c9e2a11302cc12c6f528f3b94cc56847e20661e4f7fedfaa37e0e5b891a95"
+    sha256: "cf3de09aa3f280348267b883b6845440739ac8ada6c97da9ef90927c97926a82"
     mode: "0644"
     owners:
       - "opensearch"
@@ -215,12 +215,12 @@ files:
       - "dcgm-exporter"
 services:
   caddy: "6ab86c4b4080e9f36a8a33ac2c17068802e1161844d10a4474b8285c69c1650f"
-  prometheus: "1aa6707da47bf62b663164feee412a28b366df50abd2d41dd32dfd956ebc0147"
+  prometheus: "9b4417e59fa00d36fa6b4e73406cde7d5fd6749334c41556a49e932c36c0c351"
   node-exporter: "a581b1f8a717fdaab3b3e0ffa46114516da01f2c51c85838380c168d506632df"
   grafana: "e989e41db628460bdae25dfc5bb12bb155d4fa2572680907dabae30a8086578a"
   postgres: "2148d7061855b0cc304400c260a9da53b7a1e9eb251fcb9a4947e8c15de03c52"
   qdrant: "a9d3665d4760688564d7c20a7c525a09eb8f5a2418a56514bd3c323b50f2efdc"
-  opensearch: "6974df63d365dd3dfecfc1d55700bf66c97f19e16447f19db2baa95bafae883d"
+  opensearch: "7902e93c4287e0f4f988683d4487145b3f9b428d3e71bcd29c66b7e401d1c915"
   open-webui: "afd3ec2b31ba2950037ad572b7e0c7235b9ccccdb56eb249236e4e0ae7444075"
   gideon-generator: "84079f1b7d3e982523b147ec321f76cfdd3059213f4eba877d26cdc59b6e3912"
   gideon-embed: "a1799c9ceff0b6159be9b8588da119879ef38280aaeb577c6a3542828eb20d8e"
@@ -231,7 +231,7 @@ services:
   postgres-exporter: "d36e03785dee0d52e65763c1d7f6dda2c4c09b17c129d7e8439fe5994338bfe7"
   cadvisor: "7bd0e221d909e45fc1555750f1839250774b89d6333a0fb7b0443bcca62ec837"
   blackbox-exporter: "5b3942cc5a72cac952fe8085233662b727ad6e9ee6caf933d7f4590572db8024"
-top_level: "87d2498c99fcb5405b14a786285ed8ba1478f4943a5d85a46ded52f9f03952f0"
+top_level: "88b192fa9ed8633c202f0466a972c6b3a050f779d6afd94aea51ee3e5e33e149"
 top_level_parts:
   static: "9d8f1896c9ac3c179131b112cf67afcceeee7672c19635149ea32c986c4dcb6a"
   secrets:
@@ -239,6 +239,11 @@ top_level_parts:
       sha256: "7f0573b4c1802e8ff8b41a7577595a36ff897f93a664cbda3c291a1da8cd17cf"
       mounts:
         - "caddy"
+    opensearch_metrics_password:
+      sha256: "210367e66a8a9056cffa4f9061667ed242c900ee61c6e9a2ff99fc1f0f319027"
+      mounts:
+        - "prometheus"
+        - "opensearch"
     grafana_admin_password:
       sha256: "a391a06547292cae5d49086bdf79ba483da0b0cb0f7b3bf0e767b17f0ed1f8dd"
       mounts:

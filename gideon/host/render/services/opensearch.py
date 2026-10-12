@@ -11,6 +11,8 @@ from gideon.host.render.opensearch import (
     OPENSEARCH_DATA_MOUNT,
     OPENSEARCH_DATA_ROOT,
     OPENSEARCH_KEY_SECRET_NAME,
+    OPENSEARCH_METRICS_PASSWORD_VARIABLE,
+    OPENSEARCH_METRICS_SECRET_NAME,
     OPENSEARCH_NO_GPU_HEAP_MIB,
     OPENSEARCH_PASSWORD_SECRET_NAME,
     OPENSEARCH_PASSWORD_VARIABLE,
@@ -94,6 +96,11 @@ def opensearch_service(
                     OPENSEARCH_PASSWORD_VARIABLE,
                     "OpenSearch password",
                 ),
+                MountedSecret(
+                    f"/run/secrets/{OPENSEARCH_METRICS_SECRET_NAME}",
+                    OPENSEARCH_METRICS_PASSWORD_VARIABLE,
+                    "OpenSearch metrics password",
+                ),
             ),
             "./opensearch-docker-entrypoint.sh",
             OPENSEARCH_SERVICE_NAME,
@@ -109,6 +116,7 @@ def opensearch_service(
         ],
         "secrets": [
             OPENSEARCH_PASSWORD_SECRET_NAME,
+            OPENSEARCH_METRICS_SECRET_NAME,
             OPENSEARCH_KEY_SECRET_NAME,
             OPENSEARCH_CERT_SECRET_NAME,
         ],

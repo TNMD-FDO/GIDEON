@@ -12,8 +12,13 @@ from gideon.host.render.api import API_JOB_NAME, api_enabled, api_health_url
 from gideon.host.render.engine import MODEL_SERVERS, metrics_target
 from gideon.host.render.opensearch import (
     OPENSEARCH_JOB_NAME,
+    OPENSEARCH_METRICS_JOB_NAME,
+    OPENSEARCH_METRICS_PATH,
+    OPENSEARCH_METRICS_SECRET_NAME,
+    OPENSEARCH_METRICS_USER,
     OPENSEARCH_SERVICE_NAME,
     opensearch_health_url,
+    opensearch_metrics_target,
 )
 from gideon.host.render.qdrant import QDRANT_JOB_NAME, qdrant_metrics_target
 from gideon.host.render.searxng import (
@@ -68,13 +73,22 @@ def _probe_job(name: str, target: str) -> str:
 
 
 # The template's $store_jobs line, on every host: the vector store's metrics
-# listener sits outside its API key. OpenSearch's health path answers without
-# a credential, so its probe holds none; its own probe_success rule pages on it.
+# listener sits outside its API key. OpenSearch's health probe needs no
+# credential; its metrics job reads Prometheus's first credential from a
+# mounted file at each scrape.
 _STORE_JOBS: Final = (
     f"  - job_name: {QDRANT_JOB_NAME}\n"
     "    static_configs:\n"
     f"      - targets: [{qdrant_metrics_target()}]\n"
     + _probe_job(OPENSEARCH_JOB_NAME, opensearch_health_url(OPENSEARCH_SERVICE_NAME))
+    + "\n"
+    f"  - job_name: {OPENSEARCH_METRICS_JOB_NAME}\n"
+    f"    metrics_path: {OPENSEARCH_METRICS_PATH}\n"
+    "    basic_auth:\n"
+    f"      username: {OPENSEARCH_METRICS_USER}\n"
+    f"      password_file: /run/secrets/{OPENSEARCH_METRICS_SECRET_NAME}\n"
+    "    static_configs:\n"
+    f"      - targets: [{opensearch_metrics_target()}]"
 )
 # The template's $search_jobs line: one blackbox probe of SearXNG's health
 # endpoint, rendered only while the service is (web.search on) and as one

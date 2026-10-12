@@ -179,7 +179,9 @@ same command is run again after the fix.
    nothing else consumes it yet), `qdrant_read_only_api_key` (the store
    recreated in seconds, then the frontend; signed-in sessions stay because
    the session key does not move), `opensearch_password` (the lexical store
-   recreated, about ten seconds to healthy), `opensearch_transport_key` and
+   recreated, about ten seconds to healthy), `opensearch_metrics_password`
+   (the lexical store and Prometheus recreated; the scrape resumes within a
+   minute), `opensearch_transport_key` and
    `opensearch_transport_cert` (the lexical store recreated; rotating the
    certificate alone renews it from its standing key before its ten-year end
    date, and rotating the key re-issues the certificate with it), and the two minted keys `gideon_admin_api_key` and

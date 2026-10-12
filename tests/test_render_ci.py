@@ -8,6 +8,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import yaml  # type: ignore[import-untyped]
+from test_secrets import FakeHost
 
 from gideon.host.egress import load_egress_allowlist
 from gideon.host.images import load_image_lock, parse_registry, reference
@@ -39,6 +40,7 @@ from gideon.host.render.ci import (
     CI_ROOT,
     CI_SECRET_NAMES,
     CI_SECRETS_DIR,
+    CI_SKIPPED_SECRETS,
     CI_WIPE_PATHS,
     RELAY_MEMORY_LIMIT,
     RELAY_SERVICE_NAME,
@@ -65,7 +67,11 @@ from gideon.host.render.engine import (
 )
 from gideon.host.render.facts import HostFacts
 from gideon.host.render.opensearch import (
+    OPENSEARCH_CERT_SECRET_NAME,
     OPENSEARCH_DATA_MOUNT,
+    OPENSEARCH_KEY_SECRET_NAME,
+    OPENSEARCH_METRICS_SECRET_NAME,
+    OPENSEARCH_PASSWORD_SECRET_NAME,
     OPENSEARCH_SECURITY_PATH,
     OPENSEARCH_SERVICE_NAME,
     OPENSEARCH_SETTINGS_PATH,
@@ -87,6 +93,7 @@ from gideon.host.render.services.open_webui import OpenWebuiService
 from gideon.host.render.services.opensearch import OpensearchService
 from gideon.host.render.services.postgres import PostgresService
 from gideon.host.render.services.qdrant import QdrantService
+from gideon.host.secrets import current_directory, ensure_generated, select_directory
 from gideon.host.site import load_site
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -247,6 +254,15 @@ class Compose(unittest.TestCase):
             ],
         )
         self.assertNotIn(OPENSEARCH_SNAPSHOTS_ROOT, str(opensearch["volumes"]))
+        self.assertEqual(
+            opensearch["secrets"],
+            [
+                OPENSEARCH_PASSWORD_SECRET_NAME,
+                OPENSEARCH_METRICS_SECRET_NAME,
+                OPENSEARCH_KEY_SECRET_NAME,
+                OPENSEARCH_CERT_SECRET_NAME,
+            ],
+        )
         production_environment = mapping(
             OpensearchService().block(render_inputs, target)["environment"]
         )
@@ -483,6 +499,18 @@ class Compose(unittest.TestCase):
             },
         )
         self.assertIn(ENGINE_SECRET_NAME, names)
+
+    def test_sibling_mints_its_own_metrics_password(self) -> None:
+        original = current_directory()
+        try:
+            select_directory(Path(CI_SECRETS_DIR))
+            host = FakeHost(dirs={CI_SECRETS_DIR})
+            result = ensure_generated(host, skip=CI_SKIPPED_SECRETS)
+            self.assertTrue(result.ok, result.problem)
+            self.assertIn(OPENSEARCH_METRICS_SECRET_NAME, result.created)
+            self.assertIn(f"{CI_SECRETS_DIR}/{OPENSEARCH_METRICS_SECRET_NAME}", host.files)
+        finally:
+            select_directory(original)
 
     def test_wipe_paths_are_all_inside_the_ci_root(self) -> None:
         self.assertTrue(CI_SECRETS_DIR.startswith(f"{CI_ROOT}/"))

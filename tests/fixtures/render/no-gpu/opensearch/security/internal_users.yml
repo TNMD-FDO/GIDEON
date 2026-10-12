@@ -5,3 +5,6 @@ _meta:
 gideon:
   hash: "${envbc.GIDEON_OPENSEARCH_PASSWORD}"
   reserved: true
+metrics:
+  hash: "${envbc.GIDEON_OPENSEARCH_METRICS_PASSWORD}"
+  reserved: true

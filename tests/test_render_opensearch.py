@@ -2,9 +2,9 @@
 
 import hashlib
 import subprocess
-import sys
 import tempfile
 import unittest
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 
@@ -29,6 +29,12 @@ from gideon.host.render.opensearch import (
     OPENSEARCH_HEALTH_PATH,
     OPENSEARCH_JOB_NAME,
     OPENSEARCH_KEY_SECRET_NAME,
+    OPENSEARCH_METRICS_JOB_NAME,
+    OPENSEARCH_METRICS_PASSWORD_VARIABLE,
+    OPENSEARCH_METRICS_PATH,
+    OPENSEARCH_METRICS_ROLE,
+    OPENSEARCH_METRICS_SECRET_NAME,
+    OPENSEARCH_METRICS_USER,
     OPENSEARCH_NO_GPU_HEAP_MIB,
     OPENSEARCH_PASSWORD_SECRET_NAME,
     OPENSEARCH_PASSWORD_VARIABLE,
@@ -40,10 +46,11 @@ from gideon.host.render.opensearch import (
     OPENSEARCH_USER,
     opensearch_health_url,
     opensearch_heap_mib,
+    opensearch_metrics_target,
 )
 from gideon.host.render.prometheus import PrometheusConfigArtifact
-from gideon.host.render.services import MountedSecret, secret_wrapper
 from gideon.host.render.services.opensearch import OpensearchService, opensearch_service
+from gideon.host.render.services.prometheus import PrometheusService
 
 HOSTS = (inputs(EXAMPLE), inputs(SECOND), inputs(EXAMPLE, no_gpu=True))
 SECURITY_FILES = (
@@ -104,6 +111,7 @@ class Block(unittest.TestCase):
         for base_inputs in HOSTS:
             secret_values = {
                 OPENSEARCH_PASSWORD_SECRET_NAME: "fictitious-opensearch-password",
+                OPENSEARCH_METRICS_SECRET_NAME: "fictitious-metrics-password",
                 OPENSEARCH_KEY_SECRET_NAME: PAIR_KEY_TEXT,
                 OPENSEARCH_CERT_SECRET_NAME: PAIR_CERT_TEXT,
             }
@@ -156,6 +164,7 @@ class Block(unittest.TestCase):
                     block["secrets"],
                     [
                         OPENSEARCH_PASSWORD_SECRET_NAME,
+                        OPENSEARCH_METRICS_SECRET_NAME,
                         OPENSEARCH_KEY_SECRET_NAME,
                         OPENSEARCH_CERT_SECRET_NAME,
                     ],
@@ -193,59 +202,67 @@ class Block(unittest.TestCase):
 
 
 class Wrapper(unittest.TestCase):
-    def test_missing_and_empty_password_refuse_before_server(self) -> None:
+    def run_rendered_entrypoint(
+        self, files: Mapping[str, str | None]
+    ) -> subprocess.CompletedProcess[str]:
+        block = service_blocks(inputs())[OPENSEARCH_SERVICE_NAME]
+        assert isinstance(block, dict)
+        entrypoint = block["entrypoint"]
+        command = block["command"]
+        assert isinstance(entrypoint, list)
+        assert isinstance(command, list)
+        self.assertEqual(entrypoint[:2], ["sh", "-c"])
+        self.assertEqual(entrypoint[3], OPENSEARCH_SERVICE_NAME)
         with tempfile.TemporaryDirectory() as directory:
-            absent = Path(directory) / "absent"
-            empty = Path(directory) / "empty"
-            empty.write_text("")
-            for secret in (absent, empty):
-                with self.subTest(secret=secret):
-                    result = subprocess.run(
-                        secret_wrapper(
-                            (
-                                MountedSecret(
-                                    str(secret),
-                                    OPENSEARCH_PASSWORD_VARIABLE,
-                                    "OpenSearch password",
-                                ),
-                            ),
-                            sys.executable,
-                            OPENSEARCH_SERVICE_NAME,
-                        )
-                        + ["-c", "raise SystemExit(23)"],
-                        check=False,
-                        capture_output=True,
-                        text=True,
-                    )
-                    self.assertEqual(result.returncode, 1)
-                    self.assertEqual(len(result.stderr.splitlines()), 1)
-                    self.assertIn(str(secret), result.stderr)
-
-    def test_password_reaches_server_in_dotless_variable(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            secret = Path(directory) / "password"
-            secret.write_text("fictitious-password\n")
-            result = subprocess.run(
-                secret_wrapper(
-                    (
-                        MountedSecret(
-                            str(secret),
-                            OPENSEARCH_PASSWORD_VARIABLE,
-                            "OpenSearch password",
-                        ),
-                    ),
-                    sys.executable,
-                    OPENSEARCH_SERVICE_NAME,
-                )
-                + [
-                    "-c",
-                    "import os; raise SystemExit(os.environ.get('GIDEON_OPENSEARCH_PASSWORD') != 'fictitious-password')",
-                ],
+            root = Path(directory)
+            script = root / "opensearch-docker-entrypoint.sh"
+            script.write_text(
+                "#!/bin/sh\n"
+                f"printf '%s\\n' \"${{{OPENSEARCH_PASSWORD_VARIABLE}}}\" "
+                f"\"${{{OPENSEARCH_METRICS_PASSWORD_VARIABLE}}}\"\n"
+            )
+            script.chmod(0o700)
+            rendered_script = entrypoint[2]
+            for name, value in files.items():
+                path = root / name
+                if value is not None:
+                    path.write_text(value)
+                rendered_script = rendered_script.replace(f"/run/secrets/{name}", str(path))
+            return subprocess.run(
+                [*entrypoint[:2], rendered_script, entrypoint[3], *command],
+                cwd=root,
                 check=False,
                 capture_output=True,
                 text=True,
             )
-            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_missing_and_empty_either_password_refuse_before_server(self) -> None:
+        main = OPENSEARCH_PASSWORD_SECRET_NAME
+        metrics = OPENSEARCH_METRICS_SECRET_NAME
+        for name, files in (
+            (main, {main: None, metrics: "fixture-metrics\n"}),
+            (main, {main: "", metrics: "fixture-metrics\n"}),
+            (metrics, {main: "fixture-main\n", metrics: None}),
+            (metrics, {main: "fixture-main\n", metrics: ""}),
+            (main, {main: None, metrics: None}),
+        ):
+            with self.subTest(secret=name, files=files):
+                result = self.run_rendered_entrypoint(files)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(len(result.stderr.splitlines()), 1)
+                self.assertIn(name, result.stderr)
+                self.assertIn("missing or empty", result.stderr)
+
+    def test_both_passwords_reach_server_in_dotless_variables(self) -> None:
+        self.assertNotIn(".", OPENSEARCH_PASSWORD_VARIABLE)
+        self.assertNotIn(".", OPENSEARCH_METRICS_PASSWORD_VARIABLE)
+        result = self.run_rendered_entrypoint({
+            OPENSEARCH_PASSWORD_SECRET_NAME: "fixture-main\n",
+            OPENSEARCH_METRICS_SECRET_NAME: "fixture-metrics\n",
+        })
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["fixture-main", "fixture-metrics"])
 
 
 class Heap(unittest.TestCase):
@@ -275,6 +292,8 @@ class Files(unittest.TestCase):
             "search.insights.top_queries.latency.enabled": False,
             "search.insights.top_queries.cpu.enabled": False,
             "search.insights.top_queries.memory.enabled": False,
+            "prometheus.indices": True,
+            "prometheus.cluster.settings": False,
         }
         for rendered_inputs in HOSTS:
             with self.subTest(
@@ -317,7 +336,7 @@ class Files(unittest.TestCase):
                         document["_meta"], {"type": kind, "config_version": 2}
                     )
 
-    def test_security_documents_have_one_user_and_no_demo_user(self) -> None:
+    def test_security_documents_restrict_both_users_and_the_metrics_role(self) -> None:
         for rendered_inputs in HOSTS:
             with self.subTest(
                 site=rendered_inputs.site.hostname, no_gpu=rendered_inputs.no_gpu
@@ -330,11 +349,18 @@ class Files(unittest.TestCase):
                     for name in SECURITY_FILES
                 }
                 user = documents["internal_users"]
-                self.assertEqual(set(user), {"_meta", OPENSEARCH_USER})
+                self.assertEqual(set(user), {"_meta", OPENSEARCH_USER, OPENSEARCH_METRICS_USER})
                 self.assertEqual(
                     user[OPENSEARCH_USER],
                     {
                         "hash": f"${{envbc.{OPENSEARCH_PASSWORD_VARIABLE}}}",
+                        "reserved": True,
+                    },
+                )
+                self.assertEqual(
+                    user[OPENSEARCH_METRICS_USER],
+                    {
+                        "hash": f"${{envbc.{OPENSEARCH_METRICS_PASSWORD_VARIABLE}}}",
                         "reserved": True,
                     },
                 )
@@ -349,9 +375,40 @@ class Files(unittest.TestCase):
                     {"users": [OPENSEARCH_USER]},
                 )
                 self.assertEqual(
-                    set(documents["roles_mapping"]), {"_meta", "all_access"}
+                    documents["roles_mapping"][OPENSEARCH_METRICS_ROLE],
+                    {"users": [OPENSEARCH_METRICS_USER]},
                 )
-                for name in ("roles", "action_groups", "tenants"):
+                self.assertEqual(
+                    set(documents["roles_mapping"]),
+                    {"_meta", "all_access", OPENSEARCH_METRICS_ROLE},
+                )
+                role = documents["roles"][OPENSEARCH_METRICS_ROLE]
+                self.assertEqual(set(documents["roles"]), {"_meta", OPENSEARCH_METRICS_ROLE})
+                self.assertEqual(
+                    role,
+                    {
+                        "reserved": True,
+                        "cluster_permissions": [
+                            "cluster:monitor/prometheus/metrics",
+                            "cluster:monitor/health",
+                            "cluster:monitor/nodes/info",
+                            "cluster:monitor/nodes/stats*",
+                            "indices:monitor/stats*",
+                        ],
+                        "index_permissions": [{
+                            "index_patterns": ["*"],
+                            "allowed_actions": ["indices:monitor/stats*"],
+                        }],
+                    },
+                )
+                actions = [
+                    *role["cluster_permissions"],
+                    *role["index_permissions"][0]["allowed_actions"],
+                ]
+                for action in actions:
+                    for forbidden in ("read", "search", "write", "cluster:monitor/state"):
+                        self.assertNotIn(forbidden, action)
+                for name in ("action_groups", "tenants"):
                     self.assertEqual(set(documents[name]), {"_meta"})
                 for text in (files[path].content for path in PATHS):
                     for demo in (
@@ -398,6 +455,47 @@ class Files(unittest.TestCase):
         )
         self.assertEqual(judgment.services, (OPENSEARCH_SERVICE_NAME,))
         self.assertEqual(judgment.files, (OPENSEARCH_SERVICE_NAME,))
+
+
+class Metrics(unittest.TestCase):
+    def test_scrape_job_reads_the_secret_file_on_every_host(self) -> None:
+        for rendered_inputs in HOSTS:
+            with self.subTest(
+                site=rendered_inputs.site.hostname, no_gpu=rendered_inputs.no_gpu
+            ):
+                jobs = yaml.safe_load(PrometheusConfigArtifact().emit(rendered_inputs))[
+                    "scrape_configs"
+                ]
+                matches = [
+                    job for job in jobs if job["job_name"] == OPENSEARCH_METRICS_JOB_NAME
+                ]
+                self.assertEqual(len(matches), 1)
+                job = matches[0]
+                self.assertEqual(job["metrics_path"], OPENSEARCH_METRICS_PATH)
+                self.assertEqual(job["metrics_path"], "/_prometheus/metrics")
+                self.assertEqual(
+                    job["static_configs"],
+                    [{"targets": [opensearch_metrics_target()]}],
+                )
+                self.assertEqual(
+                    job["basic_auth"],
+                    {
+                        "username": OPENSEARCH_METRICS_USER,
+                        "password_file": f"/run/secrets/{OPENSEARCH_METRICS_SECRET_NAME}",
+                    },
+                )
+                self.assertNotIn("password", job)
+                self.assertNotIn("password", job["basic_auth"])
+
+    def test_prometheus_mounts_only_the_metrics_password_with_service_group(self) -> None:
+        for rendered_inputs in HOSTS:
+            with self.subTest(
+                site=rendered_inputs.site.hostname, no_gpu=rendered_inputs.no_gpu
+            ):
+                block = service_blocks(rendered_inputs)[PrometheusService.name]
+                assert isinstance(block, dict)
+                self.assertEqual(block["secrets"], [OPENSEARCH_METRICS_SECRET_NAME])
+                self.assertEqual(block["group_add"], [str(rendered_inputs.facts.service_gid)])
 
 
 class Probe(unittest.TestCase):

@@ -43,7 +43,12 @@ from gideon.host.render.api import API_SERVICE_NAME
 from gideon.host.render.command import run_render
 from gideon.host.render.compose import service_blocks
 from gideon.host.render.engine import EMBED_SERVICE_NAME, ENGINE_SERVICE_NAME
+from gideon.host.render.opensearch import (
+    OPENSEARCH_METRICS_SECRET_NAME,
+    OPENSEARCH_SERVICE_NAME,
+)
 from gideon.host.render.services import all_service_names, store_services
+from gideon.host.render.services.prometheus import PrometheusService
 from gideon.host.secrets import SECRET_REGISTRY, SECRETS_DIR
 from gideon.host.site import SiteConfig, load_site
 from gideon.host.stack import compose_argv, exec_argv
@@ -1324,6 +1329,38 @@ class OtherRotations(RealStack):
         )
         self.assertIn("recreated opensearch: mount opensearch_password", out)
         assert_no_secret_text(self, out + err, (host.files[path].strip(),))
+
+    def test_opensearch_metrics_password_rotation_recreates_its_two_mounters(self) -> None:
+        host = self.applied_host()
+        path = f"{SECRETS_DIR}/{OPENSEARCH_METRICS_SECRET_NAME}"
+        old_value = host.files[path]
+        baseline = len(host.calls)
+        baseline_inputs = len(host.inputs)
+
+        code, out, err = run_rotate(host, OPENSEARCH_METRICS_SECRET_NAME)
+
+        self.assertEqual((code, err), (0, ""), out)
+        new_value = host.files[path].strip()
+        self.assertNotEqual(new_value, old_value.strip())
+        # Prometheus reads the file at each scrape, so the two recreates'
+        # order is the consumer map's and carries no meaning; each runs once.
+        recreates = [call for call in argv_calls(host)[baseline:] if "--force-recreate" in call]
+        self.assertCountEqual(
+            recreates,
+            [force_recreate(OPENSEARCH_SERVICE_NAME), force_recreate(PrometheusService.name)],
+        )
+        self.assertIn(f": mount {OPENSEARCH_METRICS_SECRET_NAME}", out)
+        for file_path, contents in host.files.items():
+            if new_value in contents:
+                self.assertEqual(file_path, path)
+        for command, environment in host.calls[baseline:]:
+            self.assertNotIn(new_value, command)
+            if environment is not None:
+                self.assertNotIn(new_value, environment.values())
+        for command, input_text in host.inputs[baseline_inputs:]:
+            self.assertNotIn(new_value, command)
+            self.assertNotIn(new_value, input_text or "")
+        assert_no_secret_text(self, out + err, (new_value,))
 
     def test_opensearch_key_rotation_reissues_certificate_and_recreates_once(self) -> None:
         host = self.applied_host()

@@ -1,6 +1,7 @@
 """Image-lock contracts: the committed artifact loads, refusal shapes, registry parsing."""
 
 import os
+import re
 import subprocess
 import unittest
 from collections.abc import Mapping
@@ -31,6 +32,9 @@ ROOT = Path(__file__).resolve().parent.parent
 LOCK = ROOT / "images.lock"
 EXAMPLE = ROOT / "config/site.example.yaml"
 CADDY_DIGEST = "sha256:" + "e" * 64
+UNWATCHED_BUILD_ARGS = {
+    "opensearch": frozenset(("PROMETHEUS_EXPORTER_VERSION", "PROMETHEUS_EXPORTER_SHA256")),
+}
 
 VALID = (
     "version: 1\n"
@@ -161,8 +165,32 @@ class CommittedLock(unittest.TestCase):
                     self.assertTrue(pin.built, "committed built pins cannot be unbuilt")
                     self.assertIsNotNone(SOURCE_REFERENCE.fullmatch(pin.base))
                     self.assertIsNotNone(DIGEST.fullmatch(pin.base_digest))
-                    self.assertEqual(set(pin.watch), set(pin.build_args))
+                    unwatched = UNWATCHED_BUILD_ARGS.get(pin.name, frozenset())
+                    self.assertTrue(unwatched <= set(pin.build_args))
+                    self.assertTrue(unwatched.isdisjoint(pin.watch))
+                    self.assertEqual(set(pin.watch), set(pin.build_args) - unwatched)
                 self.assertIsNotNone(DIGEST.fullmatch(pin.digest))
+
+    def test_committed_opensearch_plugin_matches_base_and_has_sha256(self) -> None:
+        result = load_image_lock(LOCK)
+        assert result.lock is not None
+        pin = next(pin for pin in result.lock.images if pin.name == "opensearch")
+        assert isinstance(pin, BuiltImagePin)
+        base_tag = pin.base.rsplit(":", 1)[1]
+        self.assertEqual(pin.build_args["PROMETHEUS_EXPORTER_VERSION"], base_tag + ".0")
+        self.assertIsNotNone(
+            re.fullmatch(r"[0-9a-f]{64}", pin.build_args["PROMETHEUS_EXPORTER_SHA256"])
+        )
+
+    def test_committed_built_dockerfiles_declare_lock_arguments(self) -> None:
+        result = load_image_lock(LOCK)
+        assert result.lock is not None
+        for pin in result.lock.images:
+            if isinstance(pin, BuiltImagePin):
+                with self.subTest(image=pin.name):
+                    dockerfile = (ROOT / pin.build / "Dockerfile").read_text()
+                    declared = set(re.findall(r"^ARG ([A-Z][A-Z0-9_]*)$", dockerfile, re.MULTILINE))
+                    self.assertTrue({"BASE", *pin.build_args} <= declared)
 
     def test_watch_and_build_args_are_optional(self) -> None:
         text = BUILT_LOCK.replace(

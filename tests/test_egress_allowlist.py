@@ -59,7 +59,7 @@ class CommittedArtifact(unittest.TestCase):
         self.assertIn("objects.githubusercontent.com", hosts)
 
     def test_image_build_group_holds_the_build_hosts(self) -> None:
-        """The hosts apt reaches inside a GIDEON image build."""
+        """The hosts used for packages and the OpenSearch plugin zip."""
 
         result = load_egress_allowlist(ARTIFACT)
         assert result.allowlist is not None
@@ -67,10 +67,20 @@ class CommittedArtifact(unittest.TestCase):
         assert group is not None
         self.assertEqual(
             [entry.host for entry in group.hosts],
-            ["apt.postgresql.org", "deb.debian.org", "pypi.org", "files.pythonhosted.org"],
+            [
+                "apt.postgresql.org",
+                "deb.debian.org",
+                "pypi.org",
+                "files.pythonhosted.org",
+                "github.com",
+                "release-assets.githubusercontent.com",
+            ],
         )
         for entry in group.hosts:
             self.assertTrue(entry.probe_url.startswith("https://"))
+        for host in ("github.com", "release-assets.githubusercontent.com"):
+            entry = next(entry for entry in group.hosts if entry.host == host)
+            self.assertEqual(entry.probe_url, f"https://{host}/")
 
     def test_default_path_points_at_the_committed_artifact(self) -> None:
         self.assertEqual(default_egress_path().resolve(), ARTIFACT.resolve())

@@ -16,6 +16,7 @@ from gideon.host.images import (
     BuiltImagePin,
     RegistryTarget,
     compute_inputs_digest,
+    load_image_lock,
     load_image_lock_text,
 )
 from gideon.host.sysio import Command, PathLike
@@ -246,6 +247,27 @@ def run_tool(
 
 
 class BuildPlans(unittest.TestCase):
+    def test_every_committed_built_pin_has_a_smoke_with_declared_version_args(self) -> None:
+        result = load_image_lock(ROOT / "images.lock")
+        assert result.lock is not None
+        for pin in result.lock.images:
+            if isinstance(pin, BuiltImagePin):
+                with self.subTest(image=pin.name):
+                    self.assertIn(pin.name, SMOKE)
+                    self.assertTrue(set(SMOKE[pin.name].version_args) <= set(pin.build_args))
+
+    def test_opensearch_smoke_reads_plugin_descriptor_without_starting_node(self) -> None:
+        result = load_image_lock(ROOT / "images.lock")
+        assert result.lock is not None
+        pin = next(pin for pin in result.lock.images if pin.name == "opensearch")
+        assert isinstance(pin, BuiltImagePin)
+        smoke = SMOKE[pin.name]
+        self.assertEqual(
+            smoke.argv,
+            ("cat", "/usr/share/opensearch/plugins/prometheus-exporter/plugin-descriptor.properties"),
+        )
+        self.assertEqual(smoke.version_args, ("PROMETHEUS_EXPORTER_VERSION",))
+
     def test_build_plan_has_the_exact_base_tag_args_labels_and_context(self) -> None:
         result = load_image_lock_text(LOCK_TEXT)
         assert result.lock is not None

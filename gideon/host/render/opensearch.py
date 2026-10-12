@@ -29,6 +29,27 @@ OPENSEARCH_GID: Final = 1000
 OPENSEARCH_SETTINGS_PATH: Final = "/usr/share/opensearch/config/opensearch.yml"
 OPENSEARCH_SECURITY_PATH: Final = "/usr/share/opensearch/config/opensearch-security"
 OPENSEARCH_PASSWORD_VARIABLE: Final = "GIDEON_OPENSEARCH_PASSWORD"
+OPENSEARCH_METRICS_JOB_NAME: Final = "opensearch-metrics"
+# exempt: the metrics plugin's own endpoint, fixed by the plugin.
+OPENSEARCH_METRICS_PATH: Final = "/_prometheus/metrics"
+OPENSEARCH_METRICS_USER: Final = "metrics"
+OPENSEARCH_METRICS_ROLE: Final = "metrics"
+OPENSEARCH_METRICS_SECRET_NAME: Final = "opensearch_metrics_password"
+OPENSEARCH_METRICS_PASSWORD_VARIABLE: Final = "GIDEON_OPENSEARCH_METRICS_PASSWORD"
+# The plugin answers a scrape by running its inner requests as the caller, so
+# the metrics role holds the plugin's own action and each request it makes:
+# cluster health, nodes info, and nodes stats for the node series, and indices
+# stats for the per-index series. It holds no read, search, or cluster-state
+# action, so the credential lists and reads no document.
+OPENSEARCH_METRICS_CLUSTER_PERMISSIONS: Final = (
+    "cluster:monitor/prometheus/metrics",
+    "cluster:monitor/health",
+    "cluster:monitor/nodes/info",
+    "cluster:monitor/nodes/stats*",
+    "indices:monitor/stats*",
+)
+OPENSEARCH_METRICS_INDEX_PATTERN: Final = "*"
+OPENSEARCH_METRICS_INDEX_PERMISSIONS: Final = ("indices:monitor/stats*",)
 # exempt: 1024 MiB is the acceptance machine's floor, not a tuned heap value.
 OPENSEARCH_NO_GPU_HEAP_MIB: Final = 1024
 # exempt: 31 GiB (31744 MiB) is the JVM compressed-pointer ceiling;
@@ -47,6 +68,12 @@ def opensearch_health_url(host: str) -> str:
     """Return the unauthenticated security-health URL for a reachable host."""
 
     return f"http://{host}:{OPENSEARCH_REST_PORT}{OPENSEARCH_HEALTH_PATH}"
+
+
+def opensearch_metrics_target() -> str:
+    """Return the plugin's Compose-network host and port."""
+
+    return f"{OPENSEARCH_SERVICE_NAME}:{OPENSEARCH_REST_PORT}"
 
 
 def opensearch_settings_document() -> Mapping[str, object]:
@@ -77,6 +104,10 @@ def opensearch_settings_document() -> Mapping[str, object]:
         "search.insights.top_queries.latency.enabled": False,
         "search.insights.top_queries.cpu.enabled": False,
         "search.insights.top_queries.memory.enabled": False,
+        # exempt: per-index series are the figures the corpus board draws.
+        "prometheus.indices": True,
+        # exempt: cluster-settings series repeat the rendered settings file.
+        "prometheus.cluster.settings": False,
     }
 
 
@@ -85,7 +116,7 @@ def _meta_document(kind: str) -> dict[str, object]:
 
 
 def opensearch_config_document() -> Mapping[str, object]:
-    """One basic-auth domain backed by the one internal user."""
+    """One basic-auth domain backed by reserved internal users."""
 
     return {
         **_meta_document("config"),
@@ -109,7 +140,7 @@ def opensearch_config_document() -> Mapping[str, object]:
 
 
 def opensearch_internal_users_document() -> Mapping[str, object]:
-    """One reserved user whose password is hashed from the wrapper variable."""
+    """Reserved users whose passwords resolve from wrapper variables."""
 
     return {
         **_meta_document("internalusers"),
@@ -120,15 +151,20 @@ def opensearch_internal_users_document() -> Mapping[str, object]:
             # The REST account API must not create another credential home.
             "reserved": True,
         },
+        OPENSEARCH_METRICS_USER: {
+            "hash": f"${{envbc.{OPENSEARCH_METRICS_PASSWORD_VARIABLE}}}",
+            "reserved": True,
+        },
     }
 
 
 def opensearch_roles_mapping_document() -> Mapping[str, object]:
-    """Map the sole internal user to the static data-plane role."""
+    """Map each internal user to its own role."""
 
     return {
         **_meta_document("rolesmapping"),
         "all_access": {"users": [OPENSEARCH_USER]},
+        OPENSEARCH_METRICS_ROLE: {"users": [OPENSEARCH_METRICS_USER]},
     }
 
 
@@ -159,7 +195,7 @@ class OpensearchConfigArtifact(_OpensearchArtifact):
 
 
 class OpensearchInternalUsersArtifact(_OpensearchArtifact):
-    """The reserved internal user and its environment placeholder."""
+    """The reserved internal users and their environment placeholders."""
 
     name = "opensearch-internal-users"
     relative_path = "opensearch/security/internal_users.yml"
@@ -170,7 +206,7 @@ class OpensearchInternalUsersArtifact(_OpensearchArtifact):
 
 
 class OpensearchRolesMappingArtifact(_OpensearchArtifact):
-    """The sole user-to-role mapping."""
+    """The data-plane and metrics user-to-role mappings."""
 
     name = "opensearch-roles-mapping"
     relative_path = "opensearch/security/roles_mapping.yml"
@@ -181,14 +217,24 @@ class OpensearchRolesMappingArtifact(_OpensearchArtifact):
 
 
 class OpensearchRolesArtifact(_OpensearchArtifact):
-    """An empty custom-role document; the static role comes from the plugin."""
+    """The metrics reader's restricted role beside the built-in roles."""
 
     name = "opensearch-roles"
     relative_path = "opensearch/security/roles.yml"
 
     def emit(self, inputs: RenderInputs) -> str:
         del inputs
-        return dump(_meta_document("roles"))
+        return dump({
+            **_meta_document("roles"),
+            OPENSEARCH_METRICS_ROLE: {
+                "reserved": True,
+                "cluster_permissions": list(OPENSEARCH_METRICS_CLUSTER_PERMISSIONS),
+                "index_permissions": [{
+                    "index_patterns": [OPENSEARCH_METRICS_INDEX_PATTERN],
+                    "allowed_actions": list(OPENSEARCH_METRICS_INDEX_PERMISSIONS),
+                }],
+            },
+        })
 
 
 class OpensearchActionGroupsArtifact(_OpensearchArtifact):

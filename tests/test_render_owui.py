@@ -31,6 +31,7 @@ from gideon.host.render.drill import (
 )
 from gideon.host.render.engine import ENGINE_SERVICE_NAME
 from gideon.host.render.facts import HostFacts
+from gideon.host.render.opensearch import OPENSEARCH_METRICS_SECRET_NAME
 from gideon.host.render.owui import (
     ALLOWED_ENDPOINTS,
     AUDIT_EXCLUDED_PATHS,
@@ -935,6 +936,7 @@ class ComposeShape(unittest.TestCase):
                 "qdrant_api_key",
                 "qdrant_read_only_api_key",
                 "opensearch_password",
+                OPENSEARCH_METRICS_SECRET_NAME,
                 "opensearch_transport_key",
                 "opensearch_transport_cert",
             },

@@ -13,3 +13,5 @@ cluster.default_number_of_replicas: 0
 search.insights.top_queries.latency.enabled: false
 search.insights.top_queries.cpu.enabled: false
 search.insights.top_queries.memory.enabled: false
+prometheus.indices: true
+prometheus.cluster.settings: false

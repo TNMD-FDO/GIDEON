@@ -5,3 +5,6 @@ _meta:
 all_access:
   users:
     - "gideon"
+metrics:
+  users:
+    - "metrics"

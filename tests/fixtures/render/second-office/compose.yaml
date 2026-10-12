@@ -23,6 +23,8 @@ services:
     restart: "unless-stopped"
     environment:
       TZ: "America/Denver"
+    group_add:
+      - "4242"
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/data/observability/prometheus"
@@ -33,6 +35,8 @@ services:
       - "/data/observability/prometheus:/data/observability/prometheus"
     ports:
       - "127.0.0.1:9090:9090"
+    secrets:
+      - "opensearch_metrics_password"
     networks:
       - "gideon"
       - "internal"
@@ -184,7 +188,7 @@ services:
     mem_limit: 110000000000
     memswap_limit: 110000004096
   opensearch:
-    image: "127.0.0.1:5000/opensearch@sha256:fafe3fc3587088674669235575aa166228c48bdb940294a8cdbbc1da75236a40"
+    image: "127.0.0.1:5000/opensearch@sha256:a227e338a5f2920119167cf70b39dcf0a920e407df67e1c1f6f7f64bc27b0e8c"
     restart: "unless-stopped"
     environment:
       TZ: "America/Denver"
@@ -194,7 +198,7 @@ services:
     entrypoint:
       - "sh"
       - "-c"
-      - "set -eu; if [ ! -s /run/secrets/opensearch_password ]; then echo \"OpenSearch password file is missing or empty: /run/secrets/opensearch_password\" >&2; exit 1; fi; GIDEON_OPENSEARCH_PASSWORD=$(cat /run/secrets/opensearch_password); export GIDEON_OPENSEARCH_PASSWORD; exec ./opensearch-docker-entrypoint.sh \"$@\""
+      - "set -eu; if [ ! -s /run/secrets/opensearch_password ]; then echo \"OpenSearch password file is missing or empty: /run/secrets/opensearch_password\" >&2; exit 1; fi; GIDEON_OPENSEARCH_PASSWORD=$(cat /run/secrets/opensearch_password); export GIDEON_OPENSEARCH_PASSWORD; if [ ! -s /run/secrets/opensearch_metrics_password ]; then echo \"OpenSearch metrics password file is missing or empty: /run/secrets/opensearch_metrics_password\" >&2; exit 1; fi; GIDEON_OPENSEARCH_METRICS_PASSWORD=$(cat /run/secrets/opensearch_metrics_password); export GIDEON_OPENSEARCH_METRICS_PASSWORD; exec ./opensearch-docker-entrypoint.sh \"$@\""
       - "opensearch"
     command:
       - "opensearch"
@@ -205,6 +209,7 @@ services:
       - "/etc/gideon/rendered/opensearch/security:/usr/share/opensearch/config/opensearch-security:ro"
     secrets:
       - "opensearch_password"
+      - "opensearch_metrics_password"
       - "opensearch_transport_key"
       - "opensearch_transport_cert"
     group_add:
@@ -723,6 +728,8 @@ volumes:
 secrets:
   tls_key:
     file: "/etc/gideon/secrets/tls_key"
+  opensearch_metrics_password:
+    file: "/etc/gideon/secrets/opensearch_metrics_password"
   grafana_admin_password:
     file: "/etc/gideon/secrets/grafana_admin_password"
   ldap_bind_password:

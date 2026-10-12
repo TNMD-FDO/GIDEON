@@ -120,6 +120,10 @@ SECRET_REGISTRY: Final[tuple[GeneratedSecret, ...]] = (
         "the opensearch service's transport certificate", "rewrite",
         issued_from="opensearch_transport_key",
     ),
+    GeneratedSecret(
+        "opensearch_metrics_password", "password", False,
+        "the opensearch service's metrics reader, mounted by prometheus", "rewrite",
+    ),
     GeneratedSecret("gideon_admin_api_key", "minted", False, "apply and reconcile", "remint"),
     GeneratedSecret("gideon_eval_api_key", "minted", False, "evaluation identity", "remint"),
 )

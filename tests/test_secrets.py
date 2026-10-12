@@ -201,6 +201,7 @@ class Registry(unittest.TestCase):
                 "qdrant_api_key",
                 "qdrant_read_only_api_key",
                 "opensearch_password",
+                "opensearch_metrics_password",
             ],
         )
         self.assertEqual(MINTED_KIND, ["gideon_admin_api_key", "gideon_eval_api_key"])
@@ -283,6 +284,7 @@ class Registry(unittest.TestCase):
                 "opensearch_password": "rewrite",
                 "opensearch_transport_key": "rewrite",
                 "opensearch_transport_cert": "rewrite",
+                "opensearch_metrics_password": "rewrite",
                 "gideon_admin_api_key": "remint",
                 "gideon_eval_api_key": "remint",
             },
@@ -300,6 +302,7 @@ class Registry(unittest.TestCase):
                 "opensearch_password",
                 "opensearch_transport_key",
                 "opensearch_transport_cert",
+                "opensearch_metrics_password",
                 "gideon_admin_api_key",
                 "gideon_eval_api_key",
             },
@@ -397,8 +400,13 @@ class Ensure(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(
             result.created,
-            tuple(name for name in PASSWORD_KIND if name != "webui_secret_key") + PAIR_NAMES,
+            tuple(
+                secret.name
+                for secret in SECRET_REGISTRY
+                if secret.kind != "minted" and secret.name != "webui_secret_key"
+            ),
         )
+        self.assertEqual(result.created[-3:], (*PAIR_NAMES, "opensearch_metrics_password"))
         self.assertEqual(host.files[f"{SECRETS_DIR}/webui_secret_key"], "keep-me\n")
         for name in PASSWORD_KIND:
             if name == "webui_secret_key":
@@ -448,7 +456,7 @@ class TransportPair(unittest.TestCase):
         host = FakeHost()
         result = ensure_generated(host)
         self.assertTrue(result.ok, result.problem)
-        self.assertEqual(result.created[-2:], PAIR_NAMES)
+        self.assertEqual(tuple(name for name in result.created if name in PAIR_NAMES), PAIR_NAMES)
         for name in PAIR_NAMES:
             with self.subTest(name=name):
                 path = str(SECRETS_DIR / name)
@@ -493,7 +501,7 @@ class TransportPair(unittest.TestCase):
         host = FakeHost({str(SECRETS_DIR / PAIR_NAMES[1]): PAIR_CERT_TEXT})
         result = ensure_generated(host)
         self.assertTrue(result.ok, result.problem)
-        self.assertEqual(result.created[-2:], PAIR_NAMES)
+        self.assertEqual(tuple(name for name in result.created if name in PAIR_NAMES), PAIR_NAMES)
         self.assertEqual(host.public_keys[str(SECRETS_DIR / PAIR_NAMES[0])],
                          host.public_keys[str(SECRETS_DIR / PAIR_NAMES[1])])
 
@@ -607,6 +615,17 @@ class TransportPair(unittest.TestCase):
         self.assertTrue(certificate.ok, certificate.problem)
         self.assertTrue(certificate.written)
         self.assertEqual([call[1] for call in host.calls if call[0] == "openssl"], ["req"])
+
+    def test_metrics_password_rotation_rewrites_its_file(self) -> None:
+        name = "opensearch_metrics_password"
+        path = f"{SECRETS_DIR}/{name}"
+        host = FakeHost({path: "fixture-old-metrics-password\n"})
+        result = rotate_generated(host, name)
+        self.assertTrue(result.ok, result.problem)
+        self.assertTrue(result.written)
+        self.assertNotEqual(host.files[path], "fixture-old-metrics-password\n")
+        self.assertTrue(host.files[path].endswith("\n"))
+        self.assertEqual(host.modes[path], 0o440)
 
     @unittest.skipUnless(shutil.which("openssl"), "openssl is unavailable")
     def test_real_openssl_pair_verifies_and_second_ensure_is_absent_only(self) -> None:

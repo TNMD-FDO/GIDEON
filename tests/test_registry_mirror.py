@@ -60,13 +60,15 @@ LOCK_IMAGES = tuple(
     for pin in _COMMITTED_LOCK.images
     if isinstance(pin, MirroredImagePin)
 )
-# Each built pin is probed twice, its base under the base's tag then its own
-# digest, in lock order — derived, so a new built pin never moves this.
-BUILT_PROBES = tuple(
+# Every pin in lock order: a mirrored pin's digest once, a built pin's base
+# under the base's tag then its own digest — derived, so a new pin of either
+# kind, anywhere in the lock, never moves this.
+LOCK_PROBES = tuple(
     (pin.name, digest)
     for pin in _COMMITTED_LOCK.images
-    if isinstance(pin, BuiltImagePin)
-    for digest in (pin.base_digest, pin.digest)
+    for digest in (
+        (pin.base_digest, pin.digest) if isinstance(pin, BuiltImagePin) else (pin.digest,)
+    )
 )
 BUILT_BASE_DIGEST = "sha256:" + "a" * 64
 BUILT_DIGEST = "sha256:" + "b" * 64
@@ -275,8 +277,7 @@ class Mirroring(unittest.TestCase):
         code, out, err = mirror(host, to="127.0.0.1:5000")
         self.assertEqual((code, err), (0, ""), out)
         self.assertIn(f"caddy: mirrored — {LOOPBACK_REF}\n", out)
-        # Every other mirrored pin is probed once in lock order, then each
-        # built pin's base and digest — derived, so a new pin never moves this.
+        # Every other pin is probed in lock order.
         self.assertEqual(
             argv_calls(host),
             [
@@ -286,12 +287,8 @@ class Mirroring(unittest.TestCase):
                 caddy_probe,
                 *(
                     image_probe("127.0.0.1:5000", name, digest)
-                    for name, digest, _source in LOCK_IMAGES
+                    for name, digest in LOCK_PROBES
                     if name != "caddy"
-                ),
-                *(
-                    image_probe("127.0.0.1:5000", name, digest)
-                    for name, digest in BUILT_PROBES
                 ),
             ],
         )

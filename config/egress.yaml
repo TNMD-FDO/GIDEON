@@ -96,7 +96,8 @@ groups:
   # TNMD's before 1.0, the release pipeline from the public flip.
   # Probed by `python3 -m tools.imagebuild` before a build, never by preflight:
   # an office never builds. The base image needs no egress (it comes from the
-  # release registry); these serve apt inside the build.
+  # release registry); these serve apt, Python packages, and the OpenSearch
+  # plugin zip inside builds.
   image-build:
     - host: apt.postgresql.org
       probe_url: https://apt.postgresql.org/pub/repos/apt/
@@ -106,3 +107,7 @@ groups:
       probe_url: https://pypi.org/
     - host: files.pythonhosted.org
       probe_url: https://files.pythonhosted.org/
+    - host: github.com
+      probe_url: https://github.com/
+    - host: release-assets.githubusercontent.com
+      probe_url: https://release-assets.githubusercontent.com/
