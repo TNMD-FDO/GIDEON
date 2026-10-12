@@ -68,7 +68,7 @@ Let each silence expire at its planned end.
 ## 5. The comparand
 
 Who: The developer.\
-Command: `journalctl -u gideon-eval-nightly.service` to find the run id; if needed, `sudo python3 -m gideon eval run --slice guardrails` before the window.\
+Command: `journalctl -u gideon-eval-nightly.service` to find the run id; if needed, `gideon eval run --slice guardrails` before the window.\
 Failure: Without a complete recorded comparand, do not swap.
 
 Before the swap, find a complete `guardrails` run under the outgoing model
@@ -176,7 +176,7 @@ recorded. No panel kit or Research answers exist for this step yet.
 ## 11. Merge and tag
 
 Who: The developer merges and tags; the CSAs coordinate the closing window and receiving offices.\
-Command: From the proposal checkout at the tag, `sudo python3 -B -m gideon render --diff`; then from the install directory, `sudo python3 -m gideon upgrade <tag>`.\
+Command: From the proposal checkout at the tag, `sudo python3 -B -m gideon render --diff`; then from the install directory, `gideon upgrade <tag>`.\
 Failure: A moved proposal revision voids its proof; a red upgrade follows `docs/runbooks/install-upgrade.md` §3.
 
 Confirm that the pull request still names the exact revision and commit
@@ -211,9 +211,9 @@ wait for that run to finish. Never stop a run in flight.
 From the install directory, run:
 
 ```sh
-sudo python3 -m gideon render --diff
-sudo python3 -m gideon apply
-sudo python3 -m gideon engine verify
+gideon render --diff
+gideon apply
+gideon engine verify
 ```
 
 The preview's `Services apply would recreate:` row should name

@@ -15,7 +15,7 @@ A CSA, as root on the box, once a month after the month ends, from the
 install home as every command runs:
 
 ```
-sudo python3 -m gideon eval candidates --out /root/candidates/<YYYY-MM>
+gideon eval candidates --out /root/candidates/<YYYY-MM>
 ```
 
 `--month YYYY-MM` names another month; without it the command reads the
@@ -166,7 +166,7 @@ written when the read refuses.
 
 | Refusal | Fix |
 |---|---|
-| `this command must run as root` | Run `sudo python3 -m gideon eval candidates --out <dir>`. |
+| `this command must run as root` | Run `gideon eval candidates --out <dir>`. |
 | the site file's findings | Correct the site file, then retry. |
 | `month must use YYYY-MM with a valid month` | Supply `--month YYYY-MM`, such as `--month 2026-09`. |
 | `The packet output path must be absolute.` | Name an absolute directory under `/root`, such as `/root/candidates/<YYYY-MM>`. |
@@ -174,6 +174,6 @@ written when the read refuses.
 | `The packet would be inside a checkout.` | Name a directory outside every checkout. |
 | `The packet output path is not an empty directory.` / `The packet output directory is not empty.` | Name an absent path or an empty directory; a packet is never written over another. |
 | `The empty packet output directory is not root-owned.` | Create the directory as root, or name an absent path. |
-| `read` — `snapshot reader command could not run` | Check the stack with `sudo python3 -m gideon status`, then retry. |
-| `read` — `snapshot reader failed with exit code <n>` | Run as root with the stack up, then retry; if it persists, converge the frontend with `sudo python3 -m gideon apply`. |
+| `read` — `snapshot reader command could not run` | Check the stack with `gideon status`, then retry. |
+| `read` — `snapshot reader failed with exit code <n>` | Run as root with the stack up, then retry; if it persists, converge the frontend with `gideon apply`. |
 | `write` — `packet files could not be written` | Name an absent path or an empty directory whose parent exists, then retry. |

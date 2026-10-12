@@ -56,7 +56,7 @@ The audit role writes the rows and the metrics role reads them.
 Once a month, from the release checkout on the box:
 
 ```bash
-sudo python3 -m gideon proposals
+gideon proposals
 ```
 
 The `guardrail` section follows `feedback`. It reads the last thirty days, so
@@ -77,11 +77,11 @@ Then come two kinds of row, ids and figures only:
   time, and the pattern ids that tripped in that chat.
 
 No row is ever `fired`, so neither the report's closing count nor
-`sudo python3 -m gideon status` treats the section as waiting on anyone; the
+`gideon status` treats the section as waiting on anyone; the
 review is this monthly step.
 
 For each report, the CSA reads the rated turn in the month's feedback packet
-(`sudo python3 -m gideon eval candidates`, described in
+(`gideon eval candidates`, described in
 [`docs/runbooks/feedback-packet.md`](feedback-packet.md)), where it appears
 under the same chat and message ids, most often in the `refused` bucket. The
 packet covers a calendar month and this section the last thirty days, so a

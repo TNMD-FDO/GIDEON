@@ -7,6 +7,8 @@ import unittest
 from dataclasses import dataclass
 from pathlib import Path
 
+from test_start_here_card import _cli_args
+
 from gideon.host.lock import load_host_lock
 from gideon.host.models import load_models_lock
 
@@ -325,7 +327,7 @@ def rule_sequence(readme_source: str, runbook_source: str) -> list[Finding]:
     for number, (readme_step, runbook_step) in enumerate(
         zip(readme_steps, runbook_steps, strict=False), 1
     ):
-        if readme_step.commands != runbook_step.commands:
+        if _comparable_lines(readme_step.commands) != _comparable_lines(runbook_step.commands):
             findings.append(
                 Finding(
                     RUNBOOK,
@@ -335,6 +337,15 @@ def rule_sequence(readme_source: str, runbook_source: str) -> list[Finding]:
                 )
             )
     return findings
+
+
+def _comparable_lines(commands: tuple[str, ...]) -> tuple[str | tuple[str, ...], ...]:
+    """Compare product commands by parsed words and other lines verbatim."""
+
+    return tuple(
+        tuple(args) if (args := _cli_args(line)) is not None else line
+        for line in commands
+    )
 
 
 def render_findings(findings: list[Finding]) -> str:
@@ -486,6 +497,16 @@ class SeededText(unittest.TestCase):
 
     def test_matching_sequences(self) -> None:
         self.assertEqual(rule_sequence(self.source, self.runbook_source()), [])
+
+    def test_product_spelling_matches(self) -> None:
+        readme = self.source.replace("example command", "sudo python3 -m gideon apply")
+        runbook = self.runbook_source().replace("example command", "gideon apply")
+        self.assertEqual(rule_sequence(readme, runbook), [])
+
+    def test_different_product_commands(self) -> None:
+        readme = self.source.replace("example command", "sudo python3 -m gideon apply")
+        runbook = self.runbook_source().replace("example command", "gideon status")
+        self.check_sequence(readme, runbook, "step 1 fenced command lines differ")
 
     def test_unequal_step_counts(self) -> None:
         runbook = self.runbook_source().replace(

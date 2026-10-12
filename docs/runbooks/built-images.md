@@ -51,8 +51,8 @@ pull request: `git fetch origin && git checkout pin-watch/<pin id>`):
    at merge time).
 5. Merge when green. The push-only chain runs `mirror-images` (with the
    built-image contract) then `frontend-contract`; a human tags the release
-   after the merge and green checks. The running stack moves at the next
-   `sudo python3 -m gideon apply`:
+   after the merge and green checks. The running stack moves at the
+   `gideon upgrade <tag>` to that release:
    the store tier is recreated onto the new image, so Postgres restarts for
    about a minute — choose the moment.
 
@@ -102,7 +102,7 @@ once, one pull request each. Complete them with one build:
   meanings for the service image and its built digest.
 - `postgres: failed — … Fix: Build and push it with …` — build per §2, or,
   after a `/data/registry` loss, restore the registry from the backup set
-  (`sudo python3 -m gideon restore --from staging`, or `--from target`;
+  (`gideon restore --from staging`, or `--from target`;
   `/data/registry` is one of the set's file roots, so restoring the set brings
   the registry back too; see `docs/runbooks/backup-restore.md`. Until then
   `apply` refuses at its registry

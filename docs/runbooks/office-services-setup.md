@@ -58,7 +58,7 @@ command argument:
 )
 ```
 
-After the write succeeds, run `sudo python3 -m gideon host provision` again.
+After the write succeeds, run `gideon host provision` again.
 Its `secrets-dirs` step converges the supplied file to `root:gideon` mode 0440.
 
 Create two Global Security groups. `auth.ldap.users_group` defaults to
@@ -202,7 +202,7 @@ issued and given one by the office CA's own means before preflight. Install
 also needs a TLS certificate for the site `hostname`, with the private key
 generated on the box and never sent to the CA. Its homes are `/etc/gideon/tls/cert.pem` (0644) and
 `/etc/gideon/secrets/tls_key`, whose owner and mode the next
-`sudo python3 -m gideon host provision` converges to `root:gideon` 0440, as
+`gideon host provision` converges to `root:gideon` 0440, as
 for every supplied secret.
 
 `/etc/gideon/ca.pem` is one PEM file. Where the CA issues from an
@@ -253,11 +253,11 @@ key copy:
 sudo install -m 0644 ~/gideon-tls.pem /etc/gideon/tls/cert.pem
 sudo install -m 0400 ~/gideon-tls.key /etc/gideon/secrets/tls_key
 shred -u ~/gideon-tls.key
-sudo python3 -m gideon host provision
+gideon host provision
 ```
 
 To renew, repeat this section's key, CSR, check, and install steps, then run
-`sudo python3 -m gideon tls reload`.
+`gideon tls reload`.
 
 **TNMD example — an office CA on AD CS.** On a domain-joined Windows machine,
 export the root from its trust store with PowerShell, one command at a time:
@@ -297,7 +297,7 @@ When `alerts.smtp.user` is set, put its password in
 `/etc/gideon/secrets/smtp_password`. Use the same Bash command in §1,
 changing the prompt to `SMTP password: ` and the `sudo tee` destination to
 `/etc/gideon/secrets/smtp_password`; it likewise writes no trailing newline.
-Run `sudo python3 -m gideon host provision` after the write to converge its
+Run `gideon host provision` after the write to converge its
 owner and mode.
 
 Members of the admins group (`auth.ldap.admins_group`), and only they, sign

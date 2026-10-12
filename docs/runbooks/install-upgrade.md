@@ -52,8 +52,9 @@ same command is run again after the fix.
    network wait accept any one link online, so a box with an unplugged second
    port no longer boots with a failed unit. Once provision has run,
    `gideon <command>` from any directory runs
-   `sudo python3 -m gideon <command>` from `/opt/gideon`; this runbook keeps
-   the long form because it is the only form available before this step.
+   `sudo python3 -m gideon <command>` from `/opt/gideon`; the lines through this
+   step keep the long form, the only form available before it, and every later
+   line names the installed command unless it says why the run has none.
 
    ```bash
    sudo python3 -m gideon host provision
@@ -61,7 +62,7 @@ same command is run again after the fix.
 3. **Write the site file** at `/etc/gideon/site.yaml` from
    `config/site.example.yaml`, and place the supplied secrets as described in
    `office-services-setup.md`. On the build box,
-   `sudo python3 -m gideon registry mirror` pulls the release's images into its
+   `gideon registry mirror` pulls the release's images into its
    loopback registry, and where a receiving office pulls its images from is
    settled with the release registry at `v1.0.0`. Set `docker_address_pool` when
    an office host sits in a range Docker could assign to a container network;
@@ -79,7 +80,7 @@ same command is run again after the fix.
    site-dependent steps cannot converge until the site file exists.
 
    ```bash
-   sudo python3 -m gideon host provision
+   gideon host provision
    ```
 5. **Preflight**. Every provisioning step re-checked,
    then the install-time checks (the directory, the relay, the backup target,
@@ -118,7 +119,7 @@ same command is run again after the fix.
    **The weights tree** (`v0.1.5`): apply's `models` stage, between
    `pull` and `recreate`, makes `/data/models` hold the profile's models in the
    Hugging Face hub-cache layout, every file verified against `models.lock`;
-   `sudo python3 -m gideon models pull` runs the same converge by hand, and a
+   `gideon models pull` runs the same converge by hand, and a
    re-run verifies and fetches nothing. The tree is derived state outside the
    backup set because it is derived from the model lock; after a rebuild,
    apply fetches it again. The pull
@@ -152,7 +153,7 @@ same command is run again after the fix.
    stage; a rollback to a release without the engine removes its container as
    an orphan and leaves the key file. On a no-GPU host none of this is
    rendered.
-   To rotate the key: `sudo python3 -m gideon secrets rotate engine_api_key`
+   To rotate the key: `gideon secrets rotate engine_api_key`
    (`v0.1.40`). The command refuses first when `apply` has pending
    changes or has never verified (run `render --diff`, then `apply`), then
    prints what it will do — the engine recreated with a cold start, bounded by
@@ -164,9 +165,9 @@ same command is run again after the fix.
    `render --diff` then reports nothing. Since `v0.2.29` the frontend is not
    among the consumers: the engine's key left its env file at the cutover.
    The frontend's own connection key is `gideon_api_key`, and
-   `sudo python3 -m gideon secrets rotate gideon_api_key` recreates
+   `gideon secrets rotate gideon_api_key` recreates
    `gideon-api` (its mount) and the frontend (its env file's owner).
-   `sudo python3 -m gideon secrets rotate embed_api_key` recreates the
+   `gideon secrets rotate embed_api_key` recreates the
    embedding server alone, with a cold start bounded by the same wait;
    nothing else consumes its key yet. Once General is live, a rotation that recreates the
    engine is made in an announced maintenance window because the cold start
@@ -203,7 +204,7 @@ same command is run again after the fix.
    page path is proven through the relay (`observability.md`).
 
    ```bash
-   sudo python3 -m gideon alerts test
+   gideon alerts test
    ```
 
 `gideon corpus install <label>` fetches and verifies the files a committed lockfile pins, records the label as installing, and stages each court's rows under `/data/work/` (the release-files runbook's §10); its build, and `index promote`, arrive with slice 3.
@@ -221,20 +222,20 @@ files as new. The marker is never carried in a backup set.
 `models.lock` GPU position to that recorded card. If a recorded card is no
 longer reported, render refuses with its position and UUID; after a card
 change, remove the file as root with `sudo rm /etc/gideon/gpus.yaml`, then run
-`sudo python3 -m gideon render --diff` to re-record the cards and inspect what
+`gideon render --diff` to re-record the cards and inspect what
 moves before applying. The record is never carried in a backup set.
 
 **Build box.** The KVM, registry, and runner steps (`kvm`, `registry`, and
 `gh-runner`) converge only on TNMD's box, declared once with
-`sudo python3 -m gideon host provision --build-box`, which writes
+`gideon host provision --build-box`, which writes
 `/etc/gideon/build-box`; every other host skips them, and a no-GPU host cannot
 be declared the build box (nor the build box a no-GPU host). The marker is never
 carried in a backup set. A host that already runs the three units when it
-crosses `v0.1.68` runs `sudo ./upgrade.sh <tag>` (its provision skips the three
+crosses `v0.1.68` runs `gideon upgrade <tag>` (its provision skips the three
 with a reason naming the declaration, their units still running, and its apply
 renders the host-unit rule and the runner's unit pattern away), then
-`sudo python3 -m gideon host provision --build-box` (the three `ok`), then
-`sudo python3 -m gideon apply`, which renders the rule and the pattern back; the
+`gideon host provision --build-box` (the three `ok`), then
+`gideon apply`, which renders the rule and the pattern back; the
 transcript is kept as §2 says. TNMD's box was declared on 2026-09-16, at
 `v0.1.71`'s release, before any upgrade, and its crossing — the marker
 removed to leave the mode, then the three commands — was recorded that way. To leave
@@ -329,14 +330,15 @@ made the second of these visible.
 
 **The `v0.3.0` run.** The tag was cut twice. At the first cut, the install form went red twice on the office resolvers answering `0.0.0.0` for `huggingface.co` (cleared by an allowlist entry for the box), and once at its in-VM restore, which ran inside the 01:00 backup's minutes and passed on the next run started outside that hour. The full-restore form then went red at its second `apply`: the restored applied record names the build box's nightly units, which the no-GPU VM never linked, and `apply` refused to disable them. That fix moved the tag. At the re-cut tag, the no-GPU install passed every stage in 1137 seconds (eleven authenticated TLS messages, thirteen transcripts, about 52 GB allocated), and the full-restore form restored the box's newest set from release 0.2.98 and passed every stage in 1101 seconds (about 168 GB at its peak). The box then upgraded 0.2.98 to 0.3.0 from `/opt/gideon` in about six minutes; its apply recreated nothing, and `engine-verify` passed. The run transcripts are kept with the release records, and the pushed tag's own two-step run is the standing record.
 
-## 2. Upgrading: `sudo ./upgrade.sh <tag>`
+## 2. Upgrading: `gideon upgrade <tag>`
 
-Run from the checkout, as root, with a clean work tree: no change to a tracked
-file. An untracked file is no obstacle, so `sudo ./upgrade.sh <tag> 2>&1 | tee
-<transcript file>` keeps the command output with the office's records. The
-command runs from the *current* release's tree and hands over to the new tree's
-own CLI after the checkout; nothing of the new release is loaded into the
-running process.
+Run as root from any directory against the install home's clean work tree: no
+change to a tracked file. An untracked file is no obstacle, so
+`gideon upgrade <tag> 2>&1 | tee <transcript file>` keeps the command output
+with the office's records. The command runs from the *current* release's tree
+and hands over to the new tree's own CLI after the checkout; nothing of the new
+release is loaded into the running process.
+`sudo ./upgrade.sh <tag>` from the checkout runs the same command.
 
 The installed release's site loader refuses keys it does not know from every
 command and timer running from `/opt/gideon`, and `upgrade` loads the site file
@@ -394,7 +396,7 @@ An upgrade takes about the time of a preflight before and after the checkout
 pass, an apply, and the `engine-verify` gate (about two to eight minutes). The
 pre-upgrade set is not pushed; the nightly unit pushes.
 
-## 3. Rolling back: `sudo ./upgrade.sh --rollback [<tag>]`
+## 3. Rolling back: `gideon upgrade --rollback [<tag>]`
 
 The pre-upgrade set *is* the record of what to restore: its manifest carries
 the checkout's commit, the release, and the archive boundary. Rollback restores
@@ -473,11 +475,11 @@ folder again and fetches nothing.
 
 - `install` again on a live box: a no-op apply, an incremental set, a drill,
   the URL. Safe at any time.
-- After editing `/etc/gideon/site.yaml`, run `sudo python3 -m gideon apply` to
+- After editing `/etc/gideon/site.yaml`, run `gideon apply` to
   converge the running stack to the site file. If the edit changed `alerts.*`,
-  follow apply with `sudo python3 -m gideon alerts test` (`observability.md` §4).
+  follow apply with `gideon alerts test` (`observability.md` §4).
   A renewed certificate is placed in the certificate and key files, then picked
-  up with `sudo python3 -m gideon tls reload`; it is not a site-file edit
+  up with `gideon tls reload`; it is not a site-file edit
   (`office-services-setup.md` §4).
 - `upgrade <tag>` again after a reboot: the checkout is already at the tag, the
   set is reused, and the run resumes at the new tree's provision.
@@ -486,8 +488,8 @@ folder again and fetches nothing.
   re-run `host provision` or `upgrade <tag>` with `--acknowledge-disruption`.
   When the release running the upgrade has no such flag on `upgrade`, the
   checkout is already at the tag: from `/opt/gideon`, run
-  `sudo python3 -m gideon host provision --acknowledge-disruption` by hand,
-  then re-run `sudo python3 -m gideon upgrade <tag>`, which resumes at the new
+  `gideon host provision --acknowledge-disruption` by hand,
+  then re-run `gideon upgrade <tag>`, which resumes at the new
   tree's provision and reuses the set.
 - `upgrade <tag>` again after an attempt that stopped before the checkout: a
   fresh suffixed set is taken (the stale plain-label set is left alone); the
@@ -653,7 +655,7 @@ A package action during provision must not start a daemon on the old root, so ho
 cd /opt/gideon
 printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d >/dev/null
 sudo chmod 755 /usr/sbin/policy-rc.d
-sudo python3 -m gideon host provision --only docker-engine
+gideon host provision --only docker-engine
 sudo rm /usr/sbin/policy-rc.d
 sudo systemctl start gideon-registry.service
 sudo containerd config dump
@@ -689,7 +691,7 @@ Only after acceptance, confirm once more that `containerd config dump` names `/v
 
 ```sh
 sudo rm -rf /var/lib/containerd /var/lib/gideon-store-move
-sudo python3 -m gideon host provision
+gideon host provision
 ```
 
 The closing provision, from `/opt/gideon`, should report every step converged.
@@ -804,7 +806,7 @@ From `/opt/gideon`, converge the volume and mount it. On a box that has not fini
 
 ```sh
 cd /opt/gideon
-sudo python3 -m gideon host provision --only disk-layout
+gideon host provision --only disk-layout
 # On a first-provision box, use instead: sudo python3 -m gideon host provision
 sudo findmnt -rn -o TARGET,SOURCE,FSTYPE,SIZE --mountpoint /data
 sudo lvs -o lv_name,lv_size vg_data
@@ -873,7 +875,7 @@ sudo test -f /var/lib/gideon-data-move/start.accepted
 sudo findmnt -rn -o TARGET,SOURCE,FSTYPE --mountpoint /data
 sudo rm -rf /data.before-gideon-move /var/lib/gideon-data-move
 cd /opt/gideon
-sudo python3 -m gideon host provision
+gideon host provision
 ```
 
 ### Roll back before the start
@@ -949,13 +951,13 @@ From the release checkout, re-run provision:
 
 ```sh
 cd /opt/gideon
-sudo python3 -m gideon host provision
+gideon host provision
 ```
 
 After a driver or Docker change, verify the engine once services are running again:
 
 ```sh
-sudo python3 -m gideon engine verify
+gideon engine verify
 ```
 
 A merged `host.minimums.*` or `host.driver.branch` bump makes provision and preflight refuse until this procedure is followed (`docs/runbooks/release-files.md §9`). Provision never upgrades a present prerequisite itself.
@@ -999,7 +1001,7 @@ Measure the store under the named root with `sudo du -sb <named-root>` and check
 If the store is populated, follow `docs/runbooks/install-upgrade.md §7` by hand, substituting the named root for `/var/lib/containerd` throughout:
 
 - At the survey, also save the root file beside the shipped copy, `sudo cp -p <root-file> /var/lib/gideon-store-move/root-file.saved`, before any change; when the root file is `config.toml`, the survey's own copy is that save.
-- At the provision stage, set `root = '/var/lib/docker/containerd'` in the root file by hand before `sudo python3 -m gideon host provision --only docker-engine` under the same `policy-rc.d` hold. Provision does not rewrite a moved file.
+- At the provision stage, set `root = '/var/lib/docker/containerd'` in the root file by hand before `gideon host provision --only docker-engine` under the same `policy-rc.d` hold. Provision does not rewrite a moved file.
 - A rollback restores the root file from `/var/lib/gideon-store-move/root-file.saved` as well as `config.toml`, and continues only when `containerd config dump` reports the named root, not `/var/lib/containerd`.
 - Finish the check, accept, and remove stages over the named root.
 
@@ -1015,7 +1017,7 @@ From the release checkout, converge after the hand change:
 
 ```sh
 cd /opt/gideon
-sudo python3 -m gideon host provision
+gideon host provision
 ```
 
 ## 11. Removing GIDEON

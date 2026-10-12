@@ -88,13 +88,13 @@ nothing older is recoverable, and there is no monthly tier.
    one path on one filesystem, and `rsync` and `sha256sum` on the target —
    `preflight`'s `backup-ssh` check now proves all three (it writes a probe
    file and verifies it with `sha256sum -c`).
-3. `sudo python3 -m gideon apply` — the `postgres` service is recreated with WAL
+3. `gideon apply` — the `postgres` service is recreated with WAL
    archiving on (about a minute), the stores row reports
    `pgBackRest stanza gideon current; archiving verified`, and the two timers
    are enabled. `apply` owns the stanza: `backup run` refuses until it exists.
-4. `sudo python3 -m gideon backup run` — the first run takes a full backup.
-   Then `sudo python3 -m gideon backup push`, then
-   `sudo python3 -m gideon backup drill`. Each prints one row per stage and
+4. `gideon backup run` — the first run takes a full backup.
+   Then `gideon backup push`, then
+   `gideon backup drill`. Each prints one row per stage and
    exits 0 only when every stage passed.
 
 ## 3. Reading the rows
@@ -132,7 +132,7 @@ nothing older is recoverable, and there is no monthly tier.
 
 ## 4. Restoring
 
-`sudo python3 -m gideon restore --from staging` restores the newest local set;
+`gideon restore --from staging` restores the newest local set;
 `--from target` fetches a snapshot from the target first (into a side
 directory, verified and re-owned before anything live is touched).
 `--at <ISO time>` restores Postgres to that instant and the files to the newest
@@ -172,7 +172,7 @@ prints the two next steps:
   that made the set) or *not the set's (a rebuilt box)* — then decrypt the
   tarball with the office's age identity:
   `age -d -i <identity file kept off-box> <set>/secrets.tar.age | tar -x -C /etc/gideon`
-- `Next: sudo python3 -m gideon apply, then sudo python3 -m gideon backup run --full`
+- `Next: gideon apply, then gideon backup run --full`
 
 For the content-addressed store, restore compares the set's pinned listing
 with the live names and adds only objects the live store lacks. It hashes each
@@ -222,7 +222,7 @@ Qdrant collection's aliases are not in its snapshot. A refused recovery fails th
 row with the store's logs command and leaves the tier running.
 
 A set made before a secret rotation restores the older value: after that
-`apply`, run `sudo python3 -m gideon secrets rotate <name>` for every secret
+`apply`, run `gideon secrets rotate <name>` for every secret
 rotated since the set was made (the install runbook's rotation step, `v0.1.40`).
 
 ## 5. Total-loss recovery (a rebuilt box)
@@ -237,9 +237,9 @@ rotated since the set was made (the install runbook's rotation step, `v0.1.40`).
    its own **new** box identity, which opens none of the earlier sets: they
    open here with the office identity alone.
 2. Write `site.yaml`, place the certificate, CA root, and supplied secrets;
-   `sudo python3 -m gideon preflight`.
-3. `sudo python3 -m gideon apply` — a fresh stack with freshly generated secrets.
-4. `sudo python3 -m gideon restore --from target` (with `--at` if needed) on
+   `gideon preflight`.
+3. `gideon apply` — a fresh stack with freshly generated secrets.
+4. `gideon restore --from target` (with `--at` if needed) on
    the running fresh stack. Its `pre-restore` row reads the fresh-stack skip
    because a stack holding no set has nothing a safety set would protect. If
    the 01:00 nightly ran between steps 3 and 4, the stack holds a set and is
@@ -252,8 +252,8 @@ rotated since the set was made (the install runbook's rotation step, `v0.1.40`).
 5. Decrypt the set's tarball over the fresh secrets with the **old** identity
    from the password manager (the restored databases carry the old role
    passwords, so the old secrets must be back before anything connects).
-6. `sudo python3 -m gideon apply`, then `sudo python3 -m gideon backup run --full`,
-   then `sudo python3 -m gideon backup drill`.
+6. `gideon apply`, then `gideon backup run --full`,
+   then `gideon backup drill`.
 
 For the corpus's court coverage after these steps, follow `docs/runbooks/release-files.md §11`.
 
@@ -266,11 +266,11 @@ This is a check a person makes, not a gate any command enforces.
 
 ## 6. The pre-upgrade backup
 
-`sudo ./upgrade.sh <tag>` takes a full, labelled set before an upgrade so
+`gideon upgrade <tag>` takes a full, labelled set before an upgrade so
 rollback has the checkout and data from before the change — `pre-<tag>`, or
 `pre-<tag>-<timestamp>` when an earlier attempt
-that never crossed the checkout left the plain label behind — and `sudo
-./upgrade.sh --rollback [<tag>]` is the rollback: it restores that set with
+that never crossed the checkout left the plain label behind — and
+`gideon upgrade --rollback [<tag>]` is the rollback: it restores that set with
 `restore --from staging --set <label>` and re-applies the previous release
 (`install-upgrade.md`). The `--set` form addresses a set by its
 label and restores Postgres from that set's own backup to that set's own
