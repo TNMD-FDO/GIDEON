@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.134](docs/release-notes/v0.3.134.md) — 2026-10-12 — tranche 1 installed and ingested
 - [v0.3.133](docs/release-notes/v0.3.133.md) — 2026-10-12 — render --diff before a minted secret
 - [v0.3.132](docs/release-notes/v0.3.132.md) — 2026-10-12 — an ADR's number derived at landing
 - [v0.3.131](docs/release-notes/v0.3.131.md) — 2026-10-11 — a stopped timer stays stopped
