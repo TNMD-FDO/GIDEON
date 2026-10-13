@@ -7,7 +7,7 @@ import json
 import threading
 import unittest
 from typing import Any, ClassVar, cast
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from gideon.host import grafana, report, secrets
 from gideon.host.grafana import (
@@ -45,7 +45,7 @@ class _SecretHost:
 class AdministratorAccess(unittest.TestCase):
     """The break-glass administrator's access, read once, and its secret file's refusals."""
 
-    def test_rotation_route_names_the_administrator_and_is_command_form_independent(self) -> None:
+    def test_rotation_route_names_the_administrator_and_command_in_both_forms(self) -> None:
         routes = []
         try:
             for installed in (False, True):
@@ -54,14 +54,17 @@ class AdministratorAccess(unittest.TestCase):
                     route = grafana.administrator_rotation_route()
                     self.assertIn(GRAFANA_ADMIN_USER, route)
                     self.assertIn(str(secrets.secret_path("grafana_admin_password")), route)
-                    self.assertIn("/grafana/api/user/password", route)
-                    self.assertIn("the install runbook's rotation step", route)
-                    self.assertNotIn("python3 -m gideon", route)
-                    self.assertNotIn("gideon ", route)
+                    self.assertIn(report.command("secrets rotate grafana_admin_password"), route)
+                    self.assertIn("Grafana's own CLI inside the container", route)
+                    self.assertIn("needing no old value", route)
+                    self.assertIn("in place and verifies the sign-in", route)
+                    self.assertNotIn("/api/", route)
+                    if installed:
+                        self.assertNotIn("python3 -m gideon", route)
                     routes.append(route)
         finally:
             report.set_installed_form(False)
-        self.assertEqual(routes[0], routes[1])
+        self.assertNotEqual(routes[0], routes[1])
 
     def test_available_secret_opens_injected_client_without_exposing_password(self) -> None:
         password = "fictitious-grafana-password"
@@ -422,6 +425,59 @@ class ClientOverLoopback(unittest.TestCase):
         with patch.object(http.client.HTTPConnection, "connect"):
             connection.connect()
         self.assertEqual(context.server_hostname, "grafana.example.invalid")
+
+
+class SignIn(unittest.TestCase):
+    """One credential check over a fake HTTP transport, with no body text returned."""
+
+    def check_sign_in(self, status: int) -> str | None:
+        password = "fictitious-sign-in-password"
+        connection = Mock()
+        response = connection.getresponse.return_value
+        response.status = status
+        response.read.return_value = json.dumps({"private": password}).encode()
+        client = Client(
+            "http://127.0.0.1/grafana",
+            credential=(GRAFANA_ADMIN_USER, password),
+        )
+        with patch.object(client, "_connection", return_value=connection):
+            problem = grafana.verify_sign_in(client)
+        connection.request.assert_called_once_with(
+            "GET",
+            "/grafana/api/user",
+            body=None,
+            headers={
+                "Accept": "application/json",
+                "Authorization": "Basic " + base64.b64encode(
+                    f"{GRAFANA_ADMIN_USER}:{password}".encode()
+                ).decode(),
+            },
+        )
+        connection.close.assert_called_once_with()
+        self.assertNotIn(password, problem or "")
+        return problem
+
+    def test_success_statuses_accept_the_credential(self) -> None:
+        for status in (200, 204, 299):
+            with self.subTest(status=status):
+                self.assertIsNone(self.check_sign_in(status))
+
+    def test_failure_statuses_name_the_problem_without_body_text(self) -> None:
+        for status in (401, 403, 500, 302):
+            with self.subTest(status=status):
+                problem = self.check_sign_in(status)
+                if status in (401, 403):
+                    self.assertEqual(problem, f"Grafana refused the sign-in as {GRAFANA_ADMIN_USER}.")
+                else:
+                    self.assertEqual(problem, f"Grafana sign-in returned HTTP {status}.")
+
+    def test_grafana_error_returns_its_problem(self) -> None:
+        client = Client("http://127.0.0.1/grafana")
+        failure = GrafanaError("Fictitious Grafana transport failure.")
+        with patch.object(client, "request", side_effect=failure) as request:
+            problem = grafana.verify_sign_in(client)
+        self.assertEqual(problem, failure.problem)
+        request.assert_called_once_with("GET", "/api/user")
 
 
 class WaitReady(unittest.TestCase):

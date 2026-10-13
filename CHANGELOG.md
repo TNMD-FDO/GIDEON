@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.147](docs/release-notes/v0.3.147.md) — 2026-10-12 — Grafana's admin password rotated
 - [v0.3.146](docs/release-notes/v0.3.146.md) — 2026-10-12 — back to development on a wiped box
 - [v0.3.144](docs/release-notes/v0.3.144.md) — 2026-10-12 — the scheduler arbitrates the engine
 - [v0.3.143](docs/release-notes/v0.3.143.md) — 2026-10-12 — preflight matches the card, any edition

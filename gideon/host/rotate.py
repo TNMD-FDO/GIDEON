@@ -1,11 +1,14 @@
 """The ordered host command for rotating one generated secret.
 
-``secrets rotate <name>`` regenerates one rotatable secret and recreates exactly
-the services that loaded the old value, then converges the rest of the stack
-the way ``apply`` does.  Every other registry name refuses before any change,
-naming the class of its second home or the office's replacement path.
+The seeded class resets Grafana's stored administrator password through its own
+CLI, rewrites the file, and verifies sign-in without recreating anything.
+The rewrite and remint classes regenerate one secret and recreate exactly the
+services that loaded the old value, then converge the rest of the stack the way
+``apply`` does. Every other registry name refuses before any change, naming the
+class of its second home or the office's replacement path.
 """
 
+import subprocess
 import sys
 import time
 from collections.abc import Callable, Mapping
@@ -14,11 +17,21 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
-from gideon.host import apply, backuplock, grafana, owui, report, secrets, weights
+from gideon.host import (
+    apply,
+    backuplock,
+    grafana,
+    owui,
+    report,
+    secrets,
+    stack,
+    weights,
+)
 from gideon.host.render import RenderedSet, RenderInputs, render_all
 from gideon.host.render import command as render_command
 from gideon.host.render.compose import service_names
 from gideon.host.render.consumers import SecretConsumers, consumers_of
+from gideon.host.render.grafana import GRAFANA_ADMIN_USER
 from gideon.host.render.owui import BREAK_GLASS, EVAL_IDENTITY
 from gideon.host.render.services import slow_start_services
 from gideon.host.report import StageResult, print_stage, refusal
@@ -30,10 +43,20 @@ _SITE_PATH: Final = "/etc/gideon/site.yaml"
 _RENDERED_DIR: Final = "/etc/gideon/rendered"
 _COMPOSE_FILE: Final = f"{_RENDERED_DIR}/compose.yaml"
 _INPUTS_FIX: Final = "Correct the render inputs named above, then retry."
-# The command rotates only a secret whose file is the value's only home; a
-# second home is changed through its consumer's own route first.
-_ONLY_HOME_RULE: Final = "this command rotates only a secret whose file is its only home"
-_ROTATABLE_CLASSES: Final[frozenset[str]] = frozenset({"rewrite", "remint"})
+# A second home needs its consumer's own route; Grafana's seeded administrator
+# is the exception whose stored value the command resets through its CLI.
+_ONLY_HOME_RULE: Final = (
+    "this command rotates only a secret whose file is its only home, or Grafana's "
+    "seeded administrator, whose stored value it resets through Grafana's own CLI"
+)
+_ROTATABLE_CLASSES: Final[frozenset[str]] = frozenset({"rewrite", "remint", "seeded"})
+_GRAFANA_SERVICE: Final = "grafana"
+_RESET_ARGV: Final = (
+    "grafana", "cli", "admin", "reset-admin-password", "--password-from-stdin"
+)
+_RESET_SUCCESS: Final = "Admin password changed successfully"
+# exempt: one Grafana CLI password reset must finish before the file is written.
+_RESET_TIMEOUT: Final = 60
 
 # Release identities the refusals name, never a value: the superuser is the
 # image's fixed role, the application roles are the store convergence's own
@@ -99,10 +122,6 @@ def _account_fix(name: str, login: str) -> str:
     )
 
 
-def _seeded_fix() -> str:
-    return f"{grafana.administrator_rotation_route()}; a ticket of its own — {_ONLY_HOME_RULE}."
-
-
 def _pre_run_refusal(name: str) -> int | None:
     """The refusal for a name the command will not rotate, or None for a rotatable one."""
 
@@ -140,11 +159,7 @@ def _pre_run_refusal(name: str) -> int | None:
             f"{name} also lives in the frontend account {login}.",
             _account_fix(name, login),
         )
-    return _refuse(
-        f"{name} also lives in Grafana's stored admin user, seeded from the file at "
-        "first start only.",
-        _seeded_fix(),
-    )
+    return None
 
 
 def _pending_reason(judgment: render_command.RecreateJudgment) -> str:
@@ -244,6 +259,16 @@ def _preconditions(
 def _plan(name: str, entry: secrets.GeneratedSecret, consumers: SecretConsumers) -> StageResult:
     """What the run will do: the class, the consumers, and each consumer's unavailability."""
 
+    if entry.rotation == "seeded":
+        return StageResult(
+            "plan",
+            True,
+            f"{name}: seeded — Grafana's stored password reset through its CLI in the "
+            f"{_GRAFANA_SERVICE} service with the value on stdin, then the file rewritten; "
+            f"{', '.join(consumers.mounts)} reads the file at first start only and is not "
+            "recreated; copy the new value into the office password manager",
+            "",
+        )
     if entry.rotation == "remint":
         return StageResult(
             "plan",
@@ -307,6 +332,111 @@ def _rotate(io: Host, name: str, entry: secrets.GeneratedSecret) -> StageResult:
     return StageResult("rotate", True, f"{name}: file removed; re-minted below", "")
 
 
+def _reset(io: Host, rendered_dir: PathLike, name: str, value: str) -> StageResult:
+    """Reset Grafana's stored administrator password, carrying the value on stdin."""
+
+    fix = (
+        "Nothing was written; read the logs with "
+        f"sudo {stack.logs_fix(rendered_dir, _GRAFANA_SERVICE)}, "
+        f"then run {_rotate_command()} {name} again."
+    )
+    try:
+        result = io.run(
+            stack.exec_argv(rendered_dir, _GRAFANA_SERVICE, *_RESET_ARGV),
+            input=value + "\n",
+            timeout=_RESET_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        return StageResult(
+            "reset", False, f"Grafana password reset exceeded {_RESET_TIMEOUT} s", fix
+        )
+    except (OSError, subprocess.SubprocessError):
+        return StageResult("reset", False, "could not run Grafana's password reset CLI", fix)
+    if result.returncode != 0 or _RESET_SUCCESS not in result.stdout:
+        return StageResult(
+            "reset", False, report.command_detail(result).replace(value, "<redacted>"), fix
+        )
+    return StageResult(
+        "reset", True,
+        f"stored password for {GRAFANA_ADMIN_USER} reset through the CLI in the "
+        f"{_GRAFANA_SERVICE} service, the value on stdin",
+        "",
+    )
+
+
+def _write_seeded(io: Host, name: str, value: str) -> StageResult:
+    """Record the seeded password as an owned secret file after its CLI reset."""
+
+    path = secret_path(name)
+    try:
+        problem = secrets.write_secret(io, name, value)
+    except (OSError, subprocess.SubprocessError):
+        problem = "could not write the secret or resolve the service group"
+    if problem is not None:
+        return StageResult(
+            "rotate", False, problem.replace(value, "<redacted>"),
+            f"Correct {path} to root:gideon 0440, then run {_rotate_command()} {name} "
+            "again: Grafana already holds a value the file does not, and a re-run resets "
+            "it needing no old value.",
+        )
+    return StageResult("rotate", True, f"{name}: new value written to {path} (root:gideon 0440)", "")
+
+
+def _verify_sign_in(
+    io: Host,
+    name: str,
+    hostname: str,
+    grafana_client_factory: Callable[..., grafana.Client] | None,
+) -> StageResult:
+    """Read back the secret file and check its administrator credential through ingress."""
+
+    access = grafana.administrator(io, hostname, client_factory=grafana_client_factory)
+    if isinstance(access, report.Problem):
+        return StageResult(
+            "verify", False, access.problem, f"Run {_rotate_command()} {name} again."
+        )
+    try:
+        problem = grafana.verify_sign_in(access.client())
+    except grafana.GrafanaError as exc:
+        problem = exc.problem
+    if problem is not None:
+        return StageResult(
+            "verify", False, problem,
+            f"The file holds the value Grafana was given; run {_rotate_command()} {name} "
+            "again.",
+        )
+    return StageResult(
+        "verify", True,
+        f"signed in as {GRAFANA_ADMIN_USER} through the ingress with the file's value",
+        "",
+    )
+
+
+def _rotate_seeded(
+    io: Host,
+    name: str,
+    entry: secrets.GeneratedSecret,
+    context: _RotationContext,
+    rendered_dir: PathLike,
+    grafana_client_factory: Callable[..., grafana.Client] | None,
+) -> int:
+    """Reset, record, and verify the seeded password, stopping at the first failed row."""
+
+    print_stage(_plan(name, entry, context.consumers))
+    value = secrets.mint_password()
+    for step in (
+        lambda: _reset(io, rendered_dir, name, value),
+        lambda: _write_seeded(io, name, value),
+        lambda: _verify_sign_in(io, name, context.inputs.site.hostname, grafana_client_factory),
+    ):
+        result = step()
+        print_stage(result)
+        if not result.ok:
+            return 1
+    print(f"Next: copy the new value from {secret_path(name)} into the office password manager.")
+    return 0
+
+
 def _recreate(
     io: Host, rendered_dir: PathLike, name: str, mounts: tuple[str, ...]
 ) -> StageResult:
@@ -346,7 +476,7 @@ def run_secrets_rotate(
     grafana_client_factory: Callable[..., grafana.Client] | None = None,
     now: datetime | None = None,
 ) -> int:
-    """Rotate one generated secret, recreate its mount consumers, and converge the rest."""
+    """Rotate one generated secret through its registry class's route."""
 
     name = str(getattr(args, "name", ""))
     io = host or RealHost()
@@ -378,6 +508,15 @@ def run_secrets_rotate(
     if not preconditions.ok or context is None:
         print_stage(preconditions)
         return 1
+
+    if entry.rotation == "seeded":
+        print_stage(StageResult(
+            preconditions.name,
+            True,
+            f"{preconditions.detail}; no engine lock taken — nothing is recreated",
+            preconditions.fix,
+        ))
+        return _rotate_seeded(io, name, entry, context, rendered_dir, grafana_client_factory)
 
     lock_claim = backuplock.claim(
         io,

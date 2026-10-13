@@ -189,21 +189,21 @@ same command is run again after the fix.
    certificate alone renews it from its standing key before its ten-year end
    date, and rotating the key re-issues the certificate with it), and the two minted keys `gideon_admin_api_key` and
    `gideon_eval_api_key` (the file removed and re-minted by the apply-manifest
-   stage; nothing recreated). Every other name refuses before any change,
-   naming the office's path: a supplied secret — `tls_key`: replace the files
+   stage; nothing recreated). `gideon secrets rotate grafana_admin_password`
+   resets Grafana's stored password through Grafana's own CLI inside the
+   container, needing no old value, then rewrites the file and verifies the
+   sign-in without recreating anything; it is the route for a stored password
+   nobody knows. Copy the file's new value into the office password manager.
+   Every other name refuses before any change, naming the office's path: a supplied secret — `tls_key`: replace the files
    and run `tls reload`; `ldap_bind_password` and `smtp_password`: replace the
    file, run `apply`, then force-recreate Grafana by hand (`sudo docker compose
    -f /etc/gideon/rendered/compose.yaml up -d --no-deps --force-recreate
    grafana`), which mounts them and which the recreate rule does not see;
    `proxy_auth`: replace the file and run `apply` — a Postgres role password
    (the role itself holds the value), `gideon_admin_password`
-   and `gideon_eval_password` (the frontend's account holds it),
-   `grafana_admin_password` (Grafana's admin user is seeded from the file at
-   first start only: change it through Grafana's password endpoint as the
-   administrator with the old and new value in the request body carried on
-   stdin, then rewrite the file in place; the rotation transcript is the
-   record. A restore of a set made before a rotation brings the
-   older value back: after that restore's `apply`, run `secrets rotate <name>`
+   and `gideon_eval_password` (the frontend's account holds it). The rotation
+   transcript is the record. A restore of a set made before a rotation brings
+   the older value back: after that restore's `apply`, run `secrets rotate <name>`
    for every secret rotated since the set was made.
 7. **Hand over the URL**, and test alerts once so the
    page path is proven through the relay (`observability.md`).

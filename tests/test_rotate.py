@@ -31,6 +31,7 @@ from gideon.host import (
     pgbackrest,
     report,
     rotate,
+    secrets,
     weights,
 )
 from gideon.host.apply import run_apply
@@ -43,6 +44,7 @@ from gideon.host.render.api import API_SERVICE_NAME
 from gideon.host.render.command import run_render
 from gideon.host.render.compose import service_blocks
 from gideon.host.render.engine import EMBED_SERVICE_NAME, ENGINE_SERVICE_NAME
+from gideon.host.render.grafana import GRAFANA_ADMIN_USER
 from gideon.host.render.opensearch import (
     OPENSEARCH_METRICS_SECRET_NAME,
     OPENSEARCH_SERVICE_NAME,
@@ -51,7 +53,7 @@ from gideon.host.render.services import all_service_names, store_services
 from gideon.host.render.services.prometheus import PrometheusService
 from gideon.host.secrets import SECRET_REGISTRY, SECRETS_DIR
 from gideon.host.site import SiteConfig, load_site
-from gideon.host.stack import compose_argv, exec_argv
+from gideon.host.stack import compose_argv, exec_argv, logs_fix
 from gideon.host.sysio import Command, Host, PathLike
 from gideon.host.tls import CA_PATH, CERT_PATH
 
@@ -226,7 +228,10 @@ PLACED_FP = ("openssl", "x509", "-in", CERT, "-noout", "-fingerprint", "-sha256"
 LEAF = "-----BEGIN CERTIFICATE-----\nMIIC\n-----END CERTIFICATE-----\n"
 FINGERPRINT = "sha256 Fingerprint=81:2C:7A:46:FB:2D:27:AA\n"
 
-Outcome = subprocess.CompletedProcess[str] | list[subprocess.CompletedProcess[str]]
+Outcome = (
+    subprocess.CompletedProcess[str] | list[subprocess.CompletedProcess[str]]
+    | OSError | subprocess.SubprocessError
+)
 
 
 def done(
@@ -409,6 +414,8 @@ class FakeClient(owui.Client):
 class FakeGrafanaClient(grafana.Client):
     def __init__(self) -> None:
         super().__init__("http://127.0.0.1")
+        self.sign_in_status = 200
+        self.requests: list[tuple[str, str]] = []
 
     def request(
         self,
@@ -418,8 +425,13 @@ class FakeGrafanaClient(grafana.Client):
         *,
         headers: Mapping[str, str] | None = None,
     ) -> grafana.Response:
-        del method, path, body, headers
-        return grafana.Response(200, {"database": "ok"})
+        del body, headers
+        self.requests.append((method, path))
+        if method == "GET" and path == "/api/user":
+            return grafana.Response(self.sign_in_status, {"private": "fictitious-response-body"})
+        if method == "GET" and path == "/api/health":
+            return grafana.Response(200, {"database": "ok"})
+        raise AssertionError(f"unexpected Grafana request: {method} {path}")
 
 
 class ApplyHost:
@@ -439,6 +451,8 @@ class ApplyHost:
         self.euid = euid
         self.calls: list[tuple[tuple[str, ...], Mapping[str, str] | None]] = []
         self.inputs: list[tuple[tuple[str, ...], str | None]] = []
+        self.timeouts: list[tuple[tuple[str, ...], float | None]] = []
+        self.reads: list[str] = []
         self.writes: list[str] = []
         self.write_modes: dict[str, int] = {}
         self.chown_calls: list[tuple[str, int, int]] = []
@@ -451,6 +465,7 @@ class ApplyHost:
         self.lock_log: list[tuple[str, str]] = []
         self.frontend = FakeFrontend()
         self.grafana = FakeGrafanaClient()
+        self.grafana_credentials: list[tuple[str, str] | None] = []
 
     def run(
         self,
@@ -463,15 +478,18 @@ class ApplyHost:
         timeout: float | None = None,
         passthrough: bool = False,
     ) -> subprocess.CompletedProcess[str]:
-        del check, cwd, timeout, passthrough
+        del check, cwd, passthrough
         command = tuple(argv)
         self.calls.append((command, env))
         self.inputs.append((command, input))
+        self.timeouts.append((command, timeout))
         if command and command[0] in {"openssl", "mv"}:
             answered = answer_pair_command(command, self.files, self.public_keys)
             if answered is not None:
                 return answered
         outcome = self.commands.get(command)
+        if isinstance(outcome, (OSError, subprocess.SubprocessError)):
+            raise outcome
         if isinstance(outcome, list):
             return outcome.pop(0) if len(outcome) > 1 else outcome[0]
         if outcome is None:
@@ -484,6 +502,7 @@ class ApplyHost:
     def read_text(self, path: PathLike, *, encoding: str = "utf-8") -> str:
         del encoding
         key = os.fspath(path)
+        self.reads.append(key)
         if key not in self.files:
             raise FileNotFoundError(key)
         return self.files[key]
@@ -693,7 +712,7 @@ def client_factory(host: ApplyHost) -> Callable[..., owui.Client]:
 
 def grafana_client_factory(host: ApplyHost) -> Callable[..., grafana.Client]:
     def make(*, credential: tuple[str, str] | None = None) -> FakeGrafanaClient:
-        del credential
+        host.grafana_credentials.append(credential)
         return host.grafana
 
     return make
@@ -997,6 +1016,242 @@ class ApiRotation(RealStack):
         assert_no_secret_text(self, out + err, (new_value,))
 
 
+class GrafanaRotation(RealStack):
+    """The seeded password resets, records, and verifies without a lock or converge."""
+
+    def setUp(self) -> None:
+        self.addCleanup(report.set_form_from_environment, os.environ.copy())
+        self.name = "grafana_admin_password"
+        self.path = str(secrets.secret_path(self.name))
+        self.reset = tuple(exec_argv(
+            RENDERED, "grafana", "grafana", "cli", "admin",
+            "reset-admin-password", "--password-from-stdin",
+        ))
+
+    def ready_host(self) -> ApplyHost:
+        host = self.applied_host()
+        host.commands[self.reset] = done(
+            self.reset, stdout="New Password:\nAdmin password changed successfully ✔\n"
+        )
+        host.calls.clear()
+        host.inputs.clear()
+        host.timeouts.clear()
+        host.reads.clear()
+        host.writes.clear()
+        host.write_modes.clear()
+        host.chown_calls.clear()
+        host.lock_log.clear()
+        host.lock_records.clear()
+        host.grafana_credentials.clear()
+        host.grafana.requests.clear()
+        return host
+
+    def assert_isolated(self, host: ApplyHost, before: str, output: str, value: str) -> None:
+        self.assertEqual(host.files[f"{RENDERED}/applied.yaml"], before)
+        self.assertEqual(host.lock_log, [])
+        self.assertEqual(host.lock_records, [])
+        self.assertEqual(
+            [call for call in argv_calls(host) if call[:2] == ("docker", "compose") and call != VERSION],
+            [self.reset],
+        )
+        self.assertFalse(any("--force-recreate" in call for call in argv_calls(host)))
+        for command, environment in host.calls:
+            self.assertNotIn(value, " ".join(command))
+            if environment is not None:
+                self.assertNotIn(value, repr(environment))
+        assert_no_secret_text(self, output, (value,))
+
+    def test_resets_records_and_verifies_without_recreating_or_taking_the_lock(self) -> None:
+        for installed in (False, True):
+            with self.subTest(installed=installed):
+                report.set_installed_form(installed)
+                host = self.ready_host()
+                before_files = dict(host.files)
+                before = host.files[f"{RENDERED}/applied.yaml"]
+                host.lock_holder = backuplock.Record(
+                    "eval run fixture", os.getpid() + 1, datetime(2026, 9, 3, tzinfo=UTC)
+                ).to_json()
+                with (
+                    patch.object(rotate, "_recreate") as recreate,
+                    patch.object(rotate.apply, "converge") as converge,
+                    patch.object(rotate.grafana, "administrator", wraps=grafana.administrator) as administrator,
+                ):
+                    code, out, err = run_rotate(host, self.name)
+                self.assertEqual((code, err), (0, ""), out)
+                self.assertEqual(stages(out), ["preconditions", "plan", "reset", "rotate", "verify", "Next"])
+                self.assertIn("no engine lock taken — nothing is recreated", out)
+                self.assertIn(f"{self.name}: seeded", out)
+                self.assertIn("grafana reads the file at first start only and is not recreated", out)
+                self.assertIn("CLI in the grafana service with the value on stdin", out)
+                self.assertIn(f"stored password for {GRAFANA_ADMIN_USER} reset", out)
+                self.assertIn(f"signed in as {GRAFANA_ADMIN_USER} through the ingress", out)
+                self.assertTrue(out.endswith(
+                    f"Next: copy the new value from {self.path} into the office password manager.\n"
+                ))
+                value = host.files[self.path].rstrip("\n")
+                self.assertNotEqual(host.files[self.path], before_files[self.path])
+                self.assertEqual(host.writes, [self.path])
+                self.assertEqual(host.write_modes, {self.path: 0o440})
+                self.assertEqual(host.chown_calls, [(self.path, 0, 4242)])
+                self.assertEqual([record for record in host.inputs if record[0] == self.reset], [(self.reset, value + "\n")])
+                self.assertEqual([record for record in host.timeouts if record[0] == self.reset], [(self.reset, rotate._RESET_TIMEOUT)])
+                self.assertEqual(host.grafana_credentials, [(GRAFANA_ADMIN_USER, value)])
+                self.assertEqual(host.grafana.requests, [("GET", "/api/user")])
+                self.assertIn(self.path, host.reads)
+                administrator.assert_called_once()
+                site = load_site(EXAMPLE).config
+                assert site is not None
+                self.assertEqual(administrator.call_args.args[1], site.hostname)
+                recreate.assert_not_called()
+                converge.assert_not_called()
+                for path, text in host.files.items():
+                    if value in text:
+                        self.assertEqual(path, self.path)
+                    if path != self.path:
+                        self.assertEqual(text, before_files[path])
+                self.assert_isolated(host, before, out + err, value)
+
+    def test_cli_failure_missing_success_and_timeout_stop_before_the_write(self) -> None:
+        value = "fictitious-minted-grafana-password"
+        outcomes: tuple[Outcome, ...] = (
+            done(self.reset, rc=1, stdout=f"New Password:\n{value}\n", stderr=f"fictitious reset failure {value}"),
+            done(self.reset, stdout=f"New Password:\nfictitious reset failure {value}\n"),
+            done(self.reset, rc=1, stdout="Admin password changed successfully ✔\n", stderr="fictitious nonzero exit"),
+            done(self.reset, stdout="New Password:\n", stderr="Admin password changed successfully ✔\n"),
+            subprocess.TimeoutExpired(self.reset, rotate._RESET_TIMEOUT, output=value, stderr=value),
+            done(self.reset, rc=127, stderr="fictitious unavailable CLI"),
+            OSError(f"fictitious execution failure {value}"),
+        )
+        for installed in (False, True):
+            report.set_installed_form(installed)
+            for outcome in outcomes:
+                with self.subTest(installed=installed, outcome=type(outcome).__name__):
+                    host = self.ready_host()
+                    before_files = dict(host.files)
+                    before = host.files[f"{RENDERED}/applied.yaml"]
+                    host.commands[self.reset] = outcome
+                    with patch.object(secrets, "mint_password", return_value=value) as mint:
+                        code, out, err = run_rotate(host, self.name)
+                    self.assertEqual((code, err), (1, ""), out)
+                    mint.assert_called_once_with()
+                    self.assertEqual(stages(out), ["preconditions", "plan", "reset"])
+                    self.assertIn("reset: refuse", out)
+                    self.assertIn(f"sudo {logs_fix(RENDERED, 'grafana')}", out)
+                    self.assertIn(f"{report.command(f'secrets rotate {self.name}')} again", out)
+                    self.assertIn("Nothing was written", out)
+                    if isinstance(outcome, subprocess.TimeoutExpired):
+                        self.assertIn(f"exceeded {rotate._RESET_TIMEOUT} s", out)
+                    elif isinstance(outcome, subprocess.CompletedProcess):
+                        detail = report.command_detail(outcome).replace(value, "<redacted>")
+                        self.assertIn(detail, out)
+                    self.assertEqual(host.files, before_files)
+                    self.assertEqual(host.writes, [])
+                    self.assertEqual(host.grafana_credentials, [])
+                    self.assertEqual(host.grafana.requests, [])
+                    self.assertNotIn("Next:", out)
+                    self.assert_isolated(host, before, out + err, value)
+
+    def test_service_group_write_refusal_stops_before_verifying_and_can_be_rerun(self) -> None:
+        for installed in (False, True):
+            with self.subTest(installed=installed):
+                report.set_installed_form(installed)
+                host = self.ready_host()
+                before_files = dict(host.files)
+                before = host.files[f"{RENDERED}/applied.yaml"]
+                host.commands[SERVICE_GROUP] = [
+                    done(SERVICE_GROUP, stdout="gideon:x:4242:\n"),
+                    done(SERVICE_GROUP, rc=2),
+                ]
+                value = "fictitious-reset-but-unwritten-password"
+                with patch.object(secrets, "mint_password", return_value=value):
+                    code, out, err = run_rotate(host, self.name)
+                self.assertEqual((code, err), (1, ""), out)
+                self.assertEqual(stages(out), ["preconditions", "plan", "reset", "rotate"])
+                self.assertIn(secrets.SERVICE_GROUP_PROBLEM, out)
+                self.assertIn(f"Correct {self.path} to root:gideon 0440", out)
+                self.assertIn(f"{report.command(f'secrets rotate {self.name}')} again", out)
+                self.assertIn("Grafana already holds a value the file does not", out)
+                self.assertEqual(host.files, before_files)
+                self.assertEqual(host.writes, [])
+                self.assertEqual(host.grafana_credentials, [])
+                self.assertNotIn("Next:", out)
+                self.assert_isolated(host, before, out + err, value)
+                host.commands[SERVICE_GROUP] = done(SERVICE_GROUP, stdout="gideon:x:4242:\n")
+                code, out, err = run_rotate(host, self.name)
+                self.assertEqual((code, err), (0, ""), out)
+                self.assertNotEqual(host.files[self.path], before_files[self.path])
+                assert_no_secret_text(self, out + err, (host.files[self.path].strip(),))
+
+    def test_refused_sign_in_keeps_the_written_file_and_prints_the_rerun_fix(self) -> None:
+        for installed in (False, True):
+            report.set_installed_form(installed)
+            for status in (401, 403, 500):
+                with self.subTest(installed=installed, status=status):
+                    host = self.ready_host()
+                    before = host.files[f"{RENDERED}/applied.yaml"]
+                    old_value = host.files[self.path]
+                    host.grafana.sign_in_status = status
+                    code, out, err = run_rotate(host, self.name)
+                    self.assertEqual((code, err), (1, ""), out)
+                    self.assertEqual(stages(out), ["preconditions", "plan", "reset", "rotate", "verify"])
+                    self.assertIn("verify: refuse", out)
+                    self.assertIn("The file holds the value Grafana was given", out)
+                    self.assertIn(f"{report.command(f'secrets rotate {self.name}')} again", out)
+                    if status in (401, 403):
+                        self.assertIn(f"Grafana refused the sign-in as {GRAFANA_ADMIN_USER}", out)
+                    else:
+                        self.assertIn(f"HTTP {status}", out)
+                    self.assertNotIn("fictitious-response-body", out)
+                    self.assertNotIn("Next:", out)
+                    self.assertEqual(host.writes, [self.path])
+                    self.assertEqual(host.write_modes[self.path], 0o440)
+                    self.assertEqual(host.chown_calls, [(self.path, 0, 4242)])
+                    self.assertNotEqual(host.files[self.path], old_value)
+                    value = host.files[self.path].strip()
+                    self.assertEqual(host.grafana_credentials, [(GRAFANA_ADMIN_USER, value)])
+                    self.assert_isolated(host, before, out + err, value)
+
+    def test_secret_read_problem_stops_after_the_write_with_the_rerun_fix(self) -> None:
+        for installed in (False, True):
+            with self.subTest(installed=installed):
+                report.set_installed_form(installed)
+                host = self.ready_host()
+                before = host.files[f"{RENDERED}/applied.yaml"]
+                failure = report.Problem("Fictitious administrator secret read failure.", "unused fix")
+                with patch.object(grafana, "administrator", return_value=failure):
+                    code, out, err = run_rotate(host, self.name)
+                self.assertEqual((code, err), (1, ""), out)
+                self.assertEqual(stages(out), ["preconditions", "plan", "reset", "rotate", "verify"])
+                self.assertIn(failure.problem, out)
+                self.assertIn(f"Run {report.command(f'secrets rotate {self.name}')} again", out)
+                self.assertEqual(host.writes, [self.path])
+                self.assertEqual(host.grafana_credentials, [])
+                self.assertNotIn("Next:", out)
+                self.assert_isolated(host, before, out + err, host.files[self.path].strip())
+
+    def test_default_ingress_factory_and_client_construction_failure(self) -> None:
+        for installed in (False, True):
+            with self.subTest(installed=installed):
+                report.set_installed_form(installed)
+                host = self.ready_host()
+                hostname = "fictitious-grafana.example.invalid"
+                factory = grafana_client_factory(host)
+                with patch.object(grafana, "ingress_client_factory", return_value=factory) as ingress:
+                    result = rotate._verify_sign_in(host, self.name, hostname, None)
+                self.assertTrue(result.ok, result.detail)
+                ingress.assert_called_once_with(hostname, ca_path=CA_PATH)
+                self.assertEqual(host.grafana_credentials, [(GRAFANA_ADMIN_USER, host.files[self.path].strip())])
+                failure = grafana.GrafanaError("Fictitious Grafana client construction failure.")
+                with (
+                    patch.object(grafana, "ingress_client_factory", return_value=factory),
+                    patch.object(grafana.Administrator, "client", side_effect=failure),
+                ):
+                    result = rotate._verify_sign_in(host, self.name, hostname, None)
+                self.assertFalse(result.ok)
+                self.assertEqual(result.detail, failure.problem)
+                self.assertIn(report.command(f"secrets rotate {self.name}"), result.fix)
+
+
 class RefusalClasses(RealStack):
     def test_fixes_follow_the_run_form_and_lock_keeps_its_name(self) -> None:
         self.addCleanup(report.set_form_from_environment, os.environ.copy())
@@ -1025,11 +1280,14 @@ class RefusalClasses(RealStack):
                 self.assertIn(
                     f"Run {prefix} secrets rotate <name> with a rotatable name", err
                 )
+                self.assertIn("grafana_admin_password", err.partition("generated:")[0])
                 for name in ("postgres_gideon_password", "gideon_admin_password"):
                     with self.subTest(name=name):
                         code, out, err = run_rotate(self.new_host(), name)
                         self.assertEqual((code, out), (1, ""))
                         self.assertIn(f"then {prefix} apply; a ticket of its own", err)
+                        self.assertIn("or Grafana's seeded administrator", err)
+                        self.assertIn("stored value it resets through Grafana's own CLI", err)
 
                 code, out, err = run_rotate(self.new_host(), "engine_api_key")
                 self.assertEqual((code, err), (1, ""))
@@ -1073,12 +1331,12 @@ class RefusalClasses(RealStack):
     def test_refusals_are_before_any_new_write_or_compose_call(self) -> None:
         host = self.applied_host()
         cases = (
-            ("unknown-name", ("engine_api_key", "webui_secret_key")),
+            ("unknown-name", ("engine_api_key", "webui_secret_key", "grafana_admin_password")),
             ("tls_key", ("tls reload",)),
             ("ldap_bind_password", ("/etc/gideon/secrets/ldap_bind_password", "apply", "grafana")),
             ("postgres_gideon_password", ("Postgres role", "gideon")),
             ("gideon_admin_password", ("gideon-admin", "frontend")),
-            ("grafana_admin_password", ("stored admin user", "/api/user/password")),
+            ("gideon_eval_password", ("gideon-eval", "frontend")),
         )
         for name, expected in cases:
             with self.subTest(name=name):

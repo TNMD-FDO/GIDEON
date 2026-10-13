@@ -43,6 +43,10 @@ and stays Normal, inert until the directory is recreated.
   `/etc/gideon/secrets/grafana_admin_password` (root-readable). Use it when
   the directory is what is broken. The frontend has its own break-glass
   administrator; the two are different accounts.
+  To rotate the password, or when the stored one is one nobody knows,
+  `gideon secrets rotate grafana_admin_password` resets Grafana's stored
+  value through its own CLI and rewrites the file; copy the new value into
+  the office password manager.
 - A sign-in lands on the **Overview**, Grafana's home: its first row is the
   pages firing now and the links to the other boards and the start-here card
   (§3).

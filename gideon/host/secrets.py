@@ -20,9 +20,15 @@ from gideon.host.sysio import CompletedText, Host
 SecretKind = Literal["password", "minted", "key", "certificate"]
 """How a generated secret file is made."""
 RotationClass = Literal["rewrite", "remint", "role", "account", "seeded"]
-"""How a secret's value is held beyond its file, if anywhere."""
+"""How a secret's value is held beyond its file, if anywhere.
+
+The command rotates seeded entries through the consumer's own CLI, resetting
+the stored value without the old one before rewriting the file.
+"""
 # A file rotation is safe only when the file alone holds the value; a second
-# home must be changed through that consumer's own route.
+# home must be changed through that consumer's own route. The exception is a
+# seeded entry: the command resets the stored value through the consumer's own
+# CLI, needing no old value, then rewrites the file.
 SECRETS_DIR = Path("/etc/gideon/secrets")
 SERVICE_GROUP: Final = "gideon"
 SERVICE_GROUP_PROBLEM: Final = f"the {SERVICE_GROUP} service group is missing or invalid"
@@ -149,7 +155,7 @@ GENERATED_NAMES: Final[frozenset[str]] = frozenset(
 ROTATABLE_NAMES: Final[frozenset[str]] = frozenset(
     secret.name
     for secret in SECRET_REGISTRY
-    if secret.rotation in {"rewrite", "remint"}
+    if secret.rotation in {"rewrite", "remint", "seeded"}
 )
 
 # exempt: one local openssl operation must finish before apply proceeds.
@@ -461,6 +467,12 @@ def write_secret(host: Host, name: str, value: str) -> str | None:
     return problem
 
 
+def mint_password() -> str:
+    """Mint a password as 43 URL-safe characters from 32 random bytes."""
+
+    return token_secrets.token_urlsafe(32)
+
+
 def rotate_generated(host: Host, name: str) -> RotateResult:
     """Rewrite a file by kind, re-issuing a key's certificate after its move."""
 
@@ -498,7 +510,7 @@ def rotate_generated(host: Host, name: str) -> RotateResult:
         assert entry.issued_from is not None
         problem, fix = _issue_certificate(host, name, entry.issued_from, service_gid)
         return RotateResult(written=problem is None, problem=problem, fix=fix)
-    problem, written = _write_secret(host, name, token_secrets.token_urlsafe(32), service_gid)
+    problem, written = _write_secret(host, name, mint_password(), service_gid)
     if problem is not None:
         # A value that reached the path is a rotation no consumer has yet:
         # apply converges its carriers, and a fresh rotation reaches the rest.
@@ -561,7 +573,7 @@ def ensure_generated(host: Host, *, skip: Collection[str] = ()) -> EnsureResult:
         else:
             if host.exists(path):
                 continue
-            value = token_secrets.token_urlsafe(32)
+            value = mint_password()
             problem, _ = _write_secret(host, secret.name, value, service_gid)
             fix = f"Correct ownership and mode for {SECRETS_DIR}, then retry."
         if problem is not None:

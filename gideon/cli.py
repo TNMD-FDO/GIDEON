@@ -282,7 +282,9 @@ def build_parser() -> argparse.ArgumentParser:
             "opensearch_transport_key, opensearch_transport_cert, "
             "opensearch_metrics_password "
             "(a new value written to the file), gideon_admin_api_key, gideon_eval_api_key "
-            "(the file removed and re-minted); every other registry name refuses before any "
+            "(the file removed and re-minted), grafana_admin_password "
+            "(Grafana's stored password reset through its CLI, then the file rewritten "
+            "with nothing recreated); every other registry name refuses before any "
             "change, naming the office's path"
         ),
     )

@@ -109,7 +109,8 @@ def _signin_fix() -> str:
     return (
         f"Rewrite {secrets.secret_path('grafana_admin_password')} in place from the office "
         "password manager if the file is wrong. If Grafana's stored password is what "
-        f"differs: {grafana.administrator_rotation_route()}. After repeated failures "
+        "differs, or is one nobody knows: "
+        f"{grafana.administrator_rotation_route()} After repeated failures "
         "wait five minutes for Grafana's login lockout, then retry."
     )
 

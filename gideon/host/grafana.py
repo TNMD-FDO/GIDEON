@@ -20,6 +20,7 @@ _DEFAULT_TIMEOUT: Final[float] = 15.0
 _READY_SLEEP_SECONDS: Final[float] = 5.0
 _RETRY_FIX: Final[str] = "Check Grafana availability, then retry."
 _HEALTH_PATH: Final[str] = "/api/health"
+_USER_PATH: Final[str] = "/api/user"
 _ADMIN_SECRET: Final[str] = "grafana_admin_password"
 _RECEIVERS_NAMESPACE: Final[str] = "default"
 _RECEIVERS_PATH: Final[str] = (
@@ -45,17 +46,13 @@ def _administrator_secret_fix(*, missing: bool) -> str:
 
 
 def administrator_rotation_route() -> str:
-    """The by-hand route for the administrator's seeded password, unpunctuated.
-
-    The rotate refusal and the board check's sign-in fix both print it, so the two
-    name one route in the same words.
-    """
+    """The administrator's rotation command, printed by the board check's sign-in fix."""
 
     return (
-        "Change it in Grafana first: PUT /grafana/api/user/password through the ingress "
-        f"as {GRAFANA_ADMIN_USER} with the old and new value in the request body carried "
-        "on stdin (curl -K -), then rewrite "
-        f"{secrets.secret_path(_ADMIN_SECRET)} in place — the install runbook's rotation step"
+        f"Run {report.command('secrets rotate grafana_admin_password')}, which resets "
+        f"Grafana's stored password for {GRAFANA_ADMIN_USER} through Grafana's own CLI "
+        "inside the container, needing no old value, then rewrites "
+        f"{secrets.secret_path(_ADMIN_SECRET)} in place and verifies the sign-in."
     )
 
 
@@ -431,6 +428,20 @@ class Administrator[T]:
         """Open a client with the administrator's credential."""
 
         return self.factory(credential=(self.user, self.password))
+
+
+def verify_sign_in(client: Client) -> str | None:
+    """Check the administrator's sign-in once without returning response body text."""
+
+    try:
+        response = client.request("GET", _USER_PATH)
+    except GrafanaError as exc:
+        return exc.problem
+    if 200 <= response.status < 300:
+        return None
+    if response.status in {401, 403}:
+        return f"Grafana refused the sign-in as {GRAFANA_ADMIN_USER}."
+    return f"Grafana sign-in returned HTTP {response.status}."
 
 
 def wait_ready(

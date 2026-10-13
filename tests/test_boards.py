@@ -761,38 +761,64 @@ class BoardRows(unittest.TestCase):
                     row = next(line for line in stdout.splitlines() if line.startswith("signin: refuse"))
                     self.assertIn("Grafana refused the break-glass sign-in Fix: ", row)
                     self.assertIn(
-                        f"Rewrite {secret_path('grafana_admin_password')} in place from the office password manager",
+                        f"Rewrite {secret_path('grafana_admin_password')} in place from the office "
+                        "password manager if the file is wrong.",
                         row,
                     )
-                    self.assertIn("the install runbook's rotation step", row)
-                    self.assertIn("wait five minutes for Grafana's login lockout", row)
-                    self.assertNotIn("secrets rotate", row)
-                    self.assertNotIn("python3 -m gideon", row)
-                    self.assertNotIn(PASSWORD, stdout + stderr)
+                    self.assertIn("If Grafana's stored password is what differs, or is one nobody knows:", row)
+                    self.assertIn(report.command("secrets rotate grafana_admin_password"), row)
+                    self.assertIn(grafana.administrator_rotation_route(), row)
+                    self.assertIn("After repeated failures wait five minutes for Grafana's login lockout, then retry.", row)
+                    self.assertNotIn("/api/", row)
+                    if installed:
+                        self.assertNotIn("python3 -m gideon", row)
+                    for value in (
+                        stdout, stderr, host.files[str(OUTPUT / "requests.log")],
+                        *(" ".join(command) for command in host.commands),
+                    ):
+                        self.assertNotIn(PASSWORD, value)
                     rows.append(row)
         finally:
             report.set_installed_form(False)
-        self.assertEqual(rows[0], rows[1])
+        self.assertNotEqual(rows[0], rows[1])
 
     def test_sign_in_that_does_not_finish_has_a_fix(self) -> None:
-        host = FakeHost(board_document("example-board", [("Figure", "timeseries")]))
-        browser_page = FakePage(host, [], login_mode="stalled")
-        code, stdout, stderr = self.invoke(host, browser_page)
-        self.assertEqual(code, 1)
-        self.assertEqual(stderr, "")
-        row = next(line for line in stdout.splitlines() if line.startswith("signin: refuse"))
-        self.assertIn("Grafana sign-in did not finish Fix: ", row)
-        self.assertIn(
-            f"Rewrite {secret_path('grafana_admin_password')} in place from the office password manager",
-            row,
-        )
-        self.assertIn("the install runbook's rotation step", row)
-        self.assertIn("wait five minutes for Grafana's login lockout", row)
-        self.assertNotIn("secrets rotate", row)
-        self.assertNotIn(PASSWORD, stdout + stderr)
-        self.assertEqual(browser_page.fill_selectors.count(page.USERNAME_SELECTOR), 1)
-        self.assertEqual(browser_page.fill_selectors.count(page.PASSWORD_SELECTOR), 1)
-        self.assertEqual(browser_page.click_selectors, [page.LOGIN_SELECTOR])
+        rows = []
+        try:
+            for installed in (False, True):
+                with self.subTest(installed=installed):
+                    report.set_installed_form(installed)
+                    host = FakeHost(board_document("example-board", [("Figure", "timeseries")]))
+                    browser_page = FakePage(host, [], login_mode="stalled")
+                    code, stdout, stderr = self.invoke(host, browser_page)
+                    self.assertEqual(code, 1)
+                    self.assertEqual(stderr, "")
+                    row = next(line for line in stdout.splitlines() if line.startswith("signin: refuse"))
+                    self.assertIn("Grafana sign-in did not finish Fix: ", row)
+                    self.assertIn(
+                        f"Rewrite {secret_path('grafana_admin_password')} in place from the office "
+                        "password manager if the file is wrong.",
+                        row,
+                    )
+                    self.assertIn("If Grafana's stored password is what differs, or is one nobody knows:", row)
+                    self.assertIn(report.command("secrets rotate grafana_admin_password"), row)
+                    self.assertIn(grafana.administrator_rotation_route(), row)
+                    self.assertIn("After repeated failures wait five minutes for Grafana's login lockout, then retry.", row)
+                    self.assertNotIn("/api/", row)
+                    if installed:
+                        self.assertNotIn("python3 -m gideon", row)
+                    for value in (
+                        stdout, stderr, host.files[str(OUTPUT / "requests.log")],
+                        *(" ".join(command) for command in host.commands),
+                    ):
+                        self.assertNotIn(PASSWORD, value)
+                    self.assertEqual(browser_page.fill_selectors.count(page.USERNAME_SELECTOR), 1)
+                    self.assertEqual(browser_page.fill_selectors.count(page.PASSWORD_SELECTOR), 1)
+                    self.assertEqual(browser_page.click_selectors, [page.LOGIN_SELECTOR])
+                    rows.append(row)
+        finally:
+            report.set_installed_form(False)
+        self.assertNotEqual(rows[0], rows[1])
 
     def test_certificate_page_error_has_trust_ca_fix(self) -> None:
         host = FakeHost(board_document("example-board", [("Figure", "timeseries")]))

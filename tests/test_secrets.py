@@ -8,6 +8,7 @@ import unittest
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 from gideon.host import report
 from gideon.host import secrets as secrets_module
@@ -22,6 +23,7 @@ from gideon.host.secrets import (
     current_directory,
     ensure_generated,
     is_generated,
+    mint_password,
     read_secret,
     rotate_generated,
     secret_path,
@@ -292,6 +294,7 @@ class Registry(unittest.TestCase):
         self.assertEqual(
             ROTATABLE_NAMES,
             {
+                "grafana_admin_password",
                 "engine_api_key",
                 "embed_api_key",
                 "gideon_api_key",
@@ -326,6 +329,16 @@ class Registry(unittest.TestCase):
         self.assertTrue(is_generated("gideon_admin_password"))
         self.assertFalse(is_generated("ldap_bind_password"))
         self.assertFalse(is_generated("tls_key"))
+
+
+class MintPassword(unittest.TestCase):
+    def test_mints_distinct_url_safe_passwords(self) -> None:
+        first = mint_password()
+        second = mint_password()
+        for value in (first, second):
+            self.assertEqual(len(value), 43)
+            self.assertRegex(value, r"^[A-Za-z0-9_-]{43}$")
+        self.assertNotEqual(first, second)
 
 
 class Reader(unittest.TestCase):
@@ -371,6 +384,24 @@ class Reader(unittest.TestCase):
 
 
 class Ensure(unittest.TestCase):
+    def test_missing_password_uses_the_shared_minter_once(self) -> None:
+        name = "grafana_admin_password"
+        path = str(secret_path(name))
+        files = {str(secret_path(entry)): "fictitious-standing-password\n" for entry in PASSWORD_KIND if entry != name}
+        seed_pair(files)
+        host = FakeHost(files)
+        value = "fictitious-minted-password"
+        with patch.object(secrets_module, "mint_password", return_value=value) as mint:
+            first = ensure_generated(host)
+            self.assertTrue(first.ok, first.problem)
+            self.assertEqual(first.created, (name,))
+            self.assertEqual(first.printed, {name: value})
+            self.assertEqual(host.files[path], value + "\n")
+            second = ensure_generated(host)
+            self.assertTrue(second.ok, second.problem)
+            self.assertEqual(second.created, ())
+        mint.assert_called_once_with()
+
     def test_root_is_required(self) -> None:
         result = ensure_generated(FakeHost(euid=1000))
         self.assertFalse(result.ok)
@@ -682,6 +713,18 @@ class TransportPair(unittest.TestCase):
 
 
 class Rotation(unittest.TestCase):
+    def test_password_rotation_uses_the_shared_minter(self) -> None:
+        name = "engine_api_key"
+        path = str(secret_path(name))
+        host = FakeHost({path: "fictitious-old-password\n"})
+        value = "fictitious-minted-password"
+        with patch.object(secrets_module, "mint_password", return_value=value) as mint:
+            result = rotate_generated(host, name)
+        self.assertTrue(result.ok, result.problem)
+        self.assertTrue(result.written)
+        self.assertEqual(host.files[path], value + "\n")
+        mint.assert_called_once_with()
+
     def test_fixes_and_supplied_replacements_follow_the_run_form(self) -> None:
         self.addCleanup(report.set_form_from_environment, os.environ.copy())
         for installed in (False, True):
