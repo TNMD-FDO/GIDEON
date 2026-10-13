@@ -33,7 +33,7 @@ class SliceSurfaces(unittest.TestCase):
 
     def test_reaches_box_matches_surface_membership(self) -> None:
         on_box = {surface for surface in CallSurface if surface.on_box}
-        self.assertEqual(on_box, {CallSurface.ENGINE, CallSurface.IMAGE, CallSurface.TURNS})
+        self.assertEqual(on_box, {CallSurface.ENGINE, CallSurface.IMAGE, CallSurface.RECORD, CallSurface.TURNS})
         for name, spec in SLICE_RUNNERS.items():
             with self.subTest(slice_name=name):
                 self.assertIs(type(spec.reaches_box), bool)
@@ -73,6 +73,7 @@ def _invoke_planted(
     surfaces: frozenset[CallSurface],
     *,
     supplied_set: Path | None = None,
+    site_path: Path | None = None,
 ) -> tuple[tuple[int, str, str], list[RunContext], command.engine.EngineTarget]:
     """Run one surface set through the command with observable seams."""
 
@@ -94,6 +95,8 @@ def _invoke_planted(
         argv.extend(("--set", str(supplied_set)))
     kwargs = _run_kwargs(host, checkout=checkout, court_path=checkout / "courts.yaml")
     kwargs["clock"] = lambda: NOW
+    if site_path is not None:
+        kwargs["site_path"] = site_path
     with (
         patch.object(command, "SLICE_RUNNERS", replacement),
         patch.object(command.engine, "resolve_engine_target", return_value=target),
@@ -115,6 +118,42 @@ def _invoke_planted(
 
 class PreparationRoutes(unittest.TestCase):
     """Each named surface supplies its runner context and record facts."""
+
+    def test_record_only_requires_root_and_site_without_a_surface_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkout, _ids = _fixture(directory, {1: 3})
+            ranked_path, _ = _ranked_file(directory, {1: (1,)})
+            supplied_set = Path(directory) / (checkout / SET_ROOT).name
+            shutil.copytree(checkout / SET_ROOT, supplied_set)
+            record_only = frozenset({CallSurface.RECORD})
+
+            host = EvalHost()
+            (code, stdout, stderr), contexts, _ = _invoke_planted(
+                host, checkout, ranked_path, record_only, supplied_set=supplied_set
+            )
+            self.assertEqual((code, stderr), (0, ""), stdout)
+            self.assertEqual(len(contexts), 1)
+            self.assertIsNone(contexts[0].image)
+            self.assertIn("preconditions: ok — root, site, profile ", stdout)
+            self.assertNotIn("image present", stdout)
+            self.assertFalse(any(input == "SELECT 1;\n" for _, input in host.calls))
+            self.assertFalse(any(argv[:3] == ("docker", "image", "inspect") for argv, _ in host.calls))
+
+            (code, stdout, stderr), contexts, _ = _invoke_planted(
+                EvalHost(effective_uid=1), checkout, ranked_path, record_only,
+                supplied_set=supplied_set,
+            )
+            self.assertEqual((code, stderr, contexts), (1, "", []))
+            self.assertIn("preconditions: refuse — root privileges are required", stdout)
+
+            broken_site = Path(directory) / "broken-site.yaml"
+            broken_site.write_text("broken: [\n", encoding="utf-8")
+            (code, stdout, stderr), contexts, _ = _invoke_planted(
+                EvalHost(), checkout, ranked_path, record_only,
+                supplied_set=supplied_set, site_path=broken_site,
+            )
+            self.assertEqual((code, stderr, contexts), (1, "", []))
+            self.assertIn("preconditions: refuse", stdout)
 
     def test_image_mirror_fix_uses_the_run_form(self) -> None:
         self.addCleanup(report.set_form_from_environment, os.environ.copy())

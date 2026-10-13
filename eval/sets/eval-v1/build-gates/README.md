@@ -96,3 +96,139 @@ A case name typed beside its reporter cite, full or short form, belongs to that 
 **The subsections.** The parenthesised designators after the section, in order, each without its parentheses and as typed: `§ 2511(2)(c)` is `["2", "c"]`, `3553(a)(2)(A)` is `["a", "2", "A"]`, and none is `[]`.
 
 **Lists and ranges.** A list under one title is one object per member: `18 U.S.C. §§ 922(g) and 924(c)` is `18 U.S.C. §§ 922(g)` and `924(c)`, each a `statute` carrying the list's title, a later member's span its own words; a C.F.R. list is the same, each member a `regulation` (`28 C.F.R. §§ 523.42(c)` and `523.44(d)`). A hyphen after a letter joins one hyphenated section (`2000e-5`, `78u-4`, `240.10b-5`). A hyphen or an en dash between two all-digit numbers is a range only under a plural marker (`§§`, `sections`, `secs.`): its two endpoints as typed, the sections between them not in the text — `18 U.S.C. §§ 3553-3554` is `18 U.S.C. §§ 3553` and `3554`; under a singular marker or none it is one hyphenated section (`50 U.S.C. § 403-1`).
+
+# The `segmenter-300` cases
+
+## What a case is
+
+Each case is one staged tranche-1 opinion, identified by its opinion id, court,
+decade, and first nonblank text source. A case contains no opinion text. The
+sample comes from stage `corpus-2026-10-07`, snapshot `caselaw-2026-09-30`,
+whose staged opinion counts are 111,396 for the Sixth Circuit and 521,837 for
+the Supreme Court. An opinion with no text source is
+counted as skipped and cannot enter the sample.
+
+## The draw
+
+The draw takes 150 opinions per court. Within each court it splits seats equally
+among text sources present; a source with fewer rows contributes all its rows,
+and the shortfall is spread over the others in proportion to their rows. Within a source, decades receive seats in
+proportion to their counts by largest remainder, with at least one in every
+nonempty decade. Within each court/source/decade cell, the tool shuffles opinion
+ids sorted ascending under the fixed seed and takes the first allocated ids.
+Case lines are ordered by court, text source, decade, and opinion id.
+
+The seed is `20261008`, 150 per court, over stage `corpus-2026-10-07`, snapshot `caselaw-2026-09-30`. Rows with no text column: ca6 6, scotus 2; opinions with no dated cluster: ca6 0, scotus 0. Each cell is the staged opinions, then the drawn cases, as `population / drawn`; a blank cell is an empty stratum.
+
+**ca6**
+
+| Decade | `xml_harvard` | `html_lawbox` | `html` | `plain_text` |
+|---|---:|---:|---:|---:|
+| 1860s | 1 / 1 |  |  |  |
+| 1890s | 613 / 1 |  |  |  |
+| 1900s | 1004 / 1 |  |  |  |
+| 1910s | 1168 / 1 |  |  |  |
+| 1920s | 1894 / 2 | 18 / 2 |  |  |
+| 1930s | 2369 / 2 | 52 / 4 |  |  |
+| 1940s | 1965 / 2 | 50 / 3 | 1 / 1 |  |
+| 1950s | 2259 / 2 |  | 357 / 1 |  |
+| 1960s | 3111 / 2 |  | 595 / 1 |  |
+| 1970s | 4012 / 3 |  | 4694 / 5 |  |
+| 1980s | 5755 / 3 |  | 16780 / 15 |  |
+| 1990s | 5376 / 3 |  | 14631 / 13 |  |
+| 2000s | 16976 / 8 | 338 / 17 | 1250 / 2 | 4861 / 12 |
+| 2010s | 11678 / 6 | 224 / 12 |  | 3194 / 9 |
+| 2020s |  |  |  | 6164 / 16 |
+| total | 58181 / 37 | 682 / 38 | 38308 / 38 | 14219 / 37 |
+
+**scotus**
+
+| Decade | `xml_harvard` | `html_lawbox` | `html` | `plain_text` |
+|---|---:|---:|---:|---:|
+| 1750s | 1 / 1 |  |  |  |
+| 1760s | 6 / 1 |  | 5 / 1 |  |
+| 1770s | 6 / 1 |  | 3 / 1 |  |
+| 1780s | 86 / 1 | 4 / 1 | 11 / 1 |  |
+| 1790s | 103 / 1 | 56 / 1 | 33 / 1 |  |
+| 1800s | 204 / 1 | 99 / 1 | 67 / 1 |  |
+| 1810s | 379 / 1 | 60 / 1 | 68 / 1 |  |
+| 1820s | 396 / 1 | 73 / 1 | 18 / 1 |  |
+| 1830s | 514 / 1 | 71 / 1 | 21 / 1 |  |
+| 1840s | 456 / 1 | 39 / 1 | 23 / 1 |  |
+| 1850s | 907 / 1 | 89 / 1 | 24 / 1 |  |
+| 1860s | 988 / 1 | 178 / 1 | 86 / 1 |  |
+| 1870s | 2565 / 1 | 199 / 1 | 121 / 1 |  |
+| 1880s | 2972 / 1 | 146 / 1 | 72 / 1 |  |
+| 1890s | 2860 / 1 | 226 / 2 | 87 / 1 |  |
+| 1900s | 3683 / 1 | 224 / 2 | 59 / 1 |  |
+| 1910s | 4322 / 1 | 182 / 1 | 45 / 1 |  |
+| 1920s | 6053 / 1 | 183 / 1 | 57 / 1 |  |
+| 1930s | 9814 / 1 | 212 / 2 | 144 / 1 |  |
+| 1940s | 14888 / 1 | 568 / 2 | 72 / 1 |  |
+| 1950s | 16836 / 1 | 683 / 2 | 70 / 1 |  |
+| 1960s | 28014 / 2 | 1175 / 3 | 171 / 1 |  |
+| 1970s | 42870 / 2 | 1180 / 3 | 356 / 1 |  |
+| 1980s | 64919 / 2 | 1228 / 3 | 485 / 1 |  |
+| 1990s | 112576 / 3 | 751 / 2 | 4581 / 3 |  |
+| 2000s | 72063 / 3 | 1053 / 3 | 24132 / 11 | 111 / 3 |
+| 2010s | 89073 / 3 | 6 / 1 | 1 / 1 | 628 / 13 |
+| 2020s | 3037 / 1 |  |  | 1008 / 21 |
+| total | 480591 / 37 | 8685 / 38 | 30812 / 38 | 1747 / 37 |
+
+## The labels file
+
+`segmenter-300.labels.jsonl` is created by the first intake. Each line has
+`case_id`, `text` (`sha256`, canonical code-point `length`), `sections` (ordered
+`start`, `end`, `type` spans), and `signed` (`by` role id, `on` ISO date).
+The sections are nonempty and tile the canonical text: the first starts at 0,
+each end meets the next start, and the last ends at `length`. A missing label
+leaves its case unsigned and out of the measure.
+
+## The label guide
+
+The checker's mark guide:
+
+| Type | Mark when the text says |
+|---|---|
+| `syllabus` | an official case summary begins |
+| `headmatter` | caption, case details, or a participation line appears before the opinion |
+| `majority` | a byline or heading begins the court's majority opinion |
+| `plurality` | a byline or heading begins the court's plurality opinion |
+| `per_curiam` | a byline or heading begins the court's per curiam opinion |
+| `concurrence` | a separate concurrence begins at its byline or heading |
+| `dissent` | a separate dissent begins at its byline or heading |
+| `concurrence_dissent` | a separate opinion both concurs and dissents |
+| `footnote` | a footnote body begins, wherever the dump placed it; each footnote starts its own section |
+| `appendix` | appended material begins |
+| `order` | a court order begins |
+| `unknown` | the text itself does not establish a type |
+
+## The check
+
+A bare byline without a new opinion continues the running type. A record
+holding one separate opinion alone, as a dissent filed as its own opinion
+does, carries that type from its first paragraph. The text has lost the
+footnote numbers that tie a closing paragraph to its mark, so each sheet
+names the opinion's reporter cites and links the public original by the first
+printed one, where the checker reads the footnotes and bylines; a case the
+checker cannot settle stays unsigned rather than guessed. The checker uses the
+whole numbered paragraphs beside each draft sheet to read the text, corrects
+bracketed transition marks on the sheet, and signs through intake. The kit
+commands are `tools.segmenter.draw`, `tools.segmenter.draft`, and
+`tools.segmenter.intake`. Draft sheets and full text stay outside the checkout;
+only the person's checked marks become committed label spans.
+
+```text
+sudo python3 -B -m tools.segmenter.draw <stage-root> --seed <seed> --out <sample-file>
+python3 -m tools.segmenter.draw --write <sample-file> --reviewer <role-id> --on <date>
+sudo python3 -B -m tools.segmenter.draft --out <sheets-dir>
+python3 -m tools.segmenter.intake <manifest> <sheets-dir> --signer <role-id> --on <date>
+```
+
+## The pin and the rule
+
+`tests/test_segmenter_set.py` pins committed case, id-list, and label bytes by
+line count and SHA-256 prefix (`PINNED_PREFIXES`). A case or label line is never
+edited. Correct a case with a new case line whose `supersedes` names the old id,
+and a new label line for the new id; keep the old pair unchanged. The id list
+changes only by append.

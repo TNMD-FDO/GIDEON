@@ -284,7 +284,9 @@ def _argv(rendered_dir: PathLike) -> list[str]:
     )
 
 
-def _reader_argv(rendered_dir: PathLike) -> list[str]:
+def reader_argv(rendered_dir: PathLike) -> list[str]:
+    """Build the metrics-role psql argv for eval and segmenter record readers."""
+
     return stack.exec_argv(
         rendered_dir,
         POSTGRES_SERVICE,
@@ -638,7 +640,7 @@ def _read_document(
     """Run one reader statement as the metrics role and return its stdout."""
 
     try:
-        result = io.run(_reader_argv(rendered_dir), input=sql)
+        result = io.run(reader_argv(rendered_dir), input=sql)
     except (OSError, subprocess.SubprocessError):
         return Problem("eval reader failed: command could not run", fix)
     if result.returncode != 0:

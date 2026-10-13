@@ -186,6 +186,14 @@ class Constants(unittest.TestCase):
             next(spec.name for spec in stores.ROLE_SPECS if spec.name == record.METRICS_ROLE),
         )
 
+    def test_public_reader_argv_uses_the_metrics_role_and_reader_flags(self) -> None:
+        argv = tuple(record.reader_argv(RENDERED))
+        self.assertEqual(argv, READER_PSQL)
+        self.assertEqual(argv[argv.index("-U") + 1], record.METRICS_ROLE)
+        self.assertEqual(argv[argv.index("-d") + 1], record.EVAL_DATABASE)
+        self.assertIn("-tA", argv)
+        self.assertNotIn("--single-transaction", argv)
+
 
 class WriteRows(unittest.TestCase):
     def test_batch_binds_values_and_starts_with_both_partition_calls(self) -> None:

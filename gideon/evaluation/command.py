@@ -924,7 +924,8 @@ def _prepare_on_box(
         )
         print_stage(StageResult(
             "preconditions", True,
-            f"root, site, image present, profile {config.hardware_profile}, {writer}", "",
+            f"root, site{', image present' if image is not None else ''}, "
+            f"profile {config.hardware_profile}, {writer}", "",
         ))
         return _Prepared(
             served_model_name=None,

@@ -174,7 +174,10 @@ class ResearchQAContract(unittest.TestCase):
         self.assertTrue(result.ok, result.findings)
         assert result.loaded is not None
         case_ids = frozenset(value.get("id") for value in self.cases)
-        self.assertEqual(result.loaded.unsigned_ids, case_ids)
+        research_unsigned = {
+            case_id for case_id in result.loaded.unsigned_ids if case_id.startswith("research-qa-")
+        }
+        self.assertEqual(research_unsigned, case_ids)
         self.assertEqual(result.loaded.signoffs, ())
         self.assertFalse((ROOT / SET_ROOT / signoffs.SIGNOFFS_PATH).exists())
 

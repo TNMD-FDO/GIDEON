@@ -10,6 +10,8 @@ Guardrails family cases carry an expected turn class and, for positives, a
 pattern id with an optional ``must_not`` string or list of regular expressions.
 Tier-2 cases carry the instructed turn expectation without a family pattern.
 General smoke cases carry the turn harness's expected class and checks.
+Segmenter cases carry a drawn opinion's strata; checked section spans live in
+their own labels file.
 """
 
 import hashlib
@@ -36,6 +38,7 @@ from gideon.extraction import (
 
 if TYPE_CHECKING:
     from gideon.evaluation.judgments import Judgment
+    from gideon.evaluation.segmenter_labels import SegmenterLabel
     from gideon.evaluation.signoffs import SignOff
 
 type Case = dict[str, object]
@@ -56,6 +59,10 @@ _HARVEST_ID: Final[re.Pattern[str]] = re.compile(r"HARV-[0-9]{3}")
 _HARVEST_CLUSTER: Final[re.Pattern[str]] = re.compile(r"harvest-chat-[0-9a-f]+")
 _JUDGMENT_CLUSTER: Final[re.Pattern[str]] = re.compile(r"harvest-chat-[A-Za-z0-9_-]+")
 RESEARCH_QA_ID_PATTERN: Final[re.Pattern[str]] = re.compile(r"research-qa-[0-9]{3,}")
+SEGMENTER_ID_PATTERN: Final[re.Pattern[str]] = re.compile(r"segmenter-[0-9]{3,}")
+SEGMENTER_TEXT_SOURCES: Final[tuple[str, ...]] = (
+    "xml_harvard", "html_columbia", "html_lawbox", "html_anon_2020", "html", "plain_text",
+)
 TIER_2_CATEGORY: Final[str] = "tier-2-refusals"
 GUARDRAIL_ID_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"[a-z]+(?:-[a-z0-9]+)*/[a-z]+(?:-[a-z]+)*(?:-[0-9]+)?-[0-9]{2,}"
@@ -176,6 +183,19 @@ SHAPE_REGISTRY: Final[Mapping[tuple[str, str], ShapeSpec]] = {
         _EXTRACTION_ID,
         _HARVEST_CLUSTER,
         ("by", "on"),
+    ),
+    ("build-gates", "segmenter-300"): ShapeSpec(
+        "build-gates",
+        "segmenter-300",
+        (
+            "id", "suite", "category", "branch", "opinion_id", "court", "decade",
+            "text_source", "labels", "cluster_id", "review", "notes",
+        ),
+        {"suite": "build-gates", "category": "segmenter-300", "branch": "legal"},
+        SEGMENTER_ID_PATTERN,
+        SEGMENTER_ID_PATTERN,
+        ("by", "on"),
+        takes_signoff=True,
     ),
     ("judgments", "judgments"): ShapeSpec(
         "judgments",
@@ -313,6 +333,8 @@ class Finding:
         """Render the finding without including case question text."""
 
         location = f"id {self.id}" if self.id is not None else f"line {self.line or 0}"
+        if self.id is not None and self.line is not None:
+            location += f" line {self.line}"
         return f"{self.file}:{location}: {self.rule} Fix: {self.fix}"
 
 
@@ -329,6 +351,7 @@ class LoadedSet:
     digest: str
     judgments: tuple["Judgment", ...] = ()
     signoffs: tuple["SignOff", ...] = ()
+    segmenter_labels: tuple["SegmenterLabel", ...] = ()
     unsigned_ids: frozenset[str] = frozenset()
 
 
@@ -378,9 +401,9 @@ def _finding_sort_key(finding: Finding) -> tuple[str, int, str, str]:
 def _file_paths(root: Path, suffix: str, excluded_relatives: frozenset[str]) -> tuple[Path, ...]:
     """Every case file below *root*, less the relative paths named.
 
-    The judgments and sign-offs files share suite directories and the suffix
-    with case files, so they are skipped by name: a suffix rule would take a
-    later case file with them.
+    The judgments, sign-offs, and segmenter labels files share suite directories
+    and the suffix with case files, so they are skipped by name: a suffix rule
+    would take a later case file with them.
     """
 
     suites = sorted(
@@ -619,7 +642,7 @@ def _validate_shape(
             findings.append(Finding(relative, case_id, line, f"{field} must be {expected!r}", _CASE_FIX))
 
     question = record.get("question")
-    if (
+    if spec.category != "segmenter-300" and (
         not isinstance(question, str)
         or not question
         or question != question.strip()
@@ -667,6 +690,22 @@ def _validate_shape(
         or labels[1] not in {"faithful", "wrong", "partial", "unsourced-length"}
     ):
         findings.append(Finding(relative, case_id, line, "labels", _CASE_FIX))
+    elif spec.category == "segmenter-300":
+        if labels != ["drawn"]:
+            findings.append(Finding(relative, case_id, line, "labels must be drawn", _CASE_FIX))
+        opinion_id = record.get("opinion_id")
+        if not isinstance(opinion_id, int) or isinstance(opinion_id, bool) or opinion_id <= 0:
+            findings.append(Finding(relative, case_id, line, "opinion_id positive integer", _CASE_FIX))
+        court = record.get("court")
+        if not isinstance(court, str) or _COURT_ID.fullmatch(court) is None:
+            findings.append(Finding(relative, case_id, line, "court id", _CASE_FIX))
+        elif court_ids is not None and court not in court_ids:
+            findings.append(Finding(relative, case_id, line, "court absent from courts.yaml", _CASE_FIX))
+        decade = record.get("decade")
+        if not isinstance(decade, int) or isinstance(decade, bool) or decade % 10 != 0:
+            findings.append(Finding(relative, case_id, line, "decade multiple of ten", _CASE_FIX))
+        if record.get("text_source") not in SEGMENTER_TEXT_SOURCES:
+            findings.append(Finding(relative, case_id, line, "text_source vocabulary", _CASE_FIX))
     elif spec.suite == "guardrails":
         _validate_guardrail_fields(record, relative, case_id, line, findings)
     elif spec.suite == "general":
@@ -1062,9 +1101,9 @@ def _parent_findings(
 def load_set(root: str | Path, court_ids: Iterable[str] | None = None) -> EvalSetLoadResult:
     """Load every suite case and frozen slice below *root*, or every finding."""
 
-    # judgments and signoffs import Finding from this module; keep their imports
-    # here so the loader does not create an import cycle.
-    from gideon.evaluation import judgments, signoffs
+    # The auxiliary file readers import Finding from this module; keep their
+    # imports here so the loader does not create an import cycle.
+    from gideon.evaluation import judgments, segmenter_labels, signoffs
 
     set_root = Path(root)
     findings: list[Finding] = []
@@ -1073,9 +1112,10 @@ def load_set(root: str | Path, court_ids: Iterable[str] | None = None) -> EvalSe
     court_id_set = None if court_ids is None else frozenset(court_ids)
     judgments_file = judgments.JUDGMENTS_PATH.as_posix()
     signoffs_file = signoffs.SIGNOFFS_PATH.as_posix()
+    labels_file = segmenter_labels.LABELS_PATH.as_posix()
     files: dict[str, bytes] = {}
     try:
-        case_paths = _file_paths(set_root, ".jsonl", frozenset({judgments_file, signoffs_file}))
+        case_paths = _file_paths(set_root, ".jsonl", frozenset({judgments_file, signoffs_file, labels_file}))
         slice_directories = _slice_dirs(set_root)
     except OSError as exc:
         findings.append(Finding(set_root.as_posix(), None, 0, f"set cannot be read ({exc})", _READ_FIX))
@@ -1120,6 +1160,16 @@ def load_set(root: str | Path, court_ids: Iterable[str] | None = None) -> EvalSe
             parsed_signoffs = signoffs.parse_bytes(data, signoffs_file)
             findings.extend(parsed_signoffs.findings)
             located_signoffs = parsed_signoffs.records
+    located_labels: tuple[segmenter_labels.LocatedLabel, ...] = ()
+    labels_path = set_root / segmenter_labels.LABELS_PATH
+    if labels_path.is_file():
+        data = _read_bytes(
+            set_root, labels_path, findings, files, _CASE_FIX, check_final_newline=False
+        )
+        if data is not None:
+            parsed_labels = segmenter_labels.parse_bytes(data, labels_file)
+            findings.extend(parsed_labels.findings)
+            located_labels = parsed_labels.records
     slices, slice_lists, slice_locations = _read_slices(
         set_root, slice_directories, findings, files
     )
@@ -1208,11 +1258,25 @@ def load_set(root: str | Path, court_ids: Iterable[str] | None = None) -> EvalSe
             )
         )
 
+    for located_label in located_labels:
+        case_id = located_label.record.case_id
+        label_case = cases_by_id.get(case_id)
+        if label_case is None:
+            rule = "case_id names no case"
+        elif _shape_for(label_case) is not SHAPE_REGISTRY[("build-gates", "segmenter-300")]:
+            rule = "case_id names a non-segmenter case"
+        else:
+            continue
+        findings.append(Finding(labels_file, case_id, located_label.line, rule, segmenter_labels.LABEL_LINE_FIX))
+
     ordered_findings = tuple(sorted(findings, key=_finding_sort_key))
     if ordered_findings:
         return EvalSetLoadResult(findings=ordered_findings)
     active_ids = tuple(sorted(set(cases_by_id) - retired))
-    signed_ids = frozenset(located.record.case_id for located in located_signoffs)
+    signed_ids = frozenset(
+        {located.record.case_id for located in located_signoffs}
+        | {located.record.case_id for located in located_labels}
+    )
     # Every case validated against a registered shape above, so a case whose
     # shape is unknown cannot reach here: the loader returned its finding.
     unsigned_ids = frozenset(
@@ -1232,6 +1296,7 @@ def load_set(root: str | Path, court_ids: Iterable[str] | None = None) -> EvalSe
             digest=_set_digest(files),
             judgments=tuple(located.record for located in located_judgments),
             signoffs=tuple(located.record for located in located_signoffs),
+            segmenter_labels=tuple(located.record for located in located_labels),
             unsigned_ids=unsigned_ids,
         )
     )

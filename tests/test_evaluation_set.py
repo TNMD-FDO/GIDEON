@@ -8,9 +8,10 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
-from gideon.evaluation import judgments, signoffs
+from gideon.evaluation import judgments, segmenter_labels, signoffs
 from gideon.evaluation.evalset import (
     GUARDRAIL_ID_PATTERN,
+    SEGMENTER_TEXT_SOURCES,
     SET_ROOT,
     SHAPE_REGISTRY,
     TIER_2_CATEGORY,
@@ -24,6 +25,7 @@ from gideon.evaluation.judgments import Judgment, serialize
 from gideon.evaluation.signoffs import SignOff
 from gideon.extraction.scoring import active_cases
 from gideon.host.courts import load_court_map
+from gideon.worker.opiniontext import TEXT_SOURCES
 from tools.exportboundary import absent_from_export
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -155,6 +157,41 @@ def _write_signoffs(root: Path, records: tuple[SignOff, ...]) -> None:
         root,
         signoffs.SIGNOFFS_PATH.as_posix(),
         "".join(signoffs.serialize(record) for record in records).rstrip("\n"),
+    )
+
+
+def _segmenter_case(case_id: str = "segmenter-001") -> dict[str, object]:
+    return {
+        "id": case_id,
+        "suite": "build-gates",
+        "category": "segmenter-300",
+        "branch": "legal",
+        "opinion_id": 1,
+        "court": "ca6",
+        "decade": 2000,
+        "text_source": SEGMENTER_TEXT_SOURCES[0],
+        "labels": ["drawn"],
+        "cluster_id": case_id,
+        "review": {"by": "CSA-1", "on": "2026-09-21"},
+        "notes": "",
+    }
+
+
+def _segmenter_label(case_id: str = "segmenter-001") -> segmenter_labels.SegmenterLabel:
+    return segmenter_labels.SegmenterLabel(
+        case_id, "a" * 64, 4,
+        (segmenter_labels.LabelSpan(0, 4, "majority"),),
+        "CSA-1", "2026-09-21",
+    )
+
+
+def _write_segmenter_labels(
+    root: Path, records: tuple[segmenter_labels.SegmenterLabel, ...]
+) -> None:
+    _write(
+        root,
+        segmenter_labels.LABELS_PATH.as_posix(),
+        "".join(segmenter_labels.serialize(record) for record in records).rstrip("\n"),
     )
 
 
@@ -668,7 +705,13 @@ class OrderAndProvenance(unittest.TestCase):
                 )
             )
             self.assertEqual(research_ids, tuple(f"research-qa-{i:03d}" for i in range(1, 39)))
-            self.assertEqual(result.loaded.unsigned_ids, frozenset(research_ids))
+            # A drawn segmenter case stays unsigned until its checked label lands.
+            segmenter_ids = frozenset(
+                case["id"]
+                for case in result.loaded.cases_by_file["build-gates/segmenter-300.jsonl"]
+                if isinstance(case["id"], str)
+            ) - {label.case_id for label in result.loaded.segmenter_labels}
+            self.assertEqual(result.loaded.unsigned_ids, frozenset(research_ids) | segmenter_ids)
 
 
 def _judgment_case(case_id: str = "judgments-001", question: str = SENTINEL) -> dict[str, object]:
@@ -765,6 +808,114 @@ def _general_smoke_case() -> dict[str, object]:
         "review": {"by": "CSA-1", "on": "2026-09-23"},
         "notes": "",
     }
+
+
+class SegmenterCases(unittest.TestCase):
+    """Drawn segmenter cases and checked labels join by id."""
+
+    def test_shape_and_text_sources(self) -> None:
+        self.assertEqual(SEGMENTER_TEXT_SOURCES, TEXT_SOURCES)
+        case = _segmenter_case()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "eval-v9"
+            _write_cases(root, (case,))
+            result = load_set(root, ("ca6",))
+            self.assertTrue(result.ok, result.findings)
+            assert result.loaded is not None
+            self.assertEqual(result.loaded.unsigned_ids, frozenset({"segmenter-001"}))
+            self.assertEqual(result.loaded.segmenter_labels, ())
+
+    def test_shape_refusals(self) -> None:
+        changes = (
+            ("case keys or order", lambda v: v.update(question=SENTINEL)),
+            ("id pattern", lambda v: v.update(id="segmenter-01")),
+            ("branch", lambda v: v.update(branch="general")),
+            ("opinion_id", lambda v: v.update(opinion_id=0)),
+            ("court absent", lambda v: v.update(court="unknown")),
+            ("decade", lambda v: v.update(decade=2001)),
+            ("text_source", lambda v: v.update(text_source="wrong")),
+            ("labels", lambda v: v.update(labels=["other"])),
+            ("cluster_id", lambda v: v.update(cluster_id="segmenter-999")),
+            ("review.by", lambda v: v.update(review={"by": "wrong", "on": "2026-09-21"})),
+        )
+        for rule, change in changes:
+            with self.subTest(rule=rule):
+                case = _segmenter_case()
+                change(case)
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory) / "eval-v9"
+                    _write_cases(root, (case,))
+                    result = load_set(root, ("ca6",))
+                self.assertIn(rule, "\n".join(finding.rule for finding in result.findings))
+                self.assertNotIn(SENTINEL, "\n".join(finding.text() for finding in result.findings))
+
+    def test_labels_file_is_not_a_case_and_moves_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "eval-v9"
+            _write_cases(root, (_segmenter_case(), _segmenter_case("segmenter-002")))
+            _write(root, "slices/segmenter-300/sample.ids", "segmenter-001\nsegmenter-002")
+            before = load_set(root).loaded
+            _write_segmenter_labels(root, (_segmenter_label(),))
+            after = load_set(root).loaded
+            self.assertIsNotNone(before)
+            self.assertIsNotNone(after)
+            assert before is not None and after is not None
+            self.assertNotEqual(before.digest, after.digest)
+            self.assertEqual(after.digest, _digest_model(root))
+            self.assertEqual(tuple(after.cases_by_file), ("build-gates/cases.jsonl",))
+            self.assertEqual(after.segmenter_labels, (_segmenter_label(),))
+            self.assertEqual(after.unsigned_ids, frozenset({"segmenter-002"}))
+            selection = select_cases(after, "segmenter-300")
+            self.assertEqual(selection.counted, ("segmenter-001",))
+            self.assertEqual(selection.unsigned, ("segmenter-002",))
+            self.assertTrue(selection.takes_signoff)
+
+    def test_relational_findings_and_duplicate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "eval-v9"
+            _write_cases(root, (_segmenter_case(), json.loads(_case("extraction-001"))))
+            _write_segmenter_labels(root, (
+                _segmenter_label("segmenter-999"),
+                _segmenter_label("segmenter-001"),
+                _segmenter_label("segmenter-001"),
+            ))
+            result = load_set(root)
+            self.assertEqual(
+                tuple((f.line, f.rule) for f in result.findings if f.file == segmenter_labels.LABELS_PATH.as_posix()),
+                ((1, "case_id names no case"), (3, "case_id appears more than once")),
+            )
+            other = _segmenter_case("segmenter-002")
+            other["category"] = "other"
+            _write_cases(root, (_segmenter_case(), other))
+            _write_segmenter_labels(root, (_segmenter_label("segmenter-002"),))
+            segmenter_shape = SHAPE_REGISTRY[("build-gates", "segmenter-300")]
+            other_shape = ShapeSpec(
+                "build-gates", "other", segmenter_shape.base_keys,
+                {"suite": "build-gates", "category": "other", "branch": "legal"},
+                segmenter_shape.id_pattern, segmenter_shape.cluster_pattern,
+                segmenter_shape.review_keys,
+            )
+            with patch.dict(SHAPE_REGISTRY, {("build-gates", "other"): other_shape}):
+                wrong_shape = load_set(root)
+            self.assertIn("case_id names a non-segmenter case", tuple(f.rule for f in wrong_shape.findings))
+
+    def test_superseding_correction_keeps_old_label_inert(self) -> None:
+        old = _segmenter_case()
+        new = _segmenter_case("segmenter-002")
+        new["supersedes"] = "segmenter-001"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "eval-v9"
+            _write_cases(root, (old, new))
+            _write_segmenter_labels(root, (_segmenter_label(), _segmenter_label("segmenter-002")))
+            _write(root, "slices/segmenter-300/sample.ids", "segmenter-001\nsegmenter-002")
+            result = load_set(root, ("ca6",))
+            self.assertTrue(result.ok, result.findings)
+            assert result.loaded is not None
+            loaded = result.loaded
+            self.assertEqual(loaded.active_ids, ("segmenter-002",))
+            self.assertEqual(select_cases(loaded, "segmenter-300").counted, ("segmenter-002",))
+            self.assertEqual(len(loaded.segmenter_labels), 2)
+            self.assertEqual(loaded.unsigned_ids, frozenset())
 
 
 class ShapeRefusals(unittest.TestCase):

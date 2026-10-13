@@ -12,6 +12,7 @@ from gideon.evaluation import (
     guardrails_slice,
     judge_slice,
     judgments_slice,
+    segmenter_slice,
     smoke_slice,
 )
 from gideon.evaluation.decision import DecisionMetric
@@ -20,10 +21,15 @@ from gideon.evaluation.results import RunContext, SliceResult
 
 
 class CallSurface(Enum):
-    """A surface an evaluation slice reaches, and whether it is on the box."""
+    """A surface an evaluation slice reaches, and whether it is on the box.
+
+    The record surface asks ``preconditions`` for root and the site file but
+    probes no reader; a runner reports the database refusal if its read fails.
+    """
 
     ENGINE = ("engine", True)
     IMAGE = ("image", True)
+    RECORD = ("record", True)
     TURNS = ("turns", True)
     RANKED_FILE = ("ranked-file", False)
 
@@ -103,6 +109,26 @@ _EXTRACTION: Final[SliceSpec] = SliceSpec(
     categories=frozenset({("build-gates", "extraction")}),
     turn_calls=None,
 )
+_SEGMENTER: Final[SliceSpec] = SliceSpec(
+    runner=segmenter_slice.run_segmenter,
+    surfaces=frozenset({CallSurface.IMAGE, CallSurface.RECORD}),
+    repeats=1,
+    judge_prompt=None,
+    compares_reference=True,
+    engine_calls=None,
+    gate_pass=(
+        "segmenter bounds held: no separate opinion under a court-opinion type, "
+        "every emitted type at or above 0.95 precision, unknown at or below 15 %, "
+        "the record agreeing"
+    ),
+    gate_fail="a segmenter bound failed",
+    gate_fix=(
+        "Review the segmenter report's mislabel ids and type rows, then retry; "
+        "a figure outside its bound is a finding on the segmenter, never a moved bound."
+    ),
+    categories=frozenset({("build-gates", "segmenter-300")}),
+    turn_calls=None,
+)
 _JUDGE_TRIPLES: Final[SliceSpec] = SliceSpec(
     runner=judge_slice.run_judge_triples,
     surfaces=frozenset({CallSurface.ENGINE}),
@@ -171,6 +197,7 @@ _SMOKE: Final[smoke_slice.Composite] = smoke_slice.Composite(SMOKE_PARTS)
 
 SLICE_RUNNERS: Final[Mapping[str, SliceSpec]] = {
     "extraction": _EXTRACTION,
+    "segmenter-300": _SEGMENTER,
     "judge-triples": _JUDGE_TRIPLES,
     "judgments": _JUDGMENTS,
     "guardrails": _GUARDRAILS,

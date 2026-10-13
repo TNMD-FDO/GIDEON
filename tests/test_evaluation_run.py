@@ -1656,6 +1656,18 @@ class RunnerSelection(unittest.TestCase):
 class SliceRegistry(unittest.TestCase):
     """Contracts for the registered slices' categories, settings, and surfaces."""
 
+    def test_segmenter_entry_is_image_and_record_only(self) -> None:
+        spec = SLICE_RUNNERS["segmenter-300"]
+        self.assertEqual(spec.surfaces, frozenset({CallSurface.IMAGE, CallSurface.RECORD}))
+        self.assertEqual(spec.categories, frozenset({("build-gates", "segmenter-300")}))
+        self.assertEqual(spec.repeats, 1)
+        self.assertTrue(spec.compares_reference)
+        self.assertIsNone(spec.judge_prompt)
+        self.assertIsNone(spec.engine_calls)
+        self.assertIsNone(spec.turn_calls)
+        self.assertIsNone(spec.decision)
+        self.assertNotIn("segmenter-300", SMOKE_PARTS)
+
     def test_categories_are_loader_shape_keys(self) -> None:
         for slice_name, spec in SLICE_RUNNERS.items():
             with self.subTest(slice_name=slice_name):
@@ -1680,9 +1692,11 @@ class SliceRegistry(unittest.TestCase):
                 if absent_from_export(f"eval/sets/eval-v1/slices/{slice_name}", ROOT):
                     self.skipTest("in an export this slice's lists and cases are absent")
                 self.assertTrue(spec.categories)
-                counted = select_cases(loaded, slice_name).counted
-                self.assertTrue(counted)
-                for case_id in counted:
+                selection = select_cases(loaded, slice_name)
+                # The frozen segmenter sample is all unsigned until its labels' intake.
+                if slice_name != "segmenter-300":
+                    self.assertTrue(selection.counted)
+                for case_id in (*selection.counted, *selection.unsigned):
                     case = loaded.cases_by_id[case_id]
                     self.assertIn((case["suite"], case["category"]), spec.categories)
 

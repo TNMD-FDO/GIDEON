@@ -45,3 +45,8 @@ superseded sample case is appended to the lists and named in the runner's
 `FRONTEND_SAMPLE` constant in `gideon/evaluation/guardrails_slice.py` in the
 same release. Each later slice adds its categories as they land. `harvest.ids`
 leaves at the export boundary with its cases.
+
+The `segmenter-300` slice has one list, `segmenter-300/sample.ids`, with every
+drawn case id, a superseding case's appended after it. A case without a checked
+label is excluded as unsigned. The list stays in the public tree: opinion ids
+and label offsets contain no harvest text. It changes only by append.

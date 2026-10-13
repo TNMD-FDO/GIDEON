@@ -13,7 +13,7 @@ from test_judge import false_refusal_content, valid_content
 
 from gideon import guardrail
 from gideon.evaluation import command, judge
-from gideon.evaluation.evalset import SET_ROOT, LoadedSet, load_set
+from gideon.evaluation.evalset import SET_ROOT, LoadedSet, load_set, select_cases
 from gideon.evaluation.results import RunContext, SliceResult
 from gideon.evaluation.slices import SLICE_RUNNERS, CallSurface
 from gideon.evaluation.turns import classify
@@ -239,12 +239,9 @@ class Invariance(unittest.TestCase):
                     tuple((result.verdict, result.metrics) for result in first_result.results),
                     tuple((result.verdict, result.metrics) for result in second_result.results),
                 )
-                active = set(first_loaded.active_ids)
-                expected_ids = tuple(
-                    case_id
-                    for case_id in first_loaded.slices[slice_name]
-                    if case_id in active
-                )
+                # Every runner takes the loader's selection, so an unsigned
+                # case (an unlabelled segmenter case among them) has no row.
+                expected_ids = select_cases(first_loaded, slice_name).counted
                 self.assertEqual(
                     {result.case_id for result in first_result.results},
                     set(expected_ids),
