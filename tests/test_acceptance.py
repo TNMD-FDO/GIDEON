@@ -1676,6 +1676,23 @@ class ServicesContracts(unittest.TestCase):
         self.assertIsNotNone(ctx.services)
         return host, ctx
 
+    def test_pair_forms_issue_certificates_past_the_fourteen_day_page(self) -> None:
+        for pair_form, days in (("", services.CA_DAYS), ("before", services.PAIR_CA_DAYS)):
+            with self.subTest(pair=pair_form):
+                host = FakeHost(files=base_files())
+                ctx = self._context(host)
+                ctx.spec = replace(ctx.spec, pair=pair_form)
+                result = services.prepare(ctx)
+                self.assertTrue(result.ok, result.detail)
+                issued = [
+                    call[0][call[0].index("-days") + 1]
+                    for call in host.calls
+                    if call[0][:1] == ("openssl",) and "-days" in call[0]
+                ]
+                self.assertEqual(len(issued), 3)
+                self.assertEqual(set(issued), {days})
+        self.assertGreater(int(services.PAIR_CA_DAYS), 14)
+
     def test_services_loads_the_rendered_vm_site_and_binds_the_sink_redactor(self) -> None:
         """The harness keeps the VM site and the sink redactor aligned."""
 
@@ -2183,6 +2200,7 @@ class VmContracts(unittest.TestCase):
     def test_boot_defines_starts_polls_a_lease_and_waits_for_cloud_init(self) -> None:
         host = FakeHost(commands=phase_b_commands(), files=base_files())
         ctx = harness_context(host, address=None)
+        ctx.spec = replace(ctx.spec, vcpus=14, memory_mib=20 * 1024)
 
         result = vm.boot(ctx)
 
@@ -2190,6 +2208,9 @@ class VmContracts(unittest.TestCase):
         self.assertEqual(ctx.address, "192.168.122.10")
         commands = [call[0] for call in host.calls]
         self.assertLess(commands.index(("virsh", "define", str(RUN_DIR / "domain.xml"))), commands.index(("virsh", "start", "test-vm")))
+        domain_xml = ET.fromstring(host.domain_xml or "")
+        self.assertEqual(domain_xml.findtext("./vcpu"), "14")
+        self.assertEqual(domain_xml.findtext("./memory"), str(20 * 1024))
         self.assertLess(commands.index(("virsh", "start", "test-vm")), commands.index(("virsh", "domifaddr", "test-vm", "--source", "lease")))
         self.assertTrue(any(command[0] == "ssh" and "cloud-init status --wait" in command[-1] for command in commands))
 

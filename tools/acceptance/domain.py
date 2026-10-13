@@ -186,6 +186,8 @@ def define(
     out: PathLike,
     run_id: str,
     template_path: PathLike = DOMAIN_TEMPLATE,
+    vcpus: int = 8,
+    memory_mib: int = 16 * 1024,
 ) -> StageResult:
     """Write and define an owned domain, keeping its XML under the run directory."""
 
@@ -204,6 +206,8 @@ def define(
         seed_path=seed_path,
         console_path=Path(out) / "console.log",
         run_id=run_id,
+        vcpus=vcpus,
+        memory_mib=memory_mib,
     )
     io.write_text(xml_path, xml, mode=0o644)
     result = io.run(["virsh", "define", str(xml_path)])

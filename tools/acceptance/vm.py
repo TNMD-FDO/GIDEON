@@ -190,6 +190,8 @@ def run_product(
     cwd: str = VM_CHECKOUT,
     timeout: float | None = None,
     forwards: Sequence[str] = (),
+    sudo: bool = True,
+    input: str | None = None,
 ) -> tuple[StageResult, str]:
     """Run one product command in the VM and keep its transcript on both sides.
 
@@ -197,10 +199,9 @@ def run_product(
     """
 
     transcript = f"{VM_TRANSCRIPTS}/{transcript_name}"
-    script = (
-        f"cd {shlex.quote(cwd)} && sudo {shlex.join(command)} 2>&1 | tee {transcript}"
-    )
-    result = ssh(ctx, script, timeout=timeout, forwards=forwards)
+    privilege = "sudo " if sudo else ""
+    script = f"cd {shlex.quote(cwd)} && {privilege}{shlex.join(command)} 2>&1 | tee {transcript}"
+    result = ssh(ctx, script, input=input, timeout=timeout, forwards=forwards)
     text = redact(result.stdout, ctx.vm_site)
     text = redact(text, ctx.site)
     host_transcript = ctx.spec.out / f"{ctx.stage_index:02d}-{transcript_name}"
@@ -321,6 +322,8 @@ def boot(ctx: HarnessContext) -> StageResult:
         out=ctx.spec.out,
         run_id=ctx.run_id,
         template_path=ctx.template_path,
+        vcpus=ctx.spec.vcpus,
+        memory_mib=ctx.spec.memory_mib,
     )
     if not defined.ok:
         return StageResult("boot", False, defined.detail, defined.fix)

@@ -541,7 +541,9 @@ def uninstall_text(*, bad_row: int | None = None, closing: bool = True) -> str:
     return "\n".join(lines) + "\n"
 
 
-def removal_host() -> tuple[ScriptHost, HarnessContext, dict[str, bool], dict[str, bool]]:
+def removal_host(
+    *, cotenant_data: str = cotenant.DATA_DIR
+) -> tuple[ScriptHost, HarnessContext, dict[str, bool], dict[str, bool]]:
     host = ScriptHost()
     ctx = context(host)
     before = {str(path): index % 2 == 0 for index, path in enumerate(DROPINS)}
@@ -558,7 +560,7 @@ def removal_host() -> tuple[ScriptHost, HarnessContext, dict[str, bool], dict[st
         **{str(path): False for path in DATA_PATHS},
         str(COMMAND_PATH): False,
         str(disk.DATA_MOUNT): True,
-        cotenant.DATA_DIR: True,
+        cotenant_data: True,
     }
     host.presence = before.copy()
     host.presence_after_product[UNINSTALL_ARGV] = plain
@@ -588,7 +590,6 @@ class Removal(unittest.TestCase):
             (ETC_GIDEON, *DATA_PATHS, COMMAND_PATH,
              *(item.path for item in host_uninstall.PURGED_DROP_INS)),
         )
-        self.assertEqual(cotenant._KEPT_AFTER_PURGE, (disk.DATA_MOUNT, Path(cotenant.DATA_DIR)))
 
     def test_plain_records_state_and_purge_removes_only_owned_state(self) -> None:
         host, ctx, plain, purged = removal_host()
@@ -641,7 +642,7 @@ class Removal(unittest.TestCase):
 
     def test_purge_kept_absent_dropins_and_volumes_are_checked(self) -> None:
         cases = (
-            *(("kept", str(path)) for path in cotenant._KEPT_AFTER_PURGE),
+            *(("kept", str(path)) for path in (disk.DATA_MOUNT, Path(cotenant.DATA_DIR))),
             *(("absent", str(path)) for path in cotenant._ABSENT_AFTER_PURGE),
             *(("dropin", str(item.path)) for item in host_uninstall.KEPT_DROP_INS),
             ("volumes", VOLUMES[0]),
@@ -663,6 +664,20 @@ class Removal(unittest.TestCase):
                 result = cotenant.purge(ctx)
                 self.assertFalse(result.ok)
                 self.assertIn(expected, result.detail)
+
+    def test_uninstall_stage_keeps_the_supplied_cotenant_data_path(self) -> None:
+        data_path = "/data/fictitious-cotenant"
+        host, ctx, _plain, purged = removal_host(cotenant_data=data_path)
+        ctx.dropins_before = host.presence.copy()
+        ctx.volumes_before = tuple(sorted(VOLUMES))
+        volume_command = f"sudo {shlex.join(cotenants.volume_ls_argv())}"
+        host.answer(volume_command, stdout="")
+
+        result = cotenant.uninstall_stage(ctx, purge=True, cotenant_data=data_path)
+
+        self.assertTrue(result.ok, result.detail)
+        self.assertTrue(purged[data_path])
+        self.assertNotIn(cotenant.DATA_DIR, purged)
 
     def test_plain_requires_marked_volumes_before_running(self) -> None:
         host, ctx, _plain, _purged = removal_host()

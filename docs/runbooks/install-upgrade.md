@@ -573,7 +573,7 @@ runs `v0.1.1`; the checkout is back on `main`, whose product code equals the tag
 
 ## 7. Moving a populated image store
 
-When `host provision` reports `docker-engine: unfixable`, or `apply` refuses while naming a populated package-default containerd root beside an empty root on the Docker volume, move the store by hand in an announced maintenance window. Starting the daemon on that empty root would make its existing images and container snapshots disappear. Every Compose project using the Docker daemon is down during the copy, including any other project sharing it. Tell users before starting.
+When `host provision` reports `docker-engine: failed` naming a populated package-default containerd root, or `apply` refuses while naming a populated package-default containerd root beside an empty root on the Docker volume, move the store by hand in an announced maintenance window. Starting the daemon on that empty root would make its existing images and container snapshots disappear. Every Compose project using the Docker daemon is down during the copy, including any other project sharing it. Tell users before starting.
 
 ### Survey
 
@@ -660,13 +660,13 @@ A package action during provision must not start a daemon on the old root, so ho
 cd /opt/gideon
 printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d >/dev/null
 sudo chmod 755 /usr/sbin/policy-rc.d
-gideon host provision --only docker-engine
+gideon host provision --only docker-engine --acknowledge-disruption
 sudo rm /usr/sbin/policy-rc.d
 sudo systemctl start gideon-registry.service
 sudo containerd config dump
 ```
 
-Remove `/usr/sbin/policy-rc.d` whether or not provision succeeds.
+Remove `/usr/sbin/policy-rc.d` whether or not provision succeeds. The daemons are stopped, so provision cannot list the running containers it would otherwise guard, and the flag acknowledges the window already announced. `--only` runs only when every step before `docker-engine` has converged: on a box whose first provision met the refusal before its site file existed, write the site file and run `gideon host provision` once more before the survey; it converges the rest and refuses at `docker-engine` again.
 
 Confirm Docker's socket and service, containerd, and on the build box the registry are active. Confirm `containerd config dump` reports `/var/lib/docker/containerd` as the root. If provision or that check fails, keep both roots and use the rollback below.
 

@@ -19,6 +19,7 @@ from tools.acceptance import (
     domain,
     fullrestore,
     image,
+    pair,
     rehearsal,
     seed,
     services,
@@ -408,6 +409,9 @@ STAGE_IDENTIFIERS: Final[tuple[str, ...]] = tuple(stage.identifier for stage in 
 _SHARED: Final = STAGES[
     STAGE_IDENTIFIERS.index("image") : STAGE_IDENTIFIERS.index("preflight") + 1
 ]
+_SHARED_THROUGH_INSTALL: Final = STAGES[
+    STAGE_IDENTIFIERS.index("image") : STAGE_IDENTIFIERS.index("install") + 1
+]
 FULL_RESTORE_STAGES: Final[tuple[Stage, ...]] = (
     STAGES[0],
     # Second, so a set the box cannot open boots nothing.
@@ -494,6 +498,75 @@ COTENANT_AFTER_IDENTIFIERS: Final[tuple[str, ...]] = tuple(
     stage.identifier for stage in COTENANT_AFTER_STAGES
 )
 
+PAIR_BEFORE_STAGES: Final[tuple[Stage, ...]] = (
+    _STAGE_BY_IDENTIFIER["preconditions"],
+    Stage("select", pair.select, pair.SELECT_FIX),
+    _STAGE_BY_IDENTIFIER["image"],
+    _STAGE_BY_IDENTIFIER["seed"],
+    _STAGE_BY_IDENTIFIER["services"],
+    _STAGE_BY_IDENTIFIER["boot"],
+    _STAGE_BY_IDENTIFIER["clone"],
+    Stage("data-mount", pair.mount_data, pair.MOUNT_FIX),
+    Stage("transcribe-prepare", pair.prepare, pair.PREPARE_FIX),
+    Stage("transcribe-clone", pair.clone, pair.CLONE_FIX),
+    Stage("transcribe-images", pair.images, pair.IMAGES_FIX),
+    Stage("transcribe-install", pair.install, pair.INSTALL_FIX),
+    Stage("transcribe-up", pair.up, pair.UP_FIX),
+    Stage("health", pair.health, pair.HEALTH_FIX, key="health-arrival"),
+    Stage("provision", pair.first_provision, vm.VM_FIX),
+    # The move's --only provision needs every prerequisite converged, so the
+    # site file and a full provision precede it, as GIDEON's refusal of an
+    # --only step with a pending-input prerequisite tells the operator; that
+    # provision meets the same store refusal and is read the same way.
+    _STAGE_BY_IDENTIFIER["site"],
+    Stage("provision", pair.first_provision, vm.VM_FIX, key="provision-site"),
+    Stage("store-move", pair.store_move, pair.STORE_MOVE_FIX),
+    Stage("provision-moved", pair.provision_after_move, vm.VM_FIX),
+    _STAGE_BY_IDENTIFIER["reboot"],
+    Stage("health", pair.health, pair.HEALTH_FIX, key="health-provision"),
+    Stage("provision", _before_second_provision, vm.VM_FIX, key="provision-2"),
+    Stage("health", pair.health, pair.HEALTH_FIX, key="health-provision-2"),
+    _STAGE_BY_IDENTIFIER["authorize"],
+    _STAGE_BY_IDENTIFIER["preflight"],
+    _STAGE_BY_IDENTIFIER["install"],
+    Stage("push", pair.push, pair.PUSH_FIX),
+    Stage("health", pair.health, pair.HEALTH_FIX, key="health-install"),
+    Stage("measure", pair.measure, pair.MEASURE_FIX),
+    Stage("upgrade", cotenant.upgrade, cotenant.UPGRADE_FIX),
+    Stage("health", pair.health, pair.HEALTH_FIX, key="health-upgrade"),
+    Stage("uninstall", pair.uninstall, cotenant.UNINSTALL_FIX),
+    Stage("health", pair.health, pair.HEALTH_FIX, key="health-uninstall"),
+    Stage("purge", pair.purge, cotenant.UNINSTALL_FIX),
+    Stage("health", pair.health, pair.HEALTH_FIX, key="health-purge"),
+    _STAGE_BY_IDENTIFIER["teardown"],
+)
+PAIR_BEFORE_IDENTIFIERS: Final[tuple[str, ...]] = tuple(
+    stage.identifier for stage in PAIR_BEFORE_STAGES
+)
+PAIR_AFTER_STAGES: Final[tuple[Stage, ...]] = (
+    _STAGE_BY_IDENTIFIER["preconditions"],
+    Stage("select", pair.select, pair.SELECT_FIX),
+    *_SHARED_THROUGH_INSTALL,
+    Stage("push", pair.push, pair.PUSH_FIX),
+    Stage("transcribe-prepare", pair.prepare, pair.PREPARE_FIX),
+    Stage("transcribe-clone", pair.clone, pair.CLONE_FIX),
+    Stage("transcribe-images", pair.images, pair.IMAGES_FIX),
+    Stage("transcribe-install", pair.install, pair.INSTALL_FIX),
+    Stage("transcribe-up", pair.up, pair.UP_FIX),
+    Stage("health", pair.health, pair.HEALTH_FIX, key="health-arrival"),
+    Stage("measure", pair.measure, pair.MEASURE_FIX),
+    Stage("upgrade", cotenant.upgrade, cotenant.UPGRADE_FIX),
+    Stage("health", pair.health, pair.HEALTH_FIX, key="health-upgrade"),
+    Stage("uninstall", pair.uninstall, cotenant.UNINSTALL_FIX),
+    Stage("health", pair.health, pair.HEALTH_FIX, key="health-uninstall"),
+    Stage("purge", pair.purge, cotenant.UNINSTALL_FIX),
+    Stage("health", pair.health, pair.HEALTH_FIX, key="health-purge"),
+    _STAGE_BY_IDENTIFIER["teardown"],
+)
+PAIR_AFTER_IDENTIFIERS: Final[tuple[str, ...]] = tuple(
+    stage.identifier for stage in PAIR_AFTER_STAGES
+)
+
 
 def form_stages(spec: RunSpec) -> tuple[Stage, ...]:
     """Return the stages for the selected acceptance form."""
@@ -504,6 +577,10 @@ def form_stages(spec: RunSpec) -> tuple[Stage, ...]:
         return COTENANT_BEFORE_STAGES
     if spec.cotenant == "after":
         return COTENANT_AFTER_STAGES
+    if spec.pair == "before":
+        return PAIR_BEFORE_STAGES
+    if spec.pair == "after":
+        return PAIR_AFTER_STAGES
     return STAGES
 
 

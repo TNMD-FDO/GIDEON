@@ -48,7 +48,6 @@ _ABSENT_AFTER_PLAIN: Final = (COMMAND_PATH,)
 _ABSENT_AFTER_PURGE: Final = (
     *_KEPT_AFTER_PLAIN, COMMAND_PATH, *(item.path for item in gideon.host.uninstall.PURGED_DROP_INS),
 )
-_KEPT_AFTER_PURGE: Final = (disk.DATA_MOUNT, Path(DATA_DIR))
 
 
 def _red(stage: str, detail: str, fix: str) -> StageResult:
@@ -475,12 +474,17 @@ def _uninstall_rows(stage: str, text: str) -> StageResult | None:
 
 
 def _state_after(
-    ctx: HarnessContext, stage: str, *, purge: bool, volumes: tuple[str, ...],
+    ctx: HarnessContext,
+    stage: str,
+    *,
+    purge: bool,
+    volumes: tuple[str, ...],
+    cotenant_data: str,
 ) -> StageResult:
     before = ctx.dropins_before
     if before is None:
         return _red(stage, "drop-in presence before uninstall was not recorded", UNINSTALL_FIX)
-    kept = _KEPT_AFTER_PURGE if purge else _KEPT_AFTER_PLAIN
+    kept = (disk.DATA_MOUNT, Path(cotenant_data)) if purge else _KEPT_AFTER_PLAIN
     absent = _ABSENT_AFTER_PURGE if purge else _ABSENT_AFTER_PLAIN
     paths = tuple(dict.fromkeys((*kept, *absent, *_DROPIN_PATHS)))
     present, failure = _presence(ctx, stage, paths)
@@ -591,7 +595,9 @@ def _state_after(
     )
 
 
-def _uninstall_stage(ctx: HarnessContext, *, purge: bool) -> StageResult:
+def uninstall_stage(
+    ctx: HarnessContext, *, purge: bool, cotenant_data: str
+) -> StageResult:
     stage = "purge" if purge else "uninstall"
     if not purge:
         present, failure = _presence(ctx, stage, _DROPIN_PATHS)
@@ -615,7 +621,13 @@ def _uninstall_stage(ctx: HarnessContext, *, purge: bool) -> StageResult:
     failed = _uninstall_rows(stage, text)
     if failed is not None:
         return failed
-    checked = _state_after(ctx, stage, purge=purge, volumes=ctx.volumes_before)
+    checked = _state_after(
+        ctx,
+        stage,
+        purge=purge,
+        volumes=ctx.volumes_before,
+        cotenant_data=cotenant_data,
+    )
     if not checked.ok:
         return checked
     transcript = ctx.spec.out / f"{ctx.stage_index:02d}-cotenant-{stage}.txt"
@@ -625,10 +637,10 @@ def _uninstall_stage(ctx: HarnessContext, *, purge: bool) -> StageResult:
 def uninstall(ctx: HarnessContext) -> StageResult:
     """Remove GIDEON's marked state and verify the plain tier's kept state."""
 
-    return _uninstall_stage(ctx, purge=False)
+    return uninstall_stage(ctx, purge=False, cotenant_data=DATA_DIR)
 
 
 def purge(ctx: HarnessContext) -> StageResult:
     """Purge GIDEON's data and verify the co-tenant and shared mount remain."""
 
-    return _uninstall_stage(ctx, purge=True)
+    return uninstall_stage(ctx, purge=True, cotenant_data=DATA_DIR)

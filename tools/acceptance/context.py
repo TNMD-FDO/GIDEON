@@ -30,6 +30,10 @@ DEFAULT_COTENANT_VM_NAMES: Final[Mapping[str, str]] = {
     "before": "gideon-acceptance-cotenant-before",
     "after": "gideon-acceptance-cotenant-after",
 }
+DEFAULT_PAIR_VM_NAMES: Final[Mapping[str, str]] = {
+    "before": "gideon-acceptance-pair-before",
+    "after": "gideon-acceptance-pair-after",
+}
 DEFAULT_SITE_PATH: Final = Path("/etc/gideon/site.yaml")
 # The first usable address on libvirt's default bridge is where both the
 # provisioned registry and this run's SMTP sink are reachable from the VM.
@@ -54,6 +58,10 @@ class RunSpec:
     clone_ref: str = ""
     full_restore: bool = False
     cotenant: str = ""
+    pair: str = ""
+    transcribe_tag: str = ""
+    vcpus: int = 8
+    memory_mib: int = 16 * 1024
 
 
 StageCallable = Callable[["HarnessContext"], StageResult]
@@ -149,6 +157,11 @@ class HarnessContext:
     cotenant_arrived: bool = False
     dropins_before: Mapping[str, bool] | None = None
     volumes_before: tuple[str, ...] | None = None
+    transcribe_tag: str | None = None
+    transcribe_images: Mapping[str, str] | None = None
+    store_refusal: str | None = None
+    docker_reading: tuple[str, str] | None = None
+    transcribe_root: Path | None = None
 
 
 def authenticated_messages(ctx: "HarnessContext") -> tuple[SinkMessageLike, ...]:

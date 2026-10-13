@@ -665,6 +665,53 @@ def _expected_release(ctx: HarnessContext) -> tuple[str | None, StageResult | No
     return version, None
 
 
+def services_health(
+    ctx: HarnessContext,
+    stage: str,
+    document: Mapping[str, object] | None = None,
+) -> StageResult:
+    """Check every declared Compose service recorded in applied.yaml."""
+
+    if document is None:
+        applied = vm.run_as_root(ctx, f"cat {shlex.quote(rehearsal.APPLIED_RECORD)}")
+        if applied.returncode != 0:
+            return _stage_failure(stage, f"could not read {rehearsal.APPLIED_RECORD}: {command_detail(applied)}")
+        try:
+            loaded = yaml.safe_load(applied.stdout)
+        except yaml.YAMLError as exc:
+            return _stage_failure(stage, f"could not parse {rehearsal.APPLIED_RECORD}: {exc}")
+        if not isinstance(loaded, Mapping):
+            return _stage_failure(stage, f"{rehearsal.APPLIED_RECORD} is not a mapping")
+        document = loaded
+    declared = document.get("services")
+    if not isinstance(declared, Mapping) or not all(isinstance(name, str) for name in declared):
+        return _stage_failure(stage, f"{rehearsal.APPLIED_RECORD} has no service mapping")
+    listing = vm.run_as_root(
+        ctx,
+        shlex.join(stack.compose_argv("/etc/gideon/rendered", "ps", "--all", "--format", "json")),
+    )
+    if listing.returncode != 0:
+        return _stage_failure(stage, f"Compose service check failed: {command_detail(listing)}")
+    rows = stack.parse_ps(listing.stdout)
+    if rows is None:
+        return _stage_failure(stage, "Compose service check returned invalid JSON")
+    missing: list[str] = []
+    for name in declared:
+        healthy = any(
+            row.get("Service") == name
+            and row.get("State") == "running"
+            and (not row.get("Health") or row.get("Health") == "healthy")
+            for row in rows
+        )
+        if not healthy:
+            missing.append(name)
+    if missing:
+        return _stage_failure(stage, f"services are not running and healthy: {', '.join(missing)}")
+    ctx.services_listing = listing.stdout
+    ctx.applied_record = document
+    return StageResult(stage, True, f"{len(declared)} services healthy", "")
+
+
 def health(ctx: HarnessContext) -> StageResult:
     """Check the applied release and every declared Compose service."""
 
@@ -685,33 +732,10 @@ def health(ctx: HarnessContext) -> StageResult:
             "health",
             f"applied release {document.get('release', '-')!r} does not match {expected}",
         )
-    declared = document.get("services")
-    if not isinstance(declared, Mapping) or not all(isinstance(name, str) for name in declared):
-        return _stage_failure("health", f"{rehearsal.APPLIED_RECORD} has no service mapping")
-    listing = vm.run_as_root(
-        ctx,
-        shlex.join(stack.compose_argv("/etc/gideon/rendered", "ps", "--all", "--format", "json")),
-    )
-    if listing.returncode != 0:
-        return _stage_failure("health", f"Compose service check failed: {command_detail(listing)}")
-    rows = stack.parse_ps(listing.stdout)
-    if rows is None:
-        return _stage_failure("health", "Compose service check returned invalid JSON")
-    missing: list[str] = []
-    for name in declared:
-        healthy = any(
-            row.get("Service") == name
-            and row.get("State") == "running"
-            and (not row.get("Health") or row.get("Health") == "healthy")
-            for row in rows
-        )
-        if not healthy:
-            missing.append(name)
-    if missing:
-        return _stage_failure("health", f"services are not running and healthy: {', '.join(missing)}")
-    ctx.services_listing = listing.stdout
-    ctx.applied_record = document
-    return StageResult("health", True, f"{len(declared)} services healthy at release {expected}", "")
+    result = services_health(ctx, "health", document)
+    if not result.ok:
+        return result
+    return StageResult("health", True, f"{result.detail} at release {expected}", "")
 
 
 def mode(ctx: HarnessContext) -> StageResult:

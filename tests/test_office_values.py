@@ -85,6 +85,7 @@ _CURATED_ALLOWLIST: tuple[str, ...] = (
     "kernel.org",
     "lexisnexis.com",
     "microsoft.com",
+    "nvidia.github.io",
     "openai.com",
     "openrouter.ai",
     "opensearch.org",

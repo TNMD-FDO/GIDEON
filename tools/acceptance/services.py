@@ -56,6 +56,10 @@ def ufw_comment(vm_name: str) -> str:
         return ACCEPTANCE_UFW_COMMENT
     return f"{ACCEPTANCE_UFW_COMMENT}-{vm_name}"
 CA_DAYS: Final = "2"
+# The pair forms read GIDEON's status, which pages a certificate inside 14
+# days, so their throwaway CA and leaf outlive that page; the other forms keep
+# the shortest window that covers one run.
+PAIR_CA_DAYS: Final = "30"
 SERVICE_FIX: Final = "Inspect the services-stage openssl and UFW output, then retry acceptance."
 UFW_FIX: Final = "Run ufw show added, repair the acceptance rule, then retry acceptance."
 CA_DIR_NAME: Final = "ca"
@@ -243,6 +247,8 @@ def sweep_ufw(ctx: HarnessContext) -> StageResult | None:
 def prepare(ctx: HarnessContext) -> StageResult:
     """Create certificates, site text, credentials, the sink, and its rule."""
 
+    days = PAIR_CA_DAYS if ctx.spec.pair else CA_DAYS
+
     if ctx.site is None or not ctx.run_id:
         return StageResult("services", False, "services inputs were not resolved", SERVICE_FIX)
     run_dir = ctx.spec.run_dir
@@ -272,7 +278,7 @@ def prepare(ctx: HarnessContext) -> StageResult:
                 "-out",
                 str(ca["root_cert"]),
                 "-days",
-                CA_DAYS,
+                days,
                 "-subj",
                 root_subject,
                 "-addext",
@@ -321,7 +327,7 @@ def prepare(ctx: HarnessContext) -> StageResult:
                 "-out",
                 str(ca["vm_cert"]),
                 "-days",
-                CA_DAYS,
+                days,
                 "-sha256",
                 "-copy_extensions",
                 "copy",
@@ -365,7 +371,7 @@ def prepare(ctx: HarnessContext) -> StageResult:
                 "-out",
                 str(ca["sink_cert"]),
                 "-days",
-                CA_DAYS,
+                days,
                 "-sha256",
                 "-copy_extensions",
                 "copy",

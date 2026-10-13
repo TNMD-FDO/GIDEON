@@ -5,13 +5,15 @@ import re
 import sys
 import time
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
 from gideon.host.sysio import Host, PathLike, RealHost
-from tools.acceptance import smtpsink
+from tools.acceptance import pair, smtpsink
 from tools.acceptance.context import (
     DEFAULT_COTENANT_VM_NAMES,
+    DEFAULT_PAIR_VM_NAMES,
     DEFAULT_RESTORE_VM_NAME,
     DEFAULT_SITE_PATH,
     DEFAULT_VM_NAME,
@@ -23,6 +25,8 @@ from tools.acceptance.run import (
     COTENANT_AFTER_IDENTIFIERS,
     COTENANT_BEFORE_IDENTIFIERS,
     FULL_RESTORE_IDENTIFIERS,
+    PAIR_AFTER_IDENTIFIERS,
+    PAIR_BEFORE_IDENTIFIERS,
     STAGE_IDENTIFIERS,
     form_stages,
     run,
@@ -47,7 +51,13 @@ def _parser() -> argparse.ArgumentParser:
         choices=("before", "after"),
         help="run with a synthetic co-tenant arriving before or after GIDEON",
     )
+    form.add_argument(
+        "--pair",
+        choices=("before", "after"),
+        help="run with Gideon Transcribe arriving before or after GIDEON",
+    )
     parser.add_argument("--name", default=None, metavar="VM")
+    parser.add_argument("--transcribe-tag", metavar="TAG")
     parser.add_argument("--out", metavar="DIR")
     parser.add_argument("--keep", action="store_true")
     parser.add_argument(
@@ -59,6 +69,8 @@ def _parser() -> argparse.ArgumentParser:
                     *FULL_RESTORE_IDENTIFIERS,
                     *COTENANT_BEFORE_IDENTIFIERS,
                     *COTENANT_AFTER_IDENTIFIERS,
+                    *PAIR_BEFORE_IDENTIFIERS,
+                    *PAIR_AFTER_IDENTIFIERS,
                 )
             )
         ),
@@ -89,6 +101,8 @@ def _plan(spec: RunSpec) -> None:
         form = " (full restore)"
     elif spec.cotenant:
         form = f" (co-tenant {spec.cotenant})"
+    elif spec.pair:
+        form = f" (pair {spec.pair})"
     else:
         form = ""
     print(f"Acceptance dry run{form}:")
@@ -96,7 +110,7 @@ def _plan(spec: RunSpec) -> None:
     print(f"run directory: {spec.run_dir}")
     print(f"output directory: {spec.out}")
     print(
-        "VM: 8 vCPUs, 16 GiB RAM, machine pc, "
+        f"VM: {spec.vcpus} vCPUs, {spec.memory_mib / 1024:g} GiB RAM, machine pc, "
         "/usr/bin/qemu-system-x86_64, default libvirt network"
     )
 
@@ -114,23 +128,43 @@ def main(
     """Parse and run the acceptance harness over injectable box seams."""
 
     options = _parser().parse_args(argv)
+    if options.transcribe_tag is not None and options.pair is None:
+        print(
+            "tools.acceptance: --transcribe-tag requires --pair. "
+            "Fix: pass --pair before or --pair after to use --transcribe-tag.",
+            file=sys.stderr,
+        )
+        return 1
     if options.full_restore:
         selected_identifiers = FULL_RESTORE_IDENTIFIERS
     elif options.cotenant == "before":
         selected_identifiers = COTENANT_BEFORE_IDENTIFIERS
     elif options.cotenant == "after":
         selected_identifiers = COTENANT_AFTER_IDENTIFIERS
+    elif options.pair == "before":
+        selected_identifiers = PAIR_BEFORE_IDENTIFIERS
+    elif options.pair == "after":
+        selected_identifiers = PAIR_AFTER_IDENTIFIERS
     else:
         selected_identifiers = STAGE_IDENTIFIERS
     if options.until is not None and options.until not in selected_identifiers:
         if options.until in STAGE_IDENTIFIERS:
-            other_flag = "omit --full-restore" if options.full_restore else "omit --cotenant"
+            if options.full_restore:
+                other_flag = "omit --full-restore"
+            elif options.cotenant:
+                other_flag = "omit --cotenant"
+            else:
+                other_flag = "omit --pair"
         elif options.until in FULL_RESTORE_IDENTIFIERS:
             other_flag = "--full-restore"
         elif options.until in COTENANT_BEFORE_IDENTIFIERS:
             other_flag = "--cotenant before"
-        else:
+        elif options.until in COTENANT_AFTER_IDENTIFIERS:
             other_flag = "--cotenant after"
+        elif options.until in PAIR_BEFORE_IDENTIFIERS:
+            other_flag = "--pair before"
+        else:
+            other_flag = "--pair after"
         print(
             f"tools.acceptance: --until {options.until} is not valid for this form. "
             f"Fix: {other_flag} to use that stage.",
@@ -145,6 +179,8 @@ def main(
         vm_name = DEFAULT_RESTORE_VM_NAME
     elif options.cotenant:
         vm_name = DEFAULT_COTENANT_VM_NAMES[options.cotenant]
+    elif options.pair:
+        vm_name = DEFAULT_PAIR_VM_NAMES[options.pair]
     else:
         vm_name = DEFAULT_VM_NAME
     # Absolute whatever the caller typed: libvirt opens the console log by path
@@ -185,7 +221,11 @@ def main(
         until=options.until,
         full_restore=options.full_restore,
         cotenant=options.cotenant or "",
+        pair=options.pair or "",
+        transcribe_tag=options.transcribe_tag or "",
     )
+    if options.pair:
+        spec = replace(spec, vcpus=pair.PAIR_VCPUS, memory_mib=pair.PAIR_MEMORY_MIB)
     if options.dry_run:
         _plan(spec)
         return 0
