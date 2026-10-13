@@ -683,6 +683,7 @@ class BackupRun(unittest.TestCase):
         applied_line = next(line for line in (audit_inputs[2] or "").splitlines() if line.startswith("\\set v_detail '"))
         applied_detail = json.loads(applied_line.removeprefix("\\set v_detail '").removesuffix("'"))
         self.assertEqual(applied_detail["stage_seconds"], dict.fromkeys(("intent", "indexes", "files", "secrets", "postgres", "complete", "counts", "manifest", "prune"), 0.0))
+        self.assertEqual(applied_detail["duration_s"], 0.0)
         self.assertEqual(set(applied_detail["indexes"]), {"qdrant", "opensearch"})
         self.assertEqual(applied_detail["indexes"]["qdrant"]["names"], [])
         self.assertEqual(applied_detail["indexes"]["qdrant"]["bytes"], 0)
@@ -706,6 +707,59 @@ class BackupRun(unittest.TestCase):
             "SELECT 'public.users', count(*) FROM public.users;\n", psql_inputs
         )
         self.assertNotIn("invalid-name", "".join(psql_inputs))
+
+    def test_run_duration_includes_manifest_and_prune_on_the_stage_clock(self) -> None:
+        """The run's final tick follows every stage's closing tick."""
+
+        host = _host()
+        ticks: list[float] = []
+
+        def clock() -> float:
+            tick = float(len(ticks))
+            ticks.append(tick)
+            return tick
+
+        started_tick = clock()
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = backup._backup_run_body(
+                argparse.Namespace(full=True, label=None),
+                io=host,
+                rendered_dir=RENDERED,
+                site_path=SITE_PATH,
+                root=CHECKOUT,
+                started=NOW,
+                now_was_supplied=False,
+                pre_restore=False,
+                clock=clock,
+                started_tick=started_tick,
+            )
+        self.assertEqual(code, 0)
+        applied_input = next(
+            call[1]
+            for call in host.calls
+            if call[0][0] == "docker"
+            and "gideon_audit" in call[0]
+            and call[1] is not None
+            and '"phase": "applied"' in call[1]
+        )
+        assert applied_input is not None
+        applied_line = next(
+            line for line in applied_input.splitlines()
+            if line.startswith("\\set v_detail '")
+        )
+        applied_detail = json.loads(
+            applied_line.removeprefix("\\set v_detail '").removesuffix("'")
+        )
+        timed_stages = (
+            "intent", "indexes", "files", "secrets", "postgres",
+            "complete", "counts", "manifest", "prune",
+        )
+        self.assertEqual(applied_detail["stage_seconds"], dict.fromkeys(timed_stages, 1.0))
+        self.assertEqual(len(ticks), 2 * len(timed_stages) + 2)
+        self.assertEqual(applied_detail["duration_s"], ticks[-1] - started_tick)
+        self.assertGreater(
+            applied_detail["duration_s"], sum(applied_detail["stage_seconds"].values())
+        )
 
     def test_file_arriving_after_first_pass_is_copied_and_inventoried(self) -> None:
         """The pass after the archive boundary includes a newly written upload."""

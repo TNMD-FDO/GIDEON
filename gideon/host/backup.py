@@ -13,7 +13,7 @@ import subprocess
 import sys
 import time
 import uuid
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -460,14 +460,20 @@ def _files_stage(
 
 
 @contextmanager
-def _timed(seconds: dict[str, float], stage: str, *, measured: bool) -> Iterator[None]:
-    """Record a stage's elapsed seconds; zero under a supplied clock, as ``finished`` is."""
+def _timed(
+    seconds: dict[str, float],
+    stage: str,
+    *,
+    measured: bool,
+    clock: Callable[[], float],
+) -> Iterator[None]:
+    """Record a stage's elapsed seconds; zero under a supplied now, as the run's ``duration_s`` is."""
 
-    started = time.monotonic()
+    started = clock()
     try:
         yield
     finally:
-        seconds[stage] = time.monotonic() - started if measured else 0.0
+        seconds[stage] = clock() - started if measured else 0.0
 
 
 def _complete_stage(roots: tuple[backuproots.TakingRoot, ...]) -> StageResult:
@@ -910,8 +916,7 @@ def _applied_stage(
     label: str,
     kind: backupset.Kind,
     pg: _PostgresStage,
-    started: datetime,
-    finished: datetime,
+    duration_s: float,
     inventory: Mapping[str, Sequence[backupset.Entry]],
     listings: Mapping[str, backupset.ListingPin],
     set_bytes: int,
@@ -926,7 +931,6 @@ def _applied_stage(
         for name, entries in inventory.items()
     }
     files.update({name: pin.objects for name, pin in listings.items()})
-    duration = max(0.0, (finished - started).total_seconds())
     row = audit.AuditRow(
         run_id,
         "backup_run",
@@ -941,7 +945,7 @@ def _applied_stage(
             "pgbackrest_label": pg.label,
             "pgbackrest_type": pg.backup_type,
             "archive_through": pg.archive_through.isoformat(),
-            "duration_s": duration,
+            "duration_s": duration_s,
             "stage_seconds": dict(stage_seconds),
             "indexes": (
                 derivedstores.snapshot_audit(snapshots)
@@ -978,6 +982,7 @@ def run_backup_run(
     root: PathLike | None = None,
     now: datetime | None = None,
     pre_restore: bool = False,
+    clock: Callable[[], float] = time.monotonic,
 ) -> int:
     """Run the ten ordered stages that create one local backup set."""
 
@@ -990,6 +995,7 @@ def run_backup_run(
             "backup run's clock value must be timezone-aware.",
             "Use an aware UTC time, then retry.",
         )
+    started_tick = clock()
     now_was_supplied = now is not None
     outcome = backuplock.take(io, command="backup run", now=started)
     if outcome.problem is not None:
@@ -1008,6 +1014,8 @@ def run_backup_run(
             started=started,
             now_was_supplied=now_was_supplied,
             pre_restore=pre_restore,
+            clock=clock,
+            started_tick=started_tick,
         )
     finally:
         # A nested run is its holder's; the holder releases.
@@ -1025,6 +1033,8 @@ def _backup_run_body(
     started: datetime,
     now_was_supplied: bool,
     pre_restore: bool,
+    clock: Callable[[], float],
+    started_tick: float,
 ) -> int:
     prerequisites = _preconditions(io, rendered_dir=rendered_dir, site_path=site_path)
     if prerequisites is None:
@@ -1056,7 +1066,7 @@ def _backup_run_body(
     stage_seconds: dict[str, float] = {}
     measured = not now_was_supplied
 
-    with _timed(stage_seconds, "intent", measured=measured):
+    with _timed(stage_seconds, "intent", measured=measured, clock=clock):
         intent = _intent_stage(
             io,
             rendered_dir,
@@ -1069,7 +1079,7 @@ def _backup_run_body(
     if not intent.ok:
         return 1
 
-    with _timed(stage_seconds, "indexes", measured=measured):
+    with _timed(stage_seconds, "indexes", measured=measured, clock=clock):
         indexes, snapshots = _indexes_stage(
             io, rendered_dir, backup_type=backup_type, pre_restore=pre_restore, now=started
         )
@@ -1078,7 +1088,7 @@ def _backup_run_body(
         return 1
 
     roots = backuproots.taking(io, backupset.inventory_roots(checkout_text), partial, previous)
-    with _timed(stage_seconds, "files", measured=measured):
+    with _timed(stage_seconds, "files", measured=measured, clock=clock):
         files, links = _files_stage(
             io, roots=roots
         )
@@ -1086,7 +1096,7 @@ def _backup_run_body(
     if not files.ok:
         return 1
 
-    with _timed(stage_seconds, "secrets", measured=measured):
+    with _timed(stage_seconds, "secrets", measured=measured, clock=clock):
         secrets_result, secrets_stage = _secrets_stage(
             io, recipients=recipients, partial=partial
         )
@@ -1094,7 +1104,7 @@ def _backup_run_body(
     if not secrets_result.ok or secrets_stage is None:
         return 1
 
-    with _timed(stage_seconds, "postgres", measured=measured):
+    with _timed(stage_seconds, "postgres", measured=measured, clock=clock):
         postgres_result, pg = _postgres_stage(
             io,
             rendered_dir,
@@ -1107,20 +1117,20 @@ def _backup_run_body(
     if not postgres_result.ok or pg is None:
         return 1
 
-    with _timed(stage_seconds, "complete", measured=measured):
+    with _timed(stage_seconds, "complete", measured=measured, clock=clock):
         complete = _complete_stage(roots)
     print_stage(complete)
     if not complete.ok:
         return 1
 
-    with _timed(stage_seconds, "counts", measured=measured):
+    with _timed(stage_seconds, "counts", measured=measured, clock=clock):
         counts_result, row_counts = _counts_stage(io, rendered_dir)
     print_stage(counts_result)
     if not counts_result.ok or row_counts is None:
         return 1
 
     finished = started if now_was_supplied else datetime.now(UTC)
-    with _timed(stage_seconds, "manifest", measured=measured):
+    with _timed(stage_seconds, "manifest", measured=measured, clock=clock):
         manifest_result, manifest, set_bytes = _manifest_stage(
             io,
             partial=partial,
@@ -1145,7 +1155,7 @@ def _backup_run_body(
     if not manifest_result.ok or manifest is None:
         return 1
 
-    with _timed(stage_seconds, "prune", measured=measured):
+    with _timed(stage_seconds, "prune", measured=measured, clock=clock):
         prune_result, pruned = _prune_stage(
             io,
             now=finished,
@@ -1156,6 +1166,7 @@ def _backup_run_body(
     if not prune_result.ok:
         return 1
 
+    duration_s = max(0.0, clock() - started_tick) if measured else 0.0
     applied = _applied_stage(
         io,
         rendered_dir,
@@ -1163,8 +1174,7 @@ def _backup_run_body(
         label=label,
         kind=kind,
         pg=pg,
-        started=started,
-        finished=finished,
+        duration_s=duration_s,
         inventory=manifest.inventory,
         listings=manifest.listings,
         set_bytes=set_bytes,
