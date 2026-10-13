@@ -239,6 +239,15 @@ rotated since the set was made (the install runbook's rotation step, `v0.1.40`).
 2. Write `site.yaml`, place the certificate, CA root, and supplied secrets;
    `gideon preflight`.
 3. `gideon apply` — a fresh stack with freshly generated secrets.
+   On the build box, run it from a checkout at the release tag the manifest
+   of the set step 4 will restore names, since it renders the Compose file
+   the restore's one-off Postgres container runs from. This apply then stops
+   at `registry` with a failed row naming each built image
+   (`docs/runbooks/built-images.md §3`) — expected, since those images exist
+   only in the registry step 4 brings back. The rendered
+   files and fresh secrets are already written, and no service or timer has
+   started, so no nightly runs before step 4 and its `pre-restore` row reads
+   `skipped (stack not running)`.
 4. `gideon restore --from target` (with `--at` if needed) on
    the running fresh stack. Its `pre-restore` row reads the fresh-stack skip
    because a stack holding no set has nothing a safety set would protect. If
@@ -248,7 +257,16 @@ rotated since the set was made (the install runbook's rotation step, `v0.1.40`).
    --project-directory /etc/gideon/rendered -f
    /etc/gideon/rendered/compose.yaml down`. Its `stores:` row puts the
    derived stores' indexes back from the set's snapshots, so they return with
-   the restore rather than by a rebuild.
+   the restore rather than by a rebuild. On the build box, first put the
+   set's registry root back by hand: from the snapshot the restore will select
+   (§4 above), the set it will select there — the push record's
+   `newest_set`, or under `--at` the newest complete set finished by that
+   time — fetch `sets/<set>/files/data-registry/` with the backup key into
+   `/data/registry` and restart `gideon-registry`, because the restore's
+   `fetch` reads the Postgres repository's owner through the built image
+   only that root holds; the restore's `stop` then stops the registry, its
+   file roots return `/data/registry` whole, and it starts the registry with
+   the store tier, so step 6's apply passes `registry`.
 5. Decrypt the set's tarball over the fresh secrets with the **old** identity
    from the password manager (the restored databases carry the old role
    passwords, so the old secrets must be back before anything connects).
