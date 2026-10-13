@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.150](docs/release-notes/v0.3.150.md) — 2026-10-13 — card layouts in 24 GB units costed
 - [v0.3.149](docs/release-notes/v0.3.149.md) — 2026-10-13 — backup run's duration covers prune
 - [v0.3.148](docs/release-notes/v0.3.148.md) — 2026-10-13 — the chunker packs sections by tokens
 - [v0.3.147](docs/release-notes/v0.3.147.md) — 2026-10-12 — Grafana's admin password rotated
