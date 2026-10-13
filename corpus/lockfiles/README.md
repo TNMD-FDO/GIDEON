@@ -28,8 +28,8 @@ the box that holds it. It surfaces where the lockfile is installed from
 upstream, as a digest mismatch naming the file, and the answer is a repin:
 a `mirror_url` that serves the pinned bytes, or a new cut.
 
-The `pipeline` value is `0.0.0` until a parser and chunker have a released
-version. A change to that version gets a new cut. `courts[]` lists the court
+The `pipeline` value is the release's registered pipeline version. A change
+to that version gets a new cut. `courts[]` lists the court
 map IDs in `courts.yaml` that belong to the cut; the IDs must resolve there.
 Preflight reads this list to check the site's home courts.
 

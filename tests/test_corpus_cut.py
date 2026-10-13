@@ -398,7 +398,7 @@ class Cut(unittest.TestCase):
         self.assertEqual(self.run_cut()[0], 0)
         self.host.index_bytes = b"<listing>a moved listing</listing>\n"
         next_cut = CUT_AT + timedelta(days=1)
-        with mock.patch.object(cut, "PIPELINE_VERSION", "0.0.1"):
+        with mock.patch.object(cut, "PIPELINE_VERSION", "9.9.9"):
             code, out, err = self.run_cut(cut_at=next_cut)
         self.assertEqual(code, 0, out + err)
         path = self.checkout / "corpus/lockfiles" / f"corpus-{next_cut.date().isoformat()}.yaml"
@@ -406,6 +406,7 @@ class Cut(unittest.TestCase):
         self.assertTrue(loaded.ok, render_errors(loaded.errors))
         assert loaded.lockfile is not None
         self.assertEqual(loaded.lockfile.reason, "pipeline")
+        self.assertEqual(loaded.lockfile.pipeline, "9.9.9")
         self.assertEqual((path.with_suffix("") / "example.listing.xml").read_bytes(), INDEX_BYTES)
 
     def test_refetch_fix_names_the_record_beside_the_file(self) -> None:
@@ -791,7 +792,7 @@ class Cut(unittest.TestCase):
         derived = loaded.lockfile
         self.assertEqual(derived.base, base.label)
         self.assertEqual(derived.reason, "tranche")
-        self.assertEqual(derived.pipeline, cut.PIPELINE_VERSION)
+        self.assertEqual(derived.pipeline, worker_identity.PIPELINE_VERSION)
         self.assertEqual(derived.sources["example"].courts,
                          tuple(sorted(set(base.sources["example"].courts or ()) | {"tenn", "scotus"})))
         self.assertEqual(derived.sources["example"].sidecar_sha256,

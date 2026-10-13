@@ -186,13 +186,13 @@ def _skill_directories(root: Path) -> frozenset[Path]:
     return frozenset(root / ".claude" / "skills" / entry.name for entry in lock.entries)
 
 
-# A built presentation, an iteration folder's HTML and pptx under the memo tree the
-# export omits, is a render of the slide source beside it, which is scanned; its bulk is
-# base64 on a few lines that the hostname scan reads at microseconds a character. The
-# outputs are untracked, but a local build leaves them in the tree, so the walk skips
-# them by shape.
+# A built presentation, an iteration folder's HTML, pptx, and PDFs under the memo tree
+# the export omits, is a render of the slide source beside it, which is scanned; its
+# bulk is base64 on a few lines that the hostname scan reads at microseconds a
+# character. The outputs are untracked, but a local build leaves them in the tree, so
+# the walk skips them by shape.
 _PRESENTATIONS = ("docs", "6-memo", "presentations")
-_BUILT_DECK_SUFFIXES = frozenset({".html", ".pptx"})
+_BUILT_DECK_SUFFIXES = frozenset({".html", ".pptx", ".pdf"})
 
 
 def _is_built_deck(relative: Path) -> bool:

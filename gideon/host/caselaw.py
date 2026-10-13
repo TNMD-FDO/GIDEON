@@ -2,6 +2,7 @@
 
 import datetime
 import json
+import math
 import re
 import subprocess
 from collections.abc import Mapping, Sequence
@@ -22,6 +23,7 @@ from gideon.host.render.worker import (
     DOCUMENT_FAILURE_REASONS,
     NO_STATE_REASONS,
     PATTERN_SET_ID,
+    PIPELINE_CHUNK_SIZES,
     PRECEDENTIAL_VALUES,
     QUALIFIERS,
     SECTION_TYPES,
@@ -226,6 +228,42 @@ SELECT jsonb_build_object(
 );
 """
 
+CHUNK_COUNTS_SQL = """WITH ready_documents AS (
+    SELECT d.doc_id
+    FROM public.documents AS d
+    JOIN public.opinions AS o ON o.doc_id = d.doc_id
+    WHERE d.source = :'v_source'
+      AND d.source_snapshot = :'v_snapshot_date'::date
+      AND o.court = :'v_court'
+      AND d.status = 'ready'
+), selected_chunks AS (
+    SELECT c.doc_id, c.section_type, c.token_count
+    FROM public.chunks AS c
+    JOIN ready_documents AS d ON d.doc_id = c.doc_id
+    WHERE c.pipeline = :'v_pipeline'
+)
+SELECT jsonb_build_object(
+    'ready', (SELECT count(*) FROM ready_documents),
+    'chunked', (SELECT count(DISTINCT doc_id) FROM selected_chunks),
+    'chunks', (SELECT count(*) FROM selected_chunks),
+    'by_section_type', COALESCE((
+        SELECT jsonb_object_agg(section_type, n) FROM (
+            SELECT section_type, count(*) AS n FROM selected_chunks GROUP BY section_type
+        ) AS counts
+    ), '{}'::jsonb),
+    'token_minimum', (SELECT min(token_count) FROM selected_chunks),
+    'token_median', (SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY token_count)
+                     FROM selected_chunks),
+    'token_p95', (SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY token_count)
+                  FROM selected_chunks),
+    'token_maximum', (SELECT max(token_count) FROM selected_chunks),
+    'over_maximum', (SELECT count(*) FROM selected_chunks
+                     WHERE token_count > :'v_maximum'::integer),
+    'under_minimum', (SELECT count(*) FROM selected_chunks
+                      WHERE token_count < :'v_minimum'::integer)
+);
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class CaselawRead:
@@ -312,6 +350,22 @@ class TreatmentCounts:
     by_effective_section: dict[str, int]
 
 
+@dataclass(frozen=True, slots=True)
+class ChunkCounts:
+    """Pipeline chunk coverage and token distribution for one court."""
+
+    ready: int
+    chunked: int
+    chunks: int
+    by_section_type: dict[str, int]
+    token_minimum: int | None
+    token_median: float | None
+    token_p95: float | None
+    token_maximum: int | None
+    over_maximum: int
+    under_minimum: int
+
+
 def _logs_fix(rendered_dir: PathLike, command_path: str) -> str:
     return (
         f"Run {stack.logs_fix(rendered_dir, WORKER_SERVICE_NAME)}, "
@@ -342,6 +396,17 @@ def _limit_problem(limit: object, command_path: str) -> Problem | None:
         "caselaw limit is invalid",
         f"Use an integer from 1 to {CASELAW_LIMIT_MAX} or omit it, then run "
         f"{report.command(command_path)} again.",
+    )
+
+
+def _pipeline_problem(pipeline: object, command_path: str) -> Problem | None:
+    if isinstance(pipeline, str) and pipeline in PIPELINE_CHUNK_SIZES:
+        return None
+    versions = ", ".join(sorted(PIPELINE_CHUNK_SIZES))
+    return Problem(
+        f"caselaw pipeline {pipeline!r} is not registered",
+        f"Use a registered pipeline ({versions}) from a new "
+        f"{report.command('corpus cut')}, then run {report.command(command_path)} again.",
     )
 
 
@@ -385,7 +450,8 @@ def _courts_problem(
 
 def defer_caselaw(
     host: Host, rendered_dir: PathLike, *, label: str, snapshot: str,
-    court: str, courts: Mapping[str, CourtGeography], limit: int | None = None,
+    court: str, courts: Mapping[str, CourtGeography], pipeline: str,
+    limit: int | None = None,
     command_path: str = COMMAND_PATH,
 ) -> int | Problem:
     """Validate one court job and defer it under its label and court lock."""
@@ -396,11 +462,12 @@ def defer_caselaw(
         court_problem(court, command_path),
         _limit_problem(limit, command_path),
         _courts_problem(court, courts, command_path),
+        _pipeline_problem(pipeline, command_path),
     ):
         if problem is not None:
             return problem
     args: dict[str, object] = {
-        "label": label, "snapshot": snapshot, "court": court,
+        "label": label, "snapshot": snapshot, "court": court, "pipeline": pipeline,
         "courts": {
             identifier: {"level": value.level, "circuit": value.circuit, "state": value.state}
             for identifier, value in courts.items()
@@ -467,7 +534,7 @@ def _failure_problem(
         )
     if reason == "busy":
         return Problem("caselaw is busy with another job", f"Wait, then run {install} again.")
-    if reason in {"segmenter", "anchors", "treatment"}:
+    if reason in {"segmenter", "anchors", "treatment", "chunker"}:
         return Problem(
             f"caselaw {reason} failure ({error or 'unknown error'})",
             f"Run {stack.logs_fix(rendered_dir, WORKER_SERVICE_NAME)}, report the defect, "
@@ -478,6 +545,19 @@ def _failure_problem(
             f"caselaw citations failure ({error or 'unknown error'})",
             "Run python3 -m tools.imagebuild gideon --check and "
             f"{stack.logs_fix(rendered_dir, WORKER_SERVICE_NAME)}, then run {install} again.",
+        )
+    if reason == "tokenizer":
+        return Problem(
+            f"caselaw tokenizer failure ({error or 'unknown error'})",
+            f"Run {report.command('models pull')}, then {report.command('apply')}, "
+            f"then {install} again.",
+        )
+    if reason == "pipeline":
+        versions = ", ".join(sorted(PIPELINE_CHUNK_SIZES))
+        return Problem(
+            "caselaw pipeline is not registered",
+            f"Use a registered pipeline ({versions}) from a new "
+            f"{report.command('corpus cut')}, then run {install} for its new label.",
         )
     if reason == "text-mismatch":
         return Problem(
@@ -566,6 +646,9 @@ def _read_court_row(
     host: Host, rendered_dir: PathLike, statement: str, noun: str, *, source: str,
     snapshot_date: str, court: str, command_path: str,
     pattern_set: str | None = None,
+    pipeline: str | None = None,
+    maximum: int | None = None,
+    minimum: int | None = None,
 ) -> object | Problem:
     if not isinstance(source, str) or re.fullmatch(SEGMENT_PATTERN, source) is None:
         return Problem("caselaw source is invalid", f"Use one source name, then run {report.command(command_path)} again.")
@@ -588,6 +671,12 @@ def _read_court_row(
     ]
     if pattern_set is not None:
         binds.append(worker.bind("v_pattern_set", pattern_set))
+    if pipeline is not None:
+        binds.append(worker.bind("v_pipeline", pipeline))
+    if maximum is not None:
+        binds.append(worker.bind("v_maximum", str(maximum)))
+    if minimum is not None:
+        binds.append(worker.bind("v_minimum", str(minimum)))
     sql = "\n".join((*binds, statement))
     try:
         result = host.run(worker.psql_argv(rendered_dir), input=sql)
@@ -802,4 +891,65 @@ def read_treatment_counts(
     counts = _treatment_counts_from_json(value)
     if counts is None:
         return Problem("caselaw treatment row is invalid", _logs_fix(rendered_dir, command_path))
+    return counts
+
+
+def _chunk_counts_from_json(value: object) -> ChunkCounts | None:
+    if not isinstance(value, dict) or set(value) != {
+        "ready", "chunked", "chunks", "by_section_type", "token_minimum",
+        "token_median", "token_p95", "token_maximum", "over_maximum",
+        "under_minimum",
+    }:
+        return None
+    ready, chunked, chunks = value["ready"], value["chunked"], value["chunks"]
+    over, under = value["over_maximum"], value["under_minimum"]
+    if any(type(number) is not int or number < 0 for number in (
+        ready, chunked, chunks, over, under,
+    )) or chunked > ready or chunked > chunks or over + under > chunks:
+        return None
+    by_type = _counts_map(value["by_section_type"], frozenset(SECTION_TYPES))
+    if by_type is None or sum(by_type.values()) != chunks:
+        return None
+    minimum, median = value["token_minimum"], value["token_median"]
+    p95, maximum = value["token_p95"], value["token_maximum"]
+    if chunks == 0:
+        if chunked != 0 or over != 0 or under != 0 or any(
+            item is not None for item in (minimum, median, p95, maximum)
+        ):
+            return None
+    elif (
+        chunked == 0
+        or type(minimum) is not int or minimum <= 0
+        or type(maximum) is not int or maximum < minimum
+        or type(median) not in (int, float)
+        or type(p95) not in (int, float)
+        or not math.isfinite(median) or not math.isfinite(p95)
+        or not minimum <= median <= p95 <= maximum
+    ):
+        return None
+    return ChunkCounts(
+        ready, chunked, chunks, by_type, minimum, median, p95, maximum, over, under,
+    )
+
+
+def read_chunk_counts(
+    host: Host, rendered_dir: PathLike, *, source: str, snapshot_date: str,
+    court: str, pipeline: str, command_path: str = COMMAND_PATH,
+) -> ChunkCounts | Problem:
+    """Read one court's chunk coverage and distribution under a pipeline."""
+
+    problem = _pipeline_problem(pipeline, command_path)
+    if problem is not None:
+        return problem
+    _target, maximum, minimum = PIPELINE_CHUNK_SIZES[pipeline]
+    value = _read_court_row(
+        host, rendered_dir, CHUNK_COUNTS_SQL, "chunks", source=source,
+        snapshot_date=snapshot_date, court=court, command_path=command_path,
+        pipeline=pipeline, maximum=maximum, minimum=minimum,
+    )
+    if isinstance(value, Problem):
+        return value
+    counts = _chunk_counts_from_json(value)
+    if counts is None:
+        return Problem("caselaw chunks row is invalid", _logs_fix(rendered_dir, command_path))
     return counts

@@ -61,10 +61,10 @@ pull request: `git fetch origin && git checkout pin-watch/<pin id>`):
    about a minute — choose the moment.
 
 The `gideon` build follows the same five steps with `python3 -m tools.imagebuild
-gideon`. Its smoke runs Python's `importlib.metadata.version` over the twenty-seven
+gideon`. Its smoke runs Python's `importlib.metadata.version` over the thirty-one
 image packages after importing `starlette`, `uvicorn`, `httpx`, `psycopg`,
-`procrastinate`, and `eyecite`. It also asks eyecite to find one full citation in
-a fictitious reporter string, checking that its tokenizer data loads. The smoke
+`procrastinate`, `eyecite`, and `tiktoken`. It also asks eyecite to find one full citation in
+a fictitious reporter string and tiktoken to count a fictitious BPE merge. The smoke
 refuses an image whose default user is root, and refuses unless
 the driver loads on the binary libpq implementation and its two distributions
 report the same version — one build argument installs both wheels; `--check`

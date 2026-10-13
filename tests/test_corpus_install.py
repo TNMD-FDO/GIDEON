@@ -85,6 +85,7 @@ class FakeHost(RealHost):
         self.caselaw_anchor_counts: dict[str, dict[str, object]] = {}
         self.caselaw_citation_counts: dict[str, dict[str, object]] = {}
         self.caselaw_treatment_counts: dict[str, dict[str, object]] = {}
+        self.caselaw_chunk_counts: dict[str, dict[str, object]] = {}
         self.interrupt_caselaw_job = False
         self.caselaw_events: list[tuple[str, str]] = []
         self.agreement_jobs: dict[int, dict[str, Any]] = {}
@@ -352,6 +353,36 @@ class FakeHost(RealHost):
                         "by_effective_section": {},
                     }
                 return subprocess.CompletedProcess(command, 0, json.dumps(counts) + "\n", "")
+            if "FROM public.chunks AS c" in input:
+                court = self._bound(input, "v_court")
+                self._bound(input, "v_pipeline")
+                self._bound(input, "v_maximum")
+                self._bound(input, "v_minimum")
+                if court in self.caselaw_chunk_counts:
+                    counts = self.caselaw_chunk_counts[court]
+                else:
+                    by_status = self.caselaw_counts.get(court, {}).get("by_status")
+                    if isinstance(by_status, dict):
+                        ready = by_status.get("ready", 0)
+                    else:
+                        source = self._bound(input, "v_source")
+                        directory = staging.work_directory(
+                            self.current_label, source, work_root=self.work,
+                        )
+                        stage_record = json.loads(
+                            (directory / worker_identity.STAGE_RECORD_NAME).read_text()
+                        )
+                        ready = stage_record["counts"][court]["opinions"]
+                    counts = {
+                        "ready": ready, "chunked": ready, "chunks": ready,
+                        "by_section_type": {"majority": ready} if ready else {},
+                        "token_minimum": 100 if ready else None,
+                        "token_median": 100.0 if ready else None,
+                        "token_p95": 100.0 if ready else None,
+                        "token_maximum": 100 if ready else None,
+                        "over_maximum": 0, "under_minimum": 0,
+                    }
+                return subprocess.CompletedProcess(command, 0, json.dumps(counts) + "\n", "")
             if "FROM public.citations AS c" in input:
                 court = self._bound(input, "v_court")
                 if court in self.caselaw_citation_counts:
@@ -538,7 +569,10 @@ class Install(unittest.TestCase):
             date, self.source.base_url, None,
             hashlib.sha256(sidecar.encode()).hexdigest(), 1, len(data), (index,), (entry,), None,
         )
-        lockfile = Lockfile(1, label, "0.0.0", "2099-01-03T04:05:06Z", "tranche", {"example": pin})
+        lockfile = Lockfile(
+            1, label, worker_identity.PIPELINE_VERSION,
+            "2099-01-03T04:05:06Z", "tranche", {"example": pin},
+        )
         directory = self.checkout / "corpus/lockfiles"
         (directory / label).mkdir(parents=True)
         (directory / label / "example.sha256").write_text(sidecar)
@@ -688,6 +722,19 @@ class Install(unittest.TestCase):
         self.assertEqual(self.host.record_rows[self.labels[0]]["state"], "installing")
         self.assertEqual(self.host.lock_releases, 1)
 
+    def test_preconditions_refuse_unregistered_pipeline_before_fetch(self) -> None:
+        path = self.checkout / "corpus/lockfiles" / f"{self.labels[0]}.yaml"
+        loaded = load_lockfile(path, known_sources={"example": False})
+        assert loaded.lockfile is not None
+        path.write_text(render_lockfile(replace(loaded.lockfile, pipeline="9.9.9")))
+        code, out, err = self.run_install()
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("pipeline 9.9.9 is not registered", err)
+        self.assertIn(worker_identity.PIPELINE_VERSION, err)
+        self.assertIn(report.command("corpus cut"), err)
+        self.assertFalse(self.host.deferred_urls)
+        self.assertFalse(self.host.caselaw_deferred)
+
     def test_stage_rows_follow_record_and_summarize_the_deferred_job(self) -> None:
         self._enable_stage()
         code, out, err = self.run_install()
@@ -705,7 +752,9 @@ class Install(unittest.TestCase):
         self.assertEqual(tuple(self.host.stage_deferred[0]["inputs"]), worker_identity.STAGE_TABLES)
         self.assertEqual([args["court"] for args in self.host.caselaw_deferred], ["ca6", "scotus"])
         self.assertEqual(self.host.caselaw_events[:2], [("defer", "ca6"), ("defer", "scotus")])
-        self.assertTrue(all(set(args) == {"label", "snapshot", "court", "courts"}
+        self.assertTrue(all(set(args) == {"label", "snapshot", "court", "courts", "pipeline"}
+                            for args in self.host.caselaw_deferred))
+        self.assertTrue(all(args["pipeline"] == worker_identity.PIPELINE_VERSION
                             for args in self.host.caselaw_deferred))
         loaded = courts.load_court_map(self.checkout / "courts.yaml")
         assert loaded.court_map is not None
@@ -967,9 +1016,28 @@ class Install(unittest.TestCase):
                 "by_effective_section": {"majority": 3},
             },
         }
+        self.host.caselaw_chunk_counts = {
+            "ca6": {
+                "ready": 0, "chunked": 0, "chunks": 0, "by_section_type": {},
+                "token_minimum": None, "token_median": None,
+                "token_p95": None, "token_maximum": None,
+                "over_maximum": 0, "under_minimum": 0,
+            },
+            "scotus": {
+                "ready": 2, "chunked": 2, "chunks": 3,
+                "by_section_type": {"majority": 2, "footnote": 1},
+                "token_minimum": 42, "token_median": 510.0,
+                "token_p95": 900.5, "token_maximum": 944,
+                "over_maximum": 0, "under_minimum": 1,
+            },
+        }
         code, out, err = self.run_install()
         self.assertEqual(code, 0, out + err)
         section_shares = {"majority": "60 % (3)", "footnote": "40 % (1)"}
+        chunk_types = {"majority": 2, "footnote": 1}
+        target, maximum, _minimum = worker_identity.PIPELINE_CHUNK_SIZES[
+            worker_identity.PIPELINE_VERSION
+        ]
         rows = [line for line in out.splitlines() if line.startswith("ingest: ok — ")]
         self.assertEqual(rows, [
             "ingest: ok — ca6: 1 opinions; ready 0, failed 1 "
@@ -991,6 +1059,12 @@ class Install(unittest.TestCase):
                 *worker_identity.TREATMENT_STATES, *worker_identity.NO_STATE_REASONS,
             )) + "; "
             + ", ".join(f"{kind} 0" for kind in worker_identity.QUALIFIERS),
+            "ingest: ok — ca6 chunks: 0 of 0 ready documents under "
+            + worker_identity.PIPELINE_VERSION
+            + f"; 0 chunks, 0.0 per document; tokens minimum -, median -, p95 -, "
+            f"maximum - (target {target}, maximum {maximum}); over maximum 0, "
+            "under minimum 0; "
+            + ", ".join(f"{kind} 0" for kind in worker_identity.SECTION_TYPES),
             "ingest: ok — scotus: 2 opinions; ready 2, failed 0 "
             "(no-text 0, unparseable 0, empty 0, interrupted 0); "
             "xml_harvard 1, html_columbia 1, html_lawbox 0, html_anon_2020 0, "
@@ -1026,6 +1100,15 @@ class Install(unittest.TestCase):
             + ", ".join(
                 f"{kind} {treatment_qualifiers.get(kind, 0)}"
                 for kind in worker_identity.QUALIFIERS
+            ),
+            "ingest: ok — scotus chunks: 2 of 2 ready documents under "
+            + worker_identity.PIPELINE_VERSION
+            + f"; 3 chunks, 1.5 per document; tokens minimum 42, median 510, "
+            f"p95 900.5, maximum 944 (target {target}, maximum {maximum}); "
+            "over maximum 0, under minimum 1; "
+            + ", ".join(
+                f"{kind} {chunk_types.get(kind, 0)}"
+                for kind in worker_identity.SECTION_TYPES
             ),
             "ingest: ok — caselaw: 2 courts, 3 opinions, 2 ready, 1 failed, 0 seconds",
         ])
@@ -1121,6 +1204,49 @@ class Install(unittest.TestCase):
         self.assertIn(stack.logs_fix(RENDERED, worker_identity.WORKER_SERVICE_NAME), out)
         self.assertIn(report.command("corpus install"), out)
         self.assertNotIn("ca6 treatment:", out)
+        self.assertNotIn("retain: ok", out)
+
+    def test_ingest_refuses_ready_documents_without_chunks(self) -> None:
+        self._enable_stage()
+        self._seed_complete_stage()
+        self.host.caselaw_chunk_counts["ca6"] = {
+            "ready": 1, "chunked": 0, "chunks": 0, "by_section_type": {},
+            "token_minimum": None, "token_median": None, "token_p95": None,
+            "token_maximum": None, "over_maximum": 0, "under_minimum": 0,
+        }
+        code, out, err = self.run_install()
+        self.assertEqual(code, 1, out + err)
+        self.assertIn(
+            f"ingest: refuse — ca6: 0 of 1 ready documents have chunks under "
+            f"{worker_identity.PIPELINE_VERSION}", out,
+        )
+        self.assertIn(stack.logs_fix(RENDERED, worker_identity.WORKER_SERVICE_NAME), out)
+        self.assertIn(report.command("corpus install"), out)
+        self.assertNotIn("ca6 chunks:", out)
+        self.assertNotIn("retain: ok", out)
+
+    def test_ingest_refuses_chunks_over_the_pipeline_maximum(self) -> None:
+        self._enable_stage()
+        self._seed_complete_stage()
+        _target, maximum, _minimum = worker_identity.PIPELINE_CHUNK_SIZES[
+            worker_identity.PIPELINE_VERSION
+        ]
+        self.host.caselaw_chunk_counts["ca6"] = {
+            "ready": 1, "chunked": 1, "chunks": 1,
+            "by_section_type": {"majority": 1},
+            "token_minimum": maximum + 1, "token_median": maximum + 1,
+            "token_p95": maximum + 1, "token_maximum": maximum + 1,
+            "over_maximum": 1, "under_minimum": 0,
+        }
+        code, out, err = self.run_install()
+        self.assertEqual(code, 1, out + err)
+        self.assertIn(
+            f"ingest: refuse — ca6: 1 chunks exceed pipeline "
+            f"{worker_identity.PIPELINE_VERSION}'s maximum", out,
+        )
+        self.assertIn(stack.logs_fix(RENDERED, worker_identity.WORKER_SERVICE_NAME), out)
+        self.assertIn(report.command("corpus install"), out)
+        self.assertNotIn("ca6 chunks:", out)
         self.assertNotIn("retain: ok", out)
 
     def test_ingest_refuses_ready_documents_without_citation_pass(self) -> None:

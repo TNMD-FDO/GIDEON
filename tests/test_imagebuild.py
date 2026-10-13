@@ -314,10 +314,14 @@ class BuildPlans(unittest.TestCase):
                 "PYAHOCORASICK_VERSION",
                 "LXML_VERSION",
                 "REGEX_VERSION",
+                "TIKTOKEN_VERSION",
+                "REQUESTS_VERSION",
+                "URLLIB3_VERSION",
+                "CHARSET_NORMALIZER_VERSION",
                 "FAST_DIFF_MATCH_PATCH_VERSION",
             ),
         )
-        for package in ("starlette", "uvicorn", "httpx", "psycopg", "procrastinate", "eyecite"):
+        for package in ("starlette", "uvicorn", "httpx", "psycopg", "procrastinate", "eyecite", "tiktoken"):
             self.assertIn(f"import {package}", smoke.argv[2])
         for package in (
             "starlette",
@@ -346,10 +350,16 @@ class BuildPlans(unittest.TestCase):
             "pyahocorasick",
             "lxml",
             "regex",
+            "tiktoken",
+            "requests",
+            "urllib3",
+            "charset-normalizer",
             "fast-diff-match-patch",
         ):
             self.assertIn(f'"{package}"', smoke.argv[2])
         self.assertIn("eyecite.get_citations", smoke.argv[2])
+        self.assertIn("tiktoken.Encoding", smoke.argv[2])
+        self.assertIn('encoding.encode("ab")', smoke.argv[2])
         self.assertIn("importlib.metadata.version", smoke.argv[2])
         self.assertIn("if os.getuid() == 0:", smoke.argv[2])
         self.assertIn("default user must be unprivileged", smoke.argv[2])

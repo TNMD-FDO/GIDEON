@@ -8,7 +8,6 @@ from dataclasses import replace
 from pathlib import Path
 
 from gideon.host.corpus.lockfile import (
-    PIPELINE_VERSION,
     READABLE_SCHEMAS,
     SCHEMA_VERSION,
     check_courts,
@@ -22,6 +21,7 @@ from gideon.host.corpus.lockfile import (
 )
 from gideon.host.courts import default_courts_path, load_court_map
 from gideon.host.egress import default_egress_path, load_egress_allowlist
+from gideon.host.render.worker import PIPELINE_VERSION
 
 FIXTURES = Path(__file__).parent / "fixtures/corpus"
 VALID = FIXTURES / "corpus-2099-01-03.yaml"
@@ -52,6 +52,8 @@ class Fixture(unittest.TestCase):
         self.assertTrue(base.ok, render_errors(base.errors))
         self.assertTrue(derived.ok, render_errors(derived.errors))
         assert base.lockfile is not None and derived.lockfile is not None
+        self.assertEqual(base.lockfile.pipeline, PIPELINE_VERSION)
+        self.assertEqual(derived.lockfile.pipeline, PIPELINE_VERSION)
         self.assertEqual(derived.lockfile.base, base.lockfile.label)
         self.assertEqual(render_lockfile(derived.lockfile), DERIVED.read_text())
         for name, pin in derived.lockfile.sources.items():
@@ -119,7 +121,7 @@ class Refusals(unittest.TestCase):
     def test_label_timestamp_and_version(self) -> None:
         self.edit("label: corpus-2099-01-03", "label: corpus-2099-02-30")
         self.edit("cut_at: '2099-01-03T04:05:06Z'", "cut_at: yesterday")
-        self.edit("pipeline: 0.0.0", "pipeline: next")
+        self.edit("pipeline: 1.0.0", "pipeline: next")
         self.refusal("label", "cut_at", "pipeline")
 
     def test_base_label_and_date(self) -> None:
@@ -202,7 +204,7 @@ class RelatedArtifacts(unittest.TestCase):
                             "example": replace(pin, index=(changed_index,))
                         })
         self.assertTrue(same_state(self.lockfile, other))
-        self.assertFalse(same_state(self.lockfile, replace(other, pipeline="1.0.0")))
+        self.assertFalse(same_state(self.lockfile, replace(other, pipeline="9.9.9")))
         self.assertFalse(same_state(self.lockfile, replace(other, sources={
             "example": replace(pin, mirror_url="https://example.invalid/mirror/")
         })))

@@ -18,6 +18,7 @@ __pycache__/
 .venv
 *.egg-info/
 # A presentation's built outputs (docs/6-memo/presentations/README.md): the HTML embeds
-# a font and every image and the pptx is as large, so a build is run and never committed
+# a font and every image, the pptx and the PDFs are as large, so a build is run and never committed
 docs/6-memo/presentations/*/*.html
 docs/6-memo/presentations/*/*.pptx
+docs/6-memo/presentations/*/*.pdf

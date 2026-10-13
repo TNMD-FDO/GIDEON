@@ -16,7 +16,7 @@ from test_render import (
 )
 
 from gideon.casecite.found import CITE_FORMS
-from gideon.host import cas
+from gideon.host import cas, weights
 from gideon.host.images import parse_registry, reference
 from gideon.host.models import GIGABYTE
 from gideon.host.render import render_all, worker
@@ -59,9 +59,18 @@ from gideon.worker import (
     tasks,
     treatment,
 )
+from gideon.worker.pipeline import PIPELINE_VERSION, PIPELINES
 
 
 class WorkerIdentity(unittest.TestCase):
+    def test_pipeline_identity_matches_the_worker_registry(self) -> None:
+        self.assertEqual(worker.PIPELINE_VERSION, PIPELINE_VERSION)
+        self.assertEqual(
+            worker.PIPELINE_CHUNK_SIZES,
+            {version: (entry.chunk_target, entry.chunk_maximum, entry.chunk_minimum)
+             for version, entry in PIPELINES.items()},
+        )
+
     def test_metrics_identity_matches_the_worker_listener(self) -> None:
         self.assertEqual(worker.WORKER_METRICS_PORT, metrics.METRICS_PORT)
         self.assertEqual(worker.WORKER_METRICS_PATH, metrics.METRICS_PATH)
@@ -220,6 +229,7 @@ class WorkerIdentity(unittest.TestCase):
 
 class WorkerBlock(unittest.TestCase):
     def test_definition_and_block_on_each_host_kind(self) -> None:
+        self.assertEqual(caselaw.MODELS_ROOT, weights.MODELS_ROOT)
         definition = next(
             service for service in SERVICES if service.name == worker.WORKER_SERVICE_NAME
         )
@@ -280,6 +290,7 @@ class WorkerBlock(unittest.TestCase):
                             f"{worker.SNAPSHOTS_ROOT}:{worker.SNAPSHOTS_ROOT}",
                             f"{worker.WORK_ROOT}:{worker.WORK_ROOT}",
                             f"{cas.ROOT}:{cas.ROOT}",
+                            f"{weights.MODELS_ROOT}:{weights.MODELS_ROOT}:ro",
                         ],
                         "read_only": True,
                         "group_add": [str(rendered_inputs.facts.service_gid)],

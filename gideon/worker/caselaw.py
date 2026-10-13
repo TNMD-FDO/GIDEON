@@ -25,6 +25,7 @@ from gideon.host.sysio import RealHost
 
 from . import (
     anchors,
+    chunker,
     citations,
     fetch,
     opiniontext,
@@ -33,6 +34,8 @@ from . import (
     staging,
     treatment,
 )
+from .pipeline import PIPELINES, VERSION_PATTERN, Pipeline, TokenizerPin
+from .tokens import Counter, TokenizerProblem, load_counter
 
 CASELAW_TASK: Final = "gideon.worker.tasks.caselaw"
 CASELAW_QUEUE: Final = "caselaw"
@@ -41,7 +44,7 @@ LOCK_SUFFIX: Final = ".caselaw.lock"
 CASELAW_FAILURE_REASONS: Final = frozenset({
     "invalid", "missing-stage", "stage-mismatch", "malformed", "store",
     "database", "local", "busy", "segmenter", "anchors", "text-mismatch",
-    "citations", "treatment",
+    "citations", "treatment", "tokenizer", "chunker", "pipeline",
 })
 DOCUMENT_FAILURE_REASONS: Final = frozenset({
     "no-text", "unparseable", "empty", "interrupted",
@@ -51,6 +54,7 @@ PRECEDENTIAL_VALUES: Final = ("published", "unpublished", "unknown")
 MAX_ATTEMPTS: Final = 2
 # exempt: the bound limits a queue argument and exceeds any one court's rows.
 LIMIT_MAX: Final = 10_000_000
+MODELS_ROOT: Final = Path("/data/models")
 
 _DOCKET_COLUMNS: Final = ("id", "docket_number", "court_id")
 _CLUSTER_COLUMNS: Final = (
@@ -67,7 +71,8 @@ PRESENT_SQL: Final = (
     "EXISTS (SELECT 1 FROM sections WHERE doc_id = d.doc_id) AS sectioned, "
     "d.anchored_at IS NOT NULL AS anchored, "
     "d.citations_parsed_at IS NOT NULL AS cited, "
-    "d.treatment_pattern_set AS treated_under "
+    "d.treatment_pattern_set AS treated_under, "
+    "EXISTS (SELECT 1 FROM chunks WHERE doc_id = d.doc_id AND pipeline = %s) AS chunked "
     "FROM opinions AS o JOIN documents AS d ON d.doc_id = o.doc_id "
     "WHERE d.source = %s AND d.source_snapshot = %s AND o.court = %s"
 )
@@ -128,6 +133,11 @@ SIGNAL_SQL: Final = (
     "no_state_reason, char_start, char_end, found_at) "
     "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
 )
+CHUNK_SQL: Final = (
+    "INSERT INTO chunks (chunk_id, doc_id, pipeline, ordinal, section_id, "
+    "section_type, char_start, char_end, content_hash, token_count) "
+    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+)
 MARK_TREATED_SQL: Final = (
     "UPDATE documents SET treatment_pattern_set = %s, treated_at = %s WHERE doc_id = %s"
 )
@@ -180,6 +190,7 @@ class PresentRow:
     anchored: bool
     cited: bool
     treated_under: str | None
+    chunked: bool
 
     @property
     def treated(self) -> bool:
@@ -263,12 +274,15 @@ class IngestCounts:
     cited: int
     treated: int
     signalled: int
+    chunked: int
 
 
 class DocumentRecord(Protocol):
     """The row operations needed while ingesting one court."""
 
-    def present(self, source: str, snapshot_date: date, court: str) -> dict[int, PresentRow]: ...
+    def present(
+        self, source: str, snapshot_date: date, court: str, pipeline: str,
+    ) -> dict[int, PresentRow]: ...
     def begin(self, document: NewDocument, opinion: NewOpinion) -> None: ...
     def retry(self, doc_id: str) -> None: ...
     def give_back(self, doc_id: str) -> None: ...
@@ -277,6 +291,7 @@ class DocumentRecord(Protocol):
         sections: tuple[NewSection, ...], anchors: tuple[NewAnchor, ...],
         citation_rows: tuple[citations.NewCitation, ...],
         signal_rows: tuple[treatment.NewSignal, ...],
+        chunk_rows: tuple[chunker.NewChunk, ...],
     ) -> None: ...
     def write_sections(self, doc_id: str, sections: tuple[NewSection, ...]) -> None: ...
     def write_anchors(
@@ -290,6 +305,7 @@ class DocumentRecord(Protocol):
     def write_signals(
         self, doc_id: str, signal_rows: tuple[treatment.NewSignal, ...], at: datetime,
     ) -> None: ...
+    def write_chunks(self, doc_id: str, chunk_rows: tuple[chunker.NewChunk, ...]) -> None: ...
     def finish_failed(
         self, doc_id: str, reason: str, at: datetime, sha256: str | None = None,
     ) -> None: ...
@@ -350,6 +366,19 @@ def _signal_statements(
     )
 
 
+def _chunk_statements(
+    doc_id: str, rows: tuple[chunker.NewChunk, ...],
+) -> tuple[tuple[str, tuple[object, ...]], ...]:
+    return tuple(
+        (CHUNK_SQL, (
+            row.chunk_id, doc_id, row.pipeline, row.ordinal, row.section_id,
+            row.section_type, row.char_start, row.char_end, row.content_hash,
+            row.token_count,
+        ))
+        for row in rows
+    )
+
+
 class PsycopgRecord:
     """Write document transitions as one committed transaction per operation."""
 
@@ -391,10 +420,12 @@ class PsycopgRecord:
                 connection.rollback()
             raise CaselawFailure("database", error=type(exc).__name__) from exc
 
-    def present(self, source: str, snapshot_date: date, court: str) -> dict[int, PresentRow]:
+    def present(
+        self, source: str, snapshot_date: date, court: str, pipeline: str,
+    ) -> dict[int, PresentRow]:
         """Read existing opinion states for one source, snapshot, and court."""
 
-        rows = self._run(((PRESENT_SQL, (source, snapshot_date, court)),), read=True)
+        rows = self._run(((PRESENT_SQL, (pipeline, source, snapshot_date, court)),), read=True)
         return {
             int(opinion_id): PresentRow(
                 str(doc_id), str(status), int(attempts),
@@ -402,10 +433,10 @@ class PsycopgRecord:
                 str(sha256) if sha256 is not None else None,
                 str(canonical_sha256) if canonical_sha256 is not None else None,
                 bool(sectioned), bool(anchored), bool(cited),
-                str(treated_under) if treated_under is not None else None,
+                str(treated_under) if treated_under is not None else None, bool(chunked),
             )
             for opinion_id, doc_id, status, attempts, text_source, sha256,
-            canonical_sha256, sectioned, anchored, cited, treated_under in rows
+            canonical_sha256, sectioned, anchored, cited, treated_under, chunked in rows
         }
 
     def begin(self, document: NewDocument, opinion: NewOpinion) -> None:
@@ -439,6 +470,7 @@ class PsycopgRecord:
         sections: tuple[NewSection, ...], anchors: tuple[NewAnchor, ...],
         citation_rows: tuple[citations.NewCitation, ...],
         signal_rows: tuple[treatment.NewSignal, ...],
+        chunk_rows: tuple[chunker.NewChunk, ...],
     ) -> None:
         """Commit a ready document and all completed passes together."""
 
@@ -449,7 +481,8 @@ class PsycopgRecord:
                    *_section_statements(doc_id, sections),
                    *_anchor_statements(doc_id, anchors),
                    *_citation_statements(doc_id, citation_rows),
-                   *_signal_statements(doc_id, signal_rows, at)))
+                   *_signal_statements(doc_id, signal_rows, at),
+                   *_chunk_statements(doc_id, chunk_rows)))
 
     def write_sections(self, doc_id: str, sections: tuple[NewSection, ...]) -> None:
         """Commit sections for an already ready document."""
@@ -491,6 +524,11 @@ class PsycopgRecord:
 
         self._run((*_signal_statements(doc_id, signal_rows, at),
                    (MARK_TREATED_SQL, (treatment.PATTERN_SET_ID, at, doc_id))))
+
+    def write_chunks(self, doc_id: str, chunk_rows: tuple[chunker.NewChunk, ...]) -> None:
+        """Commit a ready document's chunks under their pipeline."""
+
+        self._run(_chunk_statements(doc_id, chunk_rows))
 
     def finish_failed(
         self, doc_id: str, reason: str, at: datetime, sha256: str | None = None,
@@ -548,6 +586,7 @@ class _Progress:
     cited: int = 0
     treated: int = 0
     signalled: int = 0
+    chunked: int = 0
     ambiguous: int = 0
     error: str = "-"
 
@@ -556,7 +595,7 @@ class _Progress:
             self.seen, self.present, self.ready, self.failed,
             self.retried, self.interrupted, self.sectioned, self.anchored,
             self.pgmap_checked, self.pgmap_disagreeing, self.cited,
-            self.treated, self.signalled,
+            self.treated, self.signalled, self.chunked,
         )
 
 
@@ -565,12 +604,12 @@ def _log(progress: _Progress, action: str) -> None:
         "action=caselaw_%s job_id=%d label=%s court=%s seen=%d present=%d "
         "ready=%d failed=%d retried=%d interrupted=%d sectioned=%d anchored=%d "
         "pgmap_checked=%d pgmap_disagreeing=%d cited=%d treated=%d "
-        "signalled=%d ambiguous=%d seconds=%.3f error=%s",
+        "signalled=%d chunked=%d ambiguous=%d seconds=%.3f error=%s",
         action, progress.job, progress.label, progress.court, progress.seen,
         progress.present, progress.ready, progress.failed, progress.retried,
         progress.interrupted, progress.sectioned, progress.anchored,
         progress.pgmap_checked, progress.pgmap_disagreeing, progress.cited,
-        progress.treated, progress.signalled,
+        progress.treated, progress.signalled, progress.chunked,
         progress.ambiguous,
         max(0.0, progress.monotonic() - progress.started),
         progress.error,
@@ -599,7 +638,7 @@ def _valid_dated_name(value: object, pattern: str) -> bool:
 
 def validate_arguments(
     label: object, snapshot: object, court: object, limit: object,
-    courts: Mapping[str, Mapping[str, object]] | None,
+    courts: Mapping[str, Mapping[str, object]] | None, pipeline: object,
 ) -> dict[str, treatment.Geography]:
     """Refuse queue arguments outside the stage and geography grammars."""
 
@@ -610,8 +649,12 @@ def validate_arguments(
         or re.fullmatch(staging.COURT_PATTERN, court) is None
         or limit is not None and (type(limit) is not int or not 1 <= limit <= LIMIT_MAX)
         or not isinstance(courts, Mapping)
+        or not isinstance(pipeline, str)
+        or VERSION_PATTERN.fullmatch(pipeline) is None
     ):
         raise CaselawFailure("invalid")
+    if pipeline not in PIPELINES:
+        raise CaselawFailure("pipeline")
     parsed: dict[str, treatment.Geography] = {}
     for key, value in courts.items():
         if not isinstance(key, str) or re.fullmatch(staging.COURT_PATTERN, key) is None:
@@ -823,6 +866,18 @@ def _signal_rows(
         raise CaselawFailure("treatment", error=type(exc).__name__) from exc
 
 
+def _chunk_rows(
+    doc_id: str, pipeline: Pipeline, text: str,
+    section_rows: tuple[NewSection, ...],
+    citation_rows: tuple[citations.NewCitation, ...], count: Counter,
+) -> tuple[chunker.NewChunk, ...]:
+    try:
+        spans = tuple((row.char_start, row.char_end) for row in citation_rows)
+        return chunker.chunk(doc_id, pipeline, text, section_rows, spans, count)
+    except Exception as exc:  # a chunker defect fails the job, filed by class.
+        raise CaselawFailure("chunker", error=type(exc).__name__) from exc
+
+
 def _parse_opinion(
     record: DocumentRecord, host: RealHost, store_root: Path, doc_id: str,
     chosen: tuple[str, str] | None, opinion_type: str, per_curiam: bool,
@@ -832,6 +887,7 @@ def _parse_opinion(
     resolve: citations.Resolver,
     citing: treatment.Geography, cluster_court: Mapping[int, str],
     geography: Mapping[str, treatment.Geography],
+    pipeline: Pipeline, count: Counter,
 ) -> None:
     if chosen is None:
         record.finish_failed(doc_id, "no-text", clock())
@@ -860,10 +916,13 @@ def _parse_opinion(
         doc_id, parsed.text, section_rows, citation_rows,
         citing, cluster_court, geography,
     )
+    chunk_rows = _chunk_rows(
+        doc_id, pipeline, parsed.text, section_rows, citation_rows, count,
+    )
     canonical = _put(host, store_root, parsed.text)
     record.finish_ready(
         doc_id, original, canonical, clock(), section_rows, anchor_rows, citation_rows,
-        signal_rows,
+        signal_rows, chunk_rows,
     )
     progress.ready += 1
     progress.anchored += 1
@@ -872,6 +931,7 @@ def _parse_opinion(
     progress.cited += 1
     progress.treated += 1
     progress.signalled += len(signal_rows)
+    progress.chunked += 1
 
 
 def _backfill(
@@ -882,6 +942,7 @@ def _backfill(
     resolve: citations.Resolver,
     citing: treatment.Geography, cluster_court: Mapping[int, str],
     geography: Mapping[str, treatment.Geography],
+    pipeline: Pipeline, count: Counter,
 ) -> None:
     if present.canonical_text_sha256 is None:
         raise CaselawFailure("text-mismatch")
@@ -906,6 +967,9 @@ def _backfill(
             present.doc_id, text, section_rows, citation_rows,
             citing, cluster_court, geography,
         )
+        chunk_rows = () if present.chunked else _chunk_rows(
+            present.doc_id, pipeline, text, section_rows, citation_rows, count,
+        )
         if not present.cited:
             record.write_citations(present.doc_id, citation_rows, clock())
             progress.cited += 1
@@ -913,6 +977,9 @@ def _backfill(
             record.write_signals(present.doc_id, signal_rows, clock())
             progress.treated += 1
             progress.signalled += len(signal_rows)
+        if not present.chunked:
+            record.write_chunks(present.doc_id, chunk_rows)
+            progress.chunked += 1
         return
     if present.sha256 is None or present.text_source is None:
         raise CaselawFailure("text-mismatch")
@@ -939,6 +1006,9 @@ def _backfill(
         present.doc_id, parsed.text, recorded_sections, citation_rows,
         citing, cluster_court, geography,
     )
+    chunk_rows = () if present.chunked else _chunk_rows(
+        present.doc_id, pipeline, parsed.text, recorded_sections, citation_rows, count,
+    )
     if not present.sectioned:
         record.write_sections(present.doc_id, section_rows)
         progress.sectioned += 1
@@ -954,6 +1024,9 @@ def _backfill(
         record.write_signals(present.doc_id, signal_rows, clock())
         progress.treated += 1
         progress.signalled += len(signal_rows)
+    if not present.chunked:
+        record.write_chunks(present.doc_id, chunk_rows)
+        progress.chunked += 1
 
 
 @contextmanager
@@ -979,9 +1052,11 @@ def ingest(
     label: str, snapshot: str, court: str, limit: int | None, job: int,
     record: DocumentRecord,
     *, courts: Mapping[str, Mapping[str, object]] | None = None,
+    pipeline: str,
     clock: Callable[[], datetime] = _clock,
     monotonic: Callable[[], float] = time.monotonic,
     find: Callable[[str], tuple[FoundCitation, ...]] | None = None,
+    counter_loader: Callable[[TokenizerPin, Path], Counter] = load_counter,
 ) -> IngestCounts:
     """Stream one staged court into document rows and stored text objects."""
 
@@ -989,7 +1064,8 @@ def ingest(
     started = monotonic()
     progress = _Progress(job, label, court, started, started, monotonic)
     try:
-        geography = validate_arguments(label, snapshot, court, limit, courts)
+        geography = validate_arguments(label, snapshot, court, limit, courts, pipeline)
+        selected_pipeline = PIPELINES[pipeline]
         try:
             whole = staging.work_path(work_root, label, snapshot)
             staged = staging.read_record(whole / staging.STAGE_RECORD_NAME)
@@ -1022,9 +1098,13 @@ def ingest(
                     except ImportError as exc:
                         raise CaselawFailure("citations", error="ImportError") from exc
                     find = find_citations
+                try:
+                    count = counter_loader(selected_pipeline.tokenizer, MODELS_ROOT)
+                except TokenizerProblem as exc:
+                    raise CaselawFailure("tokenizer", error=exc.kind) from exc
                 snapshot_date = date.fromisoformat(snapshot[-10:])
                 source = snapshot[:-staging.DATE_SUFFIX_LENGTH]
-                present = record.present(source, snapshot_date, court)
+                present = record.present(source, snapshot_date, court, pipeline)
                 host = RealHost()
                 with _table_rows(court_dir, "opinions", _OPINION_COLUMNS, progress) as (columns, rows):
                     for fields, _ in itertools.islice(rows, limit):
@@ -1042,7 +1122,8 @@ def ingest(
                         previous = present.get(opinion_id)
                         if (previous is not None and previous.status == "ready"
                                 and not (previous.sectioned and previous.anchored
-                                         and previous.cited and previous.treated)):
+                                         and previous.cited and previous.treated
+                                         and previous.chunked)):
                             _backfill(
                                 record, host, store_root, previous,
                                 opinion_type=opinion_type, per_curiam=per_curiam,
@@ -1050,6 +1131,7 @@ def ingest(
                                 resolve=cite_map.get,
                                 citing=geography[court], cluster_court=cluster_court,
                                 geography=geography,
+                                pipeline=selected_pipeline, count=count,
                             )
                             continue
                         # Only a processing row is unfinished; every other status is final here.
@@ -1093,11 +1175,12 @@ def ingest(
                                 opinion_type, per_curiam, progress, clock,
                                 find, cite_map.get,
                                 geography[court], cluster_court, geography,
+                                selected_pipeline, count,
                             )
                         except CaselawFailure as exc:
                             if active_doc is not None and exc.reason in {
                                 "store", "database", "local", "segmenter", "anchors",
-                                "citations", "treatment",
+                                "citations", "treatment", "chunker",
                             }:
                                 with suppress(CaselawFailure, psycopg.Error):
                                     record.give_back(active_doc)

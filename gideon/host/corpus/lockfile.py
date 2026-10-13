@@ -19,7 +19,6 @@ from gideon.host.sysio import PathLike, ReadBytesHost, RealHost
 
 SCHEMA_VERSION: Final = 1
 READABLE_SCHEMAS: Final = (SCHEMA_VERSION,)
-PIPELINE_VERSION: Final = "0.0.0"
 REASONS: Final = ("quarterly", "instrument", "tranche", "pipeline")
 LABEL: Final = re.compile(r"^corpus-(\d{4}-\d{2}-\d{2})$")
 SIDECAR_LINE: Final = re.compile(r"^(\S+)  ([0-9a-f]{64})  (0|[1-9][0-9]*)$")

@@ -47,6 +47,10 @@ ARG COURTS_DB_VERSION
 ARG PYAHOCORASICK_VERSION
 ARG LXML_VERSION
 ARG REGEX_VERSION
+ARG TIKTOKEN_VERSION
+ARG REQUESTS_VERSION
+ARG URLLIB3_VERSION
+ARG CHARSET_NORMALIZER_VERSION
 ARG FAST_DIFF_MATCH_PATCH_VERSION
 COPY --from=wheels /tmp/wheels /tmp/wheels
 RUN set -eux; \
@@ -78,6 +82,10 @@ RUN set -eux; \
         "pyahocorasick==${PYAHOCORASICK_VERSION}" \
         "lxml==${LXML_VERSION}" \
         "regex==${REGEX_VERSION}" \
+        "tiktoken==${TIKTOKEN_VERSION}" \
+        "requests==${REQUESTS_VERSION}" \
+        "urllib3==${URLLIB3_VERSION}" \
+        "charset-normalizer==${CHARSET_NORMALIZER_VERSION}" \
         "fast-diff-match-patch==${FAST_DIFF_MATCH_PATCH_VERSION}"; \
     rm -rf /tmp/wheels; \
     pip check

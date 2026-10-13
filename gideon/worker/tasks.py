@@ -97,6 +97,7 @@ def caselaw(
     context: procrastinate.JobContext, label: str, snapshot: str,
     court: str, limit: int | None = None,
     courts: Mapping[str, Mapping[str, object]] | None = None,
+    *, pipeline: str,
 ) -> None:
     """Ingest one staged court outside the worker's event loop."""
 
@@ -107,7 +108,7 @@ def caselaw(
         document_ingest.ingest(
             SNAPSHOTS_ROOT, staging.WORK_ROOT, gideon.host.cas.ROOT,
             label, snapshot, court, limit, job_id, document_ingest.PsycopgRecord(),
-            courts=courts,
+            courts=courts, pipeline=pipeline,
         )
     except document_ingest.CaselawFailure as failure:
         document_ingest.write_job_failure(

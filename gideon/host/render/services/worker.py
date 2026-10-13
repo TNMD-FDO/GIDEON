@@ -3,6 +3,7 @@
 from collections.abc import Mapping
 from typing import Final
 
+from gideon.host import weights
 from gideon.host.cas import ROOT as CAS_ROOT
 from gideon.host.images import RegistryTarget, reference
 from gideon.host.render import RenderInputs
@@ -74,6 +75,7 @@ class WorkerService(ServiceDefinition):
                 f"{SNAPSHOTS_ROOT}:{SNAPSHOTS_ROOT}",
                 f"{WORK_ROOT}:{WORK_ROOT}",
                 f"{CAS_ROOT}:{CAS_ROOT}",
+                f"{weights.MODELS_ROOT}:{weights.MODELS_ROOT}:ro",
             ],
             "read_only": True,
             "group_add": [str(inputs.facts.service_gid)],

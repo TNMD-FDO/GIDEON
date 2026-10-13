@@ -6,6 +6,15 @@ from gideon.worker import opiniontext, sections
 
 
 class Segment(unittest.TestCase):
+    def test_public_paragraphs_keep_the_blank_line_rule_within_bounds(self) -> None:
+        text = "  Intro.\n\n  Body.\n\nTail."
+        first = sections.paragraphs(text, 0, text.index("Tail."))
+        self.assertEqual([(row.start, row.end, row.line) for row in first], [
+            (2, text.index("\n\n"), "Intro."),
+            (text.index("Body."), text.index("\n\nTail."), "Body."),
+        ])
+        self.assertEqual(sections.paragraphs(text, text.index("Tail."), len(text))[0].line, "Tail.")
+
     def parsed_sections(
         self, column: str, raw: str, *, opinion_type: str = "010combined",
         per_curiam: bool = False,

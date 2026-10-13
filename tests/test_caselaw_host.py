@@ -124,6 +124,16 @@ def treatment_counts_for() -> dict[str, object]:
     }
 
 
+def chunk_counts_for() -> dict[str, object]:
+    return {
+        "ready": 2, "chunked": 2, "chunks": 3,
+        "by_section_type": {"majority": 2, "footnote": 1},
+        "token_minimum": 42, "token_median": 510.0,
+        "token_p95": 900.5, "token_maximum": 944,
+        "over_maximum": 0, "under_minimum": 1,
+    }
+
+
 class CaselawHost(unittest.TestCase):
     """Queue arguments, durable failures, and count rows stay bounded and typed."""
 
@@ -177,13 +187,20 @@ class CaselawHost(unittest.TestCase):
             snapshot_date="2099-01-02", court=COURT,
         )
 
+    def read_chunk_counts(self) -> caselaw.ChunkCounts | report.Problem:
+        return caselaw.read_chunk_counts(
+            self.host, RENDERED, source=SOURCE, snapshot_date="2099-01-02",
+            court=COURT, pipeline=identity.PIPELINE_VERSION,
+        )
+
     def test_defer_binds_the_job_and_lock_on_stdin(self) -> None:
         for limit in (None, 7):
             with self.subTest(limit=limit):
                 self.host.calls.clear()
                 result = caselaw.defer_caselaw(
                     self.host, RENDERED, label=LABEL, snapshot=SNAPSHOT,
-                    court=COURT, courts=GEOGRAPHY, limit=limit,
+                    court=COURT, courts=GEOGRAPHY,
+                    pipeline=identity.PIPELINE_VERSION, limit=limit,
                 )
                 self.assertEqual(result, JOB_ID)
                 self.assertEqual(len(self.host.calls), 1)
@@ -199,6 +216,7 @@ class CaselawHost(unittest.TestCase):
                 args = json.loads(sql.split("\\set v_args '", 1)[1].split("'\n", 1)[0])
                 expected: dict[str, object] = {
                     "label": LABEL, "snapshot": SNAPSHOT, "court": COURT,
+                    "pipeline": identity.PIPELINE_VERSION,
                     "courts": {COURT: {"level": "circuit", "circuit": "ca6", "state": None}},
                 }
                 if limit is not None:
@@ -209,6 +227,7 @@ class CaselawHost(unittest.TestCase):
         base: dict[str, object] = {
             "label": LABEL, "snapshot": SNAPSHOT, "court": COURT,
             "courts": GEOGRAPHY, "limit": None,
+            "pipeline": identity.PIPELINE_VERSION,
         }
         cases = (
             ("label", "../other", "corpus-YYYY-MM-DD"),
@@ -220,6 +239,8 @@ class CaselawHost(unittest.TestCase):
             ("limit", True, "integer"),
             ("limit", 0, "integer"),
             ("limit", identity.CASELAW_LIMIT_MAX + 1, "integer"),
+            ("pipeline", "bad", "registered pipeline"),
+            ("pipeline", "9.9.9", "registered pipeline"),
         )
         for field, value, grammar in cases:
             with self.subTest(field=field, value=value):
@@ -262,6 +283,9 @@ class CaselawHost(unittest.TestCase):
             "treatment": ("logs", "report the defect", "corpus install"),
             "citations": ("python3 -m tools.imagebuild gideon --check", "logs", "corpus install"),
             "text-mismatch": ("logs", "new corpus cut", "corpus cut", "corpus install"),
+            "tokenizer": ("models pull", "apply", "corpus install"),
+            "chunker": ("logs", "report the defect", "corpus install"),
+            "pipeline": (identity.PIPELINE_VERSION, "corpus cut", "corpus install"),
         }
         self.assertEqual(set(expected), identity.CASELAW_FAILURE_REASONS)
         for reason, fix_parts in expected.items():
@@ -691,7 +715,7 @@ class CaselawHost(unittest.TestCase):
                 self.host.calls.clear()
                 result = caselaw.defer_caselaw(
                     self.host, RENDERED, label=LABEL, snapshot=SNAPSHOT,
-                    court=COURT, courts=geography,
+                    court=COURT, courts=geography, pipeline=identity.PIPELINE_VERSION,
                 )
                 self.assertIsInstance(result, report.Problem)
                 self.assertEqual(self.host.calls, [])
@@ -764,6 +788,91 @@ class CaselawHost(unittest.TestCase):
         self.host.code = 0
         self.host.run_error = FileNotFoundError("private executable path")
         result = self.read_treatment_counts()
+        self.assertIsInstance(result, report.Problem)
+        assert isinstance(result, report.Problem)
+        self.assertIn("FileNotFoundError", result.problem)
+
+    def test_read_chunk_counts_binds_pipeline_and_sizes_and_parses_row(self) -> None:
+        self.host.counts_output = json.dumps(chunk_counts_for())
+        self.assertEqual(self.read_chunk_counts(), caselaw.ChunkCounts(
+            2, 2, 3, {"majority": 2, "footnote": 1},
+            42, 510.0, 900.5, 944, 0, 1,
+        ))
+        argv, sql = self.host.calls[-1]
+        assert sql is not None
+        self.assertEqual(argv, worker.psql_argv(RENDERED))
+        _target, maximum, minimum = identity.PIPELINE_CHUNK_SIZES[identity.PIPELINE_VERSION]
+        for name, value in (
+            ("v_pipeline", identity.PIPELINE_VERSION),
+            ("v_maximum", str(maximum)), ("v_minimum", str(minimum)),
+        ):
+            self.assertIn(worker.bind(name, value), sql)
+            self.assertNotIn(value, " ".join(argv))
+        self.assertIn("FROM public.chunks AS c", sql)
+        self.assertIn("d.status = 'ready'", sql)
+        self.assertIn("c.pipeline = :'v_pipeline'", sql)
+        self.assertIn("percentile_cont(0.95)", sql)
+        self.assertIn("token_count > :'v_maximum'::integer", sql)
+        self.assertIn("token_count < :'v_minimum'::integer", sql)
+
+    def test_read_chunk_counts_refuses_bad_rows_arguments_and_psql(self) -> None:
+        base = chunk_counts_for()
+        cases: tuple[tuple[str, object], ...] = (
+            ("ready", True), ("ready", -1), ("chunked", 3), ("chunked", True),
+            ("chunks", -1), ("chunks", False),
+            ("by_section_type", {"invented": 3}),
+            ("by_section_type", {"majority": 1}),
+            ("token_minimum", 0), ("token_minimum", True),
+            ("token_median", "510"), ("token_median", float("nan")),
+            ("token_p95", 1000), ("token_maximum", 2),
+            ("over_maximum", 4), ("under_minimum", -1),
+        )
+        for field, bad in cases:
+            with self.subTest(field=field, bad=bad):
+                self.host.counts_output = json.dumps({**base, field: bad})
+                self.assertIsInstance(self.read_chunk_counts(), report.Problem)
+        for value in ({**base, "extra": 1},
+                      {key: item for key, item in base.items() if key != "ready"},
+                      {**base, "chunks": 0, "chunked": 0, "by_section_type": {}},
+                      {**base, "chunks": 1, "chunked": 0,
+                       "by_section_type": {"majority": 1}}):
+            self.host.counts_output = json.dumps(value)
+            self.assertIsInstance(self.read_chunk_counts(), report.Problem)
+        self.host.counts_output = json.dumps({
+            "ready": 0, "chunked": 0, "chunks": 0, "by_section_type": {},
+            "token_minimum": None, "token_median": None, "token_p95": None,
+            "token_maximum": None, "over_maximum": 0, "under_minimum": 0,
+        })
+        self.assertEqual(self.read_chunk_counts(), caselaw.ChunkCounts(
+            0, 0, 0, {}, None, None, None, None, 0, 0,
+        ))
+        self.host.calls.clear()
+        for arguments in (
+            {"source": "../outside"}, {"snapshot_date": "2099-99-02"},
+            {"court": "Court1"}, {"pipeline": "bad"}, {"pipeline": "9.9.9"},
+        ):
+            with self.subTest(arguments=arguments):
+                values = {
+                    "source": SOURCE, "snapshot_date": "2099-01-02", "court": COURT,
+                    "pipeline": identity.PIPELINE_VERSION, **arguments,
+                }
+                self.assertIsInstance(caselaw.read_chunk_counts(
+                    self.host, RENDERED, **values,
+                ), report.Problem)
+        self.assertEqual(self.host.calls, [])
+        self.host.code = 127
+        result = self.read_chunk_counts()
+        self.assertIsInstance(result, report.Problem)
+        assert isinstance(result, report.Problem)
+        self.assertIn("unavailable", result.problem)
+        self.host.code = 3
+        result = self.read_chunk_counts()
+        self.assertIsInstance(result, report.Problem)
+        assert isinstance(result, report.Problem)
+        self.assertIn("exit 3", result.problem)
+        self.host.code = 0
+        self.host.run_error = FileNotFoundError("private executable path")
+        result = self.read_chunk_counts()
         self.assertIsInstance(result, report.Problem)
         assert isinstance(result, report.Problem)
         self.assertIn("FileNotFoundError", result.problem)

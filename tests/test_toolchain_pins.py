@@ -8,9 +8,10 @@ constant the browser mode checks on the box — and this module holds them equal
 `images.lock` is the source and `requirements-dev.txt` carries the copy, so mypy
 and the unit suite see the service's imports, and each build argument is
 matched to its requirement by normalized project name. The case-citation
-packages but lxml are the exception, held absent from the file: no module the
-suite or mypy imports needs them, since the extraction leg runs them inside the
-image; lxml has its copy because the worker's opinion parser imports it.
+packages but lxml and regex are the exception, held absent from the file: no
+module the suite or mypy imports needs them, since the extraction leg runs
+them inside the image; lxml serves the worker's opinion parser and regex is
+in the token counter's dependency set.
 It states no version: every value is read from the tree.
 """
 
@@ -33,7 +34,6 @@ IMAGE_ONLY_ARGUMENTS = frozenset({
     "REPORTERS_DB_VERSION",
     "COURTS_DB_VERSION",
     "PYAHOCORASICK_VERSION",
-    "REGEX_VERSION",
     "FAST_DIFF_MATCH_PATCH_VERSION",
 })
 _PIN = re.compile(r"^(?P<name>[A-Za-z0-9_.-]+)==(?P<version>\S+)$")

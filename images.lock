@@ -145,6 +145,10 @@ images:
       PYAHOCORASICK_VERSION: 2.3.1
       LXML_VERSION: 6.1.3
       REGEX_VERSION: 2026.9.29
+      TIKTOKEN_VERSION: 0.14.0
+      REQUESTS_VERSION: 2.34.2
+      URLLIB3_VERSION: 2.8.0
+      CHARSET_NORMALIZER_VERSION: 3.5.2
       FAST_DIFF_MATCH_PATCH_VERSION: 2.1.0
     watch:
       STARLETTE_VERSION:
@@ -197,7 +201,15 @@ images:
         pypi_project: lxml
       REGEX_VERSION:
         pypi_project: regex
+      TIKTOKEN_VERSION:
+        pypi_project: tiktoken
+      REQUESTS_VERSION:
+        pypi_project: requests
+      URLLIB3_VERSION:
+        pypi_project: urllib3
+      CHARSET_NORMALIZER_VERSION:
+        pypi_project: charset-normalizer
       FAST_DIFF_MATCH_PATCH_VERSION:
         pypi_project: fast-diff-match-patch
-    inputs_digest: sha256:93fc67b708ec10b566b734ead39a340576b94551d850d5a38e7f2cb4bebd77cc
-    digest: sha256:979cbdacad5820e2b3c98fcfaf19f473edb657faa8a543c3fb5622ad0f0226f9
+    inputs_digest: sha256:071bd8e584310bb5fcc1f4299c79ebb18f759267d0fcf4b234086e88fbaaa03f
+    digest: sha256:591c1d032ee6bb03c122c93f11f46897f6169e547c9da14f8f22d634dbbaee89

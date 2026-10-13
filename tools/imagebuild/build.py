@@ -34,6 +34,7 @@ _GIDEON_SMOKE_SCRIPT: Final[str] = (
     "import psycopg\n"
     "import procrastinate\n"
     "import eyecite\n"
+    "import tiktoken\n"
     "if os.getuid() == 0:\n"
     "    raise SystemExit(\"the image's default user must be unprivileged\")\n"
     "if psycopg.pq.__impl__ != \"binary\":\n"
@@ -47,13 +48,18 @@ _GIDEON_SMOKE_SCRIPT: Final[str] = (
     "    raise SystemExit(\"psycopg and psycopg-binary are at different versions\")\n"
     "if len(eyecite.get_citations(\"Fictional v. Example, 603 U.S. 375\")) != 1:\n"
     "    raise SystemExit(\"eyecite did not find one full case citation\")\n"
+    "encoding = tiktoken.Encoding(name=\"fictitious\", pat_str=r\"[ab]+\", "
+    "mergeable_ranks={b\"a\": 0, b\"b\": 1, b\"ab\": 2}, special_tokens={})\n"
+    "if len(encoding.encode(\"ab\")) != 1:\n"
+    "    raise SystemExit(\"tiktoken did not count the fictitious merge\")\n"
     "for package in (\"starlette\", \"uvicorn\", \"httpx\", \"anyio\", "
     "\"httpcore\", \"h11\", \"certifi\", \"idna\", \"click\", "
     "\"typing_extensions\", \"psycopg\", \"psycopg-binary\", "
     "\"procrastinate\", \"psycopg-pool\", \"asgiref\", \"attrs\", "
     "\"croniter\", \"python-dateutil\", \"six\", \"packaging\", "
     "\"eyecite\", \"reporters-db\", \"courts-db\", \"pyahocorasick\", "
-    "\"lxml\", \"regex\", \"fast-diff-match-patch\"):\n"
+    "\"lxml\", \"regex\", \"tiktoken\", \"requests\", \"urllib3\", "
+    "\"charset-normalizer\", \"fast-diff-match-patch\"):\n"
     "    print(package, importlib.metadata.version(package))\n"
 )
 
@@ -92,6 +98,10 @@ SMOKE: Final[Mapping[str, Smoke]] = {
         "PYAHOCORASICK_VERSION",
         "LXML_VERSION",
         "REGEX_VERSION",
+        "TIKTOKEN_VERSION",
+        "REQUESTS_VERSION",
+        "URLLIB3_VERSION",
+        "CHARSET_NORMALIZER_VERSION",
         "FAST_DIFF_MATCH_PATCH_VERSION",
     )),
 }

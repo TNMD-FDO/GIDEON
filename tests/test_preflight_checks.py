@@ -64,7 +64,6 @@ from gideon.host.checks.network import (
 )
 from gideon.host.checks.services import BackupSshCheck, LdapCheck, SmtpCheck
 from gideon.host.corpus.lockfile import (
-    PIPELINE_VERSION,
     SCHEMA_VERSION,
     Lockfile,
     SourcePin,
@@ -76,6 +75,7 @@ from gideon.host.ldap import ldapsearch_argv
 from gideon.host.lock import load_host_lock
 from gideon.host.models import GIGABYTE, ModelPin, ModelsLock, load_models_lock
 from gideon.host.render.services.prometheus import PROMETHEUS_LOOPBACK_ADDRESS
+from gideon.host.render.worker import PIPELINE_VERSION
 from gideon.host.site import SiteConfig, load_site, render_errors
 from gideon.host.sshtarget import BACKUP_PROBE_SHA256
 from gideon.host.steps.nvidia import _LOADED_VERSION

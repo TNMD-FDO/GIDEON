@@ -47,3 +47,8 @@ six==1.17.0
 packaging==26.3
 # eyecite's dependency in the image, and the worker's opinion parser's.
 lxml==6.1.3
+regex==2026.9.29
+tiktoken==0.14.0
+requests==2.34.2
+urllib3==2.8.0
+charset-normalizer==3.5.2

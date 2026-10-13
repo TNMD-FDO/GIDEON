@@ -55,7 +55,7 @@ class Paragraphs(unittest.TestCase):
         for text in fixtures:
             with self.subTest(text_length=len(text)):
                 table = segmenter_draft.paragraph_table(text)
-                self.assertEqual(table.starts, tuple(item.start for item in sections._paragraphs(text)))
+                self.assertEqual(table.starts, tuple(item.start for item in sections.paragraphs(text, 0, len(text))))
                 self.assertEqual(table.length, len(text))
         self.assertGreater(segmenter_draft.paragraph_table(fixtures[1]).starts[0], 0)
 

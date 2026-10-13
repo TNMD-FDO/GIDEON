@@ -15,7 +15,6 @@ from gideon.host import backuplock, report, stack
 from gideon.host.corpus import artifacts, record, resolve, snapshots
 from gideon.host.corpus.lockfile import (
     LABEL,
-    PIPELINE_VERSION,
     SCHEMA_VERSION,
     IndexDocument,
     Lockfile,
@@ -32,7 +31,7 @@ from gideon.host.corpus.lockfile import (
 )
 from gideon.host.corpus.sources import SOURCES, SourceDefinition
 from gideon.host.courts import CourtMap
-from gideon.host.render.worker import SNAPSHOTS_ROOT
+from gideon.host.render.worker import PIPELINE_VERSION, SNAPSHOTS_ROOT
 from gideon.host.report import Problem, StageResult
 from gideon.host.sysio import PathLike, RealHost, WritableBytesHost
 

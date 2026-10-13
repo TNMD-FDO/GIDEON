@@ -543,7 +543,7 @@ services:
       - "gideon"
     mem_limit: 16000000000
   gideon-api:
-    image: "ghcr.io/tnmd-fdo/gideon@sha256:979cbdacad5820e2b3c98fcfaf19f473edb657faa8a543c3fb5622ad0f0226f9"
+    image: "ghcr.io/tnmd-fdo/gideon@sha256:591c1d032ee6bb03c122c93f11f46897f6169e547c9da14f8f22d634dbbaee89"
     restart: "unless-stopped"
     environment:
       GIDEON_ENGINE_URL: "http://gideon-generator:8000/v1"
@@ -588,7 +588,7 @@ services:
       - "gideon"
     mem_limit: 1000000000
   gideon-worker:
-    image: "ghcr.io/tnmd-fdo/gideon@sha256:979cbdacad5820e2b3c98fcfaf19f473edb657faa8a543c3fb5622ad0f0226f9"
+    image: "ghcr.io/tnmd-fdo/gideon@sha256:591c1d032ee6bb03c122c93f11f46897f6169e547c9da14f8f22d634dbbaee89"
     restart: "unless-stopped"
     command:
       - "python"
@@ -600,6 +600,7 @@ services:
       - "/data/bulk/snapshots:/data/bulk/snapshots"
       - "/data/work:/data/work"
       - "/data/bulk/cas:/data/bulk/cas"
+      - "/data/models:/data/models:ro"
     read_only: true
     group_add:
       - "4242"
@@ -633,7 +634,7 @@ services:
       - "internal"
     mem_limit: 12000000000
   gideon-egress:
-    image: "ghcr.io/tnmd-fdo/gideon@sha256:979cbdacad5820e2b3c98fcfaf19f473edb657faa8a543c3fb5622ad0f0226f9"
+    image: "ghcr.io/tnmd-fdo/gideon@sha256:591c1d032ee6bb03c122c93f11f46897f6169e547c9da14f8f22d634dbbaee89"
     restart: "unless-stopped"
     command:
       - "python"

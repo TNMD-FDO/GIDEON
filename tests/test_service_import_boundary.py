@@ -14,7 +14,7 @@ from gideon.host.render.worker import WORKER_SERVICE_NAME
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PARENT_INITIALIZER = REPO_ROOT / "gideon/__init__.py"
 ALLOWED_DEPENDENCIES = frozenset(
-    {"starlette", "uvicorn", "httpx", "anyio", "procrastinate", "lxml", "eyecite",
+    {"starlette", "uvicorn", "httpx", "anyio", "procrastinate", "lxml", "eyecite", "tiktoken",
      guardrail.TRIP_DRIVER_MODULE}
 )
 # The adapter imports a library the image carries and the dev venv does not, so

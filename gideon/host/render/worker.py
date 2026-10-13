@@ -48,8 +48,10 @@ AGREEMENT_FAILURE_REASONS: Final = frozenset({
 CASELAW_FAILURE_REASONS: Final = frozenset({
     "invalid", "missing-stage", "stage-mismatch", "malformed", "store",
     "database", "local", "busy", "segmenter", "anchors", "text-mismatch",
-    "citations", "treatment",
+    "citations", "treatment", "tokenizer", "chunker", "pipeline",
 })
+PIPELINE_VERSION: Final[str] = "1.0.0"
+PIPELINE_CHUNK_SIZES: Final = {"1.0.0": (512, 1024, 64)}
 DOCUMENT_FAILURE_REASONS: Final = frozenset({
     "no-text", "unparseable", "empty", "interrupted",
 })

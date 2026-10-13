@@ -24,6 +24,7 @@ from gideon.host.render.worker import (
     CITE_TYPES,
     NO_STATE_REASONS,
     PATTERN_SET_ID,
+    PIPELINE_CHUNK_SIZES,
     PRECEDENTIAL_VALUES,
     QUALIFIERS,
     RESOLVE_DIR,
@@ -129,6 +130,15 @@ def _artifact_preconditions(
             "preconditions", False, f"lockfile label {label} is not committed",
             f"Use a committed label from corpus/lockfiles/: {labels}; then run "
             f"{report.command(COMMAND_PATH)} again.",
+        ), None, None
+    if lockfile.pipeline not in PIPELINE_CHUNK_SIZES:
+        versions = ", ".join(sorted(PIPELINE_CHUNK_SIZES))
+        return StageResult(
+            "preconditions", False,
+            f"lockfile {label} pipeline {lockfile.pipeline} is not registered",
+            f"Use a registered pipeline ({versions}) from a new "
+            f"{report.command('corpus cut')}, then run {report.command(COMMAND_PATH)} "
+            "with its new label.",
         ), None, None
     issue = artifacts.artifact_problem(
         check_courts(lockfile, loaded.court_map), label, command_path=COMMAND_PATH,
@@ -374,6 +384,10 @@ def _percent(part: int, whole: int) -> int:
     return round(100 * part / whole) if whole else 0
 
 
+def _token_figure(value: int | float | None) -> str:
+    return "-" if value is None else f"{value:g}"
+
+
 def _ingest(
     host: CorpusHost, rendered_dir: PathLike, work_root: PathLike,
     lockfile: Lockfile, court_map: CourtMap, sleep: Callable[[float], None],
@@ -407,7 +421,8 @@ def _ingest(
         for court in pin.courts:
             job = caselaw.defer_caselaw(
                 host, rendered_dir, label=lockfile.label, snapshot=snapshot,
-                court=court, courts=geography, command_path=COMMAND_PATH,
+                court=court, courts=geography, pipeline=lockfile.pipeline,
+                command_path=COMMAND_PATH,
             )
             if isinstance(job, Problem):
                 return _refuse("ingest", f"{court}: {job.problem}", job.fix)
@@ -580,6 +595,45 @@ def _ingest(
             f"{court} treatment: {treatment_counts.treated} of {treatment_counts.ready} "
             f"ready documents under {PATTERN_SET_ID}; "
             f"{treatment_counts.signalled} signalled edges; {treatment_detail}", "",
+        ))
+        chunk_counts = caselaw.read_chunk_counts(
+            host, rendered_dir, source=source, snapshot_date=snapshot_date,
+            court=court, pipeline=lockfile.pipeline, command_path=COMMAND_PATH,
+        )
+        if isinstance(chunk_counts, Problem):
+            return _refuse("ingest", f"{court}: {chunk_counts.problem}", chunk_counts.fix)
+        if chunk_counts.chunked < chunk_counts.ready:
+            return _refuse(
+                "ingest",
+                f"{court}: {chunk_counts.chunked} of {chunk_counts.ready} ready documents have chunks under {lockfile.pipeline}",
+                f"Run {stack.logs_fix(rendered_dir, WORKER_SERVICE_NAME)}, then run "
+                f"{report.command(COMMAND_PATH)} again.",
+            )
+        if chunk_counts.over_maximum:
+            return _refuse(
+                "ingest",
+                f"{court}: {chunk_counts.over_maximum} chunks exceed pipeline {lockfile.pipeline}'s maximum",
+                f"Run {stack.logs_fix(rendered_dir, WORKER_SERVICE_NAME)}, then run "
+                f"{report.command(COMMAND_PATH)} again after the fix.",
+            )
+        target, maximum, _minimum = PIPELINE_CHUNK_SIZES[lockfile.pipeline]
+        per_document = chunk_counts.chunks / chunk_counts.ready if chunk_counts.ready else 0
+        chunk_detail = ", ".join(
+            f"{section_type} {chunk_counts.by_section_type.get(section_type, 0)}"
+            for section_type in SECTION_TYPES
+        )
+        report.print_stage(StageResult(
+            "ingest", True,
+            f"{court} chunks: {chunk_counts.chunked} of {chunk_counts.ready} ready documents "
+            f"under {lockfile.pipeline}; {chunk_counts.chunks} chunks, "
+            f"{per_document:.1f} per document; tokens minimum "
+            f"{_token_figure(chunk_counts.token_minimum)}, median "
+            f"{_token_figure(chunk_counts.token_median)}, p95 "
+            f"{_token_figure(chunk_counts.token_p95)}, maximum "
+            f"{_token_figure(chunk_counts.token_maximum)} "
+            f"(target {target}, maximum {maximum}); "
+            f"over maximum {chunk_counts.over_maximum}, "
+            f"under minimum {chunk_counts.under_minimum}; {chunk_detail}", "",
         ))
         total += counts.opinions
         ready += counts.by_status.get("ready", 0)

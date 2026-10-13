@@ -138,20 +138,21 @@ class _Run:
     opinion: int | None
 
 
-def _paragraphs(text: str) -> list[_Paragraph]:
-    paragraphs: list[_Paragraph] = []
-    start = 0
-    while start < len(text):
-        end = text.find("\n\n", start)
-        if end < 0:
-            end = len(text)
-        line = text[start:end].strip()
+def paragraphs(text: str, start: int, end: int) -> list[_Paragraph]:
+    """Return nonblank paragraph spans within a section of canonical text."""
+
+    result: list[_Paragraph] = []
+    position = start
+    while position < end:
+        separator = text.find("\n\n", position, end)
+        paragraph_end = end if separator < 0 else separator
+        line = text[position:paragraph_end].strip()
         if line:
             # The paragraph begins at its text, so a separator stays with the section before.
-            first = start + len(text[start:end]) - len(text[start:end].lstrip())
-            paragraphs.append(_Paragraph(first, end, line))
-        start = end + 2
-    return paragraphs
+            first = position + len(text[position:paragraph_end]) - len(text[position:paragraph_end].lstrip())
+            result.append(_Paragraph(first, paragraph_end, line))
+        position = paragraph_end + 2
+    return result
 
 
 def _heading(line: str) -> str | None:
@@ -379,9 +380,9 @@ def segment(
     text = parsed.text
     if not text:
         return ()
-    paragraphs = _paragraphs(text)
-    paragraph_starts = [paragraph.start for paragraph in paragraphs]
-    spans = _structural(parsed, column, paragraphs)
+    paragraph_rows = paragraphs(text, 0, len(text))
+    paragraph_starts = [paragraph.start for paragraph in paragraph_rows]
+    spans = _structural(parsed, column, paragraph_rows)
     opinions = [block for block in parsed.blocks if block.kind == "opinion"]
     quote_starts, quote_ends = _merged_exclusions([
         (block.start, block.end) for block in parsed.blocks if block.kind == "quote"
@@ -407,8 +408,8 @@ def segment(
             current_opinion = run.opinion
         start = run.start + len(content) - len(content.lstrip())
         openings.append((start, *running, None))
-        for paragraph_index in range(bisect_left(paragraph_starts, run.start), len(paragraphs)):
-            paragraph = paragraphs[paragraph_index]
+        for paragraph_index in range(bisect_left(paragraph_starts, run.start), len(paragraph_rows)):
+            paragraph = paragraph_rows[paragraph_index]
             if paragraph.start >= run.end:
                 break
             if paragraph.start < run.start or paragraph.end > run.end or not _eligible(paragraph.line):
