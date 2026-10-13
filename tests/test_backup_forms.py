@@ -100,6 +100,8 @@ class BackupForms(test_restore.RenderedRestoreCase):
             ("drill tools", drill._tools_fix, "Run sudo python3 -m gideon host provision --only host-tools, then retry."),
             ("drill set", drill._set_fix, "Run sudo python3 -m gideon backup run, then retry."),
             ("drill age", drill._age_fix, "Run sudo python3 -m gideon backup run, then retry."),
+            ("drill walk", drill._walk_fix, "Remove the named object's path from the set's copy; where the live store's read refuses it, move that path aside and write its bytes again from their source (docs/runbooks/backup-restore.md §4); then run sudo python3 -m gideon backup run, then retry."),
+            ("drill read", drill._read_fix, "Run sudo python3 -m gideon backup run, then retry."),
             ("physical", backuproots._physical_fix, "The fetched or restored tree does not match its manifest; re-run sudo python3 -m gideon backup push --verify-all on the source box, then retry restore."),
             ("store root", backuproots._store_root_fix, "Run sudo python3 -m gideon host provision --only disk-layout, then retry."),
             ("derived provision", derivedstores._provision_fix, "Run sudo python3 -m gideon host provision --only disk-layout, then retry."),

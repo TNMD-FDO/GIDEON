@@ -124,10 +124,28 @@ nothing older is recoverable, and there is no monthly tier.
 - **`backup drill`** — `teardown-before`, `prepare`, `tarball` (hash and age
   header, one recipient stanza per recipient the manifest names), `verify` (pgBackRest's own repository verification), `postgres`
   (the set's own backup restored to its consistency point, archiving off),
-  `counts` (exact, against the manifest — a mismatch means something wrote
-  during the backup; the nightly run assumes the quiet hour), `frontend`
-  (healthy means its migrations ran clean on the restored database),
-  `cas-walk` and `retrieval-read` (`inert` until slice 3), `teardown`, `audit`.
+  `counts` (every table's restored rows beside the manifest's: the drill
+  restores to the backup's consistency point and `backup run` counts a little
+  later, so a worker or a user writing during the backup leaves a small
+  difference — `K table(s) drift from the manifest: public.chunks -120, …`,
+  restored minus manifest — and a table first written, or a month's partition
+  made, in that window reads `absent from the restored database: …` or
+  `restored empty: …`; none of these fails the row, which fails only when a
+  database cannot be listed or counted; a drift far larger than a night's
+  writing is read against the Backup board and is worth a question),
+  `frontend` (healthy means its migrations ran clean on the restored database),
+  `cas-walk` (the set's store listing held to its manifest pin, the set's copy
+  of the store re-listed and held to that listing, every object hashed against
+  its name, then every object the restored `documents` rows name held to the
+  listing: `walked N object(s) (B bytes), every object hashes to its name; D
+  document row(s) name objects the set holds; S s`; a failure names the first
+  ten objects or document ids, and §4 holds the repair), `retrieval-read` (one
+  chunk read from the restored database and its text cut from the set's copy
+  of the document's canonical text by its offsets, the slice's hash held to the
+  chunk's own; the row names ids, characters, and tokens, never the text, and a
+  restored record with no chunk yet passes saying so), `teardown`, `audit`
+  (the row carries the walk's object count and both stages' seconds beside the
+  drill's `duration_s`).
 - Every refusal and failed row ends with the command that fixes it.
 
 ## 4. Restoring
@@ -204,6 +222,20 @@ LC_ALL=C sort -o "$live" "$live"
 LC_ALL=C join -t $'\t' -j 1 -v 1 "$listing" "$live" | cut -f1
 SH
 ```
+
+When `backup drill`'s `cas-walk` names an object whose bytes do not hash to
+its name, the damaged file is the set's copy at
+`/data/backup-staging/sets/<label>/files/data-bulk-cas/<first two>/<next two>/<name>`.
+Remove that path first: the next `backup run` hard-links its copy against this
+set's by size and modification time, so a damaged copy that keeps both is
+carried into every later set until its path is gone. Then hash the live
+object, `sudo sha256sum /data/bulk/cas/<first two>/<next two>/<name>`: where
+the sum is not its name, move that path aside and write its bytes again from their source, since
+the store leaves an existing object of the same size untouched; or return the
+whole system to a set that holds it whole with `gideon restore --from staging --set <label>`. Then
+run `backup run` and the drill again. When `cas-walk` names document rows
+whose objects the set lacks, the store lost them before the set was taken:
+write each document's bytes again from its source, then `backup run`.
 
 For the two derived stores, the `files:` row puts their snapshot directories
 back as the set holds them, and once the store tier is healthy the `stores:` row

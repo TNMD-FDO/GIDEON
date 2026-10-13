@@ -1,8 +1,10 @@
-"""The isolated backup restore drill."""
+"""The isolated backup restore drill, its store hash walk, and a verified chunk read."""
 
 import base64
 import binascii
+import hashlib
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -20,6 +22,7 @@ from gideon.host import (
     audit,
     backuproots,
     backupset,
+    cas,
     owui,
     pgbackrest,
     report,
@@ -43,7 +46,7 @@ from gideon.host.report import (
 )
 from gideon.host.site import SiteConfig
 from gideon.host.stages import IDENTIFIER, aware_now, psql_argv, run_stage, table_parts
-from gideon.host.sysio import Host, PathLike, RealHost
+from gideon.host.sysio import Host, PathLike, ReadBytesHost, RealHost
 
 _SITE_PATH: Final = "/etc/gideon/site.yaml"
 _RENDERED_DIR: Final = "/etc/gideon/rendered"
@@ -53,7 +56,8 @@ _VERIFY_FIX: Final = "Repair the pgBackRest repository, then retry."
 _COUNTS_FIX: Final = "Repair the restored database, then retry."
 _DRILL_TIMEOUT: Final = 18000.0
 _AGE_MAGIC: Final = b"age-encryption.org/v1"
-_CLEANUP_NAMES: Final = ("postgres", "openwebui", "compose.yaml")
+_CLEANUP_NAMES: Final = ("postgres", "openwebui", "compose.yaml", "walk")
+_SHA256: Final = re.compile(r"[0-9a-f]{64}")
 
 
 def _root_fix() -> str:
@@ -73,6 +77,19 @@ def _set_fix() -> str:
 
 
 def _age_fix() -> str:
+    return f"Run {report.command('backup run')}, then retry."
+
+
+def _walk_fix() -> str:
+    return (
+        "Remove the named object's path from the set's copy; where the live store's read refuses it, "
+        "move that path aside and write its bytes again from their source "
+        "(docs/runbooks/backup-restore.md §4); then run "
+        f"{report.command('backup run')}, then retry."
+    )
+
+
+def _read_fix() -> str:
     return f"Run {report.command('backup run')}, then retry."
 
 
@@ -461,22 +478,46 @@ def _counts_stage(
     *,
     manifest: backupset.Manifest,
 ) -> StageResult:
+    drifted: list[tuple[str, int]] = []
+    missing: list[str] = []
+    emptied: list[str] = []
+    tables = 0
+    listing_sql = (
+        "SELECT schemaname||'.'||relname FROM pg_stat_user_tables "
+        "ORDER BY schemaname, relname;\n"
+    )
     for database, expected_mapping in manifest.row_counts.items():
         if IDENTIFIER.fullmatch(database) is None:
             return StageResult("counts", False, f"invalid database name {database}", _COUNTS_FIX)
         expected = dict(expected_mapping)
+        tables += len(expected)
+        if any(table_parts(table) is None for table in expected):
+            return StageResult("counts", False, f"invalid table name for {database}", _COUNTS_FIX)
+        argv = psql_argv(DRILL_ROOT, database, on_error_stop=True)
+        try:
+            listing = io.run(argv, input=listing_sql)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return StageResult("counts", False, f"table listing failed for {database}: {exc}", _COUNTS_FIX)
+        if listing.returncode != 0:
+            return StageResult(
+                "counts", False, f"table listing failed for {database}: {command_detail(listing)}", _COUNTS_FIX
+            )
+        # backup run lists the same way and counts only these names, so the manifest holds no other.
+        inventory = {line.strip() for line in listing.stdout.splitlines() if table_parts(line.strip()) is not None}
+        missing.extend(set(expected) - inventory)
+        present = set(expected) & inventory
+        if not present:
+            continue
         statements: list[str] = []
-        for table in expected:
+        for table in sorted(present):
             parts = table_parts(table)
-            if parts is None:
-                return StageResult("counts", False, f"invalid table name {table}", _COUNTS_FIX)
+            assert parts is not None
             schema, relation = parts
             statements.append(f"SELECT '{table}', count(*) FROM {schema}.{relation};")
-        argv = psql_argv(DRILL_ROOT, database)
         try:
             result = io.run(
                 argv,
-                input="\n".join(statements) + ("\n" if statements else ""),
+                input="\n".join(statements) + "\n",
             )
         except (OSError, subprocess.SubprocessError) as exc:
             return StageResult("counts", False, f"row count query failed for {database}: {exc}", _COUNTS_FIX)
@@ -490,22 +531,31 @@ def _counts_stage(
         actual: dict[str, int] = {}
         for line in result.stdout.splitlines():
             name, separator, count_text = line.partition("|")
-            if not separator or not count_text.isdecimal():
+            if (
+                not separator or not count_text.isascii() or not count_text.isdecimal()
+                or name not in present or name in actual
+            ):
                 return StageResult("counts", False, f"invalid row count output for {database}", _COUNTS_FIX)
             actual[name] = int(count_text)
-        mismatches = sorted(
-            name
-            for name in set(expected) | set(actual)
-            if expected.get(name) != actual.get(name)
-        )
-        if mismatches:
+        if set(actual) != present:
             return StageResult(
-                "counts",
-                False,
-                "row counts differ for: " + ", ".join(mismatches),
-                _COUNTS_FIX,
+                "counts", False, f"row counts were missing for {database}: {', '.join(sorted(present - set(actual)))}", _COUNTS_FIX
             )
-    return StageResult("counts", True, "restored row counts match the manifest", "")
+        for name, count in actual.items():
+            if expected[name] > 0 and count == 0:
+                emptied.append(name)
+            elif count != expected[name]:
+                drifted.append((name, count - expected[name]))
+    clauses: list[str] = []
+    if drifted:
+        differences = ", ".join(f"{name} {difference:+d}" for name, difference in sorted(drifted))
+        clauses.append(f"{len(drifted)} table(s) drift from the manifest: {differences} (the writer's rows since the boundary)")
+    if missing:
+        clauses.append("absent from the restored database: " + ", ".join(sorted(missing)))
+    if emptied:
+        clauses.append("restored empty: " + ", ".join(sorted(emptied)))
+    detail = "; ".join(clauses) if clauses else f"restored row counts match the manifest ({tables} tables)"
+    return StageResult("counts", True, detail, "")
 
 
 def _frontend_stage(
@@ -547,6 +597,159 @@ def _frontend_stage(
     return StageResult("frontend", True, "drill frontend is healthy after migrations", "")
 
 
+def _store_root(io: Host, context: _DrillContext) -> backuproots.HeldRoot:
+    """Bind the set's copy of the content-addressed store."""
+
+    assert context.local_set.manifest is not None
+    return backuproots.carrying(
+        backuproots.held(
+            io, backupset.inventory_roots(context.local_set.manifest.checkout), context.local_set
+        ),
+        os.fspath(cas.ROOT),
+    )
+
+
+def _cas_walk_stage(
+    io: Host,
+    context: _DrillContext,
+    measured: bool,
+    clock: Callable[[], float],
+) -> tuple[StageResult, int | None, float]:
+    """Hash the set's store copy and check the restored documents' object references."""
+
+    started = clock() if measured else 0.0
+    objects: int | None = None
+
+    def result(ok: bool, detail: str, fix: str = "") -> tuple[StageResult, int | None, float]:
+        seconds = max(0.0, clock() - started) if measured else 0.0
+        if ok:
+            detail += f"; {seconds:.1f} s"
+        return StageResult("cas-walk", ok, detail, "" if ok else fix or _walk_fix()), objects, seconds
+
+    root = _store_root(io, context)
+    problem = root.verify()
+    if problem is not None:
+        return result(False, problem.problem)
+    scratch_dir = _drill_path("walk")
+    try:
+        io.mkdir(scratch_dir, mode=0o700, parents=True, exist_ok=True)
+    except OSError as exc:
+        return result(False, f"store walk directory could not be prepared: {exc}")
+    walk = root.walk(scratch_dir)
+    if isinstance(walk, Problem):
+        return result(False, walk.problem, walk.fix)
+    objects = walk.objects
+    if walk.failed:
+        return result(
+            False,
+            f"{len(walk.failed)} object(s) do not hash to their names: {', '.join(walk.failed[:10])}",
+        )
+    names = frozenset(walk.names)
+    statement = (
+        "SELECT doc_id, coalesce(sha256, ''), coalesce(canonical_text_sha256, '') "
+        "FROM documents WHERE sha256 IS NOT NULL OR canonical_text_sha256 IS NOT NULL;\n"
+    )
+    try:
+        queried = io.run(psql_argv(DRILL_ROOT, "gideon", on_error_stop=True), input=statement)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return result(False, f"document object query failed: {exc}")
+    if queried.returncode != 0:
+        return result(False, f"document object query failed: {command_detail(queried)}")
+    documents = 0
+    missing = 0
+    missing_ids: list[str] = []
+    for line in queried.stdout.splitlines():
+        fields = line.split("|")
+        if (
+            len(fields) != 3
+            or _SHA256.fullmatch(fields[0]) is None
+            or any(name and _SHA256.fullmatch(name) is None for name in fields[1:])
+        ):
+            return result(False, "document object query returned a malformed line")
+        documents += 1
+        if any(name and name not in names for name in fields[1:]):
+            missing += 1
+            if len(missing_ids) < 10:
+                missing_ids.append(fields[0])
+    if missing:
+        return result(False, f"{missing} document row(s) name objects the set lacks: {', '.join(missing_ids)}")
+    return result(
+        True,
+        f"walked {walk.objects} object(s) ({walk.bytes} bytes), every object hashes to its name; "
+        f"{documents} document row(s) name objects the set holds",
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _ChunkRow:
+    """One restored chunk's identifiers, object, code-point offsets, hash, and tokens."""
+
+    chunk_id: str
+    doc_id: str
+    object_name: str
+    char_start: int
+    char_end: int
+    content_hash: str
+    token_count: int
+
+
+def _retrieval_read_stage(
+    io: ReadBytesHost,
+    context: _DrillContext,
+    measured: bool,
+    clock: Callable[[], float],
+) -> tuple[StageResult, float]:
+    """Read one restored chunk from its verified object without exposing its text."""
+
+    started = clock() if measured else 0.0
+
+    def result(ok: bool, detail: str, *, show_seconds: bool = True) -> tuple[StageResult, float]:
+        seconds = max(0.0, clock() - started) if measured else 0.0
+        if ok and show_seconds:
+            detail += f"; {seconds:.1f} s"
+        return StageResult("retrieval-read", ok, detail, "" if ok else _read_fix()), seconds
+
+    statement = (
+        "SELECT c.chunk_id, c.doc_id, d.canonical_text_sha256, c.char_start, c.char_end, "
+        "c.content_hash, c.token_count FROM chunks c JOIN documents d ON d.doc_id = c.doc_id "
+        "ORDER BY c.chunk_id LIMIT 1;\n"
+    )
+    try:
+        queried = io.run(psql_argv(DRILL_ROOT, "gideon", on_error_stop=True), input=statement)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return result(False, f"chunk query failed: {exc}")
+    if queried.returncode != 0:
+        return result(False, f"chunk query failed: {command_detail(queried)}")
+    if not queried.stdout:
+        return result(True, "the restored record holds no chunk; nothing to read", show_seconds=False)
+    lines = queried.stdout.splitlines()
+    fields = lines[0].split("|")
+    if (
+        len(lines) != 1 or len(fields) != 7
+        or any(_SHA256.fullmatch(fields[index]) is None for index in (0, 1, 2, 5))
+        or any(not fields[index].isascii() or not fields[index].isdecimal() for index in (3, 4, 6))
+    ):
+        return result(False, "chunk query returned a malformed row")
+    chunk = _ChunkRow(fields[0], fields[1], fields[2], int(fields[3]), int(fields[4]), fields[5], int(fields[6]))
+    if chunk.char_start >= chunk.char_end or chunk.token_count <= 0:
+        return result(False, "chunk query returned a malformed row")
+    data = cas.get(io, chunk.object_name, root=_store_root(io, context).copy)
+    if isinstance(data, Problem):
+        return result(False, data.problem)
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return result(False, f"object {chunk.object_name} is not UTF-8")
+    content = text[chunk.char_start:chunk.char_end]
+    if not content or hashlib.sha256(content.encode("utf-8")).hexdigest() != chunk.content_hash:
+        return result(False, f"chunk {chunk.chunk_id} text does not hash to its content hash")
+    return result(
+        True,
+        f"read chunk {chunk.chunk_id} of document {chunk.doc_id}: {len(content)} character(s), "
+        f"{chunk.token_count} token(s), from object {chunk.object_name}",
+    )
+
+
 def _audit_stage(
     io: Host,
     rendered_dir: PathLike,
@@ -555,9 +758,21 @@ def _audit_stage(
     started: datetime,
     finished: datetime,
     checks: Mapping[str, str],
+    objects: int | None,
+    seconds: Mapping[str, float],
     result: str,
 ) -> StageResult:
     assert context.local_set.manifest is not None
+    detail: dict[str, object] = {
+        "set_label": context.local_set.label,
+        "pgbackrest_label": context.local_set.manifest.pgbackrest_label,
+        "duration_s": max(0.0, (finished - started).total_seconds()),
+        "checks": dict(checks),
+        "seconds": dict(seconds),
+        "result": result,
+    }
+    if objects is not None:
+        detail["objects"] = objects
     row = audit.AuditRow(
         str(uuid.uuid4()),
         "backup_drill",
@@ -565,13 +780,7 @@ def _audit_stage(
         None,
         None,
         (),
-        {
-            "set_label": context.local_set.label,
-            "pgbackrest_label": context.local_set.manifest.pgbackrest_label,
-            "duration_s": max(0.0, (finished - started).total_seconds()),
-            "checks": dict(checks),
-            "result": result,
-        },
+        detail,
     )
     problem = audit.write_rows(io, rendered_dir, (row,))
     if problem is not None:
@@ -587,15 +796,16 @@ def _audit_stage(
 def run_backup_drill(
     args: object,
     *,
-    host: Host | None = None,
+    host: ReadBytesHost | None = None,
     rendered_dir: PathLike = _RENDERED_DIR,
     site_path: PathLike = _SITE_PATH,
     root: PathLike | None = None,
     now: datetime | None = None,
     sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
     client_factory: Callable[[], owui.Client] | None = None,
 ) -> int:
-    """Run the throwaway restore drill and always tear it down after prepare."""
+    """Restore, walk the store, verify a chunk's text, and tear down the drill."""
 
     del args
     io = host or RealHost()
@@ -633,6 +843,9 @@ def run_backup_drill(
         "retrieval_read": "skipped",
     }
     failed = False
+    measured = now is None
+    seconds = {"cas_walk": 0.0, "retrieval_read": 0.0}
+    objects: int | None = None
     teardown: StageResult | None = None
     try:
         prepare = _prepare_stage(io, context, rendered_dir=rendered_dir)
@@ -677,22 +890,17 @@ def run_backup_drill(
             print_stage(frontend)
             failed = not frontend.ok
 
-        inert_cas = StageResult(
-            "cas-walk",
-            True,
-            "inert (no content-addressed store until slice 3)",
-            "",
-        )
-        inert_retrieval = StageResult(
-            "retrieval-read",
-            True,
-            "inert (no index until slice 3)",
-            "",
-        )
-        checks["cas_walk"] = "inert"
-        checks["retrieval_read"] = "inert"
-        print_stage(inert_cas)
-        print_stage(inert_retrieval)
+        if not failed:
+            walk, objects, seconds["cas_walk"] = _cas_walk_stage(io, context, measured, clock)
+            checks["cas_walk"] = "pass" if walk.ok else "failed"
+            print_stage(walk)
+            failed = not walk.ok
+
+        if not failed:
+            read, seconds["retrieval_read"] = _retrieval_read_stage(io, context, measured, clock)
+            checks["retrieval_read"] = "pass" if read.ok else "failed"
+            print_stage(read)
+            failed = not read.ok
     finally:
         teardown = _teardown_after(io)
         print_stage(teardown)
@@ -706,6 +914,8 @@ def run_backup_drill(
         started=effective_now,
         finished=effective_now if now is not None else datetime.now(UTC),
         checks=checks,
+        objects=objects,
+        seconds=seconds,
         result=result,
     )
     print_stage(audit_result)

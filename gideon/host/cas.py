@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Final
 
 from gideon.host.report import Problem
-from gideon.host.sysio import BytesHost, PathLike
+from gideon.host.sysio import BytesHost, PathLike, ReadBytesHost
 
 ROOT: Final = Path("/data/bulk/cas")
 DIRECTORY_MODE: Final = 0o2770
@@ -82,7 +82,7 @@ def put(host: BytesHost, data: bytes, *, root: PathLike = ROOT) -> str | Problem
     return name
 
 
-def get(host: BytesHost, name: str, *, root: PathLike = ROOT) -> bytes | Problem:
+def get(host: ReadBytesHost, name: str, *, root: PathLike = ROOT) -> bytes | Problem:
     """The bytes of the object *name*, or a refusal when they do not hash to it."""
 
     if _NAME.fullmatch(name) is None:
@@ -105,7 +105,7 @@ def get(host: BytesHost, name: str, *, root: PathLike = ROOT) -> bytes | Problem
     return data
 
 
-def verify(host: BytesHost, name: str, *, root: PathLike = ROOT) -> Problem | None:
+def verify(host: ReadBytesHost, name: str, *, root: PathLike = ROOT) -> Problem | None:
     """Nothing when the object *name* is present and hashes to it, else the refusal."""
 
     result = get(host, name, root=root)
@@ -140,7 +140,7 @@ def _write(host: BytesHost, path: Path, data: bytes) -> Problem | None:
     return None
 
 
-def _root_problem(host: BytesHost, root: Path) -> Problem | None:
+def _root_problem(host: ReadBytesHost, root: Path) -> Problem | None:
     try:
         state = host.stat(root)
     except (FileNotFoundError, NotADirectoryError, PermissionError):

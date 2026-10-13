@@ -2091,6 +2091,219 @@ class StoreRestore(unittest.TestCase):
         )
 
 
+class ListingNames(unittest.TestCase):
+    def test_names_keep_listing_order_and_empty_listing_passes(self) -> None:
+        path = "/example/store.listing"
+        names = (hashlib.sha256(b"fictitious second").hexdigest(), hashlib.sha256(b"fictitious first").hexdigest())
+        for content, expected in ((f"{names[0]}\t0\n{names[1]}\t123\n", names), ("", ())):
+            with self.subTest(content=content):
+                host = FakeHost(files={path: content})
+                self.assertEqual(backuproots.listing_names(cast(Host, host), path), expected)
+                self.assertEqual(host.calls, [("read_text", path, {})])
+
+    def test_malformed_lines_and_unreadable_listing_refuse(self) -> None:
+        path = "/example/store.listing"
+        name = hashlib.sha256(b"fictitious object").hexdigest()
+        for content in (
+            f"{name}  5\n", f"{name[:-1]}\t5\n", f"{name.upper()}\t5\n",
+            f"{name}\t\n", f"{name}\t-1\n", f"{name}\t1.5\n", f"{name}\t5\textra\n", "\n",
+        ):
+            with self.subTest(content=content):
+                host = FakeHost(files={path: content})
+                self.assertEqual(
+                    backuproots.listing_names(cast(Host, host), path),
+                    Problem(f"store listing {path} contains a malformed line", ""),
+                )
+        problem = backuproots.listing_names(cast(Host, FakeHost()), path)
+        self.assertIsInstance(problem, Problem)
+        assert isinstance(problem, Problem)
+        self.assertIn(path, problem.problem)
+        self.assertEqual(problem.fix, "")
+
+
+class HashObjects(unittest.TestCase):
+    def test_hashes_every_name_in_bounded_batches_and_keeps_failed_names(self) -> None:
+        names = tuple(hashlib.sha256(f"fictitious object {i}".encode()).hexdigest() for i in range(1001))
+        paths = tuple(f"{name[:2]}/{name[2:4]}/{name}" for name in names)
+        argv = ("sha256sum", "-c", "-")
+        host = FakeHost((
+            completed(argv, returncode=1, stdout="".join(f"{path}: OK\n" for path in paths[:999]) + f"{paths[999]}: FAILED\n"),
+            completed(argv, stdout=f"{paths[1000]}: OK\n"),
+        ))
+        self.assertEqual(
+            backuproots.hash_objects(cast(Host, host), SOURCE, names),
+            ([*names[:999], names[1000]], [names[999]]),
+        )
+        self.assertEqual(host.calls, [
+            ("run", argv, {"cwd": SOURCE, "input": "".join(f"{name}  {path}\n" for name, path in zip(names[:1000], paths[:1000], strict=True))}),
+            ("run", argv, {"cwd": SOURCE, "input": f"{names[1000]}  {paths[1000]}\n"}),
+        ])
+
+    def test_empty_names_run_no_command(self) -> None:
+        host = FakeHost()
+        self.assertEqual(backuproots.hash_objects(cast(Host, host), SOURCE, ()), ([], []))
+        self.assertEqual(host.calls, [])
+
+    def test_incomplete_duplicate_foreign_and_exit_inconsistent_reports_refuse(self) -> None:
+        names = tuple(hashlib.sha256(data).hexdigest() for data in (b"fictitious first", b"fictitious second"))
+        paths = tuple(f"{name[:2]}/{name[2:4]}/{name}" for name in names)
+        argv = ("sha256sum", "-c", "-")
+        okay = "".join(f"{path}: OK\n" for path in paths)
+        for result in (
+            completed(argv, stdout=f"{paths[0]}: OK\n"),
+            completed(argv, stdout=okay + f"{paths[0]}: OK\n"),
+            completed(argv, stdout=okay + "foreign: OK\n"),
+            completed(argv, returncode=1, stdout=okay),
+            completed(argv, stdout=f"{paths[0]}: OK\n{paths[1]}: FAILED\n"),
+            completed(argv, returncode=2, stdout=okay),
+            completed(argv, returncode=1, stderr="unavailable"),
+            PermissionError("sha256sum unavailable"),
+        ):
+            with self.subTest(result=result):
+                host = FakeHost((result,))
+                problem = backuproots.hash_objects(cast(Host, host), SOURCE, names)
+                self.assertIsInstance(problem, Problem)
+                assert isinstance(problem, Problem)
+                self.assertIn("store object check", problem.problem)
+                self.assertEqual(problem.fix, "")
+                self.assertEqual(len(host.calls), 1)
+
+
+class HeldStoreWalk(unittest.TestCase):
+    def setUp(self) -> None:
+        self.walk_dir = "/example/walk"
+        self.copy = os.path.join(backupset.files_dir(PREVIOUS), ROOT)
+        self.walk_listing = os.path.join(self.walk_dir, ROOT + ".listing")
+        objects = (b"fictitious second", b"fictitious first")
+        self.names = tuple(hashlib.sha256(data).hexdigest() for data in objects)
+        self.content = "".join(f"{name}\t{len(data)}\n" for name, data in zip(self.names, objects, strict=True))
+        # The manifest may name a listing differently from the scratch file.
+        self.pin = backupset.ListingPin(
+            "set-store.listing", len(self.content), hashlib.sha256(self.content.encode()).hexdigest(),
+            len(objects), sum(map(len, objects)),
+        )
+        self.set_listing = os.path.join(PREVIOUS, self.pin.file)
+        self.argv = (
+            tuple(backuproots._store_stray_argv()),
+            tuple(backuproots._store_listing_argv(self.walk_listing)),
+            tuple(backuproots._store_sort_argv(self.walk_listing)),
+            ("sha256sum", self.walk_listing),
+            ("awk", "-F", "\t", '{n++; b+=$2} END {printf "%.0f %.0f\\n", n, b}', self.walk_listing),
+        )
+
+    def _bound(self, host: FakeHost, pin: backupset.ListingPin | None) -> backuproots.HeldRoot:
+        manifest = replace(manifest_with({}), listings={ROOT: pin} if pin is not None else {})
+        row = backupset.InventoryRoot(ROOT, SOURCE, (), backupset.RootKind.STORE, False)
+        (root,) = backuproots.held(cast(Host, host), (row,), replace(previous(), manifest=manifest))
+        return root
+
+    def _host(self, *hash_results: subprocess.CompletedProcess[str]) -> FakeHost:
+        return FakeHost((
+            completed(self.argv[0]), completed(self.argv[1]), completed(self.argv[2]),
+            completed(self.argv[3], stdout=f"{self.pin.sha256}  {self.walk_listing}\n"),
+            completed(self.argv[4], stdout=f"{self.pin.objects} {self.pin.bytes}\n"),
+            *hash_results,
+        ), stats={self.walk_listing: cast(os.stat_result, mock.Mock(st_size=self.pin.size))},
+            files={self.set_listing: self.content})
+
+    def test_walk_holds_copy_to_pin_then_reads_set_listing_and_hashes_every_name(self) -> None:
+        argv = ("sha256sum", "-c", "-")
+        for failed in (False, True):
+            with self.subTest(failed=failed):
+                paths = tuple(f"{name[:2]}/{name[2:4]}/{name}" for name in self.names)
+                output = "".join(f"{path}: {'FAILED' if failed else 'OK'}\n" for path in reversed(paths))
+                host = self._host(completed(argv, returncode=int(failed), stdout=output))
+                self.assertEqual(
+                    self._bound(host, self.pin).walk(self.walk_dir),
+                    backuproots.StoreWalk(self.pin.objects, self.pin.bytes, self.names, tuple(sorted(self.names)) if failed else ()),
+                )
+                self.assertEqual(host.calls, [
+                    ("run", self.argv[0], {"cwd": self.copy}),
+                    ("run", self.argv[1], {"cwd": self.copy}),
+                    ("run", self.argv[2], {"cwd": None}),
+                    ("run", self.argv[3], {"cwd": None}),
+                    ("run", self.argv[4], {"cwd": None}),
+                    ("stat", self.walk_listing, {}),
+                    ("read_text", self.set_listing, {}),
+                    ("run", argv, {"cwd": self.copy, "input": "".join(f"{name}  {path}\n" for name, path in zip(self.names, paths, strict=True))}),
+                ])
+
+    def test_no_pin_and_stray_entry_refuse_before_listing(self) -> None:
+        host = FakeHost()
+        self.assertEqual(
+            self._bound(host, None).walk(self.walk_dir),
+            Problem(f"{ROOT}: the set predates the store listing", "Run sudo python3 -m gideon backup run, then retry."),
+        )
+        self.assertEqual(host.calls, [])
+        host = FakeHost((completed(self.argv[0], stdout="./stray\n"),))
+        self.assertEqual(
+            self._bound(host, self.pin).walk(self.walk_dir),
+            Problem(f"{self.copy}/stray is not an object in its own shard directories", ""),
+        )
+        self.assertEqual(host.calls, [("run", self.argv[0], {"cwd": self.copy})])
+
+    def test_each_pin_field_must_match_before_names_are_read_or_hashed(self) -> None:
+        for pin in (
+            replace(self.pin, size=self.pin.size + 1), replace(self.pin, sha256=hashlib.sha256(b"different fictitious listing").hexdigest()),
+            replace(self.pin, objects=self.pin.objects + 1), replace(self.pin, bytes=self.pin.bytes + 1),
+        ):
+            with self.subTest(pin=pin):
+                host = self._host()
+                self.assertEqual(
+                    self._bound(host, pin).walk(self.walk_dir),
+                    Problem(f"{self.copy} does not match the store listing's manifest pin", ""),
+                )
+                self.assertEqual(host.calls[-1], ("stat", self.walk_listing, {}))
+
+    def test_tool_failures_refuse_without_retry_and_have_empty_fix(self) -> None:
+        for index, argv in enumerate(self.argv):
+            for result in (completed(argv, returncode=1, stderr="denied"), PermissionError("unavailable")):
+                with self.subTest(index=index, result=result):
+                    host = self._host()
+                    host.responses[index:] = [result]
+                    problem = self._bound(host, self.pin).walk(self.walk_dir)
+                    self.assertIsInstance(problem, Problem)
+                    assert isinstance(problem, Problem)
+                    self.assertEqual(problem.fix, "")
+                    self.assertEqual(len(host.calls), index + 1)
+
+    def test_short_hash_report_and_malformed_set_listing_refuse(self) -> None:
+        host = self._host(completed(("sha256sum", "-c", "-"), stdout=f"{self.names[0][:2]}/{self.names[0][2:4]}/{self.names[0]}: OK\n"))
+        problem = self._bound(host, self.pin).walk(self.walk_dir)
+        self.assertIsInstance(problem, Problem)
+        assert isinstance(problem, Problem)
+        self.assertIn("store object check", problem.problem)
+        self.assertEqual(problem.fix, "")
+        host = self._host()
+        host.files[self.set_listing] = "fictitious malformed listing\n"
+        self.assertEqual(
+            self._bound(host, self.pin).walk(self.walk_dir),
+            Problem(f"store listing {self.set_listing} contains a malformed line", ""),
+        )
+        self.assertEqual(host.calls[-1], ("read_text", self.set_listing, {}))
+
+    def test_empty_store_walks_without_hash_command(self) -> None:
+        self.content = ""
+        self.pin = replace(self.pin, size=0, sha256=hashlib.sha256(b"").hexdigest(), objects=0, bytes=0)
+        host = self._host()
+        self.assertEqual(self._bound(host, self.pin).walk(self.walk_dir), backuproots.StoreWalk(0, 0, (), ()))
+        self.assertEqual(host.calls[-1], ("read_text", self.set_listing, {}))
+
+    def test_other_kinds_refuse_and_base_requires_implementation(self) -> None:
+        host = FakeHost()
+        ref = previous()
+        assert ref.manifest is not None
+        for kind in (backupset.RootKind.SNAPSHOT, backupset.RootKind.REPOSITORY):
+            with self.subTest(kind=kind):
+                row = backupset.InventoryRoot(ROOT, SOURCE, (), kind, False)
+                (root,) = backuproots.held(cast(Host, host), (row,), ref)
+                self.assertEqual(root.walk(self.walk_dir), Problem(f"{ROOT} is not a store", ""))
+        root = backuproots.HeldRoot(cast(Host, host), ROOT, SOURCE, self.copy, (), ref.manifest)
+        with self.assertRaises(NotImplementedError):
+            root.walk(self.walk_dir)
+        self.assertEqual(host.calls, [])
+
+
 class CommandBoundary(unittest.TestCase):
     def test_commands_keep_root_decisions_in_bound_roots(self) -> None:
         repository = Path(__file__).resolve().parent.parent

@@ -8,18 +8,21 @@ import io
 import os
 import subprocess
 import unittest
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
+from unittest import mock
 
 import yaml  # type: ignore[import-untyped]
 from test_render import artifact_source_files
 
-from gideon.host import backupset, drill, owui, stack
+from gideon.host import backupset, cas, drill, owui, stack
 from gideon.host.render import ARTIFACTS
 from gideon.host.render.drill import DRILL_ROOT
-from gideon.host.sysio import Command, PathLike
+from gideon.host.report import StageResult
+from gideon.host.sysio import Command, Host, PathLike
 
 ROOT = Path(__file__).resolve().parent.parent
 RENDERED = "/etc/gideon/rendered"
@@ -28,6 +31,15 @@ SET_LABEL = "20260902T110000Z"
 NOW = datetime(2026, 9, 2, 12, 0, tzinfo=UTC)
 TARBALL = b"drill tarball"
 TARBALL_SHA256 = hashlib.sha256(TARBALL).hexdigest()
+CANONICAL_TEXT = "fictitious café Ω canonical text"
+STORE_OBJECTS = {hashlib.sha256(data).hexdigest(): data for data in (b"fictitious source", CANONICAL_TEXT.encode())}
+STORE_LISTING = "".join(f"{name}\t{len(data)}\n" for name, data in sorted(STORE_OBJECTS.items()))
+STORE_PIN = backupset.ListingPin(
+    "data-bulk-cas.listing", len(STORE_LISTING), hashlib.sha256(STORE_LISTING.encode()).hexdigest(),
+    len(STORE_OBJECTS), sum(map(len, STORE_OBJECTS.values())),
+)
+STORE_COPY = os.path.join(backupset.files_dir(backupset.set_dir(SET_LABEL)), "data-bulk-cas")
+DOCUMENT_ID = hashlib.sha256(b"fictitious document").hexdigest()
 RECIPIENT = "age1" + "a" * 58
 AGE_HEADER = (
     b"age-encryption.org/v1\n"
@@ -120,6 +132,7 @@ def make_manifest() -> backupset.Manifest:
         (RECIPIENT, "age1" + "b" * 58),
         backupset.LinkVerdict(1, 1),
         "b" * 64,
+        listings={"data-bulk-cas": STORE_PIN},
     )
 
 
@@ -147,6 +160,9 @@ class FakeHost:
         fail_verify: bool = False,
         fail_postgres: bool = False,
         fail_counts: bool = False,
+        fail_inventory: bool = False,
+        planted_object: bool = False,
+        fail_listing_pin: bool = False,
     ) -> None:
         self.manifest = manifest or make_manifest()
         self.euid = euid
@@ -156,6 +172,21 @@ class FakeHost:
         self.fail_verify = fail_verify
         self.fail_postgres = fail_postgres
         self.fail_counts = fail_counts
+        self.fail_inventory = fail_inventory
+        self.counts = {database: dict(counts) for database, counts in self.manifest.row_counts.items()}
+        self.tables = {database: set(counts) for database, counts in self.counts.items()}
+        self.count_output: dict[str, str] = {}
+        self.chunk: tuple[str, ...] | None = (
+            hashlib.sha256(b"fictitious chunk").hexdigest(), DOCUMENT_ID,
+            hashlib.sha256(CANONICAL_TEXT.encode()).hexdigest(), "11", "17",
+            hashlib.sha256(CANONICAL_TEXT[11:17].encode()).hexdigest(), "3",
+        )
+        self.fail_listing_pin = fail_listing_pin
+        self.documents = [(DOCUMENT_ID, *STORE_OBJECTS)]
+        self.object_bytes = {os.fspath(cas.object_path(name, STORE_COPY)): data for name, data in STORE_OBJECTS.items()}
+        if planted_object:
+            planted_path = os.fspath(cas.object_path(sorted(STORE_OBJECTS)[0], STORE_COPY))
+            self.object_bytes[planted_path] = b"x" * len(self.object_bytes[planted_path])
         self.calls: list[
             tuple[tuple[str, ...], str | None, str | None, float | None]
         ] = []
@@ -170,6 +201,7 @@ class FakeHost:
                 backupset.set_dir(SET_LABEL), backupset.MANIFEST_NAME
             ): self.manifest.to_json(),
         }
+        self.files[os.path.join(backupset.set_dir(SET_LABEL), STORE_PIN.file)] = STORE_LISTING
         if leftover:
             self.files[os.path.join(DRILL_ROOT, "compose.yaml")] = "old\n"
         for relative in ("host.lock", "images.lock", "models.lock"):
@@ -201,10 +233,42 @@ class FakeHost:
         if "id" in command:
             value = "1000" if "-u" in command else "1001"
             return completed(command, stdout=value + "\n")
+        if command[:2] == ("find", "."):
+            if "-fprintf" in command:
+                assert cwd is not None
+                path = command[command.index("-fprintf") + 1]
+                self.files[path] = "".join(
+                    f"{os.path.basename(name)}\t{len(data)}\n"
+                    for name, data in self.object_bytes.items()
+                    if name.startswith(os.fspath(cwd) + "/")
+                )
+            return completed(command)
+        if command[:3] == ("env", "LC_ALL=C", "sort"):
+            path = command[-1]
+            self.files[path] = "".join(line + "\n" for line in sorted(self.files[path].splitlines()))
+            return completed(command)
+        if command and command[0] == "awk":
+            lines = self.files[command[-1]].splitlines()
+            total = sum(int(line.split("\t")[1]) for line in lines)
+            return completed(command, stdout=f"{len(lines)} {total}\n")
         if command and command[0] == "sha256sum":
             if len(command) > 1 and command[1] == "-c":
-                return completed(command)
+                assert input is not None and cwd is not None
+                check_lines: list[str] = []
+                failed = False
+                for line in input.splitlines():
+                    name, path = line.split("  ", 1)
+                    data = self.read_bytes(os.path.join(os.fspath(cwd), path))
+                    okay = hashlib.sha256(data).hexdigest() == name
+                    failed |= not okay
+                    check_lines.append(f"{path}: {'OK' if okay else 'FAILED'}\n")
+                return completed(command, returncode=int(failed), stdout="".join(check_lines))
             path = command[-1]
+            if path.endswith(".listing"):
+                digest = hashlib.sha256(self.files[path].encode()).hexdigest()
+                if self.fail_listing_pin:
+                    digest = hashlib.sha256(b"fictitious mismatched listing").hexdigest()
+                return completed(command, stdout=f"{digest}  {path}\n")
             digest = "0" * 64 if self.fail_tarball else TARBALL_SHA256
             return completed(command, stdout=f"{digest}  {path}\n")
         if command[:2] == ("bash", "-c"):
@@ -226,10 +290,27 @@ class FakeHost:
             database = command[command.index("-d") + 1]
             if "gideon_audit" in command:
                 return completed(command)
-            if self.fail_counts and database == "gideon":
-                return completed(command, stdout="public.users|3\n")
-            output = "public.users|2\n" if database == "gideon" else "public.files|1\n"
-            return completed(command, stdout=output)
+            if input is not None and "pg_stat_user_tables" in input:
+                assert "ON_ERROR_STOP=1" in command
+                assert input == "SELECT schemaname||'.'||relname FROM pg_stat_user_tables ORDER BY schemaname, relname;\n"
+                return completed(command, returncode=int(self.fail_inventory), stdout="".join(table + "\n" for table in sorted(self.tables[database])))
+            if input is not None and "count(*)" in input:
+                assert "ON_ERROR_STOP=1" in command
+                requested = [line.split("'")[1] for line in input.splitlines()]
+                output = self.count_output.get(database, "".join(f"{table}|{self.counts[database][table]}\n" for table in requested))
+                return completed(command, returncode=int(self.fail_counts), stdout=output)
+            if input is not None and "FROM chunks" in input:
+                assert "ON_ERROR_STOP=1" in command
+                assert "JOIN documents d ON d.doc_id = c.doc_id" in input
+                assert "ORDER BY c.chunk_id LIMIT 1" in input
+                return completed(command, stdout="" if self.chunk is None else "|".join(self.chunk) + "\n")
+            if input is not None and "FROM documents" in input:
+                assert "ON_ERROR_STOP=1" in command
+                assert "coalesce(sha256, '')" in input
+                assert "coalesce(canonical_text_sha256, '')" in input
+                assert "WHERE sha256 IS NOT NULL OR canonical_text_sha256 IS NOT NULL" in input
+                return completed(command, stdout="".join("|".join(row) + "\n" for row in self.documents))
+            raise AssertionError(f"unexpected psql statement: {input}")
         return completed(command)
 
     def read_text(self, path: PathLike, *, encoding: str = "utf-8") -> str:
@@ -238,6 +319,12 @@ class FakeHost:
         if key not in self.files:
             raise FileNotFoundError(key)
         return self.files[key]
+
+    def read_bytes(self, path: PathLike) -> bytes:
+        key = os.fspath(path)
+        if key not in self.object_bytes:
+            raise FileNotFoundError(key)
+        return self.object_bytes[key]
 
     def write_text(
         self,
@@ -265,7 +352,14 @@ class FakeHost:
         self.files.pop(os.fspath(path), None)
 
     def stat(self, path: PathLike) -> os.stat_result:
-        raise FileNotFoundError(os.fspath(path))
+        key = os.fspath(path)
+        if key == STORE_COPY:
+            return os.stat_result((0o40700, 0, 0, 1, 0, 0, 0, 0, 0, 0))
+        if key in self.files:
+            return os.stat_result((0o100644, 0, 0, 1, 0, 0, len(self.files[key].encode()), 0, 0, 0))
+        if key in self.object_bytes:
+            return os.stat_result((0o100440, 0, 0, 1, 0, 0, len(self.object_bytes[key]), 0, 0, 0))
+        raise FileNotFoundError(key)
 
     def chmod(self, path: PathLike, mode: int) -> None:
         del path, mode
@@ -292,13 +386,15 @@ def run(
     host: FakeHost,
     *,
     ready: bool = True,
-    now: datetime = NOW,
+    now: datetime | None = NOW,
+    clock: Callable[[], float] = lambda: 0.0,
 ) -> int:
     return drill.run_backup_drill(
         argparse.Namespace(),
         host=host,
         root=ROOT,
         now=now,
+        clock=clock,
         sleep=lambda seconds: None,
         client_factory=lambda: cast(owui.Client, FakeClient(ready)),
     )
@@ -351,6 +447,307 @@ class Preconditions(unittest.TestCase):
                 self.assertIn(expected, err.getvalue())
 
 
+class StoreChecks(unittest.TestCase):
+    def _observe(
+        self, host: FakeHost, *, now: datetime | None = NOW, clock: Callable[[], float] = lambda: 0.0
+    ) -> tuple[int, str, Mapping[str, object]]:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), mock.patch.object(drill.audit, "write_rows", return_value=None) as writer:
+            code = run(host, now=now, clock=clock)
+        return code, out.getvalue(), writer.call_args.args[2][0].detail
+
+    def test_walk_row_and_audit_hold_objects_documents_and_zero_seconds_with_supplied_now(self) -> None:
+        host = FakeHost()
+        code, output, detail = self._observe(host, clock=mock.Mock(side_effect=AssertionError("clock must not run")))
+        self.assertEqual(code, 0)
+        self.assertIn(
+            f"cas-walk: ok — walked {STORE_PIN.objects} object(s) ({STORE_PIN.bytes} bytes), "
+            f"every object hashes to its name; {len(host.documents)} document row(s) name objects the set holds; 0.0 s",
+            output,
+        )
+        self.assertEqual(detail["objects"], STORE_PIN.objects)
+        self.assertEqual(detail["seconds"], {"cas_walk": 0.0, "retrieval_read": 0.0})
+        self.assertEqual(cast(Mapping[str, str], detail["checks"])["cas_walk"], "pass")
+        self.assertEqual(cast(Mapping[str, str], detail["checks"])["retrieval_read"], "pass")
+        self.assertIn((os.path.join(DRILL_ROOT, "walk"), 0o700), host.mkdir_calls)
+        self.assertTrue(any(call[0] == ("sha256sum", "-c", "-") for call in host.calls))
+        for data in STORE_OBJECTS.values():
+            self.assertNotIn(data.decode(), output)
+            self.assertNotIn(data.decode(), str(detail))
+
+    def test_monotonic_seconds_reach_row_and_audit(self) -> None:
+        clock = mock.Mock(side_effect=(20.0, 21.25, 25.0, 25.75))
+        code, output, detail = self._observe(FakeHost(), now=None, clock=clock)
+        self.assertEqual(code, 0)
+        self.assertIn("; 1.2 s", output)
+        self.assertIn("; 0.8 s", output)
+        self.assertEqual(detail["seconds"], {"cas_walk": 1.25, "retrieval_read": 0.75})
+        self.assertEqual(clock.call_count, 4)
+
+    def test_read_row_uses_code_point_offsets_and_audit_contains_no_text(self) -> None:
+        host = FakeHost()
+        assert host.chunk is not None
+        chunk_id, doc_id, name, start, end, _, tokens = host.chunk
+        content = CANONICAL_TEXT[int(start):int(end)]
+        self.assertNotEqual(len(content), len(content.encode()))
+        code, output, detail = self._observe(host)
+        self.assertEqual(code, 0)
+        self.assertIn(
+            f"retrieval-read: ok — read chunk {chunk_id} of document {doc_id}: {len(content)} character(s), "
+            f"{tokens} token(s), from object {name}; 0.0 s",
+            output,
+        )
+        self.assertNotIn(content, output)
+        self.assertNotIn(content, str(detail))
+        self.assertFalse(any(content in text for _, text, _ in host.writes))
+
+    def test_no_chunk_passes_with_nothing_to_read(self) -> None:
+        host = FakeHost()
+        host.chunk = None
+        code, output, detail = self._observe(host)
+        self.assertEqual(code, 0)
+        self.assertIn("retrieval-read: ok — the restored record holds no chunk; nothing to read\n", output)
+        self.assertEqual(cast(Mapping[str, str], detail["checks"])["retrieval_read"], "pass")
+
+    def test_wrong_content_hash_and_empty_slice_fail_with_read_fix(self) -> None:
+        for empty in (False, True):
+            with self.subTest(empty=empty):
+                host = FakeHost()
+                assert host.chunk is not None
+                fields = list(host.chunk)
+                if empty:
+                    fields[3:5] = (str(len(CANONICAL_TEXT)), str(len(CANONICAL_TEXT) + 1))
+                else:
+                    fields[5] = hashlib.sha256(b"fictitious different slice").hexdigest()
+                host.chunk = tuple(fields)
+                code, output, detail = self._observe(host)
+                self.assertEqual(code, 1)
+                self.assertIn(f"chunk {fields[0]} text does not hash to its content hash", output)
+                self.assertIn("Fix: Run sudo python3 -m gideon backup run, then retry.", output)
+                self.assertEqual(cast(Mapping[str, str], detail["checks"])["retrieval_read"], "failed")
+                self.assertIn("teardown: ok", output)
+
+    def test_store_read_refusal_uses_its_problem_and_the_read_fix(self) -> None:
+        host = FakeHost()
+        assert host.chunk is not None
+        name = host.chunk[2]
+        path = os.fspath(cas.object_path(name, STORE_COPY))
+        ordinary_read = host.read_bytes
+        reads = 0
+
+        def read_bytes(object_path: PathLike) -> bytes:
+            nonlocal reads
+            if os.fspath(object_path) == path:
+                reads += 1
+                if reads > 1:
+                    raise FileNotFoundError(path)
+            return ordinary_read(object_path)
+
+        with mock.patch.object(host, "read_bytes", side_effect=read_bytes):
+            code, output, detail = self._observe(host)
+        self.assertEqual(code, 1)
+        self.assertIn(f"no object {name} at {path}", output)
+        self.assertIn("Fix: Run sudo python3 -m gideon backup run, then retry.", output)
+        self.assertEqual(cast(Mapping[str, str], detail["checks"])["retrieval_read"], "failed")
+
+    def test_non_utf8_object_fails_without_echoing_its_bytes(self) -> None:
+        host = FakeHost()
+        assert host.chunk is not None
+        data = b"fictitious invalid UTF-8: \xff"
+        name = hashlib.sha256(data).hexdigest()
+        host.object_bytes[os.fspath(cas.object_path(name, STORE_COPY))] = data
+        content = "".join(
+            f"{os.path.basename(path)}\t{len(value)}\n" for path, value in sorted(host.object_bytes.items())
+        )
+        pin = replace(STORE_PIN, size=len(content), sha256=hashlib.sha256(content.encode()).hexdigest(),
+                      objects=len(host.object_bytes), bytes=sum(map(len, host.object_bytes.values())))
+        host.manifest = replace(host.manifest, listings={"data-bulk-cas": pin})
+        host.files[os.path.join(backupset.set_dir(SET_LABEL), backupset.MANIFEST_NAME)] = host.manifest.to_json()
+        host.files[os.path.join(backupset.set_dir(SET_LABEL), pin.file)] = content
+        fields = list(host.chunk)
+        fields[2] = name
+        host.chunk = tuple(fields)
+        host.documents = [(DOCUMENT_ID, next(iter(STORE_OBJECTS)), name)]
+        code, output, detail = self._observe(host)
+        self.assertEqual(code, 1)
+        self.assertIn(f"object {name} is not UTF-8", output)
+        self.assertNotIn("fictitious invalid UTF-8", output)
+        self.assertNotIn("fictitious invalid UTF-8", str(detail))
+
+    def test_chunk_row_grammar_refuses_malformed_rows_without_echoing_text(self) -> None:
+        host = FakeHost()
+        assert host.chunk is not None
+        cases: list[tuple[str, ...]] = [host.chunk[:-1], (*host.chunk, "extra")]
+        for index, value in (
+            (0, "fictitious bad id"), (1, DOCUMENT_ID.upper()), (2, ""), (5, "fictitious bad hash"),
+            (3, "-1"), (4, "11"), (6, "0"), (6, "1.5"),
+        ):
+            fields = list(host.chunk)
+            fields[index] = value
+            cases.append(tuple(fields))
+        for row in cases:
+            with self.subTest(row=row):
+                host = FakeHost()
+                host.chunk = row
+                code, output, _ = self._observe(host)
+                self.assertEqual(code, 1)
+                self.assertIn("chunk query returned a malformed row", output)
+                self.assertNotIn("fictitious bad", output)
+
+    def test_planted_object_fails_naming_it_and_teardown_runs(self) -> None:
+        host = FakeHost(planted_object=True)
+        code, output, detail = self._observe(host)
+        self.assertEqual(code, 1)
+        self.assertIn(f"1 object(s) do not hash to their names: {sorted(STORE_OBJECTS)[0]}", output)
+        self.assertEqual(detail["result"], "failed")
+        self.assertEqual(detail["objects"], STORE_PIN.objects)
+        self.assertEqual(cast(Mapping[str, str], detail["checks"])["cas_walk"], "failed")
+        self.assertEqual(cast(Mapping[str, str], detail["checks"])["retrieval_read"], "skipped")
+        self.assertFalse(any("FROM documents" in (call[1] or "") for call in host.calls))
+        self.assertIn(("rm", "-rf", os.path.join(DRILL_ROOT, "walk")), [call[0] for call in host.calls])
+        self.assertIn("teardown: ok", output)
+        self.assertIn("Remove the named object's path from the set's copy", output)
+        self.assertIn("backup run", output)
+
+    def test_listing_pin_failure_precedes_object_hashing(self) -> None:
+        host = FakeHost(fail_listing_pin=True)
+        code, output, detail = self._observe(host)
+        self.assertEqual(code, 1)
+        self.assertIn("does not match its manifest pin", output)
+        self.assertFalse(any(call[0] == ("sha256sum", "-c", "-") for call in host.calls))
+        self.assertNotIn("objects", detail)
+        self.assertIn("teardown: ok", output)
+
+    def test_missing_object_counts_document_rows_and_names_at_most_ten_ids(self) -> None:
+        host = FakeHost()
+        absent = hashlib.sha256(b"fictitious absent object").hexdigest()
+        ids = [hashlib.sha256(f"fictitious missing document {i}".encode()).hexdigest() for i in range(12)]
+        host.documents = [(doc_id, absent, absent) for doc_id in ids]
+        code, output, detail = self._observe(host)
+        self.assertEqual(code, 1)
+        self.assertIn(f"{len(ids)} document row(s) name objects the set lacks: {', '.join(ids[:10])}", output)
+        for doc_id in ids[10:]:
+            self.assertNotIn(doc_id, output)
+        self.assertEqual(detail["objects"], STORE_PIN.objects)
+
+    def test_no_listing_pin_refuses_with_backup_run_fix(self) -> None:
+        host = FakeHost(manifest=replace(make_manifest(), listings={}))
+        code, output, detail = self._observe(host)
+        self.assertEqual(code, 1)
+        self.assertIn("the set predates the store listing", output)
+        self.assertIn("Fix: Run sudo python3 -m gideon backup run, then retry.", output)
+        self.assertNotIn("Remove the named object's path", output)
+        self.assertNotIn("objects", detail)
+        self.assertFalse(any(call[0] == ("sha256sum", "-c", "-") for call in host.calls))
+
+    def test_earlier_failure_skips_walk_and_omits_objects(self) -> None:
+        host = FakeHost(fail_counts=True)
+        clock = mock.Mock(side_effect=AssertionError("skipped walk must not use clock"))
+        code, output, detail = self._observe(host, now=None, clock=clock)
+        self.assertEqual(code, 1)
+        self.assertNotIn("cas-walk:", output)
+        self.assertEqual(cast(Mapping[str, str], detail["checks"])["cas_walk"], "skipped")
+        self.assertNotIn("objects", detail)
+        self.assertEqual(detail["seconds"], {"cas_walk": 0.0, "retrieval_read": 0.0})
+
+    def test_empty_reference_names_pass_and_malformed_document_rows_refuse_without_echoing_text(self) -> None:
+        host = FakeHost()
+        host.documents = [(DOCUMENT_ID, "", next(iter(STORE_OBJECTS)))]
+        self.assertEqual(self._observe(host)[0], 0)
+        for row in (
+            ("fictitious malformed document", "", ""),
+            (DOCUMENT_ID, "fictitious malformed name", ""),
+            (DOCUMENT_ID, "", "fictitious malformed name"),
+            (DOCUMENT_ID, "", "", "extra field"),
+        ):
+            with self.subTest(row=row):
+                host = FakeHost()
+                host.documents = [row]
+                code, output, _ = self._observe(host)
+                self.assertEqual(code, 1)
+                self.assertIn("document object query returned a malformed line", output)
+                self.assertNotIn("fictitious malformed", output)
+
+
+class Counts(unittest.TestCase):
+    def _stage(self, host: FakeHost) -> StageResult:
+        return drill._counts_stage(cast(Host, host), manifest=host.manifest)
+
+    def test_matching_counts_include_the_manifest_table_count(self) -> None:
+        host = FakeHost()
+        result = self._stage(host)
+        tables = sum(map(len, host.manifest.row_counts.values()))
+        self.assertEqual(result, StageResult("counts", True, f"restored row counts match the manifest ({tables} tables)", ""))
+
+    def test_positive_and_negative_drift_pass_in_name_order_across_databases(self) -> None:
+        manifest = replace(make_manifest(), row_counts={"gideon": {"public.users": 4}, "openwebui": {"public.files": 1}})
+        host = FakeHost(manifest=manifest)
+        host.counts["gideon"]["public.users"] = 2
+        host.counts["openwebui"]["public.files"] = 3
+        result = self._stage(host)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.detail, "2 table(s) drift from the manifest: public.files +2, public.users -2 (the writer's rows since the boundary)")
+
+    def test_absent_and_emptied_tables_each_pass_with_their_clause(self) -> None:
+        host = FakeHost()
+        host.tables["gideon"].clear()
+        result = self._stage(host)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.detail, "absent from the restored database: public.users")
+        self.assertFalse(any(call[1] and "count(*)" in call[1] and "public.users" in call[1] for call in host.calls))
+        host = FakeHost()
+        host.counts["gideon"]["public.users"] = 0
+        result = self._stage(host)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.detail, "restored empty: public.users")
+
+    def test_drift_absent_and_empty_clauses_keep_their_order(self) -> None:
+        manifest = replace(make_manifest(), row_counts={"gideon": {"public.z_drift": 1, "public.a_absent": 1}, "openwebui": {"public.b_empty": 1}})
+        host = FakeHost(manifest=manifest)
+        host.tables["gideon"].remove("public.a_absent")
+        host.counts["gideon"]["public.z_drift"] = 2
+        host.counts["openwebui"]["public.b_empty"] = 0
+        result = self._stage(host)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.detail, "1 table(s) drift from the manifest: public.z_drift +1 (the writer's rows since the boundary); absent from the restored database: public.a_absent; restored empty: public.b_empty")
+
+    def test_short_malformed_unrequested_and_duplicate_count_results_refuse(self) -> None:
+        for output in ("", "public.users|-1\n", "public.users|1|extra\n", "public.other|1\n", "public.users|2\npublic.users|2\n"):
+            with self.subTest(output=output):
+                host = FakeHost()
+                host.count_output["gideon"] = output
+                result = self._stage(host)
+                self.assertFalse(result.ok)
+                self.assertEqual(result.fix, drill._COUNTS_FIX)
+
+    def test_listing_and_count_failures_are_refusals(self) -> None:
+        for inventory in (True, False):
+            with self.subTest(inventory=inventory):
+                host = FakeHost(fail_inventory=inventory, fail_counts=not inventory)
+                result = self._stage(host)
+                self.assertFalse(result.ok)
+                self.assertIn("table listing failed" if inventory else "row count query failed", result.detail)
+                self.assertEqual(result.fix, drill._COUNTS_FIX)
+                self.assertEqual(len(host.calls), 1 if inventory else 2)
+
+    def test_listing_and_count_exceptions_are_refusals_and_unlisted_names_are_skipped(self) -> None:
+        for inventory in (True, False):
+            with self.subTest(inventory=inventory):
+                host = FakeHost()
+                responses: list[subprocess.CompletedProcess[str] | OSError] = [OSError("fictitious query failure")]
+                if not inventory:
+                    responses.insert(0, completed((), stdout="".join(table + "\n" for table in sorted(host.tables["gideon"]))))
+                with mock.patch.object(host, "run", side_effect=responses):
+                    result = self._stage(host)
+                self.assertFalse(result.ok)
+                self.assertEqual(result.fix, drill._COUNTS_FIX)
+        host = FakeHost()
+        host.tables["gideon"] = {"fictitious unlisted table"}
+        result = self._stage(host)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.detail, "absent from the restored database: public.users")
+
+
 class DrillContracts(unittest.TestCase):
     def test_document_prepare_identity_upload_and_teardown(self) -> None:
         host = FakeHost(leftover=True)
@@ -384,10 +781,10 @@ class DrillContracts(unittest.TestCase):
         )
         commands = [call[0] for call in host.calls]
         self.assertEqual(sum(command[0:2] == ("docker", "compose") and "down" in command for command in commands), 2)
-        for name in ("postgres", "openwebui", "compose.yaml"):
+        for name in ("postgres", "openwebui", "compose.yaml", "walk"):
             self.assertIn(("rm", "-rf", f"{DRILL_ROOT}/{name}"), commands)
-        self.assertIn("cas-walk: ok — inert", out.getvalue())
-        self.assertIn("retrieval-read: ok — inert", out.getvalue())
+        self.assertIn("cas-walk: ok — walked", out.getvalue())
+        self.assertIn("retrieval-read: ok — read chunk", out.getvalue())
 
     def test_tarball_bash_probe_and_verify_restore_argv(self) -> None:
         host = FakeHost()
@@ -438,11 +835,12 @@ class DrillContracts(unittest.TestCase):
             self.assertFalse(any("restore" in command for command in commands))
             self.assertTrue(any(command[0:2] == ("docker", "compose") and "down" in command for command in commands))
 
-    def test_counts_mismatch_names_only_the_table_and_frontend_can_fail(self) -> None:
-        host = FakeHost(fail_counts=True)
+    def test_counts_drift_names_only_the_table_and_frontend_can_fail(self) -> None:
+        host = FakeHost()
+        host.counts["gideon"]["public.users"] += 1
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            self.assertEqual(run(host), 1)
+            self.assertEqual(run(host), 0)
         self.assertIn("public.users", out.getvalue())
         self.assertNotIn("public.files", out.getvalue().split("counts:", 1)[-1].split("teardown:", 1)[0])
 

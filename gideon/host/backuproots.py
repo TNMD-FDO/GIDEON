@@ -139,6 +139,49 @@ def _listing_pin(io: Host, listing: str) -> backupset.ListingPin | Problem:
         return Problem(f"pinning {listing} failed: {exc}", "")
 
 
+def listing_names(io: Host, listing: str) -> tuple[str, ...] | Problem:
+    """Read the object names, in order, from a store listing of names and sizes."""
+
+    try:
+        content = io.read_text(listing)
+    except (OSError, UnicodeError) as exc:
+        return Problem(f"store listing {listing} cannot be read: {exc}", "")
+    names: list[str] = []
+    for line in content.splitlines():
+        name, separator, size = line.partition("\t")
+        if not separator or _OBJECT_NAME.fullmatch(name) is None or not size.isdecimal():
+            return Problem(f"store listing {listing} contains a malformed line", "")
+        names.append(name)
+    return tuple(names)
+
+
+def hash_objects(io: Host, copy: str, names: Sequence[str]) -> tuple[list[str], list[str]] | Problem:
+    """Split object names by whether their bytes in the copy hash to those names."""
+
+    passing: list[str] = []
+    failed: list[str] = []
+    for start in range(0, len(names), _HASH_BATCH):
+        paths = {_object_relative(name): name for name in names[start : start + _HASH_BATCH]}
+        checks = "".join(f"{name}  {path}\n" for path, name in paths.items())
+        try:
+            checked = io.run(["sha256sum", "-c", "-"], input=checks, cwd=copy)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return Problem(f"store object check for {os.path.basename(copy)} failed: {exc}", "")
+        okay_paths, failed_paths = sshtarget.parse_check_output(checked.stdout)
+        # sha256sum exits 1 whenever a line fails, so the exit alone is no
+        # refusal: a report that does not account for every line is.
+        if (
+            checked.returncode not in (0, 1)
+            or set(okay_paths + failed_paths) != set(paths)
+            or len(okay_paths) + len(failed_paths) != len(paths)
+            or bool(failed_paths) != (checked.returncode == 1)
+        ):
+            return Problem(f"store object check for {os.path.basename(copy)} failed: {command_detail(checked)}", "")
+        passing.extend(paths[path] for path in okay_paths)
+        failed.extend(paths[path] for path in failed_paths)
+    return passing, failed
+
+
 @dataclass(frozen=True, slots=True)
 class Taken:
     """A root's take: whether a copy was made, and the pairs the link sample may compare."""
@@ -938,6 +981,16 @@ class StoreCounts:
 
 
 @dataclass(frozen=True, slots=True)
+class StoreWalk:
+    """A store copy's inventory and the object names whose bytes fail their hash."""
+
+    objects: int
+    bytes: int
+    names: tuple[str, ...]
+    failed: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class HeldRoot:
     """A root bound to its live directory and copy in a complete set."""
 
@@ -961,6 +1014,9 @@ class HeldRoot:
         raise NotImplementedError
 
     def put_back(self, host_ids: backupset.AccountIds) -> PutBack | Problem:
+        raise NotImplementedError
+
+    def walk(self, scratch_dir: str) -> StoreWalk | Problem:
         raise NotImplementedError
 
 
@@ -1071,6 +1127,9 @@ class _HeldSnapshot(HeldRoot):
         )
         return PutBack((self.name,), clause, claims, added={self.name: arrived} if labels else {})
 
+    def walk(self, scratch_dir: str) -> StoreWalk | Problem:
+        return Problem(f"{self.name} is not a store", "")
+
 
 @dataclass(frozen=True, slots=True)
 class _HeldRepository(HeldRoot):
@@ -1097,13 +1156,52 @@ class _HeldRepository(HeldRoot):
     def put_back(self, host_ids: backupset.AccountIds) -> PutBack | Problem:
         return PutBack((), (), Claims())
 
+    def walk(self, scratch_dir: str) -> StoreWalk | Problem:
+        return Problem(f"{self.name} is not a store", "")
+
 
 @dataclass(frozen=True, slots=True)
 class _HeldStore(HeldRoot):
-    """A store verifies its listing and restores only missing, intact objects."""
+    """A store verifies its listing, walks its copy, and restores missing, intact objects."""
 
     pin: backupset.ListingPin | None
     later: backupset.SetRef | None = None
+
+    def walk(self, scratch_dir: str) -> StoreWalk | Problem:
+        if self.pin is None:
+            return Problem(
+                f"{self.name}: the set predates the store listing", f"Run {report.command('backup run')}, then retry."
+            )
+        stray = _checked(self.io, _store_stray_argv(), f"store shape check for {self.name}", cwd=self.copy)
+        if isinstance(stray, Problem):
+            return stray
+        if stray.stdout.strip():
+            offender = os.path.join(self.copy, stray.stdout.strip().removeprefix("./"))
+            return Problem(f"{offender} is not an object in its own shard directories", "")
+        listing = os.path.join(scratch_dir, self.name + ".listing")
+        for argv, what, cwd in (
+            (_store_listing_argv(listing), "store listing", self.copy),
+            (_store_sort_argv(listing), "store listing sort", None),
+        ):
+            result = _checked(self.io, argv, f"{what} for {self.name}", cwd=cwd)
+            if isinstance(result, Problem):
+                return result
+        pin = _listing_pin(self.io, listing)
+        if isinstance(pin, Problem):
+            return pin
+        if (pin.size, pin.sha256, pin.objects, pin.bytes) != (
+            self.pin.size, self.pin.sha256, self.pin.objects, self.pin.bytes
+        ):
+            return Problem(f"{self.copy} does not match the store listing's manifest pin", "")
+        set_listing = os.path.join(os.path.dirname(os.path.dirname(self.copy)), self.pin.file)
+        names = listing_names(self.io, set_listing)
+        if isinstance(names, Problem):
+            return names
+        checked = hash_objects(self.io, self.copy, names)
+        if isinstance(checked, Problem):
+            return checked
+        _, failed = checked
+        return StoreWalk(pin.objects, pin.bytes, names, tuple(sorted(failed)))
 
     def verify(self) -> Problem | None:
         for copy, pin in self._listings():
@@ -1171,7 +1269,7 @@ class _HeldStore(HeldRoot):
                     self.io.unlink(live_listing, missing_ok=True)
             if isinstance(needed, Problem):
                 return needed
-            checked = self._hash_needed(needed, copy)
+            checked = hash_objects(self.io, copy, needed)
             if isinstance(checked, Problem):
                 return checked
             passing, failed = checked
@@ -1226,32 +1324,6 @@ class _HeldStore(HeldRoot):
                 return Problem(f"store listing join for {self.name} returned a malformed line", "")
             needed.append(name)
         return needed
-
-    def _hash_needed(self, needed: Sequence[str], copy: str) -> tuple[list[str], list[str]] | Problem:
-        """Split the needed names into those whose bytes in the set's copy hash to them, and the rest."""
-
-        passing: list[str] = []
-        failed: list[str] = []
-        for start in range(0, len(needed), _HASH_BATCH):
-            paths = {_object_relative(name): name for name in needed[start : start + _HASH_BATCH]}
-            checks = "".join(f"{name}  {path}\n" for path, name in paths.items())
-            try:
-                checked = self.io.run(["sha256sum", "-c", "-"], input=checks, cwd=copy)
-            except (OSError, subprocess.SubprocessError) as exc:
-                return Problem(f"store object check for {self.name} failed: {exc}", "")
-            okay_paths, failed_paths = sshtarget.parse_check_output(checked.stdout)
-            # sha256sum exits 1 whenever a line fails, so the exit alone is no
-            # refusal: a report that does not account for every line is.
-            if (
-                checked.returncode not in (0, 1)
-                or set(okay_paths + failed_paths) != set(paths)
-                or len(okay_paths) + len(failed_paths) != len(paths)
-                or bool(failed_paths) != (checked.returncode == 1)
-            ):
-                return Problem(f"store object check for {self.name} failed: {command_detail(checked)}", "")
-            passing.extend(paths[path] for path in okay_paths)
-            failed.extend(paths[path] for path in failed_paths)
-        return passing, failed
 
 
 def supplies(
