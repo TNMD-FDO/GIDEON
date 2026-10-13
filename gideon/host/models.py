@@ -89,6 +89,18 @@ class GpuRequirements:
     count: int
     vram_gb: int
 
+    def matches(self, reported: str) -> bool:
+        """Match the card's name alone or with its edition after one space.
+
+        The model is the card's name as the driver leads with it, the suffix
+        its edition. Nothing is normalized.
+        """
+
+        return reported == self.model or (
+            reported.startswith(f"{self.model} ")
+            and not reported.startswith(f"{self.model}  ")
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class ProfileRequirements:
@@ -744,7 +756,9 @@ def validate_models_lock(document: Mapping[str, object]) -> list[ModelsLockError
                     _walk_unknown(gpu, _GPU_KEYS, f"{requires_path}.gpu", errors)
                     _string(gpu, "architecture", errors, error_path=f"{requires_path}.gpu.architecture")
                     capability = _string(gpu, "compute_capability", errors, error_path=f"{requires_path}.gpu.compute_capability")
-                    _string(gpu, "model", errors, error_path=f"{requires_path}.gpu.model")
+                    model = _string(gpu, "model", errors, error_path=f"{requires_path}.gpu.model")
+                    if model is not None and model != model.strip():
+                        errors.append(_error(f"{requires_path}.gpu.model", "the card's name must not begin or end with whitespace"))
                     gpu_count = _int(gpu, "count", errors, error_path=f"{requires_path}.gpu.count")
                     _int(gpu, "vram_gb", errors, error_path=f"{requires_path}.gpu.vram_gb")
                     if capability is not None and COMPUTE_CAPABILITY.fullmatch(capability) is None:

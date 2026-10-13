@@ -1870,6 +1870,7 @@ class HardwareProfile(unittest.TestCase):
         self,
         *,
         gpu_stdout: str | None = None,
+        model: str | None = None,
         gpu_returncode: int = 0,
         gpu_stderr: str = "",
         architecture_stdout: str | None = None,
@@ -1880,7 +1881,9 @@ class HardwareProfile(unittest.TestCase):
     ) -> FakeHost:
         requirements = MODELS.profiles[0].requires
         if gpu_stdout is None:
-            gpu_stdout = "\n".join(_gpu_line() for _ in range(requirements.gpu.count)) + "\n"
+            gpu_stdout = "\n".join(
+                _gpu_line(model=model) for _ in range(requirements.gpu.count)
+            ) + "\n"
         if architecture_stdout is None:
             architecture_stdout = "\n".join(
                 f"    Product Architecture              : {requirements.gpu.architecture}"
@@ -1939,12 +1942,16 @@ class HardwareProfile(unittest.TestCase):
             profiles=(dataclasses.replace(MODELS.profiles[0], name="alternate"),),
         )
         site = make_site(extra="hardware_profile: alternate\n")
+        requirements = non_reference.profiles[0].requires
+        reported = requirements.gpu.model + " Workstation Edition"
+        host = self.gpu_host(model=reported)
         report = HardwareProfileCheck().run(
-            context(self.gpu_host(), site=site, models=non_reference)
+            context(host, site=site, models=non_reference)
         )
         self.assertEqual(report.severity, Severity.WARN)
         self.assertIn("alternate", report.detail)
         self.assertIn("nvidia-smi -q", report.detail)
+        self.assertIn(f"model {reported}", report.detail)
 
     def test_matching_hardware_passes_with_all_fact_details(self) -> None:
         report = HardwareProfileCheck().run(context(self.gpu_host()))
@@ -1957,6 +1964,18 @@ class HardwareProfile(unittest.TestCase):
         self.assertIn(format_gb(_ceil_div(requirements.gpu.vram_gb * GIGABYTE, 2**20) * 2**20), report.detail)
         self.assertIn(format_gb(_ceil_div(requirements.dram_gb * GIGABYTE, 1024) * 1024), report.detail)
         self.assertIn(requirements.platform, report.detail)
+
+    def test_card_editions_pass_with_reported_name(self) -> None:
+        """Each edition selects the card's profile and reports its name."""
+
+        requirements = MODELS.profiles[0].requires
+        for suffix in (" Server Edition", " Workstation Edition", " Max-Q Workstation Edition"):
+            with self.subTest(suffix=suffix):
+                reported = requirements.gpu.model + suffix
+                host = self.gpu_host(model=reported)
+                report = HardwareProfileCheck().run(context(host))
+                self.assertEqual(report.severity, Severity.PASS, report.detail)
+                self.assertIn(f"model {reported}", report.detail)
 
     def test_wrong_count_refuses(self) -> None:
         requirements = MODELS.profiles[0].requires
@@ -1976,6 +1995,32 @@ class HardwareProfile(unittest.TestCase):
         report = HardwareProfileCheck().run(context(host))
         self.assertEqual(report.severity, Severity.REFUSE)
         self.assertIn("Other GPU", report.detail)
+        self.assertIn(f"profile requires {MODELS.profiles[0].requires.gpu.model} (any edition)", report.detail)
+
+    def test_different_card_names_refuse_with_reported_and_required_names(self) -> None:
+        """A card name changed by one edit selects no matching profile."""
+
+        requirements = MODELS.profiles[0].requires
+        before_last, last = requirements.gpu.model.rsplit(" ", 1)
+        before_number, number = before_last.rsplit(" ", 1)
+        cases = (
+            ("letter in preceding word", f"{before_last}D {last}"),
+            ("different number", f"{before_number} {int(number) - 1000} {last}"),
+            ("word before name", f"Other {requirements.gpu.model}"),
+            ("cut short", before_last),
+            ("glued letters", f"{requirements.gpu.model}XYZ"),
+        )
+        for edit, reported in cases:
+            with self.subTest(edit=edit, reported=reported):
+                host = self.gpu_host(model=reported)
+                report = HardwareProfileCheck().run(context(host))
+                self.assertEqual(report.severity, Severity.REFUSE, report.detail)
+                for index in range(1, requirements.gpu.count + 1):
+                    self.assertIn(
+                        f"GPU {index} model is {reported}, profile requires "
+                        f"{requirements.gpu.model} (any edition)",
+                        report.detail,
+                    )
 
     def test_wrong_capability_refuses(self) -> None:
         host = self.gpu_host(

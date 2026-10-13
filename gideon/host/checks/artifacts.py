@@ -276,9 +276,9 @@ class HardwareProfileCheck(PreflightCheck):
         if len(facts) != required.gpu.count:
             shortfalls.append(f"GPU count is {len(facts)}, profile requires {required.gpu.count}")
         for index, fact in enumerate(facts, 1):
-            if fact.model != required.gpu.model:
+            if not required.gpu.matches(fact.model):
                 shortfalls.append(
-                    f"GPU {index} model is {fact.model}, profile requires {required.gpu.model}"
+                    f"GPU {index} model is {fact.model}, profile requires {required.gpu.model} (any edition)"
                 )
             if fact.compute_capability != required.gpu.compute_capability:
                 shortfalls.append(

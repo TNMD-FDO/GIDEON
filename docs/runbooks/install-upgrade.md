@@ -16,7 +16,7 @@ with `v0.1.0`.
 - **Operating system** — Ubuntu Server 26.04 on `x86_64`; provision refuses any other release or architecture.
 - **Packages** — Install `git` and `python3-yaml` with `sudo apt install -y git python3-yaml`; this is safe to run if they are already installed.
 - **Login** — Use the CSA's own Linux login with `sudo`, never root; this login will own `/opt/gideon`.
-- **Hardware** — The reference profile `2x96v-256d` needs 2 × NVIDIA RTX PRO 6000 Blackwell Server Edition, 96 GB VRAM per GPU, 256 GB RAM, and a 4000 GB data volume; preflight refuses a shortfall. Alternatively, declare a no-GPU host with `--no-gpu` at step 2; preflight judges none of these figures on that host.
+- **Hardware** — The reference profile `2x96v-256d` needs 2 × NVIDIA RTX PRO 6000 Blackwell (any edition), 96 GB VRAM per GPU, 256 GB RAM, and a 4000 GB data volume; preflight refuses a shortfall. Alternatively, declare a no-GPU host with `--no-gpu` at step 2; preflight judges none of these figures on that host.
 - **Download** — Allow about 31 GB of model files at the first apply, including on a no-GPU host.
 - **Office services** — Have the directory, DNS, backup target, certificates, and mail relay ready as described in [office services setup](office-services-setup.md).
 

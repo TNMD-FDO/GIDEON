@@ -57,7 +57,7 @@ profiles:
       gpu:
         architecture: Blackwell
         compute_capability: "12.0"
-        model: NVIDIA RTX PRO 6000 Blackwell Server Edition
+        model: NVIDIA RTX PRO 6000 Blackwell
         count: 2
         vram_gb: 96
       dram_gb: 256
@@ -290,7 +290,7 @@ class CommittedLock(unittest.TestCase):
                 gpu=GpuRequirements(
                     architecture="Blackwell",
                     compute_capability="12.0",
-                    model="NVIDIA RTX PRO 6000 Blackwell Server Edition",
+                    model="NVIDIA RTX PRO 6000 Blackwell",
                     count=2,
                     vram_gb=96,
                 ),
@@ -391,6 +391,28 @@ class CommittedLock(unittest.TestCase):
             field = fields(value)[0]
             with self.assertRaises(FrozenInstanceError):
                 setattr(value, field.name, getattr(value, field.name))
+
+    def test_gpu_model_matches_card_name_and_one_space_edition(self) -> None:
+        """Editions of one card match, while different names refuse."""
+
+        requirements = GpuRequirements(
+            architecture="Example",
+            compute_capability="1.0",
+            model="Example Card 1000",
+            count=1,
+            vram_gb=1,
+        )
+        cases = (
+            ("Example Card 1000", True),
+            ("Example Card 1000 Server Edition", True),
+            ("Example Card", False),
+            ("Example Card 1000D", False),
+            ("Other Example Card 1000", False),
+            ("Example Card 1000  Server Edition", False),
+        )
+        for reported, expected in cases:
+            with self.subTest(reported=reported):
+                self.assertEqual(requirements.matches(reported), expected)
 
     def test_parse_then_load_split(self) -> None:
         parsed = parse_models_lock(VALID)
@@ -578,6 +600,26 @@ class Refusals(unittest.TestCase):
 
     def test_missing_key(self) -> None:
         self.assert_refused(VALID.replace("      data_volume_gb: 4000\n", ""), "missing required key", key_path="profiles.2x96v-256d.requires.data_volume_gb")
+
+    def test_gpu_model_surrounding_whitespace_refuses(self) -> None:
+        """Surrounding whitespace cannot be part of the card's name."""
+
+        valid = load_text(VALID)
+        assert valid.lock is not None
+        model = valid.lock.profiles[0].requires.gpu.model
+        for value in (f" {model}", f"{model} "):
+            with self.subTest(model=value):
+                text = VALID.replace(f"model: {model}", f'model: "{value}"', 1)
+                self.assert_refused(
+                    text,
+                    "the card's name must not begin or end with whitespace",
+                    key_path="profiles.2x96v-256d.requires.gpu.model",
+                )
+                result = load_text(text)
+                self.assertTrue(all(
+                    error.fix == "Edit models.lock; consult docs/runbooks/release-files.md §4."
+                    for error in result.errors
+                ))
 
     def test_memory_table_refusals(self) -> None:
         without_memory = VALID[: VALID.index("    memory:\n")] + VALID[VALID.index("    models:\n") :]

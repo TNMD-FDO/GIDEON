@@ -8,7 +8,7 @@ assistant, on one box the office controls. Built by TNMD-FDO (the Office of
 the Federal Public Defender, Middle District of Tennessee) and designed from
 day one for distribution: clone a tag, edit `site.yaml`, run one script.
 
-**Status:** 0.x — slice 0 (platform) complete at `v0.1.0`, the clean-VM acceptance at minor tags its standing proof; slice 1 (General) complete at `v0.2.0`, with no user on the box until go-live; slice 2 (eval harness) complete at `v0.3.0`; slice 3 (corpus machinery and tranche 1) next; this tree is `v0.3.142`.
+**Status:** 0.x — slice 0 (platform) complete at `v0.1.0`, the clean-VM acceptance at minor tags its standing proof; slice 1 (General) complete at `v0.2.0`, with no user on the box until go-live; slice 2 (eval harness) complete at `v0.3.0`; slice 3 (corpus machinery and tranche 1) next; this tree is `v0.3.143`.
 What each release changed is in [`CHANGELOG.md`](CHANGELOG.md), one line per release; from `v0.2.0` each line links its release note. Later-slice commands still print "not implemented".
 
 ## Install
@@ -18,7 +18,7 @@ What each release changed is in [`CHANGELOG.md`](CHANGELOG.md), one line per rel
 - **Operating system** — Ubuntu Server 26.04 on `x86_64`; provision refuses any other release or architecture.
 - **Packages** — Install `git` and `python3-yaml` with `sudo apt install -y git python3-yaml`; this is safe to run if they are already installed.
 - **Login** — Use the CSA's own Linux login with `sudo`, never root; this login will own `/opt/gideon`.
-- **Hardware** — The reference profile `2x96v-256d` needs 2 × NVIDIA RTX PRO 6000 Blackwell Server Edition, 96 GB VRAM per GPU, 256 GB RAM, and a 4000 GB data volume; preflight refuses a shortfall. Alternatively, declare a no-GPU host with `--no-gpu` at step 2; preflight judges none of these figures on that host.
+- **Hardware** — The reference profile `2x96v-256d` needs 2 × NVIDIA RTX PRO 6000 Blackwell (any edition), 96 GB VRAM per GPU, 256 GB RAM, and a 4000 GB data volume; preflight refuses a shortfall. Alternatively, declare a no-GPU host with `--no-gpu` at step 2; preflight judges none of these figures on that host.
 - **Download** — Allow about 31 GB of model files at the first apply, including on a no-GPU host.
 - **Office services** — Have the directory, DNS, backup target, certificates, and mail relay ready as described in [office services setup](docs/runbooks/office-services-setup.md).
 

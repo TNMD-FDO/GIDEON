@@ -23,15 +23,19 @@ profiles:
     # Minimums preflight checks against the host.  The memory figures are
     # decimal gigabytes (10^9 bytes), compared with the kernel's
     # MemTotal and nvidia-smi's memory.total converted to bytes; the GPU model
-    # is nvidia-smi's spelling. The data-volume floor is a capacity starting
-    # value under the corpus footprint rule, corrected by the measured
-    # footprint once the corpus lands.
+    # is the card's name as the driver leads with it. A reported name selects
+    # the profile when it equals the name or begins with it and one space,
+    # so every edition of the card selects the profile; the suffix names its
+    # cooler and power limit. The Max-Q's lower clocks are accepted, since
+    # nothing the profile fixes depends on clocks. The data-volume floor is
+    # a capacity starting value under the corpus footprint rule, corrected
+    # by the measured footprint once the corpus lands.
     requires:
       platform: x86_64
       gpu:
         architecture: Blackwell
         compute_capability: "12.0"
-        model: NVIDIA RTX PRO 6000 Blackwell Server Edition
+        model: NVIDIA RTX PRO 6000 Blackwell
         count: 2
         vram_gb: 96
       dram_gb: 256
