@@ -155,10 +155,11 @@ to them does not.
 
 ## 4. What pages, and what to do
 
-Every page-class email lists each alert on one line — its status, its rule,
-its summary, and the runbook's link in the public export at the running release
-with its section beside it, the link resolving once that release's export has
-run — and ends with one line: run `gideon status` on the box, then follow the
+Every page-class email lists each alert on two lines — its status, its rule,
+and its summary on the first, and alone on the second the runbook's link in the
+public export at the running release with its section beside it, the link
+resolving once that release's export has run — and ends with one line:
+run `gideon status` on the box, then follow the
 runbook named above. The default
 body's labels, values, and buttons are gone; a silence is made in Grafana
 (§5). The rule set is a release

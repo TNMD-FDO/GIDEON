@@ -44,7 +44,7 @@ files:
     owners:
       - "grafana"
   "grafana/provisioning/alerting/contact-points.yaml":
-    sha256: "17d43d1c4e9d54a725f08de8d1205e65c823ec8c5432acd1ca6dfbd549ef2e06"
+    sha256: "8486f85ac1d4df3c98b30f788ff45e9c5212b93531444b1cda2f8a4e8bb1d8eb"
     mode: "0644"
     owners:
       - "grafana"

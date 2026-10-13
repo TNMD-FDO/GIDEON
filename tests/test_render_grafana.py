@@ -800,11 +800,13 @@ class Alerting(unittest.TestCase):
                 )
                 self.assertNotIn(".Values", page_message)
                 self.assertNotIn("URL", page_message)
-                self.assertIn(
-                    f"(runbook: {export_tree_url(site_inputs.release)}/{{{{ . }}}})",
-                    page_message,
-                )
                 message_lines = page_message.rstrip("\n").splitlines()
+                self.assertTrue(message_lines[0].endswith("{{ with .Annotations.runbook }}"))
+                self.assertEqual(
+                    message_lines[1],
+                    f"{export_tree_url(site_inputs.release)}/{{{{ . }}}}{{{{ end }}}}",
+                )
+                self.assertNotIn("(runbook:", page_message)
                 self.assertEqual(
                     message_lines[-1],
                     "What to do: on the box, run gideon status; the full steps are in the runbook named above.",
@@ -821,8 +823,8 @@ class Alerting(unittest.TestCase):
                     '{{ .Status | toUpper }}: {{ .CommonLabels.alertname }}"\n'
                     "          message: |\n"
                     "            {{ range .Alerts }}{{ .Status | toUpper }}: {{ .Labels.alertname }}: "
-                    "{{ .Annotations.summary }}{{ with .Annotations.runbook }} "
-                    f"(runbook: {export_tree_url(site_inputs.release)}/{{{{ . }}}}){{{{ end }}}}\n"
+                    "{{ .Annotations.summary }}{{ with .Annotations.runbook }}\n"
+                    f"            {export_tree_url(site_inputs.release)}/{{{{ . }}}}{{{{ end }}}}\n"
                     "            {{ end }}\n"
                     "            What to do: on the box, run gideon status; "
                     "the full steps are in the runbook named above.\n"
