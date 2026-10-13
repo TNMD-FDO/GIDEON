@@ -14,7 +14,7 @@ from socketserver import ThreadingMixIn
 
 import psycopg
 
-from gideon.worker import caselaw, fetch, health, metrics, staging, tasks
+from gideon.worker import caselaw, fetch, health, lexical, metrics, staging, tasks
 from gideon.worker.settings import Settings, connection_kwargs
 
 
@@ -77,13 +77,16 @@ class WorkerMetrics(unittest.TestCase):
             database_role="example_worker",
             password_file=password_file,
             concurrency=7,
+            opensearch_url="http://store.example.test:9200",
+            opensearch_user="example-user",
+            opensearch_password_file=password_file,
         )
 
     def test_formatter_emits_known_zeros_and_optional_heartbeat(self) -> None:
         body = metrics.format_metrics([], None, self.settings.concurrency)
         for queue in (
             tasks.VERIFY_QUEUE, tasks.RECOVERY_QUEUE, fetch.FETCH_QUEUE,
-            staging.STAGE_QUEUE, caselaw.CASELAW_QUEUE,
+            staging.STAGE_QUEUE, caselaw.CASELAW_QUEUE, lexical.LEXICAL_QUEUE,
         ):
             for status in ("todo", "doing"):
                 with self.subTest(queue=queue, status=status):
@@ -91,7 +94,7 @@ class WorkerMetrics(unittest.TestCase):
                         f'{metrics.QUEUE_JOBS_METRIC}{{queue="{queue}",status="{status}"}} 0\n',
                         body,
                     )
-        self.assertEqual(body.count(f"{metrics.QUEUE_JOBS_METRIC}{{"), 10)
+        self.assertEqual(body.count(f"{metrics.QUEUE_JOBS_METRIC}{{"), 12)
         self.assertIn(f"# HELP {metrics.QUEUE_JOBS_METRIC} M15 ", body)
         self.assertIn(f"# TYPE {metrics.QUEUE_JOBS_METRIC} gauge\n", body)
         self.assertIn(f"# TYPE {metrics.HEARTBEAT_AGE_METRIC} gauge\n", body)
@@ -118,6 +121,29 @@ class WorkerMetrics(unittest.TestCase):
             body,
         )
         self.assertIn(f"{metrics.HEARTBEAT_AGE_METRIC} 12.5\n", body)
+
+    def test_stable_body_includes_the_index_queue_with_zero_depth(self) -> None:
+        self.assertEqual(metrics.format_metrics([], None, self.settings.concurrency), (
+            "# HELP gideon_worker_queue_jobs M15 worker queue depth by queue and status.\n"
+            "# TYPE gideon_worker_queue_jobs gauge\n"
+            'gideon_worker_queue_jobs{queue="verify",status="todo"} 0\n'
+            'gideon_worker_queue_jobs{queue="verify",status="doing"} 0\n'
+            'gideon_worker_queue_jobs{queue="maintenance",status="todo"} 0\n'
+            'gideon_worker_queue_jobs{queue="maintenance",status="doing"} 0\n'
+            'gideon_worker_queue_jobs{queue="fetch",status="todo"} 0\n'
+            'gideon_worker_queue_jobs{queue="fetch",status="doing"} 0\n'
+            'gideon_worker_queue_jobs{queue="stage",status="todo"} 0\n'
+            'gideon_worker_queue_jobs{queue="stage",status="doing"} 0\n'
+            'gideon_worker_queue_jobs{queue="caselaw",status="todo"} 0\n'
+            'gideon_worker_queue_jobs{queue="caselaw",status="doing"} 0\n'
+            'gideon_worker_queue_jobs{queue="index",status="todo"} 0\n'
+            'gideon_worker_queue_jobs{queue="index",status="doing"} 0\n'
+            "# HELP gideon_worker_heartbeat_age_seconds Age of the newest worker heartbeat in seconds.\n"
+            "# TYPE gideon_worker_heartbeat_age_seconds gauge\n"
+            "# HELP gideon_worker_concurrency Number of worker job slots.\n"
+            "# TYPE gideon_worker_concurrency gauge\n"
+            f"gideon_worker_concurrency {self.settings.concurrency}\n"
+        ))
 
     def test_read_uses_two_bounded_statements_on_one_connection(self) -> None:
         rows = [(tasks.VERIFY_QUEUE, "todo", 2)]

@@ -182,6 +182,7 @@ def ci_compose_document(inputs: RenderInputs) -> Mapping[str, object]:
             inputs, target, limit_bytes=CI_OPENSEARCH_MEMORY_GB * GIGABYTE
         )
     )
+    opensearch["networks"] = [NETWORK_NAME]
     opensearch["volumes"] = [
         f"{CI_OPENSEARCH_DATA_ROOT}:{OPENSEARCH_DATA_MOUNT}",
         f"{CI_OPENSEARCH_RENDERED_DIR}/opensearch.yml:{OPENSEARCH_SETTINGS_PATH}:ro",

@@ -38,6 +38,12 @@ from gideon.host.render.egress import (
     egress_proxy_url,
 )
 from gideon.host.render.grafana import PUBLIC_REPOSITORY_URL
+from gideon.host.render.opensearch import (
+    OPENSEARCH_PASSWORD_SECRET_NAME,
+    OPENSEARCH_REST_PORT,
+    OPENSEARCH_SERVICE_NAME,
+    OPENSEARCH_USER,
+)
 from gideon.host.render.services import SERVICES, image_pin
 from gideon.host.render.services.worker import (
     WORKER_HEALTHCHECK,
@@ -51,6 +57,7 @@ from gideon.worker import (
     caselaw,
     citations,
     fetch,
+    lexical,
     metrics,
     opiniontext,
     sections,
@@ -63,6 +70,14 @@ from gideon.worker.pipeline import PIPELINE_VERSION, PIPELINES
 
 
 class WorkerIdentity(unittest.TestCase):
+    def test_lexical_identity_matches_the_worker(self) -> None:
+        for name in (
+            "LEXICAL_TASK", "LEXICAL_QUEUE", "LEXICAL_FAILURE_REASONS", "GENERATION_STATES",
+            "GENERATION_PATTERN", "COLLECTION_NAMES", "LEXICAL_MAPPING_VERSION",
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(getattr(worker, name), getattr(lexical, name))
+
     def test_pipeline_identity_matches_the_worker_registry(self) -> None:
         self.assertEqual(worker.PIPELINE_VERSION, PIPELINE_VERSION)
         self.assertEqual(
@@ -180,6 +195,9 @@ class WorkerIdentity(unittest.TestCase):
                 worker.DATABASE_ROLE_ENV,
                 worker.PASSWORD_FILE_ENV,
                 worker.CONCURRENCY_ENV,
+                worker.OPENSEARCH_URL_ENV,
+                worker.OPENSEARCH_USER_ENV,
+                worker.OPENSEARCH_PASSWORD_FILE_ENV,
             ),
             (
                 settings.DATABASE_HOST_ENV,
@@ -188,6 +206,9 @@ class WorkerIdentity(unittest.TestCase):
                 settings.DATABASE_ROLE_ENV,
                 settings.PASSWORD_FILE_ENV,
                 settings.CONCURRENCY_ENV,
+                settings.OPENSEARCH_URL_ENV,
+                settings.OPENSEARCH_USER_ENV,
+                settings.OPENSEARCH_PASSWORD_FILE_ENV,
             ),
             "Fix: keep the rendered environment names equal to worker settings.",
         )
@@ -294,7 +315,7 @@ class WorkerBlock(unittest.TestCase):
                         ],
                         "read_only": True,
                         "group_add": [str(rendered_inputs.facts.service_gid)],
-                        "secrets": [worker.WORKER_SECRET_NAME],
+                        "secrets": [worker.WORKER_SECRET_NAME, OPENSEARCH_PASSWORD_SECRET_NAME],
                         "environment": {
                             worker.DATABASE_HOST_ENV: worker.WORKER_DATABASE_HOST,
                             worker.DATABASE_PORT_ENV: str(worker.WORKER_DATABASE_PORT),
@@ -304,6 +325,9 @@ class WorkerBlock(unittest.TestCase):
                                 f"/run/secrets/{worker.WORKER_SECRET_NAME}"
                             ),
                             worker.CONCURRENCY_ENV: str(worker.WORKER_CONCURRENCY),
+                            worker.OPENSEARCH_URL_ENV: f"http://{OPENSEARCH_SERVICE_NAME}:{OPENSEARCH_REST_PORT}",
+                            worker.OPENSEARCH_USER_ENV: OPENSEARCH_USER,
+                            worker.OPENSEARCH_PASSWORD_FILE_ENV: f"/run/secrets/{OPENSEARCH_PASSWORD_SECRET_NAME}",
                             "HTTPS_PROXY": egress_proxy_url(),
                             "HTTP_PROXY": egress_proxy_url(),
                             "NO_PROXY": ",".join(INTERNAL_NO_PROXY_HOSTS),
@@ -328,7 +352,7 @@ class WorkerBlock(unittest.TestCase):
                     and isinstance(candidate, Mapping)
                     and INTERNAL_NETWORK_NAME in candidate.get("networks", ())
                 )
-                self.assertEqual(len(internal_peers), 3)
+                self.assertEqual(len(internal_peers), 4)
                 self.assertIn("prometheus", internal_peers)
                 environment = block["environment"]
                 assert isinstance(environment, Mapping)

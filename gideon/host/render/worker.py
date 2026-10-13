@@ -7,6 +7,7 @@ here; the worker package restates them, since it never imports the host.
 from pathlib import Path
 from typing import Final
 
+from gideon.host import models
 from gideon.host.render.engine import ENGINE_PORT
 
 WORKER_SERVICE_NAME: Final[str] = "gideon-worker"
@@ -45,6 +46,19 @@ AGREEMENT_FAILURE_REASONS: Final = frozenset({
     "invalid", "missing-stage", "stage-mismatch", "missing-input",
     "input-mismatch", "malformed", "database", "local", "busy",
 })
+LEXICAL_TASK: Final[str] = "gideon.worker.tasks.lexical"
+LEXICAL_QUEUE: Final[str] = "index"
+LEXICAL_FAILURE_REASONS: Final = frozenset({
+    "invalid", "store", "database", "local", "busy", "mapping-mismatch",
+    "text-mismatch", "missing-text", "generation-mismatch",
+})
+GENERATION_STATES: Final = ("building", "built", "live", "retired", "failed")
+COLLECTION_NAMES: Final = ("caselaw",)
+GENERATION_PATTERN: Final[str] = (
+    rf"({'|'.join(COLLECTION_NAMES)})__corpus-[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}__"
+    rf"{models.EMBEDDING_SPACE_ID.pattern.removeprefix('^').removesuffix('$')}"
+)
+LEXICAL_MAPPING_VERSION: Final[int] = 1
 CASELAW_FAILURE_REASONS: Final = frozenset({
     "invalid", "missing-stage", "stage-mismatch", "malformed", "store",
     "database", "local", "busy", "segmenter", "anchors", "text-mismatch",
@@ -124,6 +138,9 @@ DATABASE_NAME_ENV: Final[str] = "GIDEON_WORKER_DB_NAME"
 DATABASE_ROLE_ENV: Final[str] = "GIDEON_WORKER_DB_ROLE"
 PASSWORD_FILE_ENV: Final[str] = "GIDEON_WORKER_PASSWORD_FILE"
 CONCURRENCY_ENV: Final[str] = "GIDEON_WORKER_CONCURRENCY"
+OPENSEARCH_URL_ENV: Final[str] = "GIDEON_WORKER_OPENSEARCH_URL"
+OPENSEARCH_USER_ENV: Final[str] = "GIDEON_WORKER_OPENSEARCH_USER"
+OPENSEARCH_PASSWORD_FILE_ENV: Final[str] = "GIDEON_WORKER_OPENSEARCH_PASSWORD_FILE"
 
 
 def worker_metrics_target() -> str:

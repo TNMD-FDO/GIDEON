@@ -12,6 +12,7 @@ import psycopg
 from .caselaw import CASELAW_QUEUE
 from .fetch import FETCH_QUEUE
 from .health import CONNECT_TIMEOUT
+from .lexical import LEXICAL_QUEUE
 from .settings import Settings, connection_kwargs
 from .staging import STAGE_QUEUE
 from .tasks import RECOVERY_QUEUE, VERIFY_QUEUE
@@ -21,7 +22,7 @@ METRICS_PORT: Final = 8000
 METRICS_PATH: Final = "/metrics"
 CONTENT_TYPE: Final = "text/plain; version=0.0.4; charset=utf-8"
 KNOWN_QUEUES: Final = (
-    VERIFY_QUEUE, RECOVERY_QUEUE, FETCH_QUEUE, STAGE_QUEUE, CASELAW_QUEUE,
+    VERIFY_QUEUE, RECOVERY_QUEUE, FETCH_QUEUE, STAGE_QUEUE, CASELAW_QUEUE, LEXICAL_QUEUE,
 )
 LIVE_STATUSES: Final = ("todo", "doing")
 QUEUE_JOBS_METRIC: Final = "gideon_worker_queue_jobs"

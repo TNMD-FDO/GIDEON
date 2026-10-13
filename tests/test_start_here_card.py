@@ -306,8 +306,8 @@ class SeededTrees(unittest.TestCase):
             root = Path(directory)
             _seed(root)
             card = root / CARD
-            card.write_text(card.read_text(encoding="utf-8").replace("`gideon status`", "`gideon index build`", 1), encoding="utf-8")
-            line = _line_of(root, "gideon index build")
+            card.write_text(card.read_text(encoding="utf-8").replace("`gideon status`", "`gideon index gc`", 1), encoding="utf-8")
+            line = _line_of(root, "gideon index gc")
             findings = rule_commands(root)
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0].line, line)

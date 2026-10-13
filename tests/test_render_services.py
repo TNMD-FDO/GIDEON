@@ -53,6 +53,10 @@ from gideon.host.render.engine import (
     ENGINE_SERVICE_NAME,
     GENERATOR,
 )
+from gideon.host.render.opensearch import (
+    OPENSEARCH_PASSWORD_SECRET_NAME,
+    OPENSEARCH_SERVICE_NAME,
+)
 from gideon.host.render.services import (
     SERVICES,
     ServiceDefinition,
@@ -245,6 +249,14 @@ class Registry(unittest.TestCase):
                 declared = compose_top_level(rendered_inputs)["secrets"]
                 assert isinstance(declared, Mapping)
                 self.assertEqual(set(declared), mounted)
+
+    def test_store_password_is_mounted_by_the_store_then_the_worker(self) -> None:
+        for rendered_inputs in host_inputs():
+            with self.subTest(site=rendered_inputs.site.hostname, no_gpu=rendered_inputs.no_gpu):
+                self.assertEqual(
+                    secret_consumers(rendered_inputs)[OPENSEARCH_PASSWORD_SECRET_NAME].mounts,
+                    (OPENSEARCH_SERVICE_NAME, WORKER_SERVICE_NAME),
+                )
 
     def test_declared_secrets_match_consumer_order_and_files(self) -> None:
         """Each mounted secret uses its production file path."""

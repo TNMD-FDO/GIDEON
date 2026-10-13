@@ -11,7 +11,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import redirect_stderr
 from http.server import HTTPServer
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import procrastinate
 from procrastinate.testing import InMemoryConnector
@@ -111,6 +111,8 @@ class WorkerSettings(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.password_file = Path(self.directory.name) / "password"
         self.password_file.write_text("first-password\n", encoding="utf-8")
+        self.opensearch_password_file = Path(self.directory.name) / "opensearch-password"
+        self.opensearch_password_file.write_text("fictitious-store-password\n", encoding="utf-8")
         self.environ = {
             settings.DATABASE_HOST_ENV: "postgres",
             settings.DATABASE_PORT_ENV: "5432",
@@ -118,6 +120,9 @@ class WorkerSettings(unittest.TestCase):
             settings.DATABASE_ROLE_ENV: "gideon_worker",
             settings.PASSWORD_FILE_ENV: str(self.password_file),
             settings.CONCURRENCY_ENV: "4",
+            settings.OPENSEARCH_URL_ENV: "http://opensearch:9200",
+            settings.OPENSEARCH_USER_ENV: "example-user",
+            settings.OPENSEARCH_PASSWORD_FILE_ENV: str(self.opensearch_password_file),
         }
 
     def test_each_missing_or_empty_variable_names_itself(self) -> None:
@@ -158,6 +163,62 @@ class WorkerSettings(unittest.TestCase):
         loaded = settings.load_settings(self.environ)
         self.assertEqual(loaded.password_file, self.password_file)
         self.assertNotIn("first-password", repr(loaded))
+        self.assertEqual(loaded.opensearch_url, self.environ[settings.OPENSEARCH_URL_ENV])
+        self.assertEqual(loaded.opensearch_user, self.environ[settings.OPENSEARCH_USER_ENV])
+        self.assertEqual(loaded.opensearch_password_file, self.opensearch_password_file)
+        self.assertNotIn("fictitious-store-password", repr(loaded))
+
+    def test_store_url_refuses_invalid_forms_without_echoing_values(self) -> None:
+        for value in (
+            "https://example.test:9200", "http://example.test", "http://:9200",
+            "http://example.test:0", "http://example.test:65536", "http://example.test:bad",
+            "http://[invalid:9200", "http://example.test:9200/extra",
+            "http://example.test:9200?query=private-sentinel", "http://example.test:9200#private-sentinel",
+            "http://private-sentinel:password@example.test:9200", "http://example .test:9200",
+        ):
+            with self.subTest(value=value), self.assertRaises(settings.WorkerSettingsError) as raised:
+                settings.load_settings({**self.environ, settings.OPENSEARCH_URL_ENV: value})
+            message = str(raised.exception)
+            self.assertIn(settings.OPENSEARCH_URL_ENV, message)
+            self.assertIn("Fix:", message)
+            self.assertNotIn("private-sentinel", message)
+
+    def test_store_url_accepts_hostnames_and_ipv6_with_explicit_ports(self) -> None:
+        for value in ("http://store.example.test:9200", "http://[::1]:9200", "http://opensearch:9200/"):
+            with self.subTest(value=value):
+                loaded = settings.load_settings({**self.environ, settings.OPENSEARCH_URL_ENV: value})
+                self.assertEqual(loaded.opensearch_url, value)
+
+    def test_store_password_is_read_once_at_load_and_for_each_new_client(self) -> None:
+        with patch.object(settings, "read_password", wraps=settings.read_password) as read:
+            loaded = settings.load_settings(self.environ)
+            self.assertEqual(read.call_args_list, [
+                call(self.password_file), call(self.opensearch_password_file),
+            ])
+        self.assertEqual(settings.opensearch_auth(loaded), (loaded.opensearch_user, "fictitious-store-password"))
+        self.opensearch_password_file.write_text("fictitious-rotated-store-password\n", encoding="utf-8")
+        self.assertEqual(settings.opensearch_auth(loaded), (loaded.opensearch_user, "fictitious-rotated-store-password"))
+        self.assertNotIn("fictitious-rotated-store-password", repr(loaded))
+
+    def test_store_password_missing_empty_or_unreadable_refuses(self) -> None:
+        for content in (b"", b" \n", b"\xff"):
+            with self.subTest(content=content):
+                self.opensearch_password_file.write_bytes(content)
+                with self.assertRaisesRegex(settings.WorkerSettingsError, str(self.opensearch_password_file)):
+                    settings.load_settings(self.environ)
+        self.opensearch_password_file.unlink()
+        with self.assertRaisesRegex(settings.WorkerSettingsError, str(self.opensearch_password_file)):
+            settings.load_settings(self.environ)
+        with patch.object(Path, "read_text", side_effect=PermissionError("private-sentinel")), self.assertRaises(settings.WorkerSettingsError) as raised:
+            settings.read_password(self.opensearch_password_file)
+        self.assertIn(str(self.opensearch_password_file), str(raised.exception))
+        self.assertNotIn("private-sentinel", str(raised.exception))
+
+    def test_new_client_refuses_if_rotated_store_password_is_unreadable(self) -> None:
+        loaded = settings.load_settings(self.environ)
+        self.opensearch_password_file.unlink()
+        with self.assertRaisesRegex(settings.WorkerSettingsError, str(self.opensearch_password_file)):
+            settings.opensearch_auth(loaded)
 
     def test_wait_retries_connection_then_probe_and_reports_ready(self) -> None:
         loaded = settings.load_settings(self.environ)

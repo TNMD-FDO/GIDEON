@@ -5,13 +5,14 @@ from typing import Final
 
 from gideon.host.images import proxy_url
 from gideon.host.render import Artifact, RenderInputs
+from gideon.host.render.opensearch import OPENSEARCH_SERVICE_NAME
 from gideon.host.render.proxy import PROXY_AUTH_NAME, proxy_credentials
 
 EGRESS_SERVICE_NAME: Final = "gideon-egress"
 EGRESS_PORT: Final = 3128
 EGRESS_GROUP: Final = "corpus"
 INTERNAL_NETWORK_NAME: Final = "internal"
-INTERNAL_NO_PROXY_HOSTS: Final = ("prometheus", "postgres", EGRESS_SERVICE_NAME)
+INTERNAL_NO_PROXY_HOSTS: Final = ("prometheus", "postgres", OPENSEARCH_SERVICE_NAME, EGRESS_SERVICE_NAME)
 HOSTS_ENV: Final = "GIDEON_EGRESS_HOSTS"
 PORT_ENV: Final = "GIDEON_EGRESS_PORT"
 PARENT_PROXY_ENV: Final = "GIDEON_EGRESS_PARENT_PROXY"

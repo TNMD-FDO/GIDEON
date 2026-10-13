@@ -7,6 +7,8 @@ import unittest
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
+from gideon.host import models
+from gideon.host.render import worker
 from gideon.host.stack import exec_argv
 from gideon.host.stores import converge
 from gideon.host.sysio import Command, PathLike
@@ -34,6 +36,7 @@ MIGRATIONS = {
     f"{ROOT}/migrations/0010_documents_opinions.sql": (ROOT / "migrations/0010_documents_opinions.sql").read_text(),
     f"{ROOT}/migrations/0011_second.sql": "CREATE TABLE second (id int);\n",
     f"{ROOT}/migrations/0015_search_turns.sql": (ROOT / "migrations/0015_search_turns.sql").read_text(),
+    f"{ROOT}/migrations/0017_index_generations.sql": (ROOT / "migrations/0017_index_generations.sql").read_text(),
     f"{ROOT}/migrations/README.md": "not a migration",
 }
 
@@ -158,6 +161,7 @@ class Converge(unittest.TestCase):
                 "0010_documents_opinions",
                 "0011_second",
                 "0015_search_turns",
+                "0017_index_generations",
             ),
         )
 
@@ -182,7 +186,7 @@ class Converge(unittest.TestCase):
         self.assertIn(psql("gideon", "gideon", *STATEMENT), argvs)
         self.assertIn(psql("gideon", "gideon", *QUERY), argvs)
         migration_runs = [call for call in host.calls if call[0] == psql("gideon", "gideon", *MIGRATION)]
-        self.assertEqual(len(migration_runs), 12)
+        self.assertEqual(len(migration_runs), 13)
         first_migration = MIGRATIONS[f"{ROOT}/migrations/0001_audit_log.sql"]
         self.assertTrue((migration_runs[0][1] or "").startswith(first_migration))
         self.assertTrue((migration_runs[0][1] or "").endswith("INSERT INTO schema_migrations (version) VALUES ('0001_audit_log');\n"))
@@ -322,6 +326,7 @@ class Converge(unittest.TestCase):
                 "0010_documents_opinions",
                 "0011_second",
                 "0015_search_turns",
+                "0017_index_generations",
             ),
         )
 
@@ -469,3 +474,61 @@ class Migration0009(unittest.TestCase):
             "GRANT SELECT ON TABLE lockfile_sources TO gideon_ro_metrics;",
         ))
         self.assertNotIn("schema_migrations", text)
+
+
+class Migration0017(unittest.TestCase):
+    """Generation identity, lifecycle checks, and record access are constrained."""
+
+    def setUp(self) -> None:
+        self.text = MIGRATIONS[f"{ROOT}/migrations/0017_index_generations.sql"]
+
+    def test_identity_and_input_checks_match_the_host_grammar(self) -> None:
+        self.assertIn("CREATE TABLE index_generations", self.text)
+        self.assertIn("gen_id text PRIMARY KEY", self.text)
+        self.assertIn(f"gen_id ~ '^{worker.GENERATION_PATTERN}$'", self.text)
+        self.assertIn("octet_length(gen_id) < 255", self.text)
+        self.assertIn(
+            f"embedding_space ~ '{models.EMBEDDING_SPACE_ID.pattern}'", self.text,
+        )
+        self.assertIn("corpus_lockfile text NOT NULL REFERENCES corpus_lockfiles(label)", self.text)
+        self.assertIn("lockfiles text[] NOT NULL", self.text)
+        self.assertIn("cardinality(lockfiles) > 0 AND lockfiles @> ARRAY[corpus_lockfile]", self.text)
+        self.assertIn("pipeline text NOT NULL CHECK (pipeline ~ '^[0-9]+\\.[0-9]+\\.[0-9]+$')", self.text)
+        self.assertIn("inputs_hash text NOT NULL CHECK (inputs_hash ~ '^[0-9a-f]{64}$')", self.text)
+        self.assertIn("UNIQUE (collection, inputs_hash)", self.text)
+        for column, expected in (
+            ("collection", set(worker.COLLECTION_NAMES)),
+            ("state", set(worker.GENERATION_STATES)),
+            ("failure_reason", worker.LEXICAL_FAILURE_REASONS),
+        ):
+            with self.subTest(column=column):
+                match = re.search(rf"CHECK \({column} IN \((.*?)\)\)", self.text, re.S)
+                self.assertIsNotNone(match)
+                assert match is not None
+                self.assertEqual(set(re.findall(r"'([^']+)'", match.group(1))), expected)
+
+    def test_lifecycle_checks_and_progress_defaults(self) -> None:
+        sql = " ".join(self.text.split())
+        for check in (
+            "CHECK ((state = 'failed') = (failure_reason IS NOT NULL))",
+            "CHECK ((built_at IS NOT NULL) = ( lexical_built_at IS NOT NULL AND dense_built_at IS NOT NULL ))",
+            "CHECK (promoted_at IS NULL OR state IN ('live', 'retired'))",
+            "CHECK ((state = 'retired') = (retired_at IS NOT NULL))",
+        ):
+            with self.subTest(check=check):
+                self.assertIn(check, sql)
+        self.assertIn("state text NOT NULL", sql)
+        self.assertIn("counts jsonb NOT NULL DEFAULT '{}'::jsonb", sql)
+        self.assertIn("bytes bigint NOT NULL DEFAULT 0 CHECK (bytes >= 0)", sql)
+        self.assertIn("created_at timestamptz NOT NULL DEFAULT now()", sql)
+        for column in ("lexical_built_at", "dense_built_at", "built_at", "promoted_at", "retired_at"):
+            self.assertIn(f"{column} timestamptz", sql)
+
+    def test_grants_allow_progress_and_metrics_reads_without_deletion(self) -> None:
+        grants = tuple(line for line in self.text.splitlines() if line.startswith("GRANT "))
+        self.assertEqual(grants, (
+            "GRANT SELECT, INSERT, UPDATE ON TABLE index_generations TO gideon_worker;",
+            "GRANT SELECT ON TABLE index_generations TO gideon_ro_metrics;",
+        ))
+        self.assertNotIn("DELETE", self.text)
+        self.assertNotIn("schema_migrations", self.text)

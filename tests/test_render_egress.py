@@ -40,6 +40,7 @@ from gideon.host.render.egress import (
     EGRESS_SOURCES_DIGEST_LABEL,
     HOSTS_ENV,
     INTERNAL_NETWORK_NAME,
+    INTERNAL_NO_PROXY_HOSTS,
     PARENT_PROXY_ENV,
     PORT_ENV,
     EgressEnvArtifact,
@@ -67,6 +68,17 @@ def _applied(rendered_inputs: RenderInputs) -> AppliedManifest:
 
 
 class Identity(unittest.TestCase):
+    def test_no_proxy_hosts_follow_the_rendered_internal_peers(self) -> None:
+        for site_path, no_gpu in ((EXAMPLE, False), (SECOND, False), (EXAMPLE, True)):
+            with self.subTest(site=site_path.name, no_gpu=no_gpu):
+                peers = tuple(
+                    name for name, block in service_blocks(inputs(site_path, no_gpu=no_gpu)).items()
+                    if name != WORKER_SERVICE_NAME and isinstance(block, Mapping)
+                    and INTERNAL_NETWORK_NAME in block["networks"]
+                )
+                self.assertEqual(INTERNAL_NO_PROXY_HOSTS, peers)
+                self.assertEqual(len(peers), 4)
+
     def test_environment_names_match_the_runtime_and_network_names_match(self) -> None:
         self.assertEqual(
             (HOSTS_ENV, PORT_ENV, PARENT_PROXY_ENV),

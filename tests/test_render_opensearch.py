@@ -21,6 +21,7 @@ from gideon.host.render.command import (
     recreate_judgment,
 )
 from gideon.host.render.compose import SWAP_CEILING_BYTES, service_blocks, service_names
+from gideon.host.render.egress import INTERNAL_NETWORK_NAME
 from gideon.host.render.grafana import GrafanaRulesArtifact
 from gideon.host.render.opensearch import (
     OPENSEARCH_CERT_SECRET_NAME,
@@ -175,7 +176,7 @@ class Block(unittest.TestCase):
                 self.assertEqual(
                     block["ulimits"], {"nofile": {"soft": 65536, "hard": 65536}}
                 )
-                self.assertEqual(block["networks"], ["gideon"])
+                self.assertEqual(block["networks"], ["gideon", INTERNAL_NETWORK_NAME])
                 self.assertEqual(
                     block["healthcheck"]["test"],
                     [

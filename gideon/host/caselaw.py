@@ -399,7 +399,9 @@ def _limit_problem(limit: object, command_path: str) -> Problem | None:
     )
 
 
-def _pipeline_problem(pipeline: object, command_path: str) -> Problem | None:
+def pipeline_problem(pipeline: object, command_path: str) -> Problem | None:
+    """Require a registered chunking pipeline for a host job."""
+
     if isinstance(pipeline, str) and pipeline in PIPELINE_CHUNK_SIZES:
         return None
     versions = ", ".join(sorted(PIPELINE_CHUNK_SIZES))
@@ -428,9 +430,11 @@ def court_geography(
     return result
 
 
-def _courts_problem(
+def courts_problem(
     court: str, courts: Mapping[str, CourtGeography], command_path: str,
 ) -> Problem | None:
+    """Validate a selected court and the geography passed to a host job."""
+
     if not isinstance(courts, Mapping) or court not in courts or any(
         not isinstance(identifier, str)
         or re.fullmatch(COURT_PATTERN, identifier) is None
@@ -461,8 +465,8 @@ def defer_caselaw(
         staging.snapshot_problem(snapshot, command_path, subject="caselaw"),
         court_problem(court, command_path),
         _limit_problem(limit, command_path),
-        _courts_problem(court, courts, command_path),
-        _pipeline_problem(pipeline, command_path),
+        courts_problem(court, courts, command_path),
+        pipeline_problem(pipeline, command_path),
     ):
         if problem is not None:
             return problem
@@ -938,7 +942,7 @@ def read_chunk_counts(
 ) -> ChunkCounts | Problem:
     """Read one court's chunk coverage and distribution under a pipeline."""
 
-    problem = _pipeline_problem(pipeline, command_path)
+    problem = pipeline_problem(pipeline, command_path)
     if problem is not None:
         return problem
     _target, maximum, minimum = PIPELINE_CHUNK_SIZES[pipeline]

@@ -229,6 +229,7 @@ services:
       start_period: "30s"
     networks:
       - "gideon"
+      - "internal"
     mem_limit: 48000000000
     memswap_limit: 48000004096
   open-webui:
@@ -423,6 +424,7 @@ services:
       - "4242"
     secrets:
       - "postgres_gideon_worker_password"
+      - "opensearch_password"
     environment:
       GIDEON_WORKER_DB_HOST: "postgres"
       GIDEON_WORKER_DB_PORT: "5432"
@@ -430,9 +432,12 @@ services:
       GIDEON_WORKER_DB_ROLE: "gideon_worker"
       GIDEON_WORKER_PASSWORD_FILE: "/run/secrets/postgres_gideon_worker_password"
       GIDEON_WORKER_CONCURRENCY: "4"
+      GIDEON_WORKER_OPENSEARCH_URL: "http://opensearch:9200"
+      GIDEON_WORKER_OPENSEARCH_USER: "gideon"
+      GIDEON_WORKER_OPENSEARCH_PASSWORD_FILE: "/run/secrets/opensearch_password"
       HTTPS_PROXY: "http://gideon-egress:3128"
       HTTP_PROXY: "http://gideon-egress:3128"
-      NO_PROXY: "prometheus,postgres,gideon-egress"
+      NO_PROXY: "prometheus,postgres,opensearch,gideon-egress"
       TZ: "America/Chicago"
     labels:
       org.gideon.worker-sources-digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"

@@ -6,6 +6,7 @@ from typing import Final
 from gideon.host.images import RegistryTarget, reference
 from gideon.host.models import GIGABYTE
 from gideon.host.render import RenderInputs
+from gideon.host.render.egress import INTERNAL_NETWORK_NAME
 from gideon.host.render.opensearch import (
     OPENSEARCH_CERT_SECRET_NAME,
     OPENSEARCH_DATA_MOUNT,
@@ -123,7 +124,7 @@ def opensearch_service(
         "group_add": [str(inputs.facts.service_gid)],
         "ulimits": {"nofile": {"soft": _NOFILE_LIMIT, "hard": _NOFILE_LIMIT}},
         "healthcheck": dict(OPENSEARCH_HEALTHCHECK),
-        "networks": ["gideon"],
+        "networks": ["gideon", INTERNAL_NETWORK_NAME],
     }
 
 

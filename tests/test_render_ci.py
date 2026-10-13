@@ -203,7 +203,7 @@ class Compose(unittest.TestCase):
             (PostgresService(), {"volumes", "command", "networks"}),
             (OpenWebuiService(), {"env_file", "environment", "volumes", "ports"}),
             (QdrantService(), {"volumes"}),
-            (OpensearchService(), {"volumes", "environment"}),
+            (OpensearchService(), {"volumes", "environment", "networks"}),
         )
         for definition, differences in cases:
             with self.subTest(service=definition.name):
@@ -243,6 +243,7 @@ class Compose(unittest.TestCase):
         self.assertNotIn(QDRANT_SNAPSHOTS_ROOT, str(qdrant["volumes"]))
 
         opensearch = mapping(services[OPENSEARCH_SERVICE_NAME])
+        self.assertEqual(opensearch["networks"], [NETWORK_NAME])
         self.assertEqual(
             opensearch["volumes"],
             [

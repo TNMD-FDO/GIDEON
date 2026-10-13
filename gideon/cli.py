@@ -26,6 +26,8 @@ import gideon
 from gideon.host import cli as host_cli
 from gideon.host import report
 from gideon.host.cotenants import ACKNOWLEDGE_DISRUPTION_FLAG
+from gideon.host.index.build import SAMPLE_LANDING
+from gideon.host.index.generations import COLLECTIONS
 from gideon.host.render.ci import PRODUCTION_STACK, STACKS
 from gideon.host.render.grafana import START_HERE_CARD
 
@@ -77,7 +79,6 @@ def start_screen(tree_root: Path | None = None) -> str:
 
 _LANDING: Final = {
     "host gpu": "the escape hatch, pulled only on eval evidence of reranker latency during bulk embedding",
-    "index build": "lands in slice 3 (v0.4.0)",
     "index promote": "lands in slice 3 (v0.4.0)",
     "index gc": "lands in slice 3 (v0.4.0)",
     "index report": "lands in slice 3 (v0.4.0)",
@@ -357,8 +358,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     index = commands.add_parser("index", help="index generations")
     index_sub = index.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)
-    build = _stub_parser(index_sub, "build", "index build", "build a new index generation")
-    build.add_argument("--sample", action="store_true", help="build the eval sample")
+    build = index_sub.add_parser(
+        "build", help="build a collection's lexical index generation from the record",
+        description="Build a collection's index generation from the record: its lexical index in the search store.",
+    )
+    build.add_argument("collection", choices=[item.name for item in COLLECTIONS], help="collection to build")
+    build.add_argument("--lockfile", metavar="LABEL", help="committed corpus lockfile label; defaults to the newest")
+    build.add_argument("--sample", action="store_true", help=f"build the eval sample ({SAMPLE_LANDING})")
+    build.set_defaults(handler=host_cli.run_index_build, command_path="index build")
     promote = _stub_parser(
         index_sub, "promote", "index promote", "switch serving to a generation"
     )

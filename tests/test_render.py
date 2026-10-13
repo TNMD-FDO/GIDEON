@@ -562,7 +562,7 @@ class Compose(unittest.TestCase):
                 internal = network_members(rendered_inputs, INTERNAL_NETWORK_NAME)
                 self.assertEqual(
                     set(internal),
-                    {"prometheus", "postgres", "gideon-worker", "gideon-egress"},
+                    {"prometheus", "postgres", OPENSEARCH_SERVICE_NAME, "gideon-worker", "gideon-egress"},
                 )
                 self.assertEqual(
                     internal, tuple(name for name in blocks if name in internal)

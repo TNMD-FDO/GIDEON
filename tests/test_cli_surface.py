@@ -10,8 +10,18 @@ import contextlib
 import io
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from gideon.cli import SITUATIONS, _label_stub_groups, _stub, main, start_screen
+from gideon.cli import (
+    SITUATIONS,
+    _label_stub_groups,
+    _stub,
+    build_parser,
+    main,
+    start_screen,
+)
+from gideon.host.index.build import SAMPLE_LANDING
+from gideon.host.index.generations import COLLECTIONS
 from gideon.host.steps import STEPS
 
 TOP_LEVEL = [
@@ -24,7 +34,6 @@ TOP_LEVEL = [
 # lands in, or the command's own words.
 STUBS = [
     (["host", "gpu"], "escape hatch"),
-    (["index", "build"], "slice 3"),
     (["index", "promote", "1"], "slice 3"),
     (["index", "gc"], "slice 3"),
     (["index", "report"], "slice 3"),
@@ -301,6 +310,51 @@ class Stubs(unittest.TestCase):
                 self.assertNotEqual(code, 0)
                 self.assertIn("not implemented", err.getvalue())
                 self.assertIn(landing, err.getvalue())
+
+
+class IndexBuild(unittest.TestCase):
+    def test_help_lists_collections_and_lockfile_selection(self) -> None:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as ctx:
+            main(["index", "build", "--help"])
+        self.assertEqual(ctx.exception.code, 0)
+        help_text = collapsed(out.getvalue())
+        for collection in COLLECTIONS:
+            self.assertIn(collection.name, help_text)
+        for phrase in ("--lockfile LABEL", "newest", "--sample", SAMPLE_LANDING, "lexical index"):
+            self.assertIn(phrase, help_text)
+
+    def test_sample_keeps_the_stub_refusal_before_host_work(self) -> None:
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = main(["index", "build", COLLECTIONS[0].name, "--sample"])
+        self.assertEqual(code, 1)
+        self.assertEqual(out.getvalue(), "")
+        self.assertEqual(err.getvalue(), f"gideon index build --sample: not implemented; {SAMPLE_LANDING}\n")
+
+    def test_collection_required_for_real_build_and_unknown_choice_refuses(self) -> None:
+        for argv in (["index", "build"], ["index", "build", "unknown"]):
+            with self.subTest(argv=argv), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as ctx:
+                main(argv)
+            self.assertEqual(ctx.exception.code, 2)
+
+    def test_parser_and_real_handler_accept_lockfile_and_default_to_newest(self) -> None:
+        for flags, label in (([], None), (["--lockfile", "corpus-2099-01-03"], "corpus-2099-01-03")):
+            args = build_parser().parse_args(["index", "build", COLLECTIONS[0].name, *flags])
+            self.assertEqual(args.collection, COLLECTIONS[0].name)
+            self.assertEqual(args.lockfile, label)
+            self.assertFalse(args.sample)
+            with patch("gideon.host.index.build.run_index_build", return_value=0) as run:
+                self.assertEqual(main(["index", "build", COLLECTIONS[0].name, *flags]), 0)
+            self.assertEqual(run.call_args.args[0].lockfile, label)
+
+    def test_handler_guards_unexpected_errors(self) -> None:
+        err = io.StringIO()
+        with patch("gideon.host.index.build.run_index_build", side_effect=ValueError("fictitious defect")), contextlib.redirect_stderr(err):
+            self.assertEqual(main(["index", "build", COLLECTIONS[0].name]), 1)
+        self.assertIn("gideon index build: internal error", err.getvalue())
+        self.assertIn("Fix:", err.getvalue())
+        self.assertNotIn("Traceback", err.getvalue())
 
 
 class RestoreSelection(unittest.TestCase):

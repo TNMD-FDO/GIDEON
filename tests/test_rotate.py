@@ -1572,7 +1572,7 @@ class OtherRotations(RealStack):
             self.assertNotIn(new_value, input_text or "")
         assert_no_secret_text(self, out + err, (new_value,))
 
-    def test_opensearch_password_rotation_recreates_opensearch_alone(self) -> None:
+    def test_opensearch_password_rotation_recreates_the_store_and_worker(self) -> None:
         host = self.applied_host()
         path = f"{SECRETS_DIR}/opensearch_password"
         old_value = host.files[path]
@@ -1584,9 +1584,9 @@ class OtherRotations(RealStack):
         self.assertNotEqual(host.files[path], old_value)
         self.assertEqual(
             [call for call in argv_calls(host)[baseline:] if "--force-recreate" in call],
-            [force_recreate("opensearch")],
+            [force_recreate("opensearch"), force_recreate("gideon-worker")],
         )
-        self.assertIn("recreated opensearch: mount opensearch_password", out)
+        self.assertIn("recreated opensearch, gideon-worker: mount opensearch_password", out)
         assert_no_secret_text(self, out + err, (host.files[path].strip(),))
 
     def test_opensearch_metrics_password_rotation_recreates_its_two_mounters(self) -> None:

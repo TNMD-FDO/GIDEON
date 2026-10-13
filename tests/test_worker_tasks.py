@@ -9,7 +9,7 @@ import json
 import tempfile
 import threading
 import unittest
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -17,10 +17,11 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import procrastinate
 from procrastinate.testing import InMemoryConnector
+from test_worker_lexical import TEXT, FakeRecord, FakeStore, inputs_for
 
 from gideon.host import cas
 from gideon.host.render import worker
-from gideon.worker import agreement, caselaw, fetch, staging, tasks
+from gideon.worker import agreement, caselaw, fetch, lexical, staging, tasks
 
 
 class Unread(httpx.SyncByteStream):
@@ -60,7 +61,8 @@ class RecoveryTask(unittest.TestCase):
         self.assertEqual(
             {name for name in app.tasks if name.startswith("gideon.worker.tasks.")},
             {tasks.VERIFY_TASK, tasks.RECOVERY_TASK, fetch.FETCH_TASK,
-             staging.STAGE_TASK, caselaw.CASELAW_TASK, agreement.AGREEMENT_TASK},
+             staging.STAGE_TASK, caselaw.CASELAW_TASK, agreement.AGREEMENT_TASK,
+             lexical.LEXICAL_TASK},
         )
         fetching = app.tasks[fetch.FETCH_TASK]
         self.assertEqual(fetching.queue, fetch.FETCH_QUEUE)
@@ -77,6 +79,106 @@ class RecoveryTask(unittest.TestCase):
         self.assertTrue(measured.pass_context)
         self.assertIsNone(measured.retry_strategy)
         self.assertFalse(inspect.iscoroutinefunction(tasks.agreement))
+        indexed = app.tasks[lexical.LEXICAL_TASK]
+        self.assertEqual(indexed.queue, lexical.LEXICAL_QUEUE)
+        self.assertTrue(indexed.pass_context)
+        self.assertIsNone(indexed.queueing_lock)
+        self.assertIsNone(indexed.retry_strategy)
+        self.assertFalse(inspect.iscoroutinefunction(tasks.lexical))
+
+    def test_lexical_jobs_run_off_the_event_loop_and_write_failure_to_the_row(self) -> None:
+        inputs = inputs_for()
+        threads: list[bool] = []
+        jobs: list[int] = []
+        original_build = lexical.build
+        connector = InMemoryConnector()
+        app = procrastinate.App(connector=connector)
+        tasks.register_tasks(app)
+
+        async def exercise() -> tuple[int, int]:
+            async with app.open_async():
+                whole = await app.configure_task(lexical.LEXICAL_TASK).defer_async(**inputs)  # type: ignore[arg-type]
+                failed = await app.configure_task(lexical.LEXICAL_TASK).defer_async(**inputs)  # type: ignore[arg-type]
+                await app.run_worker_async(wait=False, listen_notify=False)
+            return whole, failed
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store_root, work_root = root / "cas", root / "work"
+            store_root.mkdir()
+            work_root.mkdir()
+            digest = hashlib.sha256(TEXT.encode()).hexdigest()
+            path = cas.object_path(digest, store_root)
+            path.parent.mkdir(parents=True)
+            path.write_text(TEXT)
+            whole_record, failed_record = FakeRecord(digest), FakeRecord(digest)
+            whole_store, failed_store = FakeStore(), FakeStore()
+            failed_store.fail_at = "bulk"
+            records = iter((whole_record, failed_record))
+            stores = iter((whole_store, failed_store))
+
+            def record_factory() -> FakeRecord:
+                threads.append(threading.current_thread() is threading.main_thread())
+                return next(records)
+
+            def store_factory() -> FakeStore:
+                threads.append(threading.current_thread() is threading.main_thread())
+                return next(stores)
+
+            def through_fake(
+                inputs: Mapping[str, object], job: int, record: lexical.GenerationRecord,
+                store: lexical.LexicalStore, store_root: Path, *, work_root: Path,
+            ) -> lexical.BuildCounts:
+                threads.append(threading.current_thread() is threading.main_thread())
+                jobs.append(job)
+                return original_build(inputs, job, record, store, store_root,
+                                      work_root=work_root, monotonic=lambda: 0.0)
+
+            with (
+                patch.object(lexical, "PsycopgGenerations", side_effect=record_factory) as record_creation,
+                patch.object(lexical, "HttpxStore", side_effect=store_factory) as store_creation,
+                patch.object(lexical, "build", side_effect=through_fake),
+                patch.object(cas, "ROOT", store_root),
+                patch.object(staging, "WORK_ROOT", work_root),
+            ):
+                whole, failed = asyncio.run(exercise())
+            self.assertEqual((record_creation.call_count, store_creation.call_count), (2, 2))
+            self.assertEqual(threads, [False] * 6)
+            self.assertEqual(jobs, [whole, failed])
+            self.assertEqual(connector.jobs[whole]["status"], "succeeded")
+            self.assertEqual(connector.jobs[failed]["status"], "failed")
+            self.assertEqual(connector.jobs[failed]["attempts"], 1)
+            self.assertIsNotNone(whole_record.finished)
+            self.assertIsNone(whole_record.failure)
+            self.assertEqual(failed_record.failure, "store")
+            self.assertIsNotNone(failed_record.generation)
+            assert failed_record.generation is not None
+            self.assertEqual(failed_record.generation.state, "failed")
+            self.assertTrue(whole_record.closed and failed_record.closed)
+            self.assertTrue(whole_store.closed and failed_store.closed)
+
+    def test_lexical_task_reraises_the_build_failure(self) -> None:
+        app = procrastinate.App(connector=InMemoryConnector())
+        context = procrastinate.JobContext(
+            app=app,
+            job=procrastinate.jobs.Job(
+                id=77, queue=lexical.LEXICAL_QUEUE, lock=None,
+                queueing_lock=None, task_name=lexical.LEXICAL_TASK,
+            ),
+            start_timestamp=0.0,
+            abort_reason=lambda: None,
+        )
+        failure = lexical.LexicalFailure("store")
+        with (
+            patch.object(lexical, "PsycopgGenerations") as record_creation,
+            patch.object(lexical, "HttpxStore") as store_creation,
+            patch.object(lexical, "build", side_effect=failure),
+            self.assertRaises(lexical.LexicalFailure) as raised,
+        ):
+            tasks.lexical(context, **inputs_for())  # type: ignore[arg-type]
+        self.assertIs(raised.exception, failure)
+        record_creation.return_value.fail.assert_not_called()
+        store_creation.return_value.close.assert_not_called()
 
     def test_caselaw_task_files_and_reraises_a_job_failure(self) -> None:
         app = procrastinate.App(connector=InMemoryConnector())

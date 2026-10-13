@@ -1,4 +1,4 @@
-"""Queue worker tasks for verification, recovery, fetch, stage, ingest, and agreement."""
+"""Queue worker tasks for verification, recovery, corpus work, and lexical builds."""
 
 import asyncio
 import logging
@@ -12,6 +12,7 @@ import gideon.host.cas
 
 from . import agreement as citation_agreement
 from . import caselaw as document_ingest
+from . import lexical as lexical_build
 from . import staging
 from .fetch import (
     FETCH_QUEUE,
@@ -138,8 +139,30 @@ def agreement(
         raise
 
 
+def lexical(
+    context: procrastinate.JobContext, name: str, collection: str, label: str,
+    snapshot: str, courts: Mapping[str, Mapping[str, object]], pipeline: str,
+    embedding_space: str, inputs_hash: str,
+) -> None:
+    """Build a lexical generation outside the worker's event loop."""
+
+    job_id = context.job.id
+    if job_id is None:
+        raise lexical_build.LexicalFailure("invalid")
+    lexical_build.build(
+        {
+            "name": name, "collection": collection, "label": label,
+            "snapshot": snapshot, "courts": courts, "pipeline": pipeline,
+            "embedding_space": embedding_space, "inputs_hash": inputs_hash,
+        },
+        job_id, lexical_build.PsycopgGenerations(),
+        lexical_build.HttpxStore(), gideon.host.cas.ROOT,
+        work_root=staging.WORK_ROOT,
+    )
+
+
 def register_tasks(app: procrastinate.App) -> None:
-    """Register verification, recovery, and synchronous corpus jobs."""
+    """Register verification, recovery, and synchronous corpus and index jobs."""
 
     app.task(name=VERIFY_TASK, queue=VERIFY_QUEUE)(verify)
     task = app.task(
@@ -173,3 +196,9 @@ def register_tasks(app: procrastinate.App) -> None:
         pass_context=True,
         retry=False,
     )(agreement)
+    app.task(
+        name=lexical_build.LEXICAL_TASK,
+        queue=lexical_build.LEXICAL_QUEUE,
+        pass_context=True,
+        retry=False,
+    )(lexical)
