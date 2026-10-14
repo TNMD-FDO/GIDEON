@@ -243,10 +243,11 @@ def serving_document(
 
 READ_SQL: Final = "SELECT gen_id, collection, inputs_hash, pipeline, embedding_space, state FROM index_generations WHERE gen_id = %s"
 RESUME_SQL: Final = "UPDATE index_generations SET state = 'building', failure_reason = NULL WHERE gen_id = %s AND state = 'failed'"
-PROGRESS_SQL: Final = "UPDATE index_generations SET counts = %s::jsonb WHERE gen_id = %s"
+PROGRESS_SQL: Final = "UPDATE index_generations SET counts = counts || %s::jsonb WHERE gen_id = %s"
 FINISH_SQL: Final = (
-    "UPDATE index_generations SET counts = %s::jsonb, bytes = %s, lexical_built_at = %s, "
-    "built_at = CASE WHEN dense_built_at IS NOT NULL THEN COALESCE(built_at, %s) ELSE NULL END "
+    "UPDATE index_generations SET counts = counts || %s::jsonb, bytes = %s, lexical_built_at = %s, "
+    "built_at = CASE WHEN dense_built_at IS NOT NULL THEN COALESCE(built_at, %s) ELSE NULL END, "
+    "state = CASE WHEN state = 'building' AND dense_built_at IS NOT NULL THEN 'built' ELSE state END "
     "WHERE gen_id = %s"
 )
 FAIL_SQL: Final = (
@@ -590,6 +591,19 @@ def _log(job: int, name: str, counts: BuildCounts) -> None:
     )
 
 
+def canonical_text(document: Document, store_root: Path, host: BytesHost) -> str:
+    """Read and decode one verified canonical object, with safe failure reasons."""
+
+    path = gideon.host.cas.object_path(document.canonical_text_sha256, store_root)
+    data = gideon.host.cas.get(host, document.canonical_text_sha256, root=store_root)
+    if isinstance(data, Problem):
+        raise LexicalFailure("text-mismatch" if host.exists(path) else "missing-text")
+    try:
+        return data.decode("utf-8")
+    except UnicodeError as exc:
+        raise LexicalFailure("text-mismatch") from exc
+
+
 def _fill(
     inputs: _Inputs, job: int, record: GenerationRecord, store: LexicalStore,
     store_root: Path, host: BytesHost, monotonic: Callable[[], float], started: float,
@@ -613,14 +627,7 @@ def _fill(
                 missing = [chunk for chunk in rows if chunk.chunk_id not in present]
                 if not missing:
                     continue
-                path = gideon.host.cas.object_path(document.canonical_text_sha256, store_root)
-                data = gideon.host.cas.get(host, document.canonical_text_sha256, root=store_root)
-                if isinstance(data, Problem):
-                    raise LexicalFailure("text-mismatch" if host.exists(path) else "missing-text")
-                try:
-                    text = data.decode("utf-8")
-                except UnicodeError as exc:
-                    raise LexicalFailure("text-mismatch") from exc
+                text = canonical_text(document, store_root, host)
                 opinion, citation_rows = record.opinion(document.doc_id), record.citations(document.doc_id)
                 for chunk in missing:
                     serving.append((chunk.chunk_id, serving_document(chunk, slice_for(text, chunk), opinion, citation_rows, inputs.courts)))

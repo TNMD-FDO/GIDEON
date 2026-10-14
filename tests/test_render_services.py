@@ -288,12 +288,12 @@ class Registry(unittest.TestCase):
         assert isinstance(declared, Mapping)
         for name in (
             ENGINE_SECRET_NAME,
-            EMBED_SECRET_NAME,
             API_SECRET_NAME,
             "postgres_gideon_audit_password",
         ):
             with self.subTest(secret=name):
                 self.assertNotIn(name, declared)
+        self.assertIn(EMBED_SECRET_NAME, declared)
 
     def test_substituted_registry_derives_secrets_from_applying_blocks(self) -> None:
         """A credential joins through its rendered block alone."""

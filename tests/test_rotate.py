@@ -806,7 +806,7 @@ class RealStack(unittest.TestCase):
 
 
 class EngineRotation(RealStack):
-    def test_embedding_key_rewrites_and_recreates_only_embedding_server(self) -> None:
+    def test_embedding_key_rewrites_and_recreates_embedding_server_and_worker(self) -> None:
         host = self.applied_host()
         path = f"{SECRETS_DIR}/embed_api_key"
         old_value = host.files[path].strip()
@@ -822,6 +822,7 @@ class EngineRotation(RealStack):
         self.assertIn((path, 0, 4242), host.chown_calls)
         calls = argv_calls(host)[baseline_calls:]
         self.assertEqual(calls.count(force_recreate(EMBED_SERVICE_NAME)), 1)
+        self.assertEqual(calls.count(force_recreate("gideon-worker")), 1)
         self.assertEqual(calls.count(force_recreate(ENGINE_SERVICE_NAME)), 0)
         self.assertEqual(calls.count(force_recreate(API_SERVICE_NAME)), 0)
         self.assertEqual(calls.count(force_recreate("open-webui")), 0)
@@ -1665,7 +1666,7 @@ class OtherRotations(RealStack):
         self.assertIn("recreated opensearch: mount opensearch_transport_cert", out)
         assert_no_secret_text(self, out + err)
 
-    def test_qdrant_key_rotation_recreates_qdrant_alone(self) -> None:
+    def test_qdrant_key_rotation_recreates_qdrant_and_worker(self) -> None:
         host = self.applied_host()
         path = f"{SECRETS_DIR}/qdrant_api_key"
         old_value = host.files[path]
@@ -1678,9 +1679,9 @@ class OtherRotations(RealStack):
         calls = argv_calls(host)[baseline:]
         self.assertEqual(
             [call for call in calls if "--force-recreate" in call],
-            [force_recreate("qdrant")],
+            [force_recreate("qdrant"), force_recreate("gideon-worker")],
         )
-        self.assertIn("recreated qdrant: mount qdrant_api_key", out)
+        self.assertIn("recreated qdrant, gideon-worker: mount qdrant_api_key", out)
         assert_no_secret_text(self, out + err, (host.files[path].strip(),))
 
     def test_session_key_recreates_frontend_by_mount_and_converge_recreates_nothing(self) -> None:

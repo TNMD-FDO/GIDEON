@@ -113,6 +113,10 @@ class WorkerSettings(unittest.TestCase):
         self.password_file.write_text("first-password\n", encoding="utf-8")
         self.opensearch_password_file = Path(self.directory.name) / "opensearch-password"
         self.opensearch_password_file.write_text("fictitious-store-password\n", encoding="utf-8")
+        self.qdrant_key_file = Path(self.directory.name) / "qdrant-key"
+        self.qdrant_key_file.write_text("fictitious-vector-key\n", encoding="utf-8")
+        self.embed_key_file = Path(self.directory.name) / "embed-key"
+        self.embed_key_file.write_text("fictitious-embed-key\n", encoding="utf-8")
         self.environ = {
             settings.DATABASE_HOST_ENV: "postgres",
             settings.DATABASE_PORT_ENV: "5432",
@@ -123,6 +127,10 @@ class WorkerSettings(unittest.TestCase):
             settings.OPENSEARCH_URL_ENV: "http://opensearch:9200",
             settings.OPENSEARCH_USER_ENV: "example-user",
             settings.OPENSEARCH_PASSWORD_FILE_ENV: str(self.opensearch_password_file),
+            settings.QDRANT_URL_ENV: "http://vectors.example.test:6333",
+            settings.QDRANT_KEY_FILE_ENV: str(self.qdrant_key_file),
+            settings.EMBED_URL_ENV: "http://embed.example.test:8000",
+            settings.EMBED_KEY_FILE_ENV: str(self.embed_key_file),
         }
 
     def test_each_missing_or_empty_variable_names_itself(self) -> None:
@@ -167,33 +175,47 @@ class WorkerSettings(unittest.TestCase):
         self.assertEqual(loaded.opensearch_user, self.environ[settings.OPENSEARCH_USER_ENV])
         self.assertEqual(loaded.opensearch_password_file, self.opensearch_password_file)
         self.assertNotIn("fictitious-store-password", repr(loaded))
+        self.assertEqual(loaded.qdrant_url, self.environ[settings.QDRANT_URL_ENV])
+        self.assertEqual(loaded.qdrant_key_file, self.qdrant_key_file)
+        self.assertEqual(loaded.embed_url, self.environ[settings.EMBED_URL_ENV])
+        self.assertEqual(loaded.embed_key_file, self.embed_key_file)
+        self.assertNotIn("fictitious-vector-key", repr(loaded))
+        self.assertNotIn("fictitious-embed-key", repr(loaded))
 
     def test_store_url_refuses_invalid_forms_without_echoing_values(self) -> None:
-        for value in (
-            "https://example.test:9200", "http://example.test", "http://:9200",
-            "http://example.test:0", "http://example.test:65536", "http://example.test:bad",
-            "http://[invalid:9200", "http://example.test:9200/extra",
-            "http://example.test:9200?query=private-sentinel", "http://example.test:9200#private-sentinel",
-            "http://private-sentinel:password@example.test:9200", "http://example .test:9200",
-        ):
-            with self.subTest(value=value), self.assertRaises(settings.WorkerSettingsError) as raised:
-                settings.load_settings({**self.environ, settings.OPENSEARCH_URL_ENV: value})
-            message = str(raised.exception)
-            self.assertIn(settings.OPENSEARCH_URL_ENV, message)
-            self.assertIn("Fix:", message)
-            self.assertNotIn("private-sentinel", message)
+        for name in (settings.OPENSEARCH_URL_ENV, settings.QDRANT_URL_ENV, settings.EMBED_URL_ENV):
+            for value in (
+                "https://example.test:9200", "http://example.test", "http://:9200",
+                "http://example.test:0", "http://example.test:65536", "http://example.test:bad",
+                "http://[invalid:9200", "http://example.test:9200/extra",
+                "http://example.test:9200?query=private-sentinel", "http://example.test:9200#private-sentinel",
+                "http://private-sentinel:password@example.test:9200", "http://example .test:9200",
+            ):
+                with self.subTest(name=name, value=value), self.assertRaises(settings.WorkerSettingsError) as raised:
+                    settings.load_settings({**self.environ, name: value})
+                message = str(raised.exception)
+                self.assertIn(name, message)
+                self.assertIn("Fix:", message)
+                self.assertIn("apply", message)
+                self.assertNotIn("private-sentinel", message)
 
     def test_store_url_accepts_hostnames_and_ipv6_with_explicit_ports(self) -> None:
-        for value in ("http://store.example.test:9200", "http://[::1]:9200", "http://opensearch:9200/"):
-            with self.subTest(value=value):
-                loaded = settings.load_settings({**self.environ, settings.OPENSEARCH_URL_ENV: value})
-                self.assertEqual(loaded.opensearch_url, value)
+        for name, field in (
+            (settings.OPENSEARCH_URL_ENV, "opensearch_url"),
+            (settings.QDRANT_URL_ENV, "qdrant_url"),
+            (settings.EMBED_URL_ENV, "embed_url"),
+        ):
+            for value in ("http://store.example.test:9200", "http://[::1]:9200", "http://store.example.test:9200/"):
+                with self.subTest(name=name, value=value):
+                    loaded = settings.load_settings({**self.environ, name: value})
+                    self.assertEqual(getattr(loaded, field), value)
 
     def test_store_password_is_read_once_at_load_and_for_each_new_client(self) -> None:
         with patch.object(settings, "read_password", wraps=settings.read_password) as read:
             loaded = settings.load_settings(self.environ)
             self.assertEqual(read.call_args_list, [
                 call(self.password_file), call(self.opensearch_password_file),
+                call(self.qdrant_key_file), call(self.embed_key_file),
             ])
         self.assertEqual(settings.opensearch_auth(loaded), (loaded.opensearch_user, "fictitious-store-password"))
         self.opensearch_password_file.write_text("fictitious-rotated-store-password\n", encoding="utf-8")
@@ -219,6 +241,45 @@ class WorkerSettings(unittest.TestCase):
         self.opensearch_password_file.unlink()
         with self.assertRaisesRegex(settings.WorkerSettingsError, str(self.opensearch_password_file)):
             settings.opensearch_auth(loaded)
+
+    def test_keys_are_read_for_each_new_client_without_retaining_values(self) -> None:
+        loaded = settings.load_settings(self.environ)
+        for path, reader in (
+            (self.qdrant_key_file, settings.qdrant_key),
+            (self.embed_key_file, settings.embed_key),
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(reader(loaded), path.read_text(encoding="utf-8").strip())
+                path.write_text("fictitious-rotated-key\n", encoding="utf-8")
+                self.assertEqual(reader(loaded), "fictitious-rotated-key")
+                self.assertNotIn("fictitious-rotated-key", repr(loaded))
+
+    def test_key_files_refuse_at_load_and_when_a_new_client_reads_them(self) -> None:
+        loaded = settings.load_settings(self.environ)
+        for path, reader in (
+            (self.qdrant_key_file, settings.qdrant_key),
+            (self.embed_key_file, settings.embed_key),
+        ):
+            for content in (None, b"", b" \n", b"\xff"):
+                with self.subTest(path=path, content=content):
+                    if content is None:
+                        path.unlink()
+                    else:
+                        path.write_bytes(content)
+                    for at_load in (True, False):
+                        with self.assertRaises(settings.WorkerSettingsError) as raised:
+                            if at_load:
+                                settings.load_settings(self.environ)
+                            else:
+                                reader(loaded)
+                        self.assertIn(str(path), str(raised.exception))
+                        self.assertIn("apply", str(raised.exception))
+            path.write_text("fictitious-restored-key\n", encoding="utf-8")
+            with patch.object(Path, "read_text", side_effect=PermissionError("private-sentinel")), self.assertRaises(settings.WorkerSettingsError) as raised:
+                reader(loaded)
+            self.assertIn(str(path), str(raised.exception))
+            self.assertIn("apply", str(raised.exception))
+            self.assertNotIn("private-sentinel", str(raised.exception))
 
     def test_wait_retries_connection_then_probe_and_reports_ready(self) -> None:
         loaded = settings.load_settings(self.environ)

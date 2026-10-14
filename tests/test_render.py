@@ -83,6 +83,7 @@ from gideon.host.render.compose import (
 from gideon.host.render.consumers import secret_consumers
 from gideon.host.render.drill import drill_compose_document
 from gideon.host.render.engine import (
+    EMBED_SERVICE_NAME,
     ENGINE_JOB_NAME,
     ENGINE_PORT,
     ENGINE_SECRET_NAME,
@@ -120,6 +121,7 @@ from gideon.host.render.prometheus import (
     BlackboxConfigArtifact,
     PrometheusConfigArtifact,
 )
+from gideon.host.render.qdrant import QDRANT_SERVICE_NAME
 from gideon.host.render.routeguard import (
     ROUTE_GUARD_MOUNT_DIR,
     ROUTE_GUARD_RENDERED_PATH,
@@ -562,7 +564,8 @@ class Compose(unittest.TestCase):
                 internal = network_members(rendered_inputs, INTERNAL_NETWORK_NAME)
                 self.assertEqual(
                     set(internal),
-                    {"prometheus", "postgres", OPENSEARCH_SERVICE_NAME, "gideon-worker", "gideon-egress"},
+                    {"prometheus", "postgres", QDRANT_SERVICE_NAME, OPENSEARCH_SERVICE_NAME, "gideon-worker", "gideon-egress"}
+                    | (set() if no_gpu else {EMBED_SERVICE_NAME}),
                 )
                 self.assertEqual(
                     internal, tuple(name for name in blocks if name in internal)

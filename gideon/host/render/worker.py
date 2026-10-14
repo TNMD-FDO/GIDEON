@@ -52,6 +52,25 @@ LEXICAL_FAILURE_REASONS: Final = frozenset({
     "invalid", "store", "database", "local", "busy", "mapping-mismatch",
     "text-mismatch", "missing-text", "generation-mismatch",
 })
+DENSE_TASK: Final[str] = "gideon.worker.tasks.dense"
+DENSE_QUEUE: Final[str] = "index"
+DENSE_LOCK_PREFIX: Final[str] = "dense-"
+DENSE_LOCK_SUFFIX: Final[str] = ".dense.lock"
+DENSE_FAILURE_REASONS: Final = frozenset({
+    "invalid", "store", "embed", "database", "local", "busy",
+    "config-mismatch", "chunk-too-long", "text-mismatch", "missing-text",
+    "generation-mismatch",
+})
+GENERATION_FAILURE_REASONS: Final = LEXICAL_FAILURE_REASONS | DENSE_FAILURE_REASONS
+DENSE_COUNT_KEYS: Final = (
+    "dense_total", "dense_scope", "dense_present", "dense_copied",
+    "dense_embedded", "dense_texts", "dense_tokens", "dense_requests",
+    "dense_seconds", "dense_points", "dense_indexed", "dense_limit",
+    "dense_hour_seconds", "dense_hour_tokens", "dense_hour_written",
+)
+SERVED_MODEL_PATTERN: Final[str] = r"[A-Za-z0-9._-]{1,64}"
+# exempt: the bound caps a job argument's vector width and its allocation.
+DIMENSIONS_MAX: Final[int] = 65_536
 GENERATION_STATES: Final = ("building", "built", "live", "retired", "failed")
 COLLECTION_NAMES: Final = ("caselaw",)
 GENERATION_PATTERN: Final[str] = (
@@ -143,6 +162,10 @@ CONCURRENCY_ENV: Final[str] = "GIDEON_WORKER_CONCURRENCY"
 OPENSEARCH_URL_ENV: Final[str] = "GIDEON_WORKER_OPENSEARCH_URL"
 OPENSEARCH_USER_ENV: Final[str] = "GIDEON_WORKER_OPENSEARCH_USER"
 OPENSEARCH_PASSWORD_FILE_ENV: Final[str] = "GIDEON_WORKER_OPENSEARCH_PASSWORD_FILE"
+QDRANT_URL_ENV: Final[str] = "GIDEON_WORKER_QDRANT_URL"
+QDRANT_KEY_FILE_ENV: Final[str] = "GIDEON_WORKER_QDRANT_KEY_FILE"
+EMBED_URL_ENV: Final[str] = "GIDEON_WORKER_EMBED_URL"
+EMBED_KEY_FILE_ENV: Final[str] = "GIDEON_WORKER_EMBED_KEY_FILE"
 
 
 def worker_metrics_target() -> str:

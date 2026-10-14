@@ -80,6 +80,10 @@ class WorkerMetrics(unittest.TestCase):
             opensearch_url="http://store.example.test:9200",
             opensearch_user="example-user",
             opensearch_password_file=password_file,
+            qdrant_url="http://vectors.example.test:6333",
+            qdrant_key_file=password_file,
+            embed_url="http://embed.example.test:8000",
+            embed_key_file=password_file,
         )
 
     def test_formatter_emits_known_zeros_and_optional_heartbeat(self) -> None:

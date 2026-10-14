@@ -16,6 +16,10 @@ CONCURRENCY_ENV: Final = "GIDEON_WORKER_CONCURRENCY"
 OPENSEARCH_URL_ENV: Final = "GIDEON_WORKER_OPENSEARCH_URL"
 OPENSEARCH_USER_ENV: Final = "GIDEON_WORKER_OPENSEARCH_USER"
 OPENSEARCH_PASSWORD_FILE_ENV: Final = "GIDEON_WORKER_OPENSEARCH_PASSWORD_FILE"
+QDRANT_URL_ENV: Final = "GIDEON_WORKER_QDRANT_URL"
+QDRANT_KEY_FILE_ENV: Final = "GIDEON_WORKER_QDRANT_KEY_FILE"
+EMBED_URL_ENV: Final = "GIDEON_WORKER_EMBED_URL"
+EMBED_KEY_FILE_ENV: Final = "GIDEON_WORKER_EMBED_KEY_FILE"
 
 
 class WorkerSettingsError(ValueError):
@@ -24,7 +28,7 @@ class WorkerSettingsError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class Settings:
-    """Database and lexical store coordinates, secret paths, and capacity."""
+    """Database, index store, and embedding server coordinates and secret paths."""
 
     database_host: str
     database_port: int
@@ -35,6 +39,10 @@ class Settings:
     opensearch_url: str
     opensearch_user: str
     opensearch_password_file: Path
+    qdrant_url: str
+    qdrant_key_file: Path
+    embed_url: str
+    embed_key_file: Path
 
 
 def _required(environ: Mapping[str, str], name: str) -> str:
@@ -65,25 +73,25 @@ def _positive_integer(environ: Mapping[str, str], name: str) -> int:
 
 
 def read_password(path: Path) -> str:
-    """Read a mounted password when validating or constructing a client."""
+    """Read a mounted credential when validating or constructing a client."""
 
     try:
         password = path.read_text(encoding="utf-8").strip()
     except (OSError, UnicodeError) as exc:
         raise WorkerSettingsError(
             f"Secret file {path} is missing or empty. "
-            "Fix: restore the worker password file and rerun apply."
+            "Fix: restore the worker secret file and rerun apply."
         ) from exc
     if not password:
         raise WorkerSettingsError(
             f"Secret file {path} is missing or empty. "
-            "Fix: restore the worker password file and rerun apply."
+            "Fix: restore the worker secret file and rerun apply."
         )
     return password
 
 
-def _opensearch_url(environ: Mapping[str, str]) -> str:
-    value = _required(environ, OPENSEARCH_URL_ENV)
+def _http_url(environ: Mapping[str, str], name: str) -> str:
+    value = _required(environ, name)
     try:
         parsed = urlsplit(value)
         valid = (
@@ -97,14 +105,14 @@ def _opensearch_url(environ: Mapping[str, str]) -> str:
         valid = False
     if not valid:
         raise WorkerSettingsError(
-            f"Environment variable {OPENSEARCH_URL_ENV} must be an HTTP URL with a host and TCP port. "
+            f"Environment variable {name} must be an HTTP URL with a host and TCP port. "
             "Fix: rerun sudo python3 -m gideon apply."
         )
     return value
 
 
 def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
-    """Validate the environment and mounted secret without retaining its value."""
+    """Validate the environment and mounted secrets without retaining their values."""
 
     values = os.environ if environ is None else environ
     port = _positive_integer(values, DATABASE_PORT_ENV)
@@ -115,10 +123,16 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         )
     password_file = Path(_required(values, PASSWORD_FILE_ENV))
     read_password(password_file)
-    opensearch_url = _opensearch_url(values)
+    opensearch_url = _http_url(values, OPENSEARCH_URL_ENV)
     opensearch_user = _required(values, OPENSEARCH_USER_ENV)
     opensearch_password_file = Path(_required(values, OPENSEARCH_PASSWORD_FILE_ENV))
     read_password(opensearch_password_file)
+    qdrant_url = _http_url(values, QDRANT_URL_ENV)
+    qdrant_key_file = Path(_required(values, QDRANT_KEY_FILE_ENV))
+    read_password(qdrant_key_file)
+    embed_url = _http_url(values, EMBED_URL_ENV)
+    embed_key_file = Path(_required(values, EMBED_KEY_FILE_ENV))
+    read_password(embed_key_file)
     return Settings(
         database_host=_required(values, DATABASE_HOST_ENV),
         database_port=port,
@@ -129,6 +143,10 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         opensearch_url=opensearch_url,
         opensearch_user=opensearch_user,
         opensearch_password_file=opensearch_password_file,
+        qdrant_url=qdrant_url,
+        qdrant_key_file=qdrant_key_file,
+        embed_url=embed_url,
+        embed_key_file=embed_key_file,
     )
 
 
@@ -148,3 +166,15 @@ def opensearch_auth(settings: Settings) -> tuple[str, str]:
     """Resolve the mounted store credential for each new lexical client."""
 
     return settings.opensearch_user, read_password(settings.opensearch_password_file)
+
+
+def qdrant_key(settings: Settings) -> str:
+    """Resolve the mounted key for each new vector store client."""
+
+    return read_password(settings.qdrant_key_file)
+
+
+def embed_key(settings: Settings) -> str:
+    """Resolve the mounted key for each new embedding client."""
+
+    return read_password(settings.embed_key_file)

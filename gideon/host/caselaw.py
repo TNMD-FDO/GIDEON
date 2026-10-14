@@ -399,14 +399,14 @@ def _limit_problem(limit: object, command_path: str) -> Problem | None:
     )
 
 
-def pipeline_problem(pipeline: object, command_path: str) -> Problem | None:
+def pipeline_problem(pipeline: object, command_path: str, *, subject: str = "caselaw") -> Problem | None:
     """Require a registered chunking pipeline for a host job."""
 
     if isinstance(pipeline, str) and pipeline in PIPELINE_CHUNK_SIZES:
         return None
     versions = ", ".join(sorted(PIPELINE_CHUNK_SIZES))
     return Problem(
-        f"caselaw pipeline {pipeline!r} is not registered",
+        f"{subject} pipeline {pipeline!r} is not registered",
         f"Use a registered pipeline ({versions}) from a new "
         f"{report.command('corpus cut')}, then run {report.command(command_path)} again.",
     )
@@ -432,6 +432,7 @@ def court_geography(
 
 def courts_problem(
     court: str, courts: Mapping[str, CourtGeography], command_path: str,
+    *, subject: str = "caselaw",
 ) -> Problem | None:
     """Validate a selected court and the geography passed to a host job."""
 
@@ -445,7 +446,7 @@ def courts_problem(
         for identifier, value in courts.items()
     ):
         return Problem(
-            "caselaw courts are invalid",
+            f"{subject} courts are invalid",
             "Use court ids and geography from the court map, then run "
             f"{report.command(command_path)} again.",
         )

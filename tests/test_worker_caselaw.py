@@ -1520,6 +1520,8 @@ class PsycopgDocumentRecord(unittest.TestCase):
         self.configuration = settings.Settings(
             "db.example.test", 5432, "gideon", "gideon_worker", self.password, 2,
             "http://store.example.test:9200", "example-user", self.password,
+            "http://vectors.example.test:6333", self.password,
+            "http://embed.example.test:8000", self.password,
         )
         self.connection = _CapturedConnection()
         self.connection_kwargs: dict[str, object] = {}

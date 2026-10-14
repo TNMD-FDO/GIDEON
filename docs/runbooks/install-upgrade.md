@@ -212,7 +212,7 @@ same command is run again after the fix.
    gideon alerts test
    ```
 
-`gideon corpus install <label>` fetches and verifies the files a committed lockfile pins, records the label as installing, and stages each court's rows under `/data/work/` (the release-files runbook's §10); `gideon index build caselaw` builds an index generation's lexical half from it, and the dense half, the install's call to the build, and `index promote` arrive with slice 3.
+`gideon corpus install <label>` fetches and verifies the files a committed lockfile pins, records the label as installing, and stages each court's rows under `/data/work/` (the release-files runbook's §10); `gideon index build caselaw` builds both halves of an index generation from it, and the install's call to the build and `index promote` arrive with slice 3.
 
 **No-GPU host.** `sudo python3 -m gideon host provision --no-gpu` writes
 `/etc/gideon/no-gpu` once. It is refused on a host with an NVIDIA device; every

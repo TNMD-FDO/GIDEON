@@ -185,6 +185,7 @@ services:
       start_period: "30s"
     networks:
       - "gideon"
+      - "internal"
     mem_limit: 110000000000
     memswap_limit: 110000004096
   opensearch:
@@ -534,6 +535,7 @@ services:
       start_period: "300s"
     networks:
       - "gideon"
+      - "internal"
     mem_limit: 16000000000
   gideon-api:
     image: "127.0.0.1:5000/gideon@sha256:591c1d032ee6bb03c122c93f11f46897f6169e547c9da14f8f22d634dbbaee89"
@@ -600,6 +602,8 @@ services:
     secrets:
       - "postgres_gideon_worker_password"
       - "opensearch_password"
+      - "qdrant_api_key"
+      - "embed_api_key"
     environment:
       GIDEON_WORKER_DB_HOST: "postgres"
       GIDEON_WORKER_DB_PORT: "5432"
@@ -610,9 +614,13 @@ services:
       GIDEON_WORKER_OPENSEARCH_URL: "http://opensearch:9200"
       GIDEON_WORKER_OPENSEARCH_USER: "gideon"
       GIDEON_WORKER_OPENSEARCH_PASSWORD_FILE: "/run/secrets/opensearch_password"
+      GIDEON_WORKER_QDRANT_URL: "http://qdrant:6333"
+      GIDEON_WORKER_QDRANT_KEY_FILE: "/run/secrets/qdrant_api_key"
+      GIDEON_WORKER_EMBED_URL: "http://gideon-embed:8000"
+      GIDEON_WORKER_EMBED_KEY_FILE: "/run/secrets/embed_api_key"
       HTTPS_PROXY: "http://gideon-egress:3128"
       HTTP_PROXY: "http://gideon-egress:3128"
-      NO_PROXY: "prometheus,postgres,opensearch,gideon-egress"
+      NO_PROXY: "prometheus,postgres,qdrant,opensearch,gideon-embed,gideon-egress"
       TZ: "America/Denver"
     labels:
       org.gideon.worker-sources-digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"

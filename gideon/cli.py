@@ -359,8 +359,8 @@ def build_parser() -> argparse.ArgumentParser:
     index = commands.add_parser("index", help="index generations")
     index_sub = index.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)
     build = index_sub.add_parser(
-        "build", help="build a collection's lexical index generation from the record",
-        description="Build a collection's index generation from the record: its lexical index in the search store.",
+        "build", help="build a collection's index generation from the record",
+        description="Build a collection's index generation from the record: its lexical index in the search store and its vectors in the vector store.",
     )
     build.add_argument("collection", choices=[item.name for item in COLLECTIONS], help="collection to build")
     build.add_argument("--lockfile", metavar="LABEL", help="committed corpus lockfile label; defaults to the newest")

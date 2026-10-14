@@ -1,14 +1,16 @@
-"""Queue worker tasks for verification, recovery, corpus work, and lexical builds."""
+"""Queue worker tasks for verification, recovery, corpus work, and index builds."""
 
 import asyncio
 import logging
 from collections.abc import Mapping
+from contextlib import suppress
 from typing import Final
 
 import procrastinate
 from procrastinate.exceptions import UniqueViolation
 
 import gideon.host.cas
+import gideon.worker.dense
 
 from . import agreement as citation_agreement
 from . import caselaw as document_ingest
@@ -161,6 +163,41 @@ def lexical(
     )
 
 
+def dense(
+    context: procrastinate.JobContext, name: str, collection: str, label: str,
+    snapshot: str, courts: Mapping[str, Mapping[str, object]], pipeline: str,
+    embedding_space: str, inputs_hash: str, served_model: str, dimensions: int,
+    limit: int | None = None,
+) -> None:
+    """Build a dense generation outside the worker's event loop."""
+
+    job_id = context.job.id
+    if job_id is None:
+        raise gideon.worker.dense.DenseFailure("invalid")
+    record = gideon.worker.dense.PsycopgGenerations()
+    store = None
+    try:
+        store = gideon.worker.dense.HttpxVectorStore()
+        embedder = gideon.worker.dense.HttpxEmbedder(served_model, dimensions)
+    except BaseException:
+        # A constructor refusal must survive cleanup of already-created clients.
+        for client in (record, store):
+            if client is not None:
+                with suppress(Exception):
+                    client.close()
+        raise
+    gideon.worker.dense.build(
+        {
+            "name": name, "collection": collection, "label": label,
+            "snapshot": snapshot, "courts": courts, "pipeline": pipeline,
+            "embedding_space": embedding_space, "inputs_hash": inputs_hash,
+            "served_model": served_model, "dimensions": dimensions, "limit": limit,
+        },
+        job_id, record, store, embedder, gideon.worker.dense.NoBackOff(),
+        gideon.host.cas.ROOT, work_root=staging.WORK_ROOT,
+    )
+
+
 def register_tasks(app: procrastinate.App) -> None:
     """Register verification, recovery, and synchronous corpus and index jobs."""
 
@@ -202,3 +239,9 @@ def register_tasks(app: procrastinate.App) -> None:
         pass_context=True,
         retry=False,
     )(lexical)
+    app.task(
+        name=gideon.worker.dense.DENSE_TASK,
+        queue=gideon.worker.dense.DENSE_QUEUE,
+        pass_context=True,
+        retry=False,
+    )(dense)

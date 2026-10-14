@@ -7,6 +7,7 @@ from gideon.host import gpus, weights
 from gideon.host.images import RegistryTarget, parse_registry, reference
 from gideon.host.models import ModelPin
 from gideon.host.render import RenderInputs
+from gideon.host.render.egress import INTERNAL_NETWORK_NAME
 from gideon.host.render.engine import (
     GENERATOR,
     INTEGRATION_NETWORK_NAME,
@@ -152,6 +153,8 @@ def model_service(
     networks = ["gideon"]
     if member.joins_integration_network:
         networks.append(INTEGRATION_NETWORK_NAME)
+    if member.joins_internal_network:
+        networks.append(INTERNAL_NETWORK_NAME)
     return {
         "image": reference(target, image_pin(inputs, "vllm-openai")),
         "restart": "unless-stopped",

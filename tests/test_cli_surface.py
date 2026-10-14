@@ -321,7 +321,8 @@ class IndexBuild(unittest.TestCase):
         help_text = collapsed(out.getvalue())
         for collection in COLLECTIONS:
             self.assertIn(collection.name, help_text)
-        for phrase in ("--lockfile LABEL", "newest", "--sample", SAMPLE_LANDING, "lexical index"):
+        for phrase in ("--lockfile LABEL", "newest", "--sample", SAMPLE_LANDING, "lexical index",
+                       "its vectors in the vector store"):
             self.assertIn(phrase, help_text)
 
     def test_sample_keeps_the_stub_refusal_before_host_work(self) -> None:

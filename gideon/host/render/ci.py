@@ -175,6 +175,7 @@ def ci_compose_document(inputs: RenderInputs) -> Mapping[str, object]:
     open_webui["ports"] = [f"127.0.0.1:{CI_PORT}:8080"]
 
     qdrant = dict(QdrantService().block(inputs, target))
+    qdrant["networks"] = [NETWORK_NAME]
     qdrant["volumes"] = [f"{CI_QDRANT_DATA_ROOT}:{QDRANT_STORAGE_MOUNT}"]
 
     opensearch = dict(

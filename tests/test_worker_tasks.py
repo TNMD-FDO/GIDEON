@@ -17,11 +17,17 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import procrastinate
 from procrastinate.testing import InMemoryConnector
+from test_worker_dense import (
+    FakeDenseRecord,
+    FakeEmbedder,
+    FakeVectorStore,
+    dense_inputs,
+)
 from test_worker_lexical import TEXT, FakeRecord, FakeStore, inputs_for
 
 from gideon.host import cas
 from gideon.host.render import worker
-from gideon.worker import agreement, caselaw, fetch, lexical, staging, tasks
+from gideon.worker import agreement, caselaw, dense, fetch, lexical, staging, tasks
 
 
 class Unread(httpx.SyncByteStream):
@@ -62,7 +68,7 @@ class RecoveryTask(unittest.TestCase):
             {name for name in app.tasks if name.startswith("gideon.worker.tasks.")},
             {tasks.VERIFY_TASK, tasks.RECOVERY_TASK, fetch.FETCH_TASK,
              staging.STAGE_TASK, caselaw.CASELAW_TASK, agreement.AGREEMENT_TASK,
-             lexical.LEXICAL_TASK},
+             lexical.LEXICAL_TASK, dense.DENSE_TASK},
         )
         fetching = app.tasks[fetch.FETCH_TASK]
         self.assertEqual(fetching.queue, fetch.FETCH_QUEUE)
@@ -85,6 +91,136 @@ class RecoveryTask(unittest.TestCase):
         self.assertIsNone(indexed.queueing_lock)
         self.assertIsNone(indexed.retry_strategy)
         self.assertFalse(inspect.iscoroutinefunction(tasks.lexical))
+        embedded = app.tasks[dense.DENSE_TASK]
+        self.assertEqual(embedded.queue, dense.DENSE_QUEUE)
+        self.assertTrue(embedded.pass_context)
+        self.assertIsNone(embedded.queueing_lock)
+        self.assertIsNone(embedded.retry_strategy)
+        self.assertFalse(inspect.iscoroutinefunction(tasks.dense))
+
+    def test_dense_jobs_run_off_the_event_loop_and_record_success_or_failure(self) -> None:
+        values = dense_inputs()
+        connector = InMemoryConnector()
+        app = procrastinate.App(connector=connector)
+        tasks.register_tasks(app)
+        original_build = dense.build
+        threads: list[bool] = []
+        jobs: list[int] = []
+
+        async def exercise() -> tuple[int, int]:
+            async with app.open_async():
+                whole = await app.configure_task(dense.DENSE_TASK).defer_async(**values)  # type: ignore[arg-type]
+                failed = await app.configure_task(dense.DENSE_TASK).defer_async(**values)  # type: ignore[arg-type]
+                await asyncio.wait_for(app.run_worker_async(wait=False, listen_notify=False, queues=[dense.DENSE_QUEUE]), timeout=15)
+            return whole, failed
+
+        with tempfile.TemporaryDirectory() as temporary:
+            store_root, work_root = Path(temporary) / "cas", Path(temporary) / "work"
+            work_root.mkdir()
+            digest = hashlib.sha256(TEXT.encode()).hexdigest()
+            path = cas.object_path(digest, store_root)
+            path.parent.mkdir(parents=True)
+            path.write_text(TEXT, encoding="utf-8")
+            events: list[str] = []
+            whole_store, failed_store = FakeVectorStore(events), FakeVectorStore(events)
+            whole_record = FakeDenseRecord(digest, whole_store, events)
+            failed_record = FakeDenseRecord(digest, failed_store, events)
+            whole_embedder, failed_embedder = FakeEmbedder(events), FakeEmbedder(events)
+            failed_embedder.failure = dense.DenseFailure("embed")
+            records = iter((whole_record, failed_record))
+            stores = iter((whole_store, failed_store))
+            embedders = iter((whole_embedder, failed_embedder))
+
+            def record_factory() -> FakeDenseRecord:
+                threads.append(threading.current_thread() is threading.main_thread())
+                return next(records)
+
+            def store_factory() -> FakeVectorStore:
+                threads.append(threading.current_thread() is threading.main_thread())
+                return next(stores)
+
+            def embed_factory(served_model: str, dimensions: int) -> FakeEmbedder:
+                threads.append(threading.current_thread() is threading.main_thread())
+                self.assertEqual((served_model, dimensions), (values["served_model"], values["dimensions"]))
+                return next(embedders)
+
+            def through_fake(
+                inputs: Mapping[str, object], job: int, record: dense.GenerationRecord,
+                store: dense.VectorStore, embedder: dense.Embedder, pace: dense.Pace,
+                store_root: Path, *, work_root: Path,
+            ) -> dense.DenseCounts:
+                threads.append(threading.current_thread() is threading.main_thread())
+                jobs.append(job)
+                self.assertIsNone(inputs["limit"])
+                self.assertIsInstance(pace, dense.NoBackOff)
+                return original_build(inputs, job, record, store, embedder, pace, store_root,
+                                      work_root=work_root, monotonic=lambda: 0.0)
+
+            with (
+                patch.object(dense, "PsycopgGenerations", side_effect=record_factory),
+                patch.object(dense, "HttpxVectorStore", side_effect=store_factory),
+                patch.object(dense, "HttpxEmbedder", side_effect=embed_factory),
+                patch.object(dense, "build", side_effect=through_fake),
+                patch.object(cas, "ROOT", store_root),
+                patch.object(staging, "WORK_ROOT", work_root),
+            ):
+                whole, failed = asyncio.run(exercise())
+            self.assertEqual(threads, [False] * 8)
+            self.assertEqual(jobs, [whole, failed])
+            self.assertEqual(connector.jobs[whole]["status"], "succeeded")
+            self.assertEqual(connector.jobs[failed]["status"], "failed")
+            self.assertEqual(connector.jobs[failed]["attempts"], 1)
+            self.assertIsNotNone(whole_record.finished)
+            self.assertEqual(failed_record.failure, "embed")
+            self.assertTrue(all(client.closed for client in (
+                whole_record, failed_record, whole_store, failed_store, whole_embedder, failed_embedder,
+            )))
+
+    def test_dense_task_passes_the_limit_and_preserves_build_or_constructor_failure(self) -> None:
+        context = procrastinate.JobContext(
+            app=procrastinate.App(connector=InMemoryConnector()),
+            job=procrastinate.jobs.Job(id=77, queue=dense.DENSE_QUEUE, lock=None,
+                                      queueing_lock=None, task_name=dense.DENSE_TASK),
+            start_timestamp=0.0, abort_reason=lambda: None,
+        )
+        values = {**dense_inputs(), "limit": 3}
+        failure = dense.DenseFailure("embed")
+        with (
+            patch.object(dense, "PsycopgGenerations") as record_factory,
+            patch.object(dense, "HttpxVectorStore") as store_factory,
+            patch.object(dense, "HttpxEmbedder") as embed_factory,
+            patch.object(dense, "build", side_effect=failure) as build,
+            self.assertRaises(dense.DenseFailure) as raised,
+        ):
+            tasks.dense(context, **values)  # type: ignore[arg-type]
+        self.assertIs(raised.exception, failure)
+        self.assertEqual(build.call_args.args[:5], (values, 77, record_factory.return_value,
+                                                   store_factory.return_value, embed_factory.return_value))
+        self.assertIsInstance(build.call_args.args[5], dense.NoBackOff)
+        self.assertEqual(build.call_args.args[6], cas.ROOT)
+        self.assertEqual(build.call_args.kwargs, {"work_root": staging.WORK_ROOT})
+        with (
+            patch.object(dense, "PsycopgGenerations") as record_factory,
+            patch.object(dense, "HttpxVectorStore") as store_factory,
+            patch.object(dense, "HttpxEmbedder", side_effect=failure),
+            self.assertRaises(dense.DenseFailure) as raised,
+        ):
+            record_factory.return_value.close.side_effect = OSError("private cleanup")
+            tasks.dense(context, **values)  # type: ignore[arg-type]
+        self.assertIs(raised.exception, failure)
+        record_factory.return_value.close.assert_called_once()
+        store_factory.return_value.close.assert_called_once()
+
+    def test_dense_task_refuses_a_missing_job_id(self) -> None:
+        context = procrastinate.JobContext(
+            app=procrastinate.App(connector=InMemoryConnector()),
+            job=procrastinate.jobs.Job(queue=dense.DENSE_QUEUE, lock=None, queueing_lock=None,
+                                      task_name=dense.DENSE_TASK),
+            start_timestamp=0.0, abort_reason=lambda: None,
+        )
+        with self.assertRaises(dense.DenseFailure) as raised:
+            tasks.dense(context, **dense_inputs())  # type: ignore[arg-type]
+        self.assertEqual(raised.exception.reason, "invalid")
 
     def test_lexical_jobs_run_off_the_event_loop_and_write_failure_to_the_row(self) -> None:
         inputs = inputs_for()

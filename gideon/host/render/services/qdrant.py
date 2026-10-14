@@ -5,6 +5,7 @@ from typing import Final
 
 from gideon.host.images import RegistryTarget, reference
 from gideon.host.render import RenderInputs
+from gideon.host.render.egress import INTERNAL_NETWORK_NAME
 from gideon.host.render.qdrant import (
     QDRANT_DATA_ROOT,
     QDRANT_METRICS_PORT,
@@ -90,5 +91,5 @@ class QdrantService(ServiceDefinition):
             ],
             "secrets": [QDRANT_SECRET_NAME, QDRANT_READ_ONLY_SECRET_NAME],
             "healthcheck": dict(QDRANT_HEALTHCHECK),
-            "networks": ["gideon"],
+            "networks": ["gideon", INTERNAL_NETWORK_NAME],
         }

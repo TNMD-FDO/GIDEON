@@ -11,9 +11,9 @@ from gideon.host import report, worker
 from gideon.host.corpus.record import database_fix
 from gideon.host.index.generations import GenerationInputs
 from gideon.host.render.worker import (
+    GENERATION_FAILURE_REASONS,
     GENERATION_PATTERN,
     GENERATION_STATES,
-    LEXICAL_FAILURE_REASONS,
 )
 from gideon.host.report import Problem
 from gideon.host.sysio import Host, PathLike
@@ -166,7 +166,7 @@ def _parse_row(value: object) -> GenerationRow | None:
     if (
         (value["state"] == "failed") != (value["failure_reason"] is not None)
         or value["failure_reason"] is not None
-        and value["failure_reason"] not in LEXICAL_FAILURE_REASONS
+        and value["failure_reason"] not in GENERATION_FAILURE_REASONS
         or (value["built_at"] is not None) != (
             value["lexical_built_at"] is not None and value["dense_built_at"] is not None
         )

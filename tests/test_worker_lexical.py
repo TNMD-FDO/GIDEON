@@ -446,7 +446,9 @@ class Build(unittest.TestCase):
 
 def configuration(password_file: Path) -> settings.Settings:
     return settings.Settings("db.example.test", 5432, "example", "example-worker", password_file, 2,
-                             "http://store.example.test:9200", "example-user", password_file)
+                             "http://store.example.test:9200", "example-user", password_file,
+                             "http://vectors.example.test:6333", password_file,
+                             "http://embed.example.test:8000", password_file)
 
 
 class StreamConnection(_CapturedConnection):
@@ -512,7 +514,9 @@ class RecordAdapter(unittest.TestCase):
         self.assertEqual(self.stream.statements, [(lexical.DOCUMENTS_SQL, ("caselaw", "fictions", NOW.date(), ["court1"]))])
         self.assertEqual(json.loads(cast(str, self.writer.statements[1][1][0])), asdict(counts))
         self.assertEqual(self.writer.statements[2][1][1:], (4096, NOW, NOW, NAME))
-        self.assertNotIn("SET state", lexical.FINISH_SQL)
+        self.assertIn("counts = counts || %s::jsonb", lexical.PROGRESS_SQL)
+        self.assertIn("counts = counts || %s::jsonb", lexical.FINISH_SQL)
+        self.assertIn("state = CASE WHEN state = 'building' AND dense_built_at IS NOT NULL THEN 'built' ELSE state END", lexical.FINISH_SQL)
         self.assertIn("dense_built_at IS NOT NULL", lexical.FINISH_SQL)
         self.assertIn("AND state = 'failed'", lexical.RESUME_SQL)
         self.assertIn("d.superseded_by IS NULL", lexical.DOCUMENTS_SQL)

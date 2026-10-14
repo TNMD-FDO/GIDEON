@@ -1389,6 +1389,23 @@ def resolve_engine_target(
     )
 
 
+def _embed_target(selected: models.HardwareProfile) -> _EmbedTarget | Problem:
+    """Read the embedding pin and space from one selected profile."""
+
+    pin = selected.model(EMBED.role)
+    if pin is None:
+        return Problem(f"models.lock profile '{selected.name}' has no embed pin", _models_fix())
+    space = selected.embedding_space
+    if space is None:
+        return Problem(f"models.lock profile '{selected.name}' has no embedding_space", _models_fix())
+    if space.role != EMBED.role:
+        return Problem(
+            f"models.lock profile '{selected.name}' embedding_space names {space.role}, expected {EMBED.role}",
+            _models_fix(),
+        )
+    return _EmbedTarget(pin.serve.served_name, space.dimensions, space.id)
+
+
 def _resolve_embed_target(
     io: Host,
     rendered_dir: PathLike,
@@ -1407,17 +1424,9 @@ def _resolve_embed_target(
     selected = _selected_profile(io, hardware_profile, models_path)
     if isinstance(selected, Problem):
         return selected
-    pin = selected.model(EMBED.role)
-    if pin is None:
-        return Problem(f"models.lock profile '{selected.name}' has no embed pin", _models_fix())
-    space = selected.embedding_space
-    if space is None:
-        return Problem(f"models.lock profile '{selected.name}' has no embedding_space", _models_fix())
-    if space.role != EMBED.role:
-        return Problem(
-            f"models.lock profile '{selected.name}' embedding_space names {space.role}, expected {EMBED.role}",
-            _models_fix(),
-        )
+    target = _embed_target(selected)
+    if isinstance(target, Problem):
+        return target
 
     ready, detail, _service = apply.wait_for_services(
         io,
@@ -1437,7 +1446,7 @@ def _resolve_embed_target(
             f"then read its logs with {stack.logs_fix(rendered_dir, EMBED.service_name)}; "
             f"then re-run {verify}.",
         )
-    return _EmbedTarget(pin.serve.served_name, space.dimensions, space.id)
+    return target
 
 
 def _embed_vectors_figures(

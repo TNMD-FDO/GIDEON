@@ -37,6 +37,7 @@ from gideon.host.render.egress import (
     INTERNAL_NO_PROXY_HOSTS,
     egress_proxy_url,
 )
+from gideon.host.render.engine import EMBED, EMBED_SECRET_NAME
 from gideon.host.render.grafana import PUBLIC_REPOSITORY_URL
 from gideon.host.render.opensearch import (
     OPENSEARCH_PASSWORD_SECRET_NAME,
@@ -44,6 +45,7 @@ from gideon.host.render.opensearch import (
     OPENSEARCH_SERVICE_NAME,
     OPENSEARCH_USER,
 )
+from gideon.host.render.qdrant import QDRANT_SECRET_NAME, qdrant_rest_url
 from gideon.host.render.services import SERVICES, image_pin
 from gideon.host.render.services.worker import (
     WORKER_HEALTHCHECK,
@@ -56,6 +58,7 @@ from gideon.worker import (
     anchors,
     caselaw,
     citations,
+    dense,
     fetch,
     lexical,
     metrics,
@@ -70,6 +73,17 @@ from gideon.worker.pipeline import PIPELINE_VERSION, PIPELINES
 
 
 class WorkerIdentity(unittest.TestCase):
+    def test_dense_identity_matches_the_worker(self) -> None:
+        for name in (
+            "DENSE_TASK", "DENSE_QUEUE", "DENSE_LOCK_PREFIX", "DENSE_LOCK_SUFFIX",
+            "DENSE_FAILURE_REASONS", "DENSE_COUNT_KEYS", "SERVED_MODEL_PATTERN", "DIMENSIONS_MAX",
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(getattr(worker, name), getattr(dense, name))
+        for name in ("QDRANT_URL_ENV", "QDRANT_KEY_FILE_ENV", "EMBED_URL_ENV", "EMBED_KEY_FILE_ENV"):
+            with self.subTest(name=name):
+                self.assertEqual(getattr(worker, name), getattr(settings, name))
+
     def test_lexical_identity_matches_the_worker(self) -> None:
         for name in (
             "LEXICAL_TASK", "LEXICAL_QUEUE", "LEXICAL_FAILURE_REASONS", "GENERATION_STATES",
@@ -198,6 +212,10 @@ class WorkerIdentity(unittest.TestCase):
                 worker.OPENSEARCH_URL_ENV,
                 worker.OPENSEARCH_USER_ENV,
                 worker.OPENSEARCH_PASSWORD_FILE_ENV,
+                worker.QDRANT_URL_ENV,
+                worker.QDRANT_KEY_FILE_ENV,
+                worker.EMBED_URL_ENV,
+                worker.EMBED_KEY_FILE_ENV,
             ),
             (
                 settings.DATABASE_HOST_ENV,
@@ -209,6 +227,10 @@ class WorkerIdentity(unittest.TestCase):
                 settings.OPENSEARCH_URL_ENV,
                 settings.OPENSEARCH_USER_ENV,
                 settings.OPENSEARCH_PASSWORD_FILE_ENV,
+                settings.QDRANT_URL_ENV,
+                settings.QDRANT_KEY_FILE_ENV,
+                settings.EMBED_URL_ENV,
+                settings.EMBED_KEY_FILE_ENV,
             ),
             "Fix: keep the rendered environment names equal to worker settings.",
         )
@@ -315,7 +337,10 @@ class WorkerBlock(unittest.TestCase):
                         ],
                         "read_only": True,
                         "group_add": [str(rendered_inputs.facts.service_gid)],
-                        "secrets": [worker.WORKER_SECRET_NAME, OPENSEARCH_PASSWORD_SECRET_NAME],
+                        "secrets": [
+                            worker.WORKER_SECRET_NAME, OPENSEARCH_PASSWORD_SECRET_NAME,
+                            QDRANT_SECRET_NAME, EMBED_SECRET_NAME,
+                        ],
                         "environment": {
                             worker.DATABASE_HOST_ENV: worker.WORKER_DATABASE_HOST,
                             worker.DATABASE_PORT_ENV: str(worker.WORKER_DATABASE_PORT),
@@ -328,9 +353,16 @@ class WorkerBlock(unittest.TestCase):
                             worker.OPENSEARCH_URL_ENV: f"http://{OPENSEARCH_SERVICE_NAME}:{OPENSEARCH_REST_PORT}",
                             worker.OPENSEARCH_USER_ENV: OPENSEARCH_USER,
                             worker.OPENSEARCH_PASSWORD_FILE_ENV: f"/run/secrets/{OPENSEARCH_PASSWORD_SECRET_NAME}",
+                            worker.QDRANT_URL_ENV: qdrant_rest_url(),
+                            worker.QDRANT_KEY_FILE_ENV: f"/run/secrets/{QDRANT_SECRET_NAME}",
+                            worker.EMBED_URL_ENV: f"http://{EMBED.service_name}:{EMBED.port}",
+                            worker.EMBED_KEY_FILE_ENV: f"/run/secrets/{EMBED_SECRET_NAME}",
                             "HTTPS_PROXY": egress_proxy_url(),
                             "HTTP_PROXY": egress_proxy_url(),
-                            "NO_PROXY": ",".join(INTERNAL_NO_PROXY_HOSTS),
+                            "NO_PROXY": ",".join(
+                                name for name in INTERNAL_NO_PROXY_HOSTS
+                                if name != EMBED.service_name or not rendered_inputs.no_gpu
+                            ),
                             "TZ": rendered_inputs.site.office.timezone,
                         },
                         "labels": {
@@ -352,7 +384,7 @@ class WorkerBlock(unittest.TestCase):
                     and isinstance(candidate, Mapping)
                     and INTERNAL_NETWORK_NAME in candidate.get("networks", ())
                 )
-                self.assertEqual(len(internal_peers), 4)
+                self.assertEqual(len(internal_peers), 5 if rendered_inputs.no_gpu else 6)
                 self.assertIn("prometheus", internal_peers)
                 environment = block["environment"]
                 assert isinstance(environment, Mapping)

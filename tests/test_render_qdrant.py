@@ -12,6 +12,7 @@ from test_render import EXAMPLE, SECOND, inputs
 
 from gideon.host.images import parse_registry, reference
 from gideon.host.render.compose import ComposeArtifact, service_blocks
+from gideon.host.render.egress import INTERNAL_NETWORK_NAME
 from gideon.host.render.prometheus import PrometheusConfigArtifact
 from gideon.host.render.qdrant import (
     QDRANT_DATA_ROOT,
@@ -116,7 +117,7 @@ class QdrantRender(unittest.TestCase):
                 self.assertEqual(QDRANT_TEMP_PATH, QDRANT_SNAPSHOTS_MOUNT)
                 self.assertEqual(QDRANT_SNAPSHOTS_TEMP_DIR, "tmp")
                 self.assertEqual(block["secrets"], [QDRANT_SECRET_NAME, QDRANT_READ_ONLY_SECRET_NAME])
-                self.assertEqual(block["networks"], ["gideon"])
+                self.assertEqual(block["networks"], ["gideon", INTERNAL_NETWORK_NAME])
                 self.assertIn("healthcheck", block)
                 for absent in ("ports", "user", "command", "depends_on", "group_add"):
                     with self.subTest(absent=absent):

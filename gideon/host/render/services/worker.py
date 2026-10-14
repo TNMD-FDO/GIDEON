@@ -17,12 +17,14 @@ from gideon.host.render.egress import (
     INTERNAL_NO_PROXY_HOSTS,
     egress_proxy_url,
 )
+from gideon.host.render.engine import EMBED, EMBED_SECRET_NAME
 from gideon.host.render.opensearch import (
     OPENSEARCH_PASSWORD_SECRET_NAME,
     OPENSEARCH_REST_PORT,
     OPENSEARCH_SERVICE_NAME,
     OPENSEARCH_USER,
 )
+from gideon.host.render.qdrant import QDRANT_SECRET_NAME, qdrant_rest_url
 from gideon.host.render.services import ServiceDefinition, image_pin, source_digest
 from gideon.host.render.worker import (
     CONCURRENCY_ENV,
@@ -30,10 +32,14 @@ from gideon.host.render.worker import (
     DATABASE_NAME_ENV,
     DATABASE_PORT_ENV,
     DATABASE_ROLE_ENV,
+    EMBED_KEY_FILE_ENV,
+    EMBED_URL_ENV,
     OPENSEARCH_PASSWORD_FILE_ENV,
     OPENSEARCH_URL_ENV,
     OPENSEARCH_USER_ENV,
     PASSWORD_FILE_ENV,
+    QDRANT_KEY_FILE_ENV,
+    QDRANT_URL_ENV,
     SNAPSHOTS_ROOT,
     WORK_ROOT,
     WORKER_CONCURRENCY,
@@ -88,7 +94,10 @@ class WorkerService(ServiceDefinition):
             ],
             "read_only": True,
             "group_add": [str(inputs.facts.service_gid)],
-            "secrets": [WORKER_SECRET_NAME, OPENSEARCH_PASSWORD_SECRET_NAME],
+            "secrets": [
+                WORKER_SECRET_NAME, OPENSEARCH_PASSWORD_SECRET_NAME,
+                QDRANT_SECRET_NAME, EMBED_SECRET_NAME,
+            ],
             "environment": {
                 DATABASE_HOST_ENV: WORKER_DATABASE_HOST,
                 DATABASE_PORT_ENV: str(WORKER_DATABASE_PORT),
@@ -99,9 +108,16 @@ class WorkerService(ServiceDefinition):
                 OPENSEARCH_URL_ENV: f"http://{OPENSEARCH_SERVICE_NAME}:{OPENSEARCH_REST_PORT}",
                 OPENSEARCH_USER_ENV: OPENSEARCH_USER,
                 OPENSEARCH_PASSWORD_FILE_ENV: f"/run/secrets/{OPENSEARCH_PASSWORD_SECRET_NAME}",
+                QDRANT_URL_ENV: qdrant_rest_url(),
+                QDRANT_KEY_FILE_ENV: f"/run/secrets/{QDRANT_SECRET_NAME}",
+                EMBED_URL_ENV: f"http://{EMBED.service_name}:{EMBED.port}",
+                EMBED_KEY_FILE_ENV: f"/run/secrets/{EMBED_SECRET_NAME}",
                 "HTTPS_PROXY": egress_proxy_url(),
                 "HTTP_PROXY": egress_proxy_url(),
-                "NO_PROXY": ",".join(INTERNAL_NO_PROXY_HOSTS),
+                "NO_PROXY": ",".join(
+                    name for name in INTERNAL_NO_PROXY_HOSTS
+                    if name != EMBED.service_name or not inputs.no_gpu
+                ),
                 "TZ": inputs.site.office.timezone,
             },
             "labels": {

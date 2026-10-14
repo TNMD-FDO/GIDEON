@@ -94,7 +94,7 @@ class ConsumerMap(unittest.TestCase):
         no_gpu = secret_consumers(inputs(no_gpu=True))
 
         self.assertEqual(gpu["engine_api_key"], SecretConsumers(("gideon-generator", "gideon-api"), ()))
-        self.assertEqual(gpu["embed_api_key"], SecretConsumers(("gideon-embed",), ()))
+        self.assertEqual(gpu["embed_api_key"], SecretConsumers(("gideon-embed", WORKER_SERVICE_NAME), ()))
         self.assertEqual(gpu["gideon_api_key"], SecretConsumers(("gideon-api",), ("open-webui",)))
         for consumers in (gpu, second, no_gpu):
             self.assertEqual(
@@ -102,7 +102,7 @@ class ConsumerMap(unittest.TestCase):
                 SecretConsumers((WORKER_SERVICE_NAME,), ()),
             )
         self.assertEqual(no_gpu.get("engine_api_key"), None)
-        self.assertEqual(no_gpu.get("embed_api_key"), None)
+        self.assertEqual(no_gpu["embed_api_key"], SecretConsumers((WORKER_SERVICE_NAME,), ()))
         self.assertEqual(no_gpu.get("gideon_api_key"), None)
         self.assertEqual(gpu["webui_secret_key"], SecretConsumers(("open-webui",), ()))
         self.assertEqual(
@@ -114,9 +114,8 @@ class ConsumerMap(unittest.TestCase):
         self.assertEqual(gpu["tls_key"], SecretConsumers(("caddy",), ()))
         self.assertEqual(gpu["ldap_bind_password"], SecretConsumers(("grafana",), ("open-webui",)))
         self.assertEqual(gpu["searxng_secret_key"], SecretConsumers((), ("searxng",)))
-        self.assertEqual(gpu["qdrant_api_key"], SecretConsumers(("qdrant",), ()))
-        self.assertEqual(second["qdrant_api_key"], SecretConsumers(("qdrant",), ()))
-        self.assertEqual(no_gpu["qdrant_api_key"], SecretConsumers(("qdrant",), ()))
+        for consumers in (gpu, second, no_gpu):
+            self.assertEqual(consumers["qdrant_api_key"], SecretConsumers(("qdrant", WORKER_SERVICE_NAME), ()))
         for consumers in (gpu, second, no_gpu):
             self.assertEqual(
                 consumers["qdrant_read_only_api_key"],

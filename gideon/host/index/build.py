@@ -1,22 +1,33 @@
-"""Build a collection's lexical index generation through the queue worker."""
+"""Build a collection's lexical index and vectors through the queue worker."""
 
 import argparse
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
-from gideon.host import backuplock, caselaw, models, report, site, stack, staging
+from gideon.host import (
+    backuplock,
+    caselaw,
+    engine,
+    models,
+    report,
+    site,
+    stack,
+    staging,
+)
 from gideon.host.corpus import artifacts, record, snapshots
 from gideon.host.corpus.sources import SOURCES, SourceDefinition
-from gideon.host.index import generations, lexical
+from gideon.host.index import dense, generations, lexical
 from gideon.host.index import record as indexrecord
+from gideon.host.render.engine import EMBED
 from gideon.host.render.opensearch import OPENSEARCH_SERVICE_NAME
-from gideon.host.render.worker import WORKER_SERVICE_NAME
+from gideon.host.render.qdrant import QDRANT_SERVICE_NAME
+from gideon.host.render.worker import DENSE_LOCK_PREFIX, WORKER_SERVICE_NAME
 from gideon.host.report import Problem, StageResult
 from gideon.host.sysio import LockingHost, PathLike, RealHost, WritableBytesHost
 
@@ -41,29 +52,32 @@ def _refuse(name: str, problem: Problem) -> int:
     return 1
 
 
-def _store_preconditions(host: IndexHost, rendered_dir: PathLike, command_path: str) -> Problem | None:
+def _service_preconditions(
+    host: IndexHost, rendered_dir: PathLike, service: str, words: str, command_path: str,
+) -> Problem | None:
+    logs = stack.logs_fix(rendered_dir, service)
     declared = stack.declared_services(host, rendered_dir)
     if isinstance(declared, Problem):
-        return declared
-    if OPENSEARCH_SERVICE_NAME not in declared:
-        return Problem("rendered stack has no lexical store", f"Run {report.command('apply')}, then run {report.command(command_path)} again.")
-    tool_fix = f"Restore Docker Compose, then run {report.command(command_path)} again."
+        return Problem(declared.problem, f"{declared.fix} Read {logs}, then run {report.command(command_path)} again.")
+    if service not in declared:
+        return Problem(f"rendered stack has no {words}", f"Run {report.command('apply')}, read {logs}, then run {report.command(command_path)} again.")
+    tool_fix = f"Restore Docker Compose, read {logs}, then run {report.command(command_path)} again."
     try:
         result = host.run(stack.compose_argv(rendered_dir, "ps", "--all", "--format", "json"))
     except (OSError, subprocess.SubprocessError) as exc:
-        return Problem(f"lexical store state could not be read ({type(exc).__name__})", tool_fix)
+        return Problem(f"{words} state could not be read ({type(exc).__name__})", tool_fix)
     if result.returncode == 127:
-        return Problem("lexical store state command is unavailable (exit 127)", tool_fix)
-    logs_fix = f"Run {stack.logs_fix(rendered_dir, OPENSEARCH_SERVICE_NAME)}, then run {report.command(command_path)} again."
+        return Problem(f"{words} state command is unavailable (exit 127)", tool_fix)
+    logs_fix = f"Run {logs}, then run {report.command(command_path)} again."
     if result.returncode != 0:
-        return Problem(f"lexical store state read failed (exit {result.returncode})", logs_fix)
+        return Problem(f"{words} state read failed (exit {result.returncode})", logs_fix)
     rows = stack.parse_ps(result.stdout)
     if rows is None:
-        return Problem("lexical store service state is invalid", logs_fix)
-    if not any(row.get("Service") == OPENSEARCH_SERVICE_NAME
+        return Problem(f"{words} service state is invalid", logs_fix)
+    if not any(row.get("Service") == service
                and row.get("State") == "running" and row.get("Health") == "healthy"
                for row in rows):
-        return Problem("lexical store is not running and healthy", logs_fix)
+        return Problem(f"{words} is not running and healthy", logs_fix)
     return None
 
 
@@ -71,7 +85,7 @@ def _preconditions(
     args: argparse.Namespace, host: IndexHost, rendered_dir: PathLike,
     checkout: Path, registry: Sequence[SourceDefinition], site_path: PathLike,
     command_path: str,
-) -> generations.GenerationInputs | Problem:
+) -> dense.DenseInputs | Problem:
     collection = next((item for item in generations.COLLECTIONS if item.name == args.collection), None)
     if collection is None:
         return Problem("collection is not registered", f"Use a registered collection with {report.command(COMMAND_PATH)}.")
@@ -83,9 +97,11 @@ def _preconditions(
     if issue is not None:
         return Problem(issue.detail, issue.fix)
     assert loaded is not None
-    problem = _store_preconditions(host, rendered_dir, command_path)
-    if problem is not None:
-        return problem
+    for service, words in ((OPENSEARCH_SERVICE_NAME, "lexical store"),
+                           (QDRANT_SERVICE_NAME, "vector store"), (EMBED.service_name, EMBED.words)):
+        problem = _service_preconditions(host, rendered_dir, service, words, command_path)
+        if problem is not None:
+            return problem
     lockfile = (
         next((item for item in loaded.directory.lockfiles if item.label == args.lockfile), None)
         if args.lockfile is not None else loaded.directory.newest
@@ -137,21 +153,20 @@ def _preconditions(
     profile = models.select_profile(model_lock.lock, loaded_site.config.hardware_profile)
     if isinstance(profile, Problem):
         return profile
-    if profile.embedding_space is None:
-        return Problem(
-            f"profile {profile.name} has no embedding_space in models.lock",
-            f"Restore the profile's embedding_space block in models.lock, then run {report.command(command_path)} again.",
-        )
-    space = profile.embedding_space.id
+    target = engine._embed_target(profile)
+    if isinstance(target, Problem):
+        return Problem(target.problem, snapshots.retry_fix(target.fix, command_path=command_path))
+    space = target.space_id
     try:
         name = generations.generation_name(collection.name, lockfile.label, space)
     except ValueError:
         return Problem("generation name exceeds the store's grammar or byte limit",
                        f"Restore a valid embedding space id in models.lock, then run {report.command(command_path)} again.")
-    return generations.GenerationInputs(
+    return dense.DenseInputs(
         name, collection.name, lockfile.label, f"{source.name}-{pin.snapshot_date}",
         courts, geography, lockfile.pipeline, space,
         generations.inputs_hash(lockfile, collection.name, space, sources=registry),
+        target.served_name, target.dimensions,
     )
 
 
@@ -211,7 +226,105 @@ def _counts(host: IndexHost, rendered_dir: PathLike, name: str, command_path: st
         f"bytes {row.bytes}; lexical_built_at {row.lexical_built_at}; state {row.state}"
         + ("; empty index" if not counts.get("ready", 0) else ""), "",
     ))
-    report.print_stage(StageResult("dense", True, "dense half not built; promote needs built", ""))
+    return 0
+
+
+def _dense_progress(name: str, counts: Mapping[str, int], now: datetime) -> str:
+    present, copied, embedded = (counts.get(f"dense_{key}", 0) for key in ("present", "copied", "embedded"))
+    written, scope = copied + embedded, counts.get("dense_scope", 0)
+    if scope == present + written:
+        return f"{name}: indexing {counts.get('dense_indexed', 0)} of {scope}"
+    detail = (f"{name}: embedding, chunks written {written} of {scope} "
+              f"(present {present}, copied {copied}, embedded {embedded}), tokens {counts.get('dense_tokens', 0)}")
+    projected = dense.projection(counts, now)
+    if projected is not None:
+        hours = (projected.finish - now).total_seconds() / 3600
+        detail += f", {projected.tokens_per_second:.1f} tok/s, projected finish {projected.finish.isoformat()} ({hours:.1f} h)"
+    return detail
+
+
+def _first_hour(name: str, counts: Mapping[str, int], now: datetime) -> str:
+    seconds, tokens, written = (counts.get(f"dense_hour_{key}", 0) for key in ("seconds", "tokens", "written"))
+    detail = f"{name}: first hour: tokens {tokens} in {seconds} s"
+    if seconds > 0:
+        detail += f", {tokens / seconds:.1f} tok/s"
+    detail += f", written {written}"
+    projected = dense.projection({**counts, "dense_seconds": seconds, "dense_tokens": tokens,
+                                  "dense_copied": 0, "dense_embedded": written,
+                                  "dense_scope": counts.get("dense_total", 0)}, now)
+    if projected is not None:
+        days, remainder = divmod(projected.generation_seconds, timedelta(days=1).total_seconds())
+        detail += (f"; the generation of {counts.get('dense_total', 0)} chunks projected at "
+                   f"{int(days)} d {remainder / 3600:.1f} h, finish {projected.finish.isoformat()}: "
+                   f"{projected.verdict} the three-week tripwire")
+    return detail
+
+
+def _dense(
+    host: IndexHost, rendered_dir: PathLike, inputs: dense.DenseInputs,
+    command_path: str, sleep: Callable[[float], None], monotonic: Callable[[], float],
+    clock: Callable[[], datetime],
+) -> int:
+    job = lexical.live_job(host, rendered_dir, f"{DENSE_LOCK_PREFIX}{inputs.name}",
+                          prefix=DENSE_LOCK_PREFIX, command_path=command_path)
+    if isinstance(job, Problem):
+        return _refuse("dense", job)
+    rejoined = job is not None
+    if job is None:
+        job = dense.defer_dense(host, rendered_dir, inputs, command_path=command_path)
+    if isinstance(job, Problem):
+        return _refuse("dense", job)
+    report.print_stage(StageResult("dense", True, f"{inputs.name}: {'rejoined' if rejoined else 'deferred'} job {job}", ""))
+    heartbeat_at = monotonic()
+    hour_printed = False
+    while True:
+        outcome = dense.read_dense(host, rendered_dir, job, inputs.name, command_path=command_path)
+        if isinstance(outcome, Problem):
+            return _refuse("dense", outcome)
+        if outcome.failure is not None:
+            return _refuse("dense", outcome.failure)
+        now = monotonic()
+        heartbeat = now - heartbeat_at >= snapshots.HEARTBEAT_SECONDS
+        if not heartbeat and not outcome.done:
+            sleep(1.0)
+            continue
+        row = indexrecord.read_generation(host, rendered_dir, inputs.name, command_path=command_path)
+        if isinstance(row, Problem):
+            return _refuse("dense", row)
+        if row is None:
+            return _refuse("dense", Problem("generation progress row is missing", record.database_fix(rendered_dir, command_path)))
+        counts = row.counts
+        if not hour_printed and (counts.get("dense_hour_seconds", 0) > 0 or
+                                (outcome.done and counts.get("dense_limit", 0) > 0 and "dense_hour_seconds" in counts)):
+            report.print_stage(StageResult("first-hour", True, _first_hour(inputs.name, counts, clock()), ""))
+            hour_printed = True
+        if outcome.done:
+            report.print_stage(StageResult("dense", True, f"{inputs.name}: job {job} succeeded, attempts {outcome.job.attempts}", ""))
+            return 0
+        report.print_stage(StageResult("dense", True, _dense_progress(inputs.name, counts, clock()), ""))
+        heartbeat_at = now
+        sleep(1.0)
+
+
+def _built(host: IndexHost, rendered_dir: PathLike, name: str, command_path: str) -> int:
+    row = indexrecord.read_generation(host, rendered_dir, name, command_path=command_path)
+    if isinstance(row, Problem):
+        return _refuse("built", row)
+    if row is None or (row.dense_built_at is None and row.counts.get("dense_limit", 0) <= 0):
+        return _refuse("built", Problem("succeeded dense job has no recorded dense_built_at",
+                                      f"Run {stack.logs_fix(rendered_dir, WORKER_SERVICE_NAME)}, then run {report.command(command_path)} again."))
+    counts = row.counts
+    present, copied, embedded = (counts.get(f"dense_{key}", 0) for key in ("present", "copied", "embedded"))
+    written = copied + embedded
+    if row.dense_built_at is None:
+        detail = (f"{name}: limited to {counts['dense_limit']} documents, chunks written {written} of {counts.get('dense_scope', 0)}; "
+                  f"dense half not built: run {report.command(command_path)} again")
+    else:
+        detail = (f"{name}: points {counts.get('dense_points', 0)}, indexed {counts.get('dense_indexed', 0)}, "
+                  f"written {written} (present {present}, copied {copied}, embedded {embedded}), "
+                  f"tokens {counts.get('dense_tokens', 0)}, requests {counts.get('dense_requests', 0)}, "
+                  f"seconds {counts.get('dense_seconds', 0)}; dense_built_at {row.dense_built_at}; state {row.state}")
+    report.print_stage(StageResult("built", True, detail, ""))
     return 0
 
 
@@ -222,7 +335,7 @@ def run_index_build(
     sleep: Callable[[float], None] = time.sleep, monotonic: Callable[[], float] = time.monotonic,
     sources: Sequence[SourceDefinition] = SOURCES,
 ) -> int:
-    """Check inputs, record an identity, wait for its lexical build, and report."""
+    """Check inputs, record an identity, and wait for both generation builds."""
 
     if args.sample:
         print(f"gideon {COMMAND_PATH} --sample: not implemented; {SAMPLE_LANDING}", file=sys.stderr)
@@ -246,7 +359,7 @@ def run_index_build(
         inputs = _preconditions(args, io, rendered_dir, root, sources, site_path, command_path)
         if isinstance(inputs, Problem):
             return _refuse(active_stage, inputs)
-        report.print_stage(StageResult("preconditions", True, f"{inputs.collection}: {inputs.label}; {inputs.snapshot}; pipeline {inputs.pipeline}; embedding space {inputs.embedding_space}", ""))
+        report.print_stage(StageResult("preconditions", True, f"{inputs.collection}: {inputs.label}; {inputs.snapshot}; pipeline {inputs.pipeline}; embedding space {inputs.embedding_space}; served model {inputs.served_model}; dimensions {inputs.dimensions}", ""))
         active_stage = "generation"
         outcome = indexrecord.write_building(io, rendered_dir, inputs, command_path=command_path)
         if isinstance(outcome, Problem):
@@ -271,10 +384,20 @@ def run_index_build(
         if result:
             return result
         active_stage = "counts"
-        return _counts(io, rendered_dir, inputs.name, command_path)
+        result = _counts(io, rendered_dir, inputs.name, command_path)
+        if result:
+            return result
+        active_stage = "dense"
+        result = _dense(io, rendered_dir, inputs, command_path, sleep, monotonic, clock)
+        if result:
+            return result
+        active_stage = "built"
+        return _built(io, rendered_dir, inputs.name, command_path)
     except KeyboardInterrupt:
         if active_stage == "build":
             return _refuse(active_stage, Problem("interrupted; the build continues in the worker", f"Run {report.command(command_path)} again to rejoin it."))
+        if active_stage == "dense":
+            return _refuse(active_stage, Problem("interrupted; the embed continues in the worker", f"Run {report.command(command_path)} again to rejoin it."))
         detail = "interrupted; the row stands" if recorded else "interrupted; nothing was recorded"
         return _refuse(active_stage, Problem(detail, f"Run {report.command(command_path)} again."))
     finally:

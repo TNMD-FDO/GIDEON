@@ -10,12 +10,13 @@ from dataclasses import asdict, replace
 from test_index_record import NAME, RENDERED, FakeHost, inputs_for, row_for
 
 from gideon.host import caselaw, report, stack, worker
-from gideon.host.index.lexical import LexicalRead, defer_lexical, live_job, read_lexical
+from gideon.host.index.lexical import BuildRead, defer_lexical, live_job, read_lexical
 from gideon.host.render.opensearch import (
     OPENSEARCH_PASSWORD_SECRET_NAME,
     OPENSEARCH_SERVICE_NAME,
 )
 from gideon.host.render.worker import (
+    DENSE_LOCK_PREFIX,
     LEXICAL_FAILURE_REASONS,
     LEXICAL_QUEUE,
     LEXICAL_TASK,
@@ -132,6 +133,40 @@ class Defer(unittest.TestCase):
 
 
 class LiveJob(unittest.TestCase):
+    def test_dense_prefix_binds_its_lock_without_values_in_argv(self) -> None:
+        host = QueueHost()
+        lock = f"{DENSE_LOCK_PREFIX}{NAME}"
+        self.assertEqual(live_job(host, RENDERED, lock, prefix=DENSE_LOCK_PREFIX), JOB_ID)
+        argv, sql = host.calls[0]
+        self.assertEqual(argv, worker.psql_argv(RENDERED))
+        self.assertNotIn(lock, " ".join(argv))
+        assert sql is not None
+        self.assertIn(worker.bind("v_lock", lock), sql)
+        self.assertIn("status IN ('todo', 'doing')", sql)
+
+    def test_prefix_refusals_use_the_dense_subject(self) -> None:
+        for lock in (f"index-{NAME}", "dense-invalid", f"{DENSE_LOCK_PREFIX}{NAME};"):
+            with self.subTest(lock=lock):
+                host = QueueHost()
+                result = live_job(host, RENDERED, lock, prefix=DENSE_LOCK_PREFIX)
+                assert isinstance(result, Problem)
+                self.assertIn("dense", result.problem)
+                self.assertEqual(host.calls, [])
+        host = QueueHost()
+        self.assertIsInstance(live_job(host, RENDERED, f"{DENSE_LOCK_PREFIX}{NAME}"), Problem)
+        self.assertEqual(host.calls, [])
+
+    def test_dense_query_failure_is_not_retried(self) -> None:
+        for code, error in ((3, None), (127, None), (0, FileNotFoundError())):
+            with self.subTest(code=code, error=error):
+                host = QueueHost()
+                host.code, host.error = code, error
+                result = live_job(host, RENDERED, f"{DENSE_LOCK_PREFIX}{NAME}", prefix=DENSE_LOCK_PREFIX)
+                assert isinstance(result, Problem)
+                self.assertIn("dense", result.problem)
+                self.assertIn(report.command("index build"), result.fix)
+                self.assertEqual(len(host.calls), 1)
+
     def test_lookup_binds_the_lock_and_only_selects_live_statuses(self) -> None:
         host = QueueHost()
         lock = f"index-{NAME}"
@@ -191,7 +226,7 @@ class Read(unittest.TestCase):
                 host = QueueHost()
                 host.status = status
                 result = read_lexical(host, RENDERED, JOB_ID, NAME)
-                self.assertEqual(result, LexicalRead(worker.JobRow(JOB_ID, status, 1), status == "succeeded", None, None))
+                self.assertEqual(result, BuildRead(worker.JobRow(JOB_ID, status, 1), status == "succeeded", None, None))
                 self.assertEqual(len(host.calls), 1)
 
     def test_every_failure_reason_comes_from_the_row_and_has_its_fix(self) -> None:
@@ -201,8 +236,8 @@ class Read(unittest.TestCase):
                 host.status = "failed"
                 host.generation_output = json.dumps(asdict(replace(row_for(), state="failed", failure_reason=reason)))
                 result = read_lexical(host, RENDERED, JOB_ID, NAME)
-                self.assertIsInstance(result, LexicalRead)
-                assert isinstance(result, LexicalRead) and result.failure is not None
+                self.assertIsInstance(result, BuildRead)
+                assert isinstance(result, BuildRead) and result.failure is not None
                 self.assertFalse(result.done)
                 self.assertEqual(result.reason, reason)
                 self.assertEqual(result.job.id, JOB_ID)
@@ -235,8 +270,8 @@ class Read(unittest.TestCase):
                 host.status = status
                 host.generation_output = json.dumps(asdict(replace(row_for(), state="failed", failure_reason="busy")))
                 result = read_lexical(host, RENDERED, JOB_ID, NAME)
-                self.assertIsInstance(result, LexicalRead)
-                assert isinstance(result, LexicalRead)
+                self.assertIsInstance(result, BuildRead)
+                assert isinstance(result, BuildRead)
                 self.assertEqual(result.reason, "busy")
 
     def test_terminal_status_without_failed_generation_uses_local(self) -> None:
@@ -246,8 +281,8 @@ class Read(unittest.TestCase):
                     host = QueueHost()
                     host.status, host.generation_output = status, output
                     result = read_lexical(host, RENDERED, JOB_ID, NAME)
-                    self.assertIsInstance(result, LexicalRead)
-                    assert isinstance(result, LexicalRead) and result.failure is not None
+                    self.assertIsInstance(result, BuildRead)
+                    assert isinstance(result, BuildRead) and result.failure is not None
                     self.assertEqual(result.reason, "local")
                     self.assertIn(stack.logs_fix(RENDERED, WORKER_SERVICE_NAME), result.failure.fix)
 
@@ -282,6 +317,6 @@ class Read(unittest.TestCase):
                 host.status = "failed"
                 host.generation_output = json.dumps(asdict(replace(row_for(), state="failed", failure_reason=reason)))
                 result = read_lexical(host, RENDERED, JOB_ID, NAME)
-                assert isinstance(result, LexicalRead) and result.failure is not None
+                assert isinstance(result, BuildRead) and result.failure is not None
                 self.assertIn("gideon index build", result.failure.fix)
                 self.assertNotIn("python3 -m gideon", result.failure.fix)

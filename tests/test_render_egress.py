@@ -45,6 +45,7 @@ from gideon.host.render.egress import (
     PORT_ENV,
     EgressEnvArtifact,
 )
+from gideon.host.render.engine import EMBED_SERVICE_NAME
 from gideon.host.render.services import SERVICES, image_pin
 from gideon.host.render.services.egress import EgressService
 from gideon.host.render.worker import WORKER_SERVICE_NAME
@@ -76,8 +77,11 @@ class Identity(unittest.TestCase):
                     if name != WORKER_SERVICE_NAME and isinstance(block, Mapping)
                     and INTERNAL_NETWORK_NAME in block["networks"]
                 )
-                self.assertEqual(INTERNAL_NO_PROXY_HOSTS, peers)
-                self.assertEqual(len(peers), 4)
+                self.assertEqual(
+                    tuple(name for name in INTERNAL_NO_PROXY_HOSTS if name != EMBED_SERVICE_NAME or not no_gpu),
+                    peers,
+                )
+                self.assertEqual(len(peers), 5 if no_gpu else 6)
 
     def test_environment_names_match_the_runtime_and_network_names_match(self) -> None:
         self.assertEqual(

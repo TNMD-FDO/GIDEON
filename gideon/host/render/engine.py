@@ -4,7 +4,7 @@ A model server serves one pinned model on the engine image; the family is one
 member per model role of the lock, the generator first. A member holds its
 service name (the stable alias), container port, secret name, scrape job name,
 slow-start allowance, and the words its clients use for the server.
-It also says whether the member joins the integration network.
+It also says whether the member joins the integration and internal networks.
 Its served name and GPU are its pin's, the served name held equal to the
 service name by a test. The generator's identity is shared by its Compose
 definition (``render/services/generator.py``), the frontend's connection
@@ -37,7 +37,7 @@ EMBED_READY_SECONDS: Final = 300
 
 @dataclass(frozen=True, slots=True)
 class ModelServerMember:
-    """One model role's identity, startup allowance, and integration join."""
+    """One model role's identity, startup allowance, and network joins."""
 
     role: str
     service_name: str
@@ -47,6 +47,7 @@ class ModelServerMember:
     ready_seconds: int
     words: str
     joins_integration_network: bool
+    joins_internal_network: bool
 
     @property
     def key_file_words(self) -> str:
@@ -64,6 +65,7 @@ GENERATOR: Final = ModelServerMember(
     ENGINE_READY_SECONDS,
     "engine",
     True,
+    False,
 )
 EMBED: Final = ModelServerMember(
     "embed",
@@ -74,6 +76,7 @@ EMBED: Final = ModelServerMember(
     EMBED_READY_SECONDS,
     "embedding server",
     False,
+    True,
 )
 MODEL_SERVERS: Final = (GENERATOR, EMBED)
 

@@ -15,7 +15,7 @@ inputs:
   build_box: true
 files:
   compose.yaml:
-    sha256: "75d023560048337bfcea0e7c006cbc6765d09deb49c452ade05a6babbf60fafa"
+    sha256: "15f105edc4acdbdfa0712b595e4e70a669c61b4e1b3784d56de4ed850ce0c365"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
@@ -235,13 +235,13 @@ services:
   node-exporter: "372e640d7a5bc260c18cbd0a7cb48c5fd16fea5fc2f76ff1c0fa7b8eeb531134"
   grafana: "d960c1ceaa6a77defd2669c758bfc3e67f1be3b94a959adf04daaa72985c0cb2"
   postgres: "3a9087c68e7c534f00aeec7b032e8dbcb5bad751cc1ff72e9a97629e1da47306"
-  qdrant: "9805052fb17cdd7d0ed62a918188530c830b0061ef50b4f4174011809315d154"
+  qdrant: "30030653744c6091cd90a6481d358924b2c1eb8e76f86d54f1f6c1d633b61b83"
   opensearch: "5e566c66fd1232f7aa18d184184fd5680bc9be63896810da914b763f9c387742"
   open-webui: "c77cd90569cc978835d67284a3d9eac17dc5e2e65303fffa50b27798f512452a"
   gideon-generator: "820e1625abe32da4d6e61c41de06cfe8c503d1cb6073100e42f51ba986ae48d8"
-  gideon-embed: "2c0d136da5b6086d55c0b292a625c6979f5ba0945913ca8caba0358004f6465a"
+  gideon-embed: "645fb11380296a50f9fd68d238a2ac5ec6fb06e7c1f37bb1530df6e8789b7a08"
   gideon-api: "e0df6d9b49ad47f718ab5b41bfa7d95265798e400425745556002d9ce0ea98a5"
-  gideon-worker: "b1165c824e800269f44b6395d8012934645e7a182aa50bbdb29237e4ed7f5eb7"
+  gideon-worker: "0de14d194bf1b78113dd4f3cf29004cc673be099f81d516575009166a4b794bd"
   gideon-egress: "d961fa13530a157ee903e72d7e505dc032d5fa0e658054b6e698cbf11d35bae8"
   searxng: "790f3d23c5a48d8b2e3c02d12c6615884bb4073095bdf7faa51ccee49aa51c2c"
   dcgm-exporter: "69b8cf5fe0c7805a28c1690e0ac3f49736a04f2fe8b7822a939073cd435d8a5f"
@@ -282,6 +282,7 @@ top_level_parts:
       sha256: "b7213797520b30b98c6799cb95411028c2c742fc7891eda331d101c84ab34ae8"
       mounts:
         - "qdrant"
+        - "gideon-worker"
     qdrant_read_only_api_key:
       sha256: "759aa71ff9c8b4c635fdfeedd268d42f56dada1c1ad4ed9f0a6ff5d5a5f60665"
       mounts:
@@ -312,6 +313,7 @@ top_level_parts:
       sha256: "8403adda24d578a06322a2c9aa7b8553cc621d89b00cc47e620d5b94f7f9cf40"
       mounts:
         - "gideon-embed"
+        - "gideon-worker"
     gideon_api_key:
       sha256: "b1f5f536032e9f7587130ee2adafafabe82444e7e53b3d3421a2440dcc3382c7"
       mounts:

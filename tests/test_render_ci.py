@@ -202,7 +202,7 @@ class Compose(unittest.TestCase):
         cases = (
             (PostgresService(), {"volumes", "command", "networks"}),
             (OpenWebuiService(), {"env_file", "environment", "volumes", "ports"}),
-            (QdrantService(), {"volumes"}),
+            (QdrantService(), {"volumes", "networks"}),
             (OpensearchService(), {"volumes", "environment", "networks"}),
         )
         for definition, differences in cases:
@@ -239,6 +239,7 @@ class Compose(unittest.TestCase):
         self.assertEqual(frontend["ports"], [f"127.0.0.1:{CI_PORT}:8080"])
 
         qdrant = mapping(services[QDRANT_SERVICE_NAME])
+        self.assertEqual(qdrant["networks"], [NETWORK_NAME])
         self.assertEqual(qdrant["volumes"], [f"{CI_QDRANT_DATA_ROOT}:{QDRANT_STORAGE_MOUNT}"])
         self.assertNotIn(QDRANT_SNAPSHOTS_ROOT, str(qdrant["volumes"]))
 

@@ -14,7 +14,7 @@ from gideon.host.index.record import (
     read_generation,
     write_building,
 )
-from gideon.host.render.worker import PIPELINE_VERSION
+from gideon.host.render.worker import GENERATION_FAILURE_REASONS, PIPELINE_VERSION
 from gideon.host.report import Problem
 from gideon.host.sysio import Command, PathLike, RealHost
 
@@ -161,6 +161,13 @@ class Reader(unittest.TestCase):
 
     def test_absent_row_is_none(self) -> None:
         self.assertIsNone(read_generation(FakeHost(stdout="\n"), RENDERED, NAME))
+
+    def test_each_generation_failure_reason_parses(self) -> None:
+        for reason in GENERATION_FAILURE_REASONS:
+            with self.subTest(reason=reason):
+                row = replace(row_for(), state="failed", failure_reason=reason)
+                host = FakeHost(stdout=json.dumps(asdict(row)))
+                self.assertEqual(read_generation(host, RENDERED, NAME), row)
 
     def test_failed_generation_and_completed_lifecycles_parse(self) -> None:
         row = row_for()
