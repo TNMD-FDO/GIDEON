@@ -1070,3 +1070,55 @@ The last row, `networks`, fails when a container is still attached to one of GID
 ### What stays
 
 The closing `Kept:` line names what the command leaves. Remove the checkout with `sudo rm -rf /opt/gideon` once nothing more is needed from it. The `gideon` account, the packages GIDEON installed, Docker's `daemon.json` keys, and containerd's configuration are shared with whatever else runs on the box: change or remove them only after agreeing it with the box's other operators. Unmounting `/data` and removing its `/etc/fstab` block is the data volume owner's decision, in an announced window.
+
+## 12. A box that loses memory or a card
+
+On a GPU host, the `hardware-profile` row of `gideon preflight` refuses when the host reads under the selected profile's floor: fewer cards than the profile's count, or less DRAM than its floor. `gideon install` and `gideon upgrade <tag>` run preflight first; an upgrade's refusal here is before its checkout, so nothing of the product has changed (§2). The row prints one fix: `Provide the hardware the profile requires, or set hardware_profile in /etc/gideon/site.yaml to a profile this host satisfies, then re-run preflight.` `gideon apply` runs no preflight; it reads the memory table and the GPU record, so a site-file edit still converges after a lost DIMM. Nothing running compares the host with the profile between upgrades. On a no-GPU host the row passes as skipped.
+
+GIDEON changes no hardware and selects no profile by itself. Confirm the loss with the reads below, agree the fix with the people under *Who decides*, then converge from the release checkout.
+
+### A lost DIMM
+
+The shortfall reads `hardware-profile: refuse — DRAM is <kB> kB (<GB> GB), profile requires <floor> GB`. For a non-reference profile, `profile '<name>': ` precedes the shortfall after the dash. Every shortfall is joined in one row with `; `, followed by `Fix:` and the fix above.
+
+Everything keeps running from the reboot that shows the loss. The stack's limits are still the profile's memory table: ceilings sized for the floor, whose sum may now pass the host. The `host-memory` row judges a fifth of whatever the host now reads, so the loss lowers that floor rather than tripping it; the row warns, never refuses. No limit shrinks by itself. A store growing toward its ceiling with less host memory behind it risks the kernel's memory killer.
+
+Read these as root:
+
+- `MemTotal` in `/proc/meminfo`, for the DRAM the host now sees.
+- `sudo dmidecode -t memory`, for the populated slots: a slot reading no module, or fewer populated slots than the box had.
+- The `ce_count` and `ue_count` counters per controller under `/sys/devices/system/edac/mc/`, where the host exposes them, and `sudo journalctl -k -b`, the current boot's kernel log, for EDAC or machine-check lines.
+- The server's management log, where a failed or disabled DIMM is logged at boot; on an HPE box, the Integrated Management Log at the management interface.
+
+### A lost card
+
+The shortfall reads `hardware-profile: refuse — GPU count is <n>, profile requires <count>`, with the same non-reference prefix and fix as above.
+
+The model server bound to the card by UUID stops and its page fires: `Engine down` for the generator's card, `Target down` for the embedder's (`docs/runbooks/observability.md §4`). The rest of the stack serves. With the generator's card gone, General is listed and a turn never answers. With the embedder's card gone, work that embeds through it stops: an index build in progress, and from the Research launch each query's embedding.
+
+Every render refuses on the GPU record: `the GPU record /etc/gideon/gpus.yaml names card(s) nvidia-smi -L no longer reports: GPU index <n> UUID <uuid>`. Its fix reads `Remove /etc/gideon/gpus.yaml as root, then run gideon render --diff to record today's cards and inspect the diff.` `gideon apply` is refused there; `gideon upgrade <tag>` refuses at preflight before reaching render. Convergence stays refused until the card is back or a profile naming fewer cards is selected and the record is re-recorded. Removing the record alone (§1's GPU record paragraph) does not help on a profile naming more cards than the host has: render then refuses on the position the profile assigns beyond the recorded count.
+
+Read `nvidia-smi -L` against `/etc/gideon/gpus.yaml`: the missing UUID identifies the lost card's recorded position. Read `nvidia-smi -q` for the card that remains, `sudo journalctl -k -b` for the driver's Xid lines, and the management log.
+
+### The repair, or a lower profile
+
+The hardware owner replaces the DIMM or card in a maintenance window. Announce the window to every project sharing the box and, once users are on it, to them at least one working day ahead. Then converge below.
+
+When the release's `models.lock` carries a profile with a lower floor, set it as `hardware_profile` in `/etc/gideon/site.yaml` and converge below. `docs/runbooks/release-files.md §4` says what a profile sizes and how each value moves. The apply recreates every service whose limit moved, so this takes a window from go-live. The costs are a smaller memory table and a lower chunk ceiling for the index; a one-card profile puts both model servers on that card with a smaller cache pool, so fewer concurrent users. A profile the release does not carry is not an option on the box.
+
+After a card, both paths require the GPU record to be removed and re-recorded first, as §1's GPU record paragraph says. A replacement carries a new UUID; a profile naming fewer cards still meets the old record naming the lost card, which every render refuses whatever profile is selected. Re-recording the cards the host now has binds the profile's positions, and `gideon render --diff` shows what moves before the apply.
+
+### Who decides
+
+The office's hardware owner decides the repair. The CSA decides a profile change, with the developer reading the rung's costs against the office's corpus and users. Before go-live, the developer alone decides.
+
+After a card, the record's removal and `gideon render --diff` (§1) come before the block below, on both paths. Provision converges the host facts a changed profile judges, the data-volume floor among them; apply converges the memory table and GPU bindings; preflight reads the row pass. A non-reference profile warns instead, as its row says.
+
+From the release checkout, converge after the hand change:
+
+```sh
+cd /opt/gideon
+gideon host provision
+gideon apply
+gideon preflight
+```
