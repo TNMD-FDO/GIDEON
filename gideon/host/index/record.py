@@ -210,3 +210,30 @@ def read_generation(
     if row is None or row.gen_id != name:
         return Problem("generation record row is invalid", fix)
     return row
+
+
+def read_generations(
+    host: Host, rendered_dir: PathLike, *, command_path: str,
+) -> tuple[GenerationRow, ...] | Problem:
+    """Read every generation in collection, creation time, and id order."""
+
+    sql = (
+        "SELECT row_to_json(generation) FROM public.index_generations AS generation "
+        "ORDER BY collection, created_at, gen_id;\n"
+    )
+    result = _run(host, rendered_dir, sql, command_path)
+    if isinstance(result, Problem):
+        return result
+    fix = database_fix(rendered_dir, command_path)
+    if result.returncode != 0:
+        return Problem(f"generation record read failed (exit {result.returncode})", fix)
+    rows: list[GenerationRow] = []
+    for line in result.stdout.splitlines():
+        try:
+            row = _parse_row(json.loads(line))
+        except ValueError:
+            row = None
+        if row is None:
+            return Problem("generation record row is invalid", fix)
+        rows.append(row)
+    return tuple(rows)

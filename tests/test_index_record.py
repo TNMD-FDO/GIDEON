@@ -7,11 +7,13 @@ from collections.abc import Mapping
 from dataclasses import asdict, replace
 
 from gideon.host import caselaw, report, stack, worker
+from gideon.host.corpus.record import database_fix
 from gideon.host.index.generations import GenerationInputs, generation_name
 from gideon.host.index.record import (
     BuildingOutcome,
     GenerationRow,
     read_generation,
+    read_generations,
     write_building,
 )
 from gideon.host.render.worker import GENERATION_FAILURE_REASONS, PIPELINE_VERSION
@@ -216,6 +218,57 @@ class Reader(unittest.TestCase):
                 assert isinstance(result, Problem)
                 self.assertEqual(result.problem, "generation record row is invalid")
                 self.assertIn(stack.logs_fix(RENDERED, "postgres"), result.fix)
+
+
+class GenerationsReader(unittest.TestCase):
+    """List the record's generations without changing their order or state."""
+
+    def test_rows_in_reader_order_and_one_unbound_statement_on_stdin(self) -> None:
+        first = replace(row_for(), corpus_lockfile="corpus-2099-02-03",
+                        lockfiles=("corpus-2099-02-03",),
+                        gen_id=generation_name("caselaw", "corpus-2099-02-03", SPACE))
+        rows = (first, row_for())
+        host = FakeHost(stdout="".join(json.dumps(asdict(row)) + "\n" for row in rows))
+        self.assertEqual(read_generations(host, RENDERED, command_path="index report"), rows)
+        self.assertEqual(host.calls, [(worker.psql_argv(RENDERED),
+            "SELECT row_to_json(generation) FROM public.index_generations AS generation "
+            "ORDER BY collection, created_at, gen_id;\n")])
+        argv, sql = host.calls[0]
+        self.assertNotIn("SELECT", " ".join(argv))
+        self.assertNotIn("\\set", sql or "")
+
+    def test_empty_table_is_an_empty_tuple(self) -> None:
+        self.assertEqual(read_generations(FakeHost(), RENDERED, command_path="index report"), ())
+
+    def test_any_unreadable_or_invalid_line_refuses_the_whole_read(self) -> None:
+        valid = json.dumps(asdict(row_for())) + "\n"
+        for invalid in ("broken", "[]", "{}", "", json.dumps(asdict(replace(row_for(), bytes=-1)))):
+            with self.subTest(invalid=invalid):
+                host = FakeHost(stdout=valid + invalid + "\n")
+                self.assertEqual(
+                    read_generations(host, RENDERED, command_path="index report"),
+                    Problem("generation record row is invalid", database_fix(RENDERED, "index report")),
+                )
+                self.assertEqual(len(host.calls), 1)
+
+    def test_nonzero_exit_refuses_even_when_stdout_holds_a_valid_row(self) -> None:
+        host = FakeHost(code=3, stdout=json.dumps(asdict(row_for())), stderr="private text sentinel")
+        self.assertEqual(
+            read_generations(host, RENDERED, command_path="index report"),
+            Problem("generation record read failed (exit 3)", database_fix(RENDERED, "index report")),
+        )
+        self.assertEqual(len(host.calls), 1)
+
+    def test_unavailable_command_refuses_with_a_fix_without_retry(self) -> None:
+        for code, error in ((127, None), (0, FileNotFoundError()), (0, subprocess.SubprocessError())):
+            with self.subTest(code=code, error=error):
+                host = FakeHost(code=code, error=error)
+                result = read_generations(host, RENDERED, command_path="index report")
+                self.assertIsInstance(result, Problem)
+                assert isinstance(result, Problem)
+                self.assertIn("Restore Docker Compose and psql", result.fix)
+                self.assertIn(report.command("index report"), result.fix)
+                self.assertEqual(len(host.calls), 1)
 
 
 class Commands(unittest.TestCase):

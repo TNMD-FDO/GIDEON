@@ -36,7 +36,6 @@ STUBS = [
     (["host", "gpu"], "escape hatch"),
     (["index", "promote", "1"], "slice 3"),
     (["index", "gc"], "slice 3"),
-    (["index", "report"], "slice 3"),
     (["registry", "gc"], "no slice scheduled"),
     (["audit", "query"], "no slice scheduled"),
     (["retention", "sweep"], "slice 6"),
@@ -310,6 +309,22 @@ class Stubs(unittest.TestCase):
                 self.assertNotEqual(code, 0)
                 self.assertIn("not implemented", err.getvalue())
                 self.assertIn(landing, err.getvalue())
+
+
+class IndexReport(unittest.TestCase):
+    def test_help_describes_the_inventory_and_optional_generation(self) -> None:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as ctx:
+            main(["index", "report", "--help"])
+        self.assertEqual(ctx.exception.code, 0)
+        help_text = collapsed(out.getvalue())
+        for phrase in ("<generation>", "corpus inventory", "lockfiles", "live generation", "build report"):
+            self.assertIn(phrase, help_text)
+
+    def test_two_positionals_are_a_usage_error(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as ctx:
+            main(["index", "report", "first", "second"])
+        self.assertEqual(ctx.exception.code, 2)
 
 
 class IndexBuild(unittest.TestCase):

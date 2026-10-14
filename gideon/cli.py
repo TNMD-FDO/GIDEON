@@ -81,7 +81,6 @@ _LANDING: Final = {
     "host gpu": "the escape hatch, pulled only on eval evidence of reranker latency during bulk embedding",
     "index promote": "lands in slice 3 (v0.4.0)",
     "index gc": "lands in slice 3 (v0.4.0)",
-    "index report": "lands in slice 3 (v0.4.0)",
     "registry gc": "in the recorded command surface, no slice scheduled",
     "audit query": "in the recorded command surface, no slice scheduled",
     "retention sweep": "lands in slice 6 (v0.7.0)",
@@ -378,7 +377,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     promote.add_argument("gen", help="generation to promote")
     _stub_parser(index_sub, "gc", "index gc", "drop retired generations past their hold")
-    _stub_parser(index_sub, "report", "index report", "report generations and build state")
+    index_report = index_sub.add_parser(
+        "report", help="print the corpus inventory from the record",
+        description=(
+            "Print the corpus inventory: the recorded lockfiles, every index generation "
+            "and its state, and the live or named generation's documents per court by "
+            "status and text source, anchor coverage, agreement, and gates. Read from "
+            "the generation rows and the newest build report."
+        ),
+    )
+    index_report.add_argument(
+        "generation", nargs="?", metavar="<generation>",
+        help="a recorded generation's id; bare, each collection's live generation",
+    )
+    index_report.set_defaults(handler=host_cli.run_index_report, command_path="index report")
 
     registry = commands.add_parser("registry", help="local release registry")
     registry_sub = registry.add_subparsers(dest="subcommand", metavar="<subcommand>", required=True)
