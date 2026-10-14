@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.155](docs/release-notes/v0.3.155.md) — 2026-10-13 — a worktree removal hands root bytecode caches back
 - [v0.3.154](docs/release-notes/v0.3.154.md) — 2026-10-14 — engine verify re-sends a sample that proved nothing, and an exhausted row asks for a re-run, never a rollback
 - [v0.3.153](docs/release-notes/v0.3.153.md) — 2026-10-14 — the treatment table, a captured source
 - [v0.3.152](docs/release-notes/v0.3.152.md) — 2026-10-13 — index build writes a lexical generation
