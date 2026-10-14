@@ -5,7 +5,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
@@ -22,12 +22,12 @@ from gideon.host import (
 )
 from gideon.host.corpus import artifacts, record, snapshots
 from gideon.host.corpus.sources import SOURCES, SourceDefinition
-from gideon.host.index import dense, generations, lexical
+from gideon.host.index import buildreport, dense, generations, lexical
 from gideon.host.index import record as indexrecord
 from gideon.host.render.engine import EMBED
 from gideon.host.render.opensearch import OPENSEARCH_SERVICE_NAME
 from gideon.host.render.qdrant import QDRANT_SERVICE_NAME
-from gideon.host.render.worker import DENSE_LOCK_PREFIX, WORKER_SERVICE_NAME
+from gideon.host.render.worker import DENSE_LOCK_PREFIX, WORK_ROOT, WORKER_SERVICE_NAME
 from gideon.host.report import Problem, StageResult
 from gideon.host.sysio import LockingHost, PathLike, RealHost, WritableBytesHost
 
@@ -37,6 +37,14 @@ SAMPLE_LANDING = "lands in slice 3 (v0.4.0)"
 
 class IndexHost(WritableBytesHost, LockingHost, Protocol):
     """The artifact, subprocess, and lock operations needed by an index build."""
+
+
+@dataclass(frozen=True, slots=True)
+class _JobResult:
+    """A job stage's exit code and whether this run deferred its job."""
+
+    exit_code: int
+    deferred: bool
 
 
 def _utc_now() -> datetime:
@@ -173,33 +181,35 @@ def _preconditions(
 def _build(
     host: IndexHost, rendered_dir: PathLike, inputs: generations.GenerationInputs,
     command_path: str, sleep: Callable[[float], None], monotonic: Callable[[], float],
-) -> int:
+) -> _JobResult:
     job = lexical.live_job(host, rendered_dir, f"index-{inputs.name}", command_path=command_path)
     if isinstance(job, Problem):
-        return _refuse("build", job)
+        return _JobResult(_refuse("build", job), False)
     rejoined = job is not None
     if job is None:
         job = lexical.defer_lexical(host, rendered_dir, inputs, command_path=command_path)
     if isinstance(job, Problem):
-        return _refuse("build", job)
+        return _JobResult(_refuse("build", job), False)
     report.print_stage(StageResult("build", True, f"{inputs.name}: {'rejoined' if rejoined else 'deferred'} job {job}", ""))
     heartbeat_at = monotonic()
     while True:
         outcome = lexical.read_lexical(host, rendered_dir, job, inputs.name, command_path=command_path)
         if isinstance(outcome, Problem):
-            return _refuse("build", outcome)
+            return _JobResult(_refuse("build", outcome), not rejoined)
         if outcome.failure is not None:
-            return _refuse("build", outcome.failure)
+            return _JobResult(_refuse("build", outcome.failure), not rejoined)
         if outcome.done:
             report.print_stage(StageResult("build", True, f"{inputs.name}: job {job} succeeded", ""))
-            return 0
+            return _JobResult(0, not rejoined)
         now = monotonic()
         if now - heartbeat_at >= snapshots.HEARTBEAT_SECONDS:
             row = indexrecord.read_generation(host, rendered_dir, inputs.name, command_path=command_path)
             if isinstance(row, Problem):
-                return _refuse("build", row)
+                return _JobResult(_refuse("build", row), not rejoined)
             if row is None:
-                return _refuse("build", Problem("generation progress row is missing", record.database_fix(rendered_dir, command_path)))
+                return _JobResult(_refuse("build", Problem(
+                    "generation progress row is missing", record.database_fix(rendered_dir, command_path),
+                )), not rejoined)
             report.print_stage(StageResult(
                 "build", True, f"{inputs.name}: building, documents {row.counts.get('ready', 0)}, "
                 f"chunks indexed {row.counts.get('indexed', 0)}, seconds {row.counts.get('seconds', 0)}", "",
@@ -264,25 +274,25 @@ def _dense(
     host: IndexHost, rendered_dir: PathLike, inputs: dense.DenseInputs,
     command_path: str, sleep: Callable[[float], None], monotonic: Callable[[], float],
     clock: Callable[[], datetime],
-) -> int:
+) -> _JobResult:
     job = lexical.live_job(host, rendered_dir, f"{DENSE_LOCK_PREFIX}{inputs.name}",
                           prefix=DENSE_LOCK_PREFIX, command_path=command_path)
     if isinstance(job, Problem):
-        return _refuse("dense", job)
+        return _JobResult(_refuse("dense", job), False)
     rejoined = job is not None
     if job is None:
         job = dense.defer_dense(host, rendered_dir, inputs, command_path=command_path)
     if isinstance(job, Problem):
-        return _refuse("dense", job)
+        return _JobResult(_refuse("dense", job), False)
     report.print_stage(StageResult("dense", True, f"{inputs.name}: {'rejoined' if rejoined else 'deferred'} job {job}", ""))
     heartbeat_at = monotonic()
     hour_printed = False
     while True:
         outcome = dense.read_dense(host, rendered_dir, job, inputs.name, command_path=command_path)
         if isinstance(outcome, Problem):
-            return _refuse("dense", outcome)
+            return _JobResult(_refuse("dense", outcome), not rejoined)
         if outcome.failure is not None:
-            return _refuse("dense", outcome.failure)
+            return _JobResult(_refuse("dense", outcome.failure), not rejoined)
         now = monotonic()
         heartbeat = now - heartbeat_at >= snapshots.HEARTBEAT_SECONDS
         if not heartbeat and not outcome.done:
@@ -290,9 +300,11 @@ def _dense(
             continue
         row = indexrecord.read_generation(host, rendered_dir, inputs.name, command_path=command_path)
         if isinstance(row, Problem):
-            return _refuse("dense", row)
+            return _JobResult(_refuse("dense", row), not rejoined)
         if row is None:
-            return _refuse("dense", Problem("generation progress row is missing", record.database_fix(rendered_dir, command_path)))
+            return _JobResult(_refuse("dense", Problem(
+                "generation progress row is missing", record.database_fix(rendered_dir, command_path),
+            )), not rejoined)
         counts = row.counts
         if not hour_printed and (counts.get("dense_hour_seconds", 0) > 0 or
                                 (outcome.done and counts.get("dense_limit", 0) > 0 and "dense_hour_seconds" in counts)):
@@ -300,7 +312,7 @@ def _dense(
             hour_printed = True
         if outcome.done:
             report.print_stage(StageResult("dense", True, f"{inputs.name}: job {job} succeeded, attempts {outcome.job.attempts}", ""))
-            return 0
+            return _JobResult(0, not rejoined)
         report.print_stage(StageResult("dense", True, _dense_progress(inputs.name, counts, clock()), ""))
         heartbeat_at = now
         sleep(1.0)
@@ -328,10 +340,39 @@ def _built(host: IndexHost, rendered_dir: PathLike, name: str, command_path: str
     return 0
 
 
+def _report(
+    host: IndexHost, rendered_dir: PathLike, inputs: generations.GenerationInputs,
+    seconds: int, failed_stage: str | None, whole_build: bool,
+    work_root: PathLike, command_path: str,
+) -> int:
+    row = indexrecord.read_generation(host, rendered_dir, inputs.name, command_path=command_path)
+    if isinstance(row, Problem):
+        return _refuse("report", row)
+    if row is None:
+        return _refuse("report", Problem(
+            "generation row for the build report is missing",
+            record.database_fix(rendered_dir, command_path),
+        ))
+    # A limited dense finish leaves the generation unbuilt, so no run measured it whole.
+    gathered = buildreport.gather(
+        host, rendered_dir, inputs, row, seconds, failed_stage,
+        whole_build and row.dense_built_at is not None,
+        work_root=work_root, command_path=command_path,
+    )
+    if isinstance(gathered, Problem):
+        return _refuse("report", gathered)
+    written = buildreport.write_report(host, rendered_dir, gathered, command_path=command_path)
+    if isinstance(written, Problem):
+        return _refuse("report", written)
+    report.print_stage(StageResult("report", True, buildreport.summary(written), ""))
+    return 0
+
+
 def run_index_build(
     args: argparse.Namespace, *, host: IndexHost | None = None,
     rendered_dir: PathLike = "/etc/gideon/rendered", checkout: PathLike | None = None,
     site_path: PathLike = "/etc/gideon/site.yaml", clock: Callable[[], datetime] = _utc_now,
+    work_root: PathLike = WORK_ROOT,
     sleep: Callable[[float], None] = time.sleep, monotonic: Callable[[], float] = time.monotonic,
     sources: Sequence[SourceDefinition] = SOURCES,
 ) -> int:
@@ -349,6 +390,7 @@ def run_index_build(
     recorded = False
     claim: backuplock.Claim | None = None
     try:
+        started_at = monotonic()
         if io.geteuid() != 0:
             return _refuse(active_stage, Problem("root privileges are required", f"Run {report.command(command_path)}, then retry."))
         claim = backuplock.claim(io, command=report.command_name(COMMAND_PATH), now=clock(), lock=backuplock.CORPUS_LOCK)
@@ -380,24 +422,38 @@ def run_index_build(
         # The guard and reserve rows belong here: read the profile's guards,
         # the promoted generation's bytes, and the free bytes under /data.
         active_stage = "build"
-        result = _build(io, rendered_dir, inputs, command_path, sleep, monotonic)
-        if result:
-            return result
-        active_stage = "counts"
-        result = _counts(io, rendered_dir, inputs.name, command_path)
-        if result:
-            return result
-        active_stage = "dense"
-        result = _dense(io, rendered_dir, inputs, command_path, sleep, monotonic, clock)
-        if result:
-            return result
-        active_stage = "built"
-        return _built(io, rendered_dir, inputs.name, command_path)
+        lexical_result = _build(io, rendered_dir, inputs, command_path, sleep, monotonic)
+        result = lexical_result.exit_code
+        dense_deferred = False
+        if not result:
+            active_stage = "counts"
+            result = _counts(io, rendered_dir, inputs.name, command_path)
+        if not result:
+            active_stage = "dense"
+            dense_result = _dense(io, rendered_dir, inputs, command_path, sleep, monotonic, clock)
+            result = dense_result.exit_code
+            dense_deferred = dense_result.deferred
+        if not result:
+            active_stage = "built"
+            result = _built(io, rendered_dir, inputs.name, command_path)
+        failed_stage = active_stage if result else None
+        whole_build = (
+            outcome.outcome == "created" and lexical_result.deferred
+            and dense_deferred and not result
+        )
+        active_stage = "report"
+        report_result = _report(
+            io, rendered_dir, inputs, int(monotonic() - started_at), failed_stage,
+            whole_build, work_root, command_path,
+        )
+        return result if result else report_result
     except KeyboardInterrupt:
         if active_stage == "build":
             return _refuse(active_stage, Problem("interrupted; the build continues in the worker", f"Run {report.command(command_path)} again to rejoin it."))
         if active_stage == "dense":
             return _refuse(active_stage, Problem("interrupted; the embed continues in the worker", f"Run {report.command(command_path)} again to rejoin it."))
+        if active_stage == "report":
+            return _refuse(active_stage, Problem("interrupted; the report row may stand", f"Run {report.command(command_path)} again."))
         detail = "interrupted; the row stands" if recorded else "interrupted; nothing was recorded"
         return _refuse(active_stage, Problem(detail, f"Run {report.command(command_path)} again."))
     finally:
