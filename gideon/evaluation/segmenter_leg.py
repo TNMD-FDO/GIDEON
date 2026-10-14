@@ -1,4 +1,4 @@
-"""Run the candidate opinion walk and segmenter in the pinned service image."""
+"""Run the opinion walk and segmenter in the pinned image, replying with the anchorer's cross-check counts."""
 
 import hashlib
 import json
@@ -65,6 +65,8 @@ class LegResult:
     length: int
     sections: tuple[LegSection, ...]
     markers: tuple[LegMarker, ...]
+    pgmap_checked: int
+    pgmap_disagreeing: int
 
 
 def _image_fix(reference: str | None) -> str:
@@ -85,12 +87,20 @@ def _integer(value: object) -> bool:
 def _reply(value: object, expected_id: str) -> LegResult | None:
     from gideon.host.render.worker import SECTION_TYPED_BY, SECTION_TYPES
 
-    if not isinstance(value, dict) or tuple(value) != ("id", "sha256", "length", "sections", "markers"):
+    if not isinstance(value, dict) or tuple(value) != (
+        "id", "sha256", "length", "sections", "markers", "pgmap_checked", "pgmap_disagreeing"
+    ):
         return None
     case_id, sha256, length = value["id"], value["sha256"], value["length"]
     if (
         case_id != expected_id or not isinstance(sha256, str)
         or _SHA256.fullmatch(sha256) is None or not _integer(length) or length <= 0
+    ):
+        return None
+    pgmap_checked, pgmap_disagreeing = value["pgmap_checked"], value["pgmap_disagreeing"]
+    if (
+        not _integer(pgmap_checked) or not _integer(pgmap_disagreeing)
+        or not 0 <= pgmap_disagreeing <= pgmap_checked
     ):
         return None
     raw_sections, raw_markers = value["sections"], value["markers"]
@@ -120,7 +130,9 @@ def _reply(value: object, expected_id: str) -> LegResult | None:
         ):
             return None
         markers.append(LegMarker(item[0], item[1], item[2]))
-    return LegResult(case_id, sha256, length, tuple(sections), tuple(markers))
+    return LegResult(
+        case_id, sha256, length, tuple(sections), tuple(markers), pgmap_checked, pgmap_disagreeing
+    )
 
 
 def run_leg(
@@ -196,7 +208,7 @@ def run_leg(
 def main() -> int:
     """Read originals on stdin and write content-free candidate readings."""
 
-    from gideon.worker import opiniontext, sections
+    from gideon.worker import anchors, opiniontext, sections
 
     for line_number, line in enumerate(sys.stdin, start=1):
         case_id: str | None = None
@@ -223,6 +235,7 @@ def main() -> int:
                 parsed, opinion_type=opinion_type,
                 per_curiam=value["per_curiam"], column=column,
             )
+            anchored = anchors.anchor(parsed, segmented)
             answer = {
                 "id": case_id,
                 "sha256": hashlib.sha256(parsed.text.encode("utf-8")).hexdigest(),
@@ -232,6 +245,8 @@ def main() -> int:
                     for item in segmented
                 ],
                 "markers": [[item.kind, item.label, item.offset] for item in parsed.markers],
+                "pgmap_checked": anchored.pgmap_checked,
+                "pgmap_disagreeing": anchored.pgmap_disagreeing,
             }
             print(json.dumps(answer, ensure_ascii=False))
         except Exception as error:  # noqa: BLE001 - the image entry must emit no opinion text

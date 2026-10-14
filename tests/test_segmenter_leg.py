@@ -16,7 +16,7 @@ from gideon.evaluation import evalset, segmenter_leg
 from gideon.evaluation.results import ImageAccess, RunContext
 from gideon.host.report import Problem
 from gideon.host.sysio import Host
-from gideon.worker import opiniontext
+from gideon.worker import anchors, opiniontext, sections
 
 SENTINEL = "Fictional opinion paragraph that must not appear in output"
 
@@ -28,6 +28,8 @@ def _reply(case_id: str = "segmenter-001") -> str:
         "length": 4,
         "sections": [[0, 4, "majority", "row"]],
         "markers": [],
+        "pgmap_checked": 0,
+        "pgmap_disagreeing": 0,
     }) + "\n"
 
 
@@ -62,7 +64,10 @@ class Entry(unittest.TestCase):
     def test_columns_round_trip_and_leading_blank(self) -> None:
         raws = {
             "plain_text": "\n\n" + SENTINEL,
-            "xml_harvard": f"<root><p>{SENTINEL}</p></root>",
+            "xml_harvard": (
+                f'<root><p pgmap="1 2">{SENTINEL}<page-number>*2</page-number>After</p>'
+                '<p pgmap="3 4">Fictional ending</p></root>'
+            ),
             "html_columbia": f"<html><body><p>{SENTINEL}</p></body></html>",
             "html_lawbox": f"<html><body><p>{SENTINEL}</p></body></html>",
             "html_anon_2020": f"<html><body><p>{SENTINEL}</p></body></html>",
@@ -86,7 +91,31 @@ class Entry(unittest.TestCase):
                 self.assertEqual(answer["sha256"], hashlib.sha256(parsed.text.encode("utf-8")).hexdigest())
                 self.assertEqual(answer["length"], len(parsed.text))
                 self.assertEqual(answer["sections"][0][0], 0)
-                self.assertEqual(set(answer), {"id", "sha256", "length", "sections", "markers"})
+                self.assertEqual(tuple(answer), (
+                    "id", "sha256", "length", "sections", "markers",
+                    "pgmap_checked", "pgmap_disagreeing",
+                ))
+                segmented = sections.segment(
+                    parsed, opinion_type="010combined", per_curiam=False, column=column,
+                )
+                anchored = anchors.anchor(parsed, segmented)
+                self.assertEqual(
+                    (answer["pgmap_checked"], answer["pgmap_disagreeing"]),
+                    (anchored.pgmap_checked, anchored.pgmap_disagreeing),
+                )
+                if column == "xml_harvard":
+                    self.assertGreater(anchored.pgmap_checked, 0)
+                    self.assertGreater(anchored.pgmap_disagreeing, 0)
+                case = segmenter_leg.LegInput("segmenter-001", column, "010combined", False)
+                result = segmenter_leg.run_leg(
+                    (case,), {case.case_id: raw}, _context(FakeHost(stdout=stdout.getvalue())),
+                )
+                self.assertNotIsInstance(result, Problem)
+                assert not isinstance(result, Problem)
+                self.assertEqual(
+                    (result[case.case_id].pgmap_checked, result[case.case_id].pgmap_disagreeing),
+                    (anchored.pgmap_checked, anchored.pgmap_disagreeing),
+                )
 
     def test_malformed_input_refuses_without_echoing_opinion(self) -> None:
         requests = (
@@ -137,6 +166,37 @@ class Entry(unittest.TestCase):
 
 class HostSide(unittest.TestCase):
     """The host sends originals on stdin through one isolated container."""
+
+    def _assert_invalid_reply(self, value: dict[str, object]) -> None:
+        host = FakeHost(stdout=json.dumps(value) + "\n")
+        case = segmenter_leg.LegInput("segmenter-001", "plain_text", "lead", False)
+        result = segmenter_leg.run_leg((case,), {case.case_id: SENTINEL}, _context(host))
+        self.assertIsInstance(result, Problem)
+        assert isinstance(result, Problem)
+        self.assertIn("invalid reply line 1", result.problem)
+        self.assertIn("tools.imagebuild gideon", result.fix)
+        self.assertNotIn(SENTINEL, result.problem + result.fix)
+
+    def test_reply_missing_pgmap_counts_refuses(self) -> None:
+        for missing in (("pgmap_checked",), ("pgmap_disagreeing",), ("pgmap_checked", "pgmap_disagreeing")):
+            with self.subTest(missing=missing):
+                value = json.loads(_reply())
+                for key in missing:
+                    del value[key]
+                self._assert_invalid_reply(value)
+
+    def test_non_integer_or_negative_pgmap_counts_refuse(self) -> None:
+        for key in ("pgmap_checked", "pgmap_disagreeing"):
+            for invalid in (True, False, 1.0, "1", None, -1):
+                with self.subTest(key=key, invalid=invalid):
+                    value = json.loads(_reply())
+                    value[key] = invalid
+                    self._assert_invalid_reply(value)
+
+    def test_pgmap_disagreeing_above_checked_refuses(self) -> None:
+        value = json.loads(_reply())
+        value["pgmap_disagreeing"] = value["pgmap_checked"] + 1
+        self._assert_invalid_reply(value)
 
     def test_argv_stdin_and_reply(self) -> None:
         host = FakeHost()

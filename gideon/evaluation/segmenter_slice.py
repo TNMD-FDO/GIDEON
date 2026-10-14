@@ -1,4 +1,4 @@
-"""Run the segmenter gate against checked labels and the recorded sections."""
+"""Gate mislabels, type precision, unknown share, and page-locator counts against checked labels and the record."""
 
 import json
 import re
@@ -7,6 +7,7 @@ import time
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from typing import Final, Protocol, cast
 
 from gideon.evaluation import record, segmenter_leg
@@ -27,6 +28,7 @@ PRECISION_FLOOR: Final[float] = 0.95
 UNKNOWN_CEILING: Final[float] = 0.15
 PROBLEMS: Final[frozenset[str]] = frozenset({
     "record-unreachable", "not-ingested", "original-missing", "text-moved", "record-stale",
+    "locator-count-differs",
 }) | segmenter_leg.PROBLEMS
 _SHA256: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
 DOCUMENTS_SQL: Final[str] = """SELECT COALESCE(jsonb_agg(jsonb_build_object(
@@ -82,6 +84,17 @@ class CaseFigures:
 
 
 @dataclass(frozen=True, slots=True)
+class PageFigures:
+    """Page-locator and page-map counts and differing ids for one text source."""
+
+    elements: int
+    markers: int
+    differing: tuple[str, ...]
+    pgmap_checked: int
+    pgmap_disagreeing: int
+
+
+@dataclass(frozen=True, slots=True)
 class GateVerdict:
     """Whether every code-computed segmenter bound holds."""
 
@@ -110,6 +123,37 @@ class RecordDocument:
     canonical_sha256: str
     opinion_type: str
     sections: tuple[RecordSection, ...]
+
+
+class _PageLocatorParser(HTMLParser):
+    """Count the walk's page-locator element shapes without keeping text."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.count = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        classes = set((dict(attrs).get("class") or "").split())
+        if (
+            tag == "page-number"
+            or tag == "span" and ("star-pagination" in classes or "ldml-pagenumber" in classes)
+            or tag == "a" and "page-label" in classes
+        ):
+            self.count += 1
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.handle_starttag(tag, attrs)
+
+
+def page_locator_count(column: str, original: str) -> int:
+    """Count page-locator elements in markup; plain text has none by rule."""
+
+    if column == "plain_text":
+        return 0
+    parser = _PageLocatorParser()
+    parser.feed(original)
+    parser.close()
+    return parser.count
 
 
 def overlap_matrix(
@@ -151,9 +195,9 @@ def record_agrees(sections: Sequence[_Span], recorded: Sequence[_RecordSpan]) ->
 
 
 def slice_gate(
-    matrix: Mapping[str, Mapping[str, int]], counted: int, measured: int
+    matrix: Mapping[str, Mapping[str, int]], counted: int, measured: int, differing: int
 ) -> GateVerdict:
-    """Apply the zero-tolerance, precision, coverage, and unknown bounds."""
+    """Apply the mislabel, precision, coverage, unknown, and page-locator bounds."""
 
     figures = case_figures(matrix)
     reasons: list[str] = []
@@ -174,6 +218,8 @@ def slice_gate(
             reasons.append(f"{section_type} precision below floor")
     if figures.chars and figures.unknown / figures.chars > UNKNOWN_CEILING:
         reasons.append("unknown share above ceiling")
+    if differing:
+        reasons.append("page locators and markers differ")
     return GateVerdict(not reasons, tuple(reasons))
 
 
@@ -270,6 +316,7 @@ def _report(
     results: Sequence[CaseResult],
     matrix: Mapping[str, Mapping[str, int]],
     source_counts: Mapping[str, tuple[int, int]],
+    page_figures: Mapping[str, PageFigures],
     elapsed: float,
     reasons: tuple[str, ...],
     fixes: Mapping[str, str],
@@ -305,6 +352,14 @@ def _report(
         if source in source_counts:
             unknown, chars = source_counts[source]
             lines.append(f"unknown {source}: {unknown}/{chars} characters")
+    for source in SEGMENTER_TEXT_SOURCES:
+        if source in page_figures:
+            pages = page_figures[source]
+            lines.append(
+                f"page {source}: {pages.elements} locators, {pages.markers} markers, "
+                f"differing ids {', '.join(pages.differing) or 'none'}; "
+                f"pgmap checked {pages.pgmap_checked}, disagreeing {pages.pgmap_disagreeing}"
+            )
     failures: Counter[str] = Counter(
         cast(str, item.metrics["problem"])
         for item in results if isinstance(item.metrics.get("problem"), str)
@@ -340,6 +395,7 @@ def run_segmenter(eval_set: LoadedSet, slice_name: str, context: RunContext) -> 
     details: list[str] = []
     matrix: dict[str, dict[str, int]] = {}
     source_counts: dict[str, tuple[int, int]] = {}
+    page_figures: dict[str, PageFigures] = {}
     elapsed = 0.0
 
     def fail(case_id: str, code: str, fix: str, latency_ms: float | None = None) -> None:
@@ -347,14 +403,14 @@ def run_segmenter(eval_set: LoadedSet, slice_name: str, context: RunContext) -> 
         fixes[code] = fix
 
     if not counted:
-        gate = slice_gate(matrix, 0, 0)
-        return SliceResult(False, _report(0, len(selection.unsigned), (), matrix, source_counts, elapsed, gate.reasons, fixes, details), ())
+        gate = slice_gate(matrix, 0, 0, 0)
+        return SliceResult(False, _report(0, len(selection.unsigned), (), matrix, source_counts, page_figures, elapsed, gate.reasons, fixes, details), ())
     if context.image is None:
         for case_id in counted:
             fail(case_id, "image-leg-failed", "Build the pinned gideon image with tools.imagebuild, then retry.")
         ordered = tuple(results[case_id] for case_id in counted)
-        gate = slice_gate(matrix, len(counted), 0)
-        return SliceResult(False, _report(len(counted), len(selection.unsigned), ordered, matrix, source_counts, elapsed, gate.reasons, fixes, details), ordered)
+        gate = slice_gate(matrix, len(counted), 0, 0)
+        return SliceResult(False, _report(len(counted), len(selection.unsigned), ordered, matrix, source_counts, page_figures, elapsed, gate.reasons, fixes, details), ordered)
 
     opinion_ids = tuple(cast(int, eval_set.cases_by_id[case_id]["opinion_id"]) for case_id in counted)
     documents = _read_documents(opinion_ids, context)
@@ -362,8 +418,8 @@ def run_segmenter(eval_set: LoadedSet, slice_name: str, context: RunContext) -> 
         for case_id in counted:
             fail(case_id, "record-unreachable", documents.fix)
         ordered = tuple(results[case_id] for case_id in counted)
-        gate = slice_gate(matrix, len(counted), 0)
-        return SliceResult(False, _report(len(counted), len(selection.unsigned), ordered, matrix, source_counts, elapsed, gate.reasons, fixes, details), ordered)
+        gate = slice_gate(matrix, len(counted), 0, 0)
+        return SliceResult(False, _report(len(counted), len(selection.unsigned), ordered, matrix, source_counts, page_figures, elapsed, gate.reasons, fixes, details), ordered)
 
     available: dict[str, RecordDocument] = {}
     originals: dict[str, str] = {}
@@ -415,6 +471,17 @@ def run_segmenter(eval_set: LoadedSet, slice_name: str, context: RunContext) -> 
                         f"label {label.sha256[:12]}, record {document.canonical_sha256[:12]}"
                     )
                     continue
+                page_elements = page_locator_count(document.text_source, originals[case_id])
+                page_markers = sum(item.kind == "page" for item in candidate.markers)
+                pages_agree = page_elements == page_markers
+                pages = page_figures.get(document.text_source, PageFigures(0, 0, (), 0, 0))
+                page_figures[document.text_source] = PageFigures(
+                    pages.elements + page_elements,
+                    pages.markers + page_markers,
+                    pages.differing + (() if pages_agree else (case_id,)),
+                    pages.pgmap_checked + candidate.pgmap_checked,
+                    pages.pgmap_disagreeing + candidate.pgmap_disagreeing,
+                )
                 part = overlap_matrix(candidate.sections, label.sections)
                 figures = case_figures(part)
                 _sum_matrix(matrix, part)
@@ -428,20 +495,31 @@ def run_segmenter(eval_set: LoadedSet, slice_name: str, context: RunContext) -> 
                     "matrix": part,
                     "text_source": document.text_source,
                     "record_agrees": agrees,
+                    "page_elements": page_elements,
+                    "page_markers": page_markers,
+                    "pgmap_checked": candidate.pgmap_checked,
+                    "pgmap_disagreeing": candidate.pgmap_disagreeing,
                 }
-                if not agrees:
+                if not pages_agree:
+                    metrics["problem"] = "locator-count-differs"
+                    fixes["locator-count-differs"] = (
+                        "Compare the named case's page locators with the walk's markers; "
+                        "a locator the walk drops is a finding on the opinion parser, never a moved bound."
+                    )
+                elif not agrees:
                     metrics["problem"] = "record-stale"
                     fixes["record-stale"] = "Re-ingest the named opinion at the candidate pipeline, then retry."
                 results[case_id] = CaseResult(
-                    case_id, 1, "pass" if figures.mislabel == 0 and agrees else "fail",
+                    case_id, 1, "pass" if figures.mislabel == 0 and agrees and pages_agree else "fail",
                     metrics, judge=None, latency_ms=share_ms,
                 )
     ordered = tuple(results[case_id] for case_id in counted)
     measured = sum("chars" in item.metrics for item in ordered)
-    gate = slice_gate(matrix, len(counted), measured)
+    differing = sum(item.metrics.get("problem") == "locator-count-differs" for item in ordered)
+    gate = slice_gate(matrix, len(counted), measured, differing)
     verdict = gate.ok and all(item.verdict == "pass" for item in ordered)
     return SliceResult(
         verdict,
-        _report(len(counted), len(selection.unsigned), ordered, matrix, source_counts, elapsed, gate.reasons, fixes, details),
+        _report(len(counted), len(selection.unsigned), ordered, matrix, source_counts, page_figures, elapsed, gate.reasons, fixes, details),
         ordered,
     )

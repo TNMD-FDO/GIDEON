@@ -119,12 +119,12 @@ _SEGMENTER: Final[SliceSpec] = SliceSpec(
     gate_pass=(
         "segmenter bounds held: no separate opinion under a court-opinion type, "
         "every emitted type at or above 0.95 precision, unknown at or below 15 %, "
-        "the record agreeing"
+        "every page locator a marker, the record agreeing"
     ),
     gate_fail="a segmenter bound failed",
     gate_fix=(
-        "Review the segmenter report's mislabel ids and type rows, then retry; "
-        "a figure outside its bound is a finding on the segmenter, never a moved bound."
+        "Review the segmenter report's mislabel ids, type rows, and page lines, then retry; "
+        "a figure outside its bound is a finding on the segmenter or the parser, never a moved bound."
     ),
     categories=frozenset({("build-gates", "segmenter-300")}),
     turn_calls=None,
