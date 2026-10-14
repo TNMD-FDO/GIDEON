@@ -9,6 +9,11 @@ row holds — its expectation, ``must``, ``must_not``, ``block``, ``sources``,
 nothing is graded, and no judge gates. A harness cut has the fixed problem
 code ``turn-cut`` and fails the slice gate. Rows carry ids, classes, check
 names, and fixed codes, never text.
+
+A turn the model declined against an answered expectation leaves the path
+unproven, so it is re-sent within ``engine.py``'s ``SAMPLE_ATTEMPTS``, each
+attempt a managed turn with its own chat deleted; the row keeps the last
+attempt's verdict, the attempt count, and the first class when re-sent.
 """
 
 import re
@@ -23,6 +28,7 @@ from gideon.evaluation.evalset import LoadedSet, select_cases
 from gideon.evaluation.results import CaseResult, JSONValue, RunContext, SliceResult
 from gideon.evaluation.turns import cases, managed, run
 from gideon.host import owui, owuiturn
+from gideon.host.engine import SAMPLE_ATTEMPTS
 from gideon.host.report import failure_lines
 
 PROBLEMS: Final[frozenset[str]] = frozenset(
@@ -55,6 +61,8 @@ class _Outcome:
     failed: tuple[str, ...] = ()
     elapsed: float | None = None
     problem: str | None = None
+    attempts: int = 1
+    first_class: str | None = None
 
     @property
     def passed(self) -> bool:
@@ -128,8 +136,35 @@ def _turn_outcome(record: EvalCase, repeat: int, row: run.TurnRow) -> _Outcome:
     )
 
 
+def _resend(outcome: _Outcome) -> bool:
+    """Whether a turn is the model's own decline of a case it should answer.
+
+    ``check-failed`` is read only after cleanup, a class, and a clean stream, so
+    a leak, a dirty stream, a cut, or a cleanup failure is never re-sent; the
+    class and the expectation exclude a replacement and every other case.
+    """
+
+    return (
+        outcome.problem == "check-failed"
+        and outcome.class_name == "declined"
+        and outcome.expected == "answered"
+    )
+
+
+def _was_resent(outcome: _Outcome) -> bool:
+    """Read whether this attempt was re-sent within the shared bound."""
+
+    return _resend(outcome) and outcome.attempts < SAMPLE_ATTEMPTS
+
+
 def _metrics(outcome: _Outcome) -> dict[str, JSONValue]:
-    metrics: dict[str, JSONValue] = {"expect": outcome.expected, "search": outcome.search}
+    metrics: dict[str, JSONValue] = {
+        "expect": outcome.expected,
+        "search": outcome.search,
+        "attempts": outcome.attempts,
+    }
+    if outcome.first_class is not None:
+        metrics["first_class"] = outcome.first_class
     if outcome.class_name is not None:
         metrics["class"] = outcome.class_name
     if outcome.stream is not None:
@@ -163,11 +198,16 @@ def _progress(outcome: _Outcome) -> str:
     class_detail = outcome.class_name or (run.CUT_AT if cut else "error")
     # A classed turn that is cut was cut on its replay.
     stream = run.CUT_AT if cut and outcome.class_name is not None else outcome.stream or "none"
-    return (
+    detail = (
         f"general-smoke {outcome.case_id}#{outcome.repeat}: "
         f"{class_detail}; checks {checks}; "
         f"stream {stream}; seconds {seconds}"
     )
+    if outcome.attempts > 1:
+        detail += f"; attempt {outcome.attempts} of {SAMPLE_ATTEMPTS}"
+    if _was_resent(outcome):
+        detail += "; re-sent"
+    return detail
 
 
 def _ids(values: tuple[str, ...]) -> str:
@@ -182,6 +222,8 @@ def _case_line(case_id: str, rows: tuple[_Outcome, ...]) -> str:
             detail += f", {row.problem}"
             if row.failed:
                 detail += f": {', '.join(row.failed)}"
+        if row.attempts > 1:
+            detail += f" (attempt {row.attempts} of {SAMPLE_ATTEMPTS}, first {row.first_class})"
         details.append(detail)
     verdict = "pass" if all(row.passed for row in rows) else "fail"
     return f"{case_id}: {verdict} — " + "; ".join(details)
@@ -201,7 +243,10 @@ def _slice_result(
     by_case = {
         case_id: tuple(row for row in outcomes if row.case_id == case_id) for case_id in case_ids
     }
-    turns_made = sum(row.problem not in {"turns-unavailable", "frontend-signin"} for row in outcomes)
+    turns_made = sum(
+        row.attempts for row in outcomes if row.problem not in {"turns-unavailable", "frontend-signin"}
+    )
+    resent = sum(row.attempts > 1 for row in outcomes)
     lines = [*head, *(_case_line(case_id, by_case[case_id]) for case_id in case_ids)]
     lines.append(
         f"chats: {turns_made} turns made, {chats_deleted} chats deleted; "
@@ -218,7 +263,7 @@ def _slice_result(
     passed = bool(outcomes) and all(row.passed for row in outcomes)
     lines.append(
         f"general-smoke: {'pass' if passed else 'fail'}; {len(case_ids)} cases at "
-        f"{repeats} repeats, {turns_made} turns; classes {class_detail}; "
+        f"{repeats} repeats, {turns_made} turns, {resent} re-sent; classes {class_detail}; "
         f"failed: {_ids(failed_ids)}"
     )
     report = "\n".join(lines) + "\n"
@@ -263,13 +308,21 @@ def run_general_smoke(eval_set: LoadedSet, slice_name: str, context: RunContext)
     chats_deleted = 0
     for repeat in repeats:
         for record in records:
-            context.checkpoint()
             case = _turn_case(record)
-            row = session.turn(case, row_name=f"{case.id}#{repeat}")
-            outcome = _turn_outcome(record, repeat, row)
-            collected.append(outcome)
-            chats_deleted += row.deleted
-            context.progress(_progress(outcome))
+            first_class: str | None = None
+            for attempt in range(1, SAMPLE_ATTEMPTS + 1):
+                context.checkpoint()
+                row = session.turn(case, row_name=f"{case.id}#{repeat}")
+                outcome = _turn_outcome(record, repeat, row)
+                chats_deleted += row.deleted
+                outcome = replace(outcome, attempts=attempt, first_class=first_class)
+                context.progress(_progress(outcome))
+                if attempt == 1:
+                    first_class = outcome.class_name
+                if _was_resent(outcome):
+                    continue
+                collected.append(outcome)
+                break
 
     # Reported and never gated: a chat another session holds is a person's.
     try:

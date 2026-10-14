@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 import unittest
 from collections.abc import Mapping
 from dataclasses import replace
@@ -26,6 +28,8 @@ from gideon.evaluation.evalset import SET_ROOT, LoadedSet, load_set, select_case
 from gideon.evaluation.results import CaseResult, RunContext
 from gideon.evaluation.turns import run
 from gideon.evaluation.turns.access import TurnAccess
+from gideon.host.engine import SAMPLE_ATTEMPTS
+from gideon.host.owui import Response
 from gideon.host.render.owui import EVAL_IDENTITY
 from gideon.host.sysio import Host
 
@@ -62,6 +66,7 @@ class SmokeFrontend(Frontend):
         self.omit_sources: set[str] = set()
         self.store_reasoning: set[str] = set()
         self.stream_payloads: list[str] = []
+        self.attempt_modes: dict[str, list[str]] = {}
         for case_id in select_cases(loaded, "general-smoke").counted:
             expected = cast(dict[str, object], loaded.cases_by_id[case_id]["expected"])
             expectation = cast(str, expected["expect"])
@@ -72,6 +77,22 @@ class SmokeFrontend(Frontend):
                 "recorded": "answered",
             }[expectation]
         super().__init__(guardrail, modes, preexisting=preexisting)
+
+    def handle(
+        self,
+        method: str,
+        path: str,
+        body: object | None,
+        credential: str | None,
+    ) -> Response:
+        if method == "POST" and path == "/api/chat/completions" and isinstance(body, dict):
+            user_message = body.get("user_message")
+            if isinstance(user_message, dict):
+                case_id = _tagged_case_id(cast(str, user_message["content"]))
+                modes = self.attempt_modes.get(case_id)
+                if modes:
+                    self.modes[case_id] = modes.pop(0)
+        return super().handle(method, path, body, credential)
 
     def _new_chat(self, body: dict[str, object], mode: str) -> None:
         user_message = cast(dict[str, object], body["user_message"])
@@ -87,7 +108,7 @@ class SmokeFrontend(Frontend):
             assistant = messages.get(assistant_id)
             if not isinstance(assistant, dict):
                 continue
-            if case_id in self.answers and mode != "replaced":
+            if case_id in self.answers and mode == "answered":
                 assistant["content"] = self.answers[case_id]
             if case_id in self.omit_sources:
                 assistant.pop("sources", None)
@@ -137,6 +158,13 @@ def _context(
         turns=access,
     )
     return host, context
+
+
+def _recorded_metrics(sql: str) -> list[dict[str, object]]:
+    return [
+        json.loads(value.replace("''", "'").replace("\\\\", "\\"))
+        for value in re.findall(r"(?m)^\\set result_\d+_metrics '(.*)'$", sql)
+    ]
 
 
 class GeneralSmokeRunner(unittest.TestCase):
@@ -210,12 +238,182 @@ class GeneralSmokeRunner(unittest.TestCase):
         for answer in _FICTIONAL_ANSWERS.values():
             self.assertNotIn(answer, result.report + "\n".join(progress))
         for row in result.results:
+            self.assertEqual(row.metrics["attempts"], 1)
+            self.assertNotIn("first_class", row.metrics)
             self.assertNotIn(SENTINEL, str(row.metrics))
             for record in loaded.cases_by_file["general/smoke.jsonl"]:
                 self.assertNotIn(cast(str, record["question"]), str(row.metrics))
             for answer in _FICTIONAL_ANSWERS.values():
                 self.assertNotIn(answer, str(row.metrics))
             self.assertFalse(any("judge" in key.lower() for key in row.metrics))
+
+    def test_decline_then_answer_keeps_one_passing_row_and_reports_both_attempts(self) -> None:
+        loaded = _loaded()
+        frontend = SmokeFrontend(loaded)
+        frontend.attempt_modes["doctrine-03"] = ["declined", "answered", "answered"]
+        progress: list[str] = []
+        _host, context = _context(frontend, progress)
+
+        result = general_smoke_slice.run_general_smoke(loaded, "general-smoke", context)
+
+        turns = len(select_cases(loaded, "general-smoke").counted) * context.repeats
+        self.assertTrue(result.verdict, result.report)
+        self.assertEqual(len(result.results), turns)
+        rows = {(row.case_id, row.repeat): row for row in result.results}
+        row = rows[("doctrine-03", 1)]
+        self.assertEqual(row.verdict, "pass")
+        self.assertEqual(row.metrics["class"], "answered")
+        self.assertEqual(row.metrics["attempts"], 2)
+        self.assertEqual(row.metrics["first_class"], "declined")
+        self.assertNotIn("problem", row.metrics)
+        self.assertEqual(rows[("doctrine-03", 2)].metrics["attempts"], 1)
+        self.assertNotIn("first_class", rows[("doctrine-03", 2)].metrics)
+        self.assertEqual(frontend.attempt_modes["doctrine-03"], [])
+        completions = [
+            call for call in frontend.calls
+            if call[0] == "POST" and call[1] == "/api/chat/completions"
+        ]
+        self.assertEqual(len(completions), turns + 1)
+        self.assertEqual(len(frontend.stream_calls), turns + 1)
+        self.assertEqual(len(frontend.deleted_chats), turns + 1)
+        self.assertEqual(frontend.chats, {})
+        self.assertEqual(len(progress), turns + 1)
+        attempt_lines = [line for line in progress if line.startswith("general-smoke doctrine-03#1:")]
+        self.assertEqual(len(attempt_lines), 2)
+        self.assertIn(": declined;", attempt_lines[0])
+        self.assertTrue(attempt_lines[0].endswith("; re-sent"))
+        self.assertNotIn("; attempt", attempt_lines[0])
+        self.assertIn(": answered; checks ok; stream clean;", attempt_lines[1])
+        self.assertTrue(attempt_lines[1].endswith(f"; attempt 2 of {SAMPLE_ATTEMPTS}"))
+        self.assertEqual(progress.index(attempt_lines[1]), progress.index(attempt_lines[0]) + 1)
+        self.assertIn(
+            f"doctrine-03: pass — repeat 1 answered (attempt 2 of {SAMPLE_ATTEMPTS}, "
+            "first declined); repeat 2 answered",
+            result.report,
+        )
+        self.assertIn(f"chats: {turns + 1} turns made, {turns + 1} chats deleted", result.report)
+        self.assertIn(f"{turns + 1} turns, 1 re-sent;", result.report)
+        output = result.report + "\n".join(progress) + str(result.results)
+        self.assertNotIn(SENTINEL, output)
+        self.assertNotIn("I can't compute that for you.", output)
+        for record in loaded.cases_by_file["general/smoke.jsonl"]:
+            self.assertNotIn(cast(str, record["question"]), output)
+        for answer in frontend.answers.values():
+            self.assertNotIn(answer, output)
+
+    def test_decline_on_every_attempt_fails_that_repeat_at_the_bound(self) -> None:
+        loaded = _loaded()
+        frontend = SmokeFrontend(loaded)
+        frontend.attempt_modes["plain-01"] = ["declined"] * SAMPLE_ATTEMPTS + ["answered"]
+        progress: list[str] = []
+        _host, context = _context(frontend, progress)
+
+        result = general_smoke_slice.run_general_smoke(loaded, "general-smoke", context)
+
+        self.assertFalse(result.verdict)
+        rows = [row for row in result.results if row.case_id == "plain-01"]
+        self.assertEqual(len(rows), context.repeats)
+        self.assertEqual(rows[0].verdict, "fail")
+        self.assertEqual(rows[0].metrics["class"], "declined")
+        self.assertEqual(rows[0].metrics["problem"], "check-failed")
+        self.assertEqual(rows[0].metrics["failed"], ["expect"])
+        self.assertEqual(rows[0].metrics["attempts"], SAMPLE_ATTEMPTS)
+        self.assertEqual(rows[0].metrics["first_class"], "declined")
+        self.assertEqual(rows[1].verdict, "pass")
+        self.assertEqual(rows[1].metrics["attempts"], 1)
+        self.assertNotIn("first_class", rows[1].metrics)
+        attempts = [line for line in progress if line.startswith("general-smoke plain-01#1:")]
+        self.assertEqual(len(attempts), SAMPLE_ATTEMPTS)
+        self.assertTrue(all(line.endswith("; re-sent") for line in attempts[:-1]))
+        self.assertTrue(attempts[-1].endswith(f"; attempt {SAMPLE_ATTEMPTS} of {SAMPLE_ATTEMPTS}"))
+        self.assertNotIn("re-sent", attempts[-1])
+        self.assertIn(
+            f"plain-01: fail — repeat 1 declined, check-failed: expect "
+            f"(attempt {SAMPLE_ATTEMPTS} of {SAMPLE_ATTEMPTS}, first declined); repeat 2 answered",
+            result.report,
+        )
+        turns = len(select_cases(loaded, "general-smoke").counted) * context.repeats
+        completions = [call for call in frontend.calls if call[1] == "/api/chat/completions"]
+        self.assertEqual(len(completions), turns + SAMPLE_ATTEMPTS - 1)
+        self.assertEqual(len(frontend.deleted_chats), turns + SAMPLE_ATTEMPTS - 1)
+        self.assertIn(f"{turns + SAMPLE_ATTEMPTS - 1} turns, 1 re-sent;", result.report)
+
+    def test_breaks_and_other_expectations_are_never_resent(self) -> None:
+        actual = run.frontend_turn
+        for mode, case_id, problem, refuse_deletion, cut in (
+            ("replaced", "plain-01", "check-failed", False, False),
+            ("stream-leak", "plain-01", "stream-leak", False, False),
+            ("declined", "plain-01", "cleanup-failed", True, False),
+            ("declined", "plain-01", "turn-cut", False, True),
+            ("answered", "compute-01", "check-failed", False, False),
+        ):
+            with self.subTest(mode=mode, problem=problem):
+                loaded = _loaded()
+                frontend = SmokeFrontend(loaded)
+                frontend.attempt_modes[case_id] = [mode, "answered"]
+                frontend.refuse_deletion = refuse_deletion
+                progress: list[str] = []
+                _host, context = _context(frontend, progress)
+                context = replace(context, repeats=1)
+
+                def cut_row(
+                    *args: Any, cut: bool = cut, case_id: str = case_id, **kwargs: Any
+                ) -> run.TurnRow:
+                    row = actual(*args, **kwargs)
+                    if cut and kwargs["case"].id == case_id:
+                        return replace(row, cut=True)
+                    return row
+
+                with patch.object(run, "frontend_turn", side_effect=cut_row):
+                    result = general_smoke_slice.run_general_smoke(loaded, "general-smoke", context)
+
+                self.assertFalse(result.verdict)
+                row = next(row for row in result.results if row.case_id == case_id)
+                self.assertEqual(row.verdict, "fail")
+                self.assertEqual(row.metrics["problem"], problem)
+                if mode == "declined":
+                    self.assertEqual(row.metrics["class"], "declined")
+                self.assertEqual(row.metrics["attempts"], 1)
+                self.assertNotIn("first_class", row.metrics)
+                self.assertEqual(frontend.attempt_modes[case_id], ["answered"])
+                completions = [call for call in frontend.calls if call[1] == "/api/chat/completions"]
+                self.assertEqual(len(completions), len(select_cases(loaded, "general-smoke").counted))
+                self.assertEqual(
+                    len([line for line in progress if line.startswith(f"general-smoke {case_id}#1:")]),
+                    1,
+                )
+                self.assertEqual(len(progress), len(result.results))
+                self.assertFalse(any("re-sent" in line for line in progress))
+
+    def test_declines_pass_other_expectations_without_resending(self) -> None:
+        for expectation in ("recorded", "not-confirmed"):
+            with self.subTest(expectation=expectation):
+                loaded = _loaded()
+                record = loaded.cases_by_id["plain-01"]
+                expected = cast(dict[str, object], record["expected"])
+                loaded = replace(loaded, cases_by_id={
+                    **loaded.cases_by_id,
+                    "plain-01": {**record, "expected": {**expected, "expect": expectation}},
+                })
+                frontend = SmokeFrontend(loaded)
+                frontend.attempt_modes["plain-01"] = ["declined", "answered"]
+                progress: list[str] = []
+                _host, context = _context(frontend, progress)
+                context = replace(context, repeats=1)
+
+                result = general_smoke_slice.run_general_smoke(loaded, "general-smoke", context)
+
+                self.assertTrue(result.verdict, result.report)
+                row = next(row for row in result.results if row.case_id == "plain-01")
+                self.assertEqual(row.verdict, "pass")
+                self.assertEqual(row.metrics["expect"], expectation)
+                self.assertEqual(row.metrics["class"], "declined")
+                self.assertEqual(row.metrics["attempts"], 1)
+                self.assertNotIn("first_class", row.metrics)
+                self.assertEqual(frontend.attempt_modes["plain-01"], ["answered"])
+                self.assertEqual(len(frontend.stream_calls), len(result.results))
+                self.assertEqual(len(frontend.deleted_chats), len(result.results))
+                self.assertFalse(any("re-sent" in line for line in progress))
 
     def test_turn_with_both_pattern_ids_reports_the_stored_one(self) -> None:
         loaded = _loaded()
@@ -246,7 +444,6 @@ class GeneralSmokeRunner(unittest.TestCase):
         loaded = _loaded()
         frontend = SmokeFrontend(loaded)
         frontend.answers["doctrine-03"] = "A fictional doctrinal answer omits its required term."
-        frontend.answers["doctrine-04"] = "I can't compute that fictional answer for you."
         frontend.modes["doctrine-04"] = "declined"
         frontend.omit_sources.add("search-01")
         frontend.store_reasoning.add("identity-02")
@@ -272,6 +469,11 @@ class GeneralSmokeRunner(unittest.TestCase):
                     self.assertEqual(row.metrics["problem"], "check-failed")
                     self.assertIn(check, cast(list[str], row.metrics["failed"]))
                     self.assertFalse(cast(Mapping[str, bool], row.metrics["checks"])[check])
+                    self.assertEqual(row.metrics["attempts"], SAMPLE_ATTEMPTS if case_id == "doctrine-04" else 1)
+                    if case_id == "doctrine-04":
+                        self.assertEqual(row.metrics["first_class"], "declined")
+                    else:
+                        self.assertNotIn("first_class", row.metrics)
                 self.assertIn(f"{case_id}: fail", result.report)
                 self.assertIn("check-failed:", result.report)
                 self.assertIn(check, result.report)
@@ -281,6 +483,16 @@ class GeneralSmokeRunner(unittest.TestCase):
                         for line in progress
                     )
                 )
+        turns = len(select_cases(loaded, "general-smoke").counted) * context.repeats
+        completions = [call for call in frontend.calls if call[1] == "/api/chat/completions"]
+        self.assertEqual(len(completions), turns + (SAMPLE_ATTEMPTS - 1) * context.repeats)
+        self.assertEqual(len(frontend.deleted_chats), len(completions))
+        for repeat in range(1, context.repeats + 1):
+            self.assertEqual(
+                len([line for line in progress if line.startswith(f"general-smoke doctrine-04#{repeat}:")]),
+                SAMPLE_ATTEMPTS,
+            )
+            self.assertIn(f"repeat {repeat} declined, check-failed: expect", result.report)
 
     def test_stream_leak_fails_its_turn(self) -> None:
         loaded = _loaded()
@@ -297,8 +509,13 @@ class GeneralSmokeRunner(unittest.TestCase):
             self.assertEqual(row.metrics["problem"], "stream-leak")
             self.assertEqual(row.metrics["stream"], "leak")
             self.assertIn("pattern", row.metrics)
+            self.assertEqual(row.metrics["attempts"], 1)
+            self.assertNotIn("first_class", row.metrics)
         self.assertIn("doctrine-03: fail", result.report)
         self.assertTrue(any("doctrine-03#" in line and "stream leak" in line for line in progress))
+        completions = [call for call in frontend.calls if call[1] == "/api/chat/completions"]
+        turns = len(select_cases(loaded, "general-smoke").counted) * context.repeats
+        self.assertEqual(len(completions), turns)
 
     def test_turn_cuts_fail_and_report_distinct_progress_slots(self) -> None:
         loaded = _loaded()
@@ -388,6 +605,48 @@ class GeneralSmokeRunner(unittest.TestCase):
         self.assertEqual(turn_spy.call_count, 2)
         self.assertEqual(len(frontend.deleted_chats), 2)
 
+    def test_checkpoint_runs_before_every_attempt_including_resends(self) -> None:
+        loaded = _loaded()
+        frontend = SmokeFrontend(loaded)
+        frontend.attempt_modes["doctrine-03"] = ["declined", "answered", "answered"]
+        _host, context = _context(frontend, [])
+        completed: list[int] = []
+
+        def checkpoint() -> None:
+            completed.append(len([
+                call for call in frontend.calls if call[1] == "/api/chat/completions"
+            ]))
+            self.assertEqual(len(frontend.deleted_chats), completed[-1])
+
+        result = general_smoke_slice.run_general_smoke(
+            loaded, "general-smoke", replace(context, checkpoint=checkpoint)
+        )
+
+        self.assertTrue(result.verdict, result.report)
+        self.assertEqual(completed, list(range(len(result.results) + 1)))
+        self.assertEqual(len(frontend.deleted_chats), len(completed))
+
+    def test_checkpoint_overrun_stops_before_resending_a_decline(self) -> None:
+        loaded = _loaded()
+        frontend = SmokeFrontend(loaded)
+        frontend.attempt_modes["doctrine-03"] = ["declined", "answered"]
+        progress: list[str] = []
+        _host, context = _context(frontend, progress)
+
+        def checkpoint() -> None:
+            if progress and progress[-1].endswith("; re-sent"):
+                raise window.WindowOverrun(NOW)
+
+        with self.assertRaises(window.WindowOverrun):
+            general_smoke_slice.run_general_smoke(
+                loaded, "general-smoke", replace(context, checkpoint=checkpoint)
+            )
+
+        self.assertTrue(progress[-1].startswith("general-smoke doctrine-03#1: declined;"))
+        self.assertEqual(frontend.attempt_modes["doctrine-03"], ["answered"])
+        self.assertEqual(len(frontend.deleted_chats), len(progress))
+        self.assertEqual(frontend.chats, {})
+
     def test_signin_refusal_fails_every_result_without_making_turns(self) -> None:
         loaded = _loaded()
         frontend = SmokeFrontend(loaded)
@@ -398,6 +657,9 @@ class GeneralSmokeRunner(unittest.TestCase):
         result = general_smoke_slice.run_general_smoke(loaded, "general-smoke", context)
         self.assertEqual(len(result.results), 22)
         self.assertTrue(all(row.metrics["problem"] == "frontend-signin" for row in result.results))
+        for row in result.results:
+            self.assertEqual(row.metrics["attempts"], 1)
+            self.assertNotIn("first_class", row.metrics)
         self.assertEqual(
             [path for _method, path, _body in frontend.calls if path == "/api/chat/completions"],
             [],
@@ -423,6 +685,9 @@ class GeneralSmokeRunner(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(len(first.results), 22)
         self.assertTrue(all(row.metrics["problem"] == "turns-unavailable" for row in first.results))
+        for row in first.results:
+            self.assertEqual(row.metrics["attempts"], 1)
+            self.assertNotIn("first_class", row.metrics)
         self.assertTrue(all("stream" not in row.metrics and "checks" not in row.metrics for row in first.results))
         self.assertIn("turn access unavailable", first.report)
         self.assertEqual(host.calls, [])
@@ -433,12 +698,14 @@ class GeneralSmokeCommand(unittest.TestCase):
     """The public command resolves turn access and records the smoke results."""
 
     def _run_command(
-        self, *, supplied_set: bool, failing: bool = False
+        self, *, supplied_set: bool, failing: bool = False, resent: bool = False
     ) -> tuple[int, str, str, EvalHost, SmokeFrontend, MagicMock]:
         loaded = _loaded()
         frontend = SmokeFrontend(loaded)
         if failing:
             frontend.modes["doctrine-03"] = "stream-leak"
+        if resent:
+            frontend.attempt_modes["doctrine-03"] = ["declined", "answered", "answered"]
         host = EvalHost()
         argv = ["eval", "run", "--slice", "general-smoke"]
         if supplied_set:
@@ -505,9 +772,62 @@ class GeneralSmokeCommand(unittest.TestCase):
         self.assertIn("\\set run_stack 'production'", sql)
         self.assertIn("\\set kind 'manual'", sql)
         self.assertEqual(sql.count("INSERT INTO eval_results"), 22)
+        metrics = _recorded_metrics(sql)
+        self.assertEqual(len(metrics), sql.count("INSERT INTO eval_results"))
+        for row in metrics:
+            self.assertEqual(row["attempts"], 1)
+            self.assertNotIn("first_class", row)
         self.assertEqual(len(frontend.stream_calls), 22)
         self.assertNotIn(SENTINEL, stdout + stderr + sql)
         self.assertNotIn(SENTINEL, "".join(frontend.stream_payloads))
+
+    def test_cli_resent_turn_records_attempts_without_adding_result_rows(self) -> None:
+        code, stdout, stderr, host, frontend, comparison = self._run_command(
+            supplied_set=False, resent=True
+        )
+        self.assertEqual((code, stderr), (0, ""), stdout)
+        turns = len(select_cases(_loaded(), "general-smoke").counted) * 2
+        self.assertIn("22 results over 11 active cases at 2 repeats", stdout)
+        self.assertIn(f"{turns + 1} turns, 1 re-sent;", stdout)
+        _assert_comparison_lines(self, stdout, word="pass")
+        comparison.assert_called_once()
+        sql = "\n".join(
+            cast(str, input_text)
+            for argv, input_text in host.calls
+            if argv[0] == "docker" and input_text != "SELECT 1;\n"
+        )
+        self.assertEqual(sql.count("INSERT INTO eval_results"), turns)
+        metrics = _recorded_metrics(sql)
+        self.assertEqual(len(metrics), turns)
+        self.assertEqual(sum(cast(int, row["attempts"]) for row in metrics), turns + 1)
+        resent_rows = [row for row in metrics if cast(int, row["attempts"]) > 1]
+        self.assertEqual(len(resent_rows), 1)
+        self.assertEqual(resent_rows[0]["attempts"], 2)
+        self.assertEqual(resent_rows[0]["first_class"], "declined")
+        self.assertEqual(resent_rows[0]["class"], "answered")
+        for row in metrics:
+            if row is not resent_rows[0]:
+                self.assertEqual(row["attempts"], 1)
+                self.assertNotIn("first_class", row)
+        completions = [call for call in frontend.calls if call[1] == "/api/chat/completions"]
+        self.assertEqual(len(completions), turns + 1)
+        self.assertEqual(len(frontend.deleted_chats), turns + 1)
+        self.assertNotIn(SENTINEL, stdout + stderr + sql)
+        for answer in frontend.answers.values():
+            self.assertNotIn(answer, stdout + stderr + sql)
+
+    def test_cli_set_run_with_a_resent_turn_still_skips_recording(self) -> None:
+        code, stdout, stderr, host, frontend, comparison = self._run_command(
+            supplied_set=True, resent=True
+        )
+        self.assertEqual((code, stderr), (0, ""), stdout)
+        self.assertIn("record: ok — skipped", stdout)
+        self.assertIn("22 results over 11 active cases at 2 repeats", stdout)
+        self.assertIn("1 re-sent;", stdout)
+        self.assertFalse(any(argv[0] == "docker" for argv, _input in host.calls))
+        turns = len(select_cases(_loaded(), "general-smoke").counted) * 2
+        self.assertEqual(len(frontend.deleted_chats), turns + 1)
+        comparison.assert_called_once()
 
     def test_cli_failing_turn_prints_fail(self) -> None:
         code, stdout, stderr, _host, _frontend, comparison = self._run_command(
