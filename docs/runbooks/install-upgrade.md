@@ -387,7 +387,7 @@ A model upgrade's proof window precedes its tag: announce it under
 | `preflight` | the new tree's preflight: the gate for apply and the new release's own readiness checks. An unconverged or `reboot-required` step, or a new office-services requirement, refuses here — nothing of the product has changed yet | **reboot if asked, then re-run `upgrade <tag>`**: the checkout is already made and the set is reused, so the re-run resumes here |
 | `apply` | the new tree's `apply` (thirteen stages, streamed; a pin bump in `models.lock` fetches the new revision here, before the engine restarts) | `upgrade --rollback`; but when the row names the engine lock's holder, nothing was changed: wait for that evaluation to finish and re-run `upgrade <tag>`, which the version stage accepts as a re-run |
 | `verify` | the new tree answers `--version` with the tag's version, the applied record names it, every service the rendered project declares has a container that is running and healthy on a fresh read | `upgrade --rollback` |
-| `engine-verify` | the new tree's `engine verify` as a passthrough child; its failing row names its own server's logs | `upgrade --rollback`; but when the row names the engine lock's holder, nothing was changed: wait for that evaluation to finish and re-run `upgrade <tag>`, which the version stage accepts as a re-run |
+| `engine-verify` | the new tree's `engine verify` as a passthrough child; its failing row names its own server's logs | `upgrade --rollback`; but when the row names the engine lock's holder, nothing was changed: wait for that evaluation to finish and re-run `upgrade <tag>`, which the version stage accepts as a re-run; and when the failing row names the model's decline on every attempt (the trip's `answered`, the structured row's `length`), nothing is broken: run `engine verify` by hand and, when it declines again, supersede the case as `eval/engine-verify/README.md` says, never `upgrade --rollback` |
 | `audit-applied` | the `upgrade` row with the durations | — |
 
 The standing next step after a failure depends on where it happened: before the
@@ -398,7 +398,8 @@ refusal prints exactly that.
 
 An upgrade takes about the time of a preflight before and after the checkout
 (two relay test messages), one full set (TNMD: about 35 s), a provision check
-pass, an apply, and the `engine-verify` gate (about two to eight minutes). The
+pass, an apply, and the `engine-verify` gate (about two to eight minutes; a
+re-sent sample adds a turn). The
 pre-upgrade set is not pushed; the nightly unit pushes.
 
 ## 3. Rolling back: `gideon upgrade --rollback [<tag>]`
@@ -430,7 +431,7 @@ as foreign and keeps it, so the pool still protects new Docker networks.
 | `restore` | when needed, the previous tree's `restore --from staging --set <label>`: verified whole before anything is replaced, Postgres back to the set's archive boundary |
 | `apply` | the previous tree's `apply` — restore leaves the frontend and ingress down and names apply as the next command; here the command runs it |
 | `verify` | as the forward path, against the set's release |
-| `engine-verify` | the previous tree's `engine verify`; if it refuses, read the failing row's own server logs and run `engine verify` by hand, never going live |
+| `engine-verify` | the previous tree's `engine verify`; if it refuses, read the failing row's own server logs and run `engine verify` by hand, never going live; but when the failing row names the model's decline on every attempt (the trip's `answered`, the structured row's `length`), nothing is broken: run `engine verify` by hand and, when it declines again, supersede the case as `eval/engine-verify/README.md` says |
 | `audit-applied` | the `rollback` row |
 
 **What is preserved and what is not.** The database, `/etc/gideon`, the

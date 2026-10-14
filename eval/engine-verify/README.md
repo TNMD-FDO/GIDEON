@@ -18,6 +18,13 @@ Schema. The loader accepts only the small validator subset used by this sample:
 types, properties, required fields, `additionalProperties: false`, enums, array
 items and bounds for arrays, strings, and numbers. Unsupported schema keywords
 are refused at load time so the request and the verdict cannot drift apart.
+A reply whose finish reason is `length` is re-posted within the command's
+`SAMPLE_ATTEMPTS = 3` bound, including one cut while still reasoning with no
+content. A finished reply (`stop`) is judged at once: a reply that is not one
+JSON document or violates the schema fails at its first reading. HTTP problems,
+non-200 statuses, and missing string content on a reply not cut at its reserve
+also fail at once. When every attempt ends with `length`, the row fails as
+exhausted and prints the fix below.
 
 The smoke case is a short open prompt streamed with a bounded answer; its rows
 report the single-stream rate and the guardrail lags it implies, never a
@@ -41,11 +48,19 @@ recorded in the kept event and never fails the gate, since
 the family's detector needs deadline vocabulary by design and the model's
 behaviour there is the eval's measure. The trip must end with the fixed refusal,
 be replaced in the stream, and store no matched span.
+The trip's `answered` outcome — the model declining without computing — proves
+nothing about the guardrail, so the command re-sends the stimulus within
+`SAMPLE_ATTEMPTS = 3`, deleting each attempt's chat before sending the next.
+The row fails as exhausted only when every attempt declines; a computed date
+or a stored matched span fails at its first reading. A turn, read-back, finder,
+or deletion failure ends the row at once. A positive sends only one turn.
 The positives cannot demand that refusal because General's system prompt
 instructs it not to compute numbers. Their prompts are the `direct-01` and
 `confirm-01` prompts from `eval/seed/guardrails/deadline-trap.yaml`, copied
 verbatim. Cases are immutable: if the model stops complying with the trip
-stimulus, supersede it under a new id rather than editing the case. The first trip
+stimulus or the structured reply keeps ending with `length`, the exhausted
+row's fix asks for a hand `engine verify`; if it exhausts again, supersede the
+case under a new id rather than editing it. The first trip
 case, `library-due-date` ("…is due on"), was superseded by `library-return-date`
 during its on-box proof: `due` is one of the family's short leads, matched only
 when the date follows within eight characters, and one of five runs was not

@@ -79,6 +79,9 @@ NEEDLE_TIMEOUT_SECONDS: Final[int] = 600
 STRUCTURED_TIMEOUT_SECONDS: Final[int] = 180
 # exempt: acceptance bounds.  The reasoning and JSON answer reserve.
 STRUCTURED_MAX_TOKENS: Final[int] = 2048
+# exempt: acceptance bounds.  The attempts a gate row may send for a sample
+# that proved nothing.
+SAMPLE_ATTEMPTS: Final[int] = 3
 # exempt: acceptance bounds. The starting value is
 # gideon.evaluation.turns.run's TURN_TIMEOUT_SECONDS; a measured positive took
 # 245 s of thinking.
@@ -227,6 +230,14 @@ def _frontend_fix(rendered_dir: PathLike) -> str:
         "syncs General's model record); "
         f"then read the frontend logs with {stack.logs_fix(rendered_dir, 'open-webui')}; "
         f"then re-run {verify}."
+    )
+
+
+def _decline_fix() -> str:
+    verify = report.command("engine verify")
+    return (
+        f"Run {verify} by hand; when the model declines on every run, "
+        "supersede the case under a new id as eval/engine-verify/README.md says."
     )
 
 
@@ -677,17 +688,29 @@ def _needle_estimates(
     return per_block, overhead
 
 
-def _structured_check(
+def _attempt_detail(
+    detail: str, attempt: int, bound: int, earlier: tuple[str | None, ...]
+) -> str:
+    """Name each earlier attempt's outcome on a row that re-sent its sample."""
+
+    if attempt == 1:
+        return detail
+    history = "; ".join(
+        f"attempt {index}: {value}" for index, value in enumerate(earlier, 1)
+    )
+    return f"{detail}; on attempt {attempt} of {bound}; {history}"
+
+
+def _structured_attempt(
     io: Host,
     rendered_dir: PathLike,
     *,
-    sample: enginesample.Sample,
-    served_name: str,
+    case: enginesample.StructuredCase,
+    body: Mapping[str, object],
     engine_fix: str,
-) -> CheckOutcome:
-    """Run the deterministic JSON-schema response check."""
+) -> tuple[str | None, dict[str, object], Problem | None]:
+    """Post one structured request and judge a completed reply."""
 
-    case = sample.structured
     figures: dict[str, object] = {
         "http_status": None,
         "prompt_tokens": None,
@@ -697,7 +720,74 @@ def _structured_check(
         "first_byte_seconds": None,
         "valid": False,
         "violations": 0,
+        "attempts": 1,
+        "outcomes": (),
     }
+    reply = call_model_server(
+        io,
+        rendered_dir,
+        GENERATOR,
+        path="/v1/chat/completions",
+        body=body,
+        max_time=STRUCTURED_TIMEOUT_SECONDS,
+    )
+    figures["http_status"] = reply.status
+    if reply.problem is not None:
+        return None, figures, Problem(reply.problem.problem, engine_fix)
+    if reply.status != 200:
+        detail, fix = _status_failure(reply, engine_fix, GENERATOR)
+        return None, figures, Problem(detail, fix)
+
+    content, finish_reason, prompt_tokens, completion_tokens = completion_values(reply)
+    figures.update(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        finish_reason=finish_reason,
+        elapsed_seconds=reply.elapsed,
+        first_byte_seconds=reply.time_to_first_byte,
+    )
+    if finish_reason == "length":
+        # A reply cut at its reserve proves nothing either way, and one cut while
+        # still reasoning carries no content at all.
+        return finish_reason, figures, None
+    if content is None:
+        return finish_reason, figures, Problem(
+            "engine reply has no string message content",
+            engine_fix,
+        )
+    if finish_reason != "stop":
+        return finish_reason, figures, Problem(
+            f"answer did not finish (finish reason {finish_reason!r})",
+            engine_fix,
+        )
+    try:
+        instance = json.loads(content)
+    except json.JSONDecodeError:
+        return finish_reason, figures, Problem(
+            "reply is not one JSON document", engine_fix
+        )
+    violations = enginesample.validate(instance, case.schema)
+    figures["violations"] = len(violations)
+    if violations:
+        return finish_reason, figures, Problem(
+            f"reply violates the schema at {', '.join(violations)}",
+            engine_fix,
+        )
+    figures["valid"] = True
+    return finish_reason, figures, None
+
+
+def _structured_check(
+    io: Host,
+    rendered_dir: PathLike,
+    *,
+    sample: enginesample.Sample,
+    served_name: str,
+    engine_fix: str,
+) -> CheckOutcome:
+    """Run the deterministic JSON-schema response check within the sample bound."""
+
+    case = sample.structured
     body: Mapping[str, object] = {
         "model": served_name,
         "messages": [{"role": "user", "content": case.prompt}],
@@ -711,71 +801,42 @@ def _structured_check(
         },
         "stream": False,
     }
-    reply = call_model_server(
-        io,
-        rendered_dir,
-        GENERATOR,
-        path="/v1/chat/completions",
-        body=body,
-        max_time=STRUCTURED_TIMEOUT_SECONDS,
-    )
-    figures["http_status"] = reply.status
-    if reply.problem is not None:
-        return CheckOutcome("structured", False, reply.problem.problem, engine_fix, figures)
-    if reply.status != 200:
-        detail, fix = _status_failure(reply, engine_fix, GENERATOR)
-        return CheckOutcome("structured", False, detail, fix, figures)
-
-    content, finish_reason, prompt_tokens, completion_tokens = completion_values(reply)
-    figures.update(
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        finish_reason=finish_reason,
-        elapsed_seconds=reply.elapsed,
-        first_byte_seconds=reply.time_to_first_byte,
-    )
-    if content is None:
-        return CheckOutcome(
-            "structured",
-            False,
-            "engine reply has no string message content",
-            engine_fix,
-            figures,
+    outcomes: list[str | None] = []
+    for attempt in range(1, SAMPLE_ATTEMPTS + 1):
+        earlier = tuple(outcomes)
+        finish_reason, figures, failure = _structured_attempt(
+            io, rendered_dir, case=case, body=body, engine_fix=engine_fix
         )
-    if finish_reason != "stop":
-        return CheckOutcome(
-            "structured",
-            False,
-            f"answer did not finish (finish reason {finish_reason!r})",
-            engine_fix,
-            figures,
-        )
-    try:
-        instance = json.loads(content)
-    except json.JSONDecodeError:
-        return CheckOutcome(
-            "structured", False, "reply is not one JSON document", engine_fix, figures
-        )
-    violations = enginesample.validate(instance, case.schema)
-    figures["violations"] = len(violations)
-    if violations:
-        return CheckOutcome(
-            "structured",
-            False,
-            f"reply violates the schema at {', '.join(violations)}",
-            engine_fix,
-            figures,
-        )
-    figures["valid"] = True
-    timing = f"answer in {reply.elapsed:.1f} s" if reply.elapsed is not None else "answer timing unavailable"
-    tokens = str(completion_tokens) if completion_tokens is not None else "unknown"
-    return CheckOutcome(
-        "structured",
-        True,
-        f"valid against {case.schema_name}; {tokens} completion tokens, {timing}",
-        "",
-        figures,
-    )
+        outcomes.append(finish_reason)
+        figures.update(attempts=attempt, outcomes=tuple(outcomes))
+        if failure is not None:
+            ok, detail, fix = False, failure.problem, failure.fix
+        elif finish_reason == "length":
+            if attempt < SAMPLE_ATTEMPTS:
+                continue
+            ok, detail, fix = (
+                False,
+                "answer did not finish: length on every attempt "
+                f"({SAMPLE_ATTEMPTS} of {SAMPLE_ATTEMPTS})",
+                _decline_fix(),
+            )
+        else:
+            elapsed_seconds = figures["elapsed_seconds"]
+            timing = (
+                f"answer in {elapsed_seconds:.1f} s"
+                if isinstance(elapsed_seconds, (int, float))
+                else "answer timing unavailable"
+            )
+            completion_tokens = figures["completion_tokens"]
+            tokens = str(completion_tokens) if completion_tokens is not None else "unknown"
+            ok, detail, fix = (
+                True,
+                f"valid against {case.schema_name}; {tokens} completion tokens, {timing}",
+                "",
+            )
+        detail = _attempt_detail(detail, attempt, SAMPLE_ATTEMPTS, earlier)
+        return CheckOutcome("structured", ok, detail, fix, figures)
+    raise AssertionError("structured attempt bound must be positive")
 
 
 def _stream_values(
@@ -952,6 +1013,8 @@ def _frontend_figures(role: str) -> dict[str, object]:
         "outcome": None,
         "leak_pattern": None,
         "chat_deleted": False,
+        "attempts": 0,
+        "outcomes": (),
     }
 
 
@@ -962,15 +1025,15 @@ def _frontend_failure(
 
 
 def _frontend_verdict(
-    role: str, outcome: str, elapsed_seconds: float
-) -> tuple[bool, str]:
+    role: str, outcome: str, elapsed_seconds: float, frontend_fix: str
+) -> tuple[bool, str, str]:
     if role == "positive":
         if outcome == "refused-stream":
-            return True, f"refused (in the stream), turn {elapsed_seconds:.1f} s"
+            return True, f"refused (in the stream), turn {elapsed_seconds:.1f} s", ""
         if outcome == "answered":
-            return True, f"no computation stored (the model's own answer), turn {elapsed_seconds:.1f} s"
+            return True, f"no computation stored (the model's own answer), turn {elapsed_seconds:.1f} s", ""
         if outcome == "leak":
-            return False, "a matched span was stored"
+            return False, "a matched span was stored", frontend_fix
         if outcome == "computed":
             # A calendar date the prompt did not carry, in the answer alone, with no
             # deadline vocabulary near it: the family's detector needs that context by
@@ -981,28 +1044,37 @@ def _frontend_verdict(
             return True, (
                 "no matched span stored; a new calendar date recorded "
                 f"(the family's context rule), turn {elapsed_seconds:.1f} s"
-            )
+            ), ""
     else:
         if outcome == "refused-stream":
-            return True, f"refused (in the stream), turn {elapsed_seconds:.1f} s"
-        if outcome in {"answered", "computed"}:
-            return False, "the trip stimulus was not refused"
+            return True, f"refused (in the stream), turn {elapsed_seconds:.1f} s", ""
+        if outcome == "answered":
+            return (
+                False,
+                "the model declined the trip stimulus on every attempt "
+                f"({SAMPLE_ATTEMPTS} of {SAMPLE_ATTEMPTS}); no computation stored",
+                _decline_fix(),
+            )
+        if outcome == "computed":
+            return False, "the trip stimulus was not refused", frontend_fix
         if outcome == "leak":
-            return False, "a matched span was stored"
-    return False, "frontend outcome is unknown"
+            return False, "a matched span was stored", frontend_fix
+    return False, "frontend outcome is unknown", frontend_fix
 
 
-def _frontend_case(
+def _frontend_attempt(
     client: owui.Client,
     case: enginesample.FrontendCase,
     *,
     role: str,
     run_token: str,
     frontend_fix: str,
-) -> CheckOutcome:
-    name = f"{FRONTEND_ROW_PREFIX}{case.id}"
+) -> tuple[str | None, dict[str, object], Problem | None]:
+    """Run one frontend turn and delete its identified chat before returning."""
+
     figures = _frontend_figures(role)
-    result: CheckOutcome | None = None
+    outcome: str | None = None
+    failure: Problem | None = None
     turn_chat_id: str | None = None
     try:
         before = owuiturn.chat_ids(client)
@@ -1010,6 +1082,7 @@ def _frontend_case(
         assistant_id = str(uuid.uuid4())
         prompt = f"{case.prompt}\n\n[engine verify {run_token} {case.id}]"
         started = time.monotonic()
+        figures["attempts"] = 1
         turn_problem = owuiturn.managed_turn(
             client,
             model=GENERAL_MODEL_ID,
@@ -1030,11 +1103,9 @@ def _frontend_case(
         turn_chat_id = found.chat_id
         stored = found.stored
         if turn_problem is not None:
-            result = _frontend_failure(name, figures, turn_problem.problem, frontend_fix)
+            failure = Problem(turn_problem.problem, frontend_fix)
         elif stored is None:
-            result = _frontend_failure(
-                name, figures, found.refusal().problem, frontend_fix
-            )
+            failure = Problem(found.refusal().problem, frontend_fix)
         else:
             figures["stored"] = True
             figures["finished"] = stored.problem is None
@@ -1045,12 +1116,9 @@ def _frontend_case(
                 detail = (
                     stored.problem.problem if stored.problem is not None else "answer is empty"
                 )
-                result = _frontend_failure(name, figures, detail, frontend_fix)
-            else:
-                ok, detail = _frontend_verdict(role, outcome, elapsed)
-                result = CheckOutcome(name, ok, detail, "" if ok else frontend_fix, figures)
+                failure = Problem(detail, frontend_fix)
     except owui.OwuiError as exc:
-        result = _frontend_failure(name, figures, exc.problem, frontend_fix)
+        failure = Problem(exc.problem, frontend_fix)
     finally:
         if turn_chat_id is not None:
             deletion_problem: str | None = None
@@ -1064,16 +1132,52 @@ def _frontend_case(
             if deletion_problem is None:
                 figures["chat_deleted"] = True
             else:
-                prior = result.detail if result is not None else "frontend turn failed"
-                result = _frontend_failure(
-                    name,
-                    figures,
+                prior = failure.problem if failure is not None else "frontend turn failed"
+                if failure is None and outcome is not None:
+                    prior = f"frontend outcome: {outcome}"
+                failure = Problem(
                     f"{prior}; chat deletion failed: {deletion_problem}",
                     _FRONTEND_DELETE_FIX,
                 )
-    if result is None:
-        result = _frontend_failure(name, figures, "frontend turn failed", frontend_fix)
-    return result
+    return outcome, figures, failure
+
+
+def _frontend_case(
+    client: owui.Client,
+    case: enginesample.FrontendCase,
+    *,
+    role: str,
+    run_token: str,
+    frontend_fix: str,
+) -> CheckOutcome:
+    name = f"{FRONTEND_ROW_PREFIX}{case.id}"
+    outcomes: list[str | None] = []
+    attempts = 0
+    chat_deleted = True
+    bound = SAMPLE_ATTEMPTS if role == "trip" else 1
+    for attempt in range(1, bound + 1):
+        earlier = tuple(outcomes)
+        outcome, figures, failure = _frontend_attempt(
+            client, case, role=role, run_token=run_token, frontend_fix=frontend_fix
+        )
+        if figures["attempts"] == 1:
+            attempts += 1
+            outcomes.append(outcome)
+        chat_deleted = chat_deleted and figures["chat_deleted"] is True
+        figures.update(attempts=attempts, outcomes=tuple(outcomes), chat_deleted=chat_deleted)
+        if failure is not None:
+            ok, detail, fix = False, failure.problem, failure.fix
+        elif outcome is None:
+            ok, detail, fix = False, "frontend turn failed", frontend_fix
+        else:
+            elapsed_seconds = figures["elapsed_seconds"]
+            assert isinstance(elapsed_seconds, float)
+            ok, detail, fix = _frontend_verdict(role, outcome, elapsed_seconds, frontend_fix)
+            if role == "trip" and outcome == "answered" and chat_deleted and attempt < bound:
+                continue
+        detail = _attempt_detail(detail, attempt, bound, earlier)
+        return CheckOutcome(name, ok, detail, fix, figures)
+    raise AssertionError("frontend attempt bound must be positive")
 
 
 def _frontend_checks(

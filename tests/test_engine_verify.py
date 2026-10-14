@@ -190,8 +190,8 @@ class FakeHost:
         needle_error: str = "",
         tokenize_failure: bool = False,
         never_lands: bool = False,
-        structured_content: str | None = '{"objective":"fixture-objective","route":"map","steps":["fixture-step"],"confidence":80}',
-        structured_finish: str | None = "stop",
+        structured_content: str | None | list[str | None] = '{"objective":"fixture-objective","route":"map","steps":["fixture-step"],"confidence":80}',
+        structured_finish: str | None | list[str | None] = "stop",
         structured_status: int = 200,
         structured_error: str = "",
         embed_returncode: int = 0,
@@ -221,8 +221,8 @@ class FakeHost:
         self.needle_error = needle_error
         self.tokenize_failure = tokenize_failure
         self.never_lands = never_lands
-        self.structured_content = structured_content
-        self.structured_finish = structured_finish
+        self.structured_content = structured_content.copy() if isinstance(structured_content, list) else structured_content
+        self.structured_finish = structured_finish.copy() if isinstance(structured_finish, list) else structured_finish
         self.structured_status = structured_status
         self.structured_error = structured_error
         self.embed_returncode = embed_returncode
@@ -283,19 +283,17 @@ class FakeHost:
         )
 
     def _structured_reply(self) -> str:
+        content = self.structured_content.pop(0) if isinstance(self.structured_content, list) else self.structured_content
+        finish = self.structured_finish.pop(0) if isinstance(self.structured_finish, list) else self.structured_finish
         if self.structured_status != 200:
             response: Mapping[str, object] = {
                 "error": {"message": self.structured_error}
             }
         else:
-            message = (
-                {"content": self.structured_content}
-                if self.structured_content is not None
-                else {}
-            )
+            message = {"content": content}
             response = {
                 "choices": [
-                    {"finish_reason": self.structured_finish, "message": message}
+                    {"finish_reason": finish, "message": message}
                 ],
                 "usage": {"prompt_tokens": 7, "completion_tokens": 4},
             }
@@ -558,6 +556,7 @@ class FakeFrontend:
         self.factory_calls: list[Mapping[str, object]] = []
         self.case_id: str | None = None
         self.case_number = 0
+        self.case_attempts: dict[str, int] = {}
 
     def factory(self, **_: object) -> FakeFrontendClient:
         self.factory_calls.append(_)
@@ -609,6 +608,8 @@ class FakeFrontend:
             prompt = body["messages"][0]["content"]
             assert isinstance(prompt, str)
             self.case_id = prompt.rsplit(" ", 1)[-1].removesuffix("]")
+            attempt = self.case_attempts.get(self.case_id, 0)
+            self.case_attempts[self.case_id] = attempt + 1
             behavior = self.behavior()
             if behavior.get("turn_error"):
                 raise OwuiError("fixture managed turn failed")
@@ -627,6 +628,9 @@ class FakeFrontend:
                     assert isinstance(user_id, str)
                     assert isinstance(assistant_id, str)
                     content = behavior.get("content")
+                    if isinstance(content, list):
+                        content = content[attempt]
+                        assert isinstance(content, str)
                     if not isinstance(content, str):
                         content = (
                             self.refusal
@@ -686,6 +690,7 @@ class FakeFrontend:
             if chat_id not in self.chat_ids:
                 return owui.Response(401, {"detail": "Not found"})
             self.chat_ids.remove(chat_id)
+            self.records.pop(chat_id, None)
             return owui.Response(200, True)
         if path.startswith(owuiturn._CHAT_PATH):
             if self.behavior().get("read_error"):
@@ -848,6 +853,26 @@ class CommandTests(unittest.TestCase):
     def stored(self, content: object, **assistant_fields: object) -> owuiturn.StoredTurn:
         assistant = {"content": content, "done": True, **assistant_fields}
         return owuiturn.StoredTurn(assistant=assistant, user={"content": "fixture prompt"})
+
+    def kept_checks(self, backend: FakeAudit) -> dict[str, dict[str, object]]:
+        """Read the check figures in the JSON shape the audit writer stores."""
+
+        return cast(dict[str, dict[str, object]], json.loads(json.dumps(backend.rows[0].detail))["checks"])
+
+    def frontend_posts(self, frontend: FakeFrontend, case_id: str) -> list[Mapping[str, Any]]:
+        return [
+            body for method, path, body in frontend.requests
+            if method == "POST" and path == owuiturn.COMPLETIONS_PATH
+            and isinstance(body, Mapping)
+            and body["messages"][0]["content"].endswith(f" {case_id}]")
+        ]
+
+    def structured_requests(self, host: FakeHost) -> list[dict[str, Any]]:
+        return [
+            json.loads(body) for argv, body, _ in host.runs
+            if "exec" in argv and body is not None
+            and isinstance(json.loads(body).get("response_format"), Mapping)
+        ]
 
     def test_stage_order_body_and_audit(self) -> None:
         host = self.make_host()
@@ -1280,8 +1305,13 @@ class CommandTests(unittest.TestCase):
             assert isinstance(figure, Mapping)
             self.assertEqual(
                 set(figure),
-                {"ok", "role", "elapsed_seconds", "chats_created", "stored", "finished", "outcome", "leak_pattern", "chat_deleted"},
+                {"ok", "role", "elapsed_seconds", "chats_created", "stored", "finished", "outcome", "leak_pattern", "chat_deleted", "attempts", "outcomes"},
             )
+            kept = self.kept_checks(backend)[name]
+            self.assertIs(type(kept["attempts"]), int)
+            self.assertEqual(kept["attempts"], 1)
+            self.assertIsInstance(kept["outcomes"], list)
+            self.assertEqual(kept["outcomes"], [kept["outcome"]])
             self.assertNotIn(SECRET_VALUE, repr(figure))
         for case in cases:
             self.assertNotIn(case.prompt, output)
@@ -1353,6 +1383,7 @@ class CommandTests(unittest.TestCase):
         self.assertEqual((outcome, pattern), ("answered", None))
 
     def test_frontend_verdicts_match_the_two_roles(self) -> None:
+        frontend_fix = "fixture frontend repair"
         positive = {
             "refused-stream": (True, "refused (in the stream), turn 43.2 s"),
             "answered": (True, "no computation stored (the model's own answer), turn 43.2 s"),
@@ -1364,17 +1395,154 @@ class CommandTests(unittest.TestCase):
         }
         for outcome, expected in positive.items():
             with self.subTest(role="positive", outcome=outcome):
-                self.assertEqual(engine._frontend_verdict("positive", outcome, 43.2), expected)
+                ok, detail, fix = engine._frontend_verdict("positive", outcome, 43.2, frontend_fix)
+                self.assertEqual((ok, detail), expected)
+                self.assertEqual(fix, "" if ok else frontend_fix)
         for outcome in ("refused-stream", "answered", "computed", "leak"):
             with self.subTest(role="trip", outcome=outcome):
-                ok, detail = engine._frontend_verdict("trip", outcome, 58.4)
+                ok, detail, fix = engine._frontend_verdict("trip", outcome, 58.4, frontend_fix)
                 self.assertEqual(ok, outcome == "refused-stream")
                 if outcome == "refused-stream":
                     self.assertEqual(detail, "refused (in the stream), turn 58.4 s")
-                elif outcome in {"answered", "computed"}:
+                    self.assertEqual(fix, "")
+                elif outcome == "answered":
+                    self.assertEqual(
+                        detail,
+                        "the model declined the trip stimulus on every attempt "
+                        f"({engine.SAMPLE_ATTEMPTS} of {engine.SAMPLE_ATTEMPTS}); no computation stored",
+                    )
+                    self.assertEqual(fix, engine._decline_fix())
+                elif outcome == "computed":
                     self.assertEqual(detail, "the trip stimulus was not refused")
+                    self.assertEqual(fix, frontend_fix)
                 elif outcome == "leak":
                     self.assertEqual(detail, "a matched span was stored")
+                    self.assertEqual(fix, frontend_fix)
+
+    def test_trip_passes_after_decline_and_deletes_every_attempt_chat(self) -> None:
+        host = self.make_host()
+        sample = enginesample.load_sample(SAMPLE_PATH, host=host).sample
+        assert sample is not None
+        case = sample.frontend.trip
+        decline = "The fixture request is outside my scope."
+        frontend = self.make_frontend(behaviors={case.id: {"content": [decline, guardrail.DEADLINE_REFUSAL]}})
+        code, output, backend = self.run_command(host, frontend=frontend)
+
+        self.assertEqual(code, 0, output)
+        figure = self.kept_checks(backend)[f"{engine.FRONTEND_ROW_PREFIX}{case.id}"]
+        self.assertTrue(figure["ok"])
+        self.assertIs(type(figure["attempts"]), int)
+        self.assertEqual(figure["attempts"], 2)
+        self.assertIsInstance(figure["outcomes"], list)
+        self.assertEqual(figure["outcomes"], ["answered", "refused-stream"])
+        self.assertEqual(figure["outcome"], "refused-stream")
+        self.assertEqual(figure["chats_created"], 1)
+        self.assertTrue(figure["chat_deleted"])
+        self.assertIn(f"on attempt 2 of {engine.SAMPLE_ATTEMPTS}; attempt 1: answered", output)
+        posts = self.frontend_posts(frontend, case.id)
+        self.assertEqual(len(posts), 2)
+        self.assertEqual(len({body["id"] for body in posts}), len(posts))
+        self.assertEqual(len({body["user_message"]["id"] for body in posts}), len(posts))
+        deletes = [path for method, path, _ in frontend.requests if method == "DELETE"]
+        self.assertEqual(len(deletes), len(sample.frontend.positives) + len(posts))
+        self.assertEqual(len(set(deletes)), len(deletes))
+        self.assertEqual(frontend.chat_ids, [])
+        self.assertEqual(frontend.records, {})
+        self.assertNotIn(case.prompt, repr(figure))
+        self.assertNotIn(decline, output)
+        self.assertNotIn(decline, repr(backend.rows[0].detail))
+
+    def test_trip_exhausts_declines_with_the_supersede_fix(self) -> None:
+        host = self.make_host()
+        sample = enginesample.load_sample(SAMPLE_PATH, host=host).sample
+        assert sample is not None
+        case = sample.frontend.trip
+        decline = "The fixture request is outside my scope."
+        frontend = self.make_frontend(behaviors={case.id: {"content": decline}})
+        code, output, backend = self.run_command(host, frontend=frontend)
+
+        self.assertEqual(code, 1)
+        figure = self.kept_checks(backend)[f"{engine.FRONTEND_ROW_PREFIX}{case.id}"]
+        self.assertFalse(figure["ok"])
+        self.assertEqual(figure["attempts"], engine.SAMPLE_ATTEMPTS)
+        self.assertEqual(figure["outcomes"], ["answered"] * engine.SAMPLE_ATTEMPTS)
+        self.assertEqual(len(self.frontend_posts(frontend, case.id)), engine.SAMPLE_ATTEMPTS)
+        self.assertIn(f"({engine.SAMPLE_ATTEMPTS} of {engine.SAMPLE_ATTEMPTS})", output)
+        self.assertIn(engine._decline_fix(), output)
+        self.assertNotIn("--rollback", output)
+        self.assertTrue(figure["chat_deleted"])
+        self.assertEqual(frontend.chat_ids, [])
+        self.assertEqual(frontend.records, {})
+        self.assertNotIn(case.prompt, repr(backend.rows[0].detail))
+        self.assertNotIn(decline, repr(backend.rows[0].detail))
+
+    def test_trip_computation_and_leak_fail_at_the_first_reading(self) -> None:
+        host = self.make_host()
+        sample = enginesample.load_sample(SAMPLE_PATH, host=host).sample
+        assert sample is not None
+        case = sample.frontend.trip
+        for outcome, content in (
+            ("computed", "The fixture appointment is March 2, 2027."),
+            ("leak", "The fixture deadline is March 2, 2027."),
+        ):
+            with self.subTest(outcome=outcome):
+                frontend = self.make_frontend(behaviors={case.id: {"content": [content, guardrail.DEADLINE_REFUSAL]}})
+                code, output, backend = self.run_command(self.make_host(), frontend=frontend)
+                figure = self.kept_checks(backend)[f"{engine.FRONTEND_ROW_PREFIX}{case.id}"]
+                self.assertEqual(code, 1)
+                self.assertFalse(figure["ok"])
+                self.assertEqual(figure["attempts"], 1)
+                self.assertEqual(figure["outcomes"], [outcome])
+                self.assertEqual(len(self.frontend_posts(frontend, case.id)), 1)
+                self.assertIn(engine._frontend_fix(RENDERED), output)
+                self.assertNotIn(engine._decline_fix(), output)
+                self.assertTrue(figure["chat_deleted"])
+                self.assertEqual(frontend.chat_ids, [])
+                self.assertEqual(frontend.records, {})
+                self.assertNotIn(content, repr(backend.rows[0].detail))
+
+    def test_positive_answer_sends_one_turn(self) -> None:
+        host = self.make_host()
+        sample = enginesample.load_sample(SAMPLE_PATH, host=host).sample
+        assert sample is not None
+        case = sample.frontend.positives[0]
+        frontend = self.make_frontend(behaviors={case.id: {"content": "The fixture request is outside my scope."}})
+        code, output, backend = self.run_command(host, frontend=frontend)
+        figure = self.kept_checks(backend)[f"{engine.FRONTEND_ROW_PREFIX}{case.id}"]
+
+        self.assertEqual(code, 0, output)
+        self.assertTrue(figure["ok"])
+        self.assertEqual(figure["attempts"], 1)
+        self.assertEqual(figure["outcomes"], ["answered"])
+        self.assertEqual(len(self.frontend_posts(frontend, case.id)), 1)
+        self.assertTrue(figure["chat_deleted"])
+        self.assertEqual(frontend.chat_ids, [])
+
+    def test_trip_deletion_failure_stops_before_a_second_turn(self) -> None:
+        host = self.make_host()
+        sample = enginesample.load_sample(SAMPLE_PATH, host=host).sample
+        assert sample is not None
+        case = sample.frontend.trip
+        for failure in ("delete_false", "delete_error"):
+            with self.subTest(failure=failure):
+                frontend = self.make_frontend(behaviors={case.id: {
+                    "content": ["The fixture request is outside my scope.", guardrail.DEADLINE_REFUSAL],
+                    failure: True,
+                }})
+                observed: list[engine.StageResult] = []
+                code, output, backend = self.run_command(self.make_host(), frontend=frontend, observe=observed)
+                name = f"{engine.FRONTEND_ROW_PREFIX}{case.id}"
+                row = next(row for row in observed if row.name == name)
+                figure = self.kept_checks(backend)[name]
+                self.assertEqual(code, 1)
+                self.assertFalse(row.ok)
+                self.assertEqual(row.fix, engine._FRONTEND_DELETE_FIX)
+                self.assertIn("chat deletion failed", row.detail)
+                self.assertEqual(figure["attempts"], 1)
+                self.assertEqual(figure["outcomes"], ["answered"])
+                self.assertFalse(figure["chat_deleted"])
+                self.assertEqual(len(self.frontend_posts(frontend, case.id)), 1)
+                self.assertEqual(len(frontend.chat_ids), 1)
 
     def test_frontend_boundaries_keep_running_each_case_and_audit(self) -> None:
         sample = enginesample.load_sample(SAMPLE_PATH, host=self.make_host()).sample
@@ -1559,11 +1727,18 @@ class CommandTests(unittest.TestCase):
                 "first_byte_seconds",
                 "valid",
                 "violations",
+                "attempts",
+                "outcomes",
             },
         )
         self.assertEqual(structured["http_status"], 200)
         self.assertTrue(structured["valid"])
         self.assertEqual(structured["violations"], 0)
+        kept = self.kept_checks(backend)["structured"]
+        self.assertIs(type(kept["attempts"]), int)
+        self.assertEqual(kept["attempts"], 1)
+        self.assertIsInstance(kept["outcomes"], list)
+        self.assertEqual(kept["outcomes"], ["stop"])
 
         structured_runs = [
             run
@@ -1616,7 +1791,12 @@ class CommandTests(unittest.TestCase):
                 "violates the schema at /confidence, /<additional-property>",
                 engine._engine_fix(RENDERED, GENERATOR),
             ),
-            ({"structured_finish": "length"}, "finish reason 'length'", engine._engine_fix(RENDERED, GENERATOR)),
+            (
+                {"structured_finish": "length"},
+                "answer did not finish: length on every attempt "
+                f"({engine.SAMPLE_ATTEMPTS} of {engine.SAMPLE_ATTEMPTS})",
+                engine._decline_fix(),
+            ),
             (
                 {"structured_status": 400, "structured_error": "schema rejected"},
                 "schema rejected",
@@ -1634,6 +1814,68 @@ class CommandTests(unittest.TestCase):
                 self.assertNotIn("fixture-extra", repr(backend.rows[0].detail))
                 self.assertIn("smoke: ok", output)
                 self.assertEqual(backend.rows[0].detail["outcome"], "failed")
+                figure = self.kept_checks(backend)["structured"]
+                attempts = engine.SAMPLE_ATTEMPTS if options.get("structured_finish") == "length" else 1
+                self.assertEqual(figure["attempts"], attempts)
+                self.assertEqual(len(self.structured_requests(host)), attempts)
+                if attempts == engine.SAMPLE_ATTEMPTS:
+                    self.assertEqual(figure["outcomes"], ["length"] * engine.SAMPLE_ATTEMPTS)
+                    self.assertNotIn("--rollback", output)
+
+    def test_structured_reposts_length_including_null_content_then_passes(self) -> None:
+        valid = '{"objective":"fixture-objective","route":"map","steps":["fixture-step"],"confidence":80}'
+        for cut_content in ("fixture incomplete JSON {", None):
+            with self.subTest(cut_content=cut_content):
+                host = self.make_host(
+                    structured_finish=["length", "stop"],
+                    structured_content=[cut_content, valid],
+                )
+                code, output, backend = self.run_command(host)
+                figure = self.kept_checks(backend)["structured"]
+                self.assertEqual(code, 0, output)
+                self.assertTrue(figure["ok"])
+                self.assertTrue(figure["valid"])
+                self.assertEqual(figure["violations"], 0)
+                self.assertIs(type(figure["attempts"]), int)
+                self.assertEqual(figure["attempts"], 2)
+                self.assertIsInstance(figure["outcomes"], list)
+                self.assertEqual(figure["outcomes"], ["length", "stop"])
+                self.assertEqual(figure["finish_reason"], "stop")
+                self.assertEqual(figure["completion_tokens"], 4)
+                self.assertEqual(figure["elapsed_seconds"], 2.5)
+                self.assertIn(f"on attempt 2 of {engine.SAMPLE_ATTEMPTS}; attempt 1: length", output)
+                requests = self.structured_requests(host)
+                self.assertEqual(len(requests), 2)
+                self.assertEqual(requests[0], requests[1])
+                sample = enginesample.load_sample(SAMPLE_PATH, host=host).sample
+                assert sample is not None
+                for text in (sample.structured.prompt, valid, "fixture-objective", "fixture-step"):
+                    self.assertNotIn(text, output)
+                    self.assertNotIn(text, repr(backend.rows[0].detail))
+                if cut_content is not None:
+                    self.assertNotIn(cut_content, repr(backend.rows[0].detail))
+
+    def test_structured_length_then_invalid_document_fails_without_a_third_request(self) -> None:
+        host = self.make_host(
+            structured_finish=["length", "stop"],
+            structured_content=[None, "fixture invalid JSON"],
+        )
+        observed: list[engine.StageResult] = []
+        code, output, backend = self.run_command(host, observe=observed)
+        row = next(row for row in observed if row.name == "structured")
+        figure = self.kept_checks(backend)["structured"]
+        self.assertEqual(code, 1)
+        self.assertFalse(row.ok)
+        self.assertEqual(row.fix, engine._engine_fix(RENDERED, GENERATOR))
+        self.assertIn("reply is not one JSON document", row.detail)
+        self.assertIn(f"on attempt 2 of {engine.SAMPLE_ATTEMPTS}; attempt 1: length", row.detail)
+        self.assertEqual(figure["attempts"], 2)
+        self.assertEqual(figure["outcomes"], ["length", "stop"])
+        self.assertEqual(figure["finish_reason"], "stop")
+        self.assertFalse(figure["valid"])
+        self.assertEqual(len(self.structured_requests(host)), 2)
+        self.assertIn("smoke: ok", output)
+        self.assertNotIn("fixture invalid JSON", repr(backend.rows[0].detail))
 
     def test_needle_failure_variants_keep_running_smoke_and_audit(self) -> None:
         variants = (
