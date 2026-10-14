@@ -216,6 +216,7 @@ class WorkerIdentity(unittest.TestCase):
         self.assertEqual(worker.CITE_TYPES, citations.CITE_TYPES)
         self.assertEqual(worker.CITE_FORMS, CITE_FORMS)
         self.assertEqual(worker.PATTERN_SET_ID, treatment.PATTERN_SET_ID)
+        self.assertEqual(worker.SIGNAL_PATTERN, treatment.SIGNAL_PATTERN)
         self.assertEqual(worker.TREATMENT_SIGNALS, treatment.TREATMENT_SIGNALS)
         self.assertEqual(worker.QUALIFIERS, treatment.QUALIFIERS)
         self.assertEqual(worker.SIGNAL_SOURCES, treatment.SIGNAL_SOURCES)

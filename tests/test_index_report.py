@@ -9,13 +9,16 @@ from dataclasses import fields, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import test_agreement_host
 import test_index_record
+import test_index_treatment
 
 from gideon.host import caselaw, report, stack, staging, worker
 from gideon.host.index import buildreport, generations
 from gideon.host.index.record import GenerationRow
+from gideon.host.index.treatment import RISK_STATES, Treatment
 from gideon.host.render.worker import (
     AGREEMENT_RECORD_NAME,
     CLUSTER_BUDGET_SECONDS,
@@ -143,6 +146,16 @@ class ReportHost(test_index_record.FakeHost):
         result = super().run(argv, check=check, input=input, cwd=cwd, env=env,
                              timeout=timeout, passthrough=passthrough)
         if result.returncode == 0 and input is not None:
+            if "INSERT INTO public.build_reports" in input:
+                payload = json.loads(input.split("\n", 1)[0].removeprefix("\\set v_payload '").removesuffix("'"))
+                column = payload["treatment"]
+                # JSON null is a jsonb scalar. Only NULLIF converts it to SQL NULL,
+                # which the nullable object column accepts.
+                if (
+                    column is None and "NULLIF(value->'treatment', 'null'::jsonb)" not in input
+                    or column is not None and not isinstance(column, dict)
+                ):
+                    return subprocess.CompletedProcess(list(argv), 1, "", "fictitious treatment object check failed")
             for statement, rows in ((caselaw.CASELAW_COUNTS_SQL, self.counts), (caselaw.ANCHOR_COUNTS_SQL, self.anchors)):
                 if statement in input:
                     court = next(line for line in input.splitlines() if line.startswith("\\set v_court ")).split("'", 2)[1]
@@ -161,6 +174,31 @@ class Parser(unittest.TestCase):
         self.assertEqual(buildreport.BuildReport.from_json(empty.to_json()), empty)
         self.assertEqual(self.row.courts["court2"].anchors.by_text_source, {})
         self.assertIsNone(self.row.courts["court2"].agreement)
+        self.assertIn("treatment", self.payload)
+        self.assertIsNone(self.payload["treatment"])
+        self.assertIsNone(self.row.treatment)
+
+    def test_treatment_object_round_trips_including_an_older_pattern_set(self) -> None:
+        current = test_index_treatment.treatment_for()
+        older = replace(current, pattern_set=test_index_treatment.older_pattern_set())
+        for treatment in (current, older):
+            with self.subTest(pattern_set=treatment.pattern_set):
+                row = replace(self.row, treatment=treatment)
+                payload = json.loads(json.dumps(row.to_json()))
+                self.assertEqual(payload["treatment"], treatment.to_json())
+                self.assertEqual(buildreport.BuildReport.from_json(payload), row)
+
+    def test_invalid_treatment_objects_refuse_the_whole_report(self) -> None:
+        treatment = test_index_treatment.treatment_for().to_json()
+        value: object
+        for value in ([], "fictitious malformed treatment", 1, {},
+                      {**treatment, "unexpected": 1}, {**treatment, "clusters": -1},
+                      {**treatment, "pattern_set": "fictitious invalid set"}):
+            with self.subTest(value=value):
+                self.assertIsNone(buildreport.BuildReport.from_json({**self.payload, "treatment": value}))
+
+    def test_treatment_is_a_report_stage(self) -> None:
+        self.assertIn("treatment", buildreport.REPORT_STAGES)
 
     def test_generation_states_failure_reasons_and_stages_parse(self) -> None:
         for state in GENERATION_STATES:
@@ -356,10 +394,12 @@ class Gather(unittest.TestCase):
         self.row = replace(base, state="built", counts={"seconds": 5, "dense_seconds": 11},
                            dense_built_at=base.lexical_built_at, built_at=base.lexical_built_at)
 
-    def gather(self, row: GenerationRow | None = None) -> buildreport.BuildReport:
+    def gather(
+        self, row: GenerationRow | None = None, *, treatment: Treatment | None = None,
+    ) -> buildreport.BuildReport:
         result = buildreport.gather(
             self.host, RENDERED, self.inputs, row or self.row, 17, None, True,
-            work_root=WORK_ROOT, command_path=COMMAND_PATH,
+            treatment=treatment, work_root=WORK_ROOT, command_path=COMMAND_PATH,
         )
         self.assertIsInstance(result, buildreport.BuildReport)
         assert isinstance(result, buildreport.BuildReport)
@@ -378,6 +418,7 @@ class Gather(unittest.TestCase):
         self.assertEqual(observed.wall_clock, report_for().wall_clock)
         self.assertEqual(observed.metadata_changes, {})
         self.assertNotIn("cluster", observed.gates)
+        self.assertIsNone(observed.treatment)
         courts = [next(line for line in sql.splitlines() if line.startswith("\\set v_court "))
                   for _, sql in self.host.calls if sql is not None]
         self.assertEqual(courts, [worker.bind("v_court", court) for court in ("court1", "court1", "court2", "court2")])
@@ -406,6 +447,14 @@ class Gather(unittest.TestCase):
         row = replace(self.row, counts={**self.row.counts, "cluster_seconds": 7},
                       clustered_at=self.row.lexical_built_at)
         self.assertFalse(self.gather(row).gates["cluster"].reused)
+
+    def test_gather_places_the_supplied_treatment_object_without_materializing(self) -> None:
+        treatment = test_index_treatment.treatment_for()
+        observed = self.gather(treatment=treatment)
+        self.assertIs(observed.treatment, treatment)
+        self.assertEqual(buildreport.BuildReport.from_json(json.loads(json.dumps(observed.to_json()))), observed)
+        self.assertTrue(all("INSERT" not in (sql or "") and "DELETE" not in (sql or "")
+                            for _, sql in self.host.calls))
 
     def test_absent_work_records_keep_counts_and_nullable_observations(self) -> None:
         self.host.files.clear()
@@ -487,9 +536,46 @@ class Record(unittest.TestCase):
         self.assertIn(worker.bind("v_payload", json.dumps(self.row.to_json(), separators=(",", ":"))), sql)
         self.assertIn("INSERT INTO public.build_reports", sql)
         self.assertIn("RETURNING *", sql)
+        self.assertIn("NULLIF(value->'treatment', 'null'::jsonb)", sql)
         self.assertEqual(sql.count("\\set "), 1)
         self.assertNotIn("UPDATE", sql)
         self.assertNotIn("DELETE", sql)
+
+    def test_writer_and_reader_round_trip_present_and_absent_treatment(self) -> None:
+        current = test_index_treatment.treatment_for()
+        older = replace(current, pattern_set=test_index_treatment.older_pattern_set())
+        for treatment in (None, current, older):
+            with self.subTest(treatment=treatment):
+                row = replace(self.row, treatment=treatment)
+                host = ReportHost(stdout=json.dumps(row.to_json()))
+                self.assertEqual(buildreport.write_report(host, RENDERED, row), row)
+                self.assertEqual(buildreport.read_report(host, RENDERED, row.gen_id), row)
+
+    def test_reports_without_treatment_write_sql_null_even_when_the_stage_failed(self) -> None:
+        for failed_stage in (None, "build", "treatment"):
+            with self.subTest(failed_stage=failed_stage):
+                row = replace(self.row, failed_stage=failed_stage)
+                host = ReportHost(stdout=json.dumps(row.to_json()))
+                self.assertEqual(buildreport.write_report(host, RENDERED, row), row)
+                sql = host.calls[0][1]
+                assert sql is not None
+                payload = json.loads(sql.split("\n", 1)[0].removeprefix("\\set v_payload '").removesuffix("'"))
+                self.assertIsNone(payload["treatment"])
+                self.assertIn("NULLIF(value->'treatment', 'null'::jsonb)", sql)
+
+    def test_fake_database_refuses_a_jsonb_null_when_the_conversion_is_removed(self) -> None:
+        sql = buildreport.WRITE_REPORT_SQL.replace(
+            "NULLIF(value->'treatment', 'null'::jsonb)", "value->'treatment'",
+        )
+        host = ReportHost(stdout=json.dumps(self.row.to_json()))
+        with patch.object(buildreport, "WRITE_REPORT_SQL", sql):
+            result = buildreport.write_report(host, RENDERED, self.row, command_path=COMMAND_PATH)
+        self.assertIsInstance(result, Problem)
+        assert isinstance(result, Problem)
+        self.assertIn("exit 1", result.problem)
+        self.assertIn(stack.logs_fix(RENDERED, "postgres"), result.fix)
+        self.assertIn(report.command(COMMAND_PATH), result.fix)
+        self.assertEqual(len(host.calls), 1)
 
     def test_writer_refuses_failed_exit_invalid_payload_and_invalid_returned_rows(self) -> None:
         host = ReportHost(code=3, stdout=json.dumps(self.row.to_json()), stderr="private text sentinel")
@@ -561,7 +647,7 @@ class Record(unittest.TestCase):
         self.assertEqual(buildreport.summary(self.row), (
             f"{self.row.gen_id}: written_at {self.row.written_at}; courts 2; "
             "opinions 7, ready 3, failed 3; anchored 2 of 3; agreement figures 1 of 2 courts; "
-            "accounted 1 of 2 staged; seconds 17"
+            f"accounted 1 of 2 staged; seconds {self.row.seconds}; treatment none"
         ))
         self.assertNotIn(str(WORK_ROOT), buildreport.summary(self.row))
         self.assertNotIn("=", buildreport.summary(self.row))
@@ -577,3 +663,10 @@ class Record(unittest.TestCase):
                 self.assertEqual(buildreport.summary(row), buildreport.summary(self.row).replace(
                     f"seconds {row.seconds}", f"{suffix}; seconds {row.seconds}",
                 ))
+
+    def test_summary_carries_the_three_treatment_states_when_present(self) -> None:
+        treatment = test_index_treatment.treatment_for()
+        row = replace(self.row, treatment=treatment)
+        states = ", ".join(f"{state} {treatment.by_state[state]}" for state in RISK_STATES)
+        self.assertTrue(buildreport.summary(row).endswith(f"; treatment {states}"))
+        self.assertNotIn("treatment none", buildreport.summary(row))

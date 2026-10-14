@@ -13,6 +13,7 @@ from gideon.host import agreement, caselaw, report, staging, worker
 from gideon.host.corpus.record import database_fix
 from gideon.host.index import record
 from gideon.host.index.generations import GenerationInputs
+from gideon.host.index.treatment import RISK_STATES, Treatment
 from gideon.host.render.worker import (
     CLUSTER_BUDGET_SECONDS,
     COURT_PATTERN,
@@ -24,7 +25,7 @@ from gideon.host.render.worker import (
 from gideon.host.report import Problem
 from gideon.host.sysio import Host, PathLike
 
-REPORT_STAGES = ("cluster", "build", "counts", "dense", "built")
+REPORT_STAGES = ("cluster", "build", "counts", "dense", "built", "treatment")
 GATE_NAMES = ("accounted", "cluster")
 
 WRITE_REPORT_SQL = """WITH payload AS (
@@ -32,12 +33,12 @@ WRITE_REPORT_SQL = """WITH payload AS (
 ), written AS (
     INSERT INTO public.build_reports (
         gen_id, state, failed_stage, failure_reason, seconds,
-        courts, metadata_changes, gates, wall_clock
+        courts, metadata_changes, gates, wall_clock, treatment
     )
     SELECT value->>'gen_id', value->>'state', value->>'failed_stage',
            value->>'failure_reason', (value->>'seconds')::bigint,
            value->'courts', value->'metadata_changes', value->'gates',
-           value->'wall_clock'
+           value->'wall_clock', NULLIF(value->'treatment', 'null'::jsonb)
     FROM payload
     RETURNING *
 )
@@ -271,6 +272,7 @@ class BuildReport:
     metadata_changes: Mapping[str, object]
     gates: Gates
     wall_clock: WallClock
+    treatment: Treatment | None = None
 
     def to_json(self) -> dict[str, object]:
         gates: dict[str, object] = {}
@@ -286,6 +288,7 @@ class BuildReport:
             "metadata_changes": dict(self.metadata_changes),
             "gates": gates,
             "wall_clock": self.wall_clock.to_json(),
+            "treatment": None if self.treatment is None else self.treatment.to_json(),
         }
 
     @classmethod
@@ -341,17 +344,21 @@ class BuildReport:
         wall_clock = WallClock.from_json(value["wall_clock"])
         if wall_clock is None or wall_clock.run_seconds != value["seconds"]:
             return None
+        treatment = None if value["treatment"] is None else Treatment.from_json(value["treatment"])
+        if value["treatment"] is not None and treatment is None:
+            return None
         return cls(
             value["gen_id"], value["written_at"], value["state"], value["failed_stage"],
             value["failure_reason"], value["seconds"], courts, value["metadata_changes"],
-            gates, wall_clock,
+            gates, wall_clock, treatment,
         )
 
 
 def gather(
     host: Host, rendered_dir: PathLike, inputs: GenerationInputs,
     row: record.GenerationRow, seconds: int, failed_stage: str | None,
-    whole_build: bool, *, work_root: PathLike = WORK_ROOT,
+    whole_build: bool, *, treatment: Treatment | None = None,
+    work_root: PathLike = WORK_ROOT,
     command_path: str = "index build",
 ) -> BuildReport | Problem:
     """Gather record counts and optional work files without writing the database."""
@@ -423,7 +430,7 @@ def gather(
     return BuildReport(
         row.gen_id, datetime.datetime.now(datetime.UTC).isoformat(), row.state,
         failed_stage, row.failure_reason, seconds, courts, {},
-        gates, wall_clock,
+        gates, wall_clock, treatment,
     )
 
 
@@ -507,9 +514,12 @@ def summary(build_report: BuildReport) -> str:
         f"cluster {cluster.seconds} of {cluster.budget} s, {'pass' if cluster.passed else 'fail'}"
         + (", reused" if cluster.reused else "") + "; "
     )
+    treatment_summary = "treatment none" if build_report.treatment is None else "treatment " + ", ".join(
+        f"{state} {build_report.treatment.by_state[state]}" for state in RISK_STATES
+    )
     return (
         f"{build_report.gen_id}: written_at {build_report.written_at}; courts {len(courts)}; "
         f"opinions {opinions}, ready {ready}, failed {failed}; anchored {anchored} of {ready}; "
         f"agreement figures {figures} of {len(courts)} courts; accounted {passed} of {staged} staged; "
-        f"{cluster_summary}seconds {build_report.seconds}"
+        f"{cluster_summary}seconds {build_report.seconds}; {treatment_summary}"
     )

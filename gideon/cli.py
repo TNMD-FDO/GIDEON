@@ -363,9 +363,10 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Build a collection's index generation from the record: its near-duplicate clusters, "
             "its lexical index in the search store, and its vectors in the vector store. The build "
-            "ends by writing its build report to the record: the documents per court by status, "
-            "precedential status, and text source, the page-anchor coverage, the agreement figure, "
-            "and the wall-clock."
+            "materializes each cited case's risk state for the generation before writing its "
+            "build report to the record: the documents per court by status, precedential "
+            "status, and text source, the page-anchor coverage, the agreement figure, "
+            "the distribution of risk states, and the wall-clock."
         ),
     )
     build.add_argument("collection", choices=[item.name for item in COLLECTIONS], help="collection to build")

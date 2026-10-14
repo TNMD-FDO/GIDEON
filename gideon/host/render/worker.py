@@ -139,6 +139,9 @@ CITE_TYPES: Final = (
 )
 CITE_FORMS: Final = ("full", "short", "id", "supra", "reference")
 PATTERN_SET_ID: Final = "treatment/patterns@2"
+# On at 0.997 measured precision; the build's materialization reads
+# the switch here, held equal to the worker's, which never imports the host.
+SIGNAL_PATTERN: Final[bool] = True
 TREATMENT_SIGNALS: Final = (
     "overruled", "abrogated", "superseded", "reversed", "vacated", "disapproved",
 )

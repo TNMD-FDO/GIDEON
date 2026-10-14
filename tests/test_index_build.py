@@ -11,10 +11,11 @@ import subprocess
 import unittest
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, replace
-from datetime import timedelta
+from datetime import date, timedelta
 from typing import Any
 
 import test_corpus_install
+import test_index_treatment
 import yaml  # type: ignore[import-untyped]
 from test_corpus_install import NOW, RENDERED, ROOT, FakeHost
 from test_engine_verify import models_text
@@ -22,8 +23,8 @@ from test_models_lock import VALID, VALID_WITH_SPACE
 
 from gideon.host import backuplock, models, report, stack, staging
 from gideon.host.corpus.lockfile import load_lockfile, render_lockfile
-from gideon.host.corpus.sources import SOURCES
-from gideon.host.index import build, buildreport, dense, generations
+from gideon.host.corpus.sources import SOURCES, SourceDefinition
+from gideon.host.index import build, buildreport, dense, generations, treatment
 from gideon.host.index.record import GenerationRow
 from gideon.host.render.engine import EMBED
 from gideon.host.render.opensearch import OPENSEARCH_SERVICE_NAME
@@ -36,6 +37,7 @@ from gideon.host.render.worker import (
     DUPES_LOCK_PREFIX,
     DUPES_TASK,
     LEXICAL_TASK,
+    OVERRULED_SOURCE,
     STAGE_TABLES,
     WORKER_SERVICE_NAME,
 )
@@ -45,7 +47,7 @@ SITE_PATH = "/etc/gideon/site.yaml"
 
 
 class BuildHost(FakeHost):
-    """Extend the corpus fixture host with generation records, clustering, and both build jobs."""
+    """Serve generation records, clustering, build jobs, and a canned treatment distribution."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -91,6 +93,13 @@ class BuildHost(FakeHost):
         self.statements: list[str] = []
         self.reports: list[dict[str, Any]] = []
         self.report_write_code = 0
+        self.treatment_payloads: list[dict[str, Any]] = []
+        self.treatment_results: list[treatment.Treatment] = []
+        self.treatment_distribution = test_index_treatment.treatment_for()
+        self.treatment_distribution = replace(
+            self.treatment_distribution,
+            by_source={"pattern": sum(self.treatment_distribution.by_source.values())},
+        )
 
     def read_text(self, path: PathLike, *, encoding: str = "utf-8") -> str:
         if str(path) == SITE_PATH:
@@ -107,6 +116,27 @@ class BuildHost(FakeHost):
         timeout: float | None = None, passthrough: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         command = list(argv)
+        if input is not None and treatment.MATERIALIZE_SQL in input:
+            self.calls.append(command)
+            self.statements.append(input)
+            payload = json.loads(self._bound(input, "v_payload"))
+            self.treatment_payloads.append(payload)
+            if self.interrupt_phase == "treatment":
+                raise KeyboardInterrupt
+            if self.fail_phase == "treatment":
+                return subprocess.CompletedProcess(command, 3, "", "private diagnostic")
+            snapshot = (
+                None if payload["treatment_source"] is None
+                else f"{payload['treatment_source']}-{payload['treatment_snapshot_date']}"
+            )
+            materialized = replace(
+                self.treatment_distribution,
+                materialized_at=(NOW + timedelta(microseconds=len(self.treatment_results) + 1)).isoformat(),
+                pattern_set=payload["pattern_set"], signal_pattern=payload["signal_pattern"],
+                signal_list=payload["signal_list"], treatment_snapshot=snapshot,
+            )
+            self.treatment_results.append(materialized)
+            return subprocess.CompletedProcess(command, 0, json.dumps(materialized.to_json()), "")
         if input is not None and "public.build_reports" in input:
             self.calls.append(command)
             self.statements.append(input)
@@ -288,6 +318,7 @@ class Build(unittest.TestCase):
         self, label: str | None = None, *, sample: bool = False,
         collection: str = "caselaw", sleep: Callable[[float], None] | None = None,
         dense_limit: int | None = None,
+        sources: tuple[SourceDefinition, ...] | None = None,
     ) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
         self.host.current_label = label or self.fixture.labels[-1]
@@ -300,7 +331,7 @@ class Build(unittest.TestCase):
                 argparse.Namespace(collection=collection, lockfile=label, sample=sample),
                 host=self.host, rendered_dir=RENDERED, checkout=self.fixture.checkout,
                 work_root=self.fixture.work,
-                sources=(self.fixture.source,), clock=lambda: NOW,
+                sources=sources if sources is not None else (self.fixture.source,), clock=lambda: NOW,
                 monotonic=lambda: self.time, sleep=sleep or tick, dense_limit=dense_limit,
             )
         return code, out.getvalue(), err.getvalue()
@@ -326,7 +357,7 @@ class Build(unittest.TestCase):
             inputs = self.inputs(label)
             code, out, err = self.run_build(label)
             self.assertEqual((code, err), (0, ""), out)
-            for stage in ("preconditions", "generation", "cluster", "build", "counts", "dense", "built", "report"):
+            for stage in ("preconditions", "generation", "cluster", "build", "counts", "dense", "built", "treatment", "report"):
                 self.assertIn(f"{stage}: ok", out)
             self.assertIn(inputs.name, out)
             self.assertIn("building, created", out)
@@ -340,9 +371,64 @@ class Build(unittest.TestCase):
             self.assertEqual(job["courts"].keys(), set(inputs.courts))
             self.assertEqual(job["inputs_hash"], inputs.inputs_hash)
             self.assertEqual(job["embedding_space"], inputs.embedding_space)
+            materialized = self.host.treatment_results[-1]
+            self.assertIn(f"treatment: ok — {inputs.name}: {treatment.summary(materialized)}", out)
+            self.assertEqual(self.host.reports[-1]["treatment"], materialized.to_json())
+            self.assertGreater(out.index("treatment: ok"), out.index("built: ok"))
+            self.assertGreater(out.index("report: ok"), out.index("treatment: ok"))
             self.assertIsNone(self.host.lock_holder)
         self.assertEqual(len(self.host.generations), 2)
+        self.assertEqual(len(self.host.treatment_payloads), len(self.fixture.labels))
         self.assertEqual(self.host.lock_releases, 2)
+
+    def test_absent_treatment_pin_materializes_with_null_snapshot_bindings(self) -> None:
+        label = self.fixture.labels[0]
+        inputs = self.inputs(label)
+        code, out, err = self.run_build(label)
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertEqual(len(self.host.treatment_payloads), 1)
+        payload = self.host.treatment_payloads[0]
+        self.assertEqual(payload["gen_id"], inputs.name)
+        self.assertEqual(payload["source"], inputs.snapshot[:-staging.DATE_SUFFIX_LENGTH])
+        self.assertEqual(payload["snapshot_date"], inputs.snapshot[-10:])
+        self.assertEqual(payload["courts"], list(inputs.courts))
+        self.assertIsNone(payload["treatment_source"])
+        self.assertIsNone(payload["treatment_snapshot_date"])
+        self.assertIsNone(self.host.reports[0]["treatment"]["treatment_snapshot"])
+
+    def test_selected_lockfile_supplies_treatment_snapshot_without_changing_the_preconditions_row(self) -> None:
+        preconditions = {}
+        for label in self.fixture.labels:
+            code, out, err = self.run_build(label)
+            self.assertEqual((code, err), (0, ""), out)
+            preconditions[label] = next(line for line in out.splitlines() if line.startswith("preconditions:"))
+        captured, _, _ = self.fixture._add_captured_source()
+        registry = (self.fixture.source, captured)
+        known_sources = {source.name: source for source in registry}
+        for index, label in enumerate(self.fixture.labels):
+            path = self.fixture.checkout / f"corpus/lockfiles/{label}.yaml"
+            loaded = load_lockfile(path, known_sources=known_sources)
+            assert loaded.lockfile is not None
+            lockfile = loaded.lockfile
+            pin = lockfile.sources[OVERRULED_SOURCE]
+            pin = replace(pin, snapshot_date=(date.fromisoformat(pin.snapshot_date) + timedelta(days=index)).isoformat())
+            path.write_text(render_lockfile(replace(lockfile, sources={**lockfile.sources, OVERRULED_SOURCE: pin})))
+            self.host.record_rows[label]["sources"].append({
+                "source": OVERRULED_SOURCE, "snapshot_date": pin.snapshot_date,
+            })
+        for label in self.fixture.labels:
+            with self.subTest(label=label):
+                loaded = load_lockfile(self.fixture.checkout / f"corpus/lockfiles/{label}.yaml", known_sources=known_sources)
+                assert loaded.lockfile is not None
+                pin = loaded.lockfile.sources[OVERRULED_SOURCE]
+                code, out, err = self.run_build(label, sources=registry)
+                self.assertEqual((code, err), (0, ""), out)
+                self.assertIn(preconditions[label], out.splitlines())
+                payload = self.host.treatment_payloads[-1]
+                self.assertEqual(payload["treatment_source"], OVERRULED_SOURCE)
+                self.assertEqual(payload["treatment_snapshot_date"], pin.snapshot_date)
+                self.assertEqual(self.host.reports[-1]["treatment"]["treatment_snapshot"],
+                                 f"{OVERRULED_SOURCE}-{pin.snapshot_date}")
 
     def test_newest_default_and_sample_refusal_before_any_host_work(self) -> None:
         code, out, err = self.run_build()
@@ -381,6 +467,7 @@ class Build(unittest.TestCase):
             self.host.generations[row.gen_id] = replace(row, state=state)
             self.host.deferred.clear()
             reports = len(self.host.reports)
+            materializations = len(self.host.treatment_payloads)
             code, out, err = self.run_build(label)
             self.assertEqual(err, "")
             self.assertEqual(code, 0 if state == "live" else 1)
@@ -388,6 +475,8 @@ class Build(unittest.TestCase):
             self.assertNotIn("counts:", out)
             self.assertEqual(self.host.deferred, [])
             self.assertEqual(len(self.host.reports), reports)
+            self.assertEqual(len(self.host.treatment_payloads), materializations)
+            self.assertNotIn("treatment:", out)
             self.assertNotIn("report:", out)
             self.assertIsNone(self.host.lock_holder)
 
@@ -925,14 +1014,19 @@ class Build(unittest.TestCase):
         self.assertEqual(payload["wall_clock"]["lexical_seconds"], self.host.counts["seconds"])
         self.assertEqual(payload["wall_clock"]["dense_seconds"], self.host.dense_counts["dense_seconds"])
         self.assertTrue(payload["wall_clock"]["whole_build"])
+        self.assertEqual(len(self.host.treatment_payloads), 1)
+        materialized = self.host.treatment_results[0]
+        self.assertEqual(payload["treatment"], materialized.to_json())
+        self.assertIn(f"treatment: ok — {inputs.name}: {treatment.summary(materialized)}", out)
+        states = ", ".join(f"{state} {materialized.by_state[state]}" for state in treatment.RISK_STATES)
         line = next(line for line in out.splitlines() if line.startswith("report: ok"))
         self.assertEqual(line, f"report: ok — {inputs.name}: written_at {payload['written_at']}; courts 2; "
                          "opinions 5, ready 4, failed 1; anchored 3 of 4; agreement figures 2 of 2 courts; "
                          f"accounted 2 of 2 staged; cluster {self.host.cluster_counts['cluster_seconds']} "
-                         f"of {CLUSTER_BUDGET_SECONDS} s, pass; seconds {int(self.time)}")
+                         f"of {CLUSTER_BUDGET_SECONDS} s, pass; seconds {int(self.time)}; treatment {states}")
         self.assertNotIn(str(self.fixture.work), line)
         self.assertNotIn("=", line)
-        self.assertGreater(out.index("report: ok"), out.index("built: ok"))
+        self.assertGreater(out.index("report: ok"), out.index("treatment: ok"))
 
     def test_rerun_appends_and_newest_reader_returns_the_found_run(self) -> None:
         label = self.fixture.labels[0]
@@ -983,6 +1077,10 @@ class Build(unittest.TestCase):
         self.assertIsNone(payload["wall_clock"]["dense_built_at"])
         self.assertIsNone(payload["wall_clock"]["lifecycle_seconds"])
         self.assertIsNone(payload["failed_stage"])
+        self.assertEqual(len(self.host.treatment_payloads), 1)
+        self.assertEqual(payload["treatment"], self.host.treatment_results[0].to_json())
+        self.assertIn("treatment: ok", out)
+        self.assertGreater(out.index("treatment: ok"), out.index("built: ok"))
 
     def test_job_failures_write_the_stage_reason_and_keep_exit_one(self) -> None:
         for stage, reason in (("cluster", "cluster-budget"), ("build", "store"), ("dense", "embed")):
@@ -1000,6 +1098,9 @@ class Build(unittest.TestCase):
                 payload = self.host.reports[0]
                 self.assertEqual((payload["failed_stage"], payload["failure_reason"], payload["state"]), (stage, reason, "failed"))
                 self.assertFalse(payload["wall_clock"]["whole_build"])
+                self.assertIsNone(payload["treatment"])
+                self.assertEqual(self.host.treatment_payloads, [])
+                self.assertNotIn("treatment:", out)
 
     def test_counts_and_built_refusals_write_without_a_generation_failure_reason(self) -> None:
         for stage in ("counts", "built"):
@@ -1016,6 +1117,49 @@ class Build(unittest.TestCase):
                 self.assertEqual(payload["failed_stage"], stage)
                 self.assertIsNone(payload["failure_reason"])
                 self.assertFalse(payload["wall_clock"]["whole_build"])
+                self.assertIsNone(payload["treatment"])
+                self.assertEqual(self.host.treatment_payloads, [])
+                self.assertNotIn("treatment:", out)
+
+    def test_failed_materialization_writes_the_treatment_stage_with_null_and_exits_one(self) -> None:
+        label = self.fixture.labels[0]
+        self.host.fail_phase = "treatment"
+        code, out, err = self.run_build(label)
+        self.assertEqual((code, err), (1, ""), out)
+        self.assertIn("built: ok", out)
+        self.assertIn("treatment: refuse", out)
+        self.assertIn("treatment materialization failed (exit 3)", out)
+        self.assertIn(stack.logs_fix(RENDERED, "postgres"), out)
+        self.assertIn(report.command(f"index build caselaw --lockfile {label}"), out)
+        self.assertNotIn("private diagnostic", out)
+        self.assertIn("report: ok", out)
+        self.assertEqual(len(self.host.treatment_payloads), 1)
+        self.assertEqual(self.host.treatment_results, [])
+        self.assertEqual(len(self.host.reports), 1)
+        payload = self.host.reports[0]
+        self.assertEqual(payload["failed_stage"], "treatment")
+        self.assertIsNone(payload["treatment"])
+        self.assertEqual(payload["state"], "built")
+        self.assertIsNone(payload["failure_reason"])
+        self.assertIsNone(self.host.lock_holder)
+
+    def test_treatment_interrupt_names_whole_replacement_and_releases_the_lock(self) -> None:
+        label = self.fixture.labels[0]
+        self.host.interrupt_phase = "treatment"
+        code, out, err = self.run_build(label)
+        self.assertEqual((code, err), (1, ""), out)
+        self.assertIn("treatment: refuse", out)
+        self.assertIn("interrupted; the generation's states are replaced whole by the next run", out)
+        self.assertIn(report.command(f"index build caselaw --lockfile {label}"), out)
+        self.assertEqual(len(self.host.treatment_payloads), 1)
+        self.assertEqual(self.host.treatment_results, [])
+        self.assertEqual(self.host.reports, [])
+        self.assertIsNone(self.host.lock_holder)
+        self.host.interrupt_phase = None
+        code, out, err = self.run_build(label)
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertIn("treatment: ok", out)
+        self.assertEqual(self.host.reports[-1]["treatment"], self.host.treatment_results[-1].to_json())
 
     def test_report_write_failure_after_success_refuses_with_a_rerun_fix(self) -> None:
         self.host.report_write_code = 3

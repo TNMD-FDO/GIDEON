@@ -323,7 +323,8 @@ class IndexBuild(unittest.TestCase):
             self.assertIn(collection.name, help_text)
         for phrase in ("--lockfile LABEL", "newest", "--sample", SAMPLE_LANDING, "lexical index",
                        "its near-duplicate clusters", "from the record", "its vectors in the vector store",
-                       "build report"):
+                       "build report", "cited case's risk state for the generation",
+                       "distribution of risk states"):
             self.assertIn(phrase, help_text)
 
     def test_sample_keeps_the_stub_refusal_before_host_work(self) -> None:
