@@ -13,7 +13,13 @@ from pathlib import Path
 from typing import NamedTuple, cast
 from unittest.mock import patch
 
-from test_evaluation_run import ROOT, EvalHost, _invoke, _run_kwargs
+from test_evaluation_run import (
+    ROOT,
+    EvalHost,
+    _invoke,
+    _reference_checkout,
+    _run_kwargs,
+)
 
 from gideon.evaluation.evalset import SEGMENTER_TEXT_SOURCES, LoadedSet
 from gideon.evaluation.results import ImageAccess, RunContext
@@ -559,6 +565,7 @@ class Command(unittest.TestCase):
         from gideon.evaluation import segmenter_labels
 
         with tempfile.TemporaryDirectory() as directory:
+            checkout = _reference_checkout(directory)
             root = Path(directory) / "eval-v9"
             cases = root / "build-gates" / "segmenter-300.jsonl"
             cases.parent.mkdir(parents=True)
@@ -585,7 +592,7 @@ class Command(unittest.TestCase):
                         host.documents[0]["sections"] = [[0, len(TEXT), "majority", "row"]]
                     code, stdout, stderr = _invoke(
                         ["eval", "run", "--slice", "segmenter-300", "--set", str(root)],
-                        **_run_kwargs(host),
+                        **_run_kwargs(host, checkout=checkout),
                     )
                     self.assertEqual(stderr, "")
                     self.assertEqual(code, 0 if state == "clean" else 1, stdout)
@@ -599,7 +606,7 @@ class Command(unittest.TestCase):
             with patch("gideon.evaluation.command.stacks.secrets.select_directory"):
                 code, stdout, stderr = _invoke(
                     ["eval", "run", "--slice", "segmenter-300", "--stack", "ci", "--set", str(root)],
-                    **_run_kwargs(host),
+                    **_run_kwargs(host, checkout=checkout),
                 )
             self.assertEqual((code, stderr), (0, ""), stdout)
             from gideon.evaluation import stacks
