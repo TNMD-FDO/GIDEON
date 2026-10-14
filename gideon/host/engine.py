@@ -9,7 +9,7 @@ import subprocess
 import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
 
@@ -48,11 +48,18 @@ _FRONTEND_DELETE_FIX: Final[str] = (
 # curl's own diagnostic is safe to show (never a response body); one line, bounded.
 _STDERR_LIMIT: Final[int] = 200
 
+# exempt: the pinned frontend permits one account fifteen sign-in attempts in
+# a rolling window. This bounds GIDEON's widest batch of engine sequences;
+# correct it when the frontend pin's window changes.
+CONCURRENT_SESSIONS_CEILING: Final[int] = 15
+
 # exempt: acceptance bounds, starting values corrected by measurement.  The
 # smoke is a bounded operator check; the timing is not a pass threshold.
 SMOKE_TIMEOUT_SECONDS: Final[int] = 120
 # exempt: acceptance bounds.  Host.run must outlive curl's bound.
 RUN_TIMEOUT_MARGIN_SECONDS: Final[int] = 15
+# exempt: acceptance bounds. The in-container process argv read bound.
+SEQUENCE_CAP_TIMEOUT_SECONDS: Final[int] = 5
 # The nominal needle lengths (32k, 128k, 256k): a product decision, not a starting value.
 NEEDLE_LENGTHS: Final[tuple[int, ...]] = (32_768, 131_072, 262_144)
 # exempt: acceptance bounds.  The bounded recall answer reserve.
@@ -160,11 +167,13 @@ class CheckOutcome:
 
 @dataclass(frozen=True, slots=True)
 class EngineTarget:
-    """The selected engine profile, served model, and context window."""
+    """The selected engine profile, served model, window, and sequence capacity."""
 
     profile_name: str
     served_model_name: str
     window: int
+    max_num_seqs: int | None = field(default=None, kw_only=True)
+    client_reserve_seqs: int = field(default=0, kw_only=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -380,6 +389,84 @@ def call_model_server(
             detail += f" ({diagnostic})"
         return _failed_reply(_response_problem(rendered_dir, member, detail))
     return _reply_from_output(result.stdout, rendered_dir, member)
+
+
+def _max_num_seqs_from_cmdline(cmdline: str) -> int | None:
+    """Read the last sequence-cap flag from a NUL-separated process argv."""
+
+    tokens = cmdline.split("\0")
+    value: str | None = None
+    for index, token in enumerate(tokens):
+        if token == "--max-num-seqs":
+            value = tokens[index + 1] if index + 1 < len(tokens) else None
+        elif token.startswith("--max-num-seqs="):
+            value = token.split("=", 1)[1]
+    if value is None or re.fullmatch(r"[0-9]+", value) is None:
+        return None
+    return int(value)
+
+
+def _sequence_cap_check(
+    io: Host,
+    rendered_dir: PathLike,
+    *,
+    target: EngineTarget,
+) -> CheckOutcome:
+    """Compare the running generator's sequence cap with its release pin."""
+
+    figures: dict[str, object] = {
+        "lock_max_num_seqs": target.max_num_seqs,
+        "running_max_num_seqs": None,
+        "widest_batch": CONCURRENT_SESSIONS_CEILING,
+        "client_reserve_seqs": target.client_reserve_seqs,
+    }
+    if target.max_num_seqs is None:
+        return CheckOutcome(
+            "sequence-cap", False,
+            "models.lock generator pin has no usable max-num-seqs flag",
+            _models_fix(), figures,
+        )
+    try:
+        result = io.run(
+            stack.exec_argv(rendered_dir, GENERATOR.service_name, "cat", "/proc/1/cmdline"),
+            timeout=SEQUENCE_CAP_TIMEOUT_SECONDS + RUN_TIMEOUT_MARGIN_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return CheckOutcome(
+            "sequence-cap", False, f"{GENERATOR.words} argv read failed: TimeoutExpired",
+            _apply_fix(), figures,
+        )
+    except OSError:
+        return CheckOutcome(
+            "sequence-cap", False, f"{GENERATOR.words} argv read failed: OSError",
+            _apply_fix(), figures,
+        )
+    if result.returncode != 0:
+        return CheckOutcome(
+            "sequence-cap", False,
+            f"{GENERATOR.words} argv read failed: non-zero exit {result.returncode}",
+            _apply_fix(), figures,
+        )
+    running_cap = _max_num_seqs_from_cmdline(result.stdout)
+    figures["running_max_num_seqs"] = running_cap
+    if running_cap is None:
+        return CheckOutcome(
+            "sequence-cap", False,
+            f"running engine has no max-num-seqs on its argv; the lock names {target.max_num_seqs}",
+            _apply_fix(), figures,
+        )
+    if running_cap != target.max_num_seqs:
+        return CheckOutcome(
+            "sequence-cap", False,
+            f"running max-num-seqs {running_cap} differs from the lock's {target.max_num_seqs}",
+            _apply_fix(), figures,
+        )
+    return CheckOutcome(
+        "sequence-cap", True,
+        f"lock max-num-seqs {target.max_num_seqs}; running max-num-seqs {running_cap}; "
+        f"widest batch {CONCURRENT_SESSIONS_CEILING}; client reserve {target.client_reserve_seqs}",
+        "", figures,
+    )
 
 
 def _last_stderr_line(stderr: str) -> str:
@@ -1294,7 +1381,12 @@ def resolve_engine_target(
     )
     if not ready:
         return Problem(detail, stack.logs_fix(rendered_dir, service))
-    return EngineTarget(selected.name, generator.serve.served_name, window)
+    max_num_seqs = generator.serve.flags.get("max-num-seqs")
+    return EngineTarget(
+        selected.name, generator.serve.served_name, window,
+        max_num_seqs=max_num_seqs if type(max_num_seqs) is int and max_num_seqs > 0 else None,
+        client_reserve_seqs=selected.client_reserve_seqs,
+    )
 
 
 def _resolve_embed_target(
@@ -1643,6 +1735,7 @@ def run_engine_verify(
             checks.append(outcome)
 
         # The generator's sequence.
+        record(_sequence_cap_check(io, rendered_dir, target=engine_target))
         estimates = _needle_estimates(
             io, rendered_dir, sample=sample, served_name=served_name, engine_fix=engine_fix
         )

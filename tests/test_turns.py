@@ -34,6 +34,7 @@ from gideon.evaluation.turns import (
     session,
 )
 from gideon.host import backuplock, models, owuiturn, report, secrets, site
+from gideon.host.engine import CONCURRENT_SESSIONS_CEILING
 from gideon.host.owui import Client, OwuiError, OwuiTimeout, Response
 from gideon.host.render.ci import CI_PORT, CI_ROOT, CI_SECRETS_DIR
 from gideon.host.render.engine import GENERATOR
@@ -3900,6 +3901,45 @@ class TurnHarness(TestCase):
         self.assertEqual(code, 0)
         self.assertIn("turns: 9 (3 sessions × 1 × 3)", stdout)
         self.assertIn("sessions: 3 in flight", stdout)
+        self.assertEqual(frontend.calls, [])
+
+    def test_concurrent_above_ceiling_refuses_before_root_check(self) -> None:
+        for flags in ([], ["--dry-run"], ["--force"]):
+            with self.subTest(flags=flags):
+                frontend = Frontend(self.guardrail, {})
+                host = FakeHost(euid=1000)
+                code, stdout, stderr = _run_file(
+                    frontend,
+                    _cases_file("one"),
+                    host=host,
+                    args=["--concurrent", str(CONCURRENT_SESSIONS_CEILING + 1), *flags],
+                )
+                self.assertEqual(code, 1)
+                self.assertEqual(
+                    stdout,
+                    f"preconditions: refuse — --concurrent above {CONCURRENT_SESSIONS_CEILING} "
+                    "exceeds the frontend's sign-in window Fix: "
+                    f"Run with --concurrent {CONCURRENT_SESSIONS_CEILING} or below, then retry.\n",
+                )
+                self.assertEqual(stderr, "")
+                self.assertNotIn("root is required", stdout)
+                self.assertEqual(host.read_paths, [])
+                self.assertEqual(host.commands, [])
+                self.assertEqual(frontend.calls, [])
+
+    def test_concurrent_at_ceiling_is_admitted_under_dry_run(self) -> None:
+        frontend = Frontend(self.guardrail, {})
+        code, stdout, stderr = _run_file(
+            frontend,
+            _cases_file("one"),
+            host=FakeHost(),
+            args=["--concurrent", str(CONCURRENT_SESSIONS_CEILING), "--dry-run"],
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("preconditions: ok", stdout)
+        self.assertIn("Turn harness dry run:", stdout)
+        self.assertIn(f"sessions: {CONCURRENT_SESSIONS_CEILING} in flight", stdout)
+        self.assertEqual(stderr, "")
         self.assertEqual(frontend.calls, [])
 
     def test_concurrent_browser_refusal_precedes_root_check(self) -> None:

@@ -131,6 +131,8 @@ class HardwareProfile:
     models: tuple[ModelPin, ...]
     embedding_space: EmbeddingSpace | None = None
     cotenant_reserve: tuple[CotenantReserve, ...] = ()
+    # The share of the generator's cap left for a client; absent reserves nothing.
+    client_reserve_seqs: int = 0
 
     def model(self, role: str) -> ModelPin | None:
         """Return the model for *role*, or ``None`` when it is absent."""
@@ -233,7 +235,10 @@ _CANDIDATE_CLASH_FIX: Final = (
     "Rename the candidate in models.lock; consult docs/runbooks/release-files.md §4."
 )
 _ROOT_KEYS: Final =("version", "reference", "profiles", "candidates")
-_PROFILE_KEYS: Final = ("requires", "memory", "models", "embedding_space", "cotenant_reserve_gb")
+_PROFILE_KEYS: Final = (
+    "requires", "memory", "models", "embedding_space", "cotenant_reserve_gb",
+    "client_reserve_seqs",
+)
 _REQUIRES_KEYS: Final = ("platform", "gpu", "dram_gb", "data_volume_gb")
 _GPU_KEYS: Final = (
     "architecture",
@@ -713,6 +718,32 @@ def _validate_cotenant_reserve(
         _int({"gb": gb}, "gb", errors, positive=False, error_path=row_path)
 
 
+def _validate_client_reserve(
+    profile_path: str,
+    value: object,
+    cap: object,
+    errors: list[ModelsLockError],
+) -> None:
+    """Validate the optional client reserve against the generator's sequence cap."""
+
+    path = f"{profile_path}.client_reserve_seqs"
+    reserve = _int(
+        {"client_reserve_seqs": value}, "client_reserve_seqs", errors,
+        positive=False, error_path=path,
+    )
+    if not isinstance(cap, int) or isinstance(cap, bool) or cap <= 0:
+        errors.append(
+            _error(
+                path,
+                "the reserve requires a whole-number models.generator.serve.flags.max-num-seqs to be cut from",
+            )
+        )
+    elif reserve is not None and reserve > cap:
+        errors.append(
+            _error(path, f"must be at or below models.generator.serve.flags.max-num-seqs ({cap})")
+        )
+
+
 def validate_models_lock(document: Mapping[str, object]) -> list[ModelsLockError]:
     """Return all shape, grammar, pin, and unknown-key errors in a lock."""
 
@@ -779,6 +810,11 @@ def validate_models_lock(document: Mapping[str, object]) -> list[ModelsLockError
             if "cotenant_reserve_gb" in profile:
                 _validate_cotenant_reserve(
                     profile_path, profile["cotenant_reserve_gb"], gpu_count, errors
+                )
+            if "client_reserve_seqs" in profile:
+                _, cap = _lookup(profile, "models.generator.serve.flags.max-num-seqs")
+                _validate_client_reserve(
+                    profile_path, profile["client_reserve_seqs"], cap, errors
                 )
 
             if "memory" not in profile:
@@ -863,7 +899,8 @@ def _construct(document: Mapping[str, object]) -> ModelsLock:
         )
         profiles.append(
             HardwareProfile(
-                cast(str, name), requirements, memory, models, embedding_space, cotenant_reserve
+                cast(str, name), requirements, memory, models, embedding_space, cotenant_reserve,
+                client_reserve_seqs=cast(int, profile.get("client_reserve_seqs", 0)),
             )
         )
     candidates_value = cast(Mapping[str, object], document.get("candidates", {}))
@@ -964,7 +1001,7 @@ def _finish(result: ModelsLockLoadResult) -> ModelsLockLoadResult:
 
 
 def load_models_lock(path: PathLike, *, host: Host | None = None) -> ModelsLockLoadResult:
-    """Load model pins and optional co-tenant reserves from a models lock."""
+    """Load model pins and optional co-tenant and client reserves from a models lock."""
 
     return _finish(read_models_lock(path, host=host))
 

@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.159](docs/release-notes/v0.3.159.md) — 2026-10-13 — the engine's client reserve
 - [v0.3.158](docs/release-notes/v0.3.158.md) — 2026-10-13 — a general-smoke decline is re-sent
 - [v0.3.157](docs/release-notes/v0.3.157.md) — 2026-10-13 — the segmenter's page-locator bound
 - [v0.3.156](docs/release-notes/v0.3.156.md) — 2026-10-14 — the install-upgrade runbook gains a section for a box that loses a DIMM or a GPU card

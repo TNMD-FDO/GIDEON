@@ -105,6 +105,7 @@ profiles:
             HF_HOME: /data/models
           flags:
             max-model-len: {max_model_len}
+            max-num-seqs: 37
         files:
           config.json:
             sha256: sha256:{'b' * 64}
@@ -184,6 +185,11 @@ class FakeHost:
         exec_stdout: str | None = None,
         exec_returncode: int = 0,
         exec_error: BaseException | None = None,
+        running_cap: int | None = None,
+        cmdline_absent_flag: bool = False,
+        cmdline_equals: bool = False,
+        cmdline_returncode: int = 0,
+        cmdline_error: BaseException | None = None,
         needle_content: str | None = None,
         needle_usage_offset: int = 0,
         needle_status: int = 200,
@@ -215,6 +221,11 @@ class FakeHost:
         self.exec_stdout = exec_stdout if exec_stdout is not None else sse_output()
         self.exec_returncode = exec_returncode
         self.exec_error = exec_error
+        self.running_cap = running_cap
+        self.cmdline_absent_flag = cmdline_absent_flag
+        self.cmdline_equals = cmdline_equals
+        self.cmdline_returncode = cmdline_returncode
+        self.cmdline_error = cmdline_error
         self.needle_content = needle_content
         self.needle_usage_offset = needle_usage_offset
         self.needle_status = needle_status
@@ -364,6 +375,34 @@ class FakeHost:
         del cwd, env, passthrough
         command = tuple(argv)
         self.runs.append((command, input, timeout))
+        if command == tuple(exec_argv(RENDERED, GENERATOR.service_name, "cat", "/proc/1/cmdline")):
+            if self.cmdline_error is not None:
+                raise self.cmdline_error
+            loaded = models.load_models_lock(MODELS_PATH, host=self)
+            assert loaded.lock is not None
+            profile = loaded.lock.profile(loaded.lock.reference)
+            assert profile is not None
+            pin = profile.model(GENERATOR.role)
+            assert pin is not None
+            process_argv = ["vllm", "serve", pin.repo]
+            for flag, value in pin.serve.flags.items():
+                if flag == "max-num-seqs":
+                    if self.cmdline_absent_flag:
+                        continue
+                    if self.running_cap is not None:
+                        value = self.running_cap
+                    if self.cmdline_equals:
+                        process_argv.append(f"--{flag}={value}")
+                        continue
+                if value is True:
+                    process_argv.append(f"--{flag}")
+                elif value is not False:
+                    process_argv.extend((f"--{flag}", str(value)))
+            return completed(
+                command, returncode=self.cmdline_returncode,
+                stdout="\0".join(process_argv) + "\0",
+                stderr="fixture argv read diagnostic",
+            )
         if self.exec_error is not None and "exec" in command:
             raise self.exec_error
         if tuple(command[-4:]) == ("ps", "--all", "--format", "json"):
@@ -885,6 +924,7 @@ class CommandTests(unittest.TestCase):
             [line.split(":", 1)[0] for line in output.splitlines()],
             [
                 "preconditions",
+                "sequence-cap",
                 "needle-32k",
                 "needle-128k",
                 "needle-256k",
@@ -971,6 +1011,136 @@ class CommandTests(unittest.TestCase):
         }
         self.assertEqual(len(frontend_checks), 3)
         self.assertTrue(all(isinstance(value, Mapping) for value in frontend_checks.values()))
+
+    def test_sequence_cap_row_and_audit_match_the_fixture_lock(self) -> None:
+        document = yaml.safe_load(models_text())
+        profile_document = document["profiles"][document["reference"]]
+        profile_document["client_reserve_seqs"] = (
+            profile_document["models"][GENERATOR.role]["serve"]["flags"]["max-num-seqs"]
+            - engine.CONCURRENT_SESSIONS_CEILING
+        )
+        for equals in (False, True):
+            with self.subTest(equals=equals):
+                host = self.make_host(files={MODELS_PATH: yaml.safe_dump(document)}, cmdline_equals=equals)
+                loaded = models.load_models_lock(MODELS_PATH, host=host)
+                self.assertTrue(loaded.ok, models.render_errors(loaded.errors))
+                assert loaded.lock is not None
+                profile = loaded.lock.profile(loaded.lock.reference)
+                assert profile is not None
+                pin = profile.model(GENERATOR.role)
+                assert pin is not None
+                cap = pin.serve.flags["max-num-seqs"]
+                observed: list[engine.StageResult] = []
+                code, output, backend = self.run_command(host, observe=observed)
+                self.assertEqual(code, 0, output)
+                self.assertEqual([row.name for row in observed[:3]], ["preconditions", "sequence-cap", "needle-32k"])
+                row = observed[1]
+                self.assertTrue(row.ok)
+                self.assertEqual(row.fix, "")
+                self.assertEqual(
+                    row.detail,
+                    f"lock max-num-seqs {cap}; running max-num-seqs {cap}; "
+                    f"widest batch {engine.CONCURRENT_SESSIONS_CEILING}; client reserve {profile.client_reserve_seqs}",
+                )
+                figures = self.kept_checks(backend)["sequence-cap"]
+                self.assertEqual(figures, {
+                    "ok": True,
+                    "lock_max_num_seqs": cap,
+                    "running_max_num_seqs": cap,
+                    "widest_batch": engine.CONCURRENT_SESSIONS_CEILING,
+                    "client_reserve_seqs": profile.client_reserve_seqs,
+                })
+                self.assertTrue(all(type(value) is int for key, value in figures.items() if key != "ok"))
+                read_argv = tuple(exec_argv(RENDERED, GENERATOR.service_name, "cat", "/proc/1/cmdline"))
+                reads = [entry for entry in host.runs if entry[0] == read_argv]
+                self.assertEqual(reads, [(read_argv, None, engine.SEQUENCE_CAP_TIMEOUT_SECONDS + engine.RUN_TIMEOUT_MARGIN_SECONDS)])
+                for forbidden in (SECRET_VALUE, GENERATOR.secret_name, "/run/secrets/"):
+                    self.assertNotIn(forbidden, " ".join(read_argv))
+                for forbidden in (pin.repo, "--max-num-seqs", "\0", "fixture argv read diagnostic", SECRET_VALUE):
+                    self.assertNotIn(forbidden, output)
+                    self.assertNotIn(forbidden, repr(backend.rows[0].detail))
+
+    def test_sequence_cap_failures_leave_later_rows_and_audit_running(self) -> None:
+        loaded = models.load_models_lock(MODELS_PATH, host=self.make_host())
+        assert loaded.lock is not None
+        profile = loaded.lock.profile(loaded.lock.reference)
+        assert profile is not None
+        pin = profile.model(GENERATOR.role)
+        assert pin is not None
+        cap = pin.serve.flags["max-num-seqs"]
+        assert isinstance(cap, int)
+        apply_fix = f"Run {report.command('apply')}, then retry."
+        models_fix = f"Edit models.lock, then re-run {report.command('engine verify')}."
+        cases: list[tuple[str, dict[str, Any], int | None, int | None, str, str]] = [
+            ("absent running flag", {"cmdline_absent_flag": True}, cap, None,
+             f"running engine has no max-num-seqs on its argv; the lock names {cap}", apply_fix),
+            ("different running cap", {"running_cap": cap + 1}, cap, cap + 1,
+             f"running max-num-seqs {cap + 1} differs from the lock's {cap}", apply_fix),
+            ("non-zero exit", {"cmdline_returncode": 7}, cap, None,
+             f"{GENERATOR.words} argv read failed: non-zero exit 7", apply_fix),
+            ("timeout", {"cmdline_error": subprocess.TimeoutExpired(["fixture-process"], 1, output="fixture private argv")}, cap, None,
+             f"{GENERATOR.words} argv read failed: TimeoutExpired", apply_fix),
+            ("unavailable", {"cmdline_error": OSError("fixture private argv")}, cap, None,
+             f"{GENERATOR.words} argv read failed: OSError", apply_fix),
+        ]
+        for unusable in (None, 0, True, "not-a-cap", 1.5):
+            document = yaml.safe_load(models_text())
+            flags = document["profiles"][document["reference"]]["models"][GENERATOR.role]["serve"]["flags"]
+            if unusable is None:
+                del flags["max-num-seqs"]
+            else:
+                flags["max-num-seqs"] = unusable
+            cases.append((
+                f"lock cap {unusable!r}", {"files": {MODELS_PATH: yaml.safe_dump(document)}}, None, None,
+                "models.lock generator pin has no usable max-num-seqs flag", models_fix,
+            ))
+        for name, options, lock_cap, running_cap, detail, fix in cases:
+            with self.subTest(name=name):
+                host = self.make_host(**options)
+                observed: list[engine.StageResult] = []
+                code, output, backend = self.run_command(host, observe=observed)
+                self.assertEqual(code, 1, output)
+                self.assertEqual([row.name for row in observed[:3]], ["preconditions", "sequence-cap", "needle-32k"])
+                row = observed[1]
+                self.assertFalse(row.ok)
+                self.assertEqual(row.detail, detail)
+                self.assertEqual(row.fix, fix)
+                self.assertIn(f"sequence-cap: refuse — {detail} Fix: {fix}", output)
+                self.assertTrue(all(row.ok for row in observed if row.name != "sequence-cap"))
+                checks = self.kept_checks(backend)
+                self.assertTrue(all(check["ok"] for name, check in checks.items() if name != "sequence-cap"))
+                self.assertEqual(backend.rows[0].detail["outcome"], "failed")
+                figures = checks["sequence-cap"]
+                self.assertEqual(figures, {
+                    "ok": False,
+                    "lock_max_num_seqs": lock_cap,
+                    "running_max_num_seqs": running_cap,
+                    "widest_batch": engine.CONCURRENT_SESSIONS_CEILING,
+                    "client_reserve_seqs": profile.client_reserve_seqs,
+                })
+                self.assertTrue(all(value is None or type(value) is int for key, value in figures.items() if key != "ok"))
+                for forbidden in (pin.repo, "fixture private argv", "fixture argv read diagnostic", SECRET_VALUE):
+                    self.assertNotIn(forbidden, output)
+                    self.assertNotIn(forbidden, repr(backend.rows[0].detail))
+
+    def test_sequence_cap_argv_reader_forms_and_last_occurrence(self) -> None:
+        first, last = 11, 23
+        cases = (
+            (f"fixture-engine\0--max-num-seqs\0{first}", first),
+            (f"fixture-engine\0--max-num-seqs={first}", first),
+            (f"fixture-engine\0--max-num-seqs\0{first}\0--max-num-seqs={last}\0", last),
+            (f"fixture-engine\0--max-num-seqs={first}\0--max-num-seqs\0{last}\0", last),
+            ("fixture-engine\0serve\0", None),
+            ("fixture-engine\0--max-num-seqs\0invalid\0", None),
+            ("fixture-engine\0--max-num-seqs=invalid\0", None),
+            (f"fixture-engine\0--max-num-seqs={first}\0--max-num-seqs=invalid\0", None),
+            ("fixture-engine\0--max-num-seqs", None),
+            ("fixture-engine\0--max-num-seqs\0", None),
+            (f"fixture-engine\0--max-num-seqs\0{first}\0", first),
+        )
+        for cmdline, expected in cases:
+            with self.subTest(cmdline=cmdline):
+                self.assertEqual(engine._max_num_seqs_from_cmdline(cmdline), expected)
 
     def test_embed_vectors_request_and_figures_follow_the_fixture_lock(self) -> None:
         host = self.make_host(files={MODELS_PATH: models_text(embed_width=9)})
@@ -1898,7 +2068,7 @@ class CommandTests(unittest.TestCase):
                 self.assertIn("smoke: ok", output)
                 checks = backend.rows[0].detail["checks"]
                 assert isinstance(checks, Mapping)
-                self.assertEqual(list(checks)[4], "smoke")
+                self.assertEqual(list(checks)[5], "smoke")
 
     def test_tokenize_failure_fails_all_needles_but_runs_smoke(self) -> None:
         host = self.make_host(tokenize_failure=True)
@@ -1917,7 +2087,7 @@ class CommandTests(unittest.TestCase):
         ]
         self.assertEqual(
             list(checks),
-            ["needle-32k", "needle-128k", "needle-256k", "structured", "smoke", *expected_frontend, "embed-vectors", "embed-throughput"],
+            ["sequence-cap", "needle-32k", "needle-128k", "needle-256k", "structured", "smoke", *expected_frontend, "embed-vectors", "embed-throughput"],
         )
 
     def test_needle_rows_and_audit_never_keep_sample_text(self) -> None:

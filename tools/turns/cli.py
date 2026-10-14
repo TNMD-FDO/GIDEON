@@ -22,6 +22,7 @@ from gideon.evaluation.turns.run import (
     run,
 )
 from gideon.host import backuplock, models, nogpu, owui, site
+from gideon.host.engine import CONCURRENT_SESSIONS_CEILING
 from gideon.host.render.ci import CI_STACK, PRODUCTION_STACK, STACKS
 from gideon.host.render.owui import GENERAL_MODEL_ID
 from gideon.host.report import Problem, StageResult, print_stage
@@ -44,6 +45,9 @@ _BROWSER_STREAM_FIX: Final[str] = "Browser mode captures the live screen; drop -
 _BROWSER_CONCURRENT_FIX: Final[str] = (
     "Run the API mode with --concurrent, and one --browser case with --beside for the "
     "screen under load, then retry."
+)
+_CONCURRENT_FIX: Final[str] = (
+    f"Run with --concurrent {CONCURRENT_SESSIONS_CEILING} or below, then retry."
 )
 _BROWSER_SEARCH_FIX: Final[str] = (
     "Run the API mode over this file, or remove its search cases for a browser run, "
@@ -300,6 +304,16 @@ def main(
                 False,
                 "--concurrent is not available with --browser",
                 _BROWSER_CONCURRENT_FIX,
+            )
+        )
+        return 1
+    if options.concurrent > CONCURRENT_SESSIONS_CEILING:
+        print_stage(
+            StageResult(
+                "preconditions",
+                False,
+                f"--concurrent above {CONCURRENT_SESSIONS_CEILING} exceeds the frontend's sign-in window",
+                _CONCURRENT_FIX,
             )
         )
         return 1

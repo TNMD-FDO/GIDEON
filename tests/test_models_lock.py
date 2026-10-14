@@ -10,6 +10,7 @@ from dataclasses import FrozenInstanceError, fields, is_dataclass
 from fractions import Fraction
 from pathlib import Path
 
+from gideon.host.engine import CONCURRENT_SESSIONS_CEILING
 from gideon.host.images import DIGEST
 from gideon.host.models import (
     EMBEDDING_SPACE_ID,
@@ -218,6 +219,26 @@ def load_text(text: str) -> ModelsLockLoadResult:
 
 
 class CommittedLock(unittest.TestCase):
+    def test_client_reserve_and_widest_batch_fit_each_generator_cap(self) -> None:
+        result = load_models_lock(LOCK)
+        self.assertTrue(result.ok, render_errors(result.errors))
+        assert result.lock is not None and result.document is not None
+        profiles_document = result.document["profiles"]
+        assert isinstance(profiles_document, Mapping)
+        for profile in result.lock.profiles:
+            with self.subTest(profile=profile.name):
+                profile_document = profiles_document[profile.name]
+                assert isinstance(profile_document, Mapping)
+                self.assertIn("client_reserve_seqs", profile_document)
+                self.assertEqual(profile.client_reserve_seqs, profile_document["client_reserve_seqs"])
+                generator = profile.model("generator")
+                self.assertIsNotNone(generator)
+                assert generator is not None
+                cap = generator.serve.flags["max-num-seqs"]
+                self.assertIs(type(cap), int)
+                assert isinstance(cap, int)
+                self.assertLessEqual(CONCURRENT_SESSIONS_CEILING + profile.client_reserve_seqs, cap)
+
     def test_committed_reserves_and_model_budgets_fit_each_card(self) -> None:
         result = load_models_lock(LOCK)
         self.assertTrue(result.ok, render_errors(result.errors))
@@ -537,6 +558,45 @@ class Refusals(unittest.TestCase):
         self.assertEqual(profile.cotenant_reserve, (CotenantReserve(0, 3), CotenantReserve(1, 5)))
         self.assertEqual(profile.cotenant_reserve_gb(1), 5)
         self.assertEqual(profile.cotenant_reserve_gb(2), 0)
+
+    def test_client_reserve_absent_and_zero_reserve_nothing(self) -> None:
+        for text in (VALID, VALID.replace("    models:\n", "    client_reserve_seqs: 0\n    models:\n")):
+            with self.subTest(text=text):
+                result = load_text(text)
+                self.assertTrue(result.ok, render_errors(result.errors))
+                assert result.lock is not None
+                self.assertEqual(result.lock.profiles[0].client_reserve_seqs, 0)
+
+    def test_client_reserve_refusals_collect_with_another_error(self) -> None:
+        fixture = load_text(VALID)
+        self.assertTrue(fixture.ok, render_errors(fixture.errors))
+        assert fixture.lock is not None
+        profile = fixture.lock.profiles[0]
+        generator = profile.model("generator")
+        assert generator is not None
+        cap = generator.serve.flags["max-num-seqs"]
+        assert isinstance(cap, int)
+        flag_line = f"            max-num-seqs: {cap}\n"
+        path = f"profiles.{profile.name}.client_reserve_seqs"
+        cases = (
+            ("string", VALID, "one", "non-negative integer"),
+            ("boolean", VALID, "true", "non-negative integer"),
+            ("negative", VALID, "-1", "non-negative integer"),
+            ("above cap", VALID, str(cap + 1), f"at or below models.generator.serve.flags.max-num-seqs ({cap})"),
+            ("absent cap", VALID.replace(flag_line, ""), "1", "requires a whole-number models.generator.serve.flags.max-num-seqs"),
+            ("zero cap", VALID.replace(flag_line, "            max-num-seqs: 0\n"), "1", "requires a whole-number models.generator.serve.flags.max-num-seqs"),
+        )
+        for name, text, reserve, fragment in cases:
+            with self.subTest(case=name):
+                text = text.replace("    models:\n", f"    client_reserve_seqs: {reserve}\n    models:\n")
+                text = text.replace(f"reference: {fixture.lock.reference}\n", "")
+                self.assert_refused(text, fragment, key_path=path)
+                result = load_text(text)
+                self.assertEqual({error.key_path for error in result.errors}, {path, "reference"})
+                reserve_error = next(error for error in result.errors if error.key_path == path)
+                self.assertIn(path, reserve_error.problem)
+                self.assertIn(fragment, reserve_error.problem)
+                self.assertTrue(all("docs/runbooks/release-files.md §4" in error.fix for error in result.errors))
 
     def test_cotenant_reserve_shape_refusals(self) -> None:
         path = "profiles.2x96v-256d.cotenant_reserve_gb"

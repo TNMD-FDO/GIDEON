@@ -119,6 +119,19 @@ profiles:
     cotenant_reserve_gb:
       0: 0
       1: 24
+    # The client reserve is the share of the generator's sequence cap
+    # (`max-num-seqs` below) GIDEON leaves for whatever client an office
+    # connects to the engine. It belongs to the profile, never to a named
+    # application. GIDEON's widest batch is the turn harness's --concurrent
+    # ceiling, gideon/host/engine.py's CONCURRENT_SESSIONS_CEILING; the nightly
+    # and a decision run each have one request in flight, below that ceiling.
+    # The starting value is the cap less that ceiling, an E46 starting value
+    # with the cap it is cut from, read against the eval record's
+    # engine-condition columns when they land. A test holds the ceiling plus
+    # this reserve within the cap. An absent key reserves nothing. Nothing
+    # enforces the reserve on a client: the scheduler and counters stand
+    # until a front of the engine exists. The pin watch patches nothing here.
+    client_reserve_seqs: 81
     # The embedding space: the one vector space every stored chunk and every
     # query is embedded into. Its id names the model, the dimension, and the
     # precision together, and is the third part of a generation's name and
