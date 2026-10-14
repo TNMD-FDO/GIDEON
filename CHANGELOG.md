@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.161](docs/release-notes/v0.3.161.md) — 2026-10-14 — the known-overruled list
 - [v0.3.160](docs/release-notes/v0.3.160.md) — 2026-10-13 — index build embeds into Qdrant
 - [v0.3.159](docs/release-notes/v0.3.159.md) — 2026-10-13 — the engine's client reserve
 - [v0.3.158](docs/release-notes/v0.3.158.md) — 2026-10-13 — a general-smoke decline is re-sent

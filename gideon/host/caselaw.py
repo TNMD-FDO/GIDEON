@@ -620,7 +620,9 @@ def read_caselaw(
     return CaselawRead(row, False, failure, reason)
 
 
-def _counts_map(value: object, allowed: frozenset[str]) -> dict[str, int] | None:
+def counts_map(value: object, allowed: frozenset[str]) -> dict[str, int] | None:
+    """Return a by-key count map whose keys are allowed and values non-negative."""
+
     if not isinstance(value, dict) or any(
         not isinstance(key, str) or key not in allowed
         or type(count) is not int or count < 0
@@ -635,12 +637,12 @@ def _counts_from_json(value: object) -> CourtCounts | None:
         "opinions", "by_status", "by_text_source", "by_precedential", "by_failure_reason",
     } or type(value["opinions"]) is not int or value["opinions"] < 0:
         return None
-    status = _counts_map(value["by_status"], frozenset({
+    status = counts_map(value["by_status"], frozenset({
         "processing", "ready", "failed", "withdrawn",
     }))
-    sources = _counts_map(value["by_text_source"], frozenset(TEXT_SOURCES))
-    precedential = _counts_map(value["by_precedential"], frozenset(PRECEDENTIAL_VALUES))
-    reasons = _counts_map(value["by_failure_reason"], DOCUMENT_FAILURE_REASONS)
+    sources = counts_map(value["by_text_source"], frozenset(TEXT_SOURCES))
+    precedential = counts_map(value["by_precedential"], frozenset(PRECEDENTIAL_VALUES))
+    reasons = counts_map(value["by_failure_reason"], DOCUMENT_FAILURE_REASONS)
     if any(item is None for item in (status, sources, precedential, reasons)):
         return None
     assert status is not None and sources is not None and precedential is not None and reasons is not None
@@ -738,8 +740,8 @@ def _section_counts_from_json(value: object) -> SectionCounts | None:
             or sectioned < 0 or sectioned > ready):
         return None
     allowed = frozenset(SECTION_TYPES)
-    section_totals = _counts_map(value["sections_by_type"], allowed)
-    char_totals = _counts_map(value["chars_by_type"], allowed)
+    section_totals = counts_map(value["sections_by_type"], allowed)
+    char_totals = counts_map(value["chars_by_type"], allowed)
     if section_totals is None or char_totals is None:
         return None
     return SectionCounts(ready, sectioned, section_totals, char_totals)
@@ -823,8 +825,8 @@ def _citation_counts_from_json(value: object) -> CitationCounts | None:
         or cited > ready or case_resolved > case_rows
     ):
         return None
-    by_type = _counts_map(value["by_type"], frozenset(CITE_TYPES))
-    by_form = _counts_map(value["by_form"], frozenset(CITE_FORMS))
+    by_type = counts_map(value["by_type"], frozenset(CITE_TYPES))
+    by_form = counts_map(value["by_form"], frozenset(CITE_FORMS))
     if by_type is None or by_form is None:
         return None
     return CitationCounts(ready, cited, edges, by_type, by_form, case_rows, case_resolved)
@@ -860,12 +862,12 @@ def _treatment_counts_from_json(value: object) -> TreatmentCounts | None:
         or treated > ready
     ):
         return None
-    by_signal = _counts_map(value["by_signal"], frozenset(TREATMENT_SIGNALS))
-    by_outcome = _counts_map(
+    by_signal = counts_map(value["by_signal"], frozenset(TREATMENT_SIGNALS))
+    by_outcome = counts_map(
         value["by_outcome"], frozenset((*TREATMENT_STATES, *NO_STATE_REASONS)),
     )
-    by_qualifier = _counts_map(value["by_qualifier"], frozenset(QUALIFIERS))
-    by_effective_section = _counts_map(
+    by_qualifier = counts_map(value["by_qualifier"], frozenset(QUALIFIERS))
+    by_effective_section = counts_map(
         value["by_effective_section"], frozenset(SECTION_TYPES),
     )
     if any(item is None for item in (
@@ -912,7 +914,7 @@ def _chunk_counts_from_json(value: object) -> ChunkCounts | None:
         ready, chunked, chunks, over, under,
     )) or chunked > ready or chunked > chunks or over + under > chunks:
         return None
-    by_type = _counts_map(value["by_section_type"], frozenset(SECTION_TYPES))
+    by_type = counts_map(value["by_section_type"], frozenset(SECTION_TYPES))
     if by_type is None or sum(by_type.values()) != chunks:
         return None
     minimum, median = value["token_minimum"], value["token_median"]

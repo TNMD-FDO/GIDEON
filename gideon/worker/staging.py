@@ -220,8 +220,11 @@ def input_records(
     return result
 
 
-def input_record(snapshot_dir: Path, table: str, item: dict[str, str]) -> dict[str, str | int]:
-    """Read one whole kept fetch record and compare its pin and file size."""
+def input_record(
+    snapshot_dir: Path, table: str, item: dict[str, str],
+    *, forms: tuple[str, ...] = (fetch.KEPT_FORM,),
+) -> dict[str, str | int]:
+    """Read one whole fetch record and compare its form, pin, and file size."""
 
     if not valid_input(item):
         raise StageFailure("invalid", table=table)
@@ -237,7 +240,7 @@ def input_record(snapshot_dir: Path, table: str, item: dict[str, str]) -> dict[s
     # A whole record's size is validated as an int equal to its offset.
     size = record.durable
     if (
-        record.form != fetch.KEPT_FORM or record.sha256 != item["sha256"]
+        record.form not in forms or record.sha256 != item["sha256"]
         or path.stat().st_size != size
     ):
         raise StageFailure("input-mismatch", table=table)

@@ -16,6 +16,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
+from gideon.host import fetch as host_fetch
+from gideon.host.sysio import RealHost
 from gideon.worker import fetch, staging
 
 
@@ -328,6 +330,39 @@ class WorkerStaging(unittest.TestCase):
             staging.input_record(self.dump, table, {**item, "sha256": "0" * 64})
         self.assertEqual((raised.exception.reason, raised.exception.table),
                          ("input-mismatch", table))
+
+    def test_one_input_record_admits_seeded_only_when_requested(self) -> None:
+        body = b"Fictional saved capture."
+        path = self.dump / "fictional-capture.html"
+        path.write_bytes(body)
+        item = {"path": path.name, "sha256": hashlib.sha256(body).hexdigest()}
+        host_fetch.write_seed_record(
+            RealHost(), self.snapshots_root, f"{self.snapshot}/{path.name}",
+            url="https://archive.example.test/fictional-capture/", size=len(body),
+            sha256=item["sha256"], fetched_at=self.instant.isoformat(),
+        )
+        with self.assertRaises(staging.StageFailure) as raised:
+            staging.input_record(self.dump, "fictional-capture", item)
+        self.assertEqual(raised.exception.reason, "input-mismatch")
+        self.assertEqual(staging.input_record(
+            self.dump, "fictional-capture", item, forms=(fetch.KEPT_FORM, fetch.SEEDED_FORM),
+        ), {**item, "size": len(body)})
+        with self.assertRaises(staging.StageFailure) as raised:
+            staging.input_record(
+                self.dump, "fictional-capture", {**item, "sha256": "0" * 64},
+                forms=(fetch.KEPT_FORM, fetch.SEEDED_FORM),
+            )
+        self.assertEqual(raised.exception.reason, "input-mismatch")
+        record_path = path.with_name(path.name + fetch.RECORD_SUFFIX)
+        value = json.loads(record_path.read_text())
+        value.update(form=fetch.FRESH_FORM, job=3)
+        record_path.chmod(0o600)
+        record_path.write_text(json.dumps(value))
+        with self.assertRaises(staging.StageFailure) as raised:
+            staging.input_record(
+                self.dump, "fictional-capture", item, forms=(fetch.KEPT_FORM, fetch.SEEDED_FORM),
+            )
+        self.assertEqual(raised.exception.reason, "input-mismatch")
 
     def test_outputs_accept_per_court_paths(self) -> None:
         paths = [self.work_root / f"{court}.csv" for court in self.courts]

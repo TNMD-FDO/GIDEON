@@ -46,6 +46,18 @@ AGREEMENT_FAILURE_REASONS: Final = frozenset({
     "invalid", "missing-stage", "stage-mismatch", "missing-input",
     "input-mismatch", "malformed", "database", "local", "busy",
 })
+OVERRULED_TASK: Final[str] = "gideon.worker.tasks.overruled"
+OVERRULED_QUEUE: Final[str] = "caselaw"
+OVERRULED_SOURCE: Final[str] = "treatment"
+OVERRULED_COURT: Final[str] = "scotus"
+OVERRULED_FAILURE_NAME: Final[str] = "overruled-failed.json"
+OVERRULED_LOCK_NAME: Final[str] = "overruled.lock"
+OVERRULED_FAILURE_REASONS: Final = frozenset({
+    "invalid", "missing-input", "input-mismatch", "missing-stage",
+    "stage-mismatch", "malformed", "database", "local", "busy",
+})
+OVERRULED_RESOLUTIONS: Final = ("cite", "name", "docket", "ambiguous", "absent")
+OVERRULED_WORK_DIRECTORY: Final[str] = "treatment"
 LEXICAL_TASK: Final[str] = "gideon.worker.tasks.lexical"
 LEXICAL_QUEUE: Final[str] = "index"
 LEXICAL_FAILURE_REASONS: Final = frozenset({

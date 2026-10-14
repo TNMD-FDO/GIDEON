@@ -126,7 +126,9 @@ def snapshot_problem(
     return None
 
 
-def _source_problem(source: object, command_path: str) -> Problem | None:
+def source_problem(source: object, command_path: str) -> Problem | None:
+    """Refuse a source name outside the one-segment grammar."""
+
     if not isinstance(source, str) or re.fullmatch(SEGMENT_PATTERN, source) is None:
         return Problem(
             "stage source is invalid",
@@ -252,7 +254,7 @@ def _record_from_json(value: dict[str, object], label: str, source: str) -> Stag
     if (
         not _is_int(value["schema"]) or value["schema"] != 1
         or value["label"] != label or label_problem(value["label"], COMMAND_PATH) is not None
-        or value["source"] != source or _source_problem(value["source"], COMMAND_PATH) is not None
+        or value["source"] != source or source_problem(value["source"], COMMAND_PATH) is not None
         or snapshot_problem(snapshot, COMMAND_PATH) is not None
         or not isinstance(snapshot, str)
         or source != snapshot[:-DATE_SUFFIX_LENGTH]
@@ -281,7 +283,7 @@ def read_record(
 ) -> StageRecord | None | Problem:
     """Read a whole stage record through the host seam, if one is present."""
 
-    for problem in (label_problem(label, command_path), _source_problem(source, command_path)):
+    for problem in (label_problem(label, command_path), source_problem(source, command_path)):
         if problem is not None:
             return problem
     path = work_directory(label, source, work_root=work_root) / STAGE_RECORD_NAME

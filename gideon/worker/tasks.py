@@ -15,6 +15,7 @@ import gideon.worker.dense
 from . import agreement as citation_agreement
 from . import caselaw as document_ingest
 from . import lexical as lexical_build
+from . import overruled as listed_overrulings
 from . import staging
 from .fetch import (
     FETCH_QUEUE,
@@ -141,6 +142,27 @@ def agreement(
         raise
 
 
+def overruled(
+    context: procrastinate.JobContext, label: str, snapshot: str,
+    caselaw_snapshot: str, court: str, input: dict[str, str],
+) -> None:
+    """Resolve the captured list outside the worker's event loop."""
+
+    job_id = context.job.id
+    if job_id is None:
+        raise listed_overrulings.OverruledFailure("invalid")
+    try:
+        listed_overrulings.overruled(
+            SNAPSHOTS_ROOT, staging.WORK_ROOT, label, snapshot, caselaw_snapshot,
+            court, input, job_id, listed_overrulings.PsycopgRecord(),
+        )
+    except listed_overrulings.OverruledFailure as failure:
+        listed_overrulings.write_job_failure(
+            staging.WORK_ROOT, label, snapshot, court, job_id, failure,
+        )
+        raise
+
+
 def lexical(
     context: procrastinate.JobContext, name: str, collection: str, label: str,
     snapshot: str, courts: Mapping[str, Mapping[str, object]], pipeline: str,
@@ -233,6 +255,12 @@ def register_tasks(app: procrastinate.App) -> None:
         pass_context=True,
         retry=False,
     )(agreement)
+    app.task(
+        name=listed_overrulings.OVERRULED_TASK,
+        queue=listed_overrulings.OVERRULED_QUEUE,
+        pass_context=True,
+        retry=False,
+    )(overruled)
     app.task(
         name=lexical_build.LEXICAL_TASK,
         queue=lexical_build.LEXICAL_QUEUE,

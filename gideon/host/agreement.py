@@ -83,7 +83,9 @@ def _logs_fix(rendered_dir: PathLike, command_path: str) -> str:
     )
 
 
-def _input_problem(value: object, command_path: str) -> Problem | None:
+def input_problem(value: object, command_path: str) -> Problem | None:
+    """Refuse one pinned input outside the one-segment path and digest grammars."""
+
     if isinstance(value, dict) and set(value) == {"path", "sha256"}:
         path, digest = value["path"], value["sha256"]
         if (
@@ -112,7 +114,7 @@ def defer_agreement(
         staging.label_problem(label, command_path, subject="agreement"),
         staging.snapshot_problem(snapshot, command_path, subject="agreement"),
         caselaw.court_problem(court, command_path, subject="agreement"),
-        _input_problem(input, command_path),
+        input_problem(input, command_path),
     ):
         if problem is not None:
             return problem
@@ -123,7 +125,9 @@ def defer_agreement(
     )
 
 
-def _aware_time(value: object) -> bool:
+def aware_time(value: object) -> bool:
+    """Answer whether a value is an ISO timestamp carrying its offset."""
+
     if not isinstance(value, str):
         return False
     try:
@@ -146,7 +150,7 @@ def _record_from_json(
         or any(type(value[name]) is not int or value[name] < 0 for name in _COUNTS)
         or type(value["seconds"]) not in (int, float)
         or not math.isfinite(value["seconds"]) or value["seconds"] < 0
-        or not _aware_time(value["computed_at"])
+        or not aware_time(value["computed_at"])
     ):
         return None
     if (
@@ -204,7 +208,7 @@ def _failure_valid(value: object, job_id: int, court: str) -> bool:
         and (table is None or isinstance(table, str) and table in (*STAGE_TABLES, AGREEMENT_TABLE))
         and (error is None or isinstance(error, str)
              and staging.ERROR_PATTERN.fullmatch(error) is not None)
-        and _aware_time(value["at"])
+        and aware_time(value["at"])
     )
 
 

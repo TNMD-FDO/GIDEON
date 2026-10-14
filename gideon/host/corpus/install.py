@@ -1,4 +1,4 @@
-"""Fetch, verify, record, stage, ingest, measure, and retain a corpus lockfile."""
+"""Fetch, verify, record, stage, ingest, resolve, measure, and retain a corpus lockfile."""
 
 import argparse
 import sys
@@ -8,7 +8,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
-from gideon.host import agreement, backuplock, caselaw, fetch, report, stack, staging
+from gideon.host import (
+    agreement,
+    backuplock,
+    caselaw,
+    fetch,
+    overruled,
+    report,
+    stack,
+    staging,
+)
 from gideon.host.corpus import artifacts, record, snapshots
 from gideon.host.corpus.lockfile import (
     LABEL,
@@ -23,6 +32,8 @@ from gideon.host.render.worker import (
     CITE_FORMS,
     CITE_TYPES,
     NO_STATE_REASONS,
+    OVERRULED_COURT,
+    OVERRULED_SOURCE,
     PATTERN_SET_ID,
     PIPELINE_CHUNK_SIZES,
     PRECEDENTIAL_VALUES,
@@ -285,6 +296,10 @@ def _run_install_stages(
     ingested = _ingest(host, rendered_dir, work_root, lockfile, court_map, sleep, monotonic)
     if ingested:
         return ingested
+    active_stage[0] = "overruled"
+    resolved = _overruled(host, rendered_dir, work_root, lockfile, sleep, monotonic)
+    if resolved:
+        return resolved
     active_stage[0] = "agreement"
     measured = _agreement(host, rendered_dir, work_root, lockfile, sleep, monotonic)
     if measured:
@@ -664,6 +679,102 @@ def _ingest(
     return 0
 
 
+def _overruled(
+    host: CorpusHost, rendered_dir: PathLike, work_root: PathLike,
+    lockfile: Lockfile, sleep: Callable[[float], None],
+    monotonic: Callable[[], float],
+) -> int:
+    """Replay the captured list job and report its recorded resolution counts."""
+
+    pin = lockfile.sources.get(OVERRULED_SOURCE)
+    if pin is None:
+        return 0
+    caselaw_pin = next(((name, item) for name, item in lockfile.sources.items() if item.courts is not None), None)
+    if caselaw_pin is None or OVERRULED_COURT not in (caselaw_pin[1].courts or ()):
+        return _refuse(
+            "overruled", "the known-overruled list is Supreme Court only and "
+            f"{OVERRULED_COURT} is not among the lockfile's courts",
+            f"Run {report.command(f'corpus cut --base {lockfile.label} --add-courts {OVERRULED_COURT}')}, "
+            f"then run {report.command(COMMAND_PATH)} with the new label.",
+        )
+    name, case_pin = caselaw_pin
+    caselaw_snapshot = f"{name}-{case_pin.snapshot_date}"
+    stage_record = staging.read_record(
+        host, lockfile.label, name, work_root=work_root, command_path=COMMAND_PATH,
+    )
+    if isinstance(stage_record, Problem):
+        return _refuse("overruled", f"{name}: {stage_record.problem}", stage_record.fix)
+    if stage_record is None:
+        return _refuse(
+            "overruled", f"{name}: stage record is missing",
+            _stage_removal_fix(lockfile.label, name, work_root),
+        )
+    if stage_record.courts != list(case_pin.courts or ()) or stage_record.snapshot != caselaw_snapshot:
+        return _refuse(
+            "overruled", f"{name}: stage record disagrees with the lockfile",
+            _stage_removal_fix(lockfile.label, name, work_root),
+        )
+    started = heartbeat_at = monotonic()
+    snapshot = f"{OVERRULED_SOURCE}-{pin.snapshot_date}"
+    entry = pin.entries[0]
+    job = overruled.defer_overruled(
+        host, rendered_dir, label=lockfile.label, snapshot=snapshot,
+        caselaw_snapshot=caselaw_snapshot, court=OVERRULED_COURT,
+        input={"path": entry.path, "sha256": entry.sha256}, command_path=COMMAND_PATH,
+    )
+    if isinstance(job, Problem):
+        return _refuse("overruled", f"{OVERRULED_SOURCE}: {job.problem}", job.fix)
+    while True:
+        outcome = overruled.read_overruled(
+            host, rendered_dir, job, label=lockfile.label, snapshot=snapshot,
+            work_root=work_root, command_path=COMMAND_PATH,
+        )
+        if isinstance(outcome, Problem):
+            return _refuse("overruled", f"{OVERRULED_SOURCE}: {outcome.problem}", outcome.fix)
+        if outcome.failure is not None:
+            return _refuse("overruled", f"{OVERRULED_SOURCE}: {outcome.failure.problem}", outcome.failure.fix)
+        if outcome.done:
+            break
+        sleep(1.0)
+        now = monotonic()
+        if now - heartbeat_at >= snapshots.HEARTBEAT_SECONDS:
+            report.print_stage(StageResult(
+                "overruled", True, f"{OVERRULED_SOURCE}: resolving, {round(now - started)} seconds", "",
+            ))
+            heartbeat_at = now
+    counts = overruled.read_overruled_counts(
+        host, rendered_dir, source=OVERRULED_SOURCE, snapshot_date=pin.snapshot_date,
+        caselaw_source=name, caselaw_snapshot_date=case_pin.snapshot_date,
+        court=OVERRULED_COURT, command_path=COMMAND_PATH,
+    )
+    if isinstance(counts, Problem):
+        return _refuse("overruled", f"{OVERRULED_SOURCE}: {counts.problem}", counts.fix)
+    if counts.rows == 0:
+        return _refuse(
+            "overruled", f"{OVERRULED_SOURCE}: job succeeded but the record holds zero rows",
+            _retry_fix(f"Run {stack.logs_fix(rendered_dir, WORKER_SERVICE_NAME)}."),
+        )
+    ruled, ruling = counts.overruled, counts.overruling
+    cite, named = ruled.get("cite", 0), ruled.get("name", 0)
+    ambiguous, absent = ruled.get("ambiguous", 0), ruled.get("absent", 0)
+    ruling_cite, docket = ruling.get("cite", 0), ruling.get("docket", 0)
+    unresolved = ruling.get("ambiguous", 0) + ruling.get("absent", 0)
+    report.print_stage(StageResult(
+        "overruled", True,
+        f"{OVERRULED_SOURCE}: {counts.list_rows} table rows, {counts.rows} listed decisions; "
+        f"overruled resolved {cite + named} (cite {cite}, name {named}), "
+        f"unresolved {ambiguous + absent} (ambiguous {ambiguous}, absent {absent}); "
+        f"overruling resolved {ruling_cite + docket} (cite {ruling_cite}, docket {docket}), "
+        f"unresolved {unresolved}", "",
+    ))
+    report.print_stage(StageResult(
+        "overruled", True,
+        f"{OVERRULED_SOURCE}: {counts.rows} rows over {counts.clusters} clusters, "
+        f"{round(monotonic() - started)} seconds", "",
+    ))
+    return 0
+
+
 def _agreement(
     host: CorpusHost, rendered_dir: PathLike, work_root: PathLike,
     lockfile: Lockfile, sleep: Callable[[float], None],
@@ -836,7 +947,7 @@ def run_corpus_install(
     monotonic: Callable[[], float] = time.monotonic,
     sources: Sequence[SourceDefinition] = SOURCES,
 ) -> int:
-    """Run preconditions, fetch, verify, record, stage, ingest, agreement, and retain."""
+    """Run preconditions, fetch, verify, record, stage, ingest, overruled, agreement, and retain."""
     io = host if host is not None else RealHost()
     root = Path(checkout) if checkout is not None else Path(__file__).parents[3]
     active_stage = ["preconditions"]
@@ -867,6 +978,11 @@ def run_corpus_install(
         if active_stage[0] == "ingest":
             return _refuse(
                 "ingest", "interrupted; the ingest continues in the worker",
+                f"Run {report.command(COMMAND_PATH)} again to rejoin it.",
+            )
+        if active_stage[0] == "overruled":
+            return _refuse(
+                "overruled", "interrupted; the overruled job continues in the worker",
                 f"Run {report.command(COMMAND_PATH)} again to rejoin it.",
             )
         if active_stage[0] == "agreement":

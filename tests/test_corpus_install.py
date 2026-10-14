@@ -94,6 +94,17 @@ class FakeHost(RealHost):
         self.agreement_figures: dict[str, dict[str, int]] = {}
         self.agreement_events: list[tuple[str, str]] = []
         self.interrupt_agreement_job = False
+        self.overruled_jobs: dict[int, dict[str, Any]] = {}
+        self.overruled_deferred: list[dict[str, Any]] = []
+        self.overruled_failure: str | None = None
+        self.overruled_counts: dict[str, Any] = {
+            "list_rows": 4, "rows": 6, "clusters": 3,
+            "overruled": {"cite": 2, "name": 2, "ambiguous": 1, "absent": 1},
+            "overruling": {"cite": 3, "docket": 1, "ambiguous": 1, "absent": 1},
+        }
+        self.overruled_events: list[str] = []
+        self.overruled_count_reads: list[dict[str, str]] = []
+        self.interrupt_overruled_job = False
         self.job_polls: dict[int, int] = {}
         self.next_job = 100
         self.unreadable_root = False
@@ -280,6 +291,18 @@ class FakeHost(RealHost):
                     self.agreement_deferred.append(args)
                     self.agreement_events.append(("defer", args["court"]))
                     self._write_agreement(job, args)
+                elif self._bound(input, "v_task") == worker_identity.OVERRULED_TASK:
+                    self.overruled_jobs[job] = args
+                    self.overruled_deferred.append(args)
+                    self.overruled_events.append("defer")
+                    directory = self.work / args["label"] / "treatment"
+                    directory.mkdir(exist_ok=True)
+                    if self.overruled_failure is not None:
+                        (directory / worker_identity.OVERRULED_FAILURE_NAME).write_text(json.dumps({
+                            "schema": 1, "job": job, "court": args["court"],
+                            "reason": self.overruled_failure, "table": None, "error": None,
+                            "at": NOW.isoformat(),
+                        }))
                 elif "snapshot" in args:
                     self.stage_jobs[job] = args
                     self.stage_deferred.append(args)
@@ -301,12 +324,16 @@ class FakeHost(RealHost):
                     raise KeyboardInterrupt
                 if self.interrupt_agreement_job and job in self.agreement_jobs:
                     raise KeyboardInterrupt
+                if self.interrupt_overruled_job and job in self.overruled_jobs:
+                    raise KeyboardInterrupt
                 assert (job in self.job_destinations or job in self.stage_jobs
-                        or job in self.caselaw_jobs or job in self.agreement_jobs)
+                        or job in self.caselaw_jobs or job in self.agreement_jobs or job in self.overruled_jobs)
                 if job in self.caselaw_jobs:
                     self.caselaw_events.append(("read", self.caselaw_jobs[job]["court"]))
                 if job in self.agreement_jobs:
                     self.agreement_events.append(("read", self.agreement_jobs[job]["court"]))
+                if job in self.overruled_jobs:
+                    self.overruled_events.append("read")
                 polls = self.job_polls[job]
                 self.job_polls[job] += 1
                 status = (
@@ -314,9 +341,18 @@ class FakeHost(RealHost):
                     "failed" if (job in self.stage_jobs and self.stage_failure is not None)
                     or (job in self.caselaw_jobs and self.caselaw_failure is not None)
                     or (job in self.agreement_jobs and self.agreement_failure is not None)
+                    or (job in self.overruled_jobs and self.overruled_failure is not None)
                     else "succeeded"
                 )
                 return subprocess.CompletedProcess(command, 0, f"{job}|{status}|1\n", "")
+            if "FROM public.known_overruled" in input:
+                self.overruled_events.append("counts")
+                self.overruled_count_reads.append({
+                    name: self._bound(input, f"v_{name}") for name in (
+                        "source", "snapshot_date", "caselaw_source", "caselaw_snapshot_date", "court",
+                    )
+                })
+                return subprocess.CompletedProcess(command, 0, json.dumps(self.overruled_counts) + "\n", "")
             if "SELECT d.doc_id, COALESCE(d.text_source, '') AS text_source, d.anchored_at" in input:
                 court = self._bound(input, "v_court")
                 if court in self.caselaw_anchor_counts:
@@ -705,12 +741,12 @@ class Install(unittest.TestCase):
     def _add_captured_source(self) -> tuple[SourceDefinition, Path, Path]:
         """Add one visibly fictitious saved page to the two install fixtures."""
         source = SourceDefinition(
-            "saved-example", "https://capture.example.invalid/table", False, (),
+            "treatment", "https://capture.example.invalid/table", False, (),
             lambda: (), lambda _: report.Problem("Fictitious captured source", "Use its saved page."),
-            captured_file="saved.html",
+            captured_file="decisions-overruled.html",
         )
         data = b"<!doctype html><title>Fictitious saved install page</title>\n"
-        entry = SidecarEntry("saved.html", hashlib.sha256(data).hexdigest(), len(data))
+        entry = SidecarEntry("decisions-overruled.html", hashlib.sha256(data).hexdigest(), len(data))
         sidecar = render_sidecar((entry,))
         pin = SourcePin(
             "2099-01-04", source.base_url, None,
@@ -787,12 +823,17 @@ class Install(unittest.TestCase):
         self.assertEqual(len(self.host.stage_deferred), 1)
         self.assertEqual(len(self.host.caselaw_deferred), len(self.source.first_courts))
         self.assertEqual(len(self.host.agreement_deferred), len(self.source.first_courts))
-        self.assertFalse((self.work / self.labels[0] / source.name).exists())
+        self.assertEqual(self.host.overruled_events, ["defer", "read", "read", "counts"])
+        self.assertEqual(len(self.host.overruled_deferred), 1)
+        self.assertFalse((self.work / self.labels[0] / source.name / worker_identity.STAGE_RECORD_NAME).exists())
+        self.assertIn("overruled: ok — treatment: 4 table rows, 6 listed decisions", out)
+        self.assertIn("overruled: ok — treatment: 6 rows over 3 clusters, 0 seconds", out)
         self.assertTrue(target.parent.is_dir())
         self.assertNotIn(target.parent, self.host.removed_dirs)
         self.assertIn(f"retain: ok — 2 kept ({self.labels[0]})", out)
 
     def test_install_keeps_an_equal_captured_snapshot_without_seed_writes(self) -> None:
+        self._enable_stage()
         source, companion, target = self._add_captured_source()
         self.assertEqual(self.run_install(sources=(self.source, source))[0], 0)
         record_path = target.with_name(target.name + worker_identity.RECORD_SUFFIX)
@@ -806,6 +847,9 @@ class Install(unittest.TestCase):
         self.assertEqual(self.host.seed_writes, [])
         self.assertEqual(self.host.chown_calls, [])
         self.assertEqual(self.host.deferred_urls, [])
+        self.assertEqual(len(self.host.overruled_deferred), 2)
+        self.assertEqual(self.host.overruled_deferred[0], self.host.overruled_deferred[1])
+        self.assertIn("overruled: ok — treatment: 6 rows over 3 clusters, 0 seconds", out)
 
     def test_unreadable_captured_copy_refuses_at_fetch(self) -> None:
         source, companion, target = self._add_captured_source()
@@ -870,6 +914,189 @@ class Install(unittest.TestCase):
         )
         self.assertEqual(self.host.record_rows[self.labels[0]]["state"], "installing")
         self.assertEqual(self.host.lock_releases, 1)
+
+    def test_overruled_rows_follow_ingest_and_bind_both_snapshots(self) -> None:
+        self._enable_stage()
+        self._seed_complete_stage()
+        source, companion, _ = self._add_captured_source()
+        code, out, err = self.run_install(sources=(self.source, source))
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(err, "")
+        self.assertLess(out.index("ingest: ok"), out.index("overruled: ok"))
+        self.assertLess(out.index("overruled: ok"), out.index("agreement: ok"))
+        self.assertLess(out.index("agreement: ok"), out.index("retain: ok"))
+        self.assertEqual([line for line in out.splitlines() if line.startswith("overruled:")], [
+            "overruled: ok — treatment: 4 table rows, 6 listed decisions; "
+            "overruled resolved 4 (cite 2, name 2), unresolved 2 (ambiguous 1, absent 1); "
+            "overruling resolved 4 (cite 3, docket 1), unresolved 2",
+            "overruled: ok — treatment: 6 rows over 3 clusters, 0 seconds",
+        ])
+        self.assertEqual(self.host.overruled_deferred, [{
+            "label": self.labels[0], "snapshot": "treatment-2099-01-04",
+            "caselaw_snapshot": "example-2099-01-02", "court": "scotus",
+            "input": {"path": "decisions-overruled.html", "sha256": hashlib.sha256(companion.read_bytes()).hexdigest()},
+        }])
+        self.assertEqual(self.host.overruled_count_reads, [{
+            "source": "treatment", "snapshot_date": "2099-01-04", "caselaw_source": "example",
+            "caselaw_snapshot_date": "2099-01-02", "court": "scotus",
+        }])
+        self.assertEqual(self.host.overruled_events, ["defer", "read", "read", "counts"])
+
+    def test_overruled_wait_uses_the_shared_heartbeat(self) -> None:
+        self._enable_stage()
+        self._seed_complete_stage()
+        source, _, _ = self._add_captured_source()
+        now = [0.0]
+        sleeps: list[float] = []
+
+        def sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            now[0] += snapshots.HEARTBEAT_SECONDS
+
+        code, out, err = self.run_install(sources=(self.source, source), sleep=sleep, monotonic=lambda: now[0])
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(sleeps, [1.0, 1.0, 1.0])
+        self.assertIn(f"overruled: ok — treatment: resolving, {snapshots.HEARTBEAT_SECONDS} seconds", out)
+        self.assertIn(f"overruled: ok — treatment: 6 rows over 3 clusters, {snapshots.HEARTBEAT_SECONDS} seconds", out)
+
+    def test_overruled_reports_all_unresolved_without_a_count_gate(self) -> None:
+        self._enable_stage()
+        source, _, _ = self._add_captured_source()
+        self.host.overruled_counts = {
+            "list_rows": 4, "rows": 7, "clusters": 0,
+            "overruled": {"absent": 7}, "overruling": {"ambiguous": 7},
+        }
+        code, out, err = self.run_install(sources=(self.source, source))
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("overruled resolved 0 (cite 0, name 0), unresolved 7 (ambiguous 0, absent 7)", out)
+        self.assertIn("overruling resolved 0 (cite 0, docket 0), unresolved 7", out)
+        self.assertIn("overruled: ok — treatment: 7 rows over 0 clusters, 0 seconds", out)
+        self.assertIn("retain: ok", out)
+
+    def test_overruled_refuses_without_scotus_and_names_the_derived_cut(self) -> None:
+        self._enable_stage()
+        source, _, _ = self._add_captured_source()
+        lock_path = self.checkout / "corpus/lockfiles" / f"{self.labels[0]}.yaml"
+        loaded = load_lockfile(lock_path, known_sources={self.source.name: self.source, source.name: source})
+        assert loaded.lockfile is not None
+        lockfile = loaded.lockfile
+        lock_path.write_text(render_lockfile(replace(
+            lockfile, sources={**lockfile.sources, "example": replace(lockfile.sources["example"], courts=("ca6",))},
+        )))
+        code, out, err = self.run_install(sources=(self.source, source))
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("the known-overruled list is Supreme Court only and scotus is not among the lockfile's courts", out)
+        self.assertIn(report.command(f"corpus cut --base {self.labels[0]} --add-courts scotus"), out)
+        self.assertIn(f"then run {report.command('corpus install')} with the new label", out)
+        self.assertEqual(self.host.overruled_deferred, [])
+        self.assertEqual(self.host.agreement_deferred, [])
+        self.assertNotIn("retain: ok", out)
+
+    def test_overruled_refuses_a_capture_without_any_case_law_courts(self) -> None:
+        source, _, _ = self._add_captured_source()
+        code, out, err = self.run_install(sources=(self.source, source))
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("overruled: refuse", out)
+        self.assertIn("--add-courts scotus", out)
+        self.assertEqual(self.host.overruled_deferred, [])
+
+    def test_overruled_reads_the_matching_stage_before_defer(self) -> None:
+        self._enable_stage()
+        self._seed_complete_stage()
+        source, _, _ = self._add_captured_source()
+        complete = staging.read_record(self.host, self.labels[0], "example", work_root=self.work)
+        assert isinstance(complete, staging.StageRecord)
+        for issue in (
+            None, replace(complete, courts=["scotus"]),
+            replace(complete, snapshot="example-2099-01-01"),
+            report.Problem("fictitious stage read failed", "Run the fictitious stage fix."),
+        ):
+            with self.subTest(issue=issue):
+                with patch.object(install.staging, "read_record", side_effect=[complete, complete, issue]):
+                    code, out, err = self.run_install(sources=(self.source, source))
+                self.assertEqual(code, 1, out + err)
+                self.assertIn("overruled: refuse", out)
+                self.assertEqual(self.host.overruled_deferred, [])
+                self.assertEqual(self.host.agreement_deferred, [])
+                if isinstance(issue, report.Problem):
+                    self.assertIn(issue.fix, out)
+                else:
+                    self.assertIn(f"Remove {self.work / self.labels[0] / 'example'}", out)
+
+    def test_overruled_defer_and_read_problems_preserve_their_fixes(self) -> None:
+        self._enable_stage()
+        self._seed_complete_stage()
+        source, _, _ = self._add_captured_source()
+        issue = report.Problem("fictitious list job failed", "Run the fictitious job fix.")
+        for operation in ("defer_overruled", "read_overruled"):
+            with self.subTest(operation=operation), patch.object(install.overruled, operation, return_value=issue):
+                code, out, err = self.run_install(sources=(self.source, source))
+            self.assertEqual(code, 1, out + err)
+            self.assertIn("overruled: refuse — treatment: fictitious list job failed", out)
+            self.assertIn(issue.fix, out)
+            self.assertEqual(self.host.overruled_count_reads, [])
+            self.assertEqual(self.host.agreement_deferred, [])
+
+    def test_failed_overruled_job_uses_its_fix_and_never_reads_counts(self) -> None:
+        self._enable_stage()
+        source, _, _ = self._add_captured_source()
+        self.host.overruled_failure = "database"
+        code, out, err = self.run_install(sources=(self.source, source))
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("overruled: refuse — treatment: overruled database failure", out)
+        self.assertIn(stack.logs_fix(RENDERED, worker_identity.WORKER_SERVICE_NAME), out)
+        self.assertIn(report.command("corpus install"), out)
+        self.assertEqual(self.host.overruled_count_reads, [])
+        self.assertEqual(self.host.agreement_deferred, [])
+
+    def test_overruled_counts_problem_is_read_only_after_job_success(self) -> None:
+        self._enable_stage()
+        source, _, _ = self._add_captured_source()
+        issue = report.Problem("fictitious counts read failed", "Run the fictitious counts fix.")
+
+        def counts_problem(*_args: object, **_kwargs: object) -> report.Problem:
+            self.assertEqual(self.host.overruled_events, ["defer", "read", "read"])
+            return issue
+
+        with patch.object(install.overruled, "read_overruled_counts", side_effect=counts_problem):
+            code, out, err = self.run_install(sources=(self.source, source))
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("overruled: refuse — treatment: fictitious counts read failed", out)
+        self.assertIn(issue.fix, out)
+        self.assertEqual(self.host.agreement_deferred, [])
+        self.assertNotIn("retain: ok", out)
+
+    def test_overruled_zero_rows_after_success_refuses_with_worker_logs(self) -> None:
+        self._enable_stage()
+        source, _, _ = self._add_captured_source()
+        self.host.overruled_counts = {"list_rows": 0, "rows": 0, "clusters": 0, "overruled": {}, "overruling": {}}
+        code, out, err = self.run_install(sources=(self.source, source))
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("job succeeded but the record holds zero rows", out)
+        self.assertIn(stack.logs_fix(RENDERED, worker_identity.WORKER_SERVICE_NAME), out)
+        self.assertIn(report.command("corpus install"), out)
+        self.assertEqual(self.host.overruled_events, ["defer", "read", "read", "counts"])
+        self.assertNotIn("agreement: ok", out)
+        self.assertNotIn("retain: ok", out)
+
+    def test_interrupt_during_overruled_rejoins_the_worker_job(self) -> None:
+        self._enable_stage()
+        source, _, _ = self._add_captured_source()
+        self.host.interrupt_overruled_job = True
+        code, out, err = self.run_install(sources=(self.source, source))
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("overruled: refuse — interrupted; the overruled job continues in the worker", out)
+        self.assertIn(f"Run {report.command('corpus install')} again to rejoin it", out)
+        self.assertEqual(self.host.lock_releases, 1)
+        self.assertEqual(self.host.overruled_count_reads, [])
+
+    def test_without_treatment_the_overruled_stage_prints_nothing(self) -> None:
+        code, out, err = self.run_install()
+        self.assertEqual(code, 0, out + err)
+        self.assertNotIn("overruled:", out)
+        self.assertEqual(len(out.splitlines()), 8)
+        self.assertEqual(self.host.overruled_deferred, [])
+        self.assertEqual(self.host.overruled_count_reads, [])
 
     def test_preconditions_refuse_unregistered_pipeline_before_fetch(self) -> None:
         path = self.checkout / "corpus/lockfiles" / f"{self.labels[0]}.yaml"

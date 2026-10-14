@@ -17,6 +17,7 @@ from test_render import (
 
 from gideon.casecite.found import CITE_FORMS
 from gideon.host import cas, weights
+from gideon.host.corpus.sources import source_by_name
 from gideon.host.images import parse_registry, reference
 from gideon.host.models import GIGABYTE
 from gideon.host.render import render_all, worker
@@ -63,6 +64,7 @@ from gideon.worker import (
     lexical,
     metrics,
     opiniontext,
+    overruled,
     sections,
     settings,
     staging,
@@ -83,6 +85,19 @@ class WorkerIdentity(unittest.TestCase):
         for name in ("QDRANT_URL_ENV", "QDRANT_KEY_FILE_ENV", "EMBED_URL_ENV", "EMBED_KEY_FILE_ENV"):
             with self.subTest(name=name):
                 self.assertEqual(getattr(worker, name), getattr(settings, name))
+
+    def test_overruled_identity_matches_the_worker(self) -> None:
+        for name in (
+            "OVERRULED_TASK", "OVERRULED_QUEUE", "OVERRULED_SOURCE", "OVERRULED_COURT",
+            "OVERRULED_FAILURE_NAME", "OVERRULED_LOCK_NAME", "OVERRULED_FAILURE_REASONS",
+            "OVERRULED_RESOLUTIONS", "OVERRULED_WORK_DIRECTORY",
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(getattr(worker, name), getattr(overruled, name))
+        self.assertEqual(worker.QUALIFIERS, overruled.QUALIFIERS)
+        definition = source_by_name(worker.OVERRULED_SOURCE)
+        assert definition is not None
+        self.assertEqual(definition.captured_file, overruled.INPUT_NAME)
 
     def test_lexical_identity_matches_the_worker(self) -> None:
         for name in (

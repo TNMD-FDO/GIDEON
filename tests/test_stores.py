@@ -38,6 +38,7 @@ MIGRATIONS = {
     f"{ROOT}/migrations/0015_search_turns.sql": (ROOT / "migrations/0015_search_turns.sql").read_text(),
     f"{ROOT}/migrations/0017_index_generations.sql": (ROOT / "migrations/0017_index_generations.sql").read_text(),
     f"{ROOT}/migrations/0018_chunk_embeddings.sql": (ROOT / "migrations/0018_chunk_embeddings.sql").read_text(),
+    f"{ROOT}/migrations/0019_known_overruled.sql": (ROOT / "migrations/0019_known_overruled.sql").read_text(),
     f"{ROOT}/migrations/README.md": "not a migration",
 }
 
@@ -164,6 +165,7 @@ class Converge(unittest.TestCase):
                 "0015_search_turns",
                 "0017_index_generations",
                 "0018_chunk_embeddings",
+                "0019_known_overruled",
             ),
         )
 
@@ -188,7 +190,7 @@ class Converge(unittest.TestCase):
         self.assertIn(psql("gideon", "gideon", *STATEMENT), argvs)
         self.assertIn(psql("gideon", "gideon", *QUERY), argvs)
         migration_runs = [call for call in host.calls if call[0] == psql("gideon", "gideon", *MIGRATION)]
-        self.assertEqual(len(migration_runs), 14)
+        self.assertEqual(len(migration_runs), 15)
         first_migration = MIGRATIONS[f"{ROOT}/migrations/0001_audit_log.sql"]
         self.assertTrue((migration_runs[0][1] or "").startswith(first_migration))
         self.assertTrue((migration_runs[0][1] or "").endswith("INSERT INTO schema_migrations (version) VALUES ('0001_audit_log');\n"))
@@ -330,6 +332,7 @@ class Converge(unittest.TestCase):
                 "0015_search_turns",
                 "0017_index_generations",
                 "0018_chunk_embeddings",
+                "0019_known_overruled",
             ),
         )
 
@@ -533,5 +536,75 @@ class Migration0017(unittest.TestCase):
             "GRANT SELECT, INSERT, UPDATE ON TABLE index_generations TO gideon_worker;",
             "GRANT SELECT ON TABLE index_generations TO gideon_ro_metrics;",
         ))
+        self.assertNotIn("DELETE", self.text)
+        self.assertNotIn("schema_migrations", self.text)
+
+
+class Migration0019(unittest.TestCase):
+    """Listed pairs retain their snapshot identity and unresolved decisions."""
+
+    def setUp(self) -> None:
+        self.text = MIGRATIONS[f"{ROOT}/migrations/0019_known_overruled.sql"]
+
+    def test_pair_identity_is_bound_to_both_source_snapshots(self) -> None:
+        self.assertIn("CREATE TABLE known_overruled", self.text)
+        self.assertIn("row_id text PRIMARY KEY CHECK (row_id ~ '^[0-9a-f]{64}$')", self.text)
+        for source, snapshot in (
+            ("source", "source_snapshot"),
+            ("caselaw_source", "caselaw_snapshot"),
+        ):
+            with self.subTest(source=source):
+                self.assertIn(f"{source} text NOT NULL", self.text)
+                self.assertIn(f"{snapshot} date NOT NULL", self.text)
+                self.assertIn(
+                    f"FOREIGN KEY ({source}, {snapshot}) REFERENCES source_snapshots(source, snapshot_date)",
+                    self.text,
+                )
+        self.assertIn("list_order integer NOT NULL CHECK (list_order > 0)", self.text)
+        self.assertIn("ordinal integer NOT NULL CHECK (ordinal >= 0)", self.text)
+        self.assertIn(
+            "UNIQUE (source, source_snapshot, caselaw_source, caselaw_snapshot, list_order, ordinal)",
+            self.text,
+        )
+
+    def test_resolution_and_qualifier_checks_match_the_vocabularies(self) -> None:
+        for column, expected in (
+            ("overruling_resolution", {"cite", "docket", "ambiguous", "absent"}),
+            ("overruled_resolution", {"cite", "name", "ambiguous", "absent"}),
+            ("qualifier", {"in_part", "on_other_grounds", "none"}),
+        ):
+            with self.subTest(column=column):
+                self.assertIn(f"{column} text NOT NULL", self.text)
+                match = re.search(rf"CHECK \({column} IN \((.*?)\)\)", self.text, re.S)
+                self.assertIsNotNone(match)
+                assert match is not None
+                self.assertEqual(set(re.findall(r"'([^']+)'", match.group(1))), expected)
+        for decision in ("overruling", "overruled"):
+            with self.subTest(decision=decision):
+                self.assertIn(f"{decision}_name text NOT NULL", self.text)
+                self.assertIn(f"{decision}_cite text,", self.text)
+                self.assertIn(f"{decision}_cluster bigint,", self.text)
+                self.assertIn(
+                    f"CHECK (({decision}_cluster IS NULL) = ({decision}_resolution IN ('ambiguous', 'absent')))",
+                    self.text,
+                )
+        self.assertIn("overruling_docket text,", self.text)
+        self.assertIn("overruling_year integer NOT NULL", self.text)
+        self.assertIn("overruled_year integer,", self.text)
+        self.assertIn("found_at timestamptz NOT NULL", self.text)
+
+    def test_cluster_index_and_grants_preserve_append_only_rows(self) -> None:
+        sql = " ".join(self.text.split())
+        self.assertIn(
+            "CREATE INDEX known_overruled_overruled_cluster_idx ON known_overruled (overruled_cluster) "
+            "WHERE overruled_cluster IS NOT NULL;",
+            sql,
+        )
+        grants = tuple(line for line in self.text.splitlines() if line.startswith("GRANT "))
+        self.assertEqual(grants, (
+            "GRANT SELECT, INSERT ON TABLE known_overruled TO gideon_worker;",
+            "GRANT SELECT ON TABLE known_overruled TO gideon_ro_metrics;",
+        ))
+        self.assertNotIn("UPDATE", self.text)
         self.assertNotIn("DELETE", self.text)
         self.assertNotIn("schema_migrations", self.text)
