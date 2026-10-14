@@ -16,6 +16,7 @@ from gideon.host.render import (
 from gideon.host.render.api import API_JOB_NAME, api_enabled
 from gideon.host.render.engine import ENGINE_JOB_NAME
 from gideon.host.render.opensearch import OPENSEARCH_JOB_NAME
+from gideon.host.render.prometheus import DCGM_JOB_NAME
 from gideon.host.render.searxng import SEARXNG_JOB_NAME, search_enabled
 from gideon.host.render.systemd import NIGHTLY_SUITES
 from gideon.host.steps.command import INSTALL_HOME
@@ -37,6 +38,11 @@ RULES_TEMPLATE: Final = "grafana/provisioning/alerting/rules.yaml.tmpl"
 PLUGINS_TEMPLATE: Final = "grafana/provisioning/plugins/plugins.yaml"
 DRIFT_RULE_TEMPLATE: Final = "grafana/provisioning/alerting/driver-drift-rule.yaml.tmpl"
 ENGINE_RULE_TEMPLATE: Final = "grafana/provisioning/alerting/engine-down-rule.yaml.tmpl"
+# The selected profile's requires supplies both floors. No pending period:
+# memory moves only at boot and a lost card is not transient. The count yields
+# zero with every card gone, nothing when the exporter is down, leaving that
+# page to Target down alone; both rules keep no data OK.
+PROFILE_FLOOR_RULE_TEMPLATE: Final = "grafana/provisioning/alerting/profile-floor-rules.yaml.tmpl"
 # The host-unit rule pages on the registry and runner units, which only the
 # build box runs.
 HOST_UNIT_RULE_TEMPLATE: Final = "grafana/provisioning/alerting/host-unit-rule.yaml.tmpl"
@@ -260,13 +266,15 @@ class GrafanaRulesArtifact(Artifact):
         SEARCH_RULE_TEMPLATE,
         API_RULE_TEMPLATE,
         NIGHTLY_RULE_TEMPLATE,
+        PROFILE_FLOOR_RULE_TEMPLATE,
     )
 
     def emit(self, inputs: RenderInputs) -> str:
-        # The engine and drift rules are their own templates so the rules file
-        # carries no code: the engine rule on every GPU host, the drift rule
-        # only when host.lock records a tested driver version. A no-GPU host
-        # renders neither; the host-unit rule belongs only to the build box.
+        # The engine, drift, and floor rules are their own templates so the
+        # rules file carries no code: the engine and floor rules on every GPU
+        # host, the drift rule only when host.lock records a tested driver
+        # version. A no-GPU host renders none; the host-unit rule belongs only
+        # to the build box.
         # The nightly run's rules render where its unit does, on a GPU host,
         # each query enumerating the unit's suites so one that never ran
         # still has a series.
@@ -286,6 +294,19 @@ class GrafanaRulesArtifact(Artifact):
             ""
             if inputs.no_gpu or driver is None
             else substitute_template(inputs, DRIFT_RULE_TEMPLATE, {"driver": driver})
+        )
+        profile_rules = (
+            ""
+            if inputs.no_gpu
+            else substitute_template(
+                inputs,
+                PROFILE_FLOOR_RULE_TEMPLATE,
+                {
+                    "dram_gb": inputs.profile.requires.dram_gb,
+                    "gpu_count": inputs.profile.requires.gpu.count,
+                    "dcgm_job": DCGM_JOB_NAME,
+                },
+            )
         )
         search_rule = (
             substitute_template(inputs, SEARCH_RULE_TEMPLATE, {"search_job": SEARXNG_JOB_NAME})
@@ -328,7 +349,7 @@ class GrafanaRulesArtifact(Artifact):
                 "certificate_days": CERTIFICATE_EXPIRING_SECONDS // 86400,
                 "search_rules": search_rule,
                 "api_rules": api_rule,
-                "gpu_rules": engine_rule + driver_rule,
+                "gpu_rules": engine_rule + driver_rule + profile_rules,
                 "host_unit_rules": host_unit_rule,
                 "nightly_rules": nightly_rules,
                 "engine_job": ENGINE_JOB_NAME,

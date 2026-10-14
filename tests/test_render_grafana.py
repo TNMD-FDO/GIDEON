@@ -1,4 +1,14 @@
-"""Grafana configuration, alerting, and dashboard render contracts."""
+"""Grafana configuration, alerting, and dashboard render contracts.
+
+Rules, routes, contact points, and intervals are held at render alongside
+LDAP, provisioning, and the Overview's cards, alert list, and start-here
+links. Each graded card's line follows its rule's, and the alert list's filter
+follows the status labels. Page and upstream receivers carry the runbook link
+on every host kind. The upstream rule's statement follows the record's; the
+notification log's retention is at least the route's repeat, which outlasts
+the notice's window. Profile-floor figures follow the selected models lock,
+with substitution checked against fictitious lock text.
+"""
 
 import json
 import re
@@ -15,7 +25,12 @@ from gideon.host.corpus import record
 from gideon.host.egress import load_egress_allowlist
 from gideon.host.images import load_image_lock
 from gideon.host.lock import load_host_lock, load_host_lock_text
-from gideon.host.models import HardwareProfile, load_models_lock, select_profile
+from gideon.host.models import (
+    HardwareProfile,
+    load_models_lock,
+    load_models_lock_text,
+    select_profile,
+)
 from gideon.host.render import ARTIFACTS, RenderInputs, VerbatimArtifact
 from gideon.host.render.api import API_JOB_NAME
 from gideon.host.render.compose import service_blocks
@@ -55,7 +70,7 @@ from gideon.host.render.grafana import (
     GrafanaTimeIntervalsArtifact,
     export_tree_url,
 )
-from gideon.host.render.prometheus import PrometheusConfigArtifact
+from gideon.host.render.prometheus import DCGM_JOB_NAME, PrometheusConfigArtifact
 from gideon.host.render.searxng import search_enabled
 from gideon.host.render.services import declared_sources
 from gideon.host.render.systemd import NIGHTLY_SUITES
@@ -949,6 +964,8 @@ class Alerting(unittest.TestCase):
             "gideon-tls-expiring",
             "gideon-driver-drift",
             "gideon-engine-down",
+            "gideon-memory-under-profile",
+            "gideon-gpu-count-under-profile",
             "gideon-heartbeat",
             "gideon-proposals-waiting",
             "gideon-upstream-watch-notice",
@@ -1294,6 +1311,8 @@ class Alerting(unittest.TestCase):
         gpu_only_rules = nightly_uids | {
             "gideon-engine-down",
             "gideon-driver-drift",
+            "gideon-memory-under-profile",
+            "gideon-gpu-count-under-profile",
             "gideon-api-probe-failing",
         }
         self.assertEqual(uids_by_host[True], uids_by_host[False] - gpu_only_rules)
@@ -1409,6 +1428,95 @@ class Alerting(unittest.TestCase):
             f'up{{job!="{ENGINE_JOB_NAME}"}}',
             no_gpu_target_down["data"][0]["model"]["expr"],
         )
+
+    def test_profile_floor_rules_follow_the_selected_models_lock(self) -> None:
+        lock_text = (ROOT / "models.lock").read_text(encoding="utf-8")
+        # Fictitious floors, deliberately different from the committed lock.
+        fake_text = re.sub(r"(?m)^      dram_gb:.*$", "      dram_gb: 10000", lock_text)
+        fake_text = re.sub(r"(?m)^        count:.*$", "        count: 1000", fake_text)
+        loaded = load_models_lock(ROOT / "models.lock")
+        fictitious = load_models_lock_text(fake_text)
+        floor_uids = {"gideon-memory-under-profile", "gideon-gpu-count-under-profile"}
+        for result in (loaded, fictitious):
+            self.assertTrue(result.ok, result.errors)
+            assert result.lock is not None
+            for site_path, build_box in ((EXAMPLE, False), (SECOND, False), (EXAMPLE, True)):
+                base = inputs(site_path, build_box=build_box)
+                profile = select_profile(result.lock, base.site.hardware_profile)
+                assert isinstance(profile, HardwareProfile)
+                requires = profile.requires
+                if result is fictitious:
+                    self.assertNotEqual(requires.dram_gb, base.profile.requires.dram_gb)
+                    self.assertNotEqual(requires.gpu.count, base.profile.requires.gpu.count)
+                for no_gpu in (False, True):
+                    with self.subTest(
+                        site=site_path.name, build_box=build_box,
+                        fictitious=result is fictitious, no_gpu=no_gpu,
+                    ):
+                        # Floors also render when there is no tested driver.
+                        site_inputs = replace(
+                            base, profile=profile, no_gpu=no_gpu,
+                            lock=replace(base.lock, driver=replace(base.lock.driver, tested=None)),
+                        )
+                        groups = yaml.safe_load(GrafanaRulesArtifact().emit(site_inputs))["groups"]
+                        rules = {rule["uid"]: rule for group in groups for rule in group["rules"]}
+                        self.assertNotIn("gideon-driver-drift", rules)
+                        self.assertEqual(set(rules) & floor_uids, set() if no_gpu else floor_uids)
+                        if no_gpu:
+                            continue
+                        jobs = yaml.safe_load(PrometheusConfigArtifact().emit(site_inputs))["scrape_configs"]
+                        dcgm = next(
+                            job for job in jobs
+                            if job.get("static_configs") == [{"targets": ["dcgm-exporter:9400"]}]
+                        )
+                        self.assertEqual(dcgm["job_name"], DCGM_JOB_NAME)
+                        metrics = next(group for group in groups if group["name"] == "metrics")
+                        self.assertEqual(metrics["interval"], "1m")
+                        for uid, title, expression, floor, summary in (
+                            (
+                                "gideon-memory-under-profile", "Memory under profile",
+                                "node_memory_MemTotal_bytes / 1e9", requires.dram_gb,
+                                'The host has {{ printf "%.1f" $values.A.Value }} GB, '
+                                f"the profile requires {requires.dram_gb} GB",
+                            ),
+                            (
+                                "gideon-gpu-count-under-profile", "GPU count under profile",
+                                '(count(DCGM_FI_DEV_GPU_UTIL) or vector(0)) '
+                                f'and on() (up{{job="{DCGM_JOB_NAME}"}} == 1)', requires.gpu.count,
+                                "The host has {{ $values.A.Value }} GPU(s), "
+                                f"the profile requires {requires.gpu.count}",
+                            ),
+                        ):
+                            with self.subTest(uid=uid):
+                                rule = rules[uid]
+                                self.assertIn(rule, metrics["rules"])
+                                self.assertEqual(rule["title"], title)
+                                self.assertEqual(rule["condition"], "B")
+                                self.assertEqual(rule["for"], "0s")
+                                self.assertEqual(rule["noDataState"], "OK")
+                                self.assertEqual(rule["execErrState"], "OK")
+                                self.assertFalse(rule["isPaused"])
+                                self.assertEqual(rule["labels"], {"class": "page"})
+                                self.assertEqual(rule["annotations"], {
+                                    "summary": summary,
+                                    "runbook": "docs/runbooks/observability.md §4",
+                                })
+                                query, threshold = rule["data"]
+                                self.assertEqual(query["refId"], "A")
+                                self.assertEqual(query["relativeTimeRange"], {"from": 60, "to": 0})
+                                self.assertEqual(query["datasourceUid"], "prometheus")
+                                self.assertEqual(query["model"], {
+                                    "datasource": {"type": "prometheus", "uid": "prometheus"},
+                                    "expr": expression, "instant": True,
+                                    "intervalMs": 1000, "maxDataPoints": 43200, "refId": "A",
+                                })
+                                self.assertEqual(threshold["refId"], "B")
+                                self.assertEqual(threshold["datasourceUid"], "__expr__")
+                                self.assertEqual(threshold["model"]["type"], "threshold")
+                                self.assertEqual(threshold["model"]["expression"], "A")
+                                self.assertEqual(threshold["model"]["conditions"][0]["evaluator"], {
+                                    "type": "lt", "params": [floor],
+                                })
 
     def test_alerting_templates_are_all_yaml_documents(self) -> None:
         for artifact in (

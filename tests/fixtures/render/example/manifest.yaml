@@ -59,7 +59,7 @@ files:
     owners:
       - "grafana"
   "grafana/provisioning/alerting/rules.yaml":
-    sha256: "40a36315df79c485945e687ffaf4a8962563418390f1ac51243cf8833605cc28"
+    sha256: "f7f03f405218319d95af05b141c02cc56a2b102827686b044a362356556226cf"
     mode: "0644"
     owners:
       - "grafana"

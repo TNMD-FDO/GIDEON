@@ -885,6 +885,112 @@ groups:
         labels:
           class: page
         isPaused: false
+      - uid: gideon-memory-under-profile
+        title: Memory under profile
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 60
+              to: 0
+            datasourceUid: prometheus
+            model:
+              datasource:
+                type: prometheus
+                uid: prometheus
+              expr: 'node_memory_MemTotal_bytes / 1e9'
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params: [256]
+                    type: lt
+                  operator:
+                    type: and
+                  query:
+                    params: [A, 5m, now]
+                  reducer:
+                    params: []
+                    type: avg
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+              type: threshold
+        for: 0s
+        noDataState: OK
+        execErrState: OK
+        annotations:
+          summary: 'The host has {{ printf "%.1f" $values.A.Value }} GB, the profile requires 256 GB'
+          runbook: docs/runbooks/observability.md §4
+        labels:
+          class: page
+        isPaused: false
+      - uid: gideon-gpu-count-under-profile
+        title: GPU count under profile
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 60
+              to: 0
+            datasourceUid: prometheus
+            model:
+              datasource:
+                type: prometheus
+                uid: prometheus
+              expr: '(count(DCGM_FI_DEV_GPU_UTIL) or vector(0)) and on() (up{job="dcgm"} == 1)'
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params: [2]
+                    type: lt
+                  operator:
+                    type: and
+                  query:
+                    params: [A, 5m, now]
+                  reducer:
+                    params: []
+                    type: avg
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+              type: threshold
+        for: 0s
+        noDataState: OK
+        execErrState: OK
+        annotations:
+          summary: 'The host has {{ $values.A.Value }} GPU(s), the profile requires 2'
+          runbook: docs/runbooks/observability.md §4
+        labels:
+          class: page
+        isPaused: false
 
       - uid: gideon-heartbeat
         title: Channel heartbeat
