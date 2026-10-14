@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
-from gideon.host import agreement, backuplock, caselaw, report, stack, staging
+from gideon.host import agreement, backuplock, caselaw, fetch, report, stack, staging
 from gideon.host.corpus import artifacts, record, snapshots
 from gideon.host.corpus.lockfile import (
     LABEL,
@@ -187,6 +187,7 @@ def _artifact_preconditions(
 def _run_install_stages(
     host: CorpusHost,
     rendered_dir: PathLike,
+    checkout: Path,
     snapshots_root: PathLike,
     work_root: PathLike,
     lockfile: Lockfile,
@@ -199,12 +200,29 @@ def _run_install_stages(
     active_stage[0] = "fetch"
     fetched: dict[str, snapshots.FetchedSource] = {}
     for name, pin in lockfile.sources.items():
-        base = (pin.mirror_url or pin.base_url).rstrip("/") + "/"
-        result = snapshots.fetch_source(
-            host, rendered_dir, snapshots_root, name, pin.snapshot_date,
-            tuple((entry.path, base + entry.path) for entry in pin.entries),
-            sleep=sleep, monotonic=monotonic, command_path=COMMAND_PATH,
-        )
+        if pin.captured:
+            entry = pin.entries[0]
+            companion = checkout / "corpus/lockfiles" / lockfile.label / f"{name}.{entry.path}"
+            try:
+                data = host.read_bytes(companion)
+            except OSError as exc:
+                return _refuse(
+                    "fetch", f"{name}: committed copy {companion} is unreadable ({type(exc).__name__})",
+                    _retry_fix("Restore the lockfile and its companion files from the release checkout."),
+                )
+            target = Path(snapshots_root) / fetch.snapshot_destination(name, pin.snapshot_date, entry.path)
+            result = snapshots.seed_source(
+                host, snapshots_root, name, pin.snapshot_date, entry.path, data,
+                url=pin.base_url, now=clock(), command_path=COMMAND_PATH,
+                other_bytes_fix=snapshots.refetch_fix(target, command_path=COMMAND_PATH),
+            )
+        else:
+            base = (pin.mirror_url or pin.base_url).rstrip("/") + "/"
+            result = snapshots.fetch_source(
+                host, rendered_dir, snapshots_root, name, pin.snapshot_date,
+                tuple((entry.path, base + entry.path) for entry in pin.entries),
+                sleep=sleep, monotonic=monotonic, command_path=COMMAND_PATH,
+            )
         if isinstance(result, Problem):
             return _refuse("fetch", f"{name}: {result.problem}", result.fix)
         fetched[name] = result
@@ -832,7 +850,7 @@ def run_corpus_install(
         assert lockfile is not None and court_map is not None
         report.print_stage(stage)
         return _run_install_stages(
-            io, rendered_dir, snapshots_root, work_root, lockfile, court_map,
+            io, rendered_dir, root, snapshots_root, work_root, lockfile, court_map,
             clock, sleep, monotonic, active_stage,
         )
     except KeyboardInterrupt:

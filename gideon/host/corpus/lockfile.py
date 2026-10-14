@@ -1,4 +1,4 @@
-"""Model, load, and render committed corpus lockfiles."""
+"""Model, load, and render lockfiles for fetched and captured corpus sources."""
 
 import difflib
 import hashlib
@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 
 import yaml  # type: ignore[import-untyped]
 
-from gideon.host.corpus.sources import SOURCES
+from gideon.host.corpus.sources import SOURCES, SourceDefinition
 from gideon.host.courts import CourtMap
 from gideon.host.egress import EgressAllowlist
 from gideon.host.sysio import PathLike, ReadBytesHost, RealHost
@@ -68,6 +68,7 @@ class SourcePin:
     index: tuple[IndexDocument, ...]
     entries: tuple[SidecarEntry, ...]
     courts: tuple[str, ...] | None = None
+    captured: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -307,7 +308,7 @@ def _index(value: object, prefix: str, source_dir: Path, source: str,
     return tuple(result)
 
 
-def _source(raw: object, name: str, carries_courts: bool, directory: Path,
+def _source(raw: object, name: str, definition: SourceDefinition, directory: Path,
             host: ReadBytesHost, errors: list[LockfileError]) -> SourcePin | None:
     prefix = f"sources.{name}"
     if not isinstance(raw, Mapping):
@@ -326,7 +327,7 @@ def _source(raw: object, name: str, carries_courts: bool, directory: Path,
     size = _size(raw["bytes"], f"{prefix}.bytes", errors) if "bytes" in raw else None
     index = _index(raw.get("index"), f"{prefix}.index", directory, name, host, errors) if "index" in raw else ()
     courts: tuple[str, ...] | None = None
-    if carries_courts:
+    if definition.carries_courts:
         if "courts" not in raw:
             errors.append(_error(f"{prefix}.courts", "missing required key"))
         elif not isinstance(raw["courts"], list) or not raw["courts"]:
@@ -353,18 +354,37 @@ def _source(raw: object, name: str, carries_courts: bool, directory: Path,
             errors.append(_error(f"{prefix}.files", "file count differs from sidecar"))
         if size is not None and sum(entry.size for entry in entries) != size:
             errors.append(_error(f"{prefix}.bytes", "byte total differs from sidecar"))
+    if definition.captured:
+        if mirror is not None:
+            errors.append(_error(f"{prefix}.mirror_url", "captured source must have no mirror URL"))
+        if files is not None and files != 1:
+            errors.append(_error(f"{prefix}.files", "captured source must pin exactly one file"))
+        if len(index) != 1:
+            errors.append(_error(f"{prefix}.index", "captured source must carry exactly one index document"))
+        else:
+            document = index[0]
+            if len(entries) == 1:
+                entry = entries[0]
+                if document.name != entry.path:
+                    errors.append(_error(f"{prefix}.index[0].name", "captured document name differs from sidecar path"))
+                if document.sha256 != entry.sha256:
+                    errors.append(_error(f"{prefix}.index[0].sha256", "captured document digest differs from sidecar"))
+                if document.size != entry.size:
+                    errors.append(_error(f"{prefix}.index[0].size", "captured document size differs from sidecar"))
+            if base_url is not None and document.url != base_url:
+                errors.append(_error(f"{prefix}.index[0].url", "captured document URL differs from base_url"))
     if any(value is None for value in (snapshot, base_url, digest, files, size)):
         return None
     return SourcePin(cast(str, snapshot), cast(str, base_url), mirror_url,
                      cast(str, digest), cast(int, files), cast(int, size),
-                     index, entries, courts)
+                     index, entries, courts, definition.captured)
 
 
-def load_lockfile(path: PathLike, *, known_sources: Mapping[str, bool] | None = None,
+def load_lockfile(path: PathLike, *, known_sources: Mapping[str, SourceDefinition] | None = None,
                   host: ReadBytesHost | None = None) -> LockfileLoadResult:
     """Read a lockfile and all its companion files, collecting refusals."""
     if known_sources is None:
-        known_sources = {source.name: source.carries_courts for source in SOURCES}
+        known_sources = {source.name: source for source in SOURCES}
     io = host or RealHost()
     file_path = Path(path)
     errors: list[LockfileError] = []
@@ -394,12 +414,13 @@ def load_lockfile(path: PathLike, *, known_sources: Mapping[str, bool] | None = 
         errors.append(_error("schema", f"unsupported version {schema!r}",
                              fix="Upgrade GIDEON to a release that reads this lockfile schema."))
     label = _string(document["label"], "label", errors) if "label" in document else None
+    label_date: str | None = None
     if label is not None:
         match = LABEL.fullmatch(label)
         if match is None:
             errors.append(_error("label", "expected corpus-YYYY-MM-DD"))
         else:
-            _date(match.group(1), "label", errors)
+            label_date = _date(match.group(1), "label", errors)
         if file_path.stem != label:
             errors.append(_error("label", f"does not match file stem {file_path.stem!r}"))
     pipeline = _string(document["pipeline"], "pipeline", errors) if "pipeline" in document else None
@@ -432,17 +453,24 @@ def load_lockfile(path: PathLike, *, known_sources: Mapping[str, bool] | None = 
     else:
         if not sources:
             errors.append(_error("sources", "expected at least one source"))
-        for name in known_sources:
+        required_sources = {
+            name: definition for name, definition in known_sources.items()
+            if definition.joined is None or label_date is None or definition.joined <= label_date
+        }
+        for name in required_sources:
             if name not in sources:
                 errors.append(_error(f"sources.{name}", "missing required source"))
         for name, raw in sources.items():
             if not isinstance(name, str) or name not in known_sources:
                 errors.append(_error(f"sources.{name}", "unknown source"))
                 continue
+            if name not in required_sources:
+                errors.append(_error(f"sources.{name}", f"source joined on {known_sources[name].joined}"))
+                continue
             pin = _source(raw, name, known_sources[name], file_path.with_suffix(""), io, errors)
             if pin is not None:
                 pins[name] = pin
-        if tuple(sources) != tuple(known_sources):
+        if tuple(sources) != tuple(required_sources):
             errors.append(_error("sources", "sources must follow registry order"))
     if errors:
         return LockfileLoadResult(errors=tuple(errors))
@@ -514,19 +542,20 @@ def check_courts(lockfile: Lockfile, court_map: CourtMap) -> tuple[LockfileError
 
 
 def check_egress_hosts(lockfile: Lockfile, allowlist: EgressAllowlist) -> tuple[LockfileError, ...]:
-    """Refuse source URL hosts absent from the loaded corpus allowlist."""
+    """Check fetched URL hosts; a captured pin's URL is provenance, never fetched."""
     group = allowlist.group("corpus")
     allowed = {item.host for item in group.hosts} if group is not None else set()
     return tuple(
         _error(f"sources.{name}.{field}", f"host {urlsplit(url).hostname!r} is not in the corpus allowlist",
                fix="Add the host to the corpus group in config/egress.yaml and cut again.")
         for name, pin in lockfile.sources.items()
+        if not pin.captured
         for field, url in (("base_url", pin.base_url), ("mirror_url", pin.mirror_url))
         if url is not None and urlsplit(url).hostname not in allowed
     )
 
 
-def read_lockfile_directory(path: PathLike, *, known_sources: Mapping[str, bool] | None = None,
+def read_lockfile_directory(path: PathLike, *, known_sources: Mapping[str, SourceDefinition] | None = None,
                             host: ReadBytesHost | None = None) -> LockfileDirectoryResult:
     """Load every YAML lockfile; unfinished companion directories are ignored."""
     io = host or RealHost()

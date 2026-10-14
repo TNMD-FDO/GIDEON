@@ -1,12 +1,17 @@
-"""The case-law source selects a dated dump from bounded S3 listings."""
+"""Fetched source listings and captured source names select dated snapshots."""
 
 import unittest
 
 from gideon.host.corpus.sources import (
+    CAPTURES_DIR,
     CASELAW_BASE_URL,
     CASELAW_LISTING_URL,
     MAX_LISTING_BYTES,
     SOURCES,
+    TREATMENT_FILE,
+    TREATMENT_JOINED,
+    TREATMENT_URL,
+    newest_capture,
     source_by_name,
 )
 from gideon.host.report import Problem
@@ -35,12 +40,15 @@ class Caselaw(unittest.TestCase):
     """The registered source pins the newest whole opinions dump."""
 
     def test_registry_and_newest_dated_key(self) -> None:
-        self.assertEqual(tuple(source.name for source in SOURCES), ("caselaw",))
+        self.assertEqual(tuple(source.name for source in SOURCES), ("caselaw", "treatment"))
         source = source_by_name("caselaw")
         assert source is not None
         self.assertIsNone(source_by_name("fictitious"))
         self.assertEqual(source.base_url, CASELAW_BASE_URL)
         self.assertTrue(source.carries_courts)
+        self.assertFalse(source.captured)
+        self.assertIsNone(source.captured_file)
+        self.assertIsNone(source.joined)
         self.assertEqual(source.first_courts, tuple(sorted(source.first_courts)))
         self.assertEqual(
             [(item.name, item.url) for item in source.index_documents()],
@@ -92,3 +100,40 @@ class Caselaw(unittest.TestCase):
                 self.assertIn("caselaw listing.xml", result.problem)
                 self.assertIn(detail, result.problem)
                 self.assertEqual(result.fix, "Check the upstream listing, then retry.")
+
+
+class Captured(unittest.TestCase):
+    """Saved page names supply dates without an upstream index read."""
+
+    def test_treatment_definition(self) -> None:
+        source = source_by_name("treatment")
+        assert source is not None
+        self.assertTrue(source.captured)
+        self.assertEqual(source.base_url, TREATMENT_URL)
+        self.assertEqual(source.captured_file, TREATMENT_FILE)
+        self.assertEqual(source.joined, TREATMENT_JOINED)
+        self.assertFalse(source.carries_courts)
+        self.assertEqual(source.first_courts, ())
+        self.assertEqual(source.index_documents(), ())
+        result = source.read_index({})
+        self.assertIsInstance(result, Problem)
+        assert isinstance(result, Problem)
+        self.assertIn("captured source", result.problem)
+        self.assertIn("reads no index", result.problem)
+        self.assertIn(CAPTURES_DIR, result.fix)
+
+    def test_newest_valid_capture_name(self) -> None:
+        names = (
+            "example-2099-01-02.html", "example-2099-04-03.html",
+            "example-2099-02-04.html", "example-2099-02-30.html",
+            "example-2099-13-01.html", "example-2099-1-05.html",
+            "example-2099-12-31.html.bak", "foreign-2099-12-31.html",
+            "example-not-a-date.html",
+        )
+        self.assertEqual(newest_capture(names, "example"), names[1])
+        self.assertEqual(newest_capture(tuple(reversed(names)), "example"), names[1])
+
+    def test_empty_and_foreign_names(self) -> None:
+        for names in ((), ("foreign-2099-01-02.html", "example-2099-02-30.html")):
+            with self.subTest(names=names):
+                self.assertIsNone(newest_capture(names, "example"))

@@ -20,6 +20,8 @@ class CorpusHost(WritableBytesHost, LockingHost, Protocol):
 
     def rmtree(self, path: PathLike) -> None: ...
 
+    def listdir(self, path: PathLike) -> list[str]: ...
+
 
 @dataclass(frozen=True, slots=True)
 class ResolveFailure:

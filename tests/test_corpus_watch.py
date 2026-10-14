@@ -49,6 +49,10 @@ class WatchHost(FakeHost):
         self.missing_index = False
         self.unreadable_file = False
         self.interrupt_on: str | None = None
+        self.lockfile_rows: list[dict[str, object]] = []
+        self.lockfile_reads = 0
+        self.lockfile_read_code = 0
+        self.lockfile_stdout: str | None = None
 
     def read_text(self, path: PathLike, *, encoding: str = "utf-8") -> str:
         if str(path) == f"{RENDERED}/compose.yaml" and not self.stack_has_worker:
@@ -128,6 +132,14 @@ class WatchHost(FakeHost):
     ) -> subprocess.CompletedProcess[str]:
         command = list(argv)
         if command == worker.psql_argv(RENDERED) and input is not None:
+            if "ORDER BY c.label" in input:
+                self.calls.append(command)
+                self.lockfile_reads += 1
+                output = ("".join(json.dumps(row) + "\n" for row in self.lockfile_rows)
+                          if self.lockfile_stdout is None else self.lockfile_stdout)
+                return subprocess.CompletedProcess(
+                    command, self.lockfile_read_code, output, "fictitious record read failure",
+                )
             if self.interrupt_on == "observe" and "procrastinate_defer_jobs_v1" in input:
                 raise KeyboardInterrupt
             if "INSERT INTO public.upstream_observations" in input:
@@ -206,6 +218,151 @@ class Watch(unittest.TestCase):
 
     def _invalidate_egress(self) -> None:
         (self.checkout / "config/egress.yaml").write_text("bad: [")
+
+    def _captured_source(self, name: str = "saved-example") -> SourceDefinition:
+        def no_index_reader(_documents: Mapping[str, bytes]) -> SourceResolution:
+            self.fail("A captured source must never resolve through a fetched index.")
+
+        return SourceDefinition(
+            name, "https://capture.example.invalid/table", False, (),
+            lambda: (), no_index_reader, captured_file="saved.html",
+        )
+
+    def _record_binding(
+        self, source: SourceDefinition, snapshot_date: str, label_date: str, *, state: str = "cut",
+    ) -> None:
+        """Keep the fake's lockfile reader and watch state on the same bindings."""
+        label = f"corpus-{label_date}"
+        self.host.lockfile_rows.append({
+            "label": label, "schema": 1, "pipeline": worker_identity.PIPELINE_VERSION,
+            "cut_at": f"{label_date}T00:00:00Z", "reason": "instrument", "base": None,
+            "installed_at": None, "state": state,
+            "sources": [{"source": source.name, "snapshot_date": snapshot_date}],
+        })
+        held = self.host.bindings.get(source.name)
+        if held is None or held[1] < snapshot_date:
+            self.host.bindings[source.name] = (label, snapshot_date)
+
+    def test_captured_source_observed_from_newest_binding_without_an_open_notice(self) -> None:
+        source = self._captured_source()
+        self.sources = (self.source, source)
+        self._record_binding(source, "2098-12-01", "2098-12-02")
+        self._record_binding(source, "2099-01-02", "2099-01-02", state="superseded")
+        self._record_binding(source, "2099-01-01", "2099-01-03")
+        self._record_binding(self._captured_source("other"), "2099-02-01", "2099-02-02")
+        expected_date = self.host.bindings[source.name][1]
+        code, out, err = self.run_watch()
+        self.assertEqual(code, 0, out + err)
+        self.assertIn(f"observe: ok — {source.name}: {expected_date}", out)
+        observed = next(item for item in self.host.observations if item.source == source.name)
+        self.assertEqual((observed.outcome, observed.latest_label, observed.url, observed.detail),
+                         ("observed", expected_date, source.base_url, None))
+        self.assertEqual(self.host.lockfile_reads, 1)
+        self.assertEqual(len(self.host.observations), 2)
+        self.assertNotIn(f"Next: a cut is due for {source.name}", out)
+        self.assertIn("2 observations written, 1 new notices, 1 open notices", out)
+        self.assertIn(f"Next: a cut is due for {self.source.name}", out)
+        self.assertEqual(self.host.calls, [
+            stack.compose_argv(RENDERED, "ps", "--all", "--format", "json"),
+            worker.psql_argv(RENDERED), worker.psql_argv(RENDERED),
+            worker.psql_argv(RENDERED), worker.psql_argv(RENDERED),
+            worker.psql_argv(RENDERED),
+        ])
+        self.assertEqual(tuple(self.host.job_destinations.values()),
+                         (fetch.resolve_destination("example/listing.xml"),))
+        self.assertEqual(self.host.writes, [])
+        self.assertEqual(self.host.record_writes, 0)
+
+    def test_captured_sources_share_one_record_read_and_need_no_worker(self) -> None:
+        first, second = self._captured_source(), self._captured_source("second-saved")
+        self.sources = (first, second)
+        self._record_binding(first, "2099-01-01", "2099-01-02")
+        self._record_binding(second, "2099-01-02", "2099-01-03")
+        self.host.health = "unhealthy"
+        code, out, err = self.run_watch()
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(self.host.lockfile_reads, 1)
+        self.assertEqual([item.outcome for item in self.host.observations], ["observed", "observed"])
+        self.assertIn("2 observations written, 0 new notices, 0 open notices", out)
+        self.assertNotIn("Next:", out)
+        self.assertEqual(self.host.job_destinations, {})
+        self.assertEqual(self.host.calls, [worker.psql_argv(RENDERED)] * 3)
+
+    def test_captured_source_not_yet_bound_prints_ok_and_writes_no_observation(self) -> None:
+        source = self._captured_source()
+        self.sources = (source,)
+        code, out, err = self.run_watch()
+        self.assertEqual(code, 0, out + err)
+        self.assertIn(f"observe: ok — {source.name}: not yet cut or installed here", out)
+        self.assertIn("0 observations written, 0 new notices, 0 open notices", out)
+        self.assertEqual(self.host.observations, [])
+        self.assertEqual(self.host.lockfile_reads, 1)
+        self.assertEqual(self.host.job_destinations, {})
+        self.assertNotIn("Next:", out)
+        self.assertEqual(self.host.writes, [])
+
+    def test_worker_outage_keeps_captured_observation(self) -> None:
+        source = self._captured_source()
+        self.sources = (self.source, source)
+        self._record_binding(source, "2099-01-02", "2099-01-03")
+        self.host.health = "unhealthy"
+        code, out, err = self.run_watch()
+        self.assertEqual(code, 1, out + err)
+        self.assertEqual([(item.source, item.outcome, item.detail) for item in self.host.observations], [
+            (self.source.name, "unanswered", "worker-unavailable"),
+            (source.name, "observed", None),
+        ])
+        self.assertIn(f"observe: ok — {source.name}: 2099-01-02", out)
+        self.assertIn("2 observations written, 0 new notices, 0 open notices", out)
+        self.assertNotIn("Next:", out)
+        self.assertEqual(self.host.job_destinations, {})
+        self.assertEqual(self.host.lockfile_reads, 1)
+
+    def test_record_read_failure_makes_captured_sources_unanswered_and_continues(self) -> None:
+        for code, stdout, detail in ((127, None, "exit 127"), (0, "not json\n", "row is invalid")):
+            with self.subTest(code=code, stdout=stdout):
+                self._reset_case()
+                first, second = self._captured_source(), self._captured_source("second-saved")
+                self.sources = (first, self.source, second)
+                self.host.lockfile_read_code = code
+                self.host.lockfile_stdout = stdout
+                issue = record.read_lockfiles(self.host, RENDERED, command_path="corpus watch")
+                assert isinstance(issue, report.Problem)
+                self.host.calls.clear()
+                self.host.lockfile_reads = 0
+                result, out, err = self.run_watch()
+                self.assertEqual(result, 1, out + err)
+                self.assertEqual([(item.source, item.outcome, item.detail)
+                                  for item in self.host.observations], [
+                    (first.name, "unanswered", "local"),
+                    (self.source.name, "observed", None),
+                    (second.name, "unanswered", "local"),
+                ])
+                self.assertIn(detail, out)
+                self.assertIn(issue.fix, out)
+                self.assertIn("3 observations written", out)
+                self.assertEqual(self.host.lockfile_reads, 1)
+                self.assertEqual(len(self.host.job_destinations), 1)
+
+    def test_captured_provenance_https_checked_without_index_checks(self) -> None:
+        requests = mock.Mock(return_value=())
+        source = replace(self._captured_source(), index_documents=requests)
+        self.sources = (source,)
+        self.assertEqual(self.run_watch()[0], 0)
+        requests.assert_not_called()
+        for url in ("http://capture.example.invalid/table", "https://capture.example.invalid:444/table",
+                    "https:///missing-host", "https://capture.example.invalid:invalid/table"):
+            with self.subTest(url=url):
+                self._reset_case()
+                self.sources = (replace(source, base_url=url),)
+                code, out, err = self.run_watch()
+                self.assertEqual(code, 1)
+                self.assertEqual(out, "")
+                self.assertIn("invalid HTTPS URL", err)
+                self.assertIn(report.command("corpus watch"), err)
+                self.assertEqual(self.host.lockfile_reads, 0)
+                self.assertEqual(self.host.calls, [])
+        requests.assert_not_called()
 
     def test_answered_source_writes_a_new_open_notice_with_exact_argv(self) -> None:
         code, out, err = self.run_watch()

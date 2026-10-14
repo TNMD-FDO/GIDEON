@@ -23,6 +23,8 @@ SNAPSHOTS_ROOT: Final = Path("/data/bulk/snapshots")
 RESOLVE_DIR: Final = "resolve"
 KEPT_FORM: Final = "kept"
 FRESH_FORM: Final = "fresh"
+# A file the host copied from the release checkout, with no job.
+SEEDED_FORM: Final = "seeded"
 PARTIAL_SUFFIX: Final = ".partial"
 RECORD_SUFFIX: Final = ".fetch.json"
 FAILURE_SUFFIX: Final = ".fetch-failed.json"
@@ -96,7 +98,7 @@ class FetchRecord:
     size: int | None
     sha256: str | None
     fetched_at: str | None
-    job: int
+    job: int | None
     seconds: float
     resumes: int
     schema: int = 1
@@ -246,7 +248,7 @@ def _read_json(path: Path) -> dict[str, object] | None:
 
 
 def read_record(path: Path) -> FetchRecord | None:
-    """Read and validate a schema-one transfer record."""
+    """Read and validate a schema-one transfer or seeded record."""
 
     value = _read_json(path)
     if value is None:
@@ -259,13 +261,16 @@ def read_record(path: Path) -> FetchRecord | None:
         record.schema != 1 or not isinstance(record.state, str)
         or record.state not in {"partial", "whole"}
         or not isinstance(record.form, str)
-        or record.form not in {KEPT_FORM, FRESH_FORM}
+        or record.form not in {KEPT_FORM, FRESH_FORM, SEEDED_FORM}
         or not isinstance(record.host, str) or not isinstance(record.path, str)
         or (record.etag is not None and not isinstance(record.etag, str))
         or (record.last_modified is not None and not isinstance(record.last_modified, str))
         or not isinstance(record.durable, int) or isinstance(record.durable, bool)
         or record.durable < 0
-        or not isinstance(record.job, int) or isinstance(record.job, bool) or record.job < 0
+        or (record.form == SEEDED_FORM and (record.job is not None or record.state != "whole"))
+        or (record.form != SEEDED_FORM and (
+            not isinstance(record.job, int) or isinstance(record.job, bool) or record.job < 0
+        ))
         or not isinstance(record.seconds, (float, int)) or isinstance(record.seconds, bool)
         or record.seconds < 0
         or not isinstance(record.resumes, int) or isinstance(record.resumes, bool)

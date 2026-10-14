@@ -20,6 +20,7 @@ from test_models_lock import VALID, VALID_WITH_SPACE
 
 from gideon.host import backuplock, models, report, stack
 from gideon.host.corpus.lockfile import load_lockfile, render_lockfile
+from gideon.host.corpus.sources import SOURCES
 from gideon.host.index import build, generations
 from gideon.host.index.record import GenerationRow
 from gideon.host.render.opensearch import OPENSEARCH_SERVICE_NAME
@@ -178,7 +179,7 @@ class Build(unittest.TestCase):
         return code, out.getvalue(), err.getvalue()
 
     def inputs(self, label: str) -> generations.GenerationInputs:
-        loaded = load_lockfile(self.fixture.checkout / f"corpus/lockfiles/{label}.yaml", known_sources={"example": True})
+        loaded = load_lockfile(self.fixture.checkout / f"corpus/lockfiles/{label}.yaml", known_sources={"example": replace(SOURCES[0], name="example")})
         assert loaded.lockfile is not None
         lockfile = loaded.lockfile
         model_lock = models.load_models_lock(self.fixture.checkout / "models.lock")
@@ -231,7 +232,7 @@ class Build(unittest.TestCase):
         first, second = self.fixture.labels
         self.assertEqual(self.run_build(first)[0], 0)
         directory = self.fixture.checkout / "corpus/lockfiles"
-        loaded = load_lockfile(directory / f"{first}.yaml", known_sources={"example": True})
+        loaded = load_lockfile(directory / f"{first}.yaml", known_sources={"example": replace(SOURCES[0], name="example")})
         assert loaded.lockfile is not None
         shutil.copytree(directory / first, directory / second, dirs_exist_ok=True)
         (directory / f"{second}.yaml").write_text(render_lockfile(replace(loaded.lockfile, label=second)))
@@ -430,7 +431,7 @@ class Build(unittest.TestCase):
 
     def test_unregistered_pipeline_and_unknown_court_refuse(self) -> None:
         path = self.fixture.checkout / f"corpus/lockfiles/{self.fixture.labels[0]}.yaml"
-        loaded = load_lockfile(path, known_sources={"example": True})
+        loaded = load_lockfile(path, known_sources={"example": replace(SOURCES[0], name="example")})
         assert loaded.lockfile is not None
         path.write_text(render_lockfile(replace(loaded.lockfile, pipeline="1000.0.0")))
         self.assertIn("not registered", self.run_build(self.fixture.labels[0])[2])

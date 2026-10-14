@@ -1,17 +1,18 @@
-"""Fetch and verify dated corpus snapshot files through the host seam."""
+"""Fetch, seed, and verify dated corpus snapshot files through the host seam."""
 
+import hashlib
 import re
 import stat
 import subprocess
 from collections.abc import Callable, Mapping, Sequence, Set
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from gideon.host import fetch, report
 from gideon.host.corpus import resolve
 from gideon.host.corpus.lockfile import SidecarEntry
-from gideon.host.render.worker import KEPT_FORM, RECORD_SUFFIX
+from gideon.host.render.worker import DIR_MODE, KEPT_FORM, RECORD_SUFFIX
 from gideon.host.report import Problem, StageResult
 from gideon.host.sysio import PathLike, WritableBytesHost
 
@@ -52,6 +53,87 @@ def refetch_fix(path: Path, *, command_path: str) -> str:
         f"Remove {path} and {path}{RECORD_SUFFIX}, then run "
         f"{report.command(command_path)} again to fetch it anew."
     )
+
+
+def seed_source(
+    host: WritableBytesHost,
+    snapshots_root: PathLike,
+    source_name: str,
+    snapshot_date: str,
+    path: str,
+    data: bytes,
+    *,
+    url: str,
+    now: datetime,
+    command_path: str,
+    other_bytes_fix: str,
+) -> FetchedSource | Problem:
+    """Keep an equal whole copy or seed saved bytes before their whole record."""
+    try:
+        destination = fetch.snapshot_destination(source_name, snapshot_date, path)
+    except ValueError:
+        return Problem(
+            f"source {source_name} snapshot path {path!r} is invalid",
+            retry_fix("Correct the source's file name in the release.", command_path=command_path),
+        )
+    root = Path(snapshots_root)
+    target = root / destination
+    existing = fetch.read_record(host, destination, snapshots_root=root)
+    if isinstance(existing, Problem):
+        fix = (
+            refetch_fix(target, command_path=command_path)
+            if existing.problem == "fetch file does not match its record"
+            else retry_fix(existing.fix, command_path=command_path)
+        )
+        return Problem(f"{target}: {existing.problem}", fix)
+    digest = hashlib.sha256(data).hexdigest()
+    if existing is not None:
+        if (existing.sha256, existing.size) != (digest, len(data)):
+            return Problem(f"{target}: snapshot already holds different bytes", other_bytes_fix)
+        return FetchedSource({path: existing}, 0, frozenset())
+    try:
+        if host.exists(target):
+            return Problem(
+                f"{target}: file is present without a whole fetch record",
+                refetch_fix(target, command_path=command_path),
+            )
+    except OSError as exc:
+        return Problem(
+            f"{target}: file presence could not be checked ({type(exc).__name__})",
+            retry_fix(f"Restore access to {target}.", command_path=command_path),
+        )
+    if now.tzinfo is None:
+        return Problem("seed clock has no timezone",
+                       retry_fix("Use a UTC clock.", command_path=command_path))
+    try:
+        owner = host.stat(root)
+        directory = root
+        for part in destination.split("/")[:-1]:
+            directory /= part
+            host.mkdir(directory, mode=DIR_MODE, parents=True, exist_ok=True)
+            host.chown(directory, owner.st_uid, owner.st_gid)
+            host.chmod(directory, DIR_MODE)
+        host.write_bytes(target, data, mode=0o440)
+        host.chown(target, owner.st_uid, owner.st_gid)
+        fetch.write_seed_record(
+            host, root, destination, url=url, size=len(data), sha256=digest,
+            fetched_at=now.astimezone(UTC).isoformat(),
+        )
+        host.chown(root / f"{destination}{RECORD_SUFFIX}", owner.st_uid, owner.st_gid)
+    except (OSError, ValueError) as exc:
+        return Problem(
+            f"{target}: file could not be seeded ({type(exc).__name__})",
+            retry_fix(f"Restore access to the snapshot directory {target.parent}.",
+                      command_path=command_path),
+        )
+    seeded = fetch.read_record(host, destination, snapshots_root=root)
+    if isinstance(seeded, Problem):
+        return Problem(f"{target}: {seeded.problem}",
+                       retry_fix(seeded.fix, command_path=command_path))
+    if seeded is None:
+        return Problem(f"{target}: whole seeded record is missing",
+                       refetch_fix(target, command_path=command_path))
+    return FetchedSource({path: seeded}, 0, frozenset())
 
 
 def fetch_source(

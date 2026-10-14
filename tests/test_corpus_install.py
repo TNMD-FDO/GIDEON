@@ -100,6 +100,21 @@ class FakeHost(RealHost):
         self.interrupt_rmtree = False
         self.interrupt_job = False
         self.removed_dirs: list[Path] = []
+        self.chown_calls: list[tuple[Path, int, int]] = []
+        self.seed_writes: list[Path] = []
+
+    def chown(self, path: PathLike, uid: int, gid: int) -> None:
+        self.chown_calls.append((Path(path), uid, gid))
+
+    def write_bytes(self, path: PathLike, data: bytes, *, mode: int = 0o644) -> None:
+        super().write_bytes(path, data, mode=mode)
+        self.seed_writes.append(Path(path))
+
+    def write_text(
+        self, path: PathLike, text: str, *, encoding: str = "utf-8", mode: int = 0o644,
+    ) -> None:
+        super().write_text(path, text, encoding=encoding, mode=mode)
+        self.seed_writes.append(Path(path))
 
     def listdir(self, path: PathLike) -> list[str]:
         if self.unreadable_root and Path(path) == self.snapshots:
@@ -468,16 +483,15 @@ class FakeHost(RealHost):
                         command, 3, "",
                         f"ERROR: CORPUS_LOCKFILE_CONFLICT:{payload['label']}\n",
                     )
-                pin = payload["sources"][0]
-                snapshot_key = (pin["source"], pin["snapshot_date"])
-                snapshot = self.snapshot_rows.get(snapshot_key)
-                if snapshot is not None and any(
-                    snapshot[key] != pin[key] for key in ("base_url", "sidecar_sha256")
-                ):
-                    return subprocess.CompletedProcess(
-                        command, 3, "",
-                        f"ERROR: CORPUS_SNAPSHOT_CONFLICT:{pin['source']}:{pin['snapshot_date']}\n",
-                    )
+                for pin in payload["sources"]:
+                    snapshot = self.snapshot_rows.get((pin["source"], pin["snapshot_date"]))
+                    if snapshot is not None and any(
+                        snapshot[key] != pin[key] for key in ("base_url", "sidecar_sha256")
+                    ):
+                        return subprocess.CompletedProcess(
+                            command, 3, "",
+                            f"ERROR: CORPUS_SNAPSHOT_CONFLICT:{pin['source']}:{pin['snapshot_date']}\n",
+                        )
                 if (payload.get("install") is True and held is not None
                     and held["state"] == "superseded"):
                     return subprocess.CompletedProcess(
@@ -489,14 +503,17 @@ class FakeHost(RealHost):
                     self.record_rows[payload["label"]] = held
                 if payload.get("install") is True and held["state"] == "cut":
                     held["state"] = "installing"
-                if snapshot is None:
-                    self.snapshot_rows[snapshot_key] = {
-                        **pin, "verified_at": payload["verified_at"],
-                    }
-                else:
-                    snapshot.update(
-                        mirror_url=pin["mirror_url"], verified_at=payload["verified_at"],
-                    )
+                for pin in payload["sources"]:
+                    snapshot_key = (pin["source"], pin["snapshot_date"])
+                    snapshot = self.snapshot_rows.get(snapshot_key)
+                    if snapshot is None:
+                        self.snapshot_rows[snapshot_key] = {
+                            **pin, "verified_at": payload["verified_at"],
+                        }
+                    else:
+                        snapshot.update(
+                            mirror_url=pin["mirror_url"], verified_at=payload["verified_at"],
+                        )
                 self.last_payload = payload
                 return subprocess.CompletedProcess(command, 0, "", "")
             assert "jsonb_build_object" in input
@@ -594,7 +611,7 @@ class Install(unittest.TestCase):
 
     def _set_mirror(self) -> None:
         path = self.checkout / "corpus/lockfiles" / f"{self.labels[0]}.yaml"
-        result = load_lockfile(path, known_sources={"example": self.source.carries_courts})
+        result = load_lockfile(path, known_sources={self.source.name: self.source})
         assert result.lockfile is not None
         lockfile = result.lockfile
         pin = lockfile.sources["example"]
@@ -604,7 +621,7 @@ class Install(unittest.TestCase):
 
     def _hold_record(self, state: str, label: str | None = None) -> None:
         path = self.checkout / "corpus/lockfiles" / f"{label or self.labels[0]}.yaml"
-        loaded = load_lockfile(path, known_sources={"example": self.source.carries_courts})
+        loaded = load_lockfile(path, known_sources={self.source.name: self.source})
         assert loaded.lockfile is not None
         lockfile = loaded.lockfile
         pin = lockfile.sources["example"]
@@ -633,7 +650,7 @@ class Install(unittest.TestCase):
 
         for label in self.labels:
             lock_path = self.checkout / "corpus/lockfiles" / f"{label}.yaml"
-            loaded = load_lockfile(lock_path, known_sources={"example": False})
+            loaded = load_lockfile(lock_path, known_sources={self.source.name: self.source})
             assert loaded.lockfile is not None
             lockfile = loaded.lockfile
             pin = lockfile.sources["example"]
@@ -669,7 +686,7 @@ class Install(unittest.TestCase):
 
     def _seed_complete_stage(self) -> Path:
         lock_path = self.checkout / "corpus/lockfiles" / f"{self.labels[0]}.yaml"
-        loaded = load_lockfile(lock_path, known_sources={"example": True})
+        loaded = load_lockfile(lock_path, known_sources={self.source.name: self.source})
         assert loaded.lockfile is not None
         pin = loaded.lockfile.sources["example"]
         entries = {entry.path: entry for entry in pin.entries}
@@ -685,9 +702,41 @@ class Install(unittest.TestCase):
         self.host._write_stage(91, args)
         return staging.work_directory(self.labels[0], "example", work_root=self.work)
 
+    def _add_captured_source(self) -> tuple[SourceDefinition, Path, Path]:
+        """Add one visibly fictitious saved page to the two install fixtures."""
+        source = SourceDefinition(
+            "saved-example", "https://capture.example.invalid/table", False, (),
+            lambda: (), lambda _: report.Problem("Fictitious captured source", "Use its saved page."),
+            captured_file="saved.html",
+        )
+        data = b"<!doctype html><title>Fictitious saved install page</title>\n"
+        entry = SidecarEntry("saved.html", hashlib.sha256(data).hexdigest(), len(data))
+        sidecar = render_sidecar((entry,))
+        pin = SourcePin(
+            "2099-01-04", source.base_url, None,
+            hashlib.sha256(sidecar.encode()).hexdigest(), 1, len(data),
+            (IndexDocument(entry.path, source.base_url, entry.sha256, entry.size),),
+            (entry,), captured=True,
+        )
+        directory = self.checkout / "corpus/lockfiles"
+        for label in self.labels:
+            loaded = load_lockfile(directory / f"{label}.yaml", known_sources={
+                self.source.name: self.source,
+            })
+            assert loaded.lockfile is not None
+            (directory / label / f"{source.name}.sha256").write_text(sidecar)
+            (directory / label / f"{source.name}.{entry.path}").write_bytes(data)
+            (directory / f"{label}.yaml").write_text(render_lockfile(replace(
+                loaded.lockfile, sources={**loaded.lockfile.sources, source.name: pin},
+            )))
+        companion = directory / self.labels[0] / f"{source.name}.{entry.path}"
+        target = self.snapshots / fetch.snapshot_destination(source.name, pin.snapshot_date, entry.path)
+        return source, companion, target
+
     def run_install(
         self, label: str | None = None, *, sleep: Callable[[float], None] | None = None,
         monotonic: Callable[[], float] | None = None,
+        sources: tuple[SourceDefinition, ...] | None = None,
     ) -> tuple[int, str, str]:
         self.host.current_label = label or self.labels[0]
         out, err = io.StringIO(), io.StringIO()
@@ -698,13 +747,113 @@ class Install(unittest.TestCase):
                 snapshots_root=self.snapshots, work_root=self.work, clock=lambda: NOW,
                 sleep=sleep or (lambda _seconds: None),
                 monotonic=monotonic or (lambda: 0.0),
-                sources=(self.source,),
+                sources=sources if sources is not None else (self.source,),
             )
         return code, out.getvalue(), err.getvalue()
 
     def _assert_removal_fix(self, out: str) -> None:
         self.assertIn(f"remove {self.file} and {self.record_file}", out.lower())
         self.assertIn(report.command("corpus install"), out)
+
+    def test_captured_copy_seeded_verified_recorded_and_retained(self) -> None:
+        self._enable_stage()
+        source, companion, target = self._add_captured_source()
+        code, out, err = self.run_install(sources=(self.source, source))
+        self.assertEqual(code, 0, out + err)
+        data = companion.read_bytes()
+        self.assertEqual(target.read_bytes(), data)
+        self.assertIn(f"fetch: ok — {source.name}: 1 files, {len(data)} bytes; no fetches deferred", out)
+        self.assertIn(f"{source.name} 2099-01-04", out)
+        record_path = target.with_name(target.name + worker_identity.RECORD_SUFFIX)
+        seeded = json.loads(record_path.read_text())
+        self.assertEqual((seeded["form"], seeded["job"]), (worker_identity.SEEDED_FORM, None))
+        self.assertEqual((seeded["host"], seeded["path"]),
+                         (urlsplit(source.base_url).hostname, urlsplit(source.base_url).path))
+        self.assertEqual((seeded["size"], seeded["sha256"]),
+                         (len(data), hashlib.sha256(data).hexdigest()))
+        self.assertEqual(self.host.seed_writes, [target, record_path])
+        self.assertEqual(self.host.deferred_urls, [])
+        self.assertIn(["sha256sum", str(target)], self.host.calls)
+        self.assertIn("files match fetch records and pinned sidecars", out)
+        self.assertEqual(self.host.snapshot_rows[(source.name, "2099-01-04")]["fetched_at"],
+                         seeded["fetched_at"])
+        self.assertEqual(self.host.record_rows[self.labels[0]]["sources"], [
+            {"source": self.source.name, "snapshot_date": "2099-01-02"},
+            {"source": source.name, "snapshot_date": "2099-01-04"},
+        ])
+        for args in (*self.host.stage_deferred, *self.host.caselaw_deferred,
+                     *self.host.agreement_deferred):
+            self.assertTrue(args["snapshot"].startswith(f"{self.source.name}-"))
+        self.assertEqual(len(self.host.stage_deferred), 1)
+        self.assertEqual(len(self.host.caselaw_deferred), len(self.source.first_courts))
+        self.assertEqual(len(self.host.agreement_deferred), len(self.source.first_courts))
+        self.assertFalse((self.work / self.labels[0] / source.name).exists())
+        self.assertTrue(target.parent.is_dir())
+        self.assertNotIn(target.parent, self.host.removed_dirs)
+        self.assertIn(f"retain: ok — 2 kept ({self.labels[0]})", out)
+
+    def test_install_keeps_an_equal_captured_snapshot_without_seed_writes(self) -> None:
+        source, companion, target = self._add_captured_source()
+        self.assertEqual(self.run_install(sources=(self.source, source))[0], 0)
+        record_path = target.with_name(target.name + worker_identity.RECORD_SUFFIX)
+        before = record_path.read_bytes()
+        self.host.seed_writes.clear()
+        self.host.chown_calls.clear()
+        code, out, err = self.run_install(sources=(self.source, source))
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(target.read_bytes(), companion.read_bytes())
+        self.assertEqual(record_path.read_bytes(), before)
+        self.assertEqual(self.host.seed_writes, [])
+        self.assertEqual(self.host.chown_calls, [])
+        self.assertEqual(self.host.deferred_urls, [])
+
+    def test_unreadable_captured_copy_refuses_at_fetch(self) -> None:
+        source, companion, target = self._add_captured_source()
+        read_bytes = self.host.read_bytes
+        reads = 0
+
+        def unreadable_on_fetch(path: PathLike) -> bytes:
+            nonlocal reads
+            if Path(path) == companion:
+                reads += 1
+                if reads == 2:
+                    raise OSError("fictitious unreadable committed page")
+            return read_bytes(path)
+
+        with patch.object(self.host, "read_bytes", side_effect=unreadable_on_fetch):
+            code, out, err = self.run_install(sources=(self.source, source))
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("preconditions: ok", out)
+        self.assertIn("fetch: refuse", out)
+        self.assertIn(str(companion), out)
+        self.assertIn("Restore the lockfile and its companion files from the release checkout", out)
+        self.assertFalse(target.exists())
+        self.assertEqual(self.host.seed_writes, [])
+        self.assertEqual(self.host.deferred_urls, [])
+        self.assertEqual(self.host.record_writes, 0)
+
+    def test_different_captured_snapshot_refuses_with_removal_fix(self) -> None:
+        source, _, target = self._add_captured_source()
+        other = b"A different visibly fictitious saved page.\n"
+        target.parent.mkdir(parents=True)
+        target.write_bytes(other)
+        record_path = target.with_name(target.name + worker_identity.RECORD_SUFFIX)
+        record_path.write_text(json.dumps(dict(
+            _whole_record(other, source.base_url, 1), form=worker_identity.SEEDED_FORM,
+            job=None, seconds=0.0,
+        )))
+        before = record_path.read_bytes()
+        code, out, err = self.run_install(sources=(self.source, source))
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("fetch: refuse", out)
+        self.assertIn("different bytes", out)
+        self.assertIn(f"Remove {target} and {record_path}", out)
+        self.assertIn(report.command("corpus install"), out)
+        self.assertEqual(target.read_bytes(), other)
+        self.assertEqual(record_path.read_bytes(), before)
+        self.assertEqual(self.host.seed_writes, [])
+        self.assertEqual(self.host.deferred_urls, [])
+        self.assertEqual(self.host.record_writes, 0)
 
     def test_ok_path_keeps_existing_file(self) -> None:
         code, out, err = self.run_install()
@@ -724,7 +873,7 @@ class Install(unittest.TestCase):
 
     def test_preconditions_refuse_unregistered_pipeline_before_fetch(self) -> None:
         path = self.checkout / "corpus/lockfiles" / f"{self.labels[0]}.yaml"
-        loaded = load_lockfile(path, known_sources={"example": False})
+        loaded = load_lockfile(path, known_sources={self.source.name: self.source})
         assert loaded.lockfile is not None
         path.write_text(render_lockfile(replace(loaded.lockfile, pipeline="9.9.9")))
         code, out, err = self.run_install()
@@ -1475,7 +1624,7 @@ class Install(unittest.TestCase):
     def _derive_second_label(self) -> None:
         directory = self.checkout / "corpus/lockfiles"
         loaded = load_lockfile(directory / f"{self.labels[0]}.yaml",
-                               known_sources={"example": self.source.carries_courts})
+                               known_sources={self.source.name: self.source})
         assert loaded.lockfile is not None
         shutil.rmtree(directory / self.labels[1])
         shutil.copytree(directory / self.labels[0], directory / self.labels[1])
@@ -1666,7 +1815,7 @@ class Install(unittest.TestCase):
         first, second = self.labels[:2]
         first_lock = load_lockfile(
             self.checkout / "corpus/lockfiles" / f"{first}.yaml",
-            known_sources={"example": self.source.carries_courts},
+            known_sources={self.source.name: self.source},
         ).lockfile
         assert first_lock is not None
         second_lock_path = self.checkout / "corpus/lockfiles" / f"{second}.yaml"

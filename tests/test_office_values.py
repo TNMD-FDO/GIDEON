@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
+from gideon.host.corpus.sources import SOURCES
 from gideon.host.egress import load_egress_allowlist
 from gideon.host.images import LIBVIRT_BRIDGE_CIDR
 from gideon.host.site import FIELD_REGISTRY
@@ -204,6 +205,22 @@ def _is_built_deck(relative: Path) -> bool:
     )
 
 
+# A captured source's page is a third party's bytes pinned by digest: the release
+# maintainer's saved copy under corpus/captures/ and the cut's committed copy beside
+# its lockfile. Its own links name public domains no edit may change, so the public
+# domain rule is waived there; every office-value rule still reads it.
+_CAPTURED_PAGES = frozenset(
+    f"{source.name}.{source.captured_file}" for source in SOURCES if source.captured
+)
+
+
+def _is_captured_page(relative: Path) -> bool:
+    parts = relative.parts
+    if parts[:2] == ("corpus", "captures"):
+        return len(parts) == 3
+    return len(parts) == 4 and parts[:2] == ("corpus", "lockfiles") and parts[3] in _CAPTURED_PAGES
+
+
 def _walk(root: Path) -> Iterator[Path]:
     skill_directories = _skill_directories(root)
     for path in sorted(root.rglob("*")):
@@ -372,6 +389,7 @@ def _hostname_finding(
     hostname_position: bool,
     allowlist: frozenset[str],
     public_suffixes: frozenset[str],
+    third_party: bool = False,
 ) -> _Finding | None:
     labels = token.rstrip(".").lower().split(".")
     if len(labels) < 2 or all(label.isdigit() for label in labels):
@@ -388,7 +406,7 @@ def _hostname_finding(
             f"hostname {token} uses a private-use suffix",
             "replace it with a documentation value — RFC 2606 — or the site key's placeholder",
         )
-    if allowed:
+    if allowed or third_party:
         return None
     if final in public_suffixes:
         return _Finding(
@@ -422,6 +440,7 @@ def _hostname_findings(
     forced: bool,
     allowlist: frozenset[str],
     public_suffixes: frozenset[str],
+    third_party: bool = False,
 ) -> list[_Finding]:
     findings: list[_Finding] = []
     for match in _DOTTED_TOKEN.finditer(line):
@@ -441,6 +460,7 @@ def _hostname_findings(
             hostname_position=_is_hostname_position(line, match.start(), forced=forced),
             allowlist=allowlist,
             public_suffixes=public_suffixes,
+            third_party=third_party,
         )
         if finding is not None:
             findings.append(finding)
@@ -493,6 +513,7 @@ def _text_findings(
     *,
     allowlist: frozenset[str],
     public_suffixes: frozenset[str],
+    third_party: bool = False,
 ) -> list[_Finding]:
     findings: list[_Finding] = []
     if path.suffix.lower() == ".py":
@@ -535,6 +556,7 @@ def _text_findings(
                 forced=_yaml_site_key(line) if path.suffix.lower() in {".yaml", ".yml"} else False,
                 allowlist=allowlist,
                 public_suffixes=public_suffixes,
+                third_party=third_party,
             )
         )
         findings.extend(_dn_findings(path, line_number, line))
@@ -571,6 +593,7 @@ def findings(root: Path) -> list[str]:
                 text,
                 allowlist=allowlist,
                 public_suffixes=public_suffixes,
+                third_party=_is_captured_page(path.relative_to(root)),
             )
         )
     twin = _twin_finding(root)
@@ -676,6 +699,17 @@ class OfficeValueTripwireTests(unittest.TestCase):
                 f"private: {private_host}\n",
                 encoding="utf-8",
             )
+            captured_name = sorted(_CAPTURED_PAGES)[0]
+            (root / "corpus" / "lockfiles" / "corpus-2099-01-01").mkdir(parents=True)
+            (root / "corpus" / "lockfiles" / "corpus-2099-01-01" / captured_name).write_text(
+                f"<script src=https://{public_host}/a.js></script>\n"
+                f"private: {private_host}\n",
+                encoding="utf-8",
+            )
+            (root / "corpus" / "lockfiles" / "corpus-2099-01-01" / "other.html").write_text(
+                f"public: {public_host}\n",
+                encoding="utf-8",
+            )
             seeded = findings(root)
         located = {
             (Path(match.group(1)).name, int(match.group(2)))
@@ -711,6 +745,11 @@ class OfficeValueTripwireTests(unittest.TestCase):
         # A skill's Codex state is skipped; the skill's other files are scanned.
         self.assertNotIn(("run.log", 1), located)
         self.assertIn(("SKILL.md", 1), located)
+        # A captured page's own public links are its source's; a private suffix in it
+        # is still a finding, and a page of another name beside a lockfile is judged whole.
+        self.assertNotIn((captured_name, 1), located)
+        self.assertIn((captured_name, 2), located)
+        self.assertIn(("other.html", 1), located)
         self.assertIn("private-use suffix", text)
         self.assertIn("unallowlisted public domain", text)
         self.assertIn(f"hostname {unusual_host} appears in a hostname position", text)

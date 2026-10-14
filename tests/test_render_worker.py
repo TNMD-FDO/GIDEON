@@ -99,7 +99,7 @@ class WorkerIdentity(unittest.TestCase):
             (
                 worker.FETCH_TASK, worker.FETCH_QUEUE, worker.SNAPSHOTS_ROOT,
                 worker.DIR_MODE, worker.RESOLVE_DIR, worker.KEPT_FORM,
-                worker.FRESH_FORM, worker.RECORD_SUFFIX, worker.FAILURE_SUFFIX,
+                worker.FRESH_FORM, worker.SEEDED_FORM, worker.RECORD_SUFFIX, worker.FAILURE_SUFFIX,
                 worker.RESERVED_SUFFIXES, worker.LANE_COUNT,
                 worker.SEGMENT_PATTERN, worker.SOURCE_PATTERN, worker.DNS_PATTERN,
                 worker.URL_MAX_LENGTH, worker.FAILURE_REASONS,
@@ -107,7 +107,7 @@ class WorkerIdentity(unittest.TestCase):
             (
                 fetch.FETCH_TASK, fetch.FETCH_QUEUE, fetch.SNAPSHOTS_ROOT,
                 fetch.DIR_MODE, fetch.RESOLVE_DIR, fetch.KEPT_FORM,
-                fetch.FRESH_FORM, fetch.RECORD_SUFFIX, fetch.FAILURE_SUFFIX,
+                fetch.FRESH_FORM, fetch.SEEDED_FORM, fetch.RECORD_SUFFIX, fetch.FAILURE_SUFFIX,
                 fetch.RESERVED_SUFFIXES, fetch.LANE_COUNT,
                 fetch.SEGMENT_PATTERN, fetch.SOURCE_PATTERN, fetch.DNS_PATTERN,
                 fetch.URL_MAX_LENGTH, fetch.FAILURE_REASONS,

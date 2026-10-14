@@ -1,4 +1,4 @@
-"""Observe upstream corpus indexes and record whether a cut is due."""
+"""Observe fetched corpus indexes and recorded captured snapshots."""
 
 import argparse
 import sys
@@ -79,34 +79,40 @@ def _preconditions(
                 "Correct the source definitions in the release, then run "
                 f"{report.command('corpus watch')} again.",
             ), None, {}
-        requests = source.index_documents()
-        if not requests:
+        requests = () if source.captured else source.index_documents()
+        if not source.captured and not requests:
             return StageResult(
                 "preconditions", False, f"source {source.name} has no index documents",
                 "Correct the source's index documents in the release, then run "
                 f"{report.command('corpus watch')} again.",
             ), None, {}
-        for request in requests:
+        addresses = (
+            ((None, source.base_url),) if source.captured
+            else tuple((request.name, request.url) for request in requests)
+        )
+        for name, url in addresses:
             try:
-                parsed = urlsplit(request.url)
+                parsed = urlsplit(url)
                 scheme, hostname, port = parsed.scheme, parsed.hostname, parsed.port
             except ValueError:
                 scheme, hostname, port = "", None, None
             if scheme != "https" or hostname is None or port not in (None, 443):
+                subject = f"source {source.name}" + (f" index {name}" if name is not None else "")
+                field = "URL" if source.captured else "index URL"
                 return StageResult(
                     "preconditions", False,
-                    f"source {source.name} index {request.name} has an invalid HTTPS URL",
-                    "Correct the source's index URL in the release, then run "
+                    f"{subject} has an invalid HTTPS URL",
+                    f"Correct the source's {field} in the release, then run "
                     f"{report.command('corpus watch')} again.",
                 ), None, {}
-            if hostname not in allowed:
+            if not source.captured and hostname not in allowed:
                 return StageResult(
                     "preconditions", False,
                     f"source {source.name} index host {hostname} is outside the corpus allowlist",
                     f"Add {hostname} to the corpus group in config/egress.yaml, "
                     f"run {report.command('apply')}, then run {report.command('corpus watch')} again.",
                 ), None, {}
-        urls[source.name] = requests[0].url
+        urls[source.name] = source.base_url if source.captured else requests[0].url
     claim = backuplock.claim(
         host, command=report.command_name("corpus watch"), now=clock(),
         lock=backuplock.CORPUS_LOCK,
@@ -137,11 +143,34 @@ def _observe(
     sleep: Callable[[float], None],
     monotonic: Callable[[], float],
 ) -> tuple[tuple[record.Observation, ...], bool]:
-    health = worker.worker_preconditions(host, rendered_dir, command_path="corpus watch")
+    health = (
+        worker.worker_preconditions(host, rendered_dir, command_path="corpus watch")
+        if any(not source.captured for source in sources) else None
+    )
+    lockfiles = (
+        record.read_lockfiles(host, rendered_dir, command_path="corpus watch")
+        if any(source.captured for source in sources) else ()
+    )
     observations: list[record.Observation] = []
     all_ok = True
     for source in sources:
-        if health.ok:
+        latest_label: str | None = None
+        issue: Problem | None = None
+        reason: str | None = None
+        if source.captured:
+            if isinstance(lockfiles, Problem):
+                reason, issue = "local", lockfiles
+            else:
+                latest_label = max(
+                    (binding.snapshot_date for row in lockfiles for binding in row.sources
+                     if binding.source == source.name), default=None,
+                )
+                if latest_label is None:
+                    report.print_stage(StageResult(
+                        "observe", True, f"{source.name}: not yet cut or installed here", "",
+                    ))
+                    continue
+        elif health is not None and health.ok:
             result = resolve.resolve_source(
                 host, rendered_dir, snapshots_root, source, command_path="corpus watch",
                 sleep=sleep, monotonic=monotonic,
@@ -150,17 +179,21 @@ def _observe(
                 reason = result.reason
                 issue = result.problem
             else:
-                observations.append(record.Observation(
-                    source.name, observed_at, "observed", result.snapshot.snapshot_date,
-                    None, urls[source.name], None,
-                ))
-                report.print_stage(StageResult(
-                    "observe", True, f"{source.name}: {result.snapshot.snapshot_date}", ""
-                ))
-                continue
+                latest_label = result.snapshot.snapshot_date
         else:
+            assert health is not None
             reason = "worker-unavailable"
             issue = Problem(health.detail, resolve.retry_fix(health.fix, "corpus watch"))
+        if latest_label is not None:
+            observations.append(record.Observation(
+                source.name, observed_at, "observed", latest_label,
+                None, urls[source.name], None,
+            ))
+            report.print_stage(StageResult(
+                "observe", True, f"{source.name}: {latest_label}", ""
+            ))
+            continue
+        assert issue is not None and reason is not None
         observations.append(record.Observation(
             source.name, observed_at, "unanswered", None, None, urls[source.name], reason,
         ))

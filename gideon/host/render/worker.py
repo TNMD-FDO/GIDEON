@@ -106,6 +106,8 @@ DIR_MODE: Final[int] = 0o2770
 RESOLVE_DIR: Final[str] = "resolve"
 KEPT_FORM: Final[str] = "kept"
 FRESH_FORM: Final[str] = "fresh"
+# A file the host copied from the release checkout, with no job.
+SEEDED_FORM: Final[str] = "seeded"
 RECORD_SUFFIX: Final[str] = ".fetch.json"
 FAILURE_SUFFIX: Final[str] = ".fetch-failed.json"
 PARTIAL_SUFFIX: Final[str] = ".partial"

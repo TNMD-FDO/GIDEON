@@ -14,7 +14,12 @@ from typing import cast
 from gideon.host import backupset, fetch, report, stack
 from gideon.host.render import worker
 from gideon.host.sysio import Command, PathLike, RealHost
-from gideon.worker.fetch import FetchFailure, validate_destination, validate_url
+from gideon.worker.fetch import (
+    FILE_MODE,
+    FetchFailure,
+    validate_destination,
+    validate_url,
+)
 
 RENDERED = "/rendered"
 SNAPSHOTS = "/snapshots"
@@ -31,6 +36,7 @@ class FakeHost(RealHost):
         self.calls: list[tuple[list[str], str | None]] = []
         self.files: dict[str, str] = {}
         self.sizes: dict[str, int] = {}
+        self.writes: list[tuple[str, str, int]] = []
 
     def run(
         self,
@@ -63,6 +69,13 @@ class FakeHost(RealHost):
     def stat(self, path: PathLike) -> os.stat_result:
         size = self.sizes[str(path)]
         return os.stat_result((stat.S_IFREG | 0o440, 0, 0, 1, 0, 0, size, 0, 0, 0))
+
+    def write_text(
+        self, path: PathLike, text: str, *, encoding: str = "utf-8", mode: int = 0o644,
+    ) -> None:
+        del encoding
+        self.files[str(path)] = text
+        self.writes.append((str(path), text, mode))
 
 
 def record_for(body: bytes = b"Fictitious corpus bytes") -> dict[str, object]:
@@ -98,7 +111,7 @@ class FetchHost(unittest.TestCase):
                     "Fix: keep snapshots outside every backup inventory root.",
                 )
 
-    def test_host_and_worker_grammars_agree(self) -> None:
+    def test_transfer_grammars_and_host_seeded_destinations(self) -> None:
         destinations = (
             (DESTINATION, worker.KEPT_FORM, True),
             ("resolve/index.json", worker.FRESH_FORM, True),
@@ -109,6 +122,11 @@ class FetchHost(unittest.TestCase):
             ("fictions-2026-13-30/file", worker.KEPT_FORM, False),
             ("fictions-2026-09-30/file.partial", worker.KEPT_FORM, False),
             ("fictions-2026-09-30/" + "/".join(["part"] * 8), worker.KEPT_FORM, False),
+            (DESTINATION, worker.SEEDED_FORM, True),
+            ("resolve/index.json", worker.SEEDED_FORM, False),
+            ("fictions-2026-02-30/file", worker.SEEDED_FORM, False),
+            ("fictions-2026-09-30/../outside", worker.SEEDED_FORM, False),
+            ("fictions-2026-09-30/file.fetch.json", worker.SEEDED_FORM, False),
         )
         for destination, form, expected in destinations:
             with self.subTest(destination=destination, form=form):
@@ -119,7 +137,9 @@ class FetchHost(unittest.TestCase):
                     worker_accepts = False
                 else:
                     worker_accepts = True
-                self.assertEqual((host_accepts, worker_accepts), (expected, expected))
+                # Only the host reads/writes seeded files; a worker transfer refuses them.
+                self.assertEqual((host_accepts, worker_accepts),
+                                 (expected, expected and form != worker.SEEDED_FORM))
         addresses = (
             (URL, True),
             ("https://archive.example.test:443/path?query=yes", True),
@@ -155,6 +175,7 @@ class FetchHost(unittest.TestCase):
             ("fictions-2026-13-30/file", worker.KEPT_FORM, URL),
             ("fictions-2026-09-30/file.fetch.json", worker.KEPT_FORM, URL),
             (DESTINATION, "unknown", URL),
+            (DESTINATION, worker.SEEDED_FORM, URL),
             (DESTINATION, worker.KEPT_FORM, "http://archive.example.test/file"),
             (DESTINATION, worker.KEPT_FORM, "https://User@archive.example.test/file"),
             (DESTINATION, worker.KEPT_FORM, "https://archive.example.test:444/file"),
@@ -340,6 +361,92 @@ class FetchHost(unittest.TestCase):
                              snapshots_root=SNAPSHOTS),
             report.Problem,
         )
+
+    def test_seeded_record_is_whole_only_under_a_dated_destination(self) -> None:
+        expected = dict(record_for(), form=worker.SEEDED_FORM, job=None,
+                        seconds=0.0, resumes=0, etag=None, last_modified=None)
+        for destination, accepted in ((DESTINATION, True), ("resolve/index.json", False)):
+            with self.subTest(destination=destination):
+                host = FakeHost()
+                host.files[f"{SNAPSHOTS}/{destination}{worker.RECORD_SUFFIX}"] = json.dumps(expected)
+                host.sizes[f"{SNAPSHOTS}/{destination}"] = cast(int, expected["size"])
+                result = fetch.read_record(host, destination, snapshots_root=SNAPSHOTS)
+                if accepted:
+                    self.assertIsInstance(result, fetch.FetchRecord)
+                    assert isinstance(result, fetch.FetchRecord)
+                    self.assertEqual(asdict(result), expected)
+                else:
+                    self.assertIsInstance(result, report.Problem)
+                self.assertEqual(host.calls, [])
+
+    def test_seeded_record_rules_refuse_independent_faults(self) -> None:
+        expected = dict(record_for(), form=worker.SEEDED_FORM, job=None,
+                        seconds=0.0, resumes=0, etag=None, last_modified=None)
+        cases = (
+            ("job", JOB_ID), ("job", False), ("seconds", 0.1), ("seconds", True),
+            ("resumes", 1), ("resumes", False), ("etag", '"fictitious-etag"'),
+            ("last_modified", "Tue, 06 Oct 2026 00:00:00 GMT"),
+            ("total", None), ("total", cast(int, expected["size"]) + 1),
+            ("host", "https://archive.example.test"), ("host", "UPPER.example.test"),
+            ("path", "relative/path"), ("path", "/path?query"),
+            ("fetched_at", "2026-10-06T12:00:00"), ("state", "partial"),
+        )
+        for field, value in cases:
+            with self.subTest(field=field, value=value):
+                host = FakeHost()
+                host.files[f"{SNAPSHOTS}/{DESTINATION}{worker.RECORD_SUFFIX}"] = json.dumps(
+                    dict(expected, **{field: value})
+                )
+                host.sizes[f"{SNAPSHOTS}/{DESTINATION}"] = cast(int, expected["size"])
+                result = fetch.read_record(host, DESTINATION, snapshots_root=SNAPSHOTS)
+                self.assertIsInstance(result, report.Problem)
+                assert isinstance(result, report.Problem)
+                self.assertTrue(result.fix)
+
+    def test_kept_and_fresh_records_still_require_a_job(self) -> None:
+        for destination, form in ((DESTINATION, worker.KEPT_FORM),
+                                  ("resolve/index.json", worker.FRESH_FORM)):
+            with self.subTest(form=form):
+                host = FakeHost()
+                record = dict(record_for(), form=form, job=None)
+                host.files[f"{SNAPSHOTS}/{destination}{worker.RECORD_SUFFIX}"] = json.dumps(record)
+                host.sizes[f"{SNAPSHOTS}/{destination}"] = cast(int, record["size"])
+                self.assertIsInstance(fetch.read_record(
+                    host, destination, snapshots_root=SNAPSHOTS,
+                ), report.Problem)
+
+    def test_write_seed_record_uses_only_the_text_seam(self) -> None:
+        host = FakeHost()
+        expected = dict(record_for(), form=worker.SEEDED_FORM, job=None,
+                        seconds=0.0, resumes=0, etag=None, last_modified=None)
+        fetch.write_seed_record(
+            host, SNAPSHOTS, DESTINATION, url=URL, size=cast(int, expected["size"]),
+            sha256=cast(str, expected["sha256"]), fetched_at=cast(str, expected["fetched_at"]),
+        )
+        self.assertEqual(len(host.writes), 1)
+        path, text, mode = host.writes[0]
+        self.assertEqual(path, f"{SNAPSHOTS}/{DESTINATION}{worker.RECORD_SUFFIX}")
+        self.assertEqual(json.loads(text), expected)
+        self.assertTrue(text.endswith("\n"))
+        self.assertNotIn("private-query", text)
+        self.assertEqual(mode, FILE_MODE)
+        host.sizes[f"{SNAPSHOTS}/{DESTINATION}"] = cast(int, expected["size"])
+        record = fetch.read_record(host, DESTINATION, snapshots_root=SNAPSHOTS)
+        assert isinstance(record, fetch.FetchRecord)
+        self.assertEqual(asdict(record), expected)
+        self.assertEqual(host.calls, [])
+
+    def test_seeded_form_cannot_defer_a_transfer(self) -> None:
+        host = FakeHost()
+        result = fetch.defer_fetch(
+            host, RENDERED, destination=DESTINATION, url=URL, form=worker.SEEDED_FORM,
+        )
+        self.assertIsInstance(result, report.Problem)
+        assert isinstance(result, report.Problem)
+        self.assertIn("seeded", result.problem)
+        self.assertTrue(result.fix)
+        self.assertEqual(host.calls, [])
+        self.assertEqual(host.writes, [])
 
 
 if __name__ == "__main__":

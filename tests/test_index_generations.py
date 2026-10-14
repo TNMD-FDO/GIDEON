@@ -72,7 +72,7 @@ class Names(unittest.TestCase):
 
 class Hashes(unittest.TestCase):
     def setUp(self) -> None:
-        loaded = load_lockfile(FIXTURE, known_sources={"example": True})
+        loaded = load_lockfile(FIXTURE, known_sources={"example": replace(SOURCES[0], name="example")})
         self.assertTrue(loaded.ok, render_errors(loaded.errors))
         assert loaded.lockfile is not None
         self.lockfile = loaded.lockfile

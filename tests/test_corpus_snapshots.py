@@ -4,17 +4,21 @@ import contextlib
 import hashlib
 import io
 import json
+import os
+import stat
 import subprocess
 import tempfile
 import unittest
 from collections.abc import Mapping
 from dataclasses import asdict, replace
+from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from gideon.host import fetch, report
 from gideon.host.corpus import snapshots
 from gideon.host.corpus.lockfile import SidecarEntry
-from gideon.host.render.worker import KEPT_FORM, RECORD_SUFFIX
+from gideon.host.render.worker import DIR_MODE, KEPT_FORM, RECORD_SUFFIX, SEEDED_FORM
 from gideon.host.sysio import Command, PathLike, RealHost
 
 SOURCE = "example"
@@ -41,6 +45,35 @@ class HashHost(RealHost):
     def __init__(self) -> None:
         super().__init__()
         self.calls: list[list[str]] = []
+        self.owners: dict[Path, tuple[int, int]] = {}
+        self.events: list[tuple[str, Path]] = []
+
+    def stat(self, path: PathLike) -> os.stat_result:
+        info = list(super().stat(path))
+        if Path(path) in self.owners:
+            info[4], info[5] = self.owners[Path(path)]
+        return os.stat_result(info)
+
+    def chown(self, path: PathLike, uid: int, gid: int) -> None:
+        self.owners[Path(path)] = (uid, gid)
+        self.events.append(("chown", Path(path)))
+
+    def mkdir(
+        self, path: PathLike, *, mode: int = 0o755,
+        parents: bool = False, exist_ok: bool = False,
+    ) -> None:
+        super().mkdir(path, mode=mode, parents=parents, exist_ok=exist_ok)
+        self.events.append(("mkdir", Path(path)))
+
+    def write_bytes(self, path: PathLike, data: bytes, *, mode: int = 0o644) -> None:
+        super().write_bytes(path, data, mode=mode)
+        self.events.append(("write_bytes", Path(path)))
+
+    def write_text(
+        self, path: PathLike, text: str, *, encoding: str = "utf-8", mode: int = 0o644,
+    ) -> None:
+        super().write_text(path, text, encoding=encoding, mode=mode)
+        self.events.append(("write_text", Path(path)))
 
     def run(
         self, argv: Command, *, check: bool = False, input: str | None = None,
@@ -191,6 +224,109 @@ class Files(unittest.TestCase):
         self.assertEqual(result.deferred, 0)
         self.assertEqual(result.deferred_paths, frozenset())
         self.assertEqual(self.host.calls, [])
+
+
+class Seeds(unittest.TestCase):
+    """Saved bytes are owned, recorded last, and never replace a whole snapshot."""
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.host = HashHost()
+        self.host.owners[self.root] = (1001, 2001)
+        self.destination = fetch.snapshot_destination(SOURCE, DATE, RELATIVE)
+        self.path = self.root / self.destination
+        self.record_path = self.root / f"{self.destination}{RECORD_SUFFIX}"
+        self.fix = "Save a fictitious capture under a new date, then retry the cut."
+
+    def seed(self, *, command_path: str = "corpus cut") -> snapshots.FetchedSource | report.Problem:
+        return snapshots.seed_source(
+            self.host, self.root, SOURCE, DATE, RELATIVE, DATA,
+            url=URL, now=datetime.fromisoformat(FETCHED_AT),
+            command_path=command_path, other_bytes_fix=self.fix,
+        )
+
+    def test_fresh_seed_bytes_records_ownership_and_completion_order(self) -> None:
+        result = self.seed()
+        assert isinstance(result, snapshots.FetchedSource)
+        self.assertEqual(self.path.read_bytes(), DATA)
+        record = result.records[RELATIVE]
+        self.assertEqual((record.form, record.job, record.sha256, record.size), (
+            SEEDED_FORM, None, hashlib.sha256(DATA).hexdigest(), len(DATA),
+        ))
+        self.assertEqual(record.fetched_at, FETCHED_AT)
+        self.assertEqual((record.host, record.path), ("source.example.test", "/objects/example.txt"))
+        self.assertEqual(json.loads(self.record_path.read_text()), asdict(record))
+        self.assertEqual((result.deferred, result.deferred_paths), (0, frozenset()))
+        self.assertEqual(result.latest_fetch(), record.fetched_at)
+        directories = (self.root / self.destination.split("/")[0], self.path.parent)
+        for directory in directories:
+            self.assertEqual(stat.S_IMODE(directory.stat().st_mode), DIR_MODE)
+        for path in (*directories, self.path, self.record_path):
+            self.assertEqual(self.host.owners[path], self.host.owners[self.root])
+        for path in (self.path, self.record_path):
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o440)
+        writes = [event for event in self.host.events if event[0].startswith("write_")]
+        self.assertEqual(writes, [("write_bytes", self.path), ("write_text", self.record_path)])
+        self.assertLess(self.host.events.index(("chown", self.path)),
+                        self.host.events.index(("write_text", self.record_path)))
+        self.assertEqual(self.host.calls, [])
+
+    def test_equal_whole_record_kept_without_any_mutation(self) -> None:
+        self.path.parent.mkdir(parents=True)
+        self.path.write_bytes(DATA)
+        existing = _record(DATA)
+        self.record_path.write_text(json.dumps(asdict(existing)))
+        result = self.seed()
+        assert isinstance(result, snapshots.FetchedSource)
+        self.assertEqual(result.records[RELATIVE], existing)
+        self.assertEqual((result.deferred, result.deferred_paths), (0, frozenset()))
+        self.assertEqual(self.host.events, [])
+        self.assertEqual(self.host.calls, [])
+
+    def test_different_whole_copy_refuses_with_callers_fix(self) -> None:
+        self.path.parent.mkdir(parents=True)
+        other = b"a different fictitious snapshot"
+        self.path.write_bytes(other)
+        self.record_path.write_text(json.dumps(asdict(_record(other))))
+        before = self.record_path.read_bytes()
+        for command_path in ("corpus cut", "corpus install"):
+            with self.subTest(command_path=command_path):
+                result = self.seed(command_path=command_path)
+                assert isinstance(result, report.Problem)
+                self.assertIn(str(self.path), result.problem)
+                self.assertIn("different bytes", result.problem)
+                self.assertEqual(result.fix, self.fix)
+        self.assertEqual(self.path.read_bytes(), other)
+        self.assertEqual(self.record_path.read_bytes(), before)
+        self.assertEqual(self.host.events, [])
+
+    def test_present_without_record_keeps_removal_refusal(self) -> None:
+        self.path.parent.mkdir(parents=True)
+        self.path.write_bytes(DATA)
+        result = self.seed()
+        assert isinstance(result, report.Problem)
+        self.assertIn("present without a whole fetch record", result.problem)
+        self.assertEqual(result.fix, snapshots.refetch_fix(self.path, command_path="corpus cut"))
+        self.assertEqual(self.host.events, [])
+        self.assertEqual(self.host.calls, [])
+
+    def test_record_write_sees_owned_bytes_and_failure_leaves_no_whole_record(self) -> None:
+        def refuse_record(*args: object, **kwargs: object) -> None:
+            self.assertEqual(self.path.read_bytes(), DATA)
+            self.assertEqual(self.host.owners[self.path], self.host.owners[self.root])
+            self.assertFalse(self.record_path.exists())
+            raise OSError("fictitious record write failure")
+
+        with patch.object(self.host, "write_text", side_effect=refuse_record):
+            result = self.seed()
+        assert isinstance(result, report.Problem)
+        self.assertIn("could not be seeded", result.problem)
+        self.assertFalse(self.record_path.exists())
+        result = self.seed()
+        assert isinstance(result, report.Problem)
+        self.assertIn("present without a whole fetch record", result.problem)
 
 
 class Summary(unittest.TestCase):

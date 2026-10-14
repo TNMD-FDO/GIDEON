@@ -1,0 +1,33 @@
+# Written by the corpus cut command; edit mirror_url alone.
+schema: 1
+label: corpus-2099-01-09
+pipeline: 1.0.0
+cut_at: '2099-01-09T04:05:06Z'
+reason: instrument
+sources:
+  example:
+    snapshot_date: '2099-01-02'
+    base_url: https://example.invalid/archive/
+    mirror_url: null
+    sidecar_sha256: 7eae47fcdbf3885c5ed252be410c902824e2148df65c64fdbd5336961268c28a
+    files: 1
+    bytes: 7
+    index:
+    - name: listing.xml
+      url: https://example.invalid/listing
+      sha256: f8377e6e8b6cda7d0d245ea7f13b14ac7874cfba10ead0b0a5f9a942eca5129d
+      size: 38
+    courts:
+    - ca6
+  saved-example:
+    snapshot_date: '2099-01-09'
+    base_url: https://capture.example.invalid/table
+    mirror_url: null
+    sidecar_sha256: 29f4da3a28b0aac0a453e80546f734f175e02687c0b14d76a8ac822dd761c159
+    files: 1
+    bytes: 57
+    index:
+    - name: saved.html
+      url: https://capture.example.invalid/table
+      sha256: bf9a3ac15203601cfa60cde6cb424fd2cd129f5e4a767975560a3a5f993b4a84
+      size: 57

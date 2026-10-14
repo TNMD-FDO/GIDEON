@@ -22,3 +22,6 @@ __pycache__/
 docs/6-memo/presentations/*/*.html
 docs/6-memo/presentations/*/*.pptx
 docs/6-memo/presentations/*/*.pdf
+# a release maintainer's saved pages before a corpus cut, never committed: the cut
+# commits the bytes it pins beside the lockfile
+corpus/captures/

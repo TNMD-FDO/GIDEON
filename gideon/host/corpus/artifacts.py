@@ -71,7 +71,7 @@ def load_artifacts(
 
     directory = read_lockfile_directory(
         checkout / "corpus/lockfiles",
-        known_sources={source.name: source.carries_courts for source in registry}, host=host,
+        known_sources={source.name: source for source in registry}, host=host,
     )
     issue = artifact_problem(directory.errors, "corpus lockfiles", command_path=command_path)
     if issue is not None:

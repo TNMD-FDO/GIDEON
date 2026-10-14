@@ -1,4 +1,4 @@
-"""Definitions for sources a corpus cut can acquire."""
+"""Definitions for fetched and captured corpus sources."""
 
 import re
 import xml.etree.ElementTree as ET
@@ -13,6 +13,11 @@ CASELAW_LISTING_URL = (
     "https://com-courtlistener-storage.s3-us-west-2.amazonaws.com/"
     "?list-type=2&prefix=bulk-data/opinions-"
 )
+TREATMENT_URL = "https://constitution.congress.gov/resources/decisions-overruled/"
+TREATMENT_FILE = "decisions-overruled.html"
+TREATMENT_JOINED = "2026-10-14"
+CAPTURES_DIR = "corpus/captures"
+_CAPTURE_NAME = re.compile(r"(.+)-(\d{4}-\d{2}-\d{2})\.html")
 MAX_LISTING_BYTES = 4 * 1024 * 1024
 _S3_NAMESPACE = "http://s3.amazonaws.com/doc/2006-03-01/"
 _OPINIONS_KEY = re.compile(r"bulk-data/opinions-(\d{4}-\d{2}-\d{2})\.csv\.bz2")
@@ -55,6 +60,28 @@ class SourceDefinition:
     first_courts: tuple[str, ...]
     index_documents: Callable[[], tuple[IndexRequest, ...]]
     read_index: Callable[[Mapping[str, bytes]], SourceResolution | Problem]
+    captured_file: str | None = None
+    joined: str | None = None
+
+    @property
+    def captured(self) -> bool:
+        """Whether the source carries a saved file instead of fetched objects."""
+        return self.captured_file is not None
+
+
+def newest_capture(names: Sequence[str], source_name: str) -> str | None:
+    """Select the newest valid dated HTML capture for one source."""
+    captures: list[tuple[date, str]] = []
+    for name in names:
+        match = _CAPTURE_NAME.fullmatch(name)
+        if match is None or match.group(1) != source_name:
+            continue
+        try:
+            captured_date = date.fromisoformat(match.group(2))
+        except ValueError:
+            continue
+        captures.append((captured_date, name))
+    return max(captures)[1] if captures else None
 
 
 def _listing_problem(detail: str) -> Problem:
@@ -116,10 +143,26 @@ def _read_caselaw_index(documents: Mapping[str, bytes]) -> SourceResolution | Pr
     )
 
 
+def _treatment_index_documents() -> tuple[IndexRequest, ...]:
+    return ()
+
+
+def _read_treatment_index(documents: Mapping[str, bytes]) -> SourceResolution | Problem:
+    return Problem(
+        "treatment is a captured source and reads no index",
+        f"Save the page under {CAPTURES_DIR}/treatment-YYYY-MM-DD.html, then retry.",
+    )
+
+
 SOURCES: tuple[SourceDefinition, ...] = (
     SourceDefinition(
         "caselaw", CASELAW_BASE_URL, True, ("ca6", "scotus"),
         _caselaw_index_documents, _read_caselaw_index,
+    ),
+    SourceDefinition(
+        "treatment", TREATMENT_URL, False, (),
+        _treatment_index_documents, _read_treatment_index,
+        captured_file=TREATMENT_FILE, joined=TREATMENT_JOINED,
     ),
 )
 

@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.153](docs/release-notes/v0.3.153.md) — 2026-10-14 — the treatment table, a captured source
 - [v0.3.152](docs/release-notes/v0.3.152.md) — 2026-10-13 — index build writes a lexical generation
 - [v0.3.151](docs/release-notes/v0.3.151.md) — 2026-10-13 — the drill's two inert stages go live
 - [v0.3.150](docs/release-notes/v0.3.150.md) — 2026-10-13 — card layouts in 24 GB units costed

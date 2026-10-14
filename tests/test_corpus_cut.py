@@ -28,6 +28,7 @@ from gideon.host.corpus.lockfile import (
     render_lockfile,
 )
 from gideon.host.corpus.sources import (
+    CAPTURES_DIR,
     IndexRequest,
     SourceDefinition,
     SourceEntry,
@@ -308,7 +309,8 @@ class Cut(unittest.TestCase):
 
     def run_cut(self, *, base: str | None = None, add_courts: str | None = None,
                 now: list[float] | None = None,
-                cut_at: datetime = CUT_AT) -> tuple[int, str, str]:
+                cut_at: datetime = CUT_AT,
+                sources: tuple[SourceDefinition, ...] | None = None) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
         elapsed = now if now is not None else [0.0]
 
@@ -321,7 +323,7 @@ class Cut(unittest.TestCase):
                 host=self.host, rendered_dir=RENDERED, checkout=self.checkout,
                 snapshots_root=self.snapshots, clock=lambda: cut_at,
                 sleep=advance, monotonic=lambda: elapsed[0],
-                sources=(self.source,),
+                sources=sources if sources is not None else (self.source,),
             )
         return code, out.getvalue(), err.getvalue()
 
@@ -330,7 +332,7 @@ class Cut(unittest.TestCase):
         self.assertEqual(code, 0, out + err)
         label = f"corpus-{CUT_AT.date().isoformat()}"
         loaded = load_lockfile(self.checkout / "corpus/lockfiles" / f"{label}.yaml",
-                               known_sources={"example": True})
+                               known_sources={self.source.name: self.source})
         self.assertTrue(loaded.ok, render_errors(loaded.errors))
         assert loaded.lockfile is not None and self.host.record_row is not None
         self.host.base_rows[label] = dict(self.host.record_row)
@@ -346,6 +348,281 @@ class Cut(unittest.TestCase):
         self.assertTrue(all("procrastinate" not in sql and "resolve/" not in sql
                             and "fetch" not in sql for sql in self.host.sql_calls))
 
+    def captured_source(self, *, joined: str = "2099-01-03") -> SourceDefinition:
+        def no_index_documents() -> tuple[IndexRequest, ...]:
+            self.fail("A captured source must never fetch an index.")
+
+        def no_index_reader(_documents: Mapping[str, bytes]) -> SourceResolution:
+            self.fail("A captured source must never read an upstream index.")
+
+        return SourceDefinition(
+            "saved-example", "https://capture.example.invalid/table", False, (),
+            no_index_documents, no_index_reader, captured_file="saved.html", joined=joined,
+        )
+
+    def write_capture(self, source: SourceDefinition, date: str, data: bytes) -> Path:
+        directory = self.checkout / CAPTURES_DIR
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"{source.name}-{date}.html"
+        path.write_bytes(data)
+        return path
+
+    def load_cut(self, sources: tuple[SourceDefinition, ...], *, at: datetime = CUT_AT) -> Lockfile:
+        path = self.checkout / "corpus/lockfiles" / f"corpus-{at.astimezone(UTC).date().isoformat()}.yaml"
+        loaded = load_lockfile(path, known_sources={source.name: source for source in sources})
+        self.assertTrue(loaded.ok, render_errors(loaded.errors))
+        assert loaded.lockfile is not None
+        return loaded.lockfile
+
+    def assert_capture_refusal(self, out: str, *, stage: str = "resolve") -> None:
+        refusal = next(line for line in out.splitlines() if line.startswith(f"{stage}: refuse"))
+        self.assertTrue(refusal.endswith("docs/runbooks/release-files.md §10."), refusal)
+        self.assertTrue(all(destination.startswith("resolve/")
+                            for destination in self.host.job_destinations.values()))
+        self.assertEqual(self.host.writes, [])
+        self.assertEqual(self.host.record_writes, 0)
+        self.assertIsNone(self.host.lock_holder)
+
+    def test_captured_cut_seeds_and_pins_the_saved_page_without_an_egress_host(self) -> None:
+        base = self.prepare_base()
+        source = self.captured_source(joined="2099-01-04")
+        next_cut = CUT_AT + timedelta(days=1)
+        capture_date = next_cut.date().isoformat()
+        data = b"<!doctype html><title>Fictitious capture for a corpus cut</title>\n"
+        saved = self.write_capture(source, capture_date, data)
+        self.write_capture(source, "2099-01-02", b"older fictitious saved page")
+        self.write_capture(source, "2099-02-30", b"invalid fictitious capture name")
+        self.host.ownership[str(self.snapshots)] = (12345, 23456)
+        sources = (self.source, source)
+        code, out, err = self.run_cut(cut_at=next_cut, sources=sources)
+        self.assertEqual(code, 0, out + err)
+        self.assertIn(f"resolve: ok — {source.name}: {capture_date}, 1 files", out)
+        self.assertIn(f"fetch: ok — {source.name}: 1 files, {len(data)} bytes; no fetches deferred", out)
+        current = self.load_cut(sources, at=next_cut)
+        pin = current.sources[source.name]
+        self.assertEqual(current.reason, "instrument")
+        self.assertEqual(current.sources[self.source.name].snapshot_date,
+                         base.sources[self.source.name].snapshot_date)
+        self.assertEqual((pin.base_url, pin.mirror_url, pin.files, pin.courts),
+                         (source.base_url, None, 1, None))
+        self.assertTrue(pin.captured)
+        self.assertEqual((pin.snapshot_date, pin.entries[0].path),
+                         (capture_date, source.captured_file))
+        self.assertEqual((pin.index[0].name, pin.index[0].url, pin.index[0].sha256, pin.index[0].size),
+                         (pin.entries[0].path, source.base_url, hashlib.sha256(data).hexdigest(), len(data)))
+        companion = self.checkout / "corpus/lockfiles" / current.label
+        self.assertEqual((companion / f"{source.name}.saved.html").read_bytes(), saved.read_bytes())
+        sidecar = (companion / f"{source.name}.sha256").read_text()
+        self.assertEqual(sidecar, f"saved.html  {hashlib.sha256(data).hexdigest()}  {len(data)}\n")
+        target = self.snapshots / fetch.snapshot_destination(source.name, capture_date, "saved.html")
+        record_path = target.with_name(target.name + worker_identity.RECORD_SUFFIX)
+        self.assertEqual(target.read_bytes(), data)
+        seeded = json.loads(record_path.read_text())
+        self.assertEqual((seeded["form"], seeded["job"]), (worker_identity.SEEDED_FORM, None))
+        self.assertEqual((seeded["host"], seeded["path"]),
+                         (urlsplit(source.base_url).hostname, urlsplit(source.base_url).path))
+        for path in (target.parent, target, record_path):
+            self.assertIn((str(path), 12345, 23456), self.host.chown_calls)
+        self.assertTrue(all(destination.startswith("resolve/")
+                            for destination in self.host.job_destinations.values()))
+        self.assertIn(["sha256sum", str(target)], self.host.calls)
+        self.host.writes.clear()
+        self.host.chown_calls.clear()
+        code, out, err = self.run_cut(cut_at=next_cut, sources=sources)
+        self.assertEqual(code, 0, out + err)
+        self.assertIn(f"unchanged; {current.label} already pins this state", out)
+        self.assertEqual(self.host.writes, [])
+        self.assertEqual(self.host.chown_calls, [])
+
+    def test_source_joining_after_the_label_date_is_not_carried(self) -> None:
+        source = self.captured_source(joined="2099-01-04")
+        sources = (self.source, source)
+        code, out, err = self.run_cut(sources=sources)
+        self.assertEqual(code, 0, out + err)
+        self.assertNotIn(source.name, out)
+        self.assertEqual(tuple(self.load_cut(sources).sources), (self.source.name,))
+
+    def test_absent_capture_refuses_at_resolve_before_fetch(self) -> None:
+        source = self.captured_source()
+        for listing in ("missing", "empty", "foreign", "malformed"):
+            with self.subTest(listing=listing):
+                directory = self.checkout / CAPTURES_DIR
+                if directory.exists():
+                    shutil.rmtree(directory)
+                if listing != "missing":
+                    directory.mkdir(parents=True)
+                if listing == "foreign":
+                    (directory / "foreign-2099-01-03.html").write_bytes(b"fictitious foreign file")
+                if listing == "malformed":
+                    self.write_capture(source, "2099-02-30", b"fictitious malformed name")
+                code, out, err = self.run_cut(sources=(self.source, source))
+                self.assertEqual(code, 1, out + err)
+                self.assertIn(f"{source.name}: no capture under", out)
+                self.assert_capture_refusal(out)
+
+    def test_future_capture_refuses_against_utc_today(self) -> None:
+        source = self.captured_source()
+        self.write_capture(source, "2099-01-04", b"fictitious future capture")
+        code, out, err = self.run_cut(sources=(self.source, source))
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("after today's UTC date 2099-01-03", out)
+        self.assert_capture_refusal(out)
+        # The local date is already the fourth, but UTC is still the third.
+        local_clock = datetime.fromisoformat("2099-01-04T01:00:00+02:00")
+        code, out, err = self.run_cut(cut_at=local_clock, sources=(self.source, source))
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("after today's UTC date 2099-01-03", out)
+        self.assert_capture_refusal(out)
+
+    def test_older_or_changed_pinned_capture_refuses_at_resolve(self) -> None:
+        source = self.captured_source()
+        capture = self.write_capture(source, "2099-01-03", b"fictitious original pinned page")
+        sources = (self.source, source)
+        self.assertEqual(self.run_cut(sources=sources)[0], 0)
+        before = self.load_cut(sources)
+        self.host.record_writes = 0
+        self.host.writes.clear()
+        capture.unlink()
+        older = self.write_capture(source, "2099-01-02", b"older fictitious page")
+        code, out, err = self.run_cut(sources=sources)
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("before the newest lockfile's pin 2099-01-03", out)
+        self.assert_capture_refusal(out)
+        older.unlink()
+        capture.write_bytes(b"changed fictitious page under the pinned date")
+        code, out, err = self.run_cut(sources=sources)
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("differs from the bytes already pinned under its date", out)
+        self.assert_capture_refusal(out)
+        self.assertEqual(self.load_cut(sources), before)
+
+    def test_stale_capture_refuses_after_all_sources_resolve_before_any_fetch(self) -> None:
+        source = self.captured_source()
+        self.write_capture(source, "2099-01-01", b"fictitious stale table")
+        sources = (source, self.source)
+        code, out, err = self.run_cut(sources=sources)
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("capture 2099-01-01 is older than fetched snapshot 2099-01-02", out)
+        self.assertIn(f"resolve: ok — {source.name}: 2099-01-01", out)
+        self.assertIn(f"resolve: ok — {self.source.name}: {SNAPSHOT_DATE}", out)
+        self.assertNotIn("fetch:", out)
+        self.assert_capture_refusal(out)
+
+    def test_existing_different_snapshot_refuses_at_fetch_with_a_new_date_fix(self) -> None:
+        source = self.captured_source()
+        self.write_capture(source, "2099-01-03", b"fictitious new captured page")
+        destination = fetch.snapshot_destination(source.name, "2099-01-03", "saved.html")
+        target = self.snapshots / destination
+        target.parent.mkdir()
+        old = b"different fictitious snapshot bytes"
+        target.write_bytes(old)
+        fetch.write_seed_record(self.host, self.snapshots, destination, url=source.base_url,
+                               size=len(old), sha256=hashlib.sha256(old).hexdigest(),
+                               fetched_at=CUT_AT.isoformat())
+        record_path = target.with_name(target.name + worker_identity.RECORD_SUFFIX)
+        before = record_path.read_bytes()
+        self.host.writes.clear()
+        code, out, err = self.run_cut(sources=(self.source, source))
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("different bytes", out)
+        self.assertIn("under a new date", out)
+        self.assertNotIn("Remove", out)
+        self.assert_capture_refusal(out, stage="fetch")
+        self.assertEqual(target.read_bytes(), old)
+        self.assertEqual(record_path.read_bytes(), before)
+
+    def test_captured_url_must_still_be_https(self) -> None:
+        source = replace(self.captured_source(), base_url="http://capture.example.invalid/table")
+        code, out, err = self.run_cut(sources=(self.source, source))
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertIn("invalid HTTPS base URL", err)
+        self.assertTrue(err.strip().endswith("docs/runbooks/release-files.md §10."))
+        self.assertEqual(self.host.writes, [])
+
+    def test_kept_capture_candidate_reads_the_committed_companion(self) -> None:
+        source = self.captured_source()
+        data = b"fictitious originally pinned page"
+        self.write_capture(source, "2099-01-03", data)
+        sources = (self.source, source)
+        self.assertEqual(self.run_cut(sources=sources)[0], 0)
+        newest = self.load_cut(sources)
+        resolved = {
+            self.source.name: resolve.ResolvedSource(
+                SourceResolution(SNAPSHOT_DATE, (SourceEntry(FILE_PATH, self.source.base_url + FILE_PATH),)),
+                {"listing.xml": INDEX_BYTES},
+            ),
+            source.name: resolve.ResolvedSource(
+                SourceResolution("2099-01-03", (SourceEntry("saved.html", source.base_url),)),
+                {"saved.html": b"fictitious bytes from a later read"},
+            ),
+        }
+        built = cut._full_candidate(
+            self.host, self.checkout, sources, resolved,
+            {name: pin.entries for name, pin in newest.sources.items()},
+            newest, CUT_AT + timedelta(days=1),
+        )
+        assert isinstance(built, cut.LockfileCandidate)
+        self.assertEqual(built.index_bytes[source.name], {"saved.html": data})
+        self.assertEqual(built.lockfile.sources[source.name].index, newest.sources[source.name].index)
+        self.assertIsNone(built.lockfile.sources[source.name].mirror_url)
+        self.assertTrue(built.lockfile.sources[source.name].captured)
+
+    def test_derived_cut_copies_captured_pin_and_companions_without_acquisition(self) -> None:
+        source = self.captured_source()
+        self.write_capture(source, "2099-01-03", b"fictitious saved page for a derived base")
+        sources = (self.source, source)
+        self.assertEqual(self.run_cut(sources=sources)[0], 0)
+        base = self.load_cut(sources)
+        self.host.calls.clear()
+        self.host.sql_calls.clear()
+        self.host.writes.clear()
+        self.host.health = "unhealthy"
+        shutil.rmtree(self.checkout / CAPTURES_DIR)
+        next_cut = CUT_AT + timedelta(days=1)
+        code, out, err = self.run_cut(base=base.label, add_courts="scotus",
+                                      cut_at=next_cut, sources=sources)
+        self.assertEqual(code, 0, out + err)
+        self.assert_no_acquisition()
+        derived = self.load_cut(sources, at=next_cut)
+        self.assertEqual(derived.sources[source.name], base.sources[source.name])
+        self.assertTrue(derived.sources[source.name].captured)
+        self.assertEqual(derived.base, base.label)
+        directory = self.checkout / "corpus/lockfiles"
+        for filename in (f"{source.name}.sha256", f"{source.name}.saved.html"):
+            self.assertEqual((directory / derived.label / filename).read_bytes(),
+                             (directory / base.label / filename).read_bytes())
+
+    def test_derived_base_without_joined_source_refuses_before_any_write(self) -> None:
+        base = self.prepare_base()
+        source = self.captured_source(joined="2099-01-04")
+        for next_cut in (CUT_AT + timedelta(days=1), CUT_AT + timedelta(days=2)):
+            with self.subTest(next_cut=next_cut):
+                code, out, err = self.run_cut(base=base.label, add_courts="scotus",
+                                              cut_at=next_cut, sources=(self.source, source))
+                self.assertEqual(code, 1)
+                self.assertEqual(out, "")
+                self.assertIn(f"base {base.label} lacks source {source.name}", err)
+                self.assertIn(f"joined on {source.joined}", err)
+                self.assertIn(f"Run {report.command('corpus cut')} first", err)
+                self.assertTrue(err.strip().endswith("docs/runbooks/release-files.md §11."))
+                self.assertEqual(self.host.writes, [])
+                self.assertEqual(self.host.record_writes, 1)
+                self.assert_no_acquisition()
+
+    def test_derived_cut_before_future_source_joins_uses_base_sources_alone(self) -> None:
+        base = self.prepare_base()
+        source = self.captured_source(joined="2099-01-05")
+        next_cut = CUT_AT + timedelta(days=1)
+        sources = (self.source, source)
+        code, out, err = self.run_cut(base=base.label, add_courts="scotus",
+                                      cut_at=next_cut, sources=sources)
+        self.assertEqual(code, 0, out + err)
+        self.assert_no_acquisition()
+        derived = self.load_cut(sources, at=next_cut)
+        self.assertEqual(tuple(derived.sources), tuple(base.sources))
+        self.assertNotIn(source.name, derived.sources)
+
     def test_writes_loadable_lockfile_and_reports_stages(self) -> None:
         code, out, err = self.run_cut()
         self.assertEqual(code, 0, out + err)
@@ -359,7 +636,7 @@ class Cut(unittest.TestCase):
         self.assertIn(f"record: ok — corpus-{CUT_AT.date().isoformat()}: cut", out)
         self.assertEqual(self.host.record_writes, 1)
         path = self.checkout / "corpus/lockfiles" / f"corpus-{CUT_AT.date().isoformat()}.yaml"
-        loaded = load_lockfile(path, known_sources={self.source.name: True})
+        loaded = load_lockfile(path, known_sources={self.source.name: self.source})
         self.assertTrue(loaded.ok, render_errors(loaded.errors))
         self.assertEqual((path.with_suffix("") / "example.listing.xml").read_bytes(), INDEX_BYTES)
         self.assertEqual(len(self.host.writes), 3)
@@ -378,7 +655,7 @@ class Cut(unittest.TestCase):
     def test_reason_priority_for_all_four_changes(self) -> None:
         self.assertEqual(self.run_cut()[0], 0)
         path = self.checkout / "corpus/lockfiles" / f"corpus-{CUT_AT.date().isoformat()}.yaml"
-        loaded = load_lockfile(path, known_sources={"example": True})
+        loaded = load_lockfile(path, known_sources={self.source.name: self.source})
         assert loaded.lockfile is not None
         old = loaded.lockfile
         pin = old.sources["example"]
@@ -402,7 +679,7 @@ class Cut(unittest.TestCase):
             code, out, err = self.run_cut(cut_at=next_cut)
         self.assertEqual(code, 0, out + err)
         path = self.checkout / "corpus/lockfiles" / f"corpus-{next_cut.date().isoformat()}.yaml"
-        loaded = load_lockfile(path, known_sources={"example": True})
+        loaded = load_lockfile(path, known_sources={self.source.name: self.source})
         self.assertTrue(loaded.ok, render_errors(loaded.errors))
         assert loaded.lockfile is not None
         self.assertEqual(loaded.lockfile.reason, "pipeline")
@@ -439,7 +716,7 @@ class Cut(unittest.TestCase):
         code, out, err = self.run_cut(cut_at=next_cut)
         self.assertEqual(code, 0, out + err)
         path = self.checkout / "corpus/lockfiles" / f"corpus-{next_cut.date().isoformat()}.yaml"
-        loaded = load_lockfile(path, known_sources={"example": True})
+        loaded = load_lockfile(path, known_sources={self.source.name: self.source})
         assert loaded.lockfile is not None
         self.assertEqual(loaded.lockfile.reason, "instrument")
         self.assertEqual(loaded.lockfile.sources["example"].snapshot_date, next_snapshot)
@@ -786,7 +1063,7 @@ class Cut(unittest.TestCase):
         self.assert_no_acquisition()
         label = f"corpus-{next_cut.date().isoformat()}"
         path = directory / f"{label}.yaml"
-        loaded = load_lockfile(path, known_sources={"example": True})
+        loaded = load_lockfile(path, known_sources={self.source.name: self.source})
         self.assertTrue(loaded.ok, render_errors(loaded.errors))
         assert loaded.lockfile is not None
         derived = loaded.lockfile

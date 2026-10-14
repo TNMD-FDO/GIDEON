@@ -22,12 +22,19 @@ from gideon.host.corpus.record import (
     write_install,
     write_observations,
 )
+from gideon.host.corpus.sources import SourceDefinition
 from gideon.host.report import Problem
 from gideon.host.sysio import Command, PathLike, RealHost
 from gideon.host.worker import psql_argv
 
 FIXTURE = Path(__file__).parent / "fixtures/corpus/corpus-2099-01-03.yaml"
 RENDERED = "/rendered"
+KNOWN = {
+    "example": SourceDefinition(
+        "example", "https://example.invalid/archive/", True, ("ca6",),
+        lambda: (), lambda _: Problem("Fictitious source has no index reader", "Use the fixture."),
+    ),
+}
 
 
 class FakeHost(RealHost):
@@ -61,7 +68,7 @@ class Writer(unittest.TestCase):
     """The writer binds data and refuses a conflicting existing record."""
 
     def setUp(self) -> None:
-        loaded = load_lockfile(FIXTURE, known_sources={"example": True})
+        loaded = load_lockfile(FIXTURE, known_sources=KNOWN)
         self.assertTrue(loaded.ok, render_errors(loaded.errors))
         assert loaded.lockfile is not None
         self.lockfile = loaded.lockfile
@@ -185,7 +192,7 @@ class DerivedWriter(unittest.TestCase):
 
     def setUp(self) -> None:
         fixture = FIXTURE.parent / "corpus-2099-01-07.yaml"
-        loaded = load_lockfile(fixture, known_sources={"example": True})
+        loaded = load_lockfile(fixture, known_sources=KNOWN)
         self.assertTrue(loaded.ok, render_errors(loaded.errors))
         assert loaded.lockfile is not None
         self.lockfile = loaded.lockfile

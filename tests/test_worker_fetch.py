@@ -184,6 +184,60 @@ class WorkerFetch(unittest.TestCase):
         with self.assertRaises(fetch.FetchFailure):
             fetch.validate_destination(self.destination, fetch.FRESH_FORM)
 
+    def test_seeded_form_refuses_transfer_before_request_or_write(self) -> None:
+        def no_client() -> httpx.Client:
+            self.fail("A seeded file must never open an HTTP client.")
+
+        with self.assertRaises(fetch.FetchFailure) as raised:
+            fetch.transfer(
+                self.root, self.destination, self.url, fetch.SEEDED_FORM, 1,
+                client_factory=no_client,
+            )
+        self.assertEqual(raised.exception.reason, "invalid")
+        self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_reader_accepts_null_job_for_seeded_form_alone(self) -> None:
+        body = b"A visibly fictitious saved corpus page.\n"
+        host, path = fetch.validate_url(self.url)
+        expected = {
+            "schema": 1, "state": "whole", "form": fetch.SEEDED_FORM,
+            "host": host, "path": path, "etag": None, "last_modified": None,
+            "total": len(body), "durable": len(body), "size": len(body),
+            "sha256": hashlib.sha256(body).hexdigest(),
+            "fetched_at": datetime(2026, 10, 6, tzinfo=UTC).isoformat(),
+            "job": None, "seconds": 0.0, "resumes": 0,
+        }
+        target = self.root / self.destination
+        target.parent.mkdir(parents=True)
+        target.write_bytes(body)
+        record_path = target.with_name(target.name + fetch.RECORD_SUFFIX)
+        record_path.write_text(json.dumps(expected))
+        record = fetch.read_record(record_path)
+        assert record is not None
+        self.assertEqual((record.form, record.job, record.size, record.sha256), (
+            expected["form"], expected["job"], expected["size"], expected["sha256"],
+        ))
+        for form in (fetch.SEEDED_FORM, fetch.KEPT_FORM, fetch.FRESH_FORM):
+            for job, seeded_accepts, transfer_accepts in (
+                (None, True, False), (0, False, True), (7, False, True),
+                (False, False, False), (-1, False, False),
+            ):
+                with self.subTest(form=form, job=job):
+                    record_path.write_text(json.dumps(dict(expected, form=form, job=job)))
+                    accepted = seeded_accepts if form == fetch.SEEDED_FORM else transfer_accepts
+                    if accepted:
+                        result = fetch.read_record(record_path)
+                        assert result is not None
+                        self.assertEqual((result.form, result.job), (form, job))
+                    else:
+                        with self.assertRaises(fetch.FetchFailure) as raised:
+                            fetch.read_record(record_path)
+                        self.assertEqual(raised.exception.reason, "invalid")
+        record_path.write_text(json.dumps(dict(expected, state="partial")))
+        with self.assertRaises(fetch.FetchFailure) as raised:
+            fetch.read_record(record_path)
+        self.assertEqual(raised.exception.reason, "invalid")
+
     def test_path_leaving_root_and_symbolic_link_are_refused(self) -> None:
         with self.assertRaises(fetch.FetchFailure):
             fetch.destination_path(self.root, "../outside/file", fetch.KEPT_FORM)

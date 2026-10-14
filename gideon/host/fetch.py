@@ -6,7 +6,7 @@ import json
 import math
 import re
 import stat
-from dataclasses import dataclass, fields
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import TypeGuard
 from urllib.parse import urlsplit
@@ -24,6 +24,7 @@ from gideon.host.render.worker import (
     RECORD_SUFFIX,
     RESERVED_SUFFIXES,
     RESOLVE_DIR,
+    SEEDED_FORM,
     SEGMENT_PATTERN,
     SNAPSHOTS_ROOT,
     SOURCE_PATTERN,
@@ -49,7 +50,7 @@ class FetchRecord:
     size: int
     sha256: str
     fetched_at: str
-    job: int
+    job: int | None
     seconds: float
     resumes: int
     schema: int
@@ -71,10 +72,10 @@ class MissingFetchRecord(Problem):
 
 
 def _destination_problem(destination: str, form: str) -> Problem | None:
-    if form not in {KEPT_FORM, FRESH_FORM}:
+    if form not in {KEPT_FORM, FRESH_FORM, SEEDED_FORM}:
         return Problem(
             "fetch form is invalid",
-            "Use kept for a dated snapshot or fresh for a path under resolve/.",
+            "Use kept or seeded for a dated snapshot or fresh for a path under resolve/.",
         )
     parts = destination.split("/")
     if not 2 <= len(parts) <= 8 or any(
@@ -89,11 +90,11 @@ def _destination_problem(destination: str, form: str) -> Problem | None:
             "or digit, with only letters, digits, dots, underscores, and hyphens; "
             "do not use a reserved file suffix.",
         )
-    if form == KEPT_FORM:
+    if form in {KEPT_FORM, SEEDED_FORM}:
         if parts[0] == RESOLVE_DIR or re.fullmatch(SOURCE_PATTERN, parts[0]) is None:
             return Problem(
-                "fetch destination is invalid for the kept form",
-                "Use <source>-YYYY-MM-DD/<path> for a kept file.",
+                f"fetch destination is invalid for the {form} form",
+                f"Use <source>-YYYY-MM-DD/<path> for a {form} file.",
             )
         try:
             datetime.date.fromisoformat(parts[0][-10:])
@@ -170,6 +171,11 @@ def defer_fetch(
 ) -> int | Problem:
     """Validate a public source address and defer its worker transfer."""
 
+    if form == SEEDED_FORM:
+        return Problem(
+            "a seeded file cannot be deferred for fetch",
+            "Copy the file from the release checkout and write its seeded record instead.",
+        )
     problem = _destination_problem(destination, form)
     if problem is not None:
         return problem
@@ -220,7 +226,10 @@ def _record_from_json(value: dict[str, object], form: str) -> FetchRecord | None
         return None
     if (
         not _is_int(value["schema"]) or value["schema"] != 1
-        or value["state"] != "whole" or value["form"] != form
+        or value["state"] != "whole"
+        or (value["form"] != form and not (
+            form == KEPT_FORM and value["form"] == SEEDED_FORM
+        ))
     ):
         return None
     size = value["size"]
@@ -242,11 +251,19 @@ def _record_from_json(value: dict[str, object], form: str) -> FetchRecord | None
         or (value["etag"] is not None and not isinstance(value["etag"], str))
         or (value["last_modified"] is not None and not isinstance(value["last_modified"], str))
         or not isinstance(value["fetched_at"], str)
-        or not _is_int(value["job"]) or value["job"] < 1
         or not isinstance(seconds, (int, float)) or isinstance(seconds, bool)
         or not math.isfinite(seconds) or seconds < 0
         or not _is_int(value["resumes"]) or value["resumes"] < 0
     ):
+        return None
+    if value["form"] == SEEDED_FORM:
+        if (
+            value["job"] is not None or seconds != 0 or value["resumes"] != 0
+            or value["etag"] is not None or value["last_modified"] is not None
+            or total != size
+        ):
+            return None
+    elif not _is_int(value["job"]) or value["job"] < 1:
         return None
     try:
         fetched_at = datetime.datetime.fromisoformat(value["fetched_at"])
@@ -257,13 +274,43 @@ def _record_from_json(value: dict[str, object], form: str) -> FetchRecord | None
     return FetchRecord(**value)  # type: ignore[arg-type]
 
 
+def write_seed_record(
+    host: Host,
+    snapshots_root: PathLike,
+    destination: str,
+    *,
+    url: str,
+    size: int,
+    sha256: str,
+    fetched_at: str,
+) -> None:
+    """Write a whole saved file's record through the host's atomic text seam."""
+
+    problem = _destination_problem(destination, SEEDED_FORM) or _url_problem(url)
+    if problem is not None:
+        raise ValueError(problem.problem)
+    parsed = urlsplit(url)
+    record = FetchRecord(
+        "whole", SEEDED_FORM, parsed.hostname or "", parsed.path or "/",
+        None, None, size, size, size, sha256, fetched_at, None, 0.0, 0, 1,
+    )
+    value = asdict(record)
+    if _record_from_json(value, SEEDED_FORM) is None:
+        raise ValueError("seeded record fields are invalid")
+    host.write_text(
+        _record_path(snapshots_root, destination, RECORD_SUFFIX),
+        json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
+        mode=0o440,
+    )
+
+
 def read_record(
     host: Host,
     destination: str,
     *,
     snapshots_root: PathLike = SNAPSHOTS_ROOT,
 ) -> FetchRecord | None | Problem:
-    """Read a whole file's record through the host seam, if one is present."""
+    """Read kept or seeded records under dated paths, or fresh under resolve/."""
 
     form = FRESH_FORM if destination.startswith(f"{RESOLVE_DIR}/") else KEPT_FORM
     problem = _destination_problem(destination, form)

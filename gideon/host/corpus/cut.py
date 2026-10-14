@@ -6,7 +6,7 @@ import hashlib
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -29,7 +29,14 @@ from gideon.host.corpus.lockfile import (
     render_sidecar,
     same_state,
 )
-from gideon.host.corpus.sources import SOURCES, SourceDefinition
+from gideon.host.corpus.sources import (
+    CAPTURES_DIR,
+    SOURCES,
+    SourceDefinition,
+    SourceEntry,
+    SourceResolution,
+    newest_capture,
+)
 from gideon.host.courts import CourtMap
 from gideon.host.render.worker import PIPELINE_VERSION, SNAPSHOTS_ROOT
 from gideon.host.report import Problem, StageResult
@@ -60,6 +67,10 @@ def _retry_fix(fix: str) -> str:
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+def _capture_fix(action: str) -> str:
+    return f"{action.rstrip('.')}. Follow the capture step in docs/runbooks/release-files.md §10."
 
 
 def _refuse(name: str, detail: str, fix: str) -> int:
@@ -117,12 +128,15 @@ def _artifact_preconditions(
         except ValueError:
             scheme, source_host, port = "", None, None
         if scheme != "https" or source_host is None or port not in (None, 443):
+            fix = (
+                "Correct the source URL in the release, then run "
+                f"{report.command('corpus cut')} again."
+            )
             return StageResult(
                 "preconditions", False, f"source {source.name} has an invalid HTTPS base URL",
-                "Correct the source URL in the release, then run "
-                f"{report.command('corpus cut')} again.",
+                _capture_fix(fix) if source.captured else fix,
             ), None, None
-        if source_host not in allowed:
+        if not source.captured and source_host not in allowed:
             return StageResult(
                 "preconditions", False,
                 f"source {source.name} host {source_host} is outside the corpus allowlist",
@@ -157,6 +171,7 @@ def _derived_preconditions(
     court_map: CourtMap,
     base_label: str,
     added_courts: str,
+    now: datetime,
 ) -> tuple[StageResult, DerivedRequest | None]:
     command = report.command("corpus cut")
     if LABEL.fullmatch(base_label) is None:
@@ -170,6 +185,20 @@ def _derived_preconditions(
             "preconditions", False, f"no committed lockfile is labelled {base_label}",
             f"Choose a label under corpus/lockfiles/, then run {command} again.",
         ), None
+    if now.tzinfo is None:
+        return StageResult(
+            "preconditions", False, "cut clock has no timezone",
+            f"Use a UTC clock, then run {command} again. Follow docs/runbooks/release-files.md §11.",
+        ), None
+    label_date = now.astimezone(UTC).date().isoformat()
+    for source in registry:
+        if source.name not in base.sources and (source.joined is None or source.joined <= label_date):
+            joined = f"joined on {source.joined}" if source.joined else "required in every lockfile"
+            return StageResult(
+                "preconditions", False, f"base {base_label} lacks source {source.name}, {joined}",
+                f"Run {command} first, then derive from its new label. "
+                "Follow docs/runbooks/release-files.md §11.",
+            ), None
     court_ids = tuple(item.strip() for item in added_courts.split(","))
     if "" in court_ids:
         return StageResult(
@@ -193,7 +222,8 @@ def _derived_preconditions(
                 f"Look up court ids in courts.yaml as described in "
                 f"docs/runbooks/release-files.md §11, then run {command} again.",
             ), None
-    court_sources = tuple(source for source in registry if source.carries_courts)
+    court_sources = tuple(source for source in registry
+                          if source.carries_courts and source.name in base.sources)
     for court_id in court_ids:
         for source in court_sources:
             if court_id in (base.sources[source.name].courts or ()):
@@ -285,7 +315,7 @@ def _preconditions(
             assert directory is not None and court_map is not None and added_courts is not None
             stage, request = _derived_preconditions(
                 host, rendered_dir, registry, directory, court_map,
-                base_label, added_courts,
+                base_label, added_courts, clock(),
             )
     except BaseException:
         backuplock.release_claim(host, claim, lock=backuplock.CORPUS_LOCK)
@@ -357,7 +387,7 @@ def _full_candidate(
         if same_snapshot:
             assert previous is not None and newest is not None
             indexes = previous.index
-            mirror_url = previous.mirror_url
+            mirror_url = None if source.captured else previous.mirror_url
             # A kept snapshot keeps the index documents first committed with it,
             # so their bytes come from that lockfile, never from this cut's read.
             kept: dict[str, bytes] = {}
@@ -372,6 +402,13 @@ def _full_candidate(
                         _retry_fix(f"Restore {kept_path} from the release checkout."),
                     )
             source_index_bytes: Mapping[str, bytes] = kept
+        elif source.captured:
+            assert source.captured_file is not None
+            captured_bytes = selected.index_bytes[source.captured_file]
+            indexes = (IndexDocument(source.captured_file, source.base_url,
+                                     hashlib.sha256(captured_bytes).hexdigest(), len(captured_bytes)),)
+            mirror_url = None
+            source_index_bytes = selected.index_bytes
         else:
             documents: list[IndexDocument] = []
             for request in source.index_documents():
@@ -394,7 +431,7 @@ def _full_candidate(
         pins[source.name] = SourcePin(
             snapshot.snapshot_date, source.base_url, mirror_url,
             hashlib.sha256(sidecar).hexdigest(), len(entries),
-            sum(entry.size for entry in entries), indexes, entries, courts,
+            sum(entry.size for entry in entries), indexes, entries, courts, source.captured,
         )
         index_bytes[source.name] = source_index_bytes
         sidecar_bytes[source.name] = sidecar
@@ -408,7 +445,6 @@ def _full_candidate(
 def _derived_candidate(
     host: resolve.CorpusHost,
     checkout: Path,
-    registry: Sequence[SourceDefinition],
     request: DerivedRequest,
     now: datetime,
 ) -> LockfileCandidate | StageResult:
@@ -421,17 +457,13 @@ def _derived_candidate(
     pins: dict[str, SourcePin] = {}
     index_bytes: dict[str, Mapping[str, bytes]] = {}
     sidecar_bytes: dict[str, bytes] = {}
-    for source in registry:
-        pin = base.sources[source.name]
+    for name, pin in base.sources.items():
         courts = (tuple(sorted(set(pin.courts or ()) | set(request.court_ids)))
-                  if source.carries_courts else None)
-        pins[source.name] = SourcePin(
-            pin.snapshot_date, pin.base_url, pin.mirror_url, pin.sidecar_sha256,
-            pin.files, pin.bytes, pin.index, pin.entries, courts,
-        )
+                  if pin.courts is not None else None)
+        pins[name] = replace(pin, courts=courts)
         documents: dict[str, bytes] = {}
         for document in pin.index:
-            path = companion / f"{source.name}.{document.name}"
+            path = companion / f"{name}.{document.name}"
             try:
                 documents[document.name] = host.read_bytes(path)
             except OSError as exc:
@@ -439,10 +471,10 @@ def _derived_candidate(
                     "lockfile", False, f"{path} could not be read ({type(exc).__name__})",
                     _retry_fix(f"Restore {path} from the release checkout."),
                 )
-        index_bytes[source.name] = documents
-        path = companion / f"{source.name}.sha256"
+        index_bytes[name] = documents
+        path = companion / f"{name}.sha256"
         try:
-            sidecar_bytes[source.name] = host.read_bytes(path)
+            sidecar_bytes[name] = host.read_bytes(path)
         except OSError as exc:
             return StageResult(
                 "lockfile", False, f"{path} could not be read ({type(exc).__name__})",
@@ -507,7 +539,7 @@ def _write_lockfile(
             "lockfile", False, f"lockfile {label} could not be written ({type(exc).__name__})",
             f"Fix access to {directory}, then run {report.command('corpus cut')} again.",
         )
-    loaded = load_lockfile(path, known_sources={source.name: source.carries_courts for source in registry}, host=host)
+    loaded = load_lockfile(path, known_sources={source.name: source for source in registry}, host=host)
     if not loaded.ok:
         return StageResult(
             "lockfile", False, f"written lockfile {label} does not load",
@@ -515,6 +547,65 @@ def _write_lockfile(
             f"{report.command('corpus cut')} again.",
         )
     return StageResult("lockfile", True, built.written_detail, "")
+
+
+def _read_capture(
+    host: resolve.CorpusHost,
+    checkout: Path,
+    source: SourceDefinition,
+    newest: Lockfile | None,
+    clock: Callable[[], datetime],
+) -> resolve.ResolvedSource | Problem:
+    """Resolve a saved source page by its dated name and immutable prior pin."""
+    directory = checkout / CAPTURES_DIR
+    try:
+        names = host.listdir(directory)
+    except FileNotFoundError:
+        names = []
+    except OSError as exc:
+        return Problem(
+            f"captures directory {directory} could not be listed ({type(exc).__name__})",
+            _capture_fix(f"Restore access to {directory}, then run {report.command('corpus cut')} again"),
+        )
+    name = newest_capture(names, source.name)
+    if name is None:
+        return Problem(
+            f"no capture under {directory}",
+            _capture_fix(f"Save {source.name}'s page under {directory}/{source.name}-YYYY-MM-DD.html, "
+                         f"then run {report.command('corpus cut')} again"),
+        )
+    snapshot_date = name[-15:-5]
+    now = clock()
+    if now.tzinfo is None:
+        return Problem("cut clock has no timezone", _capture_fix("Use a UTC clock, then retry"))
+    today = now.astimezone(UTC).date().isoformat()
+    new_date_fix = _capture_fix(
+        f"Save {source.name}'s page under today's UTC date, then run {report.command('corpus cut')} again"
+    )
+    if snapshot_date > today:
+        return Problem(f"capture {name} is dated after today's UTC date {today}", new_date_fix)
+    previous = newest.sources.get(source.name) if newest is not None else None
+    if previous is not None and snapshot_date < previous.snapshot_date:
+        return Problem(
+            f"capture {name} is dated before the newest lockfile's pin {previous.snapshot_date}",
+            new_date_fix,
+        )
+    path = directory / name
+    try:
+        data = host.read_bytes(path)
+    except OSError as exc:
+        return Problem(
+            f"capture {path} could not be read ({type(exc).__name__})",
+            _capture_fix(f"Restore access to {path}, then run {report.command('corpus cut')} again"),
+        )
+    if (previous is not None and snapshot_date == previous.snapshot_date
+        and hashlib.sha256(data).hexdigest() != previous.entries[0].sha256):
+        return Problem(f"capture {name} differs from the bytes already pinned under its date", new_date_fix)
+    assert source.captured_file is not None
+    return resolve.ResolvedSource(
+        SourceResolution(snapshot_date, (SourceEntry(source.captured_file, source.base_url),)),
+        {source.captured_file: data},
+    )
 
 
 def _run_cut_stages(
@@ -532,10 +623,15 @@ def _run_cut_stages(
     active_stage[0] = "resolve"
     resolved: dict[str, resolve.ResolvedSource] = {}
     for source in sources:
-        result = resolve.resolve_source(
-            io, rendered_dir, snapshots_root, source, command_path="corpus cut",
-            sleep=sleep, monotonic=monotonic,
+        result = (
+            _read_capture(io, root, source, newest, clock) if source.captured
+            else resolve.resolve_source(
+                io, rendered_dir, snapshots_root, source, command_path="corpus cut",
+                sleep=sleep, monotonic=monotonic,
+            )
         )
+        if isinstance(result, Problem):
+            return _refuse("resolve", f"{source.name}: {result.problem}", result.fix)
         if isinstance(result, resolve.ResolveFailure):
             return _refuse(
                 "resolve", f"{source.name}: {result.problem.problem}", result.problem.fix
@@ -545,17 +641,41 @@ def _run_cut_stages(
             "resolve", True,
             f"{source.name}: {result.snapshot.snapshot_date}, {len(result.snapshot.entries)} files", "",
         ))
+    latest_fetched = max(
+        (resolved[source.name].snapshot.snapshot_date for source in sources if not source.captured),
+        default=None,
+    )
+    for source in sources:
+        snapshot_date = resolved[source.name].snapshot.snapshot_date
+        if source.captured and latest_fetched is not None and snapshot_date < latest_fetched:
+            return _refuse(
+                "resolve", f"{source.name}: capture {snapshot_date} is older than fetched snapshot {latest_fetched}",
+                _capture_fix(f"Save a new {source.name} page dated at or after {latest_fetched}, "
+                             f"then run {report.command('corpus cut')} again"),
+            )
     active_stage[0] = "fetch"
     fetched: dict[str, snapshots.FetchedSource] = {}
     for source in sources:
-        fetch_result = snapshots.fetch_source(
-            io, rendered_dir, snapshots_root, source.name,
-            resolved[source.name].snapshot.snapshot_date,
-            tuple((entry.path, entry.url) for entry in resolved[source.name].snapshot.entries),
-            sleep=sleep, monotonic=monotonic, command_path="corpus cut",
-        )
+        selected = resolved[source.name]
+        if source.captured:
+            assert source.captured_file is not None
+            fetch_result = snapshots.seed_source(
+                io, snapshots_root, source.name, selected.snapshot.snapshot_date,
+                source.captured_file, selected.index_bytes[source.captured_file],
+                url=source.base_url, now=clock(), command_path="corpus cut",
+                other_bytes_fix=f"Save {source.name}'s page under a new date, then run "
+                                f"{report.command('corpus cut')} again.",
+            )
+        else:
+            fetch_result = snapshots.fetch_source(
+                io, rendered_dir, snapshots_root, source.name,
+                selected.snapshot.snapshot_date,
+                tuple((entry.path, entry.url) for entry in selected.snapshot.entries),
+                sleep=sleep, monotonic=monotonic, command_path="corpus cut",
+            )
         if isinstance(fetch_result, Problem):
-            return _refuse("fetch", f"{source.name}: {fetch_result.problem}", fetch_result.fix)
+            return _refuse("fetch", f"{source.name}: {fetch_result.problem}",
+                           _capture_fix(fetch_result.fix) if source.captured else fetch_result.fix)
         fetched[source.name] = fetch_result
         report.print_stage(StageResult(
             "fetch", True, f"{source.name}: {fetch_result.summary()}", "",
@@ -625,7 +745,7 @@ def _record_stage(
 ) -> int:
     directory = read_lockfile_directory(
         root / "corpus/lockfiles",
-        known_sources={source.name: source.carries_courts for source in sources}, host=io,
+        known_sources={source.name: source for source in sources}, host=io,
     )
     if directory.errors or directory.newest is None:
         return _refuse(
@@ -662,10 +782,11 @@ def _run_derived_stages(
     active_stage: list[str],
 ) -> int:
     active_stage[0] = "lockfile"
-    built = _derived_candidate(io, root, sources, request, clock())
+    built = _derived_candidate(io, root, request, clock())
     if isinstance(built, StageResult):
         return _refuse("lockfile", built.detail, built.fix)
-    stage = _write_lockfile(io, rendered_dir, root, sources, newest, built)
+    base_sources = tuple(source for source in sources if source.name in request.base.sources)
+    stage = _write_lockfile(io, rendered_dir, root, base_sources, newest, built)
     if not stage.ok:
         return _refuse("lockfile", stage.detail, stage.fix)
     report.print_stage(stage)
@@ -707,9 +828,13 @@ def run_corpus_cut(
             return _run_derived_stages(
                 io, rendered_dir, root, clock, sources, directory.newest, request, active_stage,
             )
+        # A lockfile carries exactly the sources that joined by its label date.
+        label_date = clock().astimezone(UTC).date().isoformat()
+        carried = tuple(source for source in sources
+                        if source.joined is None or source.joined <= label_date)
         return _run_cut_stages(
             io, rendered_dir, root, snapshots_root, clock, sleep, monotonic,
-            sources, directory.newest, active_stage,
+            carried, directory.newest, active_stage,
         )
     except KeyboardInterrupt:
         if active_stage[0] == "fetch":
