@@ -39,6 +39,7 @@ MIGRATIONS = {
     f"{ROOT}/migrations/0017_index_generations.sql": (ROOT / "migrations/0017_index_generations.sql").read_text(),
     f"{ROOT}/migrations/0018_chunk_embeddings.sql": (ROOT / "migrations/0018_chunk_embeddings.sql").read_text(),
     f"{ROOT}/migrations/0019_known_overruled.sql": (ROOT / "migrations/0019_known_overruled.sql").read_text(),
+    f"{ROOT}/migrations/0021_dupe_clusters.sql": (ROOT / "migrations/0021_dupe_clusters.sql").read_text(),
     f"{ROOT}/migrations/README.md": "not a migration",
 }
 
@@ -166,6 +167,7 @@ class Converge(unittest.TestCase):
                 "0017_index_generations",
                 "0018_chunk_embeddings",
                 "0019_known_overruled",
+                "0021_dupe_clusters",
             ),
         )
 
@@ -190,7 +192,7 @@ class Converge(unittest.TestCase):
         self.assertIn(psql("gideon", "gideon", *STATEMENT), argvs)
         self.assertIn(psql("gideon", "gideon", *QUERY), argvs)
         migration_runs = [call for call in host.calls if call[0] == psql("gideon", "gideon", *MIGRATION)]
-        self.assertEqual(len(migration_runs), 15)
+        self.assertEqual(len(migration_runs), sum(path.endswith(".sql") for path in MIGRATIONS))
         first_migration = MIGRATIONS[f"{ROOT}/migrations/0001_audit_log.sql"]
         self.assertTrue((migration_runs[0][1] or "").startswith(first_migration))
         self.assertTrue((migration_runs[0][1] or "").endswith("INSERT INTO schema_migrations (version) VALUES ('0001_audit_log');\n"))
@@ -333,6 +335,7 @@ class Converge(unittest.TestCase):
                 "0017_index_generations",
                 "0018_chunk_embeddings",
                 "0019_known_overruled",
+                "0021_dupe_clusters",
             ),
         )
 
@@ -608,3 +611,79 @@ class Migration0019(unittest.TestCase):
         self.assertNotIn("UPDATE", self.text)
         self.assertNotIn("DELETE", self.text)
         self.assertNotIn("schema_migrations", self.text)
+
+
+class Migration0021(unittest.TestCase):
+    """Clustering has generation-scoped keys, constrained counts, and limited grants."""
+
+    def setUp(self) -> None:
+        self.text = MIGRATIONS[f"{ROOT}/migrations/0021_dupe_clusters.sql"]
+
+    def test_clusters_and_members_are_constrained_and_cascade_with_the_generation(self) -> None:
+        sql = " ".join(self.text.split())
+        for clause in (
+            "CREATE TABLE dupe_clusters (",
+            "gen_id text NOT NULL REFERENCES index_generations(gen_id) ON DELETE CASCADE",
+            "PRIMARY KEY (gen_id, cluster_id)",
+            "chunk_count bigint NOT NULL CHECK (chunk_count > 0)",
+            "opinion_count bigint NOT NULL CHECK (opinion_count > 0 AND opinion_count <= chunk_count)",
+            "boilerplate boolean NOT NULL",
+            "CREATE TABLE dupe_members ( gen_id text NOT NULL",
+            "PRIMARY KEY (gen_id, content_hash)",
+            "FOREIGN KEY (gen_id, cluster_id) REFERENCES dupe_clusters(gen_id, cluster_id) ON DELETE CASCADE",
+            "CHECK (cluster_id <> content_hash)",
+        ):
+            with self.subTest(clause=clause):
+                self.assertIn(clause, sql)
+        self.assertEqual(sql.count("cluster_id text NOT NULL CHECK (cluster_id ~ '^[0-9a-f]{64}$')"), 2)
+        self.assertIn("content_hash text NOT NULL CHECK (content_hash ~ '^[0-9a-f]{64}$')", sql)
+        self.assertIn("ALTER TABLE index_generations ADD COLUMN clustered_at timestamptz;", sql)
+        self.assertNotIn("ALTER TABLE chunks", sql)
+
+    def test_grants_allow_whole_set_rebuilds_and_metrics_reads(self) -> None:
+        grants = {line for line in self.text.splitlines() if line.startswith("GRANT ")}
+        self.assertEqual(grants, {
+            f"GRANT {privileges} ON TABLE {table} TO {role};"
+            for table in ("dupe_clusters", "dupe_members")
+            for privileges, role in (
+                ("SELECT, INSERT, DELETE", worker.WORKER_ROLE),
+                ("SELECT", "gideon_ro_metrics"),
+            )
+        })
+        self.assertNotIn("schema_migrations", self.text)
+
+    def test_failure_reason_check_is_replaced_with_the_shared_union(self) -> None:
+        drop = "ALTER TABLE index_generations DROP CONSTRAINT index_generations_failure_reason_check;"
+        add = "ALTER TABLE index_generations ADD CONSTRAINT index_generations_failure_reason_check"
+        self.assertIn(drop, self.text)
+        self.assertIn(add, self.text)
+        self.assertLess(self.text.index(drop), self.text.index(add))
+        match = re.search(r"CHECK \(failure_reason IN \((.*?)\)\)", self.text, re.S)
+        assert match is not None
+        reasons = set(re.findall(r"'([^']+)'", match.group(1)))
+        self.assertEqual(reasons, worker.GENERATION_FAILURE_REASONS)
+        previous = MIGRATIONS[f"{ROOT}/migrations/0018_chunk_embeddings.sql"]
+        previous_match = re.search(r"CHECK \(failure_reason IN \((.*?)\)\)", previous, re.S)
+        assert previous_match is not None
+        self.assertEqual(reasons, set(re.findall(r"'([^']+)'", previous_match.group(1))) | {"cluster-budget"})
+
+    def test_build_report_checks_are_widened_without_changing_the_coupling(self) -> None:
+        previous = (ROOT / "migrations/0020_build_reports.sql").read_text()
+        for column, added in (("failed_stage", "cluster"), ("failure_reason", "cluster-budget")):
+            with self.subTest(column=column):
+                constraint = f"build_reports_{column}_check"
+                drop = f"ALTER TABLE build_reports DROP CONSTRAINT {constraint};"
+                add = f"ALTER TABLE build_reports ADD CONSTRAINT {constraint}"
+                self.assertIn(drop, self.text)
+                self.assertIn(add, self.text)
+                self.assertLess(self.text.index(drop), self.text.index(add))
+                old = re.search(rf"{column} text CHECK \({column} IN \((.*?)\)\)", previous, re.S)
+                new = re.search(rf"{add}\s+CHECK \({column} IN \((.*?)\)\)", self.text, re.S)
+                assert old is not None and new is not None
+                values = set(re.findall(r"'([^']+)'", new.group(1)))
+                self.assertEqual(values, set(re.findall(r"'([^']+)'", old.group(1))) | {added})
+                if column == "failure_reason":
+                    self.assertEqual(values, worker.GENERATION_FAILURE_REASONS)
+        self.assertNotIn("DROP CONSTRAINT build_reports_check", self.text)
+        self.assertNotIn("CHECK ((state = 'failed')", self.text)
+        self.assertNotIn("DROP TABLE", self.text)

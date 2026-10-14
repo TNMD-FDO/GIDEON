@@ -11,7 +11,7 @@ import tempfile
 import threading
 import unittest
 import uuid
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, astuple, fields, replace
 from datetime import UTC, datetime
@@ -83,15 +83,17 @@ class Projections(unittest.TestCase):
 
     def test_payload_has_only_record_filter_keys_and_omits_an_absent_circuit(self) -> None:
         chunk, opinion = chunk_for(), opinion_for()
-        payload = dense.payload_for(chunk, opinion, GEO)
+        keys = lexical.TextKeys("fictitious-cluster", True)
+        payload = dense.payload_for(chunk, opinion, GEO, keys)
         self.assertEqual(payload, {
             "chunk_id": chunk.chunk_id, "court": opinion.court,
             "circuit": GEO[opinion.court].circuit,
             "decided_date": datetime.combine(opinion.decided_date, datetime.min.time(), UTC).isoformat(),
             "precedential": opinion.precedential, "section_type": chunk.section_type,
+            "dupe_cluster": keys.dupe_cluster, "boilerplate": keys.boilerplate,
         })
         geography = {opinion.court: treatment.Geography("state", None, "fictional-state")}
-        self.assertEqual(dense.payload_for(chunk, opinion, geography), {key: value for key, value in payload.items() if key != "circuit"})
+        self.assertEqual(dense.payload_for(chunk, opinion, geography, keys), {key: value for key, value in payload.items() if key != "circuit"})
         for sentinel in (TEXT, opinion.docket, *opinion.reporter_cites):
             self.assertNotIn(sentinel or "absent-caption", str(payload))
 
@@ -363,11 +365,13 @@ class HttpAdapters(unittest.TestCase):
         self.assertEqual([json.loads(request.content) for request in indexes], [
             {"field_name": name, "field_schema": schema} for name, schema in dense.PAYLOAD_INDEXES.items()
         ])
+        self.assertIn({"field_name": "dupe_cluster", "field_schema": "keyword"}, [json.loads(request.content) for request in indexes])
+        self.assertIn({"field_name": "boilerplate", "field_schema": "bool"}, [json.loads(request.content) for request in indexes])
         self.assertTrue(all(request.url.params["wait"] == "true" for request in indexes))
         store.set_indexing(NAME, dense.FILL_INDEXING_THRESHOLD)
         self.assertEqual(self.requests[-1].method, "PATCH")
         self.assertEqual(json.loads(self.requests[-1].content), {"optimizers_config": {"indexing_threshold": dense.FILL_INDEXING_THRESHOLD}})
-        point = dense.Point(dense.point_id(chunk_for().chunk_id), (0.1, 0.2, 0.3), dense.payload_for(chunk_for(), opinion_for(), GEO))
+        point = dense.Point(dense.point_id(chunk_for().chunk_id), (0.1, 0.2, 0.3), dense.payload_for(chunk_for(), opinion_for(), GEO, lexical.TextKeys(chunk_for().content_hash, False)))
         store.upsert(NAME, (point,))
         self.assertEqual(self.requests[-1].url.params["wait"], "true")
         self.assertEqual(json.loads(self.requests[-1].content), json.loads(json.dumps({"points": [asdict(point)]})))
@@ -410,36 +414,82 @@ class HttpAdapters(unittest.TestCase):
 
         def handler(request: httpx.Request) -> httpx.Response:
             body = json.loads(request.content)
-            self.assertIs(body["with_payload"], False)
+            self.assertEqual(body["with_payload"], False if body["with_vector"] else ["dupe_cluster", "boilerplate"])
             bound = dense.RETRIEVE_BATCH if body["with_vector"] else dense.PRESENCE_BATCH
             self.assertLessEqual(len(body["ids"]), bound)
-            return response([{"id": identifier.upper(), "vector": [0.1, 0.2, 0.3]} for identifier in reversed(body["ids"])])
+            return response([{
+                "id": identifier.upper(), "vector": [0.1, 0.2, 0.3],
+                "payload": {"dupe_cluster": "fictitious-cluster", "boilerplate": True},
+            } for identifier in reversed(body["ids"])])
 
         store = self.store(handler)
-        self.assertEqual(store.present(NAME, identifiers), set(identifiers))
+        self.assertEqual(store.present(NAME, identifiers), dict.fromkeys(identifiers, lexical.TextKeys("fictitious-cluster", True)))
         self.assertEqual(len(self.requests), math.ceil(len(identifiers) / dense.PRESENCE_BATCH))
         self.requests.clear()
         vectors = store.retrieve(NAME, identifiers)
         self.assertEqual(vectors, dict.fromkeys(identifiers, (0.1, 0.2, 0.3)))
         self.assertEqual(len(self.requests), math.ceil(len(identifiers) / dense.RETRIEVE_BATCH))
         self.requests.clear()
-        self.assertEqual(store.present(NAME, ()), set())
+        self.assertEqual(store.present(NAME, ()), {})
         self.assertEqual(store.retrieve(NAME, ()), {})
         self.assertFalse(self.requests)
 
     def test_missing_points_are_omitted_and_dropped_home_discards_partial_results(self) -> None:
         identifiers = [str(uuid.UUID(int=index + 1)) for index in range(dense.RETRIEVE_BATCH + 1)]
         store = self.store(lambda request: response([]))
-        self.assertEqual(store.present(NAME, identifiers), set())
+        self.assertEqual(store.present(NAME, identifiers), {})
         self.assertEqual(store.retrieve(NAME, identifiers), {})
         replies = iter((response([{"id": identifiers[0], "vector": [0.1, 0.2, 0.3]}]), httpx.Response(404)))
         self.assertEqual(self.store(lambda request: next(replies)).retrieve(NAME, identifiers), {})
+
+    def test_presence_reads_complete_pairs_and_keeps_incomplete_pairs_present(self) -> None:
+        identifiers = [str(uuid.UUID(int=index + 1)) for index in range(5)]
+        payloads: tuple[dict[str, object], ...] = (
+            {"dupe_cluster": "fictitious-cluster", "boilerplate": True},
+            {"dupe_cluster": "fictitious-cluster", "boilerplate": False},
+            {"dupe_cluster": "fictitious-cluster"},
+            {"dupe_cluster": 17, "boilerplate": False},
+            {"dupe_cluster": "fictitious-cluster", "boilerplate": 1},
+        )
+        rows = [{"id": identifier, "payload": payload} for identifier, payload in zip(identifiers, payloads, strict=True)]
+        self.assertEqual(self.store(answer(rows)).present(NAME, identifiers), {
+            identifiers[0]: lexical.TextKeys("fictitious-cluster", True),
+            identifiers[1]: lexical.TextKeys("fictitious-cluster", False),
+            **dict.fromkeys(identifiers[2:]),
+        })
+        self.assertEqual(json.loads(self.requests[-1].content)["with_payload"], ["dupe_cluster", "boilerplate"])
+
+    def test_set_payload_merges_with_post_in_bounded_awaited_requests(self) -> None:
+        identifiers = [str(uuid.UUID(int=index + 1)) for index in range(dense.PRESENCE_BATCH + 1)]
+        payload: dict[str, str | bool] = {"dupe_cluster": "fictitious-cluster", "boilerplate": True}
+        store = self.store(answer({"status": "completed"}))
+        store.set_payload(NAME, identifiers, payload)
+        self.assertEqual(len(self.requests), math.ceil(len(identifiers) / dense.PRESENCE_BATCH))
+        selected: list[str] = []
+        for request in self.requests:
+            self.assertEqual(request.method, "POST")
+            self.assertEqual(request.url.path, f"/collections/{NAME}/points/payload")
+            self.assertEqual(dict(request.url.params), {"wait": "true"})
+            body = json.loads(request.content)
+            self.assertEqual(body["payload"], payload)
+            self.assertEqual(set(body), {"payload", "points"})
+            self.assertLessEqual(len(body["points"]), dense.PRESENCE_BATCH)
+            selected.extend(body["points"])
+        self.assertEqual(selected, identifiers)
+        self.requests.clear()
+        store.set_payload(NAME, (), payload)
+        self.assertFalse(self.requests)
+        for result in (None, {}, {"status": "acknowledged"}, {"status": "failed"}):
+            with self.subTest(result=result), self.assertRaises(dense.DenseFailure) as raised:
+                self.store(answer(result)).set_payload(NAME, identifiers[:1], payload)
+            self.assertEqual(raised.exception.reason, "store")
 
     def test_invalid_points_and_vectors_refuse(self) -> None:
         identifier = dense.point_id(chunk_for().chunk_id)
         results: tuple[object, ...] = (
             None, {}, [None], [{"id": 17}], [{"id": "invalid"}],
-            [{"id": str(uuid.UUID(int=29))}], [{"id": identifier}] * 2,
+            [{"id": str(uuid.UUID(int=29))}], [{"id": identifier, "payload": {}}] * 2,
+            [{"id": identifier, "payload": None}], [{"id": identifier, "payload": []}],
         )
         for result in results:
             with self.subTest(result=result), self.assertRaises(dense.DenseFailure):
@@ -660,6 +710,7 @@ class FakeVectorStore:
         self.indexed_callback: Callable[[Callable[[int], None]], None] | None = None
         self.retrievals: list[tuple[str, tuple[str, ...]]] = []
         self.thresholds: list[int] = []
+        self.payload_updates: list[tuple[str, tuple[str, ...], dict[str, str | bool]]] = []
 
     def info(self, name: str) -> dict[str, Any] | None:
         self.events.append("info")
@@ -682,9 +733,22 @@ class FakeVectorStore:
         self.events.append("pause" if threshold == dense.FILL_INDEXING_THRESHOLD else "restore")
         self.thresholds.append(threshold)
 
-    def present(self, name: str, ids: Sequence[str]) -> set[str]:
+    def present(self, name: str, ids: Sequence[str]) -> dict[str, lexical.TextKeys | None]:
         self.events.append("present")
-        return set(ids) & self.collections[name].keys()
+        result: dict[str, lexical.TextKeys | None] = {}
+        for identifier in ids:
+            if identifier in self.collections[name]:
+                payload = self.collections[name][identifier].payload
+                cluster, boilerplate = payload.get("dupe_cluster"), payload.get("boilerplate")
+                result[identifier] = lexical.TextKeys(cluster, boilerplate) if isinstance(cluster, str) and isinstance(boilerplate, bool) else None
+        return result
+
+    def set_payload(self, name: str, ids: Sequence[str], payload: Mapping[str, str | bool]) -> None:
+        self.events.append("set-payload")
+        self.payload_updates.append((name, tuple(ids), dict(payload)))
+        for identifier in ids:
+            point = self.collections[name][identifier]
+            self.collections[name][identifier] = replace(point, payload={**point.payload, **payload})
 
     def retrieve(self, name: str, ids: Sequence[str]) -> dict[str, tuple[float, ...]]:
         self.retrievals.append((name, tuple(ids)))
@@ -738,6 +802,8 @@ class FakeDenseRecord:
         self.built_at: datetime | None = None
         self.finished: tuple[dense.DenseCounts, datetime, bool] | None = None
         self.opinion_reads: list[str] = []
+        self.text_keys: dict[str, lexical.TextKeys] = {}
+        self.key_reads: list[tuple[str, tuple[str, ...]]] = []
 
     def _main(self) -> None:
         assert threading.get_ident() == self.owner, "record touched by a writer thread"
@@ -773,6 +839,11 @@ class FakeDenseRecord:
         self._main()
         self.opinion_reads.append(doc_id)
         return replace(opinion_for(), doc_id=doc_id)
+
+    def keys_for(self, name: str, hashes: Sequence[str]) -> dict[str, lexical.TextKeys]:
+        self._main()
+        self.key_reads.append((name, tuple(hashes)))
+        return {content_hash: self.text_keys.get(content_hash, lexical.TextKeys(content_hash, False)) for content_hash in hashes}
 
     def ledger_rows(self, space: str, hashes: Sequence[str]) -> tuple[dense.LedgerRow, ...]:
         self._main()
@@ -902,7 +973,7 @@ class Build(unittest.TestCase):
         chunk = chunk_for()
         identifier = dense.point_id(chunk.chunk_id)
         point = self.store.collections[NAME][identifier]
-        self.assertEqual(point.payload, dense.payload_for(chunk, opinion_for(), GEO))
+        self.assertEqual(point.payload, dense.payload_for(chunk, opinion_for(), GEO, lexical.TextKeys(chunk.content_hash, False)))
         self.assertEqual(self.record.ledger[chunk.content_hash], dense.LedgerRow(chunk.content_hash, NAME, identifier))
         self.assertEqual(self.record.finished, (counts, NOW, False))
         self.assertEqual((self.record.dense_built_at, self.record.built_at), (NOW, NOW))
@@ -954,6 +1025,91 @@ class Build(unittest.TestCase):
         self.assertFalse(self.record.opinion_reads)
         self.assertNotIn("create", self.events)
         self.assertNotIn("upsert-ack", self.events)
+
+    def test_present_only_leveling_commits_after_the_payload_ack_and_a_rerun_writes_nothing(self) -> None:
+        chunk = chunk_for()
+        identifier = dense.point_id(chunk.chunk_id)
+        keys = lexical.TextKeys("fictitious-shared-cluster", True)
+        self.record.text_keys[chunk.content_hash] = keys
+        self.record.ledger[chunk.content_hash] = dense.LedgerRow(chunk.content_hash, NAME, identifier)
+        self.store.collections[NAME] = {identifier: dense.Point(identifier, (0.1, 0.2, 0.3), {"court": "fictitious-court"})}
+        cas.object_path(self.digest, self.store_root).unlink()
+        counts = self.run_build()
+        self.assertEqual((counts.dense_present, counts.dense_leveled, counts.dense_embedded), (1, 1, 0))
+        self.assertEqual(self.record.key_reads, [(NAME, (chunk.content_hash,))])
+        self.assertEqual(self.store.payload_updates, [(NAME, (identifier,), asdict(keys))])
+        self.assertEqual(self.store.collections[NAME][identifier].payload, {"court": "fictitious-court", **asdict(keys)})
+        first, inserts, rehomes = self.record.commits[0]
+        self.assertEqual(first.dense_leveled, 1)
+        self.assertEqual((inserts, rehomes), ((), ()))
+        self.assertLess(self.events.index("set-payload"), self.events.index("commit"))
+        self.store.payload_updates.clear()
+        self.events.clear()
+        self.record.commits.clear()
+        again = self.run_build()
+        self.assertEqual((again.dense_present, again.dense_leveled, again.dense_embedded), (1, 0, 0))
+        self.assertFalse(self.store.payload_updates)
+        self.assertNotIn("upsert-ack", self.events)
+        self.assertFalse(self.embedder.calls)
+
+    def test_leveling_groups_pairs_and_counts_once_with_copies_and_embeddings(self) -> None:
+        self.distinct_chunks(5)
+        chunks = [self.record.chunk_rows[document.doc_id][0] for document in self.record.document_rows]
+        shared = lexical.TextKeys("fictitious-shared-cluster", True)
+        other = lexical.TextKeys("fictitious-other-cluster", False)
+        self.record.text_keys = {chunk.content_hash: shared if index < 2 else other for index, chunk in enumerate(chunks)}
+        self.store.collections[NAME] = {
+            dense.point_id(chunk.chunk_id): dense.Point(dense.point_id(chunk.chunk_id), (0.1, 0.2, 0.3), {})
+            for chunk in chunks[:3]
+        }
+        home = "caselaw__corpus-2098-01-01__example-space"
+        home_id = dense.point_id("f" * 64)
+        self.store.collections[home] = {home_id: dense.Point(home_id, (0.7, 0.8, 0.9), {})}
+        self.record.ledger[chunks[3].content_hash] = dense.LedgerRow(chunks[3].content_hash, home, home_id)
+        counts = self.run_build()
+        self.assertEqual((counts.dense_present, counts.dense_leveled, counts.dense_copied, counts.dense_embedded), (3, 3, 1, 1))
+        self.assertEqual(self.record.key_reads, [(NAME, tuple(chunk.content_hash for chunk in chunks))])
+        self.assertEqual(self.store.payload_updates, [
+            (NAME, tuple(dense.point_id(chunk.chunk_id) for chunk in chunks[:2]), asdict(shared)),
+            (NAME, (dense.point_id(chunks[2].chunk_id),), asdict(other)),
+        ])
+        for commit, _, _ in self.record.commits:
+            self.assertEqual(commit.dense_leveled, 3)
+        self.assertEqual(self.events[:self.events.index("commit")].count("set-payload"), 2)
+        for chunk in chunks[3:]:
+            self.assertEqual(self.store.collections[NAME][dense.point_id(chunk.chunk_id)].payload,
+                             dense.payload_for(chunk, replace(opinion_for(), doc_id=chunk.doc_id), GEO, other))
+        self.store.payload_updates.clear()
+        self.events.clear()
+        calls = len(self.embedder.calls)
+        again = self.run_build()
+        self.assertEqual((again.dense_present, again.dense_leveled, again.dense_copied, again.dense_embedded), (5, 0, 0, 0))
+        self.assertFalse(self.store.payload_updates)
+        self.assertNotIn("upsert-ack", self.events)
+        self.assertEqual(len(self.embedder.calls), calls)
+
+    def test_absent_point_carries_the_record_pair(self) -> None:
+        chunk = chunk_for()
+        keys = lexical.TextKeys("fictitious-canonical-cluster", True)
+        self.record.text_keys[chunk.content_hash] = keys
+        counts = self.run_build()
+        payload = self.store.collections[NAME][dense.point_id(chunk.chunk_id)].payload
+        self.assertEqual((payload["dupe_cluster"], payload["boilerplate"]), (keys.dupe_cluster, keys.boilerplate))
+        self.assertEqual(counts.dense_leveled, 0)
+        self.assertFalse(self.store.payload_updates)
+
+    def test_leveling_rides_the_first_embedding_commit_once(self) -> None:
+        self.distinct_chunks(3)
+        chunk = self.record.chunk_rows[self.record.document_rows[0].doc_id][0]
+        identifier = dense.point_id(chunk.chunk_id)
+        self.store.collections[NAME] = {identifier: dense.Point(identifier, (0.1, 0.2, 0.3), {})}
+        with patch.object(dense, "EMBED_BATCH_TEXTS", 1):
+            counts = self.run_build()
+        self.assertEqual((counts.dense_present, counts.dense_leveled, counts.dense_embedded), (1, 1, 2))
+        self.assertEqual(len(self.record.commits), 2)
+        for commit, _, _ in self.record.commits:
+            self.assertEqual((commit.dense_present, commit.dense_leveled), (1, 1))
+        self.assertLess(self.events.index("set-payload"), self.events.index("commit"))
 
     def test_kill_after_upsert_before_commit_is_repaired_without_reembedding(self) -> None:
         class Killed(BaseException):
@@ -1008,6 +1164,7 @@ class Build(unittest.TestCase):
         self.assertEqual((counts.dense_embedded, counts.dense_texts, counts.dense_requests), (3, 1, 1))
         self.assertEqual(self.embedder.calls, [(TEXT[chunk.char_start:chunk.char_end],)])
         self.assertEqual(read.call_count, 2)
+        self.assertEqual(self.record.key_reads, [(NAME, (chunk.content_hash,))])
         self.assertEqual(len(self.record.ledger), 1)
 
     def test_limit_and_short_hour_reading_leave_the_dense_half_unbuilt(self) -> None:
@@ -1058,6 +1215,7 @@ class Build(unittest.TestCase):
         self.record.lexical_built_at = None
         counts = self.run_build()
         self.assertEqual((counts.dense_scope, counts.dense_points, counts.dense_requests), (0, 0, 0))
+        self.assertFalse(self.record.key_reads)
         self.assertEqual(self.record.dense_built_at, NOW)
         self.assertIsNone(self.record.built_at)
         assert self.record.generation is not None

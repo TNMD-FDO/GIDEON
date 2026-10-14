@@ -18,6 +18,7 @@ from gideon.host.index import buildreport, generations
 from gideon.host.index.record import GenerationRow
 from gideon.host.render.worker import (
     AGREEMENT_RECORD_NAME,
+    CLUSTER_BUDGET_SECONDS,
     DOCUMENT_FAILURE_REASONS,
     GENERATION_FAILURE_REASONS,
     GENERATION_STATES,
@@ -171,6 +172,45 @@ class Parser(unittest.TestCase):
                 with self.subTest(reason=reason, stage=stage):
                     row = replace(self.row, state="failed", failure_reason=reason, failed_stage=stage)
                     self.assertEqual(buildreport.BuildReport.from_json(row.to_json()), row)
+
+    def test_cluster_gate_round_trip_and_failed_stage_preserve_accounted(self) -> None:
+        gate = buildreport.ClusterGate(CLUSTER_BUDGET_SECONDS, CLUSTER_BUDGET_SECONDS, True, True)
+        row = replace(self.row, state="failed", failed_stage="cluster", failure_reason="cluster-budget",
+                      gates={**self.row.gates, "cluster": gate})
+        payload = row.to_json()
+        self.assertEqual(payload["gates"], {
+            "accounted": self.payload["gates"]["accounted"], "cluster": {
+                "seconds": gate.seconds, "budget": gate.budget, "reused": gate.reused, "pass": gate.passed,
+            },
+        })
+        self.assertEqual(buildreport.BuildReport.from_json(json.loads(json.dumps(payload))), row)
+        cluster_only = replace(row, gates={"cluster": gate})
+        self.assertEqual(buildreport.BuildReport.from_json(cluster_only.to_json()), cluster_only)
+
+    def test_cluster_gate_refuses_every_off_shape_value(self) -> None:
+        value: object
+        gate = buildreport.ClusterGate(7, CLUSTER_BUDGET_SECONDS, False, True).to_json()
+        payload = changed(self.payload, ("gates", "cluster"), gate)
+        for key in gate:
+            with self.subTest(missing=key):
+                self.assertIsNone(buildreport.BuildReport.from_json(changed(
+                    payload, ("gates", "cluster"), {name: value for name, value in gate.items() if name != key},
+                )))
+        for value in (None, [], "fictitious gate", {**gate, "extra": False}, {"court1": gate}):
+            with self.subTest(value=value):
+                self.assertIsNone(buildreport.BuildReport.from_json(changed(payload, ("gates", "cluster"), value)))
+        for key in ("seconds", "budget"):
+            for value in (-1, True, 1.5, "7", None):
+                with self.subTest(key=key, value=value):
+                    self.assertIsNone(buildreport.BuildReport.from_json(changed(payload, ("gates", "cluster", key), value)))
+        self.assertIsNone(buildreport.BuildReport.from_json(changed(payload, ("gates", "cluster", "budget"), 0)))
+        for key in ("reused", "pass"):
+            for value in (0, 1, "true", None):
+                with self.subTest(key=key, value=value):
+                    self.assertIsNone(buildreport.BuildReport.from_json(changed(payload, ("gates", "cluster", key), value)))
+        self.assertIsNone(buildreport.BuildReport.from_json(changed(
+            payload, ("gates", "cluster", "seconds"), CLUSTER_BUDGET_SECONDS + 1,
+        )))
 
     def test_document_distribution_closed_sets_parse(self) -> None:
         for name, allowed in (("by_text_source", TEXT_SOURCES), ("by_precedential", PRECEDENTIAL_VALUES),
@@ -337,9 +377,35 @@ class Gather(unittest.TestCase):
         self.assertEqual(self.host.file_reads.count(self.host.stage_path), 1)
         self.assertEqual(observed.wall_clock, report_for().wall_clock)
         self.assertEqual(observed.metadata_changes, {})
+        self.assertNotIn("cluster", observed.gates)
         courts = [next(line for line in sql.splitlines() if line.startswith("\\set v_court "))
                   for _, sql in self.host.calls if sql is not None]
         self.assertEqual(courts, [worker.bind("v_court", court) for court in ("court1", "court1", "court2", "court2")])
+
+    def test_cluster_gate_uses_recorded_seconds_timestamp_reuse_and_budget_edge(self) -> None:
+        for seconds in (0, CLUSTER_BUDGET_SECONDS - 1, CLUSTER_BUDGET_SECONDS, CLUSTER_BUDGET_SECONDS + 1):
+            for timestamp in (None, self.row.lexical_built_at):
+                for reused in (0, 1):
+                    with self.subTest(seconds=seconds, timestamp=timestamp, reused=reused):
+                        row = replace(self.row, clustered_at=timestamp,
+                                      counts={**self.row.counts, "cluster_seconds": seconds, "cluster_reused": reused})
+                        observed = self.gather(row)
+                        self.assertEqual(observed.gates["cluster"], buildreport.ClusterGate(
+                            seconds, CLUSTER_BUDGET_SECONDS, reused == 1,
+                            timestamp is not None and seconds <= CLUSTER_BUDGET_SECONDS,
+                        ))
+                        self.assertEqual(observed.gates["accounted"], self.gather().gates["accounted"])
+                        self.assertEqual(buildreport.BuildReport.from_json(observed.to_json()), observed)
+
+    def test_cluster_timestamp_and_reuse_alone_do_not_add_a_gate(self) -> None:
+        row = replace(self.row, clustered_at=self.row.lexical_built_at,
+                      counts={**self.row.counts, "cluster_reused": 1})
+        self.assertNotIn("cluster", self.gather(row).gates)
+
+    def test_cluster_seconds_without_reuse_count_defaults_to_not_reused(self) -> None:
+        row = replace(self.row, counts={**self.row.counts, "cluster_seconds": 7},
+                      clustered_at=self.row.lexical_built_at)
+        self.assertFalse(self.gather(row).gates["cluster"].reused)
 
     def test_absent_work_records_keep_counts_and_nullable_observations(self) -> None:
         self.host.files.clear()
@@ -499,3 +565,15 @@ class Record(unittest.TestCase):
         ))
         self.assertNotIn(str(WORK_ROOT), buildreport.summary(self.row))
         self.assertNotIn("=", buildreport.summary(self.row))
+
+    def test_summary_names_cluster_verdict_and_optional_reuse_only_when_present(self) -> None:
+        self.assertNotIn("cluster ", buildreport.summary(self.row))
+        for passed, reused in ((True, False), (True, True), (False, False), (False, True)):
+            with self.subTest(passed=passed, reused=reused):
+                gate = buildreport.ClusterGate(CLUSTER_BUDGET_SECONDS, CLUSTER_BUDGET_SECONDS, reused, passed)
+                row = replace(self.row, gates={**self.row.gates, "cluster": gate})
+                suffix = f"cluster {gate.seconds} of {gate.budget} s, {'pass' if passed else 'fail'}"
+                suffix += ", reused" if reused else ""
+                self.assertEqual(buildreport.summary(row), buildreport.summary(self.row).replace(
+                    f"seconds {row.seconds}", f"{suffix}; seconds {row.seconds}",
+                ))

@@ -1,4 +1,4 @@
-"""Build a collection's lexical index and vectors through the queue worker."""
+"""Build a collection's near-duplicate clusters, lexical index, and vectors."""
 
 import argparse
 import subprocess
@@ -22,12 +22,18 @@ from gideon.host import (
 )
 from gideon.host.corpus import artifacts, record, snapshots
 from gideon.host.corpus.sources import SOURCES, SourceDefinition
-from gideon.host.index import buildreport, dense, generations, lexical
+from gideon.host.index import buildreport, dense, dupes, generations, lexical
 from gideon.host.index import record as indexrecord
 from gideon.host.render.engine import EMBED
 from gideon.host.render.opensearch import OPENSEARCH_SERVICE_NAME
 from gideon.host.render.qdrant import QDRANT_SERVICE_NAME
-from gideon.host.render.worker import DENSE_LOCK_PREFIX, WORK_ROOT, WORKER_SERVICE_NAME
+from gideon.host.render.worker import (
+    CLUSTER_BUDGET_SECONDS,
+    DENSE_LOCK_PREFIX,
+    DUPES_LOCK_PREFIX,
+    WORK_ROOT,
+    WORKER_SERVICE_NAME,
+)
 from gideon.host.report import Problem, StageResult
 from gideon.host.sysio import LockingHost, PathLike, RealHost, WritableBytesHost
 
@@ -178,6 +184,66 @@ def _preconditions(
     )
 
 
+def _cluster(
+    host: IndexHost, rendered_dir: PathLike, inputs: generations.GenerationInputs,
+    command_path: str, sleep: Callable[[float], None], monotonic: Callable[[], float],
+) -> int:
+    job = lexical.live_job(host, rendered_dir, f"{DUPES_LOCK_PREFIX}{inputs.name}",
+                          prefix=DUPES_LOCK_PREFIX, command_path=command_path)
+    if isinstance(job, Problem):
+        return _refuse("cluster", job)
+    rejoined = job is not None
+    if job is None:
+        job = dupes.defer_dupes(host, rendered_dir, inputs, command_path=command_path)
+    if isinstance(job, Problem):
+        return _refuse("cluster", job)
+    report.print_stage(StageResult("cluster", True, f"{inputs.name}: {'rejoined' if rejoined else 'deferred'} job {job}", ""))
+    heartbeat_at = monotonic()
+    while True:
+        outcome = dupes.read_dupes(host, rendered_dir, job, inputs.name, command_path=command_path)
+        if isinstance(outcome, Problem):
+            return _refuse("cluster", outcome)
+        if outcome.failure is not None:
+            return _refuse("cluster", outcome.failure)
+        now = monotonic()
+        if outcome.done or now - heartbeat_at >= snapshots.HEARTBEAT_SECONDS:
+            row = indexrecord.read_generation(host, rendered_dir, inputs.name, command_path=command_path)
+            if isinstance(row, Problem):
+                return _refuse("cluster", row)
+            if outcome.done and (row is None or row.clustered_at is None):
+                return _refuse("cluster", Problem(
+                    "succeeded clustering job has no recorded clustered_at",
+                    f"Run {stack.logs_fix(rendered_dir, WORKER_SERVICE_NAME)}, then run {report.command(command_path)} again.",
+                ))
+            if row is None:
+                return _refuse("cluster", Problem("generation progress row is missing", record.database_fix(rendered_dir, command_path)))
+            counts = row.counts
+            chunks, texts = counts.get("cluster_chunks", 0), counts.get("cluster_texts", 0)
+            if outcome.done:
+                if counts.get("cluster_reused", 0) == 1:
+                    detail = f"{inputs.name}: clusters stand, {chunks} chunks, {texts} texts; clustered_at {row.clustered_at}"
+                else:
+                    flagged = counts.get("cluster_flagged", 0)
+                    percent = 100 * flagged / chunks if chunks else 0.0
+                    detail = (
+                        f"{inputs.name}: clusters {counts.get('cluster_clusters', 0)} over "
+                        f"{counts.get('cluster_grouped', 0)} chunks of {chunks} "
+                        f"({counts.get('cluster_members', 0)} near-duplicate texts of {texts}), "
+                        f"boilerplate {counts.get('cluster_boilerplate', 0)} clusters over {flagged} chunks "
+                        f"({percent:.1f} % of {chunks}); {counts.get('cluster_seconds', 0)} s of the "
+                        f"{CLUSTER_BUDGET_SECONDS} s budget; clustered_at {row.clustered_at}"
+                        + ("; nothing to cluster" if not chunks else "")
+                    )
+                report.print_stage(StageResult("cluster", True, detail, ""))
+                return 0
+            report.print_stage(StageResult(
+                "cluster", True, f"{inputs.name}: clustering, documents {counts.get('cluster_documents', 0)}, "
+                f"texts {texts}, seconds {counts.get('cluster_seconds', 0)} of {CLUSTER_BUDGET_SECONDS}", "",
+            ))
+            heartbeat_at = now
+        sleep(1.0)
+
+
 def _build(
     host: IndexHost, rendered_dir: PathLike, inputs: generations.GenerationInputs,
     command_path: str, sleep: Callable[[float], None], monotonic: Callable[[], float],
@@ -232,7 +298,7 @@ def _counts(host: IndexHost, rendered_dir: PathLike, name: str, command_path: st
     report.print_stage(StageResult(
         "counts", True, f"{name}: documents ready {counts.get('ready', 0)}, "
         f"chunked {counts.get('chunked', 0)}, unchunked {counts.get('unchunked', 0)}; "
-        f"chunks indexed {indexed}, present {present}, total {indexed + present}; "
+        f"chunks indexed {indexed}, present {present}, leveled {counts.get('leveled', 0)}, total {indexed + present}; "
         f"bytes {row.bytes}; lexical_built_at {row.lexical_built_at}; state {row.state}"
         + ("; empty index" if not counts.get("ready", 0) else ""), "",
     ))
@@ -274,6 +340,7 @@ def _dense(
     host: IndexHost, rendered_dir: PathLike, inputs: dense.DenseInputs,
     command_path: str, sleep: Callable[[float], None], monotonic: Callable[[], float],
     clock: Callable[[], datetime],
+    dense_limit: int | None = None,
 ) -> _JobResult:
     job = lexical.live_job(host, rendered_dir, f"{DENSE_LOCK_PREFIX}{inputs.name}",
                           prefix=DENSE_LOCK_PREFIX, command_path=command_path)
@@ -281,10 +348,13 @@ def _dense(
         return _JobResult(_refuse("dense", job), False)
     rejoined = job is not None
     if job is None:
-        job = dense.defer_dense(host, rendered_dir, inputs, command_path=command_path)
+        job = dense.defer_dense(host, rendered_dir, inputs, limit=dense_limit, command_path=command_path)
     if isinstance(job, Problem):
         return _JobResult(_refuse("dense", job), False)
-    report.print_stage(StageResult("dense", True, f"{inputs.name}: {'rejoined' if rejoined else 'deferred'} job {job}", ""))
+    detail = f"{inputs.name}: {'rejoined' if rejoined else 'deferred'} job {job}"
+    if not rejoined and dense_limit is not None:
+        detail += f", limit {dense_limit}"
+    report.print_stage(StageResult("dense", True, detail, ""))
     heartbeat_at = monotonic()
     hour_printed = False
     while True:
@@ -328,12 +398,13 @@ def _built(host: IndexHost, rendered_dir: PathLike, name: str, command_path: str
     counts = row.counts
     present, copied, embedded = (counts.get(f"dense_{key}", 0) for key in ("present", "copied", "embedded"))
     written = copied + embedded
+    split = f"present {present}, leveled {counts.get('dense_leveled', 0)}, copied {copied}, embedded {embedded}"
     if row.dense_built_at is None:
         detail = (f"{name}: limited to {counts['dense_limit']} documents, chunks written {written} of {counts.get('dense_scope', 0)}; "
                   f"dense half not built: run {report.command(command_path)} again")
     else:
         detail = (f"{name}: points {counts.get('dense_points', 0)}, indexed {counts.get('dense_indexed', 0)}, "
-                  f"written {written} (present {present}, copied {copied}, embedded {embedded}), "
+                  f"written {written} ({split}), "
                   f"tokens {counts.get('dense_tokens', 0)}, requests {counts.get('dense_requests', 0)}, "
                   f"seconds {counts.get('dense_seconds', 0)}; dense_built_at {row.dense_built_at}; state {row.state}")
     report.print_stage(StageResult("built", True, detail, ""))
@@ -375,8 +446,9 @@ def run_index_build(
     work_root: PathLike = WORK_ROOT,
     sleep: Callable[[float], None] = time.sleep, monotonic: Callable[[], float] = time.monotonic,
     sources: Sequence[SourceDefinition] = SOURCES,
+    dense_limit: int | None = None,
 ) -> int:
-    """Check inputs, record an identity, and wait for both generation builds."""
+    """Check inputs, record an identity, and wait for clustering and both index builds."""
 
     if args.sample:
         print(f"gideon {COMMAND_PATH} --sample: not implemented; {SAMPLE_LANDING}", file=sys.stderr)
@@ -421,16 +493,20 @@ def run_index_build(
         inputs = replace(inputs, name=outcome.name)
         # The guard and reserve rows belong here: read the profile's guards,
         # the promoted generation's bytes, and the free bytes under /data.
-        active_stage = "build"
-        lexical_result = _build(io, rendered_dir, inputs, command_path, sleep, monotonic)
-        result = lexical_result.exit_code
+        active_stage = "cluster"
+        result = _cluster(io, rendered_dir, inputs, command_path, sleep, monotonic)
+        lexical_result = _JobResult(0, False)
+        if not result:
+            active_stage = "build"
+            lexical_result = _build(io, rendered_dir, inputs, command_path, sleep, monotonic)
+            result = lexical_result.exit_code
         dense_deferred = False
         if not result:
             active_stage = "counts"
             result = _counts(io, rendered_dir, inputs.name, command_path)
         if not result:
             active_stage = "dense"
-            dense_result = _dense(io, rendered_dir, inputs, command_path, sleep, monotonic, clock)
+            dense_result = _dense(io, rendered_dir, inputs, command_path, sleep, monotonic, clock, dense_limit)
             result = dense_result.exit_code
             dense_deferred = dense_result.deferred
         if not result:
@@ -448,6 +524,8 @@ def run_index_build(
         )
         return result if result else report_result
     except KeyboardInterrupt:
+        if active_stage == "cluster":
+            return _refuse(active_stage, Problem("interrupted; the clustering continues in the worker", f"Run {report.command(command_path)} again to rejoin it."))
         if active_stage == "build":
             return _refuse(active_stage, Problem("interrupted; the build continues in the worker", f"Run {report.command(command_path)} again to rejoin it."))
         if active_stage == "dense":

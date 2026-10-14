@@ -17,6 +17,7 @@ from gideon.host.render.opensearch import (
 )
 from gideon.host.render.worker import (
     DENSE_LOCK_PREFIX,
+    DUPES_LOCK_PREFIX,
     LEXICAL_FAILURE_REASONS,
     LEXICAL_QUEUE,
     LEXICAL_TASK,
@@ -133,6 +134,25 @@ class Defer(unittest.TestCase):
 
 
 class LiveJob(unittest.TestCase):
+    def test_prefixes_choose_their_subject_for_validation_and_query_refusals(self) -> None:
+        for prefix, subject in (("index-", "lexical"), (DENSE_LOCK_PREFIX, "dense"),
+                                (DUPES_LOCK_PREFIX, "clustering"), ("other-", "lexical")):
+            with self.subTest(prefix=prefix):
+                host = QueueHost()
+                result = live_job(host, RENDERED, "wrong-lock", prefix=prefix)
+                assert isinstance(result, Problem)
+                self.assertEqual(result.problem, f"{subject} queueing lock is invalid")
+                self.assertEqual(host.calls, [])
+                result = live_job(host, RENDERED, f"{prefix}invalid", prefix=prefix)
+                assert isinstance(result, Problem)
+                self.assertEqual(result.problem, f"{subject} generation name is invalid")
+                self.assertEqual(host.calls, [])
+                host.code = 3
+                result = live_job(host, RENDERED, f"{prefix}{NAME}", prefix=prefix)
+                assert isinstance(result, Problem)
+                self.assertEqual(result.problem, f"{subject} job query failed (exit 3)")
+                self.assertEqual(len(host.calls), 1)
+
     def test_dense_prefix_binds_its_lock_without_values_in_argv(self) -> None:
         host = QueueHost()
         lock = f"{DENSE_LOCK_PREFIX}{NAME}"

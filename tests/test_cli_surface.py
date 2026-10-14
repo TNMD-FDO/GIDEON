@@ -322,7 +322,8 @@ class IndexBuild(unittest.TestCase):
         for collection in COLLECTIONS:
             self.assertIn(collection.name, help_text)
         for phrase in ("--lockfile LABEL", "newest", "--sample", SAMPLE_LANDING, "lexical index",
-                       "its vectors in the vector store", "build report"):
+                       "its near-duplicate clusters", "from the record", "its vectors in the vector store",
+                       "build report"):
             self.assertIn(phrase, help_text)
 
     def test_sample_keeps_the_stub_refusal_before_host_work(self) -> None:
@@ -345,9 +346,11 @@ class IndexBuild(unittest.TestCase):
             self.assertEqual(args.collection, COLLECTIONS[0].name)
             self.assertEqual(args.lockfile, label)
             self.assertFalse(args.sample)
+            self.assertFalse(hasattr(args, "dense_limit"))
             with patch("gideon.host.index.build.run_index_build", return_value=0) as run:
                 self.assertEqual(main(["index", "build", COLLECTIONS[0].name, *flags]), 0)
             self.assertEqual(run.call_args.args[0].lockfile, label)
+            self.assertNotIn("dense_limit", run.call_args.kwargs)
 
     def test_handler_guards_unexpected_errors(self) -> None:
         err = io.StringIO()

@@ -162,6 +162,14 @@ class Reader(unittest.TestCase):
     def test_absent_row_is_none(self) -> None:
         self.assertIsNone(read_generation(FakeHost(stdout="\n"), RENDERED, NAME))
 
+    def test_clustering_timestamp_is_independent_of_the_half_build_timestamps(self) -> None:
+        for stamp in (None, "2099-01-03T11:30:00+00:00"):
+            with self.subTest(clustered_at=stamp):
+                row = replace(row_for(), clustered_at=stamp, lexical_built_at=None)
+                self.assertEqual(
+                    read_generation(FakeHost(stdout=json.dumps(asdict(row))), RENDERED, NAME), row,
+                )
+
     def test_each_generation_failure_reason_parses(self) -> None:
         for reason in GENERATION_FAILURE_REASONS:
             with self.subTest(reason=reason):
@@ -190,12 +198,15 @@ class Reader(unittest.TestCase):
             {**row, "counts": []}, {**row, "lockfiles": []},
             {**row, "lockfiles": ["corpus-2099-04-01"]},
             {**row, "created_at": None}, {**row, "failure_reason": "store"},
+            {**row, "clustered_at": True}, {**row, "clustered_at": 42},
+            {**row, "clustered_at": []},
             {**row, "state": "failed"}, {**row, "state": "failed", "failure_reason": "unknown"},
             {**row, "built_at": row["lexical_built_at"]},
             {**row, "dense_built_at": row["lexical_built_at"]},
             {**row, "promoted_at": row["lexical_built_at"]},
             {**row, "state": "retired"}, {**row, "retired_at": row["lexical_built_at"]},
             {key: value for key, value in row.items() if key != "bytes"},
+            {key: value for key, value in row.items() if key != "clustered_at"},
             {**row, "unexpected": 1},
         ]
         for stdout in ("broken", "[]", *(json.dumps(item) for item in variants), json.dumps(row) * 2):

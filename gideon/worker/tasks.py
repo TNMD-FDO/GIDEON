@@ -11,6 +11,7 @@ from procrastinate.exceptions import UniqueViolation
 
 import gideon.host.cas
 import gideon.worker.dense
+import gideon.worker.dupes
 
 from . import agreement as citation_agreement
 from . import caselaw as document_ingest
@@ -220,6 +221,29 @@ def dense(
     )
 
 
+def dupes(
+    context: procrastinate.JobContext, name: str, collection: str, label: str,
+    snapshot: str, courts: Mapping[str, Mapping[str, object]], pipeline: str,
+    embedding_space: str, inputs_hash: str,
+) -> None:
+    """Cluster a generation outside the worker's event loop."""
+
+    job_id = context.job.id
+    if job_id is None:
+        raise gideon.worker.dupes.DupesFailure("invalid")
+    gideon.worker.dupes.build(
+        {
+            "name": name, "collection": collection, "label": label,
+            "snapshot": snapshot, "courts": courts, "pipeline": pipeline,
+            "embedding_space": embedding_space, "inputs_hash": inputs_hash,
+        },
+        job_id, gideon.worker.dupes.PsycopgGenerations(),
+        gideon.worker.dupes.FileSignatures(),
+        gideon.worker.dupes.ProcessSketcher(gideon.host.cas.ROOT),
+        gideon.host.cas.ROOT, work_root=staging.WORK_ROOT,
+    )
+
+
 def register_tasks(app: procrastinate.App) -> None:
     """Register verification, recovery, and synchronous corpus and index jobs."""
 
@@ -273,3 +297,9 @@ def register_tasks(app: procrastinate.App) -> None:
         pass_context=True,
         retry=False,
     )(dense)
+    app.task(
+        name=gideon.worker.dupes.DUPES_TASK,
+        queue=gideon.worker.dupes.DUPES_QUEUE,
+        pass_context=True,
+        retry=False,
+    )(dupes)

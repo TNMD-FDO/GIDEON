@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.166](docs/release-notes/v0.3.166.md) — 2026-10-14 — dedupe and boilerplate in the build
 - [v0.3.165](docs/release-notes/v0.3.165.md) — 2026-10-14 — a reference-free checkout in the segmenter test
 - [v0.3.164](docs/release-notes/v0.3.164.md) — 2026-10-14 — the build report
 - [v0.3.163](docs/release-notes/v0.3.163.md) — 2026-10-14 — segmenter-300 labelled and checked

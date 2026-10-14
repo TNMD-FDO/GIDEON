@@ -60,6 +60,7 @@ from gideon.worker import (
     caselaw,
     citations,
     dense,
+    dupes,
     fetch,
     lexical,
     metrics,
@@ -98,6 +99,34 @@ class WorkerIdentity(unittest.TestCase):
         definition = source_by_name(worker.OVERRULED_SOURCE)
         assert definition is not None
         self.assertEqual(definition.captured_file, overruled.INPUT_NAME)
+
+    def test_clustering_shared_names_and_generation_reasons(self) -> None:
+        self.assertEqual(worker.DUPES_TASK, "gideon.worker.tasks.dupes")
+        self.assertEqual(worker.DUPES_QUEUE, worker.LEXICAL_QUEUE)
+        self.assertEqual(worker.DUPES_LOCK_PREFIX, "dupes-")
+        self.assertEqual(worker.DUPES_LOCK_SUFFIX, ".dupes.lock")
+        self.assertEqual(worker.DUPES_FAILURE_REASONS, frozenset({
+            "invalid", "database", "local", "busy", "text-mismatch", "missing-text",
+            "generation-mismatch", "cluster-budget",
+        }))
+        self.assertEqual(
+            worker.GENERATION_FAILURE_REASONS,
+            worker.LEXICAL_FAILURE_REASONS | worker.DENSE_FAILURE_REASONS | worker.DUPES_FAILURE_REASONS,
+        )
+        self.assertEqual(worker.DUPES_COUNT_KEYS, (
+            "cluster_chunks", "cluster_texts", "cluster_documents", "cluster_clusters",
+            "cluster_members", "cluster_grouped", "cluster_boilerplate", "cluster_flagged",
+            "cluster_seconds", "cluster_reused",
+        ))
+        self.assertEqual(worker.CLUSTER_BUDGET_SECONDS, 60 * 60)
+
+    def test_clustering_identity_matches_the_worker(self) -> None:
+        for name in (
+            "DUPES_TASK", "DUPES_QUEUE", "DUPES_LOCK_PREFIX", "DUPES_LOCK_SUFFIX",
+            "DUPES_FAILURE_REASONS", "DUPES_COUNT_KEYS", "CLUSTER_BUDGET_SECONDS",
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(getattr(worker, name), getattr(dupes, name))
 
     def test_lexical_identity_matches_the_worker(self) -> None:
         for name in (

@@ -13,7 +13,7 @@ from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any, Final, Protocol, cast
+from typing import Any, Final, Literal, Protocol, cast
 
 import httpx
 import psycopg
@@ -136,7 +136,7 @@ class Document:
 
 @dataclass(frozen=True, slots=True)
 class BuildCounts:
-    """The six diagnostic counts read by the host's progress and finish rows."""
+    """The diagnostic counts read by the host's progress and finish rows."""
 
     ready: int = 0
     chunked: int = 0
@@ -144,6 +144,15 @@ class BuildCounts:
     indexed: int = 0
     present: int = 0
     seconds: int = 0
+    leveled: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class TextKeys:
+    """A text's canonical cluster hash and boilerplate flag."""
+
+    dupe_cluster: str
+    boilerplate: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +176,8 @@ class ServingDocument:
     token_count: int
     opinion_id: int
     cluster_id: int
+    dupe_cluster: str
+    boilerplate: bool
 
 
 class GenerationRecord(Protocol):
@@ -181,6 +192,7 @@ class GenerationRecord(Protocol):
     def chunks(self, doc_id: str, pipeline: str) -> tuple[chunker.NewChunk, ...]: ...
     def citations(self, doc_id: str) -> tuple[citations.NewCitation, ...]: ...
     def opinion(self, doc_id: str) -> caselaw.NewOpinion: ...
+    def keys_for(self, name: str, hashes: Sequence[str]) -> dict[str, TextKeys]: ...
     def close(self) -> None: ...
 
 
@@ -189,8 +201,9 @@ class LexicalStore(Protocol):
 
     def mapping_version(self, name: str) -> int | None: ...
     def create(self, name: str) -> None: ...
-    def present(self, name: str, ids: Sequence[str]) -> set[str]: ...
+    def present(self, name: str, ids: Sequence[str]) -> dict[str, TextKeys | None]: ...
     def bulk_create(self, name: str, documents: Sequence[tuple[str, ServingDocument]]) -> tuple[int, int]: ...
+    def bulk_update(self, name: str, updates: Sequence[tuple[str, TextKeys]]) -> int: ...
     def refresh(self, name: str) -> None: ...
     def bytes(self, name: str) -> int: ...
     def close(self) -> None: ...
@@ -229,6 +242,7 @@ def caption_for(opinion: caselaw.NewOpinion) -> str:
 def serving_document(
     chunk: chunker.NewChunk, text_slice: str, opinion: caselaw.NewOpinion,
     rows: Sequence[citations.NewCitation], geography: Mapping[str, treatment.Geography],
+    keys: TextKeys,
 ) -> ServingDocument:
     """Project one chunk and its recorded opinion into the declared mapping."""
 
@@ -237,7 +251,7 @@ def serving_document(
         geography[opinion.court].circuit, opinion.decided_date.isoformat(), opinion.precedential,
         chunk.section_type, chunk.doc_id, chunk.section_id, chunk.content_hash,
         chunk.ordinal, chunk.char_start, chunk.char_end, chunk.token_count,
-        opinion.opinion_id, opinion.cluster_id,
+        opinion.opinion_id, opinion.cluster_id, keys.dupe_cluster, keys.boilerplate,
     )
 
 
@@ -267,6 +281,13 @@ CHUNKS_SQL: Final = (
 OPINION_SQL: Final = (
     "SELECT opinion_id, doc_id, court, cluster_id, docket, decided_date, decided_date_is_approximate, "
     "precedential, precedential_raw, reporter_cites, opinion_type FROM opinions WHERE doc_id = %s"
+)
+KEYS_SQL: Final = (
+    "SELECT h.content_hash, COALESCE(m.cluster_id, h.content_hash), COALESCE(k.boilerplate, false) "
+    "FROM unnest(%s::text[]) AS h(content_hash) "
+    "LEFT JOIN dupe_members AS m ON m.gen_id = %s AND m.content_hash = h.content_hash "
+    "LEFT JOIN dupe_clusters AS k ON k.gen_id = %s "
+    "AND k.cluster_id = COALESCE(m.cluster_id, h.content_hash)"
 )
 
 
@@ -349,6 +370,17 @@ class PsycopgGenerations:
             raise LexicalFailure("database")
         return caselaw.NewOpinion(*(*rows[0][:9], tuple(rows[0][9]), rows[0][10]))
 
+    def keys_for(self, name: str, hashes: Sequence[str]) -> dict[str, TextKeys]:
+        rows = self._run(KEYS_SQL, (list(hashes), name, name), read=True)
+        keys: dict[str, TextKeys] = {}
+        for content_hash, cluster_id, boilerplate in rows:
+            if not isinstance(content_hash, str) or not isinstance(cluster_id, str) or type(boilerplate) is not bool:
+                raise LexicalFailure("database")
+            keys[content_hash] = TextKeys(cluster_id, boilerplate)
+        if set(keys) != set(hashes):
+            raise LexicalFailure("database")
+        return keys
+
     def close(self) -> None:
         first_error: psycopg.Error | None = None
         for attribute in ("_stream", "_writer"):
@@ -364,11 +396,16 @@ class PsycopgGenerations:
             raise LexicalFailure("database", error=type(first_error).__name__) from first_error
 
 
-def _bulk_lines(item: tuple[str, ServingDocument]) -> bytes:
+def _bulk_lines(
+    action: Literal["create", "update"], item: tuple[str, ServingDocument | TextKeys],
+) -> bytes:
     identifier, document = item
+    body = asdict(document)
+    if action == "update":
+        body = {"doc": body}
     return (
-        json.dumps({"create": {"_id": identifier}}, separators=(",", ":")) + "\n"
-        + json.dumps(asdict(document), separators=(",", ":"), ensure_ascii=False) + "\n"
+        json.dumps({action: {"_id": identifier}}, separators=(",", ":")) + "\n"
+        + json.dumps(body, separators=(",", ":"), ensure_ascii=False) + "\n"
     ).encode()
 
 
@@ -431,11 +468,11 @@ class HttpxStore:
         if value.get("acknowledged") is not True:
             raise LexicalFailure("store", error="Unacknowledged")
 
-    def present(self, name: str, ids: Sequence[str]) -> set[str]:
-        present: set[str] = set()
+    def present(self, name: str, ids: Sequence[str]) -> dict[str, TextKeys | None]:
+        present: dict[str, TextKeys | None] = {}
         for start in range(0, len(ids), MGET_BATCH_SIZE):
             selected = list(ids[start:start + MGET_BATCH_SIZE])
-            value = self._json(self._request("POST", f"/{name}/_mget", params={"_source": "false"}, json={"ids": selected}))
+            value = self._json(self._request("POST", f"/{name}/_mget", params={"_source_includes": "dupe_cluster,boilerplate"}, json={"ids": selected}))
             rows = value.get("docs")
             if not isinstance(rows, list) or len(rows) != len(selected):
                 raise LexicalFailure("store", error="InvalidPresence")
@@ -443,14 +480,23 @@ class HttpxStore:
                 if not isinstance(row, dict) or row.get("_id") != identifier or "error" in row or type(row.get("found")) is not bool:
                     raise LexicalFailure("store", error="InvalidPresence")
                 if row["found"]:
-                    present.add(identifier)
+                    source = row.get("_source", {})
+                    if not isinstance(source, dict):
+                        raise LexicalFailure("store", error="InvalidPresence")
+                    cluster_id, boilerplate = source.get("dupe_cluster"), source.get("boilerplate")
+                    present[identifier] = (
+                        TextKeys(cluster_id, boilerplate)
+                        if isinstance(cluster_id, str) and type(boilerplate) is bool else None
+                    )
         return present
 
-    def _bulk(self, name: str, documents: Sequence[tuple[str, ServingDocument]]) -> tuple[int, int]:
+    def _send_bulk(
+        self, name: str, action: Literal["create", "update"], documents: Sequence[tuple[str, bytes]],
+    ) -> tuple[int, int]:
         indexed = present = 0
         pending = list(documents)
         for attempt in range(len(RETRY_WAITS) + 1):
-            payload = b"".join(_bulk_lines(item) for item in pending)
+            payload = b"".join(lines for _, lines in pending)
             value = self._json(self._request(
                 "POST", f"/{name}/_bulk", content=payload,
                 headers={"Content-Type": "application/x-ndjson"},
@@ -458,19 +504,22 @@ class HttpxStore:
             items = value.get("items")
             if not isinstance(items, list) or len(items) != len(pending):
                 raise LexicalFailure("store", error="InvalidBulkReply")
-            retry: list[tuple[str, ServingDocument]] = []
+            retry: list[tuple[str, bytes]] = []
             failed = False
             for document, item in zip(pending, items, strict=True):
-                reply = item.get("create") if isinstance(item, dict) else None
+                reply = item.get(action) if isinstance(item, dict) else None
                 if not isinstance(reply, dict) or reply.get("_id") != document[0]:
                     failed = True
                     continue
                 status = reply.get("status")
                 if type(status) is not int:
                     failed = True
-                elif status == 201 and "error" not in reply:
+                elif "error" not in reply and (
+                    action == "create" and status == 201
+                    or action == "update" and status == 200 and reply.get("result") in ("updated", "noop")
+                ):
                     indexed += 1
-                elif status == 409:
+                elif action == "create" and status == 409:
                     present += 1
                 elif status in {429, 503}:
                     retry.append(document)
@@ -486,23 +535,33 @@ class HttpxStore:
             pending = retry
         raise AssertionError("bounded bulk loop ended without an outcome")
 
-    def bulk_create(self, name: str, documents: Sequence[tuple[str, ServingDocument]]) -> tuple[int, int]:
+    def _bulk(
+        self, name: str, action: Literal["create", "update"], documents: Sequence[tuple[str, ServingDocument | TextKeys]],
+    ) -> tuple[int, int]:
         indexed = present = size = 0
-        batch: list[tuple[str, ServingDocument]] = []
+        batch: list[tuple[str, bytes]] = []
         for item in documents:
-            length = len(_bulk_lines(item))
+            lines = _bulk_lines(action, item)
+            length = len(lines)
             if length > BULK_BYTES:
                 raise LexicalFailure("store", error="BulkDocumentTooLarge")
             if batch and size + length > BULK_BYTES:
-                created, found = self._bulk(name, batch)
+                created, found = self._send_bulk(name, action, batch)
                 indexed, present = indexed + created, present + found
                 batch, size = [], 0
-            batch.append(item)
+            batch.append((item[0], lines))
             size += length
         if batch:
-            created, found = self._bulk(name, batch)
+            created, found = self._send_bulk(name, action, batch)
             indexed, present = indexed + created, present + found
         return indexed, present
+
+    def bulk_create(self, name: str, documents: Sequence[tuple[str, ServingDocument]]) -> tuple[int, int]:
+        return self._bulk(name, "create", documents)
+
+    def bulk_update(self, name: str, updates: Sequence[tuple[str, TextKeys]]) -> int:
+        leveled, _present = self._bulk(name, "update", updates)
+        return leveled
 
     def refresh(self, name: str) -> None:
         value = self._json(self._request("PUT", f"/{name}/_settings", json=FINISH_SETTINGS))
@@ -617,8 +676,14 @@ def _fill(
         while batch := tuple(itertools.islice(stream, DOCUMENT_BATCH_SIZE)):
             chunks = {document.doc_id: record.chunks(document.doc_id, inputs.pipeline) for document in batch}
             ids = [chunk.chunk_id for rows in chunks.values() for chunk in rows]
-            present = store.present(inputs.name, ids) if ids else set()
+            hashes = list(dict.fromkeys(chunk.content_hash for rows in chunks.values() for chunk in rows))
+            keys = record.keys_for(inputs.name, hashes) if hashes else {}
+            present = store.present(inputs.name, ids) if ids else {}
             counts = replace(counts, present=counts.present + len(present))
+            updates = [(chunk.chunk_id, keys[chunk.content_hash]) for rows in chunks.values() for chunk in rows
+                       if chunk.chunk_id in present and present[chunk.chunk_id] != keys[chunk.content_hash]]
+            if updates:
+                counts = replace(counts, leveled=counts.leveled + store.bulk_update(inputs.name, updates))
             serving: list[tuple[str, ServingDocument]] = []
             for document in batch:
                 rows = chunks[document.doc_id]
@@ -630,7 +695,8 @@ def _fill(
                 text = canonical_text(document, store_root, host)
                 opinion, citation_rows = record.opinion(document.doc_id), record.citations(document.doc_id)
                 for chunk in missing:
-                    serving.append((chunk.chunk_id, serving_document(chunk, slice_for(text, chunk), opinion, citation_rows, inputs.courts)))
+                    serving.append((chunk.chunk_id, serving_document(chunk, slice_for(text, chunk), opinion, citation_rows, inputs.courts,
+                                                                    keys[chunk.content_hash])))
             if serving:
                 indexed, found = store.bulk_create(inputs.name, serving)
                 counts = replace(counts, indexed=counts.indexed + indexed, present=counts.present + found)

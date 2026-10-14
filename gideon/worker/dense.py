@@ -37,6 +37,7 @@ DENSE_COUNT_KEYS: Final = (
     "dense_embedded", "dense_texts", "dense_tokens", "dense_requests",
     "dense_seconds", "dense_points", "dense_indexed", "dense_limit",
     "dense_hour_seconds", "dense_hour_tokens", "dense_hour_written",
+    "dense_leveled",
 )
 SERVED_MODEL_PATTERN: Final = r"[A-Za-z0-9._-]{1,64}"
 # exempt: the bound caps a job argument's vector width and its allocation.
@@ -84,6 +85,7 @@ COLLECTION_CONFIG: Final[dict[str, Any]] = {
 PAYLOAD_INDEXES: Final = {
     "court": "keyword", "circuit": "keyword", "precedential": "keyword",
     "section_type": "keyword", "decided_date": "datetime",
+    "dupe_cluster": "keyword", "boilerplate": "bool",
 }
 logger = logging.getLogger(__name__)
 
@@ -117,6 +119,7 @@ class DenseCounts:
     dense_hour_seconds: int = 0
     dense_hour_tokens: int = 0
     dense_hour_written: int = 0
+    dense_leveled: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,7 +128,7 @@ class Point:
 
     id: str
     vector: tuple[float, ...]
-    payload: Mapping[str, str]
+    payload: Mapping[str, str | bool]
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,6 +166,7 @@ class GenerationRecord(Protocol):
     def documents(self, collection: str, source: str, snapshot: date, courts: Sequence[str], limit: int | None = None) -> Iterator[lexical.Document]: ...
     def chunks(self, doc_id: str, pipeline: str) -> tuple[chunker.NewChunk, ...]: ...
     def opinion(self, doc_id: str) -> caselaw.NewOpinion: ...
+    def keys_for(self, name: str, hashes: Sequence[str]) -> dict[str, lexical.TextKeys]: ...
     def ledger_rows(self, space: str, hashes: Sequence[str]) -> tuple[LedgerRow, ...]: ...
     def start(self, name: str, counts: DenseCounts) -> None: ...
     def progress(self, name: str, counts: DenseCounts, inserts: Sequence[LedgerRow] = (), rehomes: Sequence[LedgerRow] = ()) -> None: ...
@@ -177,9 +181,10 @@ class VectorStore(Protocol):
     def create(self, name: str, size: int) -> None: ...
     def ensure_indexes(self, name: str) -> None: ...
     def set_indexing(self, name: str, threshold: int) -> None: ...
-    def present(self, name: str, ids: Sequence[str]) -> set[str]: ...
+    def present(self, name: str, ids: Sequence[str]) -> dict[str, lexical.TextKeys | None]: ...
     def retrieve(self, name: str, ids: Sequence[str]) -> dict[str, tuple[float, ...]]: ...
     def upsert(self, name: str, points: Sequence[Point]) -> None: ...
+    def set_payload(self, name: str, ids: Sequence[str], payload: Mapping[str, str | bool]) -> None: ...
     def wait_green(self, name: str, progress: Callable[[int], None]) -> Mapping[str, Any]: ...
     def close(self) -> None: ...
 
@@ -213,13 +218,15 @@ def point_id(chunk_id: str) -> str:
 def payload_for(
     chunk: chunker.NewChunk, opinion: caselaw.NewOpinion,
     geography: Mapping[str, treatment.Geography],
-) -> dict[str, str]:
+    keys: lexical.TextKeys,
+) -> dict[str, str | bool]:
     """Project only the chunk id and record-derived filter keys."""
 
-    payload = {
+    payload: dict[str, str | bool] = {
         "chunk_id": chunk.chunk_id, "court": opinion.court,
         "decided_date": datetime.combine(opinion.decided_date, datetime.min.time(), UTC).isoformat(),
         "precedential": opinion.precedential, "section_type": chunk.section_type,
+        "dupe_cluster": keys.dupe_cluster, "boilerplate": keys.boilerplate,
     }
     circuit = geography[opinion.court].circuit
     if circuit is not None:
@@ -503,13 +510,15 @@ class HttpxVectorStore:
         if not isinstance(result, dict) or result.get("status") != "completed":
             raise DenseFailure("store", error="IncompleteOperation")
 
-    def _points(self, name: str, ids: Sequence[str], *, vectors: bool) -> dict[str, tuple[float, ...]]:
-        found: dict[str, tuple[float, ...]] = {}
+    def _points(
+        self, name: str, ids: Sequence[str], *, vectors: bool,
+    ) -> dict[str, tuple[float, ...] | lexical.TextKeys | None]:
+        found: dict[str, tuple[float, ...] | lexical.TextKeys | None] = {}
         bound = RETRIEVE_BATCH if vectors else PRESENCE_BATCH
         for start in range(0, len(ids), bound):
             selected = [_canonical_id(identifier) for identifier in ids[start:start + bound]]
             response = self._request("POST", f"/collections/{name}/points", absent=vectors, json={
-                "ids": selected, "with_payload": False, "with_vector": vectors,
+                "ids": selected, "with_payload": False if vectors else ["dupe_cluster", "boilerplate"], "with_vector": vectors,
             })
             if response.status_code == 404:
                 return {}
@@ -524,20 +533,38 @@ class HttpxVectorStore:
                 if identifier not in selected or identifier in seen:
                     raise DenseFailure("store", error="InvalidPoints")
                 seen.add(identifier)
-                found[identifier] = _vector(row.get("vector"), "store") if vectors else ()
+                if vectors:
+                    found[identifier] = _vector(row.get("vector"), "store")
+                else:
+                    payload = row.get("payload", {})
+                    if not isinstance(payload, dict):
+                        raise DenseFailure("store", error="InvalidPoints")
+                    cluster_id, boilerplate = payload.get("dupe_cluster"), payload.get("boilerplate")
+                    found[identifier] = (
+                        lexical.TextKeys(cluster_id, boilerplate)
+                        if isinstance(cluster_id, str) and type(boilerplate) is bool else None
+                    )
         return found
 
-    def present(self, name: str, ids: Sequence[str]) -> set[str]:
-        return set(self._points(name, ids, vectors=False))
+    def present(self, name: str, ids: Sequence[str]) -> dict[str, lexical.TextKeys | None]:
+        return cast(dict[str, lexical.TextKeys | None], self._points(name, ids, vectors=False))
 
     def retrieve(self, name: str, ids: Sequence[str]) -> dict[str, tuple[float, ...]]:
-        return self._points(name, ids, vectors=True)
+        return cast(dict[str, tuple[float, ...]], self._points(name, ids, vectors=True))
 
     def upsert(self, name: str, points: Sequence[Point]) -> None:
         result = self._result(self._request("PUT", f"/collections/{name}/points", params={"wait": "true"}, json={
             "points": [asdict(point) for point in points],
         }))
         self._completed(result)
+
+    def set_payload(self, name: str, ids: Sequence[str], payload: Mapping[str, str | bool]) -> None:
+        for start in range(0, len(ids), PRESENCE_BATCH):
+            selected = [_canonical_id(identifier) for identifier in ids[start:start + PRESENCE_BATCH]]
+            result = self._result(self._request("POST", f"/collections/{name}/points/payload", params={"wait": "true"}, json={
+                "payload": dict(payload), "points": selected,
+            }))
+            self._completed(result)
 
     def wait_green(self, name: str, progress: Callable[[int], None]) -> Mapping[str, Any]:
         last_progress = self._monotonic()
@@ -698,7 +725,7 @@ def _parse_inputs(inputs: Mapping[str, object]) -> tuple[lexical._Inputs, str, i
 
 def _embed_request(
     name: str, groups: Sequence[TextGroup], existing: Mapping[str, LedgerRow],
-    payloads: Mapping[str, Mapping[str, str]], store: VectorStore, embedder: Embedder, pace: Pace,
+    payloads: Mapping[str, Mapping[str, str | bool]], store: VectorStore, embedder: Embedder, pace: Pace,
 ) -> _WriteOutcome:
     pace.wait_before()
     try:
@@ -720,8 +747,8 @@ def _embed_request(
 
 def _embed_batches(
     pool: ThreadPoolExecutor, name: str, batches: Sequence[tuple[TextGroup, ...]], existing: Mapping[str, LedgerRow],
-    payloads: Mapping[str, Mapping[str, str]], store: VectorStore, embedder: Embedder, pace: Pace,
-    progress: _Progress, repairs: Sequence[LedgerRow], present: int,
+    payloads: Mapping[str, Mapping[str, str | bool]], store: VectorStore, embedder: Embedder, pace: Pace,
+    progress: _Progress, repairs: Sequence[LedgerRow], present: int, leveled: int,
 ) -> None:
     pending: dict[Future[_WriteOutcome], None] = {}
     remaining = iter(batches)
@@ -761,12 +788,13 @@ def _embed_batches(
                 progress.commit(replace(
                     progress.counts,
                     dense_present=progress.counts.dense_present + present,
+                    dense_leveled=progress.counts.dense_leveled + leveled,
                     dense_embedded=progress.counts.dense_embedded + outcome.points,
                     dense_texts=progress.counts.dense_texts + outcome.texts,
                     dense_tokens=progress.counts.dense_tokens + outcome.tokens,
                     dense_requests=progress.counts.dense_requests + 1,
                 ), (*repairs, *outcome.inserts), outcome.rehomes)
-                repairs, present = (), 0
+                repairs, present, leveled = (), 0, 0
                 del pending[future]
             raise_failure()
             for _index in range(BULK_WRITERS - len(pending)):
@@ -793,17 +821,23 @@ def _fill(
             chunks = {document.doc_id: record.chunks(document.doc_id, parsed.pipeline) for document in documents}
             all_chunks = [chunk for rows in chunks.values() for chunk in rows]
             ids = [point_id(chunk.chunk_id) for chunk in all_chunks]
-            present = store.present(parsed.name, ids) if ids else set()
+            hashes = tuple(dict.fromkeys(chunk.content_hash for chunk in all_chunks))
+            keys = record.keys_for(parsed.name, hashes) if hashes else {}
+            present = store.present(parsed.name, ids) if ids else {}
             existing = {row.content_hash: row for row in record.ledger_rows(
-                parsed.embedding_space, tuple(dict.fromkeys(chunk.content_hash for chunk in all_chunks)),
+                parsed.embedding_space, hashes,
             )}
             repairs: dict[str, LedgerRow] = {}
             missing: dict[str, list[chunker.NewChunk]] = {}
             present_count = 0
+            levels: dict[lexical.TextKeys, list[str]] = {}
             for chunk in all_chunks:
                 identifier = point_id(chunk.chunk_id)
                 if identifier in present:
                     present_count += 1
+                    current = keys[chunk.content_hash]
+                    if present[identifier] != current:
+                        levels.setdefault(current, []).append(identifier)
                     if chunk.content_hash not in existing:
                         repairs.setdefault(chunk.content_hash, LedgerRow(chunk.content_hash, parsed.name, identifier))
                 else:
@@ -820,7 +854,7 @@ def _fill(
                     vector = vectors.get(_canonical_id(row.point_id))
                     if vector is not None:
                         copied[row.content_hash] = vector
-            payloads: dict[str, Mapping[str, str]] = {}
+            payloads: dict[str, Mapping[str, str | bool]] = {}
             slices: list[tuple[chunker.NewChunk, str]] = []
             for document in documents:
                 absent = [chunk for chunk in chunks[document.doc_id] if point_id(chunk.chunk_id) not in present]
@@ -828,13 +862,17 @@ def _fill(
                     continue
                 opinion = record.opinion(document.doc_id)
                 for chunk in absent:
-                    payloads[chunk.chunk_id] = payload_for(chunk, opinion, parsed.courts)
+                    payloads[chunk.chunk_id] = payload_for(chunk, opinion, parsed.courts, keys[chunk.content_hash])
                 fresh = [chunk for chunk in absent if chunk.content_hash not in copied]
                 if fresh:
                     text = lexical.canonical_text(document, store_root, host)
                     slices.extend((chunk, lexical.slice_for(text, chunk)) for chunk in fresh)
             # Validate the entire batch before any embedding or point write.
             batches = pack_requests(group_by_hash(slices))
+            leveled_count = 0
+            for current, identifiers in levels.items():
+                store.set_payload(parsed.name, identifiers, asdict(current))
+                leveled_count += len(identifiers)
             if copied:
                 points: list[Point] = []
                 rehomes: list[LedgerRow] = []
@@ -847,14 +885,16 @@ def _fill(
                 store.upsert(parsed.name, points)
                 progress.commit(replace(progress.counts,
                                         dense_present=progress.counts.dense_present + present_count,
+                                        dense_leveled=progress.counts.dense_leveled + leveled_count,
                                         dense_copied=progress.counts.dense_copied + len(points)),
                                 tuple(repairs.values()), tuple(rehomes))
-                repairs, present_count = {}, 0
+                repairs, present_count, leveled_count = {}, 0, 0
             if batches:
                 _embed_batches(pool, parsed.name, batches, existing, payloads, store, embedder, pace,
-                               progress, tuple(repairs.values()), present_count)
-            elif repairs or present_count:
-                progress.commit(replace(progress.counts, dense_present=progress.counts.dense_present + present_count), tuple(repairs.values()))
+                               progress, tuple(repairs.values()), present_count, leveled_count)
+            elif repairs or present_count or leveled_count:
+                progress.commit(replace(progress.counts, dense_present=progress.counts.dense_present + present_count,
+                                        dense_leveled=progress.counts.dense_leveled + leveled_count), tuple(repairs.values()))
     except BaseException:
         failed = True
         raise

@@ -73,12 +73,30 @@ DENSE_FAILURE_REASONS: Final = frozenset({
     "config-mismatch", "chunk-too-long", "text-mismatch", "missing-text",
     "generation-mismatch",
 })
-GENERATION_FAILURE_REASONS: Final = LEXICAL_FAILURE_REASONS | DENSE_FAILURE_REASONS
+DUPES_TASK: Final[str] = "gideon.worker.tasks.dupes"
+DUPES_QUEUE: Final[str] = "index"
+DUPES_LOCK_PREFIX: Final[str] = "dupes-"
+DUPES_LOCK_SUFFIX: Final[str] = ".dupes.lock"
+DUPES_FAILURE_REASONS: Final = frozenset({
+    "invalid", "database", "local", "busy", "text-mismatch", "missing-text",
+    "generation-mismatch", "cluster-budget",
+})
+GENERATION_FAILURE_REASONS: Final = (
+    LEXICAL_FAILURE_REASONS | DENSE_FAILURE_REASONS | DUPES_FAILURE_REASONS
+)
+DUPES_COUNT_KEYS: Final = (
+    "cluster_chunks", "cluster_texts", "cluster_documents", "cluster_clusters",
+    "cluster_members", "cluster_grouped", "cluster_boilerplate", "cluster_flagged",
+    "cluster_seconds", "cluster_reused",
+)
+# exempt: one hour is the clustering's starting budget; past it the clustering turns incremental.
+CLUSTER_BUDGET_SECONDS: Final[int] = 3_600
 DENSE_COUNT_KEYS: Final = (
     "dense_total", "dense_scope", "dense_present", "dense_copied",
     "dense_embedded", "dense_texts", "dense_tokens", "dense_requests",
     "dense_seconds", "dense_points", "dense_indexed", "dense_limit",
     "dense_hour_seconds", "dense_hour_tokens", "dense_hour_written",
+    "dense_leveled",
 )
 SERVED_MODEL_PATTERN: Final[str] = r"[A-Za-z0-9._-]{1,64}"
 # exempt: the bound caps a job argument's vector width and its allocation.

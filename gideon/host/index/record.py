@@ -40,6 +40,7 @@ class GenerationRow:
     promoted_at: str | None
     retired_at: str | None
     created_at: str
+    clustered_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,7 +160,7 @@ def _parse_row(value: object) -> GenerationRow | None:
                for key, count in value["counts"].items())
         or any(value[key] is not None and not isinstance(value[key], str) for key in (
             "failure_reason", "lexical_built_at", "dense_built_at", "built_at",
-            "promoted_at", "retired_at",
+            "promoted_at", "retired_at", "clustered_at",
         ))
     ):
         return None
@@ -180,6 +181,7 @@ def _parse_row(value: object) -> GenerationRow | None:
         value["inputs_hash"], value["state"], value["failure_reason"], value["counts"],
         value["bytes"], value["lexical_built_at"], value["dense_built_at"],
         value["built_at"], value["promoted_at"], value["retired_at"], value["created_at"],
+        value["clustered_at"],
     )
 
 

@@ -94,7 +94,8 @@ class Projection(unittest.TestCase):
         opinion = opinion_for()
         chunk = chunk_for()
         text_slice = lexical.slice_for(TEXT, chunk)
-        document = lexical.serving_document(chunk, text_slice, opinion, (), GEO)
+        keys = lexical.TextKeys("f" * 64, True)
+        document = lexical.serving_document(chunk, text_slice, opinion, (), GEO, keys)
         self.assertEqual(document.caption, " ".join((
             *opinion.reporter_cites, " ".join((opinion.docket or "").split()),
             opinion.court, opinion.decided_date.isoformat(),
@@ -107,7 +108,8 @@ class Projection(unittest.TestCase):
         self.assertEqual(document.cluster_id, opinion.cluster_id)
         self.assertEqual(document.char_start, chunk.char_start)
         self.assertEqual(document.content_hash, chunk.content_hash)
-        self.assertEqual(set(asdict(document)), set(lexical.INDEX_MAPPING["properties"]) - {"dupe_cluster", "boilerplate"})
+        self.assertEqual((document.dupe_cluster, document.boilerplate), (keys.dupe_cluster, keys.boilerplate))
+        self.assertEqual(set(asdict(document)), set(lexical.INDEX_MAPPING["properties"]))
         self.assertEqual(lexical.caption_for(replace(opinion, docket=None, reporter_cites=())),
                          f"{opinion.court} {opinion.decided_date.isoformat()}")
 
@@ -144,6 +146,8 @@ class FakeRecord:
         self.resumed = False
         self.closed = False
         self.opinion_reads = 0
+        self.text_keys: dict[str, lexical.TextKeys] = {}
+        self.key_reads: list[tuple[str, ...]] = []
 
     def read(self, name: str) -> lexical.Generation | None:
         self.events.append("read")
@@ -186,6 +190,11 @@ class FakeRecord:
         self.opinion_reads += 1
         return opinion_for()
 
+    def keys_for(self, name: str, hashes: Sequence[str]) -> dict[str, lexical.TextKeys]:
+        assert name == NAME
+        self.key_reads.append(tuple(hashes))
+        return {content_hash: self.text_keys.get(content_hash, lexical.TextKeys(content_hash, False)) for content_hash in hashes}
+
     def close(self) -> None:
         self.closed = True
 
@@ -199,6 +208,8 @@ class FakeStore:
         self.fail_at: str | None = None
         self.closed = False
         self.refreshes = 0
+        self.updates: list[tuple[str, lexical.TextKeys]] = []
+        self.unknown_keys: set[str] = set()
 
     def _check(self, operation: str) -> None:
         if self.fail_at == operation:
@@ -212,9 +223,17 @@ class FakeStore:
         self._check("create")
         self.version = lexical.LEXICAL_MAPPING_VERSION
 
-    def present(self, name: str, ids: Sequence[str]) -> set[str]:
+    def present(self, name: str, ids: Sequence[str]) -> dict[str, lexical.TextKeys | None]:
         self._check("present")
-        return set(ids) & self.rows.keys()
+        return {identifier: None if identifier in self.unknown_keys else lexical.TextKeys(self.rows[identifier].dupe_cluster, self.rows[identifier].boilerplate) for identifier in ids if identifier in self.rows}
+
+    def bulk_update(self, name: str, updates: Sequence[tuple[str, lexical.TextKeys]]) -> int:
+        self._check("update")
+        self.updates.extend(updates)
+        for identifier, keys in updates:
+            self.rows[identifier] = replace(self.rows[identifier], dupe_cluster=keys.dupe_cluster, boilerplate=keys.boilerplate)
+            self.unknown_keys.discard(identifier)
+        return len(updates)
 
     def bulk_create(self, name: str, documents: Sequence[tuple[str, lexical.ServingDocument]]) -> tuple[int, int]:
         self._check("bulk")
@@ -275,7 +294,7 @@ class Build(unittest.TestCase):
 
     def test_first_run_writes_slices_second_run_reads_no_text_or_metadata(self) -> None:
         counts = self.run_build()
-        self.assertEqual(asdict(counts), {"ready": 2, "chunked": 1, "unchunked": 1, "indexed": 1, "present": 0, "seconds": 0})
+        self.assertEqual(asdict(counts), {"ready": 2, "chunked": 1, "unchunked": 1, "indexed": 1, "present": 0, "seconds": 0, "leveled": 0})
         self.assertEqual(self.record.scope, ("caselaw", "fictions", date(2099, 1, 2), tuple(GEO)))
         self.assertEqual(self.store.rows[chunk_for().chunk_id].text, lexical.slice_for(TEXT, chunk_for()))
         self.assertEqual(self.record.finished, (counts, self.store.bytes(NAME), NOW))
@@ -299,6 +318,51 @@ class Build(unittest.TestCase):
         self.run_build()
         self.assertEqual(self.record.generation.state, "built")
         self.assertEqual(len(self.store.rows), 1)
+
+    def test_missing_chunks_receive_the_record_keys_and_present_chunks_are_leveled_once(self) -> None:
+        content_hash = chunk_for().content_hash
+        initial = lexical.TextKeys("b" * 64, True)
+        self.record.text_keys[content_hash] = initial
+        first = self.run_build()
+        self.assertEqual((first.indexed, first.present, first.leveled), (1, 0, 0))
+        document = self.store.rows[chunk_for().chunk_id]
+        self.assertEqual((document.dupe_cluster, document.boilerplate), (initial.dupe_cluster, initial.boilerplate))
+        self.assertEqual(self.record.key_reads, [(content_hash,)])
+        updated = lexical.TextKeys("c" * 64, False)
+        self.record.text_keys[content_hash] = updated
+        self.host.reads.clear()
+        second = self.run_build()
+        self.assertEqual((second.indexed, second.present, second.leveled), (0, 1, 1))
+        self.assertEqual(self.store.updates, [(chunk_for().chunk_id, updated)])
+        self.assertEqual(self.host.reads, [])
+        writes = self.store.writes
+        third = self.run_build()
+        self.assertEqual((third.indexed, third.present, third.leveled), (0, 1, 0))
+        self.assertEqual(len(self.store.updates), 1)
+        self.assertEqual(self.store.writes, writes)
+
+    def test_keys_are_read_once_per_batch_for_distinct_chunk_hashes_and_skipped_when_empty(self) -> None:
+        first = chunk_for()
+        self.record.chunk_rows["d" * 64] = (replace(first, doc_id="d" * 64, chunk_id="9" * 64),)
+        self.run_build()
+        self.assertEqual(self.record.key_reads, [(first.content_hash,)])
+        self.record.key_reads.clear()
+        self.record.chunk_rows = dict.fromkeys(self.record.chunk_rows, ())
+        self.run_build()
+        self.assertEqual(self.record.key_reads, [])
+
+    def test_old_present_chunks_are_leveled_in_one_batch_and_update_failure_is_store(self) -> None:
+        first = chunk_for()
+        self.record.chunk_rows["d" * 64] = (replace(first, doc_id="d" * 64, chunk_id="9" * 64),)
+        self.run_build()
+        self.store.unknown_keys.update(self.store.rows)
+        with patch.object(self.store, "bulk_update", wraps=self.store.bulk_update) as bulk:
+            counts = self.run_build()
+        self.assertEqual((counts.present, counts.leveled), (2, 2))
+        self.assertEqual(bulk.call_count, 1)
+        self.store.unknown_keys.update(self.store.rows)
+        self.store.fail_at = "update"
+        self.refusal("store")
 
     def test_bulk_conflict_is_counted_present_and_empty_scope_finishes(self) -> None:
         self.store.conflicts.add(chunk_for().chunk_id)
@@ -412,7 +476,7 @@ class Build(unittest.TestCase):
             root.handlers[:] = handlers
             root.setLevel(level)
         self.assertEqual(len(self.record.progress_rows), 1)
-        self.assertEqual(set(asdict(counts)), {"ready", "chunked", "unchunked", "indexed", "present", "seconds"})
+        self.assertEqual(set(asdict(counts)), {"ready", "chunked", "unchunked", "indexed", "present", "seconds", "leveled"})
         for sentinel in ("FICTITIOUS_TEXT_SENTINEL", "FICTITIOUS_CITE_SENTINEL", "FICTITIOUS_CAPTION_SENTINEL", str(self.root)):
             self.assertNotIn(sentinel, output.getvalue())
         self.assertIn("job_id=17", output.getvalue())
@@ -544,6 +608,31 @@ class RecordAdapter(unittest.TestCase):
         self.assertNotIn("private database detail", str(raised.exception))
         self.assertEqual(self.writer.rollbacks, 1)
 
+    def test_keys_statement_preserves_exact_copy_flags_and_binds_generation_twice(self) -> None:
+        hashes = ("a" * 64, "b" * 64)
+        self.writer.rows = [(hashes[0], "c" * 64, False), (hashes[1], hashes[1], True)]
+        self.assertEqual(self.record.keys_for(NAME, hashes), {
+            hashes[0]: lexical.TextKeys("c" * 64, False), hashes[1]: lexical.TextKeys(hashes[1], True),
+        })
+        statement, parameters = self.writer.statements[-1]
+        self.assertEqual(statement, lexical.KEYS_SQL)
+        self.assertEqual(parameters, (list(hashes), NAME, NAME))
+        self.assertIn("unnest(%s::text[])", statement)
+        self.assertIn("COALESCE(m.cluster_id, h.content_hash)", statement)
+        self.assertIn("COALESCE(k.boilerplate, false)", statement)
+        self.assertIn("LEFT JOIN dupe_members", statement)
+        self.assertIn("LEFT JOIN dupe_clusters", statement)
+
+    def test_keys_refuse_missing_or_unasked_hashes_as_database(self) -> None:
+        hashes = ("a" * 64, "b" * 64)
+        for rows in ([(hashes[0], hashes[0], False)],
+                     [(hashes[0], hashes[0], False), ("c" * 64, "c" * 64, True)]):
+            with self.subTest(rows=rows):
+                self.writer.rows = [tuple(row) for row in rows]
+                with self.assertRaises(lexical.LexicalFailure) as raised:
+                    self.record.keys_for(NAME, hashes)
+                self.assertEqual(raised.exception.reason, "database")
+
 
 class StoreAdapter(unittest.TestCase):
     def setUp(self) -> None:
@@ -570,8 +659,8 @@ class StoreAdapter(unittest.TestCase):
 
         return respond
 
-    def test_requests_use_file_auth_mapping_and_source_free_presence(self) -> None:
-        document = lexical.serving_document(chunk_for(), lexical.slice_for(TEXT, chunk_for()), opinion_for(), (), GEO)
+    def test_requests_use_file_auth_mapping_and_key_presence(self) -> None:
+        document = lexical.serving_document(chunk_for(), lexical.slice_for(TEXT, chunk_for()), opinion_for(), (), GEO, lexical.TextKeys(chunk_for().content_hash, False))
 
         def respond(request: httpx.Request) -> httpx.Response:
             path = request.url.path
@@ -592,7 +681,7 @@ class StoreAdapter(unittest.TestCase):
         store = self.store(respond)
         self.assertIsNone(store.mapping_version(NAME))
         store.create(NAME)
-        self.assertEqual(store.present(NAME, (chunk_for().chunk_id,)), set())
+        self.assertEqual(store.present(NAME, (chunk_for().chunk_id,)), {})
         self.assertEqual(store.bulk_create(NAME, ((chunk_for().chunk_id, document),)), (1, 0))
         store.refresh(NAME)
         self.assertEqual(store.bytes(NAME), 4096)
@@ -603,7 +692,8 @@ class StoreAdapter(unittest.TestCase):
             ("GET", f"/{NAME}/_stats/store"),
         ])
         self.assertEqual(json.loads(self.requests[1].content), {"settings": lexical.INDEX_SETTINGS, "mappings": lexical.INDEX_MAPPING})
-        self.assertEqual(self.requests[2].url.params["_source"], "false")
+        self.assertEqual(self.requests[2].url.params["_source_includes"], "dupe_cluster,boilerplate")
+        self.assertNotIn("_source", self.requests[2].url.params)
         payload = self.requests[3].content
         self.assertTrue(payload.endswith(b"\n"))
         self.assertEqual(self.requests[3].headers["Content-Type"], "application/x-ndjson")
@@ -648,7 +738,7 @@ class StoreAdapter(unittest.TestCase):
                 self.assertEqual(len(self.requests) - before, 1)
 
     def test_bulk_conflicts_and_item_pressure_preserve_successes(self) -> None:
-        document = lexical.serving_document(chunk_for(), TEXT, opinion_for(), (), GEO)
+        document = lexical.serving_document(chunk_for(), TEXT, opinion_for(), (), GEO, lexical.TextKeys(chunk_for().content_hash, False))
         identifiers = ("1" * 64, "2" * 64, "3" * 64)
 
         def respond(request: httpx.Request) -> httpx.Response:
@@ -663,8 +753,64 @@ class StoreAdapter(unittest.TestCase):
         self.assertEqual(retry_ids, [identifiers[-1]])
         self.assertEqual(self.waits, [lexical.RETRY_WAITS[0]])
 
+    def test_bulk_update_sends_only_keys_and_counts_updated_and_noop(self) -> None:
+        updates = (("1" * 64, lexical.TextKeys("a" * 64, True)),
+                   ("2" * 64, lexical.TextKeys("b" * 64, False)))
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            lines = [json.loads(line) for line in request.content.splitlines()]
+            self.assertEqual(lines, [
+                {"update": {"_id": updates[0][0]}}, {"doc": asdict(updates[0][1])},
+                {"update": {"_id": updates[1][0]}}, {"doc": asdict(updates[1][1])},
+            ])
+            return httpx.Response(200, json={"items": [
+                {"update": {"_id": identifier, "status": 200, "result": result}}
+                for (identifier, _keys), result in zip(updates, ("updated", "noop"), strict=True)
+            ]})
+
+        self.assertEqual(self.store(respond).bulk_update(NAME, updates), len(updates))
+        self.assertTrue(self.requests[0].content.endswith(b"\n"))
+        self.assertEqual(self.requests[0].headers["Content-Type"], "application/x-ndjson")
+
+    def test_bulk_update_retries_only_pressed_items_and_obeys_byte_bound(self) -> None:
+        updates = (("1" * 64, lexical.TextKeys("a" * 64, True)),
+                   ("2" * 64, lexical.TextKeys("b" * 64, False)))
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            ids = [json.loads(line)["update"]["_id"] for line in request.content.splitlines()[::2]]
+            return httpx.Response(200, json={"items": [
+                {"update": {"_id": identifier, "status": 429 if len(ids) == 2 and identifier == updates[1][0] else 200,
+                            "result": "updated"}} for identifier in ids
+            ]})
+
+        self.assertEqual(self.store(respond).bulk_update(NAME, updates), 2)
+        self.assertEqual(self.waits, [lexical.RETRY_WAITS[0]])
+        self.assertEqual(json.loads(self.requests[1].content.splitlines()[0]), {"update": {"_id": updates[1][0]}})
+        bound = len(self.requests[1].content)
+        self.requests.clear()
+        with patch.object(lexical, "BULK_BYTES", bound):
+            self.assertEqual(self.store(respond).bulk_update(NAME, updates), 2)
+        self.assertEqual(len(self.requests), 2)
+        self.assertTrue(all(len(request.content) <= bound for request in self.requests))
+
+    def test_bulk_update_refuses_errors_missing_items_and_wrong_actions(self) -> None:
+        identifier = "1" * 64
+        replies: tuple[dict[str, object], ...] = (
+            {"items": [{"update": {"_id": identifier, "status": 400, "error": "FICTITIOUS_PRIVATE_ERROR"}}]},
+            {"items": [{"update": {"_id": identifier, "status": 200, "result": "updated", "error": "FICTITIOUS_PRIVATE_ERROR"}}]},
+            {"items": [{"create": {"_id": identifier, "status": 201}}]},
+            {"items": [{"update": {"_id": "wrong", "status": 200, "result": "updated"}}]},
+            {"items": [{"update": {"_id": identifier, "status": 200, "result": "created"}}]},
+            {"items": []},
+        )
+        for reply in replies:
+            with self.subTest(reply=reply), self.assertRaises(lexical.LexicalFailure) as raised:
+                self.store(self.response(reply)).bulk_update(NAME, ((identifier, lexical.TextKeys("a" * 64, False)),))
+            self.assertEqual(raised.exception.reason, "store")
+            self.assertNotIn("FICTITIOUS_PRIVATE_ERROR", str(raised.exception))
+
     def test_every_other_bulk_item_error_is_raised(self) -> None:
-        document = lexical.serving_document(chunk_for(), TEXT, opinion_for(), (), GEO)
+        document = lexical.serving_document(chunk_for(), TEXT, opinion_for(), (), GEO, lexical.TextKeys(chunk_for().content_hash, False))
         for status in (400, 401, 404, 500):
             with self.subTest(status=status):
                 def respond(request: httpx.Request, status=status) -> httpx.Response:
@@ -679,7 +825,7 @@ class StoreAdapter(unittest.TestCase):
                 self.assertNotIn("FICTITIOUS_PRIVATE_ERROR", str(raised.exception))
 
     def test_bulk_item_pressure_is_bounded_and_requests_obey_the_byte_bound(self) -> None:
-        document = lexical.serving_document(chunk_for(), TEXT, opinion_for(), (), GEO)
+        document = lexical.serving_document(chunk_for(), TEXT, opinion_for(), (), GEO, lexical.TextKeys(chunk_for().content_hash, False))
 
         def busy(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, json={"items": [{"create": {"_id": "1" * 64, "status": 503}}]})
@@ -693,7 +839,7 @@ class StoreAdapter(unittest.TestCase):
             return httpx.Response(200, json={"items": [{"create": {"_id": json.loads(request.content.splitlines()[0])["create"]["_id"], "status": 201}}]})
 
         first = ("1" * 64, document)
-        bound = len(lexical._bulk_lines(first))
+        bound = len(lexical._bulk_lines("create", first))
         with patch.object(lexical, "BULK_BYTES", bound):
             self.assertEqual(self.store(created).bulk_create(NAME, [first, ("2" * 64, document)]), (2, 0))
         self.assertEqual(len(self.requests), 2)
@@ -705,13 +851,33 @@ class StoreAdapter(unittest.TestCase):
         def found(request: httpx.Request) -> httpx.Response:
             selected = json.loads(request.content)["ids"]
             self.assertLessEqual(len(selected), lexical.MGET_BATCH_SIZE)
-            return httpx.Response(200, json={"docs": [{"_id": identifier, "found": True} for identifier in selected]})
+            return httpx.Response(200, json={"docs": [{"_id": identifier, "found": True, "_source": {}} for identifier in selected]})
 
-        self.assertEqual(self.store(found).present(NAME, ids), set(ids))
+        self.assertEqual(self.store(found).present(NAME, ids), dict.fromkeys(ids))
         self.assertEqual(len(self.requests), 2)
         for row in ({"_id": ids[0], "error": "FICTITIOUS_PRIVATE_ERROR"}, {"_id": ids[0], "found": "false"}, {"_id": "wrong", "found": False}):
             with self.subTest(row=row), self.assertRaises(lexical.LexicalFailure):
                 self.store(self.response({"docs": [row]})).present(NAME, ids[:1])
+
+    def test_presence_returns_stored_pairs_and_unknown_pairs_only_for_present_ids(self) -> None:
+        ids = tuple(f"{number:064x}" for number in range(6))
+        rows = [
+            {"_id": ids[0], "found": True, "_source": {"dupe_cluster": "a" * 64, "boilerplate": True}},
+            {"_id": ids[1], "found": True, "_source": {"dupe_cluster": "b" * 64}},
+            {"_id": ids[2], "found": True, "_source": {"dupe_cluster": 17, "boilerplate": False}},
+            {"_id": ids[3], "found": True, "_source": {"dupe_cluster": "c" * 64, "boilerplate": 1}},
+            {"_id": ids[4], "found": True},
+            {"_id": ids[5], "found": False},
+        ]
+        self.assertEqual(self.store(self.response({"docs": rows})).present(NAME, ids), {
+            ids[0]: lexical.TextKeys("a" * 64, True), **dict.fromkeys(ids[1:5]),
+        })
+        self.assertEqual(dict(self.requests[-1].url.params), {"_source_includes": "dupe_cluster,boilerplate"})
+        sources: tuple[object, ...] = (None, [], "FICTITIOUS_PRIVATE_TEXT")
+        for source in sources:
+            with self.subTest(source=source), self.assertRaises(lexical.LexicalFailure) as raised:
+                self.store(self.response({"docs": [{"_id": ids[0], "found": True, "_source": source}]})).present(NAME, ids[:1])
+            self.assertEqual(raised.exception.reason, "store")
 
     def test_malformed_mapping_stats_refresh_and_transport_failures_refuse(self) -> None:
         mapping_replies: tuple[dict[str, object], ...] = ({NAME: {"mappings": {}}}, {NAME: {"mappings": {"_meta": {"mapping_version": True}}}})

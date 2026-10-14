@@ -31,6 +31,7 @@ from gideon.worker import (
     agreement,
     caselaw,
     dense,
+    dupes,
     fetch,
     lexical,
     overruled,
@@ -77,7 +78,7 @@ class RecoveryTask(unittest.TestCase):
             {name for name in app.tasks if name.startswith("gideon.worker.tasks.")},
             {tasks.VERIFY_TASK, tasks.RECOVERY_TASK, fetch.FETCH_TASK,
              staging.STAGE_TASK, caselaw.CASELAW_TASK, agreement.AGREEMENT_TASK,
-             lexical.LEXICAL_TASK, dense.DENSE_TASK, worker.OVERRULED_TASK},
+             lexical.LEXICAL_TASK, dense.DENSE_TASK, worker.OVERRULED_TASK, dupes.DUPES_TASK},
         )
         fetching = app.tasks[fetch.FETCH_TASK]
         self.assertEqual(fetching.queue, fetch.FETCH_QUEUE)
@@ -106,6 +107,65 @@ class RecoveryTask(unittest.TestCase):
         self.assertIsNone(embedded.queueing_lock)
         self.assertIsNone(embedded.retry_strategy)
         self.assertFalse(inspect.iscoroutinefunction(tasks.dense))
+        clustered = app.tasks[dupes.DUPES_TASK]
+        self.assertEqual(clustered.queue, dupes.DUPES_QUEUE)
+        self.assertTrue(clustered.pass_context)
+        self.assertIsNone(clustered.queueing_lock)
+        self.assertIsNone(clustered.retry_strategy)
+        self.assertFalse(inspect.iscoroutinefunction(tasks.dupes))
+
+    def test_dupes_job_runs_off_the_event_loop_and_passes_build_inputs(self) -> None:
+        values = inputs_for()
+        connector = InMemoryConnector()
+        app = procrastinate.App(connector=connector)
+        tasks.register_tasks(app)
+        threads: list[bool] = []
+        jobs: list[int] = []
+
+        async def exercise() -> int:
+            async with app.open_async():
+                job = await app.configure_task(dupes.DUPES_TASK).defer_async(**values)  # type: ignore[arg-type]
+                await asyncio.wait_for(
+                    app.run_worker_async(
+                        wait=False, listen_notify=False, queues=[dupes.DUPES_QUEUE],
+                    ),
+                    timeout=15,
+                )
+            return job
+
+        with tempfile.TemporaryDirectory() as temporary:
+            store_root, work_root = Path(temporary) / "cas", Path(temporary) / "work"
+            with (
+                patch.object(dupes, "PsycopgGenerations") as record_factory,
+                patch.object(dupes, "FileSignatures") as signatures_factory,
+                patch.object(dupes, "ProcessSketcher") as sketcher_factory,
+            ):
+                def through_fake(
+                    inputs: Mapping[str, object], job: int,
+                    record: dupes.GenerationRecord, signatures: dupes.SignatureStore,
+                    sketcher: dupes.Sketcher, root: Path, *, work_root: Path,
+                ) -> None:
+                    threads.append(threading.current_thread() is threading.main_thread())
+                    jobs.append(job)
+                    self.assertEqual(inputs, values)
+                    self.assertIs(record, record_factory.return_value)
+                    self.assertIs(signatures, signatures_factory.return_value)
+                    self.assertIs(sketcher, sketcher_factory.return_value)
+                    self.assertEqual(root, store_root)
+                    self.assertEqual(work_root, Path(temporary) / "work")
+
+                with (
+                    patch.object(dupes, "build", side_effect=through_fake),
+                    patch.object(cas, "ROOT", store_root),
+                    patch.object(staging, "WORK_ROOT", work_root),
+                ):
+                    job = asyncio.run(exercise())
+                record_factory.assert_called_once_with()
+                signatures_factory.assert_called_once_with()
+                sketcher_factory.assert_called_once_with(store_root)
+            self.assertEqual(connector.jobs[job]["status"], "succeeded")
+            self.assertEqual(jobs, [job])
+            self.assertEqual(threads, [False])
 
     def test_dense_jobs_run_off_the_event_loop_and_record_success_or_failure(self) -> None:
         values = dense_inputs()

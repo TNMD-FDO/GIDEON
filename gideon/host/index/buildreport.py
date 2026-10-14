@@ -7,12 +7,14 @@ import re
 import subprocess
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, fields
-from typing import Self
+from typing import Self, TypedDict
 
 from gideon.host import agreement, caselaw, report, staging, worker
+from gideon.host.corpus.record import database_fix
 from gideon.host.index import record
 from gideon.host.index.generations import GenerationInputs
 from gideon.host.render.worker import (
+    CLUSTER_BUDGET_SECONDS,
     COURT_PATTERN,
     GENERATION_FAILURE_REASONS,
     GENERATION_PATTERN,
@@ -22,8 +24,8 @@ from gideon.host.render.worker import (
 from gideon.host.report import Problem
 from gideon.host.sysio import Host, PathLike
 
-REPORT_STAGES = ("build", "counts", "dense", "built")
-GATE_NAMES = ("accounted",)
+REPORT_STAGES = ("cluster", "build", "counts", "dense", "built")
+GATE_NAMES = ("accounted", "cluster")
 
 WRITE_REPORT_SQL = """WITH payload AS (
     SELECT :'v_payload'::jsonb AS value
@@ -177,6 +179,39 @@ class Accounted:
 
 
 @dataclass(frozen=True, slots=True)
+class ClusterGate:
+    """The generation's recorded clustering time compared with its budget."""
+
+    seconds: int
+    budget: int
+    reused: bool
+    passed: bool
+
+    def to_json(self) -> dict[str, object]:
+        return {"seconds": self.seconds, "budget": self.budget,
+                "reused": self.reused, "pass": self.passed}
+
+    @classmethod
+    def from_json(cls, value: object) -> Self | None:
+        """Validate the timing figures and the clustering verdict's shape."""
+
+        if not isinstance(value, dict) or set(value) != {"seconds", "budget", "reused", "pass"}:
+            return None
+        if (not _count(value["seconds"]) or not _count(value["budget"]) or value["budget"] == 0
+                or type(value["reused"]) is not bool or type(value["pass"]) is not bool
+                or value["pass"] and value["seconds"] > value["budget"]):
+            return None
+        return cls(value["seconds"], value["budget"], value["reused"], value["pass"])
+
+
+class Gates(TypedDict, total=False):
+    """Only gates that ran, with their distinct court and generation scopes."""
+
+    accounted: Mapping[str, Accounted]
+    cluster: ClusterGate
+
+
+@dataclass(frozen=True, slots=True)
 class WallClock:
     """Separate observations of the command, the halves, and the identity's life."""
 
@@ -234,20 +269,22 @@ class BuildReport:
     seconds: int
     courts: Mapping[str, CourtEntry]
     metadata_changes: Mapping[str, object]
-    gates: Mapping[str, Mapping[str, Accounted]]
+    gates: Gates
     wall_clock: WallClock
 
     def to_json(self) -> dict[str, object]:
+        gates: dict[str, object] = {}
+        if "accounted" in self.gates:
+            gates["accounted"] = {court: row.to_json() for court, row in self.gates["accounted"].items()}
+        if "cluster" in self.gates:
+            gates["cluster"] = self.gates["cluster"].to_json()
         return {
             "gen_id": self.gen_id, "written_at": self.written_at,
             "state": self.state, "failed_stage": self.failed_stage,
             "failure_reason": self.failure_reason, "seconds": self.seconds,
             "courts": {court: entry.to_json() for court, entry in self.courts.items()},
             "metadata_changes": dict(self.metadata_changes),
-            "gates": {
-                name: {court: row.to_json() for court, row in rows.items()}
-                for name, rows in self.gates.items()
-            },
+            "gates": gates,
             "wall_clock": self.wall_clock.to_json(),
         }
 
@@ -284,16 +321,23 @@ class BuildReport:
             if not _court_id(court) or parsed_entry is None:
                 return None
             courts[court] = parsed_entry
-        gates: dict[str, dict[str, Accounted]] = {}
+        gates: Gates = {}
         for name, rows in value["gates"].items():
             if name not in GATE_NAMES or not isinstance(rows, dict):
                 return None
-            gates[name] = {}
-            for court, row in rows.items():
-                parsed_row = Accounted.from_json(row)
-                if not _court_id(court) or parsed_row is None:
+            if name == "cluster":
+                cluster = ClusterGate.from_json(rows)
+                if cluster is None:
                     return None
-                gates[name][court] = parsed_row
+                gates["cluster"] = cluster
+            else:
+                accounted: dict[str, Accounted] = {}
+                for court, row in rows.items():
+                    parsed_row = Accounted.from_json(row)
+                    if not _court_id(court) or parsed_row is None:
+                        return None
+                    accounted[court] = parsed_row
+                gates["accounted"] = accounted
         wall_clock = WallClock.from_json(value["wall_clock"])
         if wall_clock is None or wall_clock.run_seconds != value["seconds"]:
             return None
@@ -354,7 +398,7 @@ def gather(
             counts.by_status.get("failed", 0),
             None if staged is None else counts.opinions >= staged,
         )
-    fix = record.database_fix(rendered_dir, command_path)
+    fix = database_fix(rendered_dir, command_path)
     if not agreement.aware_time(row.created_at) or (
         row.built_at is not None and not agreement.aware_time(row.built_at)
     ):
@@ -368,11 +412,18 @@ def gather(
         row.created_at, row.lexical_built_at, row.dense_built_at, row.built_at,
         lifecycle_seconds, whole_build,
     )
+    gates: Gates = {"accounted": accounted}
+    if "cluster_seconds" in row.counts:
+        cluster_seconds = row.counts["cluster_seconds"]
+        gates["cluster"] = ClusterGate(
+            cluster_seconds, CLUSTER_BUDGET_SECONDS, row.counts.get("cluster_reused") == 1,
+            row.clustered_at is not None and cluster_seconds <= CLUSTER_BUDGET_SECONDS,
+        )
     # The gathered time stands until the write returns the database's own.
     return BuildReport(
         row.gen_id, datetime.datetime.now(datetime.UTC).isoformat(), row.state,
         failed_stage, row.failure_reason, seconds, courts, {},
-        {"accounted": accounted}, wall_clock,
+        gates, wall_clock,
     )
 
 
@@ -403,7 +454,7 @@ def write_report(
 ) -> BuildReport | Problem:
     """Append one report, returning its database-assigned write timestamp."""
 
-    fix = record.database_fix(rendered_dir, command_path)
+    fix = database_fix(rendered_dir, command_path)
     payload = build_report.to_json()
     if BuildReport.from_json(payload) is None:
         return Problem("build report payload is invalid", fix)
@@ -428,7 +479,7 @@ def read_report(
     result = _run(host, rendered_dir, sql, command_path)
     if isinstance(result, Problem):
         return result
-    fix = record.database_fix(rendered_dir, command_path)
+    fix = database_fix(rendered_dir, command_path)
     if result.returncode != 0:
         return Problem(f"build report read failed (exit {result.returncode})", fix)
     if not result.stdout.strip():
@@ -451,9 +502,14 @@ def summary(build_report: BuildReport) -> str:
     accounted = tuple(build_report.gates.get("accounted", {}).values())
     staged = sum(row.staged is not None for row in accounted)
     passed = sum(row.passed is True for row in accounted)
+    cluster = build_report.gates.get("cluster")
+    cluster_summary = "" if cluster is None else (
+        f"cluster {cluster.seconds} of {cluster.budget} s, {'pass' if cluster.passed else 'fail'}"
+        + (", reused" if cluster.reused else "") + "; "
+    )
     return (
         f"{build_report.gen_id}: written_at {build_report.written_at}; courts {len(courts)}; "
         f"opinions {opinions}, ready {ready}, failed {failed}; anchored {anchored} of {ready}; "
         f"agreement figures {figures} of {len(courts)} courts; accounted {passed} of {staged} staged; "
-        f"seconds {build_report.seconds}"
+        f"{cluster_summary}seconds {build_report.seconds}"
     )

@@ -361,10 +361,10 @@ def build_parser() -> argparse.ArgumentParser:
     build = index_sub.add_parser(
         "build", help="build a collection's index generation from the record",
         description=(
-            "Build a collection's index generation from the record: its lexical index in the "
-            "search store and its vectors in the vector store. The build ends by writing its "
-            "build report to the record: the documents per court by status, precedential "
-            "status, and text source, the page-anchor coverage, the agreement figure, "
+            "Build a collection's index generation from the record: its near-duplicate clusters, "
+            "its lexical index in the search store, and its vectors in the vector store. The build "
+            "ends by writing its build report to the record: the documents per court by status, "
+            "precedential status, and text source, the page-anchor coverage, the agreement figure, "
             "and the wall-clock."
         ),
     )

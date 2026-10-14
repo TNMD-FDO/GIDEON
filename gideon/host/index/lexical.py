@@ -18,6 +18,7 @@ from gideon.host.render.opensearch import (
 from gideon.host.render.worker import (
     COLLECTION_NAMES,
     DENSE_LOCK_PREFIX,
+    DUPES_LOCK_PREFIX,
     GENERATION_PATTERN,
     LEXICAL_QUEUE,
     LEXICAL_TASK,
@@ -27,6 +28,7 @@ from gideon.host.report import Problem
 from gideon.host.sysio import Host, PathLike
 
 COMMAND_PATH = "index build"
+JOB_SUBJECTS = {"index-": "lexical", DENSE_LOCK_PREFIX: "dense", DUPES_LOCK_PREFIX: "clustering"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,7 +127,7 @@ def live_job(
 ) -> int | None | Problem:
     """Find the first queued or running job under a generation's lock."""
 
-    subject = "dense" if prefix == DENSE_LOCK_PREFIX else "lexical"
+    subject = JOB_SUBJECTS.get(prefix, "lexical") if isinstance(prefix, str) else "lexical"
     if not isinstance(prefix, str) or not prefix or not isinstance(lock, str) or not lock.startswith(prefix):
         return Problem(f"{subject} queueing lock is invalid", f"Run {report.command(command_path)} with a recorded generation.")
     problem = _name_problem(lock.removeprefix(prefix), command_path, subject=subject)
