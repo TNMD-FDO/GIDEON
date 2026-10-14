@@ -15,11 +15,10 @@ from typing import Final, TextIO
 
 from gideon.evaluation import evalset
 from tools.segmenter import manifest
+from tools.segmenter.manifest import CASE_PATH, IDS_PATH
 
 DEFAULT_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 REQUIRED_COURTS: Final[tuple[str, ...]] = ("ca6", "scotus")
-CASE_PATH: Final[Path] = Path("build-gates/segmenter-300.jsonl")
-IDS_PATH: Final[Path] = Path("slices/segmenter-300/sample.ids")
 SOURCE_COLUMNS: Final[tuple[str, ...]] = evalset.SEGMENTER_TEXT_SOURCES
 CSV_OPTIONS: Final[Mapping[str, object]] = {
     "delimiter": ",", "quotechar": '"', "escapechar": "\\",

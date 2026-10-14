@@ -1,4 +1,4 @@
-"""The segmenter draw and checked-sheet intake over fictitious files."""
+"""The segmenter draw, checked-sheet intake, and append-only file holds."""
 
 import ast
 import csv
@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -289,6 +290,7 @@ def _intake_fixture(root: Path) -> tuple[Path, Path, Path, str]:
         ), strict=True)))
     value = dict(zip(manifest.MANIFEST_KEYS, (
         manifest.MANIFEST_FORMAT, str(set_root.resolve()), loaded.loaded.digest,
+        manifest.pin_slice(set_root),
         "segmenter-label@1", segmenter_draft.PROMPT_DIGESTS["segmenter-label@1"], cases,
     ), strict=True))
     manifest_path = root / "manifest.json"
@@ -296,9 +298,14 @@ def _intake_fixture(root: Path) -> tuple[Path, Path, Path, str]:
     return set_root, sheets, manifest_path, text
 
 
-def _run_intake(manifest_path: Path, sheets: Path, *, set_root: Path, dry_run: bool = False) -> tuple[int, str, str]:
+def _run_intake(manifest_path: Path, sheets: Path, *, set_root: Path | None = None,
+                dry_run: bool = False, cases: tuple[str, ...] = ()) -> tuple[int, str, str]:
     output, errors = io.StringIO(), io.StringIO()
-    args = [str(manifest_path), str(sheets), "--signer", "CSA-1", "--on", "2026-10-08", "--set", str(set_root)]
+    args = [str(manifest_path), str(sheets), "--signer", "CSA-1", "--on", "2026-10-08"]
+    if set_root is not None:
+        args.extend(("--set", str(set_root)))
+    for case_id in cases:
+        args.extend(("--case", case_id))
     if dry_run:
         args.append("--dry-run")
     code = intake.main(args, stdout=output, stderr=errors)
@@ -318,6 +325,9 @@ class Intake(unittest.TestCase):
             self.assertEqual((code, errors), (0, ""), output)
             self.assertFalse(label_path.exists())
             self.assertIn("(dry-run)", output)
+            self.assertEqual(output.splitlines()[-3:-1], [
+                "set digest: unchanged since the draft", "not taken: none",
+            ])
             code, output, errors = _run_intake(manifest_path, sheets, set_root=set_root)
             self.assertEqual((code, errors), (0, ""), output)
             payload = label_path.read_bytes()
@@ -364,8 +374,9 @@ class Intake(unittest.TestCase):
                 set_root, sheets, manifest_path, _text = _intake_fixture(Path(directory))
                 sheet = sheets / "segmenter-002.txt"
                 sheet.write_text(sheet.read_text(encoding="utf-8").replace(before, after), encoding="utf-8")
-                code, _output, errors = _run_intake(manifest_path, sheets, set_root=set_root)
+                code, output, errors = _run_intake(manifest_path, sheets, set_root=set_root)
                 self.assertEqual(code, 1)
+                self.assertEqual(output, "")
                 self.assertIn("case segmenter-002 line", errors)
                 self.assertIn(rule, errors)
                 self.assertIn("Fix:", errors)
@@ -388,22 +399,239 @@ class Intake(unittest.TestCase):
             self.assertFalse(segmenter_labels.path_for(_set).exists())
 
     def test_manifest_and_set_refusals(self) -> None:
+        scenarios = ("starts", "format-1", "format-1-keys", "changed-case", "reordered-cases", "reordered-ids")
+        for scenario in scenarios:
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as directory:
+                set_root, sheets, manifest_path, _text = _intake_fixture(Path(directory))
+                if scenario in {"starts", "format-1", "format-1-keys"}:
+                    value = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    if scenario == "starts":
+                        value["cases"][0]["starts"] = [0, 0]
+                    else:
+                        value["format"] = 1
+                        if scenario == "format-1-keys":
+                            del value["slice_pins"]
+                    manifest_path.write_text(json.dumps(value), encoding="utf-8")
+                    stage = "manifest"
+                else:
+                    path = set_root / (manifest.IDS_PATH if scenario == "reordered-ids" else manifest.CASE_PATH)
+                    lines = path.read_bytes().splitlines(keepends=True)
+                    if scenario == "changed-case":
+                        case = json.loads(lines[0])
+                        case["notes"] = "Fictitious change after the draft"
+                        lines[0] = (json.dumps(case) + "\n").encode("utf-8")
+                    else:
+                        lines.reverse()
+                    path.write_bytes(b"".join(lines))
+                    stage = "set"
+                code, output, errors = _run_intake(manifest_path, sheets, set_root=set_root)
+                self.assertEqual(code, 1, output)
+                self.assertEqual(output, "")
+                self.assertTrue(errors.startswith(f"{stage}: refused"), errors)
+                self.assertIn("Fix:", errors)
+                if stage == "set":
+                    self.assertIn("the segmenter slice's files changed since the draft", errors)
+                    self.assertIn("Draft the slice's unsigned cases again, then retry.", errors)
+                else:
+                    self.assertIn("manifest shape is invalid", errors)
+                self.assertFalse(segmenter_labels.path_for(set_root).exists())
+
+    def test_slice_pin_shape_refusals(self) -> None:
+        case_key, ids_key = manifest.CASE_PATH.as_posix(), manifest.IDS_PATH.as_posix()
+        valid_pin = [2, "a" * 64]
+        invalid_pins: list[object] = [
+            None, [], {case_key: valid_pin},
+            {case_key: valid_pin, ids_key: valid_pin, "extra": valid_pin},
+        ]
+        invalid_values: tuple[object, ...] = (
+            None, {}, [], [2], [2, "a" * 64, "extra"],
+            [0, "a" * 64], [-1, "a" * 64], [True, "a" * 64],
+            ["2", "a" * 64], [2.5, "a" * 64],
+            [2, None], [2, "a" * 63], [2, "g" * 64],
+        )
+        invalid_pins.extend({case_key: pin, ids_key: valid_pin} for pin in invalid_values)
+        for index, pins in enumerate(invalid_pins):
+            with self.subTest(index=index), tempfile.TemporaryDirectory() as directory:
+                set_root, sheets, manifest_path, _text = _intake_fixture(Path(directory))
+                value = json.loads(manifest_path.read_text(encoding="utf-8"))
+                value["slice_pins"] = pins
+                manifest_path.write_text(json.dumps(value), encoding="utf-8")
+                code, output, errors = _run_intake(manifest_path, sheets, set_root=set_root)
+                self.assertEqual((code, output), (1, ""))
+                self.assertIn("manifest: refused — manifest shape is invalid", errors)
+                self.assertIn("Fix:", errors)
+                self.assertFalse(segmenter_labels.path_for(set_root).exists())
+
+    def test_appends_pass_the_hold_and_report_the_digest(self) -> None:
+        for location in ("non-slice", "slice"):
+            with self.subTest(location=location), tempfile.TemporaryDirectory() as directory:
+                set_root, sheets, manifest_path, _text = _intake_fixture(Path(directory))
+                if location == "non-slice":
+                    path = set_root / "build-gates/fictitious-other.jsonl"
+                    path.write_text(json.dumps(_case("segmenter-003", 103)) + "\n", encoding="utf-8")
+                    result = evalset.load_set(set_root)
+                    self.assertTrue(result.ok, result.findings)
+                    assert result.loaded is not None
+                    value = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    value["set_digest"] = result.loaded.digest
+                    manifest_path.write_text(json.dumps(value), encoding="utf-8")
+                    added = _case("segmenter-004", 104)
+                else:
+                    path = set_root / manifest.CASE_PATH
+                    added = _case("segmenter-003", 103)
+                    ids_path = set_root / manifest.IDS_PATH
+                    ids_path.write_bytes(ids_path.read_bytes() + f"{added['id']}\n".encode())
+                path.write_bytes(path.read_bytes() + (json.dumps(added) + "\n").encode("utf-8"))
+                code, output, errors = _run_intake(manifest_path, sheets, set_root=set_root)
+                self.assertEqual((code, errors), (0, ""), output)
+                self.assertEqual(output.splitlines()[-3:-1], [
+                    "set digest: moved since the draft", "not taken: none",
+                ])
+                value = json.loads(manifest_path.read_text(encoding="utf-8"))
+                parsed = segmenter_labels.parse_bytes(segmenter_labels.path_for(set_root).read_bytes())
+                self.assertFalse(parsed.findings)
+                self.assertEqual(
+                    [item.record.case_id for item in parsed.records],
+                    [case["case_id"] for case in value["cases"]],
+                )
+
+    def test_case_selection_batches_and_already_labelled_refusal(self) -> None:
+        """Unsigned cases are checked and appended in separate batches."""
+
         with tempfile.TemporaryDirectory() as directory:
-            set_root, sheets, manifest_path, _text = _intake_fixture(Path(directory))
+            set_root, sheets, manifest_path, text = _intake_fixture(Path(directory))
             value = json.loads(manifest_path.read_text(encoding="utf-8"))
-            value["cases"][0]["starts"] = [0, 0]
-            manifest_path.write_text(json.dumps(value), encoding="utf-8")
-            code, _output, errors = _run_intake(manifest_path, sheets, set_root=set_root)
-            self.assertEqual(code, 1)
-            self.assertIn("manifest", errors)
-            self.assertFalse(segmenter_labels.path_for(set_root).exists())
-            _set, _sheets, manifest_path, _text = _intake_fixture(Path(directory) / "fresh")
+            first, second = (case["case_id"] for case in value["cases"])
+            omitted_sheet = sheets / f"{second}.txt"
+            saved_sheet = omitted_sheet.read_bytes()
+            omitted_sheet.unlink()
+            label_path = segmenter_labels.path_for(set_root)
+            code, output, errors = _run_intake(manifest_path, sheets, cases=(first, first), dry_run=True)
+            self.assertEqual((code, errors), (0, ""), output)
+            self.assertIn(f"not taken: 1 ids {second}\n", output)
+            self.assertNotIn(f"{second}:", output)
+            self.assertFalse(label_path.exists())
+            code, output, errors = _run_intake(manifest_path, sheets, cases=(first, first))
+            self.assertEqual((code, errors), (0, ""), output)
+            self.assertIn(f"not taken: 1 ids {second}\n", output)
+            before = label_path.read_bytes()
+            parsed = segmenter_labels.parse_bytes(before)
+            self.assertFalse(parsed.findings)
+            self.assertEqual([item.record.case_id for item in parsed.records], [first])
+            omitted_sheet.write_bytes(saved_sheet)
+            first_sheet = sheets / f"{first}.txt"
+            saved_first_sheet = first_sheet.read_bytes()
+            first_sheet.unlink()
+            code, output, errors = _run_intake(manifest_path, sheets, cases=(second,))
+            self.assertEqual((code, errors), (0, ""), output)
+            self.assertEqual(output.splitlines()[-3:-1], [
+                "set digest: moved since the draft", f"not taken: 1 ids {first}",
+            ])
+            payload = label_path.read_bytes()
+            self.assertTrue(payload.startswith(before))
+            parsed = segmenter_labels.parse_bytes(payload)
+            self.assertFalse(parsed.findings)
+            self.assertEqual([item.record.case_id for item in parsed.records], [first, second])
+            first_sheet.write_bytes(saved_first_sheet)
+            code, output, errors = _run_intake(manifest_path, sheets, cases=(first, second))
+            self.assertEqual((code, output), (1, ""))
+            self.assertTrue(errors.startswith(f"set: refused — case {first} is no longer active and unsigned"), errors)
+            self.assertIn("Fix:", errors)
+            self.assertEqual(label_path.read_bytes(), payload)
+            self.assertNotIn(text, output + errors)
+
+    def test_later_batch_relocates_by_set_version(self) -> None:
+        """A checked batch lands from another checkout of the same set version."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            set_root, sheets, manifest_path, _text = _intake_fixture(root)
             value = json.loads(manifest_path.read_text(encoding="utf-8"))
-            value["set_digest"] = "a" * 64
-            manifest_path.write_text(json.dumps(value), encoding="utf-8")
-            code, _output, errors = _run_intake(manifest_path, _sheets, set_root=_set)
-            self.assertEqual(code, 1)
-            self.assertIn("changed since draft", errors)
+            first, second = (case["case_id"] for case in value["cases"])
+            code, output, errors = _run_intake(manifest_path, sheets, cases=(first,))
+            self.assertEqual((code, errors), (0, ""), output)
+            before = segmenter_labels.path_for(set_root).read_bytes()
+            relocated = root / "later-checkout" / set_root.name
+            shutil.copytree(set_root, relocated)
+            wrong_version = relocated.with_name("eval-v1000")
+            shutil.copytree(relocated, wrong_version)
+            shutil.rmtree(set_root)
+            code, output, errors = _run_intake(manifest_path, sheets, set_root=wrong_version, cases=(second,))
+            self.assertEqual((code, output), (1, ""))
+            self.assertTrue(errors.startswith("set: refused"), errors)
+            self.assertIn(f"Use a set named {set_root.name}, then retry.", errors)
+            self.assertEqual(segmenter_labels.path_for(wrong_version).read_bytes(), before)
+            code, output, errors = _run_intake(manifest_path, sheets, set_root=relocated, cases=(second,))
+            self.assertEqual((code, errors), (0, ""), output)
+            self.assertEqual(output.splitlines()[-3:-1], [
+                "set digest: moved since the draft", f"not taken: 1 ids {first}",
+            ])
+            payload = segmenter_labels.path_for(relocated).read_bytes()
+            self.assertTrue(payload.startswith(before))
+            parsed = segmenter_labels.parse_bytes(payload)
+            self.assertFalse(parsed.findings)
+            self.assertEqual([item.record.case_id for item in parsed.records], [first, second])
+
+    def test_unknown_or_invalid_requested_case_refuses_with_fix(self) -> None:
+        for case_id in ("segmenter-999", "fictitious-invalid-id"):
+            with self.subTest(case_id=case_id), tempfile.TemporaryDirectory() as directory:
+                set_root, sheets, manifest_path, _text = _intake_fixture(Path(directory))
+                code, output, errors = _run_intake(manifest_path, sheets, cases=(case_id,))
+                self.assertEqual((code, output), (1, ""))
+                self.assertIn(case_id, errors)
+                self.assertIn("Name a case the manifest holds, then retry.", errors)
+                self.assertFalse(segmenter_labels.path_for(set_root).exists())
+
+
+class SlicePins(unittest.TestCase):
+    """The holds use the slice files' byte prefixes and allow appends."""
+
+    def test_pins_and_holds_match_committed_file_prefix_arithmetic(self) -> None:
+        set_root = Path(__file__).resolve().parents[1] / evalset.SET_ROOT
+        expected: dict[str, tuple[int, str]] = {}
+        prefixes: dict[str, tuple[int, str]] = {}
+        for path in (manifest.CASE_PATH, manifest.IDS_PATH):
+            lines = (set_root / path).read_bytes().splitlines(keepends=True)
+            count = len(lines)
+            expected[path.as_posix()] = (count, hashlib.sha256(b"".join(lines[:count])).hexdigest())
+            prefix_count = count // 2
+            self.assertGreater(prefix_count, 0)
+            prefixes[path.as_posix()] = (prefix_count, hashlib.sha256(b"".join(lines[:prefix_count])).hexdigest())
+        self.assertEqual(manifest.pin_slice(set_root), expected)
+        self.assertTrue(manifest.hold_slice(set_root, expected))
+        self.assertTrue(manifest.hold_slice(set_root, prefixes))
+
+        with tempfile.TemporaryDirectory() as directory:
+            copy_root = Path(directory)
+            for path in (manifest.CASE_PATH, manifest.IDS_PATH):
+                target = copy_root / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes((set_root / path).read_bytes() + b"Fictitious appended line\n")
+            self.assertTrue(manifest.hold_slice(copy_root, expected))
+            self.assertTrue(manifest.hold_slice(copy_root, prefixes))
+
+    def test_hold_refuses_truncation_and_missing_final_newline(self) -> None:
+        set_root = Path(__file__).resolve().parents[1] / evalset.SET_ROOT
+        pins = manifest.pin_slice(set_root)
+        for path in (manifest.CASE_PATH, manifest.IDS_PATH):
+            for scenario in ("truncated", "no-newline", "appended-no-newline"):
+                with self.subTest(path=path, scenario=scenario), tempfile.TemporaryDirectory() as directory:
+                    copy_root = Path(directory)
+                    for relative_path in (manifest.CASE_PATH, manifest.IDS_PATH):
+                        target = copy_root / relative_path
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_bytes((set_root / relative_path).read_bytes())
+                    raw = (copy_root / path).read_bytes()
+                    if scenario == "truncated":
+                        changed = b"".join(raw.splitlines(keepends=True)[:-1])
+                        self.assertTrue(changed.endswith(b"\n"))
+                    elif scenario == "no-newline":
+                        self.assertTrue(raw.endswith(b"\n"))
+                        changed = raw[:-1]
+                    else:
+                        changed = raw + b"Fictitious append without a newline"
+                    (copy_root / path).write_bytes(changed)
+                    self.assertFalse(manifest.hold_slice(copy_root, pins))
 
 
 class DraftHost:

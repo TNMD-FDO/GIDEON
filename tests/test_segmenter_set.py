@@ -29,7 +29,9 @@ PINNED_PREFIXES: Final[dict[Path, tuple[tuple[int, str], ...]]] = {
     IDS_PATH: (
         (300, "7fd74a3af7177e6b300370ce73f913a60a73620693f0dcc9de864a08feacb665"),
     ),
-    LABELS_FILE: (),  # Fill with the first checked-label append; an existing file needs a pin.
+    LABELS_FILE: (
+        (298, "7fc76234e79112175e0fc7cb92684658338ae8578cd0818bb5a2f32a297842ab"),
+    ),
 }
 COURTS: Final[frozenset[str]] = frozenset({"ca6", "scotus"})
 CELL: Final[re.Pattern[str]] = re.compile(r"([1-9][0-9]*) / ([1-9][0-9]*)")

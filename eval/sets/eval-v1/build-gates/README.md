@@ -217,12 +217,65 @@ bracketed transition marks on the sheet, and signs through intake. The kit
 commands are `tools.segmenter.draw`, `tools.segmenter.draft`, and
 `tools.segmenter.intake`. Draft sheets and full text stay outside the checkout;
 only the person's checked marks become committed label spans.
+Leave an unsettled case out of the intake selection and name it in the check
+record; never mark it.
+
+The labels follow these conventions, so the set stays consistent:
+
+1. **Caption blocks.** In a slip opinion, each opinion's front block — from its
+   `Cite as:` page-head line through the court name, docket number, caption,
+   "on writ of certiorari" lines, and date — is `headmatter`: its first
+   paragraph is marked `headmatter` and the rest `-`. This holds for the
+   syllabus's block, the opinion of the Court's, and each separate opinion's.
+2. **Running heads and page furniture.** A running head (`Opinion of the
+   Court`, `BREYER, J., dissenting`, `Syllabus`, a bare page number, a
+   `Cite as:` line that starts no caption block), a circuit PDF's page header
+   line, and a divider rule continue the section: `-`.
+3. **Opinions begin at a byline or heading.** `JUSTICE BREYER delivered the
+   opinion of the Court.` is `majority`, `PER CURIAM.` is `per_curiam`,
+   `JUSTICE ALITO, concurring.` is `concurrence`; a heading such as `OPINION`
+   or `DISSENT` printed before the byline takes the mark and the byline after
+   it is `-`. A participation line inside a front block is `-`.
+4. **Syllabus.** The summary begins at its first summary paragraph after the
+   caption block, before or at `Held:`. The notice at the top of the syllabus
+   page, like the notice on an opinion's first page that it is subject to
+   formal revision, sits inside the front block: `-`.
+5. **A paragraph that merges two things.** The text sometimes runs a page's
+   last body lines and a footnote's start into one paragraph, or a running
+   head into the body line after it. A paragraph takes one mark: the part that
+   carries more of its text, or the first part when the two are equal. The
+   next paragraph is judged on its own.
+6. **Footnotes.** A footnote body is the small-font text at a page's foot,
+   after the divider; each numbered or starred footnote starts its own
+   `footnote` section and its later paragraphs are `-`. When the body resumes
+   after a footnote block, its first paragraph is re-marked with the running
+   opinion's type, even mid-sentence. A footnote continued at the next page's
+   foot after body text starts a new `footnote` section there. A `NOTES`
+   heading before a footnote block is `-`; the first footnote body takes the
+   mark.
+7. **A record holding one separate opinion alone**, as a dissent from a denial
+   of certiorari published on its own, carries that type from its first
+   paragraph, its caption block and the one-line denial order included.
+8. **Bylines.** A bare byline that begins no new opinion (`Mr. Justice DANIEL
+   dissented.`) is `-`. A byline whose opinion exists begins that opinion's
+   section even when its body did not survive in the record.
+9. **Early reports.** The reporter's statement of the case and counsel's
+   arguments before the opinion continue the `headmatter`; the opinion begins
+   at its byline. `BY THE COURT.` or `The Court,` opening an unsigned opinion
+   is `per_curiam`. A one-line disposition at the end (`Affirmed.`) continues
+   the opinion; a bare certiorari denial is `order`.
+10. **Appendix.** Appended material under an `APPENDIX` heading is `appendix`
+    at the heading.
+11. **`unknown`** only where the original itself does not establish the type:
+    an unsigned, unheaded opinion, or a writing the vocabulary lacks, such as
+    a statement respecting the denial of certiorari, which is neither a
+    concurrence nor a dissent.
 
 ```text
 sudo python3 -B -m tools.segmenter.draw <stage-root> --seed <seed> --out <sample-file>
 python3 -m tools.segmenter.draw --write <sample-file> --reviewer <role-id> --on <date>
 sudo python3 -B -m tools.segmenter.draft --out <sheets-dir>
-python3 -m tools.segmenter.intake <manifest> <sheets-dir> --signer <role-id> --on <date>
+python3 -m tools.segmenter.intake <manifest> <sheets-dir> --signer <role-id> --on <date> [--case <id> ...]
 ```
 
 ## The pin and the rule

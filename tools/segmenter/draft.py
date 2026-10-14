@@ -217,6 +217,10 @@ def _run(io: DraftHost, *, checkout: Path, set_root: Path, out: Path,
     if io.geteuid() != 0:
         raise DraftError("set", "root privileges are required", "Run the draft command with sudo, then retry.")
     loaded, case_ids = _selected(set_root, requested)
+    try:
+        slice_pins = manifest.pin_slice(set_root)
+    except OSError as error:
+        raise DraftError("set", "segmenter slice's files cannot be read", _SET_FIX) from error
     _check_output(out, checkout)
     claim = backuplock.claim(
         io, command="tools.segmenter.draft", now=now(), lock=backuplock.ENGINE_LOCK,
@@ -296,7 +300,7 @@ def _run(io: DraftHost, *, checkout: Path, set_root: Path, out: Path,
             seconds = result.elapsed_seconds if result.elapsed_seconds is not None else 0.0
             print(f"{case_id}: {len(table.starts)} paragraphs, {result.windows} windows, {outcome}, {seconds:.3f} s", file=stdout)
         value = dict(zip(manifest.MANIFEST_KEYS, (
-            manifest.MANIFEST_FORMAT, str(set_root.resolve()), loaded.digest,
+            manifest.MANIFEST_FORMAT, str(set_root.resolve()), loaded.digest, slice_pins,
             prompt.id, segmenter_draft.PROMPT_DIGESTS[prompt.id], entries,
         ), strict=True))
         try:

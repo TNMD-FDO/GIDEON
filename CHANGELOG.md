@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.163](docs/release-notes/v0.3.163.md) — 2026-10-14 — segmenter-300 labelled and checked
 - [v0.3.162](docs/release-notes/v0.3.162.md) — 2026-10-14 — the host's memory and card count paged against the selected profile's floors
 - [v0.3.161](docs/release-notes/v0.3.161.md) — 2026-10-14 — the known-overruled list
 - [v0.3.160](docs/release-notes/v0.3.160.md) — 2026-10-13 — index build embeds into Qdrant

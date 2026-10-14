@@ -1,20 +1,49 @@
-"""What the segmenter kit's commands share: the manifest's field order, the
-sheet's header, and the atomic file write."""
+"""Shared manifest fields, slice-file pins, sheet headers, and atomic writes
+for the segmenter kit."""
 
+import hashlib
 import os
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Final
 
-MANIFEST_FORMAT: Final[int] = 1
+MANIFEST_FORMAT: Final[int] = 2
 MANIFEST_KEYS: Final[tuple[str, ...]] = (
-    "format", "set_root", "set_digest", "prompt", "prompt_digest", "cases",
+    "format", "set_root", "set_digest", "slice_pins", "prompt", "prompt_digest", "cases",
 )
 CASE_KEYS: Final[tuple[str, ...]] = (
     "case_id", "opinion_id", "doc_id", "sha256", "length", "starts",
     "status", "failure_code", "sheet_sha256",
 )
 SHEET_PARAGRAPHS_HEADER: Final[str] = "Paragraphs:"
+CASE_PATH: Final[Path] = Path("build-gates/segmenter-300.jsonl")
+IDS_PATH: Final[Path] = Path("slices/segmenter-300/sample.ids")
+
+
+def pin_slice(set_root: Path) -> dict[str, tuple[int, str]]:
+    """Record the line count and byte-prefix digest of each slice file."""
+
+    pins: dict[str, tuple[int, str]] = {}
+    for path in (CASE_PATH, IDS_PATH):
+        raw = (set_root / path).read_bytes()
+        pins[path.as_posix()] = (len(raw.splitlines()), hashlib.sha256(raw).hexdigest())
+    return pins
+
+
+def hold_slice(set_root: Path, pins: Mapping[str, tuple[int, str]]) -> bool:
+    """Hold recorded byte prefixes while allowing newline-terminated appends."""
+
+    for path in (CASE_PATH, IDS_PATH):
+        count, digest = pins[path.as_posix()]
+        raw = (set_root / path).read_bytes()
+        lines = raw.splitlines(keepends=True)
+        if (
+            not raw.endswith(b"\n") or len(lines) < count
+            or hashlib.sha256(b"".join(lines[:count])).hexdigest() != digest
+        ):
+            return False
+    return True
 
 
 def sheet_header(case_id: str, opinion_id: int, court: str, sha256: str,

@@ -6,7 +6,7 @@ import json
 import re
 import sys
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, TextIO
@@ -48,6 +48,7 @@ class Manifest:
 
     set_root: Path
     set_digest: str
+    slice_pins: Mapping[str, tuple[int, str]]
     cases: tuple[ManifestCase, ...]
 
 
@@ -78,6 +79,19 @@ def _load_manifest(path: Path) -> Manifest:
         or not isinstance(raw_cases, list) or not raw_cases
     ):
         raise _manifest_problem()
+    raw_pins = value["slice_pins"]
+    if not isinstance(raw_pins, dict) or set(raw_pins) != {
+        manifest.CASE_PATH.as_posix(), manifest.IDS_PATH.as_posix(),
+    }:
+        raise _manifest_problem()
+    slice_pins: dict[str, tuple[int, str]] = {}
+    for relative_path, pin in raw_pins.items():
+        if (
+            not isinstance(pin, list) or len(pin) != 2
+            or type(pin[0]) is not int or pin[0] <= 0 or not _hex(pin[1])
+        ):
+            raise _manifest_problem()
+        slice_pins[relative_path] = (pin[0], pin[1])
     cases: list[ManifestCase] = []
     seen: set[str] = set()
     for raw in raw_cases:
@@ -104,19 +118,20 @@ def _load_manifest(path: Path) -> Manifest:
     if tuple(case.case_id for case in cases) != tuple(sorted(seen)):
         raise _manifest_problem()
     assert isinstance(set_root, str) and isinstance(digest, str)
-    return Manifest(Path(set_root), digest, tuple(cases))
+    return Manifest(Path(set_root), digest, slice_pins, tuple(cases))
 
 
-def _set_state(manifest_value: Manifest, set_root: Path) -> evalset.LoadedSet:
-    if manifest_value.set_root.resolve() != set_root.resolve():
-        raise IntakeError("set", "manifest names another set", "Use the set named by the manifest, then retry.")
+def _set_state(manifest_value: Manifest, set_root: Path,
+               cases: Sequence[ManifestCase]) -> evalset.LoadedSet:
+    if manifest_value.set_root.name != set_root.resolve().name:
+        raise IntakeError("set", "set version differs from the manifest", f"Use a set named {manifest_value.set_root.name}, then retry.")
     loaded_result = evalset.load_set(set_root)
     if loaded_result.loaded is None or loaded_result.findings:
         raise IntakeError("set", "evaluation set cannot be loaded", "Restore the evaluation set, then retry.")
     loaded = loaded_result.loaded
     active = set(loaded.active_ids)
     selected = set(loaded.slices.get("segmenter-300", ()))
-    for case in manifest_value.cases:
+    for case in cases:
         record = loaded.cases_by_id.get(case.case_id)
         if (
             case.case_id not in active or case.case_id not in selected
@@ -125,8 +140,13 @@ def _set_state(manifest_value: Manifest, set_root: Path) -> evalset.LoadedSet:
             or (record.get("suite"), record.get("category")) != ("build-gates", "segmenter-300")
         ):
             raise IntakeError("set", f"case {case.case_id} is no longer active and unsigned in the slice", "Draft this set's unsigned cases again, then retry.")
-    if loaded.digest != manifest_value.set_digest:
-        raise IntakeError("set", "evaluation set changed since draft", "Draft sheets for the current set, then retry.")
+    fix = "Draft the slice's unsigned cases again, then retry."
+    try:
+        held = manifest.hold_slice(set_root, manifest_value.slice_pins)
+    except OSError as error:
+        raise IntakeError("set", "the segmenter slice's files changed since the draft", fix) from error
+    if not held:
+        raise IntakeError("set", "the segmenter slice's files changed since the draft", fix)
     return loaded
 
 
@@ -194,16 +214,23 @@ def _label(case: ManifestCase, marks: Sequence[tuple[int, str]], signer: str, on
 
 
 def intake(manifest_path: Path, sheets: Path, *, signer: str, on: str,
-           set_root: Path | None, dry_run: bool, stdout: TextIO) -> None:
-    """Validate every sheet, then append the labels as one file replacement."""
+           set_root: Path | None, dry_run: bool, stdout: TextIO,
+           requested: Sequence[str] = ()) -> None:
+    """Validate selected sheets, then append the labels as one file replacement."""
 
     if evalset.ROLE_PATTERN.fullmatch(signer) is None or not evalset.valid_iso_date(on):
         raise IntakeError("intake", "signer or date is invalid", "Provide a role id and ISO date, then retry.")
     manifest_value = _load_manifest(manifest_path)
+    ids = {case.case_id for case in manifest_value.cases}
+    for case_id in requested:
+        if evalset.SEGMENTER_ID_PATTERN.fullmatch(case_id) is None or case_id not in ids:
+            raise IntakeError("intake", f"case {case_id} is not held by the manifest", "Name a case the manifest holds, then retry.")
+    selected_ids = set(requested) if requested else ids
+    cases = tuple(case for case in manifest_value.cases if case.case_id in selected_ids)
     target = manifest_value.set_root if set_root is None else set_root
-    loaded = _set_state(manifest_value, target)
+    loaded = _set_state(manifest_value, target, cases)
     labels: list[segmenter_labels.SegmenterLabel] = []
-    for case in manifest_value.cases:
+    for case in cases:
         court = loaded.cases_by_id[case.case_id]["court"]
         assert isinstance(court, str)
         labels.append(_label(case, _marks(sheets / f"{case.case_id}.txt", case, court), signer, on))
@@ -226,6 +253,10 @@ def intake(manifest_path: Path, sheets: Path, *, signer: str, on: str,
         counts = Counter(span.section_type for span in label.sections)
         figures = ", ".join(f"{name}={counts[name]}" for name in sorted(counts))
         print(f"{label.case_id}: {len(label.sections)} spans; {figures}", file=stdout)
+    digest_state = "unchanged" if loaded.digest == manifest_value.set_digest else "moved"
+    print(f"set digest: {digest_state} since the draft", file=stdout)
+    not_taken = tuple(case.case_id for case in manifest_value.cases if case.case_id not in selected_ids)
+    print(f"not taken: {len(not_taken)} ids {', '.join(not_taken)}" if not_taken else "not taken: none", file=stdout)
     print(f"labels: {len(parsed.records) + len(labels)} lines sha256 {hashlib.sha256(payload).hexdigest()}" + (" (dry-run)" if dry_run else ""), file=stdout)
 
 
@@ -237,6 +268,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--on", required=True)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--set", dest="set_root", type=Path)
+    parser.add_argument("--case", action="append", default=[])
     return parser
 
 
@@ -252,7 +284,8 @@ def main(argv: Sequence[str] | None = None, *, stdout: TextIO | None = None,
         return int(error.code) if isinstance(error.code, int) else 2
     try:
         intake(args.manifest, args.sheets, signer=args.signer, on=args.on,
-               set_root=args.set_root, dry_run=args.dry_run, stdout=output)
+               set_root=args.set_root, dry_run=args.dry_run, stdout=output,
+               requested=args.case)
     except IntakeError as error:
         print(f"{error.stage}: refused — {error.problem}. Fix: {error.fix}", file=errors)
         return 1
