@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.172](docs/release-notes/v0.3.172.md) — 2026-10-14 — preflight's card count is a minimum
 - [v0.3.171](docs/release-notes/v0.3.171.md) — 2026-10-14 — a moved embed pin moves the space id
 - [v0.3.170](docs/release-notes/v0.3.170.md) — 2026-10-14 — the Corpus board
 - [v0.3.169](docs/release-notes/v0.3.169.md) — 2026-10-14 — index report, the corpus inventory

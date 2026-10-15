@@ -114,6 +114,7 @@ _CURATED_ALLOWLIST: tuple[str, ...] = (
     "stanford.edu",
     "thomsonreuters.com",
     "vals.ai",
+    "vllm.ai",
     "w3c.github.io",
     "whatwg.org",
     "yaml.org",

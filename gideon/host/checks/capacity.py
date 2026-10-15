@@ -587,7 +587,7 @@ class GpuMemoryCheck(PreflightCheck):
         ordered = sorted(judged, key=lambda card: (card.fits, card.position))
         detail = "; ".join(gpu_memory_detail(card) for card in ordered)
         if recorded is None:
-            detail = "unrecorded; today's order, which the first render records; " + detail
+            detail = gpus.UNRECORDED_DETAIL + detail
         if listing_detail:
             detail += "; " + listing_detail
         if any(not card.fits for card in judged):

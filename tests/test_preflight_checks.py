@@ -1834,7 +1834,7 @@ class Jurisdiction(unittest.TestCase):
 UNAME = ("uname", "-m")
 NVIDIA_SMI = (
     "nvidia-smi",
-    "--query-gpu=name,compute_cap,memory.total",
+    "--query-gpu=uuid,name,compute_cap,memory.total",
     "--format=csv,noheader",
 )
 NVIDIA_SMI_Q = ("nvidia-smi", "-q")
@@ -1846,6 +1846,7 @@ def _ceil_div(value: int, divisor: int) -> int:
 
 def _gpu_line(
     *,
+    uuid: str = "GPU-fictitious-0",
     model: str | None = None,
     capability: str | None = None,
     vram_mib: int | None = None,
@@ -1858,6 +1859,7 @@ def _gpu_line(
     vram = f"{rendered_vram} MiB" if include_unit else str(rendered_vram)
     return ", ".join(
         (
+            uuid,
             model or requirements.gpu.model,
             capability or requirements.gpu.compute_capability,
             vram,
@@ -1878,21 +1880,30 @@ class HardwareProfile(unittest.TestCase):
         architecture_stderr: str = "",
         platform: str | None = None,
         dram_kb: int | None = None,
+        record: str | None = "valid",
     ) -> FakeHost:
         requirements = MODELS.profiles[0].requires
         if gpu_stdout is None:
             gpu_stdout = "\n".join(
-                _gpu_line(model=model) for _ in range(requirements.gpu.count)
+                _gpu_line(uuid=f"GPU-fictitious-{position}", model=model)
+                for position in range(requirements.gpu.count)
             ) + "\n"
+        uuids = tuple(line.split(",")[0].strip() for line in gpu_stdout.splitlines() if line.strip())
         if architecture_stdout is None:
             architecture_stdout = "\n".join(
                 f"    Product Architecture              : {requirements.gpu.architecture}"
-                for _ in range(requirements.gpu.count)
+                for _ in uuids
             ) + "\n"
         if platform is None:
             platform = requirements.platform
         if dram_kb is None:
             dram_kb = _ceil_div(requirements.dram_gb * GIGABYTE, 1024)
+        files = {MEMINFO: f"MemTotal:       {dram_kb} kB\n"}
+        if record is not None:
+            files[str(gpus.GPU_RECORD_PATH)] = (
+                "gpus:\n" + "".join(f"  - {uuid}\n" for uuid in uuids)
+                if record == "valid" else record
+            )
         return FakeHost(
             commands={
                 ("uname", "-m"): completed(UNAME, f"{platform}\n"),
@@ -1904,7 +1915,21 @@ class HardwareProfile(unittest.TestCase):
                     architecture_stderr,
                 ),
             },
-            files={MEMINFO: f"MemTotal:       {dram_kb} kB\n"},
+            files=files,
+        )
+
+    def models_with_count(self, count: int, *, name: str | None = None) -> ModelsLock:
+        profile = MODELS.profiles[0]
+        return dataclasses.replace(
+            MODELS,
+            profiles=(dataclasses.replace(
+                profile,
+                name=name or profile.name,
+                requires=dataclasses.replace(
+                    profile.requires,
+                    gpu=dataclasses.replace(profile.requires.gpu, count=count),
+                ),
+            ),),
         )
 
     def test_unknown_profile_refuses_before_gpu_facts_on_gpu_host(self) -> None:
@@ -1958,6 +1983,8 @@ class HardwareProfile(unittest.TestCase):
         self.assertEqual(report.severity, Severity.PASS, report.detail)
         requirements = MODELS.profiles[0].requires
         self.assertIn(f"GPU count {requirements.gpu.count}", report.detail)
+        self.assertNotIn("unused", report.detail)
+        self.assertNotIn("unrecorded", report.detail)
         self.assertIn(requirements.gpu.model, report.detail)
         self.assertIn(requirements.gpu.architecture, report.detail)
         self.assertIn(requirements.gpu.compute_capability, report.detail)
@@ -1987,10 +2014,14 @@ class HardwareProfile(unittest.TestCase):
         self.assertEqual(report.severity, Severity.REFUSE)
         self.assertIn("count", report.detail)
         self.assertIn(str(requirements.gpu.count), report.detail)
+        self.assertIn(f"GPU count is 1, profile requires {requirements.gpu.count}", report.detail)
 
     def test_wrong_model_refuses(self) -> None:
         host = self.gpu_host(
-            gpu_stdout="\n".join(_gpu_line(model="Other GPU") for _ in range(MODELS.profiles[0].requires.gpu.count)) + "\n"
+            gpu_stdout="\n".join(
+                _gpu_line(uuid=f"GPU-fictitious-{position}", model="Other GPU")
+                for position in range(MODELS.profiles[0].requires.gpu.count)
+            ) + "\n"
         )
         report = HardwareProfileCheck().run(context(host))
         self.assertEqual(report.severity, Severity.REFUSE)
@@ -2015,16 +2046,19 @@ class HardwareProfile(unittest.TestCase):
                 host = self.gpu_host(model=reported)
                 report = HardwareProfileCheck().run(context(host))
                 self.assertEqual(report.severity, Severity.REFUSE, report.detail)
-                for index in range(1, requirements.gpu.count + 1):
+                for position in range(requirements.gpu.count):
                     self.assertIn(
-                        f"GPU {index} model is {reported}, profile requires "
+                        f"GPU index {position} model is {reported}, profile requires "
                         f"{requirements.gpu.model} (any edition)",
                         report.detail,
                     )
 
     def test_wrong_capability_refuses(self) -> None:
         host = self.gpu_host(
-            gpu_stdout="\n".join(_gpu_line(capability="0.0") for _ in range(MODELS.profiles[0].requires.gpu.count)) + "\n"
+            gpu_stdout="\n".join(
+                _gpu_line(uuid=f"GPU-fictitious-{position}", capability="0.0")
+                for position in range(MODELS.profiles[0].requires.gpu.count)
+            ) + "\n"
         )
         report = HardwareProfileCheck().run(context(host))
         self.assertEqual(report.severity, Severity.REFUSE)
@@ -2047,8 +2081,8 @@ class HardwareProfile(unittest.TestCase):
         vram_mib = requirements.gpu.vram_gb * GIGABYTE // (2**20) - 1
         host = self.gpu_host(
             gpu_stdout="\n".join(
-                _gpu_line(vram_mib=vram_mib)
-                for _ in range(requirements.gpu.count)
+                _gpu_line(uuid=f"GPU-fictitious-{position}", vram_mib=vram_mib)
+                for position in range(requirements.gpu.count)
             )
             + "\n"
         )
@@ -2083,6 +2117,163 @@ class HardwareProfile(unittest.TestCase):
         self.assertEqual(report.severity, Severity.REFUSE)
         self.assertIn("GPU count", report.detail)
         self.assertIn("DRAM", report.detail)
+        self.assertIn(f"GPU count is 1, profile requires {requirements.gpu.count}", report.detail)
+
+    def test_surplus_card_passes_with_counts_and_unused_position(self) -> None:
+        count = MODELS.profiles[0].requires.gpu.count
+        host = self.gpu_host(gpu_stdout="\n".join(
+            _gpu_line(uuid=f"GPU-fictitious-{position}") for position in range(count + 1)
+        ))
+        report = HardwareProfileCheck().run(context(host))
+        self.assertEqual(report.severity, Severity.PASS, report.detail)
+        self.assertIn(
+            f"GPU count {count + 1}, profile requires {count}, unused GPU index {count}",
+            report.detail,
+        )
+
+    def test_surplus_card_requirements_are_not_judged(self) -> None:
+        requirements = MODELS.profiles[0].requires
+        count = requirements.gpu.count
+        judged = "\n".join(
+            _gpu_line(uuid=f"GPU-fictitious-{position}") for position in range(count)
+        )
+        for field, changes in (
+            ("model", {"model": "Fictitious Other GPU"}),
+            ("capability", {"capability": "0.0"}),
+            ("vram", {"vram_mib": 1}),
+            ("architecture", {}),
+        ):
+            with self.subTest(field=field):
+                surplus = _gpu_line(uuid=f"GPU-fictitious-{count}", **changes)
+                architectures = [requirements.gpu.architecture] * count + [
+                    "Fictitious Other Architecture" if field == "architecture"
+                    else requirements.gpu.architecture
+                ]
+                host = self.gpu_host(
+                    gpu_stdout=judged + "\n" + surplus,
+                    architecture_stdout="\n".join(
+                        f"Product Architecture : {architecture}" for architecture in architectures
+                    ),
+                )
+                report = HardwareProfileCheck().run(context(host))
+                self.assertEqual(report.severity, Severity.PASS, report.detail)
+                self.assertIn(f"unused GPU index {count}", report.detail)
+                self.assertNotIn("Fictitious Other", report.detail)
+
+    def test_judged_card_shortfall_names_position_zero_only(self) -> None:
+        count = MODELS.profiles[0].requires.gpu.count
+        host = self.gpu_host(gpu_stdout="\n".join(
+            _gpu_line(
+                uuid=f"GPU-fictitious-{position}",
+                model="Fictitious Other GPU" if position == 0 else None,
+            )
+            for position in range(count + 1)
+        ))
+        report = HardwareProfileCheck().run(context(host))
+        self.assertEqual(report.severity, Severity.REFUSE, report.detail)
+        self.assertIn("GPU index 0 model is Fictitious Other GPU", report.detail)
+        self.assertNotIn(f"GPU index {count}", report.detail)
+
+    def test_non_reference_profile_warns_with_unused_position(self) -> None:
+        host = self.gpu_host()
+        count = MODELS.profiles[0].requires.gpu.count - 1
+        models = self.models_with_count(count, name="fictitious-alternate")
+        site = make_site(extra="hardware_profile: fictitious-alternate\n")
+        report = HardwareProfileCheck().run(context(host, models=models, site=site))
+        self.assertEqual(report.severity, Severity.WARN, report.detail)
+        self.assertIn("fictitious-alternate", report.detail)
+        self.assertIn(
+            f"GPU count {count + 1}, profile requires {count}, unused GPU index {count}",
+            report.detail,
+        )
+
+    def test_architecture_count_includes_surplus_cards(self) -> None:
+        host = self.gpu_host()
+        count = MODELS.profiles[0].requires.gpu.count
+        architecture = MODELS.profiles[0].requires.gpu.architecture
+        host.commands[NVIDIA_SMI_Q] = completed(
+            NVIDIA_SMI_Q,
+            "\n".join(f"Product Architecture : {architecture}" for _ in range(count - 1)),
+        )
+        report = HardwareProfileCheck().run(context(host, models=self.models_with_count(count - 1)))
+        self.assertEqual(report.severity, Severity.REFUSE, report.detail)
+        self.assertIn(f"{count - 1} architecture line(s) for {count} GPU(s)", report.detail)
+
+    def test_record_order_selects_judged_heterogeneous_card(self) -> None:
+        models = self.models_with_count(1)
+        architecture = models.profiles[0].requires.gpu.architecture
+        rows = (
+            _gpu_line(uuid="GPU-fictitious-0"),
+            _gpu_line(uuid="GPU-fictitious-1", model="Fictitious Other GPU"),
+        )
+        for driver_order in ((0, 1), (1, 0)):
+            for recorded_order in ((0, 1), (1, 0)):
+                with self.subTest(driver_order=driver_order, recorded_order=recorded_order):
+                    host = self.gpu_host(
+                        gpu_stdout="\n".join(rows[position] for position in driver_order),
+                        architecture_stdout="\n".join(
+                            f"Product Architecture : {architecture if position == 0 else 'Fictitious Other'}"
+                            for position in driver_order
+                        ),
+                        record="gpus:\n" + "".join(
+                            f"  - GPU-fictitious-{position}\n" for position in recorded_order
+                        ),
+                    )
+                    report = HardwareProfileCheck().run(context(host, models=models))
+                    if recorded_order[0] == 0:
+                        self.assertEqual(report.severity, Severity.PASS, report.detail)
+                        self.assertIn("unused GPU index 1", report.detail)
+                        self.assertIn(f"architecture {architecture}", report.detail)
+                    else:
+                        self.assertEqual(report.severity, Severity.REFUSE, report.detail)
+                        self.assertIn("GPU index 0 model is Fictitious Other GPU", report.detail)
+                        self.assertIn("GPU index 0 architecture is Fictitious Other", report.detail)
+                        self.assertNotIn("GPU index 1", report.detail)
+
+    def test_unrecorded_host_pass_and_warn_carry_order_prefix(self) -> None:
+        for name, severity in ((MODELS.profiles[0].name, Severity.PASS), ("fictitious-alternate", Severity.WARN)):
+            with self.subTest(name=name):
+                host = self.gpu_host(record=None)
+                models = self.models_with_count(1, name=name)
+                site = make_site(extra=f"hardware_profile: {name}\n")
+                report = HardwareProfileCheck().run(context(host, models=models, site=site))
+                self.assertEqual(report.severity, severity, report.detail)
+                self.assertTrue(report.detail.startswith(
+                    "unrecorded; today's order, which the first render records; "
+                ))
+                self.assertNotIn(str(gpus.GPU_RECORD_PATH), host.files)
+                self.assertFalse(any(call[0] == "write_text" for call in host.calls))
+
+    def test_unrecorded_host_judges_driver_order(self) -> None:
+        host = self.gpu_host(
+            gpu_stdout="\n".join((
+                _gpu_line(uuid="GPU-fictitious-1", model="Fictitious Other GPU"),
+                _gpu_line(uuid="GPU-fictitious-0"),
+            )),
+            record=None,
+        )
+        report = HardwareProfileCheck().run(context(host, models=self.models_with_count(1)))
+        self.assertEqual(report.severity, Severity.REFUSE, report.detail)
+        self.assertIn("GPU index 0 model is Fictitious Other GPU", report.detail)
+        self.assertNotIn("GPU index 1", report.detail)
+
+    def test_lost_recorded_card_refuses_with_re_record_fix(self) -> None:
+        count = MODELS.profiles[0].requires.gpu.count
+        record = "gpus:\n" + "".join(
+            f"  - GPU-fictitious-{position}\n" for position in range(count)
+        ) + "  - GPU-fictitious-lost\n"
+        host = self.gpu_host(record=record)
+        report = HardwareProfileCheck().run(context(host, models=self.models_with_count(1)))
+        self.assertEqual(report.severity, Severity.REFUSE, report.detail)
+        self.assertIn("GPU-fictitious-lost", report.detail)
+        self.assertEqual(report.fix, gpus.re_record_fix())
+
+    def test_malformed_record_refuses_with_its_fix(self) -> None:
+        host = self.gpu_host(record="gpus: [GPU-fictitious-0, GPU-fictitious-0]\n")
+        report = HardwareProfileCheck().run(context(host))
+        self.assertEqual(report.severity, Severity.REFUSE, report.detail)
+        self.assertIn(str(gpus.GPU_RECORD_PATH), report.detail)
+        self.assertEqual(report.fix, gpus.re_record_fix())
 
     def test_missing_nvidia_smi_refuses_with_driver_fix(self) -> None:
         host = self.gpu_host(gpu_returncode=127)

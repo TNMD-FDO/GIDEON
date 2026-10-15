@@ -24,6 +24,7 @@ _RECORD_HEADER: Final = (
 )
 MISSING_CARD_PROBLEM: Final = f"the GPU record {GPU_RECORD_PATH} names card(s) nvidia-smi -L no longer reports"
 MALFORMED_RECORD_PROBLEM: Final = f"the GPU record {GPU_RECORD_PATH} is malformed"
+UNRECORDED_DETAIL: Final = "unrecorded; today's order, which the first render records; "
 CREATE_RECORD_FIX: Final = (
     f"Create {GPU_RECORD_PATH} as root with mode 0644 and a gpus: list of "
     "today's card UUIDs in lock-position order, then re-run render."

@@ -3,7 +3,7 @@
 import re
 from dataclasses import dataclass
 
-from gideon.host import nogpu, report
+from gideon.host import gpus, nogpu, report
 from gideon.host.checks import (
     MEBIBYTE,
     CheckReport,
@@ -158,6 +158,7 @@ class JurisdictionCheck(PreflightCheck):
 class _GpuFacts:
     """Facts for one GPU reported by the host probes."""
 
+    uuid: str
     model: str
     compute_capability: str
     vram_bytes: int
@@ -170,15 +171,16 @@ def _gpu_facts(output: str) -> list[_GpuFacts] | None:
         if not line.strip():
             continue
         columns = [column.strip() for column in line.split(",")]
-        if len(columns) != 3 or not columns[0] or not columns[1]:
+        if len(columns) != 4 or not all(columns[:3]):
             return None
-        match = re.fullmatch(r"([0-9]+)\s+MiB", columns[2])
+        match = re.fullmatch(r"([0-9]+)\s+MiB", columns[3])
         if match is None:
             return None
         facts.append(
             _GpuFacts(
-                model=columns[0],
-                compute_capability=columns[1],
+                uuid=columns[0],
+                model=columns[1],
+                compute_capability=columns[2],
                 vram_bytes=int(match.group(1)) * MEBIBYTE,
                 architecture="",
             )
@@ -196,10 +198,16 @@ def _architectures(output: str) -> list[str]:
 
 
 class HardwareProfileCheck(PreflightCheck):
-    """Compare live host facts with the selected profile's requirements."""
+    """Compare live host facts with the selected profile's requirements.
+
+    The card count is a minimum. The judged cards are the GPU record's first
+    `count` positions, where render binds the profile's servers, so a driver
+    that enumerates the cards differently moves no judgment; the cards beyond
+    them are unused by the profile and named so.
+    """
 
     name = "hardware-profile"
-    summary = "check the configured hardware profile and live GPU facts"
+    summary = "check the configured hardware profile against live GPU facts, the card count a minimum"
 
     def run(self, context: PreflightContext) -> CheckReport:
         profile = select_profile(context.models, context.site.hardware_profile)
@@ -224,7 +232,7 @@ class HardwareProfileCheck(PreflightCheck):
         result = context.host.run(
             [
                 "nvidia-smi",
-                "--query-gpu=name,compute_cap,memory.total",
+                "--query-gpu=uuid,name,compute_cap,memory.total",
                 "--format=csv,noheader",
             ]
         )
@@ -249,9 +257,17 @@ class HardwareProfileCheck(PreflightCheck):
                 nogpu.GPU_DRIVER_FIX,
             )
         facts = [
-            _GpuFacts(fact.model, fact.compute_capability, fact.vram_bytes, architecture)
+            _GpuFacts(fact.uuid, fact.model, fact.compute_capability, fact.vram_bytes, architecture)
             for fact, architecture in zip(facts, architectures, strict=True)
         ]
+        recorded = gpus.read(context.host)
+        if isinstance(recorded, Problem):
+            return CheckReport(Severity.REFUSE, recorded.problem, recorded.fix)
+        resolved = gpus.resolve(recorded, tuple(fact.uuid for fact in facts))
+        if isinstance(resolved, Problem):
+            return CheckReport(Severity.REFUSE, resolved.problem, resolved.fix)
+        by_uuid = {fact.uuid: fact for fact in facts}
+        facts = [by_uuid[uuid] for uuid in resolved]
 
         try:
             meminfo = context.host.read_text("/proc/meminfo")
@@ -273,27 +289,28 @@ class HardwareProfileCheck(PreflightCheck):
         shortfalls: list[str] = []
         if platform != required.platform:
             shortfalls.append(f"platform is {platform}, profile requires {required.platform}")
-        if len(facts) != required.gpu.count:
+        if len(facts) < required.gpu.count:
             shortfalls.append(f"GPU count is {len(facts)}, profile requires {required.gpu.count}")
-        for index, fact in enumerate(facts, 1):
+        for position, fact in enumerate(facts[:required.gpu.count]):
             if not required.gpu.matches(fact.model):
                 shortfalls.append(
-                    f"GPU {index} model is {fact.model}, profile requires {required.gpu.model} (any edition)"
+                    f"GPU index {position} model is {fact.model}, "
+                    f"profile requires {required.gpu.model} (any edition)"
                 )
             if fact.compute_capability != required.gpu.compute_capability:
                 shortfalls.append(
-                    f"GPU {index} compute capability is {fact.compute_capability}, "
+                    f"GPU index {position} compute capability is {fact.compute_capability}, "
                     f"profile requires {required.gpu.compute_capability}"
                 )
             if fact.architecture != required.gpu.architecture:
                 shortfalls.append(
-                    f"GPU {index} architecture is {fact.architecture} (per nvidia-smi -q), "
+                    f"GPU index {position} architecture is {fact.architecture} (per nvidia-smi -q), "
                     f"profile requires {required.gpu.architecture}"
                 )
             if fact.vram_bytes < required.gpu.vram_gb * GIGABYTE:
                 vram_mib = fact.vram_bytes // MEBIBYTE
                 shortfalls.append(
-                    f"GPU {index} VRAM is {vram_mib} MiB ({format_gb(fact.vram_bytes)}), "
+                    f"GPU index {position} VRAM is {vram_mib} MiB ({format_gb(fact.vram_bytes)}), "
                     f"profile requires {required.gpu.vram_gb} GB"
                 )
         dram_bytes = dram_kb * _KIBIBYTE
@@ -306,15 +323,16 @@ class HardwareProfileCheck(PreflightCheck):
             prefix = f"profile {profile.name!r}: " if non_reference else ""
             return CheckReport(Severity.REFUSE, prefix + "; ".join(shortfalls), _PROFILE_FIX)
 
-        detail = _matched_detail(platform, facts, dram_bytes)
+        detail = _matched_detail(platform, facts, dram_bytes, required.gpu.count)
+        prefix = gpus.UNRECORDED_DETAIL if recorded is None else ""
         if non_reference:
             return CheckReport(
                 Severity.WARN,
-                f"hardware profile is {context.site.hardware_profile!r}, not "
+                prefix + f"hardware profile is {context.site.hardware_profile!r}, not "
                 f"{context.models.reference!r}; its requirements are met: {detail}",
                 "Review the non-reference hardware profile against models.lock, then re-run preflight.",
             )
-        return CheckReport(Severity.PASS, f"profile {profile.name!r} requirements are met: {detail}")
+        return CheckReport(Severity.PASS, prefix + f"profile {profile.name!r} requirements are met: {detail}")
 
 
 def _unreadable_detail(command: str, stderr: str) -> str:
@@ -324,12 +342,16 @@ def _unreadable_detail(command: str, stderr: str) -> str:
     return f"{command} could not determine the host fact" + (f": {detail}" if detail else "")
 
 
-def _matched_detail(platform: str, facts: list[_GpuFacts], dram_bytes: int) -> str:
-    """Render the facts that matched a selected profile (every GPU matched, so the first speaks for all)."""
+def _matched_detail(platform: str, facts: list[_GpuFacts], dram_bytes: int, count: int) -> str:
+    """Render matched facts; every judged card matched, so the first speaks for that set."""
 
     first = facts[0]
+    count_detail = f"GPU count {len(facts)}"
+    if len(facts) > count:
+        unused = ", ".join(str(position) for position in range(count, len(facts)))
+        count_detail += f", profile requires {count}, unused GPU index {unused}"
     return (
-        f"GPU count {len(facts)}, model {first.model}; "
+        f"{count_detail}, model {first.model}; "
         f"architecture {first.architecture} (per nvidia-smi -q); "
         f"compute capability {first.compute_capability}; "
         f"per-GPU VRAM {format_gb(first.vram_bytes)}; "
