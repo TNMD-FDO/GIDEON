@@ -2180,7 +2180,7 @@ class GuardrailsCommand(unittest.TestCase):
             "\\set partial 'false'",
         ):
             self.assertIn(binding, write_sql)
-        self.assertIn("decision) VALUES", write_sql)
+        self.assertIn("decision, engine_in_flight_max, engine_preemptions) VALUES", write_sql)
         decision_line = next(
             line for line in write_sql.splitlines() if line.startswith("\\set decision ")
         )

@@ -42,6 +42,7 @@ MIGRATIONS = {
     f"{ROOT}/migrations/0019_known_overruled.sql": (ROOT / "migrations/0019_known_overruled.sql").read_text(),
     f"{ROOT}/migrations/0021_dupe_clusters.sql": (ROOT / "migrations/0021_dupe_clusters.sql").read_text(),
     f"{ROOT}/migrations/0023_generation_documents.sql": (ROOT / "migrations/0023_generation_documents.sql").read_text(),
+    f"{ROOT}/migrations/0024_eval_runs_engine_conditions.sql": (ROOT / "migrations/0024_eval_runs_engine_conditions.sql").read_text(),
     f"{ROOT}/migrations/README.md": "not a migration",
 }
 
@@ -171,6 +172,7 @@ class Converge(unittest.TestCase):
                 "0019_known_overruled",
                 "0021_dupe_clusters",
                 "0023_generation_documents",
+                "0024_eval_runs_engine_conditions",
             ),
         )
 
@@ -340,6 +342,7 @@ class Converge(unittest.TestCase):
                 "0019_known_overruled",
                 "0021_dupe_clusters",
                 "0023_generation_documents",
+                "0024_eval_runs_engine_conditions",
             ),
         )
 

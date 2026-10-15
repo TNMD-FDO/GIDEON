@@ -17,18 +17,14 @@ from processes and containers. The co-tenant reserve is held by a lock test,
 not by this live check.
 """
 
-import http.client
-import json
 import math
 import re
 from collections.abc import Callable
-from contextlib import suppress
 from dataclasses import dataclass
 from fractions import Fraction
 from typing import Final
-from urllib.parse import urlencode
 
-from gideon.host import cotenants, gpus, nogpu, report
+from gideon.host import cotenants, gpus, nogpu, prometheus, report
 from gideon.host.checks import (
     MEBIBYTE,
     CheckReport,
@@ -56,8 +52,6 @@ HOST_MEMORY_FLOOR_FRACTION: Final = Fraction(1, 5)
 MEMORY_LOW_RANGE: Final = "14d"
 MEMORY_AVAILABLE_SERIES: Final = "node_memory_MemAvailable_bytes"
 MEMORY_LOW_QUERY: Final = f"min(min_over_time({MEMORY_AVAILABLE_SERIES}[{MEMORY_LOW_RANGE}]))"
-PROMETHEUS_QUERY_PATH: Final = "/api/v1/query"
-PROMETHEUS_TIMEOUT_SECONDS: Final = 5
 _MEMINFO_FIX = "Restore /proc/meminfo on the host, then re-run preflight."
 _HOST_MEMORY_FIX = (
     "Read each container's working set against its limit on the Overview's "
@@ -104,54 +98,12 @@ def read_prometheus_low() -> LowReading:
     """Read the fourteen-day minimum directly from Prometheus on loopback."""
 
     address = PROMETHEUS_LOOPBACK_ADDRESS
-    connection: http.client.HTTPConnection | None = None
-    try:
-        connection = http.client.HTTPConnection(address, timeout=PROMETHEUS_TIMEOUT_SECONDS)
-        connection.request("GET", f"{PROMETHEUS_QUERY_PATH}?{urlencode({'query': MEMORY_LOW_QUERY})}")
-        response = connection.getresponse()
-        if response.status != 200:
-            return LowReading(None, f"Prometheus returned HTTP {response.status} at {address}")
-        body = response.read()
-    except TimeoutError:
-        return LowReading(None, f"Prometheus timed out at {address}")
-    except OSError:
-        return LowReading(None, f"Prometheus did not answer at {address}")
-    except http.client.HTTPException:
-        return LowReading(None, f"Prometheus returned an unreadable reply at {address}")
-    finally:
-        if connection is not None:
-            with suppress(OSError):
-                connection.close()
-
-    try:
-        document: object = json.loads(body)
-    except (ValueError, UnicodeDecodeError, RecursionError):
-        return LowReading(None, f"Prometheus returned unreadable JSON at {address}")
-    if not isinstance(document, dict) or not isinstance(document.get("status"), str):
-        return LowReading(None, f"Prometheus returned an unreadable result at {address}")
-    if document["status"] != "success":
-        return LowReading(None, f"Prometheus returned a non-success status at {address}")
-    data = document.get("data")
-    if not isinstance(data, dict) or data.get("resultType") != "vector":
-        return LowReading(None, f"Prometheus returned an unreadable result at {address}")
-    result = data.get("result")
-    if not isinstance(result, list):
-        return LowReading(None, f"Prometheus returned an unreadable result at {address}")
-    if not result:
+    reading = prometheus.instant_query(MEMORY_LOW_QUERY)
+    if reading.reason:
+        return LowReading(None, reading.reason)
+    if reading.samples is None:
         return LowReading(None, f"no fourteen-day low on Prometheus at {address} yet")
-    sample = result[0]
-    if not isinstance(sample, dict):
-        return LowReading(None, f"Prometheus returned an unreadable result at {address}")
-    value = sample.get("value")
-    if not isinstance(value, list) or len(value) != 2 or not isinstance(value[1], str):
-        return LowReading(None, f"Prometheus returned an unreadable result at {address}")
-    try:
-        number = float(value[1])
-    except (ValueError, OverflowError):
-        return LowReading(None, f"Prometheus returned an unreadable value at {address}")
-    if not math.isfinite(number) or number < 0:
-        return LowReading(None, f"Prometheus returned an unreadable value at {address}")
-    return LowReading(int(number))
+    return LowReading(int(reading.samples))
 
 
 def read_promoted_bytes(host: Host) -> reserve.PromotedReading:

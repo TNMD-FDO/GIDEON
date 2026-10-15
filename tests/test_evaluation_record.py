@@ -1,4 +1,10 @@
-"""The evaluation recorder: one transaction, bound values, and host constants."""
+"""The evaluation recorder: one transaction, bound values, and host constants.
+
+The binding's round trip runs through a test-side model of ``psql``'s
+single-quote substitution, byte for byte. The id-taking reads bind the run id
+as the reader role; the metrics read's statement never names ``judge``, and
+the newest-run read's statement is restricted; none selects the engine columns.
+"""
 
 import json
 import os
@@ -196,6 +202,34 @@ class Constants(unittest.TestCase):
 
 
 class WriteRows(unittest.TestCase):
+    def test_engine_conditions_default_to_unknown(self) -> None:
+        row = run_row()
+        self.assertIsNone(row.engine_in_flight_max)
+        self.assertIsNone(row.engine_preemptions)
+
+    def test_engine_conditions_bind_integers_and_unknowns_in_the_last_columns(self) -> None:
+        for maximum, preemptions in ((7, 3), (0, 0), (None, None)):
+            with self.subTest(maximum=maximum, preemptions=preemptions):
+                host = FakeHost()
+                self.assertIsNone(record.write_rows(
+                    host, RENDERED,
+                    run_row(engine_in_flight_max=maximum, engine_preemptions=preemptions), (),
+                ))
+                sql = host.calls[0][1]
+                assert sql is not None
+                insert = sql[sql.index("INSERT INTO eval_runs"):]
+                self.assertIn("decision, engine_in_flight_max, engine_preemptions) VALUES (", insert)
+                expected: list[str] = []
+                for name, value in (("engine_in_flight_max", maximum), ("engine_preemptions", preemptions)):
+                    if value is None:
+                        self.assertNotIn(f"\\set {name} ", sql)
+                        expected.append("NULL")
+                    else:
+                        line = next(line for line in sql.splitlines() if line.startswith(f"\\set {name} "))
+                        self.assertEqual(int(read_psql_set(line, name)), value)
+                        expected.append(f":'{name}'::integer")
+                self.assertTrue(insert.rstrip().endswith(", ".join(expected) + ");"))
+
     def test_batch_binds_values_and_starts_with_both_partition_calls(self) -> None:
         host = FakeHost()
         self.assertIsNone(record.write_rows(host, RENDERED, run_row(), (result_row("case-z"), result_row("case-a"))))
@@ -326,7 +360,7 @@ class WriteRows(unittest.TestCase):
                 insert = sql[sql.index("INSERT INTO eval_runs"):]
                 if value is None:
                     self.assertNotIn("\\set decision ", sql)
-                    self.assertTrue(insert.rstrip().endswith("NULL);"))
+                    self.assertTrue(insert.rstrip().endswith("NULL, NULL, NULL);"))
                 else:
                     line = next(line for line in sql.splitlines() if line.startswith("\\set decision "))
                     self.assertEqual(json.loads(read_psql_set(line, "decision")), decision)
@@ -381,6 +415,8 @@ class ReadRows(unittest.TestCase):
         self.assertEqual(sql.count(run_id), 1)
         self.assertNotIn("metrics", sql)
         self.assertNotIn("judge", sql)
+        self.assertNotIn("engine_in_flight_max", sql)
+        self.assertNotIn("engine_preemptions", sql)
 
     def test_read_run_metrics_uses_metrics_reader_and_decodes_measurements(self) -> None:
         run_id = "11111111-2222-4333-8444-555555555555"
@@ -415,6 +451,8 @@ class ReadRows(unittest.TestCase):
         self.assertIn("WHERE run_id = :'run_id'::uuid", sql)
         self.assertEqual(sql.count(run_id), 1)
         self.assertNotIn("judge", sql)
+        self.assertNotIn("engine_in_flight_max", sql)
+        self.assertNotIn("engine_preemptions", sql)
 
     def test_read_run_metrics_refusals_carry_their_fixes(self) -> None:
         run_id = "11111111-2222-4333-8444-555555555555"
@@ -502,7 +540,7 @@ class ReadNewestRun(unittest.TestCase):
         self.assertIn("ORDER BY started_at DESC", sql)
         self.assertIn("finished_at AT TIME ZONE 'UTC'", sql)
         self.assertIn("'null'::json", sql)
-        for field in ("judge", "metrics", "decision", "overrides"):
+        for field in ("judge", "metrics", "decision", "overrides", "engine_in_flight_max", "engine_preemptions"):
             with self.subTest(field=field):
                 self.assertIsNone(re.search(rf"\b{field}\b", sql))
 

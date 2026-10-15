@@ -56,6 +56,8 @@ class RunRow:
     forced: bool
     partial: bool
     decision: Mapping[str, object] | None
+    engine_in_flight_max: int | None = None
+    engine_preemptions: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,12 +237,19 @@ def _run_sql(row: RunRow, lines: list[str]) -> str:
         "NULL"
         if row.decision is None
         else _json_variable("decision", row.decision, lines) + "::jsonb",
+        "NULL"
+        if row.engine_in_flight_max is None
+        else _number_variable("engine_in_flight_max", row.engine_in_flight_max, lines, "::integer"),
+        "NULL"
+        if row.engine_preemptions is None
+        else _number_variable("engine_preemptions", row.engine_preemptions, lines, "::integer"),
     ]
     return (
         "INSERT INTO eval_runs ("
         "run_id, started_at, finished_at, product_version, corpus_lockfile, "
         "eval_set_version, hardware_profile, stack, generation_id, kind, slice, "
-        "overrides, repeats, git_sha, git_dirty, set_digest, verdict, forced, partial, decision) VALUES ("
+        "overrides, repeats, git_sha, git_dirty, set_digest, verdict, forced, partial, decision, "
+        "engine_in_flight_max, engine_preemptions) VALUES ("
         + ", ".join(values)
         + ");"
     )

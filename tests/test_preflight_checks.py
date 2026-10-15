@@ -14,7 +14,7 @@ from typing import ClassVar, Self, cast
 from unittest import mock
 from urllib.parse import parse_qs, urlsplit
 
-from gideon.host import cotenants, gpus, nogpu, worker
+from gideon.host import cotenants, gpus, nogpu, prometheus, worker
 from gideon.host.checks import (
     CHECKS,
     MEBIBYTE,
@@ -40,8 +40,6 @@ from gideon.host.checks.capacity import (
     GPU_MEMORY_PROCESS_ARGV,
     HOST_MEMORY_FLOOR_FRACTION,
     MEMORY_LOW_QUERY,
-    PROMETHEUS_QUERY_PATH,
-    PROMETHEUS_TIMEOUT_SECONDS,
     DataVolumeCheck,
     GpuMemoryCheck,
     HostMemoryCheck,
@@ -76,6 +74,7 @@ from gideon.host.index import reserve
 from gideon.host.ldap import ldapsearch_argv
 from gideon.host.lock import load_host_lock
 from gideon.host.models import GIGABYTE, ModelPin, ModelsLock, load_models_lock
+from gideon.host.prometheus import PROMETHEUS_QUERY_PATH, PROMETHEUS_TIMEOUT_SECONDS
 from gideon.host.render.services.prometheus import PROMETHEUS_LOOPBACK_ADDRESS
 from gideon.host.render.worker import PIPELINE_VERSION
 from gideon.host.site import SiteConfig, load_site, render_errors
@@ -1293,7 +1292,7 @@ class PrometheusReader(unittest.TestCase):
             def close(self) -> None:
                 observed["closed"] = True
 
-        with mock.patch.object(capacity.http.client, "HTTPConnection", Connection):
+        with mock.patch.object(prometheus.http.client, "HTTPConnection", Connection):
             reading = read_prometheus_low()
         return reading, observed
 

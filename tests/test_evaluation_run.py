@@ -1,4 +1,33 @@
-"""Evaluation runner and CLI contracts."""
+"""Evaluation runner and CLI contracts.
+
+The runner and the command run in-process through ``cli.main`` over a fake
+``Host``: every stage's and every mode's outcomes and refusals with their
+fixes — the skips, the engine lock released on every path, the window's waiver
+and a forced start, a run aborted at its deadline recorded partial, the
+nightly's wait, the challenger pair's two passes, one lock, and stop rule, and
+every mode fix parsed back through the parser.
+
+The registry's flags are held entry by entry: its categories within the shape
+registry and named once, each committed slice's counted cases within its
+entry's, every ``smoke`` case routed to a part, every engine-naming part owning
+a ``turn_calls``, every directory under ``eval/reference/`` naming a comparing
+slice, and ``--stack ci``'s refusals derived from the registry. The engine's
+checks are skipped for an image-only entry and kept for ``smoke``.
+
+Tripwires: the package's imports by AST, ``turns/`` included (the browser
+driver's Playwright the one exemption, held by its own test); every entry of
+``SLICE_RUNNERS``, enumerated, run over a copy of its slice with one unsigned
+case planted and returning no result for it, so a future runner that filters
+for itself turns red; no runner module holding a ``Fix:`` constant, nor either
+turn-driving runner a cleanup code, ``ApiTurnDriver``, or ``frontend_turn``;
+the ``verdict `` and ``reference:`` lines' invariant on every path; and no
+stack-name literal in ``cli.py``, the package, ``tools/turns/``, or
+``tools/cistack/``.
+
+The record stage reads the engine's conditions once per engine-reaching pass,
+over that pass's own span, and binds both figures or both nulls; a non-engine,
+held, or skipped record reads nothing.
+"""
 
 import argparse
 import ast
@@ -20,7 +49,7 @@ from datetime import UTC, datetime, time, timedelta
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
 
 from test_evaluation_record import read_psql_set
@@ -38,6 +67,7 @@ from gideon.evaluation import (
     stacks,
     window,
 )
+from gideon.evaluation.conditions import ConditionsReader, EngineConditions
 from gideon.evaluation.evalset import SET_ROOT, LoadedSet, load_set, select_cases
 from gideon.evaluation.extraction_slice import run_extraction
 from gideon.evaluation.results import CaseResult, RunContext, SliceResult
@@ -47,6 +77,7 @@ from gideon.extraction.scoring import MIN_RECALL
 from gideon.host import backuplock, nogpu, report, stack
 from gideon.host.render.ci import CI_STACK, PRODUCTION_STACK
 from gideon.host.render.owui import GENERAL_MODEL_ID
+from gideon.host.render.services.prometheus import PROMETHEUS_LOOPBACK_ADDRESS
 from gideon.host.sysio import Host, PathLike
 from tools.exportboundary import absent_from_export
 
@@ -229,6 +260,7 @@ def _run_kwargs(
         "rendered_dir": "/tmp/evaluation-rendered",
         "site_path": ROOT / "config" / "site.example.yaml",
         "clock": lambda: NOW,
+        "conditions": lambda _started, _finished: EngineConditions(None, None, "not asked"),
         "run_id_factory": lambda: RUN_ID,
         "court_path": ROOT / "courts.yaml" if court_path is None else court_path,
     }
@@ -1092,6 +1124,7 @@ def _invoke_engine_command(
     rendered_dir: Path | None = None,
     set_root: Path | None = None,
     clock: Callable[[], datetime] | None = None,
+    conditions: ConditionsReader | None = None,
     sleep: Callable[[float], None] | None = None,
     on_run: Callable[[RunContext], SliceResult] | None = None,
 ) -> tuple[int, str, str, dict[str, list[Any]]]:
@@ -1134,6 +1167,8 @@ def _invoke_engine_command(
         run_kwargs["rendered_dir"] = rendered_dir
     if clock is not None:
         run_kwargs["clock"] = clock
+    if conditions is not None:
+        run_kwargs["conditions"] = conditions
     if sleep is not None:
         run_kwargs["sleep"] = sleep
     replacement = dict(command.SLICE_RUNNERS)
@@ -1162,6 +1197,144 @@ def _nightly_start() -> datetime:
     site_result = command.site.load_site(ROOT / "config/site.example.yaml")
     assert site_result.config is not None, site_result.errors
     return datetime.combine(NOW.date(), time(21), tzinfo=ZoneInfo(site_result.config.office.timezone))
+
+
+class EngineConditionsRecord(unittest.TestCase):
+    def statement(self, host: EvalHost) -> str:
+        statements = [
+            payload for _argv, payload in host.calls
+            if payload is not None and "INSERT INTO eval_runs" in payload
+        ]
+        self.assertEqual(len(statements), 1)
+        return statements[0]
+
+    def test_engine_pass_reads_once_with_its_recorded_span_and_binds_both_counts(self) -> None:
+        host = EvalHost()
+        finished = NOW + timedelta(seconds=37, microseconds=123456)
+        now = [NOW]
+
+        def finish_run(_context: RunContext) -> SliceResult:
+            now[0] = finished
+            return SliceResult(True, "visibly fictitious engine run\n", ())
+
+        def read_conditions(_started: datetime, _finished: datetime) -> EngineConditions:
+            self.assertTrue(any(payload == "SELECT 1;\n" for _argv, payload in host.calls))
+            self.assertFalse(any(payload is not None and "INSERT INTO eval_runs" in payload for _argv, payload in host.calls))
+            return EngineConditions(7, 3, "")
+
+        reader = Mock(side_effect=read_conditions)
+        with patch.object(command.record, "write_rows", wraps=command.record.write_rows) as writer:
+            code, stdout, stderr, _observed = _invoke_engine_command(
+                host, slice_name="guardrails", clock=lambda: now[0],
+                conditions=reader, on_run=finish_run,
+            )
+        self.assertEqual((code, stderr), (0, ""), stdout)
+        reader.assert_called_once_with(NOW, finished)
+        row = writer.call_args.args[2]
+        self.assertEqual((row.started_at, row.finished_at), (NOW, finished))
+        self.assertEqual((row.engine_in_flight_max, row.engine_preemptions), (7, 3))
+        sql = self.statement(host)
+        for name, value in (("engine_in_flight_max", 7), ("engine_preemptions", 3)):
+            line = next(line for line in sql.splitlines() if line.startswith(f"\\set {name} "))
+            self.assertEqual(int(read_psql_set(line, name)), value)
+            self.assertIn(f":'{name}'::integer", sql)
+        record_line = next(line for line in stdout.splitlines() if line.startswith("record:"))
+        self.assertTrue(record_line.endswith("; engine in-flight max 7, preemptions 3 over the span"))
+
+    def test_extraction_reads_nothing_and_keeps_its_record_detail(self) -> None:
+        host = EvalHost()
+        reader = Mock(side_effect=AssertionError("a non-engine entry must not read conditions"))
+        kwargs = _run_kwargs(host)
+        kwargs["conditions"] = reader
+        code, stdout, stderr = _invoke(["eval", "run", "--slice", "extraction"], **kwargs)
+        self.assertEqual((code, stderr), (0, ""), stdout)
+        reader.assert_not_called()
+        sql = self.statement(host)
+        result_count = sql.count("INSERT INTO eval_results")
+        self.assertEqual(
+            next(line for line in stdout.splitlines() if line.startswith("record:")),
+            f"record: ok — run {RUN_ID} recorded (1 run row, {result_count} result rows)",
+        )
+        self.assertNotIn("\\set engine_in_flight_max ", sql)
+        self.assertNotIn("\\set engine_preemptions ", sql)
+
+    def test_unknown_conditions_are_recorded_without_changing_the_gate_exit(self) -> None:
+        for reason in (
+            f"Prometheus did not answer at {PROMETHEUS_LOOPBACK_ADDRESS}",
+            f"Prometheus returned a non-success status at {PROMETHEUS_LOOPBACK_ADDRESS}",
+            "engine not scraped at every step of the span",
+        ):
+            for verdict in (True, False):
+                with self.subTest(reason=reason, verdict=verdict):
+                    host = EvalHost()
+                    reader = Mock(return_value=EngineConditions(None, None, reason))
+
+                    def run_result(_context: RunContext, verdict: bool = verdict) -> SliceResult:
+                        return SliceResult(verdict, "visibly fictitious run\n", ())
+
+                    code, stdout, stderr, _observed = _invoke_engine_command(
+                        host, slice_name="guardrails", conditions=reader, on_run=run_result,
+                    )
+                    self.assertEqual((code, stderr), (0 if verdict else 1, ""), stdout)
+                    reader.assert_called_once_with(NOW, NOW)
+                    sql = self.statement(host)
+                    self.assertNotIn("\\set engine_in_flight_max ", sql)
+                    self.assertNotIn("\\set engine_preemptions ", sql)
+                    run_insert = next(line for line in sql.splitlines() if line.startswith("INSERT INTO eval_runs"))
+                    self.assertTrue(run_insert.endswith(", NULL, NULL);"))
+                    self.assertNotIn(reason, sql)
+                    record_line = next(line for line in stdout.splitlines() if line.startswith("record:"))
+                    self.assertTrue(record_line.startswith("record: ok — run "))
+                    self.assertTrue(record_line.endswith(f"; engine conditions unknown ({reason})"))
+                    self.assertIn("gate: ok" if verdict else "gate: refuse", stdout)
+
+    def test_supplied_set_does_not_read_conditions_or_write(self) -> None:
+        host = EvalHost()
+        reader = Mock(side_effect=AssertionError("a skipped record must not read conditions"))
+        code, stdout, stderr, _observed = _invoke_engine_command(
+            host, slice_name="guardrails", set_root=ROOT / SET_ROOT, conditions=reader,
+        )
+        self.assertEqual((code, stderr), (0, ""), stdout)
+        reader.assert_not_called()
+        self.assertIn("record: ok — skipped", stdout)
+        self.assertFalse(any(payload is not None and "INSERT INTO eval_runs" in payload for _argv, payload in host.calls))
+
+    def test_held_record_does_not_read_conditions_or_write(self) -> None:
+        prepare = command._prepare
+        for ok in (True, False):
+            with self.subTest(ok=ok):
+                host = EvalHost()
+                reader = Mock(side_effect=AssertionError("a held record must not read conditions"))
+                held = report.StageResult("record", ok, "visibly fictitious held record", "")
+
+                def held_prepare(*args: Any, held: report.StageResult = held, **kwargs: Any) -> command._Prepared:
+                    prepared = prepare(*args, **kwargs)
+                    assert prepared is not None
+                    return replace(prepared, record=held)
+
+                with patch.object(command, "_prepare", side_effect=held_prepare):
+                    code, stdout, stderr, _observed = _invoke_engine_command(
+                        host, slice_name="guardrails", conditions=reader,
+                    )
+                self.assertEqual((code, stderr), (0 if ok else 1, ""), stdout)
+                reader.assert_not_called()
+                self.assertIn(report.stage_line(held), stdout)
+                self.assertFalse(any(payload is not None and "INSERT INTO eval_runs" in payload for _argv, payload in host.calls))
+
+    def test_failed_write_keeps_its_record_row_and_fix(self) -> None:
+        host = EvalHost(write_rc=1)
+        reader = Mock(return_value=EngineConditions(7, 3, ""))
+        code, stdout, stderr, _observed = _invoke_engine_command(
+            host, slice_name="guardrails", conditions=reader,
+        )
+        self.assertEqual((code, stderr), (1, ""), stdout)
+        reader.assert_called_once_with(NOW, NOW)
+        self.assertEqual(
+            next(line for line in stdout.splitlines() if line.startswith("record:")),
+            f"record: refuse — run {RUN_ID} and 0 result rows were not written (eval writer failed: exit 1) "
+            f"Fix: {command.stack.logs_fix('/tmp/evaluation-rendered', command.record.POSTGRES_SERVICE)}",
+        )
+        self.assertIn("gate: ok", stdout)
 
 
 class EngineStackAndLock(unittest.TestCase):
@@ -1475,6 +1648,7 @@ class NightlyCommand(unittest.TestCase):
         started = _nightly_start()
         end = datetime.combine(started.date() + timedelta(days=1), time(6), tzinfo=started.tzinfo)
         now = [started]
+        reader = Mock(return_value=EngineConditions(7, 3, ""))
 
         def finish_at_deadline(_context: RunContext) -> SliceResult:
             now[0] = end
@@ -1489,10 +1663,12 @@ class NightlyCommand(unittest.TestCase):
             stack_name="production",
             kind=command.NIGHTLY_KIND,
             clock=lambda: now[0],
+            conditions=reader,
             sleep=unexpected_sleep,
             on_run=finish_at_deadline,
         )
         self.assertEqual((code, stderr), (1, ""))
+        reader.assert_called_once_with(started, end)
         self.assertIn(f"aborted at the window end {end.isoformat()}", stdout)
         self.assertIn("1 run row, 0 result rows", stdout)
         self.assertIn("gate: refuse", stdout)
@@ -1506,6 +1682,9 @@ class NightlyCommand(unittest.TestCase):
         self.assertIn("\\set partial 'true'", write_sql)
         self.assertIn("\\set run_verdict 'fail'", write_sql)
         self.assertIn(f"\\set run_started_at '{started.isoformat()}'", write_sql)
+        self.assertIn(f"\\set finished_at '{end.isoformat()}'", write_sql)
+        self.assertIn("\\set engine_in_flight_max '7'", write_sql)
+        self.assertIn("\\set engine_preemptions '3'", write_sql)
 
     def test_held_lock_waits_for_each_poll_and_records_the_effective_start(self) -> None:
         host = EvalHost()
@@ -1515,6 +1694,7 @@ class NightlyCommand(unittest.TestCase):
         )
         host.locks[backuplock.ENGINE_LOCK.path] = held_by.to_json()
         now = [started]
+        reader = Mock(return_value=EngineConditions(None, None, "not asked"))
         sleeps: list[float] = []
         poll_count = 3
 
@@ -1530,6 +1710,7 @@ class NightlyCommand(unittest.TestCase):
             stack_name="production",
             kind=command.NIGHTLY_KIND,
             clock=lambda: now[0],
+            conditions=reader,
             sleep=advance,
         )
         self.assertEqual((code, stderr), (0, ""), stdout + stderr)
@@ -1553,6 +1734,7 @@ class NightlyCommand(unittest.TestCase):
         taken = backuplock.parse(host.lock_records[-1][1])
         assert taken is not None
         self.assertEqual(taken.started, now[0])
+        reader.assert_called_once_with(taken.started, now[0])
         self.assertEqual(host.locks, {})
         write_sql = next(
             cast(str, statement)
@@ -2020,6 +2202,8 @@ def _challenger_invoke(
     run_results: tuple[bool, ...] = (True, True),
     partial_release: bool = False,
     extra: tuple[str, ...] = (),
+    clock: Callable[[], datetime] | None = None,
+    conditions: ConditionsReader | None = None,
 ) -> tuple[int, str, str, list[RunContext]]:
     contexts: list[RunContext] = []
     ids = iter((RUN_ID, "22222222-3333-4444-8555-666666666666"))
@@ -2046,6 +2230,10 @@ def _challenger_invoke(
         return command._RunRepeats(result, 1, 0 if partial_release else 1, NOW if partial_release else None)
 
     kwargs = _run_kwargs(host)
+    if clock is not None:
+        kwargs["clock"] = clock
+    if conditions is not None:
+        kwargs["conditions"] = conditions
     kwargs["run_id_factory"] = lambda: next(ids)
     replacement = dict(command.SLICE_RUNNERS)
     slice_name = challenger.SUBJECTS[0].slice_name
@@ -2063,6 +2251,34 @@ def _challenger_invoke(
 
 
 class ChallengerPair(unittest.TestCase):
+    def test_each_pass_reads_and_records_its_own_conditions_span(self) -> None:
+        host = ChallengerHost()
+        ticks = iter(range(100))
+        reader = Mock(side_effect=(EngineConditions(2, 1, ""), EngineConditions(5, 4, "")))
+        code, stdout, stderr, _contexts = _challenger_invoke(
+            host, clock=lambda: NOW + timedelta(seconds=next(ticks)), conditions=reader,
+        )
+        self.assertEqual((code, stderr), (0, ""), stdout)
+        self.assertEqual(reader.call_count, 2)
+        statements = [payload for _argv, payload in host.calls if payload is not None and "INSERT INTO eval_runs" in payload]
+        self.assertEqual(len(statements), 2)
+        spans: list[tuple[datetime, datetime]] = []
+        for statement, call, counts in zip(statements, reader.call_args_list, ((2, 1), (5, 4)), strict=True):
+            bound = {}
+            for name in ("run_started_at", "finished_at", "engine_in_flight_max", "engine_preemptions"):
+                line = next(line for line in statement.splitlines() if line.startswith(f"\\set {name} "))
+                bound[name] = read_psql_set(line, name)
+            span = (datetime.fromisoformat(bound["run_started_at"]), datetime.fromisoformat(bound["finished_at"]))
+            spans.append(span)
+            self.assertEqual(call.args, span)
+            self.assertLess(*span)
+            self.assertEqual((int(bound["engine_in_flight_max"]), int(bound["engine_preemptions"])), counts)
+        self.assertLess(spans[0][1], spans[1][0])
+        record_lines = [line for line in stdout.splitlines() if line.startswith("record:")]
+        self.assertEqual(len(record_lines), 2)
+        self.assertTrue(record_lines[0].endswith("; engine in-flight max 2, preemptions 1 over the span"))
+        self.assertTrue(record_lines[1].endswith("; engine in-flight max 5, preemptions 4 over the span"))
+
     def test_mode_fixes_follow_the_run_and_keep_retry_flags(self) -> None:
         self.addCleanup(report.set_form_from_environment, os.environ.copy())
         for installed in (False, True):

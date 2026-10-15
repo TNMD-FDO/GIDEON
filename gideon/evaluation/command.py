@@ -22,6 +22,11 @@ from gideon.evaluation import (
     window,
 )
 from gideon.evaluation import decision as decision_stats
+from gideon.evaluation.conditions import (
+    ConditionsReader,
+    describe,
+    read_engine_conditions,
+)
 from gideon.evaluation.evalset import (
     SET_ROOT,
     EvalSetLoadResult,
@@ -175,6 +180,7 @@ class _Seams:
     models_path: PathLike
     court_path: Path
     clock: Callable[[], datetime]
+    conditions: ConditionsReader
     sleep: Callable[[float], None]
     lock_claim: "_EngineLockClaim"
 
@@ -1320,6 +1326,7 @@ def _record(
     seams: _Seams,
     pass_value: _Pass,
     loaded: LoadedSet,
+    slice_spec: SliceSpec,
     slice_result: SliceResult,
     prepared: _Prepared,
     *,
@@ -1329,13 +1336,18 @@ def _record(
     requested_repeats: int,
     decision_json: Mapping[str, JSONValue] | None,
 ) -> _RecordOutcome:
-    """Print a held record row or write the run from facts resolved before it."""
+    """Write prepared facts and an engine entry's conditions, or print a held row."""
 
     if isinstance(prepared.record, StageResult):
         print_stage(prepared.record)
         return _RecordOutcome(prepared.record.ok, False)
 
     facts = prepared.record
+    engine_conditions = (
+        seams.conditions(prepared.started, finished)
+        if CallSurface.ENGINE in slice_spec.surfaces
+        else None
+    )
     run = record.RunRow(
         run_id=pass_value.run_id,
         started_at=prepared.started,
@@ -1357,6 +1369,8 @@ def _record(
         forced=prepared.forced,
         partial=partial,
         decision=decision_json,
+        engine_in_flight_max=None if engine_conditions is None else engine_conditions.in_flight_max,
+        engine_preemptions=None if engine_conditions is None else engine_conditions.preemptions,
     )
     results = tuple(
         record.ResultRow(
@@ -1383,11 +1397,14 @@ def _record(
             )
         )
         return _RecordOutcome(False, False)
+    detail = f"run {pass_value.run_id} recorded (1 run row, {len(results)} result rows)"
+    if engine_conditions is not None:
+        detail += "; " + describe(engine_conditions)
     print_stage(
         StageResult(
             "record",
             True,
-            f"run {pass_value.run_id} recorded (1 run row, {len(results)} result rows)",
+            detail,
             "",
         )
     )
@@ -1632,6 +1649,7 @@ def _run_body(
         seams,
         pass_value,
         loaded,
+        slice_spec,
         slice_result,
         prepared,
         finished=seams.clock(),
@@ -1722,12 +1740,16 @@ def run_eval(
     rendered_dir: PathLike = "/etc/gideon/rendered",
     site_path: PathLike = "/etc/gideon/site.yaml",
     clock: Callable[[], datetime] | None = None,
+    conditions: ConditionsReader | None = None,
     run_id_factory: Callable[[], str] | None = None,
     court_path: PathLike | None = None,
     models_path: PathLike | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> int:
-    """Run ``eval run``'s ordered stages and return the exit code."""
+    """Run ``eval run``'s ordered stages and return the exit code.
+
+    The record stage reads engine conditions over an engine-reaching pass's span.
+    """
 
     checkout = Path(__file__).parents[2] if checkout_root is None else Path(checkout_root)
     io = RealHost() if host is None else host
@@ -1824,6 +1846,7 @@ def run_eval(
         models_path=actual_models,
         court_path=selected_court_path,
         clock=now,
+        conditions=read_engine_conditions if conditions is None else conditions,
         sleep=sleep,
         lock_claim=_EngineLockClaim(),
     )
