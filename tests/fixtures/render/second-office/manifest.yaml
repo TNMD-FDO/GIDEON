@@ -3,7 +3,7 @@ release: "fixture"
 inputs:
   site_sha256: "3032cbc05ff6133992600e2f7b9f12e8488f068b2a747e88a45159753d250cb1"
   host_lock_sha256: "c487a5a60259c393ac20649336ff45b24747e8155aa0e4d5afe84e51e8424680"
-  models_lock_sha256: "51aee5918190f4423515e08eb2d58c59151768d369230980906b73fa2095de7e"
+  models_lock_sha256: "386574fee11ddd25adb0021f82c644dd1694ede0fa997f2bb9943d0b7b3e03c4"
   egress_sha256: "d41c0ffb68aef4e1e677f53cca1fbe102e1f61c17e41e2173226b1db993064f8"
   hardware_profile: "2x96v-256d"
   images_lock_version: 1
@@ -15,7 +15,7 @@ inputs:
   build_box: false
 files:
   compose.yaml:
-    sha256: "bdeb0ea4979c3b76eec954c39a89d080b7ef7887c7bd6771c3d3d1f7f95056e1"
+    sha256: "3d84910d962c1dac1fec7acc0384c2afa864a8e8f895e2f6759c4416b49431f5"
     mode: "0644"
     owners: []
   "prometheus/prometheus.yml":
@@ -59,7 +59,7 @@ files:
     owners:
       - "grafana"
   "grafana/provisioning/alerting/rules.yaml":
-    sha256: "5b6fbd86d864ba675f3cf7cd7d9e5199aede4064da2b682e64fe54fc633b181f"
+    sha256: "194a2f8abb760daa052b2dc77e0d962c875cb4a22622503b6ec8e626d7f6c7c4"
     mode: "0644"
     owners:
       - "grafana"
@@ -236,7 +236,7 @@ services:
   gideon-generator: "4c80fd0ba4f007e832667070ec3a95d1096c652a7dfdc80610bab1ecbeb7f863"
   gideon-embed: "244f64023c1b1e686580f375bed0ec1ab09752655d05d5a691e1eaec5341d72f"
   gideon-api: "eb181ec7e750354a40c46b5d09519bc91b5db66b3bfe1eb190b674e33b1361b7"
-  gideon-worker: "31b9a62be2687b23449b14e2350e83206be0509c04090703df08a1631c985f52"
+  gideon-worker: "b0f4a0d00bb1c7d62cf5b1c3f0417bce2dfe53fa9ac445a11caa038f95a82393"
   gideon-egress: "eaa0cce20818c30032a33977c8606d993f8afaf73850ff2743240643c26e3c49"
   dcgm-exporter: "80440fa3a0466766fec774772d26eed3389e9f239c1e1c0d96d81a5f7cc62a85"
   postgres-exporter: "d36e03785dee0d52e65763c1d7f6dda2c4c09b17c129d7e8439fe5994338bfe7"

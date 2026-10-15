@@ -758,6 +758,7 @@ class PsycopgRecord(unittest.TestCase):
             "http://store.example.test:9200", "example-user", self.password,
             "http://vectors.example.test:6333", self.password,
             "http://embed.example.test:8000", self.password,
+            "db.example.test", 5432, "gideon", "gideon_worker", self.password,
         )
         self.connection = CapturedConnection()
         self.record = overruled.PsycopgRecord(

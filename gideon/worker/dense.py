@@ -20,6 +20,7 @@ import httpx
 import psycopg
 
 import gideon.host.cas
+from gideon.host.index.sample import source_id
 from gideon.host.sysio import BytesHost, RealHost
 from gideon.worker import caselaw, chunker, lexical, settings, staging, treatment
 
@@ -38,6 +39,7 @@ DENSE_COUNT_KEYS: Final = (
     "dense_seconds", "dense_points", "dense_indexed", "dense_limit",
     "dense_hour_seconds", "dense_hour_tokens", "dense_hour_written",
     "dense_leveled",
+    "dense_manifest",
 )
 SERVED_MODEL_PATTERN: Final = r"[A-Za-z0-9._-]{1,64}"
 # exempt: the bound caps a job argument's vector width and its allocation.
@@ -120,6 +122,7 @@ class DenseCounts:
     dense_hour_tokens: int = 0
     dense_hour_written: int = 0
     dense_leveled: int = 0
+    dense_manifest: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,13 +166,14 @@ class GenerationRecord(Protocol):
     def resume(self, name: str) -> None: ...
     def fail(self, name: str, reason: str) -> None: ...
     def scope_total(self, collection: str, source: str, snapshot: date, courts: Sequence[str], pipeline: str, limit: int | None = None) -> int: ...
+    def chunk_counts(self, doc_ids: Sequence[str], pipeline: str) -> Mapping[str, int]: ...
     def documents(self, collection: str, source: str, snapshot: date, courts: Sequence[str], limit: int | None = None) -> Iterator[lexical.Document]: ...
     def chunks(self, doc_id: str, pipeline: str) -> tuple[chunker.NewChunk, ...]: ...
     def opinion(self, doc_id: str) -> caselaw.NewOpinion: ...
     def keys_for(self, name: str, hashes: Sequence[str]) -> dict[str, lexical.TextKeys]: ...
     def ledger_rows(self, space: str, hashes: Sequence[str]) -> tuple[LedgerRow, ...]: ...
     def start(self, name: str, counts: DenseCounts) -> None: ...
-    def progress(self, name: str, counts: DenseCounts, inserts: Sequence[LedgerRow] = (), rehomes: Sequence[LedgerRow] = ()) -> None: ...
+    def progress(self, name: str, counts: DenseCounts, inserts: Sequence[LedgerRow] = (), rehomes: Sequence[LedgerRow] = (), documents: Sequence[lexical.Document] = ()) -> DenseCounts: ...
     def finish(self, name: str, counts: DenseCounts, at: datetime, limited: bool) -> None: ...
     def close(self) -> None: ...
 
@@ -293,6 +297,13 @@ SCOPE_TOTAL_SQL: Final = (
     "SELECT COUNT(*) FROM chunks AS c JOIN (" + DOCUMENTS_SQL + ") AS scope "
     "ON scope.doc_id = c.doc_id WHERE c.pipeline = %s"
 )
+CHUNK_COUNTS_SQL: Final = (
+    "SELECT doc_id, COUNT(*) FROM chunks WHERE doc_id = ANY(%s) AND pipeline = %s GROUP BY doc_id"
+)
+MANIFEST_INSERT_SQL: Final = (
+    "INSERT INTO generation_documents (gen_id, source_id, canonical_text_sha256, doc_id) "
+    "VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING"
+)
 LEDGER_ROWS_SQL: Final = (
     "SELECT content_hash, gen_id, point_id FROM chunk_embeddings "
     "WHERE embedding_space = %s AND content_hash = ANY(%s)"
@@ -326,7 +337,7 @@ class PsycopgGenerations(lexical.PsycopgGenerations):
         self, collection: str, source: str, snapshot: date, courts: Sequence[str],
         pipeline: str, limit: int | None = None,
     ) -> int:
-        rows = self._run(SCOPE_TOTAL_SQL, (collection, source, snapshot, list(courts), limit, pipeline), read=True)
+        rows = self._run(SCOPE_TOTAL_SQL, (collection, source, snapshot, list(courts), limit, pipeline), read=True, corpus=True)
         if len(rows) != 1 or type(rows[0][0]) is not int or rows[0][0] < 0:
             raise DenseFailure("database")
         return rows[0][0]
@@ -335,7 +346,7 @@ class PsycopgGenerations(lexical.PsycopgGenerations):
         self, collection: str, source: str, snapshot: date, courts: Sequence[str],
         limit: int | None = None,
     ) -> Iterator[lexical.Document]:
-        connection = self._connection(stream=True)
+        connection = self._connection(corpus=True)
         try:
             with connection.cursor(name="dense_documents") as cursor:
                 cursor.itersize = DOCUMENT_BATCH_SIZE
@@ -348,19 +359,34 @@ class PsycopgGenerations(lexical.PsycopgGenerations):
                 connection.rollback()
             raise DenseFailure("database", error=type(exc).__name__) from exc
 
+    def chunk_counts(self, doc_ids: Sequence[str], pipeline: str) -> Mapping[str, int]:
+        rows = self._run(CHUNK_COUNTS_SQL, (list(doc_ids), pipeline), read=True, corpus=True)
+        return dict(rows)
+
     def ledger_rows(self, space: str, hashes: Sequence[str]) -> tuple[LedgerRow, ...]:
         rows = self._run(LEDGER_ROWS_SQL, (space, list(hashes)), read=True)
         return tuple(LedgerRow(row[0], row[1], str(row[2])) for row in rows)
 
     def _write(
-        self, statements: Sequence[tuple[str, tuple[object, ...]]],
-    ) -> None:
+        self, name: str, counts: DenseCounts, statements: Sequence[tuple[str, tuple[object, ...]]],
+        documents: Sequence[lexical.Document],
+    ) -> DenseCounts:
         connection = self._connection()
         try:
             with connection.cursor() as cursor:
                 for sql, parameters in statements:
                     cursor.execute(sql, parameters)
+                inserted = 0
+                for document in documents:
+                    cursor.execute(MANIFEST_INSERT_SQL, (
+                        name, source_id(document.source, document.opinion_id),
+                        document.canonical_text_sha256, document.doc_id,
+                    ))
+                    inserted += cursor.rowcount
+                updated = replace(counts, dense_manifest=counts.dense_manifest + inserted)
+                cursor.execute(PROGRESS_SQL, (json.dumps(asdict(updated)), name))
             connection.commit()
+            return updated
         except psycopg.Error as exc:
             with suppress(psycopg.Error):
                 connection.rollback()
@@ -370,12 +396,11 @@ class PsycopgGenerations(lexical.PsycopgGenerations):
         self._run(START_SQL, (list(DENSE_COUNT_KEYS), json.dumps(asdict(counts)), name))
 
     # Dense progress replaces the lexical counter contract on the shared record.
-    def progress(self, name: str, counts: DenseCounts, inserts: Sequence[LedgerRow] = (), rehomes: Sequence[LedgerRow] = ()) -> None:  # type: ignore[override]
-        self._write([
+    def progress(self, name: str, counts: DenseCounts, inserts: Sequence[LedgerRow] = (), rehomes: Sequence[LedgerRow] = (), documents: Sequence[lexical.Document] = ()) -> DenseCounts:  # type: ignore[override]
+        return self._write(name, counts, [
             *((LEDGER_INSERT_SQL, (row.content_hash, row.point_id, row.gen_id)) for row in inserts),
             *((LEDGER_REHOME_SQL, (row.gen_id, row.point_id, row.content_hash, row.gen_id)) for row in rehomes),
-            (PROGRESS_SQL, (json.dumps(asdict(counts)), name)),
-        ])
+        ], documents)
 
     # Dense finish records a vector timestamp and limit instead of lexical bytes.
     def finish(self, name: str, counts: DenseCounts, at: datetime, limited: bool) -> None:  # type: ignore[override]
@@ -682,6 +707,7 @@ class _Progress:
 
     def commit(
         self, counts: DenseCounts, inserts: Sequence[LedgerRow] = (), rehomes: Sequence[LedgerRow] = (),
+        documents: Sequence[lexical.Document] = (),
     ) -> None:
         now = self.monotonic()
         updated = replace(counts, dense_seconds=round(max(0.0, now - self.started)))
@@ -689,16 +715,16 @@ class _Progress:
             updated = replace(updated, dense_hour_seconds=updated.dense_seconds,
                               dense_hour_tokens=updated.dense_tokens,
                               dense_hour_written=updated.dense_copied + updated.dense_embedded)
-        self.record.progress(self.name, updated, inserts, rehomes)
-        self.counts = updated
+        self.counts = self.record.progress(self.name, updated, inserts, rehomes, documents)
         self.log()
 
-    def log(self, *, final: bool = False) -> None:
+    def log(self, *, final: bool = False, reason: str | None = None) -> None:
         now = self.monotonic()
         previous = self.started if self.last_log is None else self.last_log
-        if now - previous < LOG_SECONDS and not (final and self.last_log is None):
+        if reason is None and now - previous < LOG_SECONDS and not (final and self.last_log is None):
             return
-        logger.info("job_id=%s generation=%s %s", self.job, self.name,
+        logger.info("job_id=%s generation=%s%s %s", self.job, self.name,
+                    f" reason={reason}" if reason is not None else "",
                     " ".join(f"{key}={value}" for key, value in asdict(self.counts).items()))
         self.last_log = now
 
@@ -749,11 +775,13 @@ def _embed_batches(
     pool: ThreadPoolExecutor, name: str, batches: Sequence[tuple[TextGroup, ...]], existing: Mapping[str, LedgerRow],
     payloads: Mapping[str, Mapping[str, str | bool]], store: VectorStore, embedder: Embedder, pace: Pace,
     progress: _Progress, repairs: Sequence[LedgerRow], present: int, leveled: int,
+    documents: Sequence[lexical.Document],
 ) -> None:
     pending: dict[Future[_WriteOutcome], None] = {}
     remaining = iter(batches)
     failures: list[BaseException] = []
     failure_lock = threading.Lock()
+    written = 0
 
     def write(batch: Sequence[TextGroup]) -> _WriteOutcome:
         try:
@@ -785,6 +813,7 @@ def _embed_batches(
                 if future not in completed:
                     continue
                 outcome = future.result()
+                written += 1
                 progress.commit(replace(
                     progress.counts,
                     dense_present=progress.counts.dense_present + present,
@@ -793,7 +822,8 @@ def _embed_batches(
                     dense_texts=progress.counts.dense_texts + outcome.texts,
                     dense_tokens=progress.counts.dense_tokens + outcome.tokens,
                     dense_requests=progress.counts.dense_requests + 1,
-                ), (*repairs, *outcome.inserts), outcome.rehomes)
+                ), (*repairs, *outcome.inserts), outcome.rehomes,
+                    documents if written == len(batches) else ())
                 repairs, present, leveled = (), 0, 0
                 del pending[future]
             raise_failure()
@@ -813,7 +843,9 @@ def _fill(
 ) -> None:
     source = parsed.snapshot[:-staging.DATE_SUFFIX_LENGTH]
     snapshot = date.fromisoformat(parsed.snapshot[-10:])
-    stream = record.documents(parsed.collection, source, snapshot, tuple(sorted(parsed.courts)), limit)
+    stream = lexical.selected_documents(
+        parsed, record.documents(parsed.collection, source, snapshot, tuple(sorted(parsed.courts)), limit),
+    )
     pool = ThreadPoolExecutor(max_workers=BULK_WRITERS)
     failed = False
     try:
@@ -873,6 +905,7 @@ def _fill(
             for current, identifiers in levels.items():
                 store.set_payload(parsed.name, identifiers, asdict(current))
                 leveled_count += len(identifiers)
+            manifest = tuple(document for document in documents if chunks[document.doc_id])
             if copied:
                 points: list[Point] = []
                 rehomes: list[LedgerRow] = []
@@ -887,19 +920,47 @@ def _fill(
                                         dense_present=progress.counts.dense_present + present_count,
                                         dense_leveled=progress.counts.dense_leveled + leveled_count,
                                         dense_copied=progress.counts.dense_copied + len(points)),
-                                tuple(repairs.values()), tuple(rehomes))
+                                tuple(repairs.values()), tuple(rehomes), manifest if not batches else ())
                 repairs, present_count, leveled_count = {}, 0, 0
             if batches:
                 _embed_batches(pool, parsed.name, batches, existing, payloads, store, embedder, pace,
-                               progress, tuple(repairs.values()), present_count, leveled_count)
+                               progress, tuple(repairs.values()), present_count, leveled_count, manifest)
             elif repairs or present_count or leveled_count:
                 progress.commit(replace(progress.counts, dense_present=progress.counts.dense_present + present_count,
-                                        dense_leveled=progress.counts.dense_leveled + leveled_count), tuple(repairs.values()))
+                                        dense_leveled=progress.counts.dense_leveled + leveled_count),
+                                tuple(repairs.values()), documents=manifest)
     except BaseException:
         failed = True
         raise
     finally:
         pool.shutdown(wait=True, cancel_futures=True)
+        close = getattr(stream, "close", None)
+        if close is not None:
+            if failed:
+                with suppress(Exception):
+                    close()
+            else:
+                close()
+
+
+def _sample_scope_total(parsed: lexical._Inputs, record: GenerationRecord, limit: int | None = None) -> int:
+    """Count kept chunks and close the counting cursor before filling the stores."""
+
+    source = parsed.snapshot[:-staging.DATE_SUFFIX_LENGTH]
+    snapshot = date.fromisoformat(parsed.snapshot[-10:])
+    stream = lexical.selected_documents(
+        parsed, record.documents(parsed.collection, source, snapshot, tuple(sorted(parsed.courts)), limit),
+    )
+    failed = False
+    try:
+        total = 0
+        while documents := tuple(itertools.islice(stream, DOCUMENT_BATCH_SIZE)):
+            total += sum(record.chunk_counts([document.doc_id for document in documents], parsed.pipeline).values())
+        return total
+    except BaseException:
+        failed = True
+        raise
+    finally:
         close = getattr(stream, "close", None)
         if close is not None:
             if failed:
@@ -929,7 +990,9 @@ def build(
                 generation.collection, generation.pipeline, generation.embedding_space
             ) != (parsed.collection, parsed.pipeline, parsed.embedding_space):
                 raise DenseFailure("generation-mismatch")
-            if generation.state not in {"building", "built", "failed"}:
+            if generation.state not in {"building", "built", "failed"} and not (
+                generation.state == "live" and parsed.sample is not None
+            ):
                 raise DenseFailure("invalid")
             with lexical._generation_lock(work_root / f"{parsed.name}{DENSE_LOCK_SUFFIX}"):
                 if generation.state == "failed":
@@ -944,8 +1007,13 @@ def build(
                 source = parsed.snapshot[:-staging.DATE_SUFFIX_LENGTH]
                 snapshot = date.fromisoformat(parsed.snapshot[-10:])
                 scope = (parsed.collection, source, snapshot, tuple(sorted(parsed.courts)), parsed.pipeline)
-                progress.counts = DenseCounts(dense_total=record.scope_total(*scope),
-                                             dense_scope=record.scope_total(*scope, limit), dense_limit=limit or 0)
+                if parsed.sample is None:
+                    total = record.scope_total(*scope)
+                    scope_count = record.scope_total(*scope, limit)
+                else:
+                    total = _sample_scope_total(parsed, record)
+                    scope_count = total if limit is None else _sample_scope_total(parsed, record, limit)
+                progress.counts = DenseCounts(dense_total=total, dense_scope=scope_count, dense_limit=limit or 0)
                 record.start(parsed.name, progress.counts)
                 _fill(parsed, limit, record, store, embedder, pace, store_root, host or RealHost(), progress)
                 store.set_indexing(parsed.name, SHIPPED_INDEXING_THRESHOLD)
@@ -988,7 +1056,7 @@ def build(
                 if type(job) is int and job > 0:
                     if progress is None:
                         progress = _Progress(name, job, record, monotonic(), monotonic, DenseCounts())
-                    progress.log(final=True)
+                    progress.log(final=True, reason=exc.reason)
         # Cleanup must not replace the first failure or outlive a writer request.
         for client in (record, store, embedder):
             with suppress(DenseFailure, lexical.LexicalFailure, psycopg.Error, httpx.HTTPError, OSError):

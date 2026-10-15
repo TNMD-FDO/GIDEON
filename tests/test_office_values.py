@@ -49,6 +49,8 @@ _ACTIONS_EVENT_CONTEXT = "github.event."
 # entry. The public-suffix set is derived from these entries and the seed.
 _CURATED_ALLOWLIST: tuple[str, ...] = (
     "age-encryption.org",
+    "amd.com",
+    "apple.com",
     "archives.gov",
     "arxiv.org",
     "bing.com",
@@ -81,6 +83,7 @@ _CURATED_ALLOWLIST: tuple[str, ...] = (
     "gstatic.com",
     "harvey.ai",
     "healthchecks.io",
+    "intel.com",
     "json-schema.org",
     "jsdelivr.net",
     "kernel.org",

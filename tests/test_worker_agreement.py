@@ -434,6 +434,7 @@ class PsycopgEdgeRecord(unittest.TestCase):
                 "http://store.example.test:9200", "example-user", password,
                 "http://vectors.example.test:6333", password,
                 "http://embed.example.test:8000", password,
+                "corpus.example.test", 5432, "example-corpus", "example-reader", password,
             )
             connection = test_worker_caselaw._CapturedConnection()
             record = agreement.PsycopgEdges(
@@ -468,6 +469,7 @@ class PsycopgEdgeRecord(unittest.TestCase):
                 "http://store.example.test:9200", "example-user", password,
                 "http://vectors.example.test:6333", password,
                 "http://embed.example.test:8000", password,
+                "corpus.example.test", 5432, "example-corpus", "example-reader", password,
             )
             connection = test_worker_caselaw._CapturedConnection()
             connection.fail_execute = True

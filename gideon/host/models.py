@@ -1,7 +1,8 @@
 """Loading and validation for the committed models lock.
 
 The models lock is release data, not site configuration. It names evaluated
-hardware profiles, model pins, optional co-tenant reserves, and candidates.
+hardware profiles, chunk guards, model pins, optional co-tenant reserves, and
+candidates.
 """
 
 import difflib
@@ -45,6 +46,23 @@ class MemoryRow:
     service: str
     gb: int
     role: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ChunkGuards:
+    """The profile's RAM-derived chunk limits and resident bytes per chunk."""
+
+    serving_ceiling_million_chunks: int
+    build_refusal_million_chunks: int
+    resident_bytes_per_chunk: int
+
+    @property
+    def serving_ceiling_chunks(self) -> int:
+        return self.serving_ceiling_million_chunks * 1_000_000
+
+    @property
+    def build_refusal_chunks(self) -> int:
+        return self.build_refusal_million_chunks * 1_000_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +148,7 @@ class HardwareProfile:
     requires: ProfileRequirements
     memory: tuple[MemoryRow, ...]
     models: tuple[ModelPin, ...]
+    chunk_guards: ChunkGuards
     embedding_space: EmbeddingSpace | None = None
     cotenant_reserve: tuple[CotenantReserve, ...] = ()
     # The share of the generator's cap left for a client; absent reserves nothing.
@@ -232,13 +251,14 @@ _FIX: Final = (
 _MEMORY_FIX: Final = (
     "Edit models.lock; consult docs/runbooks/release-files.md §4."
 )
+_GUARDS_FIX: Final = _MEMORY_FIX
 _CANDIDATE_CLASH_FIX: Final = (
     "Rename the candidate in models.lock; consult docs/runbooks/release-files.md §4."
 )
 _ROOT_KEYS: Final =("version", "reference", "profiles", "candidates")
 _PROFILE_KEYS: Final = (
     "requires", "memory", "models", "embedding_space", "cotenant_reserve_gb",
-    "client_reserve_seqs",
+    "client_reserve_seqs", "chunk_guards",
 )
 _REQUIRES_KEYS: Final = ("platform", "gpu", "dram_gb", "data_volume_gb")
 _GPU_KEYS: Final = (
@@ -253,6 +273,10 @@ _CANDIDATE_KEYS: Final = ("role", "repo", "revision", "serve", "files")
 _SERVE_KEYS: Final = ("served_name", "env", "flags")
 _FILE_KEYS: Final = ("sha256", "size")
 _MEMORY_ROW_KEYS: Final = ("gb", "role")
+_GUARDS_KEYS: Final = (
+    "serving_ceiling_million_chunks", "build_refusal_million_chunks",
+    "resident_bytes_per_chunk",
+)
 _EMBEDDING_SPACE_KEYS: Final = ("id", "role", "revision", "dimensions")
 
 PROFILE_NAME: Final = re.compile(
@@ -676,6 +700,50 @@ def _validate_memory(
     return memory
 
 
+def _validate_chunk_guards(
+    profile_path: str,
+    value: object,
+    memory: Mapping[str, MemoryRow],
+    errors: list[ModelsLockError],
+) -> None:
+    """Hold the chunk guards within their Qdrant memory and ceiling bounds."""
+
+    path = f"{profile_path}.chunk_guards"
+    if not isinstance(value, Mapping):
+        errors.append(_mapping_error(path, value, fix=_GUARDS_FIX))
+        return
+    guards = cast(Mapping[str, object], value)
+    _walk_unknown(guards, _GUARDS_KEYS, path, errors, fix=_GUARDS_FIX)
+    ceiling, refusal, resident = (
+        _int(guards, key, errors, error_path=f"{path}.{key}", fix=_GUARDS_FIX)
+        for key in _GUARDS_KEYS
+    )
+    qdrant = memory.get("qdrant")
+    if qdrant is None:
+        errors.append(_error(
+            path, "the guards require memory.qdrant.gb to derive from", fix=_GUARDS_FIX,
+        ))
+    if ceiling is None or refusal is None or resident is None:
+        return
+    if qdrant is not None:
+        bound = qdrant.gb * GIGABYTE // (resident * 1_000_000)
+        if ceiling > bound:
+            errors.append(_error(
+                f"{path}.serving_ceiling_million_chunks",
+                f"must be at or below {bound} million chunks from memory.qdrant.gb "
+                f"({qdrant.gb} GB) divided by resident_bytes_per_chunk ({resident})",
+                fix=_GUARDS_FIX,
+            ))
+    bound = ceiling * 2 // 3
+    if refusal > bound:
+        errors.append(_error(
+            f"{path}.build_refusal_million_chunks",
+            f"must be at or below {bound} million chunks from "
+            f"serving_ceiling_million_chunks ({ceiling}) divided by 1.5",
+            fix=_GUARDS_FIX,
+        ))
+
+
 def _validate_embedding_space(
     profile_path: str,
     value: object,
@@ -821,10 +889,15 @@ def validate_models_lock(document: Mapping[str, object]) -> list[ModelsLockError
                     profile_path, profile["client_reserve_seqs"], cap, errors
                 )
 
+            memory: dict[str, MemoryRow] = {}
             if "memory" not in profile:
                 errors.append(_error(f"{profile_path}.memory", "missing required key", fix=_MEMORY_FIX))
             else:
-                _validate_memory(profile_path, profile["memory"], roles, errors)
+                memory = _validate_memory(profile_path, profile["memory"], roles, errors)
+            if "chunk_guards" not in profile:
+                errors.append(_error(f"{profile_path}.chunk_guards", "missing required key", fix=_GUARDS_FIX))
+            else:
+                _validate_chunk_guards(profile_path, profile["chunk_guards"], memory, errors)
 
     if "candidates" in document:
         candidates_value = document["candidates"]
@@ -888,6 +961,12 @@ def _construct(document: Mapping[str, object]) -> ModelsLock:
             )
             for service, value in memory_value.items()
         )
+        guards = cast(Mapping[str, object], profile["chunk_guards"])
+        chunk_guards = ChunkGuards(
+            serving_ceiling_million_chunks=cast(int, guards["serving_ceiling_million_chunks"]),
+            build_refusal_million_chunks=cast(int, guards["build_refusal_million_chunks"]),
+            resident_bytes_per_chunk=cast(int, guards["resident_bytes_per_chunk"]),
+        )
         space_value = profile.get("embedding_space")
         embedding_space = None
         if space_value is not None:
@@ -904,7 +983,8 @@ def _construct(document: Mapping[str, object]) -> ModelsLock:
         )
         profiles.append(
             HardwareProfile(
-                cast(str, name), requirements, memory, models, embedding_space, cotenant_reserve,
+                cast(str, name), requirements, memory, models, chunk_guards,
+                embedding_space, cotenant_reserve,
                 client_reserve_seqs=cast(int, profile.get("client_reserve_seqs", 0)),
             )
         )

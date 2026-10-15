@@ -14,7 +14,7 @@ from typing import ClassVar, Self, cast
 from unittest import mock
 from urllib.parse import parse_qs, urlsplit
 
-from gideon.host import cotenants, gpus, nogpu
+from gideon.host import cotenants, gpus, nogpu, worker
 from gideon.host.checks import (
     CHECKS,
     MEBIBYTE,
@@ -49,6 +49,7 @@ from gideon.host.checks.capacity import (
     LowReading,
     parse_size_and_available,
     read_prometheus_low,
+    read_promoted_bytes,
 )
 from gideon.host.checks.network import (
     DOCKER_NETWORK_TIMEOUT_SECONDS,
@@ -71,6 +72,7 @@ from gideon.host.corpus.lockfile import (
 )
 from gideon.host.courts import Court, CourtMap, CourtSource
 from gideon.host.egress import EgressAllowlist, EgressGroup, EgressHost
+from gideon.host.index import reserve
 from gideon.host.ldap import ldapsearch_argv
 from gideon.host.lock import load_host_lock
 from gideon.host.models import GIGABYTE, ModelPin, ModelsLock, load_models_lock
@@ -984,8 +986,14 @@ class DataVolume(unittest.TestCase):
     def test_one_byte_below_floor_refuses_with_raw_and_rounded_size(self) -> None:
         floor = MODELS.profiles[0].requires.data_volume_gb * GIGABYTE
         size = floor - 1
-        report = DataVolumeCheck().run(context(self.host(size)))
+        reader = mock.Mock(return_value=reserve.PromotedReading(1))
+        report = DataVolumeCheck(reader=reader).run(context(self.host(size)))
+        reader.assert_not_called()
         self.assertEqual(report.severity, Severity.REFUSE)
+        self.assertEqual(report.detail, f"/data is {size} bytes ({format_gb(size)}), profile requires a {MODELS.profiles[0].requires.data_volume_gb} GB data volume")
+        self.assertEqual(report.fix,
+            f"Provide a data volume of at least {MODELS.profiles[0].requires.data_volume_gb} GB at /data, or set "
+            "hardware_profile in /etc/gideon/site.yaml to a profile this host satisfies, then re-run preflight.")
         self.assertIn(f"{size} bytes", report.detail)
         self.assertIn(format_gb(size), report.detail)
         self.assertIn(f"{MODELS.profiles[0].requires.data_volume_gb} GB", report.detail)
@@ -996,8 +1004,15 @@ class DataVolume(unittest.TestCase):
     def test_at_floor_passes_with_size_free_bytes_and_floor(self) -> None:
         floor = MODELS.profiles[0].requires.data_volume_gb * GIGABYTE
         available = 123 * GIGABYTE
-        report = DataVolumeCheck().run(context(self.host(floor, available)))
+        host = self.host(floor, available)
+        reader = mock.Mock(return_value=reserve.PromotedReading(None, "no promoted generation"))
+        report = DataVolumeCheck(reader=reader).run(context(host))
+        reader.assert_called_once_with(host)
         self.assertEqual(report.severity, Severity.PASS, report.detail)
+        self.assertEqual(report.detail,
+            f"/data size {format_gb(floor)}, {format_gb(available)} free; profile requires a "
+            f"{MODELS.profiles[0].requires.data_volume_gb} GB data volume; reserve skipped: no promoted generation")
+        self.assertEqual(report.fix, "")
         self.assertIn(format_gb(floor), report.detail)
         self.assertIn(format_gb(available), report.detail)
         self.assertIn(str(MODELS.profiles[0].requires.data_volume_gb), report.detail)
@@ -1021,11 +1036,74 @@ class DataVolume(unittest.TestCase):
         floor = MODELS.profiles[0].requires.data_volume_gb * GIGABYTE
         size = floor - 1
         host = self.host(size)
-        report = DataVolumeCheck().run(context(host, no_gpu=True))
+        reader = mock.Mock(return_value=reserve.PromotedReading(1))
+        report = DataVolumeCheck(reader=reader).run(context(host, no_gpu=True))
+        reader.assert_not_called()
         self.assertEqual(report.severity, Severity.PASS, report.detail)
+        self.assertEqual(report.detail,
+            f"skipped: no-GPU host; /data size {format_gb(size)}, {format_gb(10_000)} free; data-volume floor is not judged")
         self.assertIn("skipped: no-GPU host", report.detail)
         self.assertIn(format_gb(size), report.detail)
         self.assertEqual(report.fix, "")
+
+    def test_unreadable_promoted_bytes_keep_the_size_verdict_and_name_the_reason(self) -> None:
+        floor = MODELS.profiles[0].requires.data_volume_gb * GIGABYTE
+        reader = mock.Mock(return_value=reserve.PromotedReading(None, "fictitious record unavailable"))
+        report = DataVolumeCheck(reader=reader).run(context(self.host(floor)))
+        self.assertEqual(report.severity, Severity.PASS)
+        self.assertTrue(report.detail.endswith("reserve skipped: fictitious record unavailable"))
+        self.assertEqual(report.fix, "")
+
+    def test_below_the_alert_line_warns_even_below_the_build_line_and_names_both(self) -> None:
+        floor = MODELS.profiles[0].requires.data_volume_gb * GIGABYTE
+        promoted = 8 * GIGABYTE
+        for available in (0, 9 * GIGABYTE, 16 * GIGABYTE - 1):
+            with self.subTest(available=available):
+                reader = mock.Mock(return_value=reserve.PromotedReading(promoted))
+                report = DataVolumeCheck(reader=reader).run(context(self.host(floor, available)))
+                self.assertEqual(report.severity, Severity.WARN)
+                self.assertIn(f"/data size {format_gb(floor)}, {format_gb(available)} free", report.detail)
+                self.assertIn(f"profile requires a {MODELS.profiles[0].requires.data_volume_gb} GB data volume", report.detail)
+                self.assertIn(reserve.describe(reserve.judge(available, promoted)), report.detail)
+                self.assertIn(f"Free space under /data as {reserve.RUNBOOK_ROW} says", report.fix)
+                self.assertIn("old drill or staging directories", report.fix)
+                self.assertIn("retention", report.fix)
+                self.assertIn(capacity.report.command("preflight"), report.fix)
+
+    def test_at_or_above_the_alert_line_passes_with_both_lines(self) -> None:
+        floor = MODELS.profiles[0].requires.data_volume_gb * GIGABYTE
+        promoted = 8 * GIGABYTE
+        for available in (16 * GIGABYTE, 17 * GIGABYTE):
+            with self.subTest(available=available):
+                reader = mock.Mock(return_value=reserve.PromotedReading(promoted))
+                report = DataVolumeCheck(reader=reader).run(context(self.host(floor, available)))
+                self.assertEqual(report.severity, Severity.PASS)
+                self.assertIn(reserve.describe(reserve.judge(available, promoted)), report.detail)
+                self.assertEqual(report.fix, "")
+
+    def test_default_reader_skips_a_failed_psql_read_with_its_reason(self) -> None:
+        floor = MODELS.profiles[0].requires.data_volume_gb * GIGABYTE
+        host = self.host(floor)
+        argv = tuple(worker.psql_argv("/etc/gideon/rendered"))
+        host.commands[argv] = subprocess.CompletedProcess(argv, 3, "[]", "private diagnostic")
+        report = DataVolumeCheck().run(context(host))
+        self.assertEqual(report.severity, Severity.PASS)
+        self.assertTrue(report.detail.endswith("reserve skipped: promoted generation read failed (exit 3)"))
+        self.assertNotIn("private diagnostic", report.detail + report.fix)
+        self.assertEqual(host.calls.count(("run", argv)), 1)
+
+    def test_default_reader_returns_no_generation_or_the_sum_across_collections(self) -> None:
+        argv = tuple(worker.psql_argv("/etc/gideon/rendered"))
+        for rows, expected in (
+            ([], reserve.PromotedReading(None, "no promoted generation")),
+            ([{"gen_id": "fictitious-live-a", "collection": "caselaw", "bytes": 7},
+              {"gen_id": "fictitious-live-b", "collection": "authorities", "bytes": 14}],
+             reserve.PromotedReading(21)),
+        ):
+            with self.subTest(rows=rows):
+                host = FakeHost(commands={argv: completed(argv, json.dumps(rows))})
+                self.assertEqual(read_promoted_bytes(host), expected)
+                self.assertEqual(host.calls, [("run", argv)])
 
     def test_lifted_df_parser_reads_the_last_measurement_row(self) -> None:
         self.assertEqual(parse_size_and_available(" Size Avail\n123 45\n"), (123, 45))

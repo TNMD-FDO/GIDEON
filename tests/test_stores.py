@@ -8,6 +8,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from gideon.host import models
+from gideon.host.index import sample
 from gideon.host.render import worker
 from gideon.host.stack import exec_argv
 from gideon.host.stores import converge
@@ -40,6 +41,7 @@ MIGRATIONS = {
     f"{ROOT}/migrations/0018_chunk_embeddings.sql": (ROOT / "migrations/0018_chunk_embeddings.sql").read_text(),
     f"{ROOT}/migrations/0019_known_overruled.sql": (ROOT / "migrations/0019_known_overruled.sql").read_text(),
     f"{ROOT}/migrations/0021_dupe_clusters.sql": (ROOT / "migrations/0021_dupe_clusters.sql").read_text(),
+    f"{ROOT}/migrations/0023_generation_documents.sql": (ROOT / "migrations/0023_generation_documents.sql").read_text(),
     f"{ROOT}/migrations/README.md": "not a migration",
 }
 
@@ -168,6 +170,7 @@ class Converge(unittest.TestCase):
                 "0018_chunk_embeddings",
                 "0019_known_overruled",
                 "0021_dupe_clusters",
+                "0023_generation_documents",
             ),
         )
 
@@ -336,6 +339,7 @@ class Converge(unittest.TestCase):
                 "0018_chunk_embeddings",
                 "0019_known_overruled",
                 "0021_dupe_clusters",
+                "0023_generation_documents",
             ),
         )
 
@@ -494,7 +498,15 @@ class Migration0017(unittest.TestCase):
     def test_identity_and_input_checks_match_the_host_grammar(self) -> None:
         self.assertIn("CREATE TABLE index_generations", self.text)
         self.assertIn("gen_id text PRIMARY KEY", self.text)
-        self.assertIn(f"gen_id ~ '^{worker.GENERATION_PATTERN}$'", self.text)
+        base_pattern = worker.GENERATION_PATTERN.removesuffix(
+            rf"(?:__{worker.SAMPLE_SUFFIX})?"
+        )
+        self.assertIn(f"gen_id ~ '^{base_pattern}$'", self.text)
+        manifest = MIGRATIONS[f"{ROOT}/migrations/0023_generation_documents.sql"]
+        self.assertIn("ALTER TABLE index_generations DROP CONSTRAINT index_generations_gen_id_check;", manifest)
+        self.assertIn("ALTER TABLE index_generations ADD CONSTRAINT index_generations_gen_id_check", manifest)
+        self.assertIn(f"gen_id ~ '^{worker.GENERATION_PATTERN}$'", manifest)
+        self.assertIn("octet_length(gen_id) < 255", manifest)
         self.assertIn("octet_length(gen_id) < 255", self.text)
         self.assertIn(
             f"embedding_space ~ '{models.EMBEDDING_SPACE_ID.pattern}'", self.text,
@@ -541,6 +553,57 @@ class Migration0017(unittest.TestCase):
         ))
         self.assertNotIn("DELETE", self.text)
         self.assertNotIn("schema_migrations", self.text)
+        manifest = MIGRATIONS[f"{ROOT}/migrations/0023_generation_documents.sql"]
+        self.assertEqual(tuple(line for line in manifest.splitlines() if line.startswith("GRANT ")), (
+            "GRANT SELECT, INSERT ON TABLE generation_documents TO gideon_worker;",
+            "GRANT SELECT ON TABLE generation_documents TO gideon_ro_metrics;",
+        ))
+        self.assertNotIn("UPDATE", manifest)
+        self.assertNotIn("DELETE", manifest)
+
+
+class Migration0020(unittest.TestCase):
+    """Manifest rows retain document identity and allow append-only worker writes."""
+
+    def setUp(self) -> None:
+        self.text = MIGRATIONS[f"{ROOT}/migrations/0023_generation_documents.sql"]
+        self.sql = " ".join(self.text.split())
+
+    def test_manifest_has_its_generation_key_hashes_and_write_timestamp(self) -> None:
+        self.assertIn("CREATE TABLE generation_documents", self.sql)
+        self.assertIn("gen_id text NOT NULL REFERENCES index_generations(gen_id)", self.sql)
+        self.assertIn("PRIMARY KEY (gen_id, source_id)", self.sql)
+        self.assertIn(f"source_id ~ '^{sample.SOURCE_ID_PATTERN}$'", self.sql)
+        self.assertIn(f"char_length(source_id) BETWEEN 1 AND {sample.SOURCE_ID_MAX_LENGTH}", self.sql)
+        for column in ("canonical_text_sha256", "doc_id"):
+            self.assertIn(f"{column} text NOT NULL CHECK ({column} ~ '^[0-9a-f]{{64}}$')", self.sql)
+        self.assertIn("indexed_at timestamptz NOT NULL DEFAULT now()", self.sql)
+        self.assertNotIn("schema_migrations", self.text)
+
+    def test_manifest_grants_only_worker_append_and_metrics_read(self) -> None:
+        grants = tuple(line for line in self.text.splitlines() if line.startswith("GRANT "))
+        self.assertEqual(grants, (
+            f"GRANT SELECT, INSERT ON TABLE generation_documents TO {worker.WORKER_ROLE};",
+            f"GRANT SELECT ON TABLE generation_documents TO {worker.METRICS_ROLE};",
+        ))
+        self.assertNotIn("UPDATE", self.text)
+        self.assertNotIn("DELETE", self.text)
+
+    def test_replacement_generation_check_keeps_the_byte_limit_and_optional_sample(self) -> None:
+        self.assertIn("ALTER TABLE index_generations DROP CONSTRAINT index_generations_gen_id_check;", self.sql)
+        self.assertIn("ALTER TABLE index_generations ADD CONSTRAINT index_generations_gen_id_check", self.sql)
+        match = re.search(r"gen_id ~ '([^']+)'", self.text)
+        self.assertIsNotNone(match)
+        assert match is not None
+        self.assertEqual(match.group(1), f"^{worker.GENERATION_PATTERN}$")
+        self.assertIn("octet_length(gen_id) < 255", self.sql)
+        base = f"{worker.COLLECTION_NAMES[0]}__corpus-2099-01-03__fictitious-space"
+        for value in (base, sample.sample_name(base)):
+            with self.subTest(value=value):
+                self.assertIsNotNone(re.fullmatch(match.group(1), value))
+        for suffix in ("__unknown", "__sample__sample", "__sample-extra"):
+            with self.subTest(suffix=suffix):
+                self.assertIsNone(re.fullmatch(match.group(1), base + suffix))
 
 
 class Migration0019(unittest.TestCase):

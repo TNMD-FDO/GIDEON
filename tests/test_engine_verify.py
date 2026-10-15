@@ -84,12 +84,18 @@ profiles:
       dram_gb: 1
       data_volume_gb: 1
     memory:
+      qdrant:
+        gb: 1
       {ENGINE_SERVICE_NAME}:
         gb: 1
         role: generator
       {EMBED.service_name}:
         gb: 1
         role: embed
+    chunk_guards:
+      serving_ceiling_million_chunks: 2
+      build_refusal_million_chunks: 1
+      resident_bytes_per_chunk: 400
     embedding_space:
       id: fixture-embed-space
       role: embed

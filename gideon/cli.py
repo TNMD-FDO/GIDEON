@@ -26,7 +26,6 @@ import gideon
 from gideon.host import cli as host_cli
 from gideon.host import report
 from gideon.host.cotenants import ACKNOWLEDGE_DISRUPTION_FLAG
-from gideon.host.index.build import SAMPLE_LANDING
 from gideon.host.index.generations import COLLECTIONS
 from gideon.host.render.ci import PRODUCTION_STACK, STACKS
 from gideon.host.render.grafana import START_HERE_CARD
@@ -131,6 +130,14 @@ def _run_eval(args: argparse.Namespace) -> int:
     from gideon.evaluation import command
 
     return host_cli._guarded("eval run", command.run_eval, args)
+
+
+def _index_build(args: argparse.Namespace) -> int:
+    if args.sample:
+        from gideon.evaluation import sample
+
+        return host_cli._guarded("index build", sample.run_sample_build, args)
+    return host_cli.run_index_build(args)
 
 
 def _run_reference(args: argparse.Namespace) -> int:
@@ -350,7 +357,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     watch.set_defaults(handler=host_cli.run_corpus_watch, command_path="corpus watch")
     corpus_install = corpus_sub.add_parser(
-        "install", help="fetch, verify, stage, and ingest each court's rows, then measure its citation edges against the dump's map"
+        "install", help="fetch, verify, stage, and ingest each court's rows, then measure its citation edges against the dump's map, then build the generations whose inputs changed"
     )
     corpus_install.add_argument("label", help="lockfile label, e.g. corpus-2026-08-31")
     corpus_install.set_defaults(handler=host_cli.run_corpus_install, command_path="corpus install")
@@ -370,8 +377,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     build.add_argument("collection", choices=[item.name for item in COLLECTIONS], help="collection to build")
     build.add_argument("--lockfile", metavar="LABEL", help="committed corpus lockfile label; defaults to the newest")
-    build.add_argument("--sample", action="store_true", help=f"build the eval sample ({SAMPLE_LANDING})")
-    build.set_defaults(handler=host_cli.run_index_build, command_path="index build")
+    build.add_argument(
+        "--sample", action="store_true",
+        help="build the eval sample generation on the CI sibling, without clusters, risk states, or a report",
+    )
+    build.set_defaults(handler=_index_build, command_path="index build")
     promote = _stub_parser(
         index_sub, "promote", "index promote", "switch serving to a generation"
     )

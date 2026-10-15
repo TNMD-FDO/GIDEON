@@ -19,6 +19,14 @@ IMAGE_DIGEST = "sha256:" + "a" * 64
 NEW_IMAGE_DIGEST = "sha256:" + "b" * 64
 MODEL_REVISION = "c" * 40
 NEW_MODEL_REVISION = "d" * 40
+FICTITIOUS_GUARDED_MEMORY = """    chunk_guards:
+      serving_ceiling_million_chunks: 2
+      build_refusal_million_chunks: 1
+      resident_bytes_per_chunk: 400
+    memory:
+      qdrant:
+        gb: 1
+"""
 
 
 def _models_lock(*, revision: str = MODEL_REVISION, second: bool = False) -> str:
@@ -36,8 +44,8 @@ def _models_lock(*, revision: str = MODEL_REVISION, second: bool = False) -> str
             "        vram_gb: 2\n"
             "      dram_gb: 2\n"
             "      data_volume_gb: 2\n"
-            "    memory:\n"
-            "      generator:\n"
+            + FICTITIOUS_GUARDED_MEMORY
+            + "      generator:\n"
             "        gb: 8\n"
             "        role: generator\n"
             "    models:\n"
@@ -69,8 +77,8 @@ def _models_lock(*, revision: str = MODEL_REVISION, second: bool = False) -> str
         "        vram_gb: 1\n"
         "      dram_gb: 1\n"
         "      data_volume_gb: 1\n"
-        "    memory:\n"
-        "      generator:\n"
+        + FICTITIOUS_GUARDED_MEMORY
+        + "      generator:\n"
         "        gb: 7\n"
         "        role: generator\n"
         "    models:\n"

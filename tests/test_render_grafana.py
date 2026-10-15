@@ -24,6 +24,7 @@ from test_render import render_templates
 from gideon.host.corpus import record
 from gideon.host.egress import load_egress_allowlist
 from gideon.host.images import load_image_lock
+from gideon.host.index.reserve import ALERT_RESERVE_MULTIPLIER
 from gideon.host.lock import load_host_lock, load_host_lock_text
 from gideon.host.models import (
     HardwareProfile,
@@ -44,6 +45,7 @@ from gideon.host.render.grafana import (
     DASHBOARDS_MOUNT,
     DATASOURCES_TEMPLATE,
     DRILL_MAX_GAP_DAYS,
+    FILESYSTEM_LOW_PERCENT,
     FILESYSTEMS_FREE_TITLE,
     FRONT_DOOR_BOARDS,
     GRAFANA_SILENCES_ROUTE,
@@ -85,6 +87,16 @@ EXAMPLE = ROOT / "config/site.example.yaml"
 SECOND = ROOT / "tests/fixtures/site/second-office.yaml"
 FULL_DN = ROOT / "tests/fixtures/site/dn-groups.yaml"
 ESCAPED_DN = ROOT / "tests/fixtures/site/dn-groups-escaping.yaml"
+
+
+def data_volume_percent(rule: dict[str, Any]) -> int:
+    """Read the percent floor from the rendered data-volume math expression."""
+
+    expression = next(item for item in rule["data"] if item["refId"] == "D")["model"]["expression"]
+    match = re.match(r"\(\$\{[A-Za-z_][A-Za-z0-9_]*\} < ([0-9]+)\) \|\|", expression)
+    if match is None:
+        raise AssertionError(f"data-volume math has no percent comparison: {expression}")
+    return int(match.group(1))
 
 
 def inputs(site_path: Path = EXAMPLE, **overrides: object) -> RenderInputs:
@@ -477,11 +489,7 @@ class Overview(unittest.TestCase):
             paged_mountpoints.update(matchers[0].split("|"))
         self.assertEqual(expected_mountpoints, paged_mountpoints)
         data_rule = by_uid["gideon-data-volume-low"]
-        data_threshold = next(
-            item
-            for item in data_rule["data"]
-            if item["refId"] == data_rule["condition"]
-        )["model"]["conditions"][0]["evaluator"]["params"][0]
+        data_threshold = data_volume_percent(data_rule)
         green_step = next(
             step
             for step in panel["fieldConfig"]["defaults"]["thresholds"]["steps"]
@@ -593,12 +601,15 @@ class Overview(unittest.TestCase):
                     ):
                         panel = panels[title]
                         rule = rules[rule_uid]
-                        condition = next(
-                            item for item in rule["data"] if item["refId"] == rule["condition"]
-                        )
-                        evaluator = condition["model"]["conditions"][0]["evaluator"]
-                        self.assertEqual(evaluator["type"], evaluator_type)
-                        line = evaluator["params"][0]
+                        if rule_uid == "gideon-data-volume-low":
+                            line = data_volume_percent(rule)
+                        else:
+                            condition = next(
+                                item for item in rule["data"] if item["refId"] == rule["condition"]
+                            )
+                            evaluator = condition["model"]["conditions"][0]["evaluator"]
+                            self.assertEqual(evaluator["type"], evaluator_type)
+                            line = evaluator["params"][0]
                         steps = panel["fieldConfig"]["defaults"]["thresholds"]["steps"]
                         self.assertEqual(steps[-1], {"color": colour, "value": line // divisor})
                         self.assertEqual(
@@ -1317,6 +1328,72 @@ class Alerting(unittest.TestCase):
         }
         self.assertEqual(uids_by_host[True], uids_by_host[False] - gpu_only_rules)
 
+    def test_data_volume_rule_combines_percent_and_measured_reserve_as_one_condition(self) -> None:
+        for site_path, no_gpu in ((EXAMPLE, False), (SECOND, False), (EXAMPLE, True)):
+            with self.subTest(site=site_path.name, no_gpu=no_gpu):
+                document = yaml.safe_load(GrafanaRulesArtifact().emit(inputs(site_path, no_gpu=no_gpu)))
+                rules = {rule["uid"]: rule for group in document["groups"] for rule in group["rules"]}
+                rule = rules["gideon-data-volume-low"]
+                self.assertEqual(rule["condition"], "E")
+                self.assertEqual(rule["for"], "0s")
+                self.assertEqual(rule["noDataState"], "OK")
+                self.assertEqual(rule["execErrState"], "OK")
+                self.assertEqual(rule["labels"], {"class": "page"})
+                self.assertFalse(rule["isPaused"])
+                self.assertEqual(rule["annotations"]["runbook"], "docs/runbooks/observability.md §4")
+                self.assertEqual(rule["annotations"]["summary"],
+                    f"The data volume has less than {FILESYSTEM_LOW_PERCENT} percent free or less than "
+                    f"{ALERT_RESERVE_MULTIPLIER} times the promoted generations' bytes free")
+                data = {item["refId"]: item for item in rule["data"]}
+                self.assertEqual(list(data), ["A", "B", "C", "A_reduced", "B_reduced", "C_reduced", "D", "E"])
+                self.assertEqual(rule["data"][0], data["A"])
+                self.assertEqual(data["A"], {
+                    "refId": "A", "relativeTimeRange": {"from": 60, "to": 0},
+                    "datasourceUid": "prometheus", "model": {
+                        "datasource": {"type": "prometheus", "uid": "prometheus"},
+                        "expr": '100 * node_filesystem_avail_bytes{mountpoint="/data"} / node_filesystem_size_bytes{mountpoint="/data"}',
+                        "instant": True, "intervalMs": 1000, "maxDataPoints": 43200, "refId": "A",
+                    },
+                })
+                self.assertEqual(data["B"]["datasourceUid"], data["A"]["datasourceUid"])
+                self.assertEqual(data["B"]["relativeTimeRange"], data["A"]["relativeTimeRange"])
+                self.assertEqual(data["B"]["model"], {
+                    **data["A"]["model"], "expr": 'node_filesystem_avail_bytes{mountpoint="/data"}', "refId": "B",
+                })
+                backup = rules["gideon-backup-set-overdue"]["data"][0]
+                self.assertEqual(data["C"]["datasourceUid"], backup["datasourceUid"])
+                self.assertEqual(data["C"]["relativeTimeRange"], backup["relativeTimeRange"])
+                for key in ("datasource", "format", "rawQuery"):
+                    self.assertEqual(data["C"]["model"][key], backup["model"][key])
+                self.assertEqual(data["C"]["model"]["refId"], "C")
+                self.assertEqual(" ".join(data["C"]["model"]["rawSql"].split()),
+                    "SELECT COALESCE(sum(bytes), 0) AS value FROM public.index_generations WHERE state = 'live'")
+                for query, reducer, seconds in (("A", "mean", 300), ("B", "last", 0), ("C", "last", 0)):
+                    reduced = data[f"{query}_reduced"]
+                    self.assertEqual(reduced["relativeTimeRange"], {"from": seconds, "to": 0})
+                    self.assertEqual(reduced["datasourceUid"], "__expr__")
+                    self.assertEqual(reduced["model"], {
+                        "datasource": {"type": "__expr__", "uid": "__expr__"},
+                        "expression": query, "reducer": reducer, "refId": f"{query}_reduced", "type": "reduce",
+                    })
+                self.assertEqual(data["D"]["datasourceUid"], "__expr__")
+                self.assertEqual(data["D"]["model"], {
+                    "datasource": {"type": "__expr__", "uid": "__expr__"}, "refId": "D", "type": "math",
+                    "expression": (
+                        f"(${{A_reduced}} < {FILESYSTEM_LOW_PERCENT}) || "
+                        f"(${{B_reduced}} < {ALERT_RESERVE_MULTIPLIER} * ${{C_reduced}})"
+                    ),
+                })
+                self.assertEqual(data_volume_percent(rule), FILESYSTEM_LOW_PERCENT)
+                threshold = data["E"]
+                self.assertEqual(threshold["datasourceUid"], "__expr__")
+                self.assertEqual(threshold["model"]["type"], "threshold")
+                self.assertEqual(threshold["model"]["expression"], "D")
+                self.assertEqual(threshold["model"]["conditions"], [{
+                    "evaluator": {"params": [0], "type": "gt"}, "operator": {"type": "and"},
+                    "query": {"params": ["D", "5m", "now"]}, "reducer": {"params": [], "type": "avg"}, "type": "query",
+                }])
+
     def test_host_filesystem_rule_covers_both_mountpoints_and_reuses_data_threshold(self) -> None:
         """Each rendered host filesystem page follows its exact contract."""
 
@@ -1356,18 +1433,14 @@ class Alerting(unittest.TestCase):
                     for rule in group["rules"]
                     if rule["uid"] == "gideon-data-volume-low"
                 )
-                data_evaluator = next(
-                    item
-                    for item in data_rule["data"]
-                    if item["refId"] == data_rule["condition"]
-                )["model"]["conditions"][0]["evaluator"]
+                data_threshold = data_volume_percent(data_rule)
                 filesystem_evaluator = next(
                     item
                     for item in rule["data"]
                     if item["refId"] == rule["condition"]
                 )["model"]["conditions"][0]["evaluator"]
                 self.assertEqual(filesystem_evaluator["type"], "lt")
-                self.assertEqual(filesystem_evaluator["params"], data_evaluator["params"])
+                self.assertEqual(filesystem_evaluator["params"], [data_threshold])
                 self.assertEqual(
                     rule["annotations"]["summary"],
                     "The filesystem {{ $labels.mountpoint }} has less than 15 percent free",

@@ -12,6 +12,11 @@ DATABASE_PORT_ENV: Final = "GIDEON_WORKER_DB_PORT"
 DATABASE_NAME_ENV: Final = "GIDEON_WORKER_DB_NAME"
 DATABASE_ROLE_ENV: Final = "GIDEON_WORKER_DB_ROLE"
 PASSWORD_FILE_ENV: Final = "GIDEON_WORKER_PASSWORD_FILE"
+CORPUS_DATABASE_HOST_ENV: Final = "GIDEON_WORKER_CORPUS_DB_HOST"
+CORPUS_DATABASE_PORT_ENV: Final = "GIDEON_WORKER_CORPUS_DB_PORT"
+CORPUS_DATABASE_NAME_ENV: Final = "GIDEON_WORKER_CORPUS_DB_NAME"
+CORPUS_DATABASE_ROLE_ENV: Final = "GIDEON_WORKER_CORPUS_DB_ROLE"
+CORPUS_PASSWORD_FILE_ENV: Final = "GIDEON_WORKER_CORPUS_PASSWORD_FILE"
 CONCURRENCY_ENV: Final = "GIDEON_WORKER_CONCURRENCY"
 OPENSEARCH_URL_ENV: Final = "GIDEON_WORKER_OPENSEARCH_URL"
 OPENSEARCH_USER_ENV: Final = "GIDEON_WORKER_OPENSEARCH_USER"
@@ -43,6 +48,11 @@ class Settings:
     qdrant_key_file: Path
     embed_url: str
     embed_key_file: Path
+    corpus_database_host: str
+    corpus_database_port: int
+    corpus_database_name: str
+    corpus_database_role: str
+    corpus_password_file: Path
 
 
 def _required(environ: Mapping[str, str], name: str) -> str:
@@ -111,18 +121,26 @@ def _http_url(environ: Mapping[str, str], name: str) -> str:
     return value
 
 
+def _database_port(environ: Mapping[str, str], name: str) -> int:
+    port = _positive_integer(environ, name)
+    if port > 65_535:
+        raise WorkerSettingsError(
+            f"Environment variable {name} must be a valid TCP port. "
+            "Fix: rerun sudo python3 -m gideon apply."
+        )
+    return port
+
+
 def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
     """Validate the environment and mounted secrets without retaining their values."""
 
     values = os.environ if environ is None else environ
-    port = _positive_integer(values, DATABASE_PORT_ENV)
-    if port > 65_535:
-        raise WorkerSettingsError(
-            f"Environment variable {DATABASE_PORT_ENV} must be a valid TCP port. "
-            "Fix: rerun sudo python3 -m gideon apply."
-        )
+    port = _database_port(values, DATABASE_PORT_ENV)
     password_file = Path(_required(values, PASSWORD_FILE_ENV))
     read_password(password_file)
+    corpus_port = _database_port(values, CORPUS_DATABASE_PORT_ENV)
+    corpus_password_file = Path(_required(values, CORPUS_PASSWORD_FILE_ENV))
+    read_password(corpus_password_file)
     opensearch_url = _http_url(values, OPENSEARCH_URL_ENV)
     opensearch_user = _required(values, OPENSEARCH_USER_ENV)
     opensearch_password_file = Path(_required(values, OPENSEARCH_PASSWORD_FILE_ENV))
@@ -147,6 +165,11 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         qdrant_key_file=qdrant_key_file,
         embed_url=embed_url,
         embed_key_file=embed_key_file,
+        corpus_database_host=_required(values, CORPUS_DATABASE_HOST_ENV),
+        corpus_database_port=corpus_port,
+        corpus_database_name=_required(values, CORPUS_DATABASE_NAME_ENV),
+        corpus_database_role=_required(values, CORPUS_DATABASE_ROLE_ENV),
+        corpus_password_file=corpus_password_file,
     )
 
 
@@ -159,6 +182,18 @@ def connection_kwargs(settings: Settings) -> dict[str, str | int]:
         "dbname": settings.database_name,
         "user": settings.database_role,
         "password": read_password(settings.password_file),
+    }
+
+
+def corpus_connection_kwargs(settings: Settings) -> dict[str, str | int]:
+    """Resolve the corpus credential when opening a connection."""
+
+    return {
+        "host": settings.corpus_database_host,
+        "port": settings.corpus_database_port,
+        "dbname": settings.corpus_database_name,
+        "user": settings.corpus_database_role,
+        "password": read_password(settings.corpus_password_file),
     }
 
 

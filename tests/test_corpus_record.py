@@ -8,18 +8,22 @@ from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 
+from gideon.host import report, stack, worker
 from gideon.host.corpus.lockfile import load_lockfile, render_errors
 from gideon.host.corpus.record import (
     WATCH_STATE_SQL,
     CutRow,
+    InstalledOutcome,
     Observation,
     WatchState,
+    copy_lockfile,
     read_cut,
     read_lockfiles,
     read_watch_state,
     write_cut,
     write_derived_cut,
     write_install,
+    write_installed,
     write_observations,
 )
 from gideon.host.corpus.sources import SourceDefinition
@@ -40,11 +44,15 @@ KNOWN = {
 class FakeHost(RealHost):
     """Return one psql answer and record its argv and stdin."""
 
-    def __init__(self, *, code: int = 0, stdout: str = "", stderr: str = "") -> None:
+    def __init__(
+        self, *, code: int = 0, stdout: str = "", stderr: str = "",
+        error: OSError | subprocess.SubprocessError | None = None,
+    ) -> None:
         super().__init__()
         self.code = code
         self.stdout = stdout
         self.stderr = stderr
+        self.error = error
         self.calls: list[tuple[list[str], str | None]] = []
 
     def run(
@@ -61,6 +69,8 @@ class FakeHost(RealHost):
         del check, cwd, env, timeout, passthrough
         command = list(argv)
         self.calls.append((command, input))
+        if self.error is not None:
+            raise self.error
         return subprocess.CompletedProcess(command, self.code, self.stdout, self.stderr)
 
 
@@ -185,6 +195,150 @@ class Writer(unittest.TestCase):
         assert isinstance(result, Problem)
         self.assertIn("exit 127", result.problem)
         self.assertIn("corpus cut", result.fix)
+
+
+class InstalledWriter(unittest.TestCase):
+    """The installed move binds its data and parses one transaction's outcome."""
+
+    def setUp(self) -> None:
+        loaded = load_lockfile(FIXTURE, known_sources=KNOWN)
+        self.assertTrue(loaded.ok, render_errors(loaded.errors))
+        assert loaded.lockfile is not None
+        self.lockfile = loaded.lockfile
+        self.outcome = {
+            "label": self.lockfile.label, "state": "installed",
+            "installed_at": self.lockfile.cut_at,
+            "superseded": ["corpus-2098-11-01", "corpus-2098-12-01"],
+        }
+
+    def notice(self, value: object) -> str:
+        return "NOTICE: CORPUS_INSTALLED:" + json.dumps(value) + "\n"
+
+    def test_one_transaction_moves_states_and_returns_sorted_labels(self) -> None:
+        host = FakeHost(stderr=self.notice(self.outcome))
+        result = write_installed(
+            host, RENDERED, self.lockfile.label, self.lockfile.cut_at,
+            command_path="corpus install",
+        )
+        self.assertEqual(result, InstalledOutcome(
+            self.lockfile.label, "installed", self.lockfile.cut_at,
+            tuple(self.outcome["superseded"]),
+        ))
+        self.assertEqual(len(host.calls), 1)
+        argv, sql = host.calls[0]
+        self.assertEqual(argv, psql_argv(RENDERED))
+        for value in (self.lockfile.label, self.lockfile.cut_at):
+            self.assertNotIn(value, " ".join(argv))
+        assert sql is not None
+        payload = json.loads(sql.split("\n", 1)[0].removeprefix("\\set v_payload '").removesuffix("'"))
+        self.assertEqual(payload, {
+            "label": self.lockfile.label, "installed_at": self.lockfile.cut_at,
+        })
+        self.assertEqual(sql.count("\\set "), 1)
+        self.assertIn("BEGIN;", sql)
+        self.assertIn("DO $installed$", sql)
+        self.assertIn("current_setting('gideon.installed_payload')::jsonb", sql)
+        self.assertIn("WHERE label = cut_label FOR UPDATE", sql)
+        for tag in ("MISSING", "SUPERSEDED", "NOT_INSTALLING"):
+            self.assertIn(f"CORPUS_LOCKFILE_{tag}:%", sql)
+        self.assertIn("IF installed.state = 'installing' THEN", sql)
+        self.assertIn("SET state = 'installed', installed_at = (payload->>'installed_at')::timestamptz", sql)
+        move = sql.split("WITH moved AS (", 1)[1].split("RAISE NOTICE", 1)[0]
+        self.assertIn("SET state = 'superseded'", move)
+        self.assertIn("WHERE label < cut_label AND state IN ('installing', 'installed')", move)
+        self.assertIn("jsonb_agg(label ORDER BY label)", move)
+        self.assertNotIn("installed_at", move)
+        self.assertNotIn("DELETE", sql)
+        self.assertIn("RAISE NOTICE 'CORPUS_INSTALLED:%'", sql)
+        self.assertTrue(sql.endswith("COMMIT;\n"))
+
+    def test_already_installed_outcome_keeps_its_timestamp(self) -> None:
+        requested_at = "2099-02-03T12:00:00+00:00"
+        host = FakeHost(stderr=self.notice({**self.outcome, "superseded": []}))
+        result = write_installed(
+            host, RENDERED, self.lockfile.label, requested_at, command_path="corpus install",
+        )
+        self.assertEqual(result, InstalledOutcome(
+            self.lockfile.label, "installed", self.lockfile.cut_at, (),
+        ))
+        sql = host.calls[0][1] or ""
+        installing_branch = sql.split("IF installed.state = 'installing' THEN", 1)[1].split("END IF;", 1)[0]
+        self.assertIn("installed_at =", installing_branch)
+        self.assertEqual(sql.count("installed_at ="), 1)
+
+    def test_tagged_failures_have_the_install_fix(self) -> None:
+        for tag, detail in (
+            ("MISSING", "is not recorded"), ("NOT_INSTALLING", "is not installing"),
+            ("SUPERSEDED", "is superseded"),
+        ):
+            with self.subTest(tag=tag):
+                host = FakeHost(code=3, stderr=f"ERROR: CORPUS_LOCKFILE_{tag}:{self.lockfile.label}\n")
+                result = write_installed(
+                    host, RENDERED, self.lockfile.label, self.lockfile.cut_at,
+                    command_path="corpus install",
+                )
+                self.assertIsInstance(result, Problem)
+                assert isinstance(result, Problem)
+                self.assertEqual(result.problem, f"lockfile label {self.lockfile.label} {detail}")
+                fix = "with the newest committed label." if tag == "SUPERSEDED" else "again."
+                self.assertEqual(result.fix, f"Run {report.command('corpus install')} {fix}")
+
+    def test_invalid_or_missing_notices_refuse(self) -> None:
+        for stderr in (
+            "", "NOTICE: CORPUS_INSTALLED:{broken}\n", self.notice([]),
+            self.notice(self.outcome) * 2,
+            *(self.notice({**self.outcome, **change}) for change in (
+                {"label": "corpus-2099-02-03"}, {"state": "installing"},
+                {"installed_at": None}, {"installed_at": "invalid"},
+                {"superseded": None}, {"superseded": [None]},
+                {"superseded": [self.lockfile.label]}, {"superseded": ["invalid"]},
+                {"superseded": ["corpus-2098-12-01", "corpus-2098-11-01"]},
+                {"superseded": ["corpus-2098-12-01"] * 2}, {"unexpected": 1},
+            )),
+            self.notice({key: value for key, value in self.outcome.items() if key != "state"}),
+        ):
+            with self.subTest(stderr=stderr):
+                result = write_installed(
+                    FakeHost(stderr=stderr), RENDERED, self.lockfile.label, self.lockfile.cut_at,
+                    command_path="corpus install",
+                )
+                self.assertIsInstance(result, Problem)
+                assert isinstance(result, Problem)
+                self.assertIn("invalid outcome", result.problem)
+                self.assertIn(stack.logs_fix(RENDERED, "postgres"), result.fix)
+                self.assertIn(report.command("corpus install"), result.fix)
+
+    def test_command_failures_override_notices_without_retry(self) -> None:
+        for code, error in ((3, None), (127, None), (0, FileNotFoundError()), (0, subprocess.SubprocessError())):
+            with self.subTest(code=code, error=error):
+                host = FakeHost(code=code, error=error,
+                                stderr=self.notice(self.outcome) + "private text sentinel")
+                result = write_installed(
+                    host, RENDERED, self.lockfile.label, self.lockfile.cut_at,
+                    command_path="corpus install",
+                )
+                self.assertIsInstance(result, Problem)
+                assert isinstance(result, Problem)
+                self.assertIn(report.command("corpus install"), result.fix)
+                self.assertNotIn("private text sentinel", result.problem + result.fix)
+                if code == 3:
+                    self.assertIn("exit 3", result.problem)
+                    self.assertIn(stack.logs_fix(RENDERED, "postgres"), result.fix)
+                else:
+                    self.assertIn("Restore Docker Compose and psql", result.fix)
+                self.assertEqual(len(host.calls), 1)
+
+    def test_tagged_fix_uses_the_installed_command_form(self) -> None:
+        report.set_installed_form(True)
+        self.addCleanup(report.set_installed_form, False)
+        host = FakeHost(code=3, stderr=f"ERROR: CORPUS_LOCKFILE_MISSING:{self.lockfile.label}\n")
+        result = write_installed(
+            host, RENDERED, self.lockfile.label, self.lockfile.cut_at,
+            command_path="corpus install",
+        )
+        self.assertIsInstance(result, Problem)
+        assert isinstance(result, Problem)
+        self.assertEqual(result.fix, "Run gideon corpus install again.")
 
 
 class DerivedWriter(unittest.TestCase):
@@ -459,3 +613,220 @@ class ObservationReader(unittest.TestCase):
                 assert isinstance(result, Problem)
                 self.assertIn(f"exit {code}", result.problem)
                 self.assertIn("corpus watch", result.fix)
+
+
+COPY_SOURCE = "/fictitious-production-record"
+COPY_TARGET = "/fictitious-sibling-record"
+
+
+def copy_rows() -> list[dict[str, object]]:
+    """Return fictitious source records with a full snapshot and a derived label."""
+    loaded = load_lockfile(FIXTURE, known_sources=KNOWN)
+    assert loaded.lockfile is not None
+    lockfile = loaded.lockfile
+    pin = lockfile.sources["example"]
+    base: dict[str, object] = {
+        "label": lockfile.label, "schema": lockfile.schema, "pipeline": lockfile.pipeline,
+        "cut_at": lockfile.cut_at, "reason": lockfile.reason, "base": None,
+        "installed_at": None, "state": "cut",
+        "sources": [{
+            "source": "example", "snapshot_date": pin.snapshot_date,
+            "base_url": pin.base_url, "mirror_url": pin.mirror_url,
+            "sidecar_sha256": pin.sidecar_sha256,
+            "fetched_at": lockfile.cut_at, "verified_at": lockfile.cut_at,
+        }],
+    }
+    return [base, {
+        **base, "label": "corpus-2099-01-04", "base": base["label"],
+        "cut_at": "2099-01-04T04:05:06+00:00",
+    }]
+
+
+class CopyHost(FakeHost):
+    """Serve source rows and retain sibling rows across copy attempts."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.rows = copy_rows()
+        self.target_rows: dict[str, dict[str, object]] = {}
+        self.read_code = 0
+        self.write_code = 0
+        self.write_error = ""
+
+    def run(
+        self, argv: Command, *, check: bool = False, input: str | None = None,
+        cwd: PathLike | None = None, env: Mapping[str, str] | None = None,
+        timeout: float | None = None, passthrough: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
+        del check, cwd, env, timeout, passthrough
+        command = list(argv)
+        self.calls.append((command, input))
+        assert input is not None
+        if command == psql_argv(COPY_SOURCE):
+            return subprocess.CompletedProcess(
+                command, self.read_code, "\n".join(json.dumps(row) for row in self.rows), "",
+            )
+        assert command == psql_argv(COPY_TARGET)
+        if self.write_code:
+            return subprocess.CompletedProcess(command, self.write_code, "", self.write_error)
+        payload = json.loads(input.split("\\set v_payload '", 1)[1].split("'", 1)[0])
+        label = payload["label"]
+        old = self.target_rows.get(label)
+        if old is not None:
+            comparisons = re.findall(r"AND [^\n]*payload->>'([a-z_]+)'", input)
+            if any(old[field] != payload[field] for field in comparisons):
+                return subprocess.CompletedProcess(command, 3, "", f"CORPUS_LOCKFILE_CONFLICT:{label}")
+        elif payload["base"] is not None and payload["base"] not in self.target_rows:
+            return subprocess.CompletedProcess(command, 3, "", "Base is not recorded")
+        else:
+            self.target_rows[label] = payload
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+
+class LockfileCopy(unittest.TestCase):
+    command_path = "index build caselaw --sample"
+    conflict_fix = "Remove the divergent sibling record and rebuild the sample."
+
+    def test_reads_and_writes_are_stdin_only_and_copy_the_base_before_its_child(self) -> None:
+        host = CopyHost()
+        label = str(host.rows[-1]["label"])
+
+        self.assertIsNone(copy_lockfile(
+            host, COPY_SOURCE, COPY_TARGET, label, self.command_path,
+            conflict_fix=self.conflict_fix,
+        ))
+
+        self.assertEqual(len(host.calls), 1 + len(host.rows))
+        argv, sql = host.calls[0]
+        self.assertEqual(argv, psql_argv(COPY_SOURCE))
+        assert sql is not None
+        self.assertIn(worker.bind("v_label", label), sql)
+        self.assertIn("WITH RECURSIVE", sql)
+        self.assertIn("ORDER BY chain.depth DESC", sql)
+        payloads: list[object] = []
+        for argv, sql in host.calls[1:]:
+            self.assertEqual(argv, psql_argv(COPY_TARGET))
+            assert sql is not None
+            payloads.append(json.loads(sql.split("\\set v_payload '", 1)[1].split("'", 1)[0]))
+            self.assertIn("BEGIN;", sql)
+            self.assertTrue(sql.endswith("COMMIT;\n"))
+        self.assertEqual(payloads, host.rows)
+        self.assertEqual(list(host.target_rows), [row["label"] for row in host.rows])
+        for argv, _ in host.calls:
+            for row in host.rows:
+                self.assertNotIn(str(row["label"]), " ".join(argv))
+                self.assertNotIn(str(row["cut_at"]), " ".join(argv))
+                sources = row["sources"]
+                assert isinstance(sources, list)
+                for pin in sources:
+                    self.assertNotIn(pin["sidecar_sha256"], " ".join(argv))
+                    self.assertNotIn(pin["base_url"], " ".join(argv))
+
+    def test_absent_label_refuses_before_writes_with_a_corpus_install_fix(self) -> None:
+        host = CopyHost()
+        label = str(host.rows[-1]["label"])
+        host.rows = []
+
+        result = copy_lockfile(host, COPY_SOURCE, COPY_TARGET, label, self.command_path, conflict_fix=self.conflict_fix)
+
+        self.assertIsInstance(result, Problem)
+        assert isinstance(result, Problem)
+        self.assertIn(label, result.problem)
+        self.assertIn(f"{report.command('corpus install')} {label}", result.fix)
+        self.assertIn(report.command(self.command_path), result.fix)
+        self.assertEqual(len(host.calls), 1)
+        self.assertEqual(host.target_rows, {})
+
+    def test_both_conflicts_keep_the_callers_recovery_fix(self) -> None:
+        for marker in ("CORPUS_LOCKFILE_CONFLICT:corpus-2099-01-03", "CORPUS_SNAPSHOT_CONFLICT:example:2099-01-02"):
+            with self.subTest(marker=marker):
+                host = CopyHost()
+                host.write_code, host.write_error = 3, marker
+                label = str(host.rows[-1]["label"])
+
+                result = copy_lockfile(host, COPY_SOURCE, COPY_TARGET, label, self.command_path, conflict_fix=self.conflict_fix)
+
+                self.assertIsInstance(result, Problem)
+                assert isinstance(result, Problem)
+                self.assertIn("differs", result.problem)
+                self.assertEqual(result.fix, self.conflict_fix)
+                self.assertEqual(len(host.calls), 2)
+                self.assertEqual(host.target_rows, {})
+
+    def test_recopy_ignores_moved_source_state_and_installation_time(self) -> None:
+        host = CopyHost()
+        label = str(host.rows[-1]["label"])
+        self.assertIsNone(copy_lockfile(host, COPY_SOURCE, COPY_TARGET, label, self.command_path, conflict_fix=self.conflict_fix))
+        original = json.loads(json.dumps(host.target_rows))
+        host.rows = [{
+            **row, "state": "superseded", "installed_at": "2099-01-05T04:05:06+00:00",
+        } for row in host.rows]
+        host.calls.clear()
+
+        self.assertIsNone(copy_lockfile(host, COPY_SOURCE, COPY_TARGET, label, self.command_path, conflict_fix=self.conflict_fix))
+
+        self.assertEqual(host.target_rows, original)
+        for _, sql in host.calls[1:]:
+            assert sql is not None
+            payload = json.loads(sql.split("\\set v_payload '", 1)[1].split("'", 1)[0])
+            self.assertEqual(payload["state"], "superseded")
+            self.assertEqual(payload["installed_at"], "2099-01-05T04:05:06+00:00")
+            self.assertNotIn("UPDATE public.corpus_lockfiles", sql)
+        self.assertEqual(len(host.calls), 1 + len(host.rows))
+
+    def test_recopy_still_refuses_an_immutable_cut_change(self) -> None:
+        for change in ({"pipeline": "1000.0.0"}, {"cut_at": "2099-01-06T04:05:06+00:00"}):
+            with self.subTest(change=change):
+                host = CopyHost()
+                label = str(host.rows[-1]["label"])
+                self.assertIsNone(copy_lockfile(host, COPY_SOURCE, COPY_TARGET, label, self.command_path, conflict_fix=self.conflict_fix))
+                original = json.loads(json.dumps(host.target_rows))
+                host.rows[0].update(change)
+                host.calls.clear()
+
+                result = copy_lockfile(host, COPY_SOURCE, COPY_TARGET, label, self.command_path, conflict_fix=self.conflict_fix)
+
+                self.assertIsInstance(result, Problem)
+                assert isinstance(result, Problem)
+                self.assertIn("differs", result.problem)
+                self.assertEqual(result.fix, self.conflict_fix)
+                self.assertEqual(host.target_rows, original)
+                self.assertEqual(len(host.calls), 2)
+
+    def test_missing_or_malformed_base_chains_refuse_before_any_write(self) -> None:
+        for variant in ("child-only", "reversed", "duplicate", "invalid-json-shape"):
+            with self.subTest(variant=variant):
+                host = CopyHost()
+                label = str(host.rows[-1]["label"])
+                if variant == "child-only":
+                    host.rows = host.rows[1:]
+                elif variant == "reversed":
+                    host.rows.reverse()
+                elif variant == "duplicate":
+                    host.rows.append(host.rows[-1])
+                else:
+                    host.rows[0] = {"label": label}
+
+                result = copy_lockfile(host, COPY_SOURCE, COPY_TARGET, label, self.command_path, conflict_fix=self.conflict_fix)
+
+                self.assertIsInstance(result, Problem)
+                assert isinstance(result, Problem)
+                self.assertEqual(result.problem, "corpus record row is invalid")
+                self.assertIn(stack.logs_fix(COPY_SOURCE, "postgres"), result.fix)
+                self.assertEqual(len(host.calls), 1)
+                self.assertEqual(host.target_rows, {})
+
+    def test_failed_read_refuses_without_copying_or_retrying(self) -> None:
+        host = CopyHost()
+        host.read_code = 3
+        label = str(host.rows[-1]["label"])
+
+        result = copy_lockfile(host, COPY_SOURCE, COPY_TARGET, label, self.command_path, conflict_fix=self.conflict_fix)
+
+        self.assertIsInstance(result, Problem)
+        assert isinstance(result, Problem)
+        self.assertIn("exit 3", result.problem)
+        self.assertIn(stack.logs_fix(COPY_SOURCE, "postgres"), result.fix)
+        self.assertIn(report.command(self.command_path), result.fix)
+        self.assertEqual(len(host.calls), 1)
+        self.assertEqual(host.target_rows, {})

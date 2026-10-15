@@ -490,28 +490,64 @@ $host_unit_rules
         isPaused: false
       - uid: gideon-data-volume-low
         title: Data volume low
-        condition: B
+        condition: E
         data:
           - refId: A
             relativeTimeRange: {from: 60, to: 0}
             datasourceUid: prometheus
             model: {datasource: {type: prometheus, uid: prometheus}, expr: '100 * node_filesystem_avail_bytes{mountpoint="/data"} / node_filesystem_size_bytes{mountpoint="/data"}', instant: true, intervalMs: 1000, maxDataPoints: 43200, refId: A}
           - refId: B
+            relativeTimeRange: {from: 60, to: 0}
+            datasourceUid: prometheus
+            model: {datasource: {type: prometheus, uid: prometheus}, expr: 'node_filesystem_avail_bytes{mountpoint="/data"}', instant: true, intervalMs: 1000, maxDataPoints: 43200, refId: B}
+          - refId: C
+            relativeTimeRange: {from: 60, to: 0}
+            datasourceUid: gideon-rows
+            model:
+              datasource: {type: postgres, uid: gideon-rows}
+              format: table
+              rawQuery: true
+              rawSql: |
+                SELECT COALESCE(sum(bytes), 0) AS value
+                FROM public.index_generations
+                WHERE state = 'live'
+              refId: C
+          - refId: A_reduced
+            relativeTimeRange: {from: 300, to: 0}
+            datasourceUid: __expr__
+            model: {datasource: {type: __expr__, uid: __expr__}, expression: A, reducer: mean, refId: A_reduced, type: reduce}
+          - refId: B_reduced
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model: {datasource: {type: __expr__, uid: __expr__}, expression: B, reducer: last, refId: B_reduced, type: reduce}
+          - refId: C_reduced
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model: {datasource: {type: __expr__, uid: __expr__}, expression: C, reducer: last, refId: C_reduced, type: reduce}
+          - refId: D
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              datasource: {type: __expr__, uid: __expr__}
+              expression: '($${A_reduced} < $filesystem_percent) || ($${B_reduced} < $reserve_multiplier * $${C_reduced})'
+              refId: D
+              type: math
+          - refId: E
             relativeTimeRange: {from: 0, to: 0}
             datasourceUid: __expr__
             model:
               conditions:
-                - {evaluator: {params: [$filesystem_percent], type: lt}, operator: {type: and}, query: {params: [A, 5m, now]}, reducer: {params: [], type: avg}, type: query}
+                - {evaluator: {params: [0], type: gt}, operator: {type: and}, query: {params: [D, 5m, now]}, reducer: {params: [], type: avg}, type: query}
               datasource: {type: __expr__, uid: __expr__}
-              expression: A
+              expression: D
               intervalMs: 1000
               maxDataPoints: 43200
-              refId: B
+              refId: E
               type: threshold
         for: 0s
         noDataState: OK
         execErrState: OK
-        annotations: {summary: The data volume has less than $filesystem_percent percent free, runbook: docs/runbooks/observability.md §4}
+        annotations: {summary: "The data volume has less than $filesystem_percent percent free or less than $reserve_multiplier times the promoted generations' bytes free", runbook: docs/runbooks/observability.md §4}
         labels: {class: page}
         isPaused: false
       - uid: gideon-host-filesystem-low

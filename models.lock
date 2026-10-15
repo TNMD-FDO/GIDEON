@@ -149,7 +149,22 @@ profiles:
       role: embed
       revision: "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af"
       dimensions: 1024
-    # The chunk guards arrive with index build.
+    # The chunk guards are hardware-profile values derived from the memory
+    # table's Qdrant row, never from corpus size or scaled down to a smaller
+    # corpus. The serving ceiling is the Qdrant row divided by the resident
+    # bytes per chunk; the build refusal is the ceiling divided by 1.5.
+    # Here 110 GB / 1,200 bytes per chunk is about 91.7 M, stated as 90 M;
+    # 90 / 1.5 = 60 M. The per-chunk figure starts from the vector store's
+    # RAM wall: 1024 d int8 holds about 1.2 GB resident per million chunks.
+    # E9 corrects it from the first promoted generation's
+    # measured Qdrant RSS divided by its chunk count. The loader reads each
+    # guard as an upper bound: ceiling at most the row / the per-chunk
+    # figure, refusal at most ceiling / 1.5, so a non-whole formula result
+    # still loads. Every scalar is a value-only patch for the pin watch.
+    chunk_guards:
+      serving_ceiling_million_chunks: 90
+      build_refusal_million_chunks: 60
+      resident_bytes_per_chunk: 1200
     models:
       # The generator: GPU 0, whole card, one deployment at the native window.
       # Pinned by Hugging Face repo + revision commit + per-file sha256 and

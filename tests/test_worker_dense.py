@@ -29,13 +29,16 @@ from test_worker_lexical import (
     TEXT,
     StreamConnection,
     chunk_for,
+    citation_for,
     configuration,
     inputs_for,
     opinion_for,
+    sample_scope,
 )
 
 from gideon.host import cas
-from gideon.worker import chunker, dense, lexical, logs, treatment
+from gideon.host.index import sample
+from gideon.worker import chunker, dense, lexical, logs, settings, treatment
 
 WIDTH = 3
 SERVED = "fictitious-embedding-model"
@@ -167,11 +170,42 @@ class LedgerConnection(_CapturedConnection):
     def __init__(self) -> None:
         super().__init__()
         self.fail_statement: str | None = None
+        self.rowcount = 0
+        self.manifest: set[tuple[object, object]] = set()
+        self.ledger: set[object] = set()
+        self.stored_counts: dict[str, object] = {}
+        self.pending_manifest: set[tuple[object, object]] = set()
+        self.pending_ledger: set[object] = set()
+        self.pending_counts: dict[str, object] | None = None
 
     def execute(self, statement: str, parameters: tuple[object, ...]) -> None:
         super().execute(statement, parameters)
         if statement == self.fail_statement:
             raise psycopg.OperationalError("FICTITIOUS_PRIVATE_DETAIL")
+        if statement == dense.MANIFEST_INSERT_SQL:
+            key = (parameters[0], parameters[1])
+            self.rowcount = int(key not in self.manifest | self.pending_manifest)
+            self.pending_manifest.add(key)
+        elif statement == dense.LEDGER_INSERT_SQL:
+            self.pending_ledger.add(parameters[0])
+        elif statement == dense.PROGRESS_SQL:
+            self.pending_counts = json.loads(cast(str, parameters[0]))
+
+    def commit(self) -> None:
+        super().commit()
+        self.manifest.update(self.pending_manifest)
+        self.ledger.update(self.pending_ledger)
+        if self.pending_counts is not None:
+            self.stored_counts = self.pending_counts
+        self.pending_manifest.clear()
+        self.pending_ledger.clear()
+        self.pending_counts = None
+
+    def rollback(self) -> None:
+        super().rollback()
+        self.pending_manifest.clear()
+        self.pending_ledger.clear()
+        self.pending_counts = None
 
 
 class RecordAdapter(unittest.TestCase):
@@ -181,14 +215,20 @@ class RecordAdapter(unittest.TestCase):
         password = Path(temporary.name) / "password"
         password.write_text("fictitious-secret", encoding="utf-8")
         self.writer, self.stream = LedgerConnection(), StreamConnection()
-        connections = iter((self.writer, self.stream))
+        worker_settings = configuration(password)
+        self.configuration = worker_settings
+        record_kwargs = {**settings.connection_kwargs(worker_settings), "autocommit": False}
+        corpus_kwargs = {**settings.corpus_connection_kwargs(worker_settings), "autocommit": False}
         self.calls: list[dict[str, object]] = []
 
         def connect(**kwargs: object):
             self.calls.append(kwargs)
-            return next(connections)
+            if kwargs == record_kwargs:
+                return self.writer
+            self.assertEqual(kwargs, corpus_kwargs)
+            return self.stream
 
-        self.record = dense.PsycopgGenerations(connect=connect, worker_settings=configuration(password))
+        self.record = dense.PsycopgGenerations(connect=connect, worker_settings=worker_settings)
         self.addCleanup(self.record.close)
         chunk = chunk_for()
         self.row = dense.LedgerRow(chunk.content_hash, NAME, dense.point_id(chunk.chunk_id))
@@ -200,26 +240,81 @@ class RecordAdapter(unittest.TestCase):
         generation = lexical.Generation(NAME, "caselaw", "e" * 64, "1.2.3", "fictitious-space", "building")
         self.writer.rows = [astuple(generation)]
         self.assertEqual(self.record.read(NAME), generation)
-        self.writer.rows = [astuple(chunk_for())]
+        self.stream.rows = [astuple(chunk_for())]
         self.assertEqual(self.record.chunks(chunk_for().doc_id, chunk_for().pipeline), (chunk_for(),))
-        self.writer.rows = [astuple(opinion_for())]
+        self.stream.rows = [astuple(opinion_for())]
         self.assertEqual(self.record.opinion(opinion_for().doc_id), opinion_for())
         self.record.resume(NAME)
         self.record.fail(NAME, "embed")
         self.assertEqual(self.writer.statements[-1], (lexical.FAIL_SQL, ("embed", NAME)))
 
+    def test_manifest_ledger_and_actual_insert_count_commit_together_without_text(self) -> None:
+        document = lexical.Document("a" * 64, "b" * 64, "fictions", 419)
+        counts = dense.DenseCounts(dense_manifest=4)
+        updated = self.record.progress(NAME, counts, (self.row,), documents=(document, document))
+        self.assertEqual(updated.dense_manifest, 5)
+        self.assertEqual(self.writer.commits, 1)
+        self.assertEqual(self.writer.ledger, {self.row.content_hash})
+        self.assertEqual(self.writer.manifest, {(NAME, sample.source_id(document.source, document.opinion_id))})
+        self.assertEqual(self.writer.stored_counts, asdict(updated))
+        inserts = [(sql, parameters) for sql, parameters in self.writer.statements if sql == dense.MANIFEST_INSERT_SQL]
+        self.assertEqual(inserts, [(dense.MANIFEST_INSERT_SQL, (
+            NAME, sample.source_id(document.source, document.opinion_id), document.canonical_text_sha256, document.doc_id,
+        ))] * 2)
+        self.assertIn("ON CONFLICT DO NOTHING", dense.MANIFEST_INSERT_SQL)
+        self.assertNotIn(TEXT, str(inserts))
+        self.assertNotIn(opinion_for().docket, str(inserts))
+        again = self.record.progress(NAME, updated, documents=(document,))
+        self.assertEqual(again.dense_manifest, updated.dense_manifest)
+        self.assertEqual(self.writer.stored_counts, asdict(again))
+        self.assertEqual(self.writer.commits, 2)
+
+    def test_manifest_or_progress_failure_rolls_back_the_whole_record_batch(self) -> None:
+        document = lexical.Document("a" * 64, "b" * 64, "fictions", 419)
+        for statement in (dense.MANIFEST_INSERT_SQL, dense.PROGRESS_SQL):
+            with self.subTest(statement=statement):
+                self.writer.fail_statement = statement
+                with self.assertRaises(dense.DenseFailure) as raised:
+                    self.record.progress(NAME, dense.DenseCounts(), (self.row,), documents=(document,))
+                self.assertEqual(raised.exception.reason, "database")
+                self.assertEqual(self.writer.commits, 0)
+                self.assertEqual(self.writer.ledger, set())
+                self.assertEqual(self.writer.manifest, set())
+                self.assertEqual(self.writer.stored_counts, {})
+        self.assertEqual(self.writer.rollbacks, 2)
+
+    def test_grouped_chunk_counts_use_the_corpus_without_committing_an_open_stream(self) -> None:
+        document = lexical.Document("a" * 64, "b" * 64, "fictions", 419)
+        self.stream.rows = [astuple(document), astuple(replace(document, doc_id="c" * 64))]
+        stream = self.record.documents("caselaw", "fictions", NOW.date(), ("court1",))
+        self.addCleanup(getattr(stream, "close", lambda: None))
+        self.assertEqual(next(stream), document)
+        self.stream.rows = [(document.doc_id, 7)]
+        self.assertEqual(self.record.chunk_counts((document.doc_id, "d" * 64), chunk_for().pipeline), {document.doc_id: 7})
+        self.assertEqual(self.stream.commits, 0)
+        self.assertEqual(self.writer.statements, [])
+        sql, parameters = self.stream.statements[-1]
+        self.assertEqual(parameters, ([document.doc_id, "d" * 64], chunk_for().pipeline))
+        self.assertIn("COUNT(*)", sql)
+        self.assertIn("GROUP BY doc_id", sql)
+        self.assertIn("doc_id = ANY(%s)", sql)
+
     def test_scope_count_and_documents_bind_the_same_document_limit_before_chunks(self) -> None:
         for limit in (None, 3):
             with self.subTest(limit=limit):
-                self.writer.rows = [(19,)]
+                self.stream.rows = [(19,)]
                 self.assertEqual(self.record.scope_total("caselaw", "fictions", NOW.date(), ("court1",), "1.2.3", limit), 19)
-                self.assertEqual(self.writer.statements[-1], (dense.SCOPE_TOTAL_SQL, ("caselaw", "fictions", NOW.date(), ["court1"], limit, "1.2.3")))
+                self.assertEqual(self.stream.statements[-1], (dense.SCOPE_TOTAL_SQL, ("caselaw", "fictions", NOW.date(), ["court1"], limit, "1.2.3")))
                 self.assertEqual(dense.SCOPE_TOTAL_SQL.count("COUNT("), 1)
                 self.assertIn("JOIN (" + lexical.DOCUMENTS_SQL + " LIMIT %s) AS scope", dense.SCOPE_TOTAL_SQL)
                 self.assertTrue(dense.SCOPE_TOTAL_SQL.endswith("WHERE c.pipeline = %s"))
-        self.stream.rows = [("a" * 64, "b" * 64)]
-        self.assertEqual(list(self.record.documents("caselaw", "fictions", NOW.date(), ("court1",), 3)), [lexical.Document("a" * 64, "b" * 64)])
-        self.assertEqual(self.stream.statements, [(dense.DOCUMENTS_SQL, ("caselaw", "fictions", NOW.date(), ["court1"], 3))])
+        self.stream.rows = [("a" * 64, "b" * 64, "fictions", 1)]
+        self.assertEqual(list(self.record.documents("caselaw", "fictions", NOW.date(), ("court1",), 3)), [lexical.Document("a" * 64, "b" * 64, "fictions", 1)])
+        self.assertEqual(self.stream.statements, [
+            *((dense.SCOPE_TOTAL_SQL, ("caselaw", "fictions", NOW.date(), ["court1"], limit, "1.2.3"))
+              for limit in (None, 3)),
+            (dense.DOCUMENTS_SQL, ("caselaw", "fictions", NOW.date(), ["court1"], 3)),
+        ])
         self.assertEqual(self.stream.names, ["dense_documents"])
         self.assertEqual(self.stream.itersize, dense.DOCUMENT_BATCH_SIZE)
 
@@ -253,7 +348,7 @@ class RecordAdapter(unittest.TestCase):
 
     def test_progress_commits_ledger_and_counts_once_without_committing_the_stream(self) -> None:
         self.record.start(NAME, dense.DenseCounts())
-        self.stream.rows = [("a" * 64, "b" * 64), ("c" * 64, "d" * 64)]
+        self.stream.rows = [("a" * 64, "b" * 64, "fictions", 1), ("c" * 64, "d" * 64, "fictions", 2)]
         documents = self.record.documents("caselaw", "fictions", NOW.date(), ("court1",))
         next(documents)
         baseline = self.writer.commits
@@ -265,6 +360,69 @@ class RecordAdapter(unittest.TestCase):
         self.assertEqual(json.loads(cast(str, self.writer.statements[-1][1][0])), asdict(counts))
         self.assertEqual(len(list(documents)), 1)
         self.assertEqual(self.stream.commits, 1)
+        self.assertEqual(len(self.calls), 2)
+
+    def test_corpus_reads_and_dense_record_transactions_preserve_the_live_stream(self) -> None:
+        """Corpus cursor reads and sibling ledger commits use separate databases."""
+
+        self.stream.rows = [(19,)]
+        self.assertEqual(self.record.scope_total("caselaw", "fictions", NOW.date(), ("court1",), "1.2.3"), 19)
+        self.assertEqual(self.stream.commits, 0)
+        config = self.configuration
+        self.assertEqual(self.calls, [{
+            "host": config.corpus_database_host, "port": config.corpus_database_port,
+            "dbname": config.corpus_database_name, "user": config.corpus_database_role,
+            "password": "fictitious-secret", "autocommit": False,
+        }])
+        documents = (lexical.Document("a" * 64, "b" * 64, "fictions", 1), lexical.Document("c" * 64, "d" * 64, "fictions", 2))
+        self.stream.rows = [astuple(document) for document in documents]
+        stream = self.record.documents("caselaw", "fictions", NOW.date(), ("court1",))
+        self.addCleanup(getattr(stream, "close", lambda: None))
+        self.assertEqual(next(stream), documents[0])
+        chunk = chunk_for()
+        citation = citation_for(10, 20, "7 Fiction 11", None)
+        opinion = opinion_for()
+        for value, operation, expected in (
+            (chunk, lambda: self.record.chunks(chunk.doc_id, chunk.pipeline), (chunk,)),
+            (citation, lambda: self.record.citations(citation.doc_id), (citation,)),
+            (opinion, lambda: self.record.opinion(opinion.doc_id), opinion),
+        ):
+            with self.subTest(row=type(value).__name__):
+                self.stream.rows = [astuple(value)]
+                self.assertEqual(operation(), expected)
+                self.assertEqual(self.stream.commits, 0)
+                self.assertEqual(self.writer.statements, [])
+        self.stream.rows = [(7,)]
+        self.assertEqual(self.record.scope_total("caselaw", "fictions", NOW.date(), ("court1",), "1.2.3", 3), 7)
+        self.assertEqual(self.stream.commits, 0)
+        generation = lexical.Generation(NAME, "caselaw", "e" * 64, "1.2.3", "fictitious-space", "building")
+        self.writer.rows = [astuple(generation)]
+        self.assertEqual(self.record.read(NAME), generation)
+        self.assertEqual(self.writer.commits, 1)
+        self.assertEqual(self.calls[1], {
+            "host": config.database_host, "port": config.database_port,
+            "dbname": config.database_name, "user": config.database_role,
+            "password": "fictitious-secret", "autocommit": False,
+        })
+        self.writer.rows = [(self.row.content_hash, self.row.gen_id, self.row.point_id)]
+        self.assertEqual(self.record.ledger_rows("fictitious-space", (self.row.content_hash,)), (self.row,))
+        self.assertEqual(self.writer.commits, 2)
+        counts = dense.DenseCounts(dense_total=19, dense_scope=7, dense_embedded=3)
+        for write in (
+            lambda: self.record.resume(NAME),
+            lambda: self.record.start(NAME, counts),
+            lambda: self.record.progress(NAME, counts, (self.row,), (self.row,)),
+            lambda: self.record.finish(NAME, counts, NOW, True),
+            lambda: self.record.finish(NAME, counts, NOW, False),
+            lambda: self.record.fail(NAME, "embed"),
+        ):
+            before = self.writer.commits
+            write()
+            self.assertEqual(self.writer.commits, before + 1)
+            self.assertEqual(self.stream.commits, 0)
+        self.assertEqual(next(stream), documents[1])
+        with self.assertRaises(StopIteration):
+            next(stream)
         self.assertEqual(len(self.calls), 2)
 
     def test_progress_rehomes_in_the_same_transaction_as_inserts_and_counts(self) -> None:
@@ -785,9 +943,10 @@ class FakeDenseRecord:
             cast(str, values["embedding_space"]), "building",
         )
         self.store, self.events = store, events
-        self.document_rows = [lexical.Document("a" * 64, digest), lexical.Document("d" * 64, digest)]
+        self.document_rows = [lexical.Document("a" * 64, digest, "fictions", 1), lexical.Document("d" * 64, digest, "fictions", 2)]
         self.chunk_rows = {"a" * 64: (chunk_for(),), "d" * 64: ()}
         self.ledger: dict[str, dense.LedgerRow] = {}
+        self.manifest: dict[tuple[str, str], lexical.Document] = {}
         self.counts = dense.DenseCounts()
         self.commits: list[tuple[dense.DenseCounts, tuple[dense.LedgerRow, ...], tuple[dense.LedgerRow, ...]]] = []
         self.scopes: list[int | None] = []
@@ -804,6 +963,12 @@ class FakeDenseRecord:
         self.opinion_reads: list[str] = []
         self.text_keys: dict[str, lexical.TextKeys] = {}
         self.key_reads: list[tuple[str, tuple[str, ...]]] = []
+        self.chunk_reads: list[str] = []
+        self.chunk_count_reads: list[tuple[str, ...]] = []
+        self.manifest_commits: list[tuple[lexical.Document, ...]] = []
+        self.open_streams = 0
+        self.closed_streams = 0
+        self.start_counts: list[dense.DenseCounts] = []
 
     def _main(self) -> None:
         assert threading.get_ident() == self.owner, "record touched by a writer thread"
@@ -829,10 +994,21 @@ class FakeDenseRecord:
     def documents(self, collection: str, source: str, snapshot: object, courts: Sequence[str], limit: int | None = None) -> Iterator[lexical.Document]:
         self._main()
         self.limits.append(limit)
-        yield from self.document_rows[:limit]
+        self.open_streams += 1
+        try:
+            yield from self.document_rows[:limit]
+        finally:
+            self.open_streams -= 1
+            self.closed_streams += 1
+
+    def chunk_counts(self, doc_ids: Sequence[str], pipeline: str) -> Mapping[str, int]:
+        self._main()
+        self.chunk_count_reads.append(tuple(doc_ids))
+        return {doc_id: len(self.chunk_rows[doc_id]) for doc_id in doc_ids if self.chunk_rows[doc_id]}
 
     def chunks(self, doc_id: str, pipeline: str) -> tuple[chunker.NewChunk, ...]:
         self._main()
+        self.chunk_reads.append(doc_id)
         return self.chunk_rows[doc_id]
 
     def opinion(self, doc_id: str):
@@ -851,10 +1027,12 @@ class FakeDenseRecord:
 
     def start(self, name: str, counts: dense.DenseCounts) -> None:
         self._main()
+        assert self.open_streams == 0, "The counting stream must close before filling starts."
+        self.start_counts.append(counts)
         self.events.append("start")
         self.counts = counts
 
-    def progress(self, name: str, counts: dense.DenseCounts, inserts: Sequence[dense.LedgerRow] = (), rehomes: Sequence[dense.LedgerRow] = ()) -> None:
+    def progress(self, name: str, counts: dense.DenseCounts, inserts: Sequence[dense.LedgerRow] = (), rehomes: Sequence[dense.LedgerRow] = (), documents: Sequence[lexical.Document] = ()) -> dense.DenseCounts:
         self._main()
         if self.progress_failure is not None:
             raise self.progress_failure
@@ -865,9 +1043,21 @@ class FakeDenseRecord:
         for row in rehomes:
             assert row.content_hash in self.ledger
             self.ledger[row.content_hash] = row
+        inserted = 0
+        for document in documents:
+            assert self.chunk_rows[document.doc_id], "A document without lexical chunks has no manifest row."
+            assert all(dense.point_id(chunk.chunk_id) in self.store.collections[name]
+                       for chunk in self.chunk_rows[document.doc_id]), "A manifest row preceded a point acknowledgement."
+            key = (name, sample.source_id(document.source, document.opinion_id))
+            if key not in self.manifest:
+                self.manifest[key] = document
+                inserted += 1
+        counts = replace(counts, dense_manifest=counts.dense_manifest + inserted)
         self.counts = counts
         self.commits.append((counts, tuple(inserts), tuple(rehomes)))
+        self.manifest_commits.append(tuple(documents))
         self.events.append("commit")
+        return counts
 
     def finish(self, name: str, counts: dense.DenseCounts, at: datetime, limited: bool) -> None:
         self._main()
@@ -884,7 +1074,7 @@ class FakeDenseRecord:
     def fail(self, name: str, reason: str) -> None:
         self.failure = reason
         self.events.append("fail")
-        if self.generation is not None:
+        if self.generation is not None and self.generation.state in {"building", "built", "failed"}:
             self.generation = replace(self.generation, state="failed")
 
     def close(self) -> None:
@@ -956,9 +1146,153 @@ class Build(unittest.TestCase):
             text = f"α🙂 FICTITIOUS UNIQUE TEXT {index}"
             doc_id = f"{index + 1:064x}"
             digest = self.save_text(text)
-            self.record.document_rows.append(lexical.Document(doc_id, digest))
+            self.record.document_rows.append(lexical.Document(doc_id, digest, "fictions", index + 1))
             self.record.chunk_rows[doc_id] = (replace(chunk_for(), doc_id=doc_id, chunk_id=f"{index + 1:032x}" + "a" * 32,
                                                     char_end=len(text), content_hash=hashlib.sha256(text[2:].encode()).hexdigest()),)
+
+    def test_sample_filters_before_chunk_reads_and_counts_kept_chunks_with_the_same_limit(self) -> None:
+        documents, selection = sample_scope(self.digest)
+        self.record.document_rows = list(documents)
+        self.record.chunk_rows = {
+            document.doc_id: (replace(chunk_for(), doc_id=document.doc_id, chunk_id=f"{index + 101:064x}"),)
+            for index, document in enumerate(documents) if index != 1
+        }
+        name = sample.sample_name(NAME)
+        assert self.record.generation is not None
+        self.record.generation = replace(self.record.generation, gen_id=name)
+        counts = self.run_build({**dense_inputs(), "name": name, "sample": selection, "limit": 2})
+        self.assertEqual((counts.dense_total, counts.dense_scope, counts.dense_embedded, counts.dense_manifest), (2, 1, 1, 1))
+        self.assertEqual(self.record.chunk_count_reads, [(documents[0].doc_id, documents[2].doc_id), (documents[0].doc_id,)])
+        self.assertEqual(self.record.chunk_reads, [documents[0].doc_id])
+        self.assertEqual(self.record.scopes, [])
+        self.assertEqual(self.record.limits, [None, 2, 2])
+        self.assertEqual(self.record.start_counts[0].dense_scope, 1)
+        self.assertEqual((self.record.open_streams, self.record.closed_streams), (0, 3))
+        self.assertEqual(set(self.record.manifest), {(name, sample.source_id(documents[0].source, documents[0].opinion_id))})
+
+    def test_gold_outside_the_fill_is_embedded_and_manifested(self) -> None:
+        documents, selection = sample_scope(self.digest)
+        self.record.document_rows = list(documents)
+        self.record.chunk_rows = {
+            document.doc_id: (replace(chunk_for(), doc_id=document.doc_id, chunk_id=f"{index + 101:064x}"),)
+            for index, document in enumerate(documents) if index != 1
+        }
+        name = sample.sample_name(NAME)
+        assert self.record.generation is not None
+        self.record.generation = replace(self.record.generation, gen_id=name)
+        counts = self.run_build({**dense_inputs(), "name": name, "sample": selection})
+        self.assertEqual((counts.dense_scope, counts.dense_embedded, counts.dense_manifest), (2, 2, 2))
+        self.assertEqual(self.record.chunk_reads, [documents[0].doc_id, documents[2].doc_id])
+        self.assertEqual(set(self.record.manifest), {
+            (name, sample.source_id(document.source, document.opinion_id))
+            for index, document in enumerate(documents) if index != 1
+        })
+
+    def test_manifest_waits_for_every_request_of_a_document_and_rerun_inserts_zero(self) -> None:
+        text = "".join(chr(0x1000 + index) for index in range(dense.EMBED_BATCH_TEXTS + 1))
+        document = replace(self.record.document_rows[0], canonical_text_sha256=self.save_text(text))
+        self.record.document_rows = [document]
+        self.record.chunk_rows = {document.doc_id: tuple(
+            replace(chunk_for(), chunk_id=f"{index + 1:064x}", char_start=index, char_end=index + 1,
+                    content_hash=hashlib.sha256(character.encode()).hexdigest(), token_count=1)
+            for index, character in enumerate(text)
+        )}
+        first_commit = threading.Event()
+        guard = threading.Lock()
+        requests = 0
+        commit = self.record.progress
+
+        def reply() -> None:
+            nonlocal requests
+            with guard:
+                requests += 1
+                selected = requests
+            if selected == 2:
+                self.assertTrue(first_commit.wait(timeout=2), "The first request must commit before the last one is acknowledged.")
+
+        def progress(
+            name: str, counts: dense.DenseCounts, inserts: Sequence[dense.LedgerRow] = (),
+            rehomes: Sequence[dense.LedgerRow] = (), documents: Sequence[lexical.Document] = (),
+        ) -> dense.DenseCounts:
+            updated = commit(name, counts, inserts, rehomes, documents)
+            if updated.dense_requests == 1:
+                self.assertEqual(self.record.manifest, {})
+                first_commit.set()
+            return updated
+
+        self.embedder.before_reply = reply
+        with patch.object(self.record, "progress", side_effect=progress):
+            counts = self.run_build()
+        self.assertEqual((counts.dense_requests, counts.dense_manifest), (2, 1))
+        self.assertEqual(self.record.manifest_commits, [(), (document,)])
+        self.assertEqual(len(self.record.ledger), len(text))
+        before = dict(self.record.manifest)
+        self.embedder.before_reply = None
+        again = self.run_build()
+        self.assertEqual((again.dense_requests, again.dense_manifest, again.dense_present), (0, 0, len(text)))
+        self.assertEqual(self.record.manifest, before)
+
+    def test_failed_upsert_never_records_a_manifest_or_ledger(self) -> None:
+        failure = dense.DenseFailure("store", error="FICTITIOUS_PRIVATE_DETAIL")
+        self.store.upsert_failure = failure
+        with self.assertRaises(dense.DenseFailure) as raised:
+            self.run_build()
+        self.assertIs(raised.exception, failure)
+        self.assertEqual(self.record.manifest, {})
+        self.assertEqual(self.record.ledger, {})
+        self.assertEqual(self.record.counts.dense_manifest, 0)
+
+    def test_sample_live_refill_and_its_failure_keep_the_promoted_generation(self) -> None:
+        name = sample.sample_name(NAME)
+        values = {**dense_inputs(), "name": name, "sample": {"gold": [], "fill_per_million": sample.SAMPLE_FILL_MAX}}
+        assert self.record.generation is not None
+        self.record.generation = replace(self.record.generation, gen_id=name, state="live")
+        promoted = self.record.generation
+        self.run_build(values)
+        self.assertEqual(self.record.generation, promoted)
+        self.assertNotIn("resume", self.events)
+        timestamps = (self.record.lexical_built_at, self.record.dense_built_at, self.record.built_at)
+        manifest = dict(self.record.manifest)
+        text = TEXT + " Fictitious refill material."
+        document = lexical.Document("e" * 64, self.save_text(text), "fictions", 419)
+        self.record.document_rows.append(document)
+        self.record.chunk_rows[document.doc_id] = (
+            replace(chunk_for(), doc_id=document.doc_id, chunk_id="f" * 64, char_end=len(text),
+                    content_hash=hashlib.sha256(text[2:].encode()).hexdigest()),
+        )
+        points = dict(self.store.collections[name])
+        self.embedder.failure = dense.DenseFailure("embed")
+        with self.assertRaises(dense.DenseFailure) as raised:
+            self.run_build(values)
+        self.assertEqual((raised.exception.reason, self.record.failure), ("embed", "embed"))
+        self.assertEqual(self.record.generation, promoted)
+        self.assertEqual((self.record.lexical_built_at, self.record.dense_built_at, self.record.built_at), timestamps)
+        self.assertEqual(self.record.manifest, manifest)
+        self.assertEqual(self.store.collections[name], points)
+
+    def test_scope_read_failure_closes_counting_stream_and_keeps_the_first_failure(self) -> None:
+        document = self.record.document_rows[0]
+        failure = dense.DenseFailure("database", error="FICTITIOUS_PRIMARY_DETAIL")
+        closed: list[bool] = []
+
+        def documents(*_args: object) -> Iterator[lexical.Document]:
+            try:
+                yield from (document,) * (dense.DOCUMENT_BATCH_SIZE + 1)
+            finally:
+                closed.append(True)
+                raise OSError("FICTITIOUS_CLEANUP_DETAIL")
+
+        values = {**dense_inputs(), "sample": {"gold": [], "fill_per_million": sample.SAMPLE_FILL_MAX}}
+        with (
+            patch.object(self.record, "documents", side_effect=documents),
+            patch.object(self.record, "chunk_counts", side_effect=failure),
+            self.assertRaises(dense.DenseFailure) as raised,
+        ):
+            self.run_build(values)
+        self.assertIs(raised.exception, failure)
+        self.assertEqual(closed, [True])
+        self.assertNotIn("start", self.events)
+        self.assertEqual(self.record.chunk_reads, [])
 
     def test_first_run_creates_pauses_fills_commits_restores_and_finishes(self) -> None:
         counts = self.run_build()
@@ -1020,6 +1354,7 @@ class Build(unittest.TestCase):
         cas.object_path(self.digest, self.store_root).unlink()
         counts = self.run_build()
         self.assertEqual((counts.dense_present, counts.dense_embedded, counts.dense_copied, counts.dense_requests), (1, 0, 0, 0))
+        self.assertEqual(counts.dense_manifest, 1)
         self.assertEqual(self.record.ledger[chunk.content_hash].point_id, identifier)
         self.assertFalse(self.embedder.calls)
         self.assertFalse(self.record.opinion_reads)
@@ -1120,10 +1455,12 @@ class Build(unittest.TestCase):
             self.run_build()
         self.assertEqual(len(self.store.collections[NAME]), 1)
         self.assertFalse(self.record.ledger)
+        self.assertFalse(self.record.manifest)
         self.record.progress_failure = None
         self.embedder.calls.clear()
         counts = self.run_build()
         self.assertEqual((counts.dense_present, counts.dense_requests), (1, 0))
+        self.assertEqual(counts.dense_manifest, 1)
         self.assertEqual(len(self.record.ledger), 1)
         self.assertFalse(self.embedder.calls)
 
@@ -1138,6 +1475,7 @@ class Build(unittest.TestCase):
         cas.object_path(self.digest, self.store_root).unlink()
         counts = self.run_build()
         self.assertEqual((counts.dense_copied, counts.dense_embedded, counts.dense_texts), (2, 0, 0))
+        self.assertEqual(counts.dense_manifest, 1)
         self.assertEqual(self.store.retrievals, [(home, (identifier,))])
         self.assertEqual(self.record.ledger[chunk.content_hash], dense.LedgerRow(chunk.content_hash, NAME, dense.point_id(chunk.chunk_id)))
         self.assertEqual(len(self.record.commits[0][2]), 1)
@@ -1383,3 +1721,21 @@ class Build(unittest.TestCase):
         self.assertEqual(len(output.getvalue().splitlines()), 1)
         self.assertNotIn(TEXT[2:], output.getvalue())
         self.assertNotIn(opinion_for().docket or "absent-caption", output.getvalue())
+
+    def test_failed_build_logs_the_safe_reason_without_exception_text_or_corpus_content(self) -> None:
+        root = logging.getLogger()
+        handlers, level = root.handlers[:], root.level
+        output = io.StringIO()
+        self.embedder.failure = dense.DenseFailure("embed", error="FICTITIOUS_PRIVATE_DETAIL")
+        try:
+            logs.install_handler(output)
+            with self.assertRaises(dense.DenseFailure):
+                self.run_build()
+        finally:
+            root.handlers[:] = handlers
+            root.setLevel(level)
+        self.assertIn("reason=embed", output.getvalue())
+        self.assertIn("job_id=77", output.getvalue())
+        self.assertIn(NAME, output.getvalue())
+        for sentinel in ("FICTITIOUS_PRIVATE_DETAIL", TEXT, opinion_for().docket, str(self.root)):
+            self.assertNotIn(sentinel, output.getvalue())

@@ -111,6 +111,8 @@ class WorkerSettings(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.password_file = Path(self.directory.name) / "password"
         self.password_file.write_text("first-password\n", encoding="utf-8")
+        self.corpus_password_file = Path(self.directory.name) / "corpus-password"
+        self.corpus_password_file.write_text("fictitious-corpus-password\n", encoding="utf-8")
         self.opensearch_password_file = Path(self.directory.name) / "opensearch-password"
         self.opensearch_password_file.write_text("fictitious-store-password\n", encoding="utf-8")
         self.qdrant_key_file = Path(self.directory.name) / "qdrant-key"
@@ -123,6 +125,11 @@ class WorkerSettings(unittest.TestCase):
             settings.DATABASE_NAME_ENV: "gideon",
             settings.DATABASE_ROLE_ENV: "gideon_worker",
             settings.PASSWORD_FILE_ENV: str(self.password_file),
+            settings.CORPUS_DATABASE_HOST_ENV: "corpus.example.test",
+            settings.CORPUS_DATABASE_PORT_ENV: "6543",
+            settings.CORPUS_DATABASE_NAME_ENV: "example-corpus",
+            settings.CORPUS_DATABASE_ROLE_ENV: "example-reader",
+            settings.CORPUS_PASSWORD_FILE_ENV: str(self.corpus_password_file),
             settings.CONCURRENCY_ENV: "4",
             settings.OPENSEARCH_URL_ENV: "http://opensearch:9200",
             settings.OPENSEARCH_USER_ENV: "example-user",
@@ -142,14 +149,20 @@ class WorkerSettings(unittest.TestCase):
                         environ.pop(name)
                     else:
                         environ[name] = value
-                    with self.assertRaisesRegex(ValueError, name):
+                    with self.assertRaisesRegex(settings.WorkerSettingsError, name) as raised:
                         settings.load_settings(environ)
+                    self.assertIn("Fix:", str(raised.exception))
+                    self.assertIn("apply", str(raised.exception))
 
     def test_port_and_concurrency_refuse_invalid_numbers(self) -> None:
         for name, value in (
             (settings.DATABASE_PORT_ENV, "0"),
             (settings.DATABASE_PORT_ENV, "65536"),
             (settings.DATABASE_PORT_ENV, "bad"),
+            (settings.CORPUS_DATABASE_PORT_ENV, "0"),
+            (settings.CORPUS_DATABASE_PORT_ENV, "-1"),
+            (settings.CORPUS_DATABASE_PORT_ENV, "65536"),
+            (settings.CORPUS_DATABASE_PORT_ENV, "bad"),
             (settings.CONCURRENCY_ENV, "0"),
             (settings.CONCURRENCY_ENV, "bad"),
         ):
@@ -181,6 +194,67 @@ class WorkerSettings(unittest.TestCase):
         self.assertEqual(loaded.embed_key_file, self.embed_key_file)
         self.assertNotIn("fictitious-vector-key", repr(loaded))
         self.assertNotIn("fictitious-embed-key", repr(loaded))
+
+    def test_corpus_connections_use_their_coordinates_and_read_rotated_credentials(self) -> None:
+        """A sibling reads the corpus without its queue credential."""
+
+        loaded = settings.load_settings(self.environ)
+        self.assertEqual(loaded.corpus_password_file, self.corpus_password_file)
+        expected = {
+            "host": self.environ[settings.CORPUS_DATABASE_HOST_ENV],
+            "port": int(self.environ[settings.CORPUS_DATABASE_PORT_ENV]),
+            "dbname": self.environ[settings.CORPUS_DATABASE_NAME_ENV],
+            "user": self.environ[settings.CORPUS_DATABASE_ROLE_ENV],
+            "password": "fictitious-corpus-password",
+        }
+        self.assertEqual(settings.corpus_connection_kwargs(loaded), expected)
+        self.corpus_password_file.write_text("fictitious-rotated-corpus-password\n", encoding="utf-8")
+        self.assertEqual(
+            settings.corpus_connection_kwargs(loaded),
+            {**expected, "password": "fictitious-rotated-corpus-password"},
+        )
+        self.assertEqual(settings.connection_kwargs(loaded)["password"], "first-password")
+        for password in (expected["password"], "fictitious-rotated-corpus-password"):
+            self.assertNotIn(password, repr(loaded))
+
+    def test_corpus_credential_failures_refuse_at_load_and_per_connection(self) -> None:
+        """An unreadable corpus secret refuses with a safe fix."""
+
+        loaded = settings.load_settings(self.environ)
+        for content in (None, b"", b" \n", b"\xff"):
+            with self.subTest(content=content):
+                if content is None:
+                    self.corpus_password_file.unlink()
+                else:
+                    self.corpus_password_file.write_bytes(content)
+                for operation in (
+                    lambda: settings.load_settings(self.environ),
+                    lambda: settings.corpus_connection_kwargs(loaded),
+                ):
+                    with self.assertRaises(settings.WorkerSettingsError) as raised:
+                        operation()
+                    message = str(raised.exception)
+                    self.assertIn(str(self.corpus_password_file), message)
+                    self.assertIn("Fix:", message)
+                    self.assertIn("apply", message)
+        self.corpus_password_file.write_text("fictitious-restored-corpus-password", encoding="utf-8")
+        original_read = Path.read_text
+
+        def deny_corpus(path: Path, *, encoding: str = "utf-8") -> str:
+            if path == self.corpus_password_file:
+                raise PermissionError("FICTITIOUS_PRIVATE_CREDENTIAL_DETAIL")
+            return original_read(path, encoding=encoding)
+
+        with patch.object(Path, "read_text", autospec=True, side_effect=deny_corpus):
+            for operation in (
+                lambda: settings.load_settings(self.environ),
+                lambda: settings.corpus_connection_kwargs(loaded),
+            ):
+                with self.assertRaises(settings.WorkerSettingsError) as raised:
+                    operation()
+                self.assertIn(str(self.corpus_password_file), str(raised.exception))
+                self.assertIn("Fix:", str(raised.exception))
+                self.assertNotIn("FICTITIOUS_PRIVATE_CREDENTIAL_DETAIL", str(raised.exception))
 
     def test_store_url_refuses_invalid_forms_without_echoing_values(self) -> None:
         for name in (settings.OPENSEARCH_URL_ENV, settings.QDRANT_URL_ENV, settings.EMBED_URL_ENV):
@@ -214,7 +288,8 @@ class WorkerSettings(unittest.TestCase):
         with patch.object(settings, "read_password", wraps=settings.read_password) as read:
             loaded = settings.load_settings(self.environ)
             self.assertEqual(read.call_args_list, [
-                call(self.password_file), call(self.opensearch_password_file),
+                call(self.password_file), call(self.corpus_password_file),
+                call(self.opensearch_password_file),
                 call(self.qdrant_key_file), call(self.embed_key_file),
             ])
         self.assertEqual(settings.opensearch_auth(loaded), (loaded.opensearch_user, "fictitious-store-password"))

@@ -1,9 +1,14 @@
-"""Fetch, verify, record, stage, ingest, resolve, measure, and retain a corpus lockfile."""
+"""Install corpus lockfiles through worker jobs and changed collection builds.
+
+Fetch, verify, record, stage, ingest, overruled, and agreement lead to collections,
+installed, clean, and retain.
+"""
 
 import argparse
 import sys
 import time
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
@@ -13,6 +18,7 @@ from gideon.host import (
     backuplock,
     caselaw,
     fetch,
+    models,
     overruled,
     report,
     stack,
@@ -27,6 +33,8 @@ from gideon.host.corpus.lockfile import (
 )
 from gideon.host.corpus.sources import SOURCES, SourceDefinition, data_file
 from gideon.host.courts import CourtMap
+from gideon.host.index import build, buildreport, dense, generations
+from gideon.host.index import record as indexrecord
 from gideon.host.render.worker import (
     AGREEMENT_TABLE,
     CITE_FORMS,
@@ -86,18 +94,21 @@ def _preconditions(
     checkout: Path,
     registry: Sequence[SourceDefinition],
     clock: Callable[[], datetime],
-) -> tuple[StageResult, Lockfile | None, CourtMap | None, backuplock.Claim | None]:
+    site_path: PathLike,
+) -> tuple[StageResult, Lockfile | None, CourtMap | None, tuple[dense.DenseInputs, ...], backuplock.Claim | None]:
+    """Claim the corpus lock and validate the lockfile and generation build inputs."""
+
     label = args.label
     if LABEL.fullmatch(label) is None:
         return StageResult(
             "preconditions", False, f"lockfile label {label!r} has the wrong form",
             f"Use a label in the form corpus-YYYY-MM-DD, then run {report.command(COMMAND_PATH)} again.",
-        ), None, None, None
+        ), None, None, (), None
     if host.geteuid() != 0:
         return StageResult(
             "preconditions", False, "root privileges are required",
             f"Run {report.command(COMMAND_PATH)}, then retry.",
-        ), None, None, None
+        ), None, None, (), None
     claim = backuplock.claim(
         host, command=report.command_name(COMMAND_PATH), now=clock(),
         lock=backuplock.CORPUS_LOCK,
@@ -105,34 +116,45 @@ def _preconditions(
     if claim.refusal is not None:
         return StageResult(
             "preconditions", False, claim.refusal.detail, _retry_fix(claim.refusal.fix),
-        ), None, None, None
+        ), None, None, (), None
     if not claim.taken:
         return StageResult(
             "preconditions", False, "a corpus command is already running in this process",
             f"Wait for it to finish, then run {report.command(COMMAND_PATH)} again.",
-        ), None, None, None
+        ), None, None, (), None
     try:
-        stage, lockfile, court_map = _artifact_preconditions(
-            host, rendered_dir, checkout, registry, label,
+        stage, lockfile, court_map, inputs_by_collection = _artifact_preconditions(
+            host, rendered_dir, checkout, registry, label, site_path,
         )
     except BaseException:
         backuplock.release_claim(host, claim, lock=backuplock.CORPUS_LOCK)
         raise
-    return stage, lockfile, court_map, claim
+    return stage, lockfile, court_map, inputs_by_collection, claim
+
+
+def _build_refusal(problem: Problem) -> StageResult:
+    """Refuse a shared build check, its fix naming this command once."""
+
+    # The profile's refusal names no command; the other checks already name it.
+    fix = problem.fix if report.command(COMMAND_PATH) in problem.fix else _retry_fix(problem.fix)
+    return StageResult("preconditions", False, problem.problem, fix)
 
 
 def _artifact_preconditions(
-    host: WritableBytesHost,
+    host: CorpusHost,
     rendered_dir: PathLike,
     checkout: Path,
     registry: Sequence[SourceDefinition],
     label: str,
-) -> tuple[StageResult, Lockfile | None, CourtMap | None]:
+    site_path: PathLike,
+) -> tuple[StageResult, Lockfile | None, CourtMap | None, tuple[dense.DenseInputs, ...]]:
+    """Read the committed artifacts, corpus record, services, and embedding target."""
+
     loaded, issue = artifacts.load_artifacts(
         host, rendered_dir, checkout, registry, command_path=COMMAND_PATH,
     )
     if issue is not None:
-        return issue, None, None
+        return issue, None, None, ()
     assert loaded is not None
     lockfile = next((item for item in loaded.directory.lockfiles if item.label == label), None)
     if lockfile is None:
@@ -141,7 +163,7 @@ def _artifact_preconditions(
             "preconditions", False, f"lockfile label {label} is not committed",
             f"Use a committed label from corpus/lockfiles/: {labels}; then run "
             f"{report.command(COMMAND_PATH)} again.",
-        ), None, None
+        ), None, None, ()
     if lockfile.pipeline not in PIPELINE_CHUNK_SIZES:
         versions = ", ".join(sorted(PIPELINE_CHUNK_SIZES))
         return StageResult(
@@ -150,32 +172,32 @@ def _artifact_preconditions(
             f"Use a registered pipeline ({versions}) from a new "
             f"{report.command('corpus cut')}, then run {report.command(COMMAND_PATH)} "
             "with its new label.",
-        ), None, None
+        ), None, None, ()
     issue = artifacts.artifact_problem(
         check_courts(lockfile, loaded.court_map), label, command_path=COMMAND_PATH,
     )
     if issue is not None:
-        return issue, None, None
+        return issue, None, None, ()
     issue = artifacts.artifact_problem(
         check_egress_hosts(lockfile, loaded.allowlist), label, command_path=COMMAND_PATH,
     )
     if issue is not None:
-        return issue, None, None
+        return issue, None, None, ()
     row = record.read_cut(host, rendered_dir, label, command_path=COMMAND_PATH)
     if isinstance(row, Problem):
-        return StageResult("preconditions", False, row.problem, row.fix), None, None
+        return StageResult("preconditions", False, row.problem, row.fix), None, None, ()
     if row is not None and row.state == "superseded":
         newest = loaded.directory.newest
         assert newest is not None
         return StageResult(
             "preconditions", False, f"lockfile label {label} is superseded",
             f"Run {report.command(f'{COMMAND_PATH} {newest.label}')} instead.",
-        ), None, None
+        ), None, None, ()
     base_text = ""
     if lockfile.base is not None:
         base_row = record.read_cut(host, rendered_dir, lockfile.base, command_path=COMMAND_PATH)
         if isinstance(base_row, Problem):
-            return StageResult("preconditions", False, base_row.problem, base_row.fix), None, None
+            return StageResult("preconditions", False, base_row.problem, base_row.fix), None, None, ()
         if base_row is None:
             # The record's base column is a foreign key, so a derived lockfile
             # follows its base onto a box, and the refusal comes before any fetch.
@@ -184,15 +206,28 @@ def _artifact_preconditions(
                 f"base {lockfile.base} of lockfile {label} is not recorded on this box",
                 f"Run {report.command(f'{COMMAND_PATH} {lockfile.base}')}, then run "
                 f"{report.command(f'{COMMAND_PATH} {label}')} again.",
-            ), None, None
+            ), None, None, ()
         base_text = f"; base {lockfile.base} {base_row.state}"
+    problem = build.check_services(host, rendered_dir, COMMAND_PATH)
+    if problem is not None:
+        return _build_refusal(problem), None, None, ()
+    target = build.embed_target(host, checkout, site_path, COMMAND_PATH)
+    if isinstance(target, Problem):
+        return _build_refusal(target), None, None, ()
+    inputs_by_collection: list[dense.DenseInputs] = []
+    for collection in generations.COLLECTIONS:
+        inputs = build.collection_inputs(loaded, lockfile, collection, registry, target, COMMAND_PATH)
+        if isinstance(inputs, Problem):
+            return _build_refusal(inputs), None, None, ()
+        inputs_by_collection.append(inputs)
     snapshots_text = ", ".join(
         f"{name} {pin.snapshot_date}" for name, pin in lockfile.sources.items()
     )
     state = row.state if row is not None else "not yet recorded"
     return StageResult(
-        "preconditions", True, f"{label}: {snapshots_text}; {state}{base_text}", "",
-    ), lockfile, loaded.court_map
+        "preconditions", True,
+        f"{label}: {snapshots_text}; {state}{base_text}; embedding space {target.space_id}", "",
+    ), lockfile, loaded.court_map, tuple(inputs_by_collection)
 
 
 def _run_install_stages(
@@ -203,11 +238,15 @@ def _run_install_stages(
     work_root: PathLike,
     lockfile: Lockfile,
     court_map: CourtMap,
+    inputs_by_collection: tuple[dense.DenseInputs, ...],
+    chunk_guards: models.ChunkGuards,
     clock: Callable[[], datetime],
     sleep: Callable[[float], None],
     monotonic: Callable[[], float],
     active_stage: list[str],
 ) -> int:
+    """Run the worker stages, changed generation builds, installed move, and cleanup."""
+
     active_stage[0] = "fetch"
     fetched: dict[str, snapshots.FetchedSource] = {}
     for name, pin in lockfile.sources.items():
@@ -288,24 +327,182 @@ def _run_install_stages(
             _retry_fix(f"Run {stack.logs_fix(rendered_dir, 'postgres')} to inspect the record."),
         )
     report.print_stage(StageResult("record", True, f"{row.label}: {row.state}", ""))
-    active_stage[0] = "stage"
-    staged = _stage(host, rendered_dir, work_root, lockfile, sleep, monotonic)
-    if staged:
-        return staged
-    active_stage[0] = "ingest"
-    ingested = _ingest(host, rendered_dir, work_root, lockfile, court_map, sleep, monotonic)
-    if ingested:
-        return ingested
-    active_stage[0] = "overruled"
-    resolved = _overruled(host, rendered_dir, work_root, lockfile, sleep, monotonic)
-    if resolved:
-        return resolved
-    active_stage[0] = "agreement"
-    measured = _agreement(host, rendered_dir, work_root, lockfile, sleep, monotonic)
-    if measured:
-        return measured
+    installed = row.state == "installed"
+    for name, run in (
+        ("stage", lambda: _stage(host, rendered_dir, work_root, lockfile, sleep, monotonic)),
+        ("ingest", lambda: _ingest(host, rendered_dir, work_root, lockfile, court_map, sleep, monotonic)),
+        ("overruled", lambda: _overruled(host, rendered_dir, work_root, lockfile, sleep, monotonic)),
+        ("agreement", lambda: _agreement(host, rendered_dir, work_root, lockfile, sleep, monotonic)),
+    ):
+        active_stage[0] = name
+        if installed:
+            report.print_stage(StageResult(name, True, f"{lockfile.label} is installed; nothing to do", ""))
+        else:
+            code = run()
+            if code:
+                return code
+    active_stage[0] = "collections"
+    names = _collections(
+        host, rendered_dir, work_root, lockfile, inputs_by_collection, chunk_guards, sleep,
+        monotonic, clock, active_stage,
+    )
+    if isinstance(names, int):
+        return names
+    active_stage[0] = "installed"
+    rows = _installed(host, rendered_dir, lockfile, names, clock, installed=installed)
+    if isinstance(rows, int):
+        return rows
+    active_stage[0] = "clean"
+    code = _clean(host, work_root, lockfile.label)
+    if code:
+        return code
     active_stage[0] = "retain"
-    return _retain(host, rendered_dir, snapshots_root)
+    code = _retain(host, rendered_dir, snapshots_root)
+    if code:
+        return code
+    for generation in rows:
+        if generation.state == "built":
+            print(f"Next: run {report.command(f'index promote {generation.gen_id}')} to serve it.")
+    return 0
+
+
+def _collections(
+    host: CorpusHost, rendered_dir: PathLike, work_root: PathLike, lockfile: Lockfile,
+    inputs_by_collection: tuple[dense.DenseInputs, ...], chunk_guards: models.ChunkGuards,
+    sleep: Callable[[float], None], monotonic: Callable[[], float],
+    clock: Callable[[], datetime], active_stage: list[str],
+) -> tuple[str, ...] | int:
+    """Report changed inputs, record each generation, and build or finish the changed ones."""
+
+    verdicts: list[tuple[dense.DenseInputs, bool, bool]] = []
+    for inputs in inputs_by_collection:
+        row = indexrecord.read_generation_by_inputs(
+            host, rendered_dir, inputs.collection, inputs.inputs_hash, command_path=COMMAND_PATH,
+        )
+        if isinstance(row, Problem):
+            return _refuse("collections", row.problem, row.fix)
+        if row is not None and row.state == "retired":
+            return _refuse(
+                "collections", f"{row.gen_id}: generation is retired",
+                "A retired generation is not rebuilt in place: make a new lockfile with "
+                f"{report.command('corpus cut')} and build it with {report.command(COMMAND_PATH)}, "
+                f"or remove the retired generation with {report.command('index gc')} once its hold ends.",
+            )
+        needs_build = row is None or row.state in {"building", "failed"}
+        # A built generation's stages after built leave no mark but the report row they end in;
+        # a report written before the treatment stage existed carries no treatment object.
+        unfinished = False
+        if row is not None and row.state == "built":
+            newest = buildreport.read_report(host, rendered_dir, row.gen_id, command_path=COMMAND_PATH)
+            if isinstance(newest, Problem):
+                return _refuse("collections", newest.problem, newest.fix)
+            unfinished = newest is None or newest.failed_stage is not None or newest.treatment is None
+        verdict = "needs build" if needs_build else "unchanged"
+        generation = inputs.name if row is None else f"{row.gen_id} {row.state}"
+        if row is not None and row.failure_reason is not None:
+            generation += f": {row.failure_reason}"
+        if unfinished:
+            generation += ", its treatment and report to finish"
+        report.print_stage(StageResult(
+            "collections", True,
+            f"{inputs.collection}: {verdict}; generation {generation}, inputs hash {inputs.inputs_hash}", "",
+        ))
+        verdicts.append((inputs, needs_build, unfinished))
+    to_finish = sum(unfinished for _, _, unfinished in verdicts)
+    report.print_stage(StageResult(
+        "collections", True,
+        f"{sum(needs_build for _, needs_build, _ in verdicts)} of {len(verdicts)} need a build"
+        + (f", {to_finish} to finish" if to_finish else ""), "",
+    ))
+    names: list[str] = []
+    for inputs, needs_build, unfinished in verdicts:
+        active_stage[0] = "generation"
+        started_at = monotonic()
+        outcome = indexrecord.write_building(host, rendered_dir, inputs, command_path=COMMAND_PATH)
+        if isinstance(outcome, Problem):
+            return _refuse("generation", outcome.problem, outcome.fix)
+        report.print_stage(StageResult(
+            "generation", True, f"{outcome.name}: {outcome.state}, {outcome.outcome}", "",
+        ))
+        names.append(outcome.name)
+        if needs_build:
+            result = build.build_generation(
+                host, rendered_dir, replace(inputs, name=outcome.name), COMMAND_PATH,
+                created=outcome.outcome == "created", started_at=started_at, sleep=sleep,
+                monotonic=monotonic, clock=clock, active_stage=active_stage,
+                treatment_snapshot=build.treatment_snapshot(lockfile), chunk_guards=chunk_guards,
+                work_root=work_root,
+            )
+            if result:
+                return result
+        elif unfinished:
+            result = build.finish_generation(
+                host, rendered_dir, replace(inputs, name=outcome.name), COMMAND_PATH,
+                started_at=started_at, monotonic=monotonic, active_stage=active_stage,
+                treatment_snapshot=build.treatment_snapshot(lockfile), work_root=work_root,
+            )
+            if result:
+                return result
+    return tuple(names)
+
+
+def _installed(
+    host: CorpusHost, rendered_dir: PathLike, lockfile: Lockfile,
+    names: tuple[str, ...], clock: Callable[[], datetime], *, installed: bool = False,
+) -> tuple[indexrecord.GenerationRow, ...] | int:
+    """Require finished generations, then record the installed label and superseded rows."""
+
+    rows: list[indexrecord.GenerationRow] = []
+    for name in names:
+        row = indexrecord.read_generation(host, rendered_dir, name, command_path=COMMAND_PATH)
+        if isinstance(row, Problem):
+            return _refuse("installed", row.problem, row.fix)
+        if row is None or row.state not in {"built", "live"}:
+            state = "missing" if row is None else row.state
+            return _refuse(
+                "installed", f"generation {name} is {state}",
+                f"Run {report.command(COMMAND_PATH)} again.",
+            )
+        rows.append(row)
+    installed_at = clock()
+    if installed_at.tzinfo is None:
+        return _refuse("installed", "install clock has no timezone",
+                       f"Use a UTC clock, then run {report.command(COMMAND_PATH)} again.")
+    outcome = record.write_installed(
+        host, rendered_dir, lockfile.label, installed_at.astimezone(UTC).isoformat(),
+        command_path=COMMAND_PATH,
+    )
+    if isinstance(outcome, Problem):
+        return _refuse("installed", outcome.problem, outcome.fix)
+    detail = "installed (kept)" if installed else f"installed at {outcome.installed_at}"
+    superseded = f"superseded {', '.join(outcome.superseded)}" if outcome.superseded else "none superseded"
+    report.print_stage(StageResult("installed", True, f"{outcome.label}: {detail}; {superseded}", ""))
+    return tuple(rows)
+
+
+def _clean(host: CorpusHost, work_root: PathLike, label: str) -> int:
+    """Remove a label's whole work directory, including an interrupted removal."""
+
+    directory = Path(work_root) / label
+    try:
+        names = host.listdir(work_root)
+    except OSError as exc:
+        return _refuse(
+            "clean", f"work root {work_root} could not be listed ({type(exc).__name__})",
+            _retry_fix(f"Restore access to {work_root}."),
+        )
+    if label not in names:
+        report.print_stage(StageResult("clean", True, f"{directory} is absent; nothing removed", ""))
+        return 0
+    try:
+        host.rmtree(directory)
+    except OSError as exc:
+        return _refuse(
+            "clean", f"could not remove {directory} ({type(exc).__name__})",
+            _retry_fix(f"Restore access to {directory}."),
+        )
+    report.print_stage(StageResult("clean", True, f"removed {directory}", ""))
+    return 0
 
 
 def _stage(
@@ -940,6 +1137,7 @@ def run_corpus_install(
     host: CorpusHost | None = None,
     rendered_dir: PathLike = "/etc/gideon/rendered",
     checkout: PathLike | None = None,
+    site_path: PathLike = "/etc/gideon/site.yaml",
     snapshots_root: PathLike = SNAPSHOTS_ROOT,
     work_root: PathLike = WORK_ROOT,
     clock: Callable[[], datetime] = _utc_now,
@@ -947,22 +1145,26 @@ def run_corpus_install(
     monotonic: Callable[[], float] = time.monotonic,
     sources: Sequence[SourceDefinition] = SOURCES,
 ) -> int:
-    """Run preconditions, fetch, verify, record, stage, ingest, overruled, agreement, and retain."""
+    """Install a lockfile, build changed generations, clean its work, and retain snapshots."""
     io = host if host is not None else RealHost()
     root = Path(checkout) if checkout is not None else Path(__file__).parents[3]
     active_stage = ["preconditions"]
     lock_claim: backuplock.Claim | None = None
     try:
-        stage, lockfile, court_map, lock_claim = _preconditions(
-            args, io, rendered_dir, root, sources, clock,
+        stage, lockfile, court_map, inputs_by_collection, lock_claim = _preconditions(
+            args, io, rendered_dir, root, sources, clock, site_path,
         )
         if not stage.ok:
             return _refuse("preconditions", stage.detail, stage.fix)
         assert lockfile is not None and court_map is not None
+        chunk_guards = build.chunk_guards(io, root, site_path, COMMAND_PATH)
+        if isinstance(chunk_guards, Problem):
+            refusal = _build_refusal(chunk_guards)
+            return _refuse("preconditions", refusal.detail, refusal.fix)
         report.print_stage(stage)
         return _run_install_stages(
             io, rendered_dir, root, snapshots_root, work_root, lockfile, court_map,
-            clock, sleep, monotonic, active_stage,
+            inputs_by_collection, chunk_guards, clock, sleep, monotonic, active_stage,
         )
     except KeyboardInterrupt:
         if active_stage[0] == "fetch":
@@ -989,6 +1191,51 @@ def run_corpus_install(
             return _refuse(
                 "agreement", "interrupted; agreement jobs continue in the worker",
                 f"Run {report.command(COMMAND_PATH)} again to rejoin them.",
+            )
+        if active_stage[0] == "collections":
+            return _refuse(
+                "collections", "interrupted; the verdicts stand",
+                f"Run {report.command(COMMAND_PATH)} again.",
+            )
+        if active_stage[0] in {"generation", "guard", "reserve", "counts", "built"}:
+            return _refuse(
+                active_stage[0], "interrupted; the row stands",
+                f"Run {report.command(COMMAND_PATH)} again.",
+            )
+        if active_stage[0] == "cluster":
+            return _refuse(
+                "cluster", "interrupted; the clustering continues in the worker",
+                f"Run {report.command(COMMAND_PATH)} again to rejoin it.",
+            )
+        if active_stage[0] == "treatment":
+            return _refuse(
+                "treatment", "interrupted; the generation's states are replaced whole by the next run",
+                f"Run {report.command(COMMAND_PATH)} again.",
+            )
+        if active_stage[0] == "report":
+            return _refuse(
+                "report", "interrupted; the report row may stand",
+                f"Run {report.command(COMMAND_PATH)} again.",
+            )
+        if active_stage[0] == "build":
+            return _refuse(
+                "build", "interrupted; the build continues in the worker",
+                f"Run {report.command(COMMAND_PATH)} again to rejoin it.",
+            )
+        if active_stage[0] == "dense":
+            return _refuse(
+                "dense", "interrupted; the embed continues in the worker",
+                f"Run {report.command(COMMAND_PATH)} again to rejoin it.",
+            )
+        if active_stage[0] == "installed":
+            return _refuse(
+                "installed", "interrupted; the installed move is one transaction",
+                f"Run {report.command(COMMAND_PATH)} again.",
+            )
+        if active_stage[0] == "clean":
+            return _refuse(
+                "clean", "interrupted; a directory removed in part is removed whole by the next run",
+                f"Run {report.command(COMMAND_PATH)} again to finish cleanup.",
             )
         if active_stage[0] == "retain":
             return _refuse(

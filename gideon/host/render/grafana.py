@@ -4,6 +4,7 @@ import json
 from pathlib import PurePosixPath
 from typing import Any, Final
 
+from gideon.host.index.reserve import ALERT_RESERVE_MULTIPLIER
 from gideon.host.ldap import bind_identity
 from gideon.host.render import (
     Artifact,
@@ -131,13 +132,13 @@ UPSTREAM_REPEAT: Final = "8d"
 # exempt: schedule — Grafana's five-day default would forget a sent notice before
 # the repeat ends and send it again.
 NOTIFICATION_LOG_RETENTION: Final = "8d"
-# The page lines below are each one figure, read by its rule and by the
-# Overview card that mirrors it, so a card turns red where its page fires.
+# The lines below set the Overview's colours and their page rules' thresholds.
 # "Backup set overdue" and "Push overdue": a nightly set or push with two
 # hours of grace past the day.
 BACKUP_OVERDUE_SECONDS: Final = 26 * 3600
-# exempt: fixed by rule. "Data volume low" and "Host filesystem low": the data
-# volume's interim free-space line, applied to the host filesystems too.
+# exempt: fixed by rule. "Data volume low" and "Host filesystem low" share
+# this percent floor. The data volume's second line comes from index/reserve.py;
+# the Overview keeps the percent since the second line depends on the record.
 FILESYSTEM_LOW_PERCENT: Final = 15
 # "TLS certificate expiring": two weeks' lead time, since a renewal comes from
 # the office CA.
@@ -346,6 +347,7 @@ class GrafanaRulesArtifact(Artifact):
                 "drill_threshold": drill_overdue_seconds(inputs.site.backup.drill_interval),
                 "backup_threshold": BACKUP_OVERDUE_SECONDS,
                 "filesystem_percent": FILESYSTEM_LOW_PERCENT,
+                "reserve_multiplier": ALERT_RESERVE_MULTIPLIER,
                 "certificate_threshold": CERTIFICATE_EXPIRING_SECONDS,
                 "certificate_days": CERTIFICATE_EXPIRING_SECONDS // 86400,
                 "search_rules": search_rule,

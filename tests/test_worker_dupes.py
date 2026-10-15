@@ -1041,6 +1041,10 @@ class RecordAdapter(unittest.TestCase):
         assert isinstance(payload, str)
         self.assertEqual((json.loads(payload), name), ({"cluster_reused": 1, "cluster_seconds": 2}, NAME))
 
+    def test_documents_statement_selects_exactly_the_document_fields(self) -> None:
+        selected = dupes.DOCUMENTS_SQL.split(" FROM ", 1)[0].removeprefix("SELECT ").split(", ")
+        self.assertEqual([column.split(".")[1] for column in selected], [field.name for field in fields(dupes.Document)])
+
     def test_documents_stream_without_writer_commits_closing_the_cursor(self) -> None:
         self.record.start(NAME, dupes.DupesCounts())
         self.stream.rows = [("a" * 64, "b" * 64, "scotus", NOW.date()), ("c" * 64, "d" * 64, "ca6", NOW.date())]

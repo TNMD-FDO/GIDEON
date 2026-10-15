@@ -84,6 +84,11 @@ class WorkerMetrics(unittest.TestCase):
             qdrant_key_file=password_file,
             embed_url="http://embed.example.test:8000",
             embed_key_file=password_file,
+            corpus_database_host="corpus.example.test",
+            corpus_database_port=6543,
+            corpus_database_name="example-corpus",
+            corpus_database_role="example-reader",
+            corpus_password_file=password_file,
         )
 
     def test_formatter_emits_known_zeros_and_optional_heartbeat(self) -> None:

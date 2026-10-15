@@ -7,7 +7,7 @@ import unittest
 from dataclasses import FrozenInstanceError, asdict, replace
 from datetime import UTC, datetime, timedelta
 
-from test_index_lexical_host import JOB_ID, QueueHost
+from test_index_lexical_host import JOB_ID, QueueHost, sample_inputs
 from test_index_record import NAME, RENDERED, inputs_for, row_for
 
 from gideon.host import caselaw, report, stack, worker
@@ -19,6 +19,7 @@ from gideon.host.index.dense import (
     read_dense,
 )
 from gideon.host.index.lexical import BuildRead
+from gideon.host.index.sample import GoldDocument
 from gideon.host.render.engine import EMBED_SERVICE_NAME
 from gideon.host.render.qdrant import (
     QDRANT_REST_PORT,
@@ -70,6 +71,7 @@ class Defer(unittest.TestCase):
             "courts": {court: asdict(geography) for court, geography in inputs.geography.items()},
             "served_model": inputs.served_model, "dimensions": inputs.dimensions,
         })
+        self.assertNotIn("sample", args)
         for key, value in (("v_task", DENSE_TASK), ("v_queue", DENSE_QUEUE),
                            ("v_lock", f"{DENSE_LOCK_PREFIX}{inputs.name}")):
             self.assertIn(worker.bind(key, value), sql)
@@ -77,6 +79,50 @@ class Defer(unittest.TestCase):
         for value in (inputs.name, inputs.label, inputs.snapshot, inputs.inputs_hash, inputs.served_model):
             self.assertNotIn(value, " ".join(argv))
         self.assertIn(":'v_lock'", sql)
+
+    def test_sample_arguments_reach_the_dense_job_only_on_stdin(self) -> None:
+        sample = sample_inputs()
+        host = QueueHost()
+        inputs = replace(dense_inputs(), sample=sample)
+
+        self.assertEqual(defer_dense(host, RENDERED, inputs), JOB_ID)
+
+        argv, sql = host.calls[0]
+        assert sql is not None
+        args = json.loads(sql.split("\\set v_args '", 1)[1].split("'", 1)[0])
+        self.assertEqual(args["sample"], {
+            "gold": [{"source_id": document.source_id, "sha256": document.sha256} for document in sample.gold],
+            "fill_per_million": sample.fill_per_million,
+        })
+        self.assertNotIn(sample.set_version, sql)
+        for document in sample.gold:
+            self.assertNotIn(document.source_id, " ".join(argv))
+            if document.sha256 is not None:
+                self.assertNotIn(document.sha256, " ".join(argv))
+        self.assertEqual(len(host.calls), 1)
+
+    def test_invalid_sample_refuses_before_a_child_without_echoing_values(self) -> None:
+        sample = sample_inputs()
+        sentinel = "Private dense sample value; do not print"
+        for invalid, field in (
+            (sentinel, "sample"),
+            (replace(sample, gold=(GoldDocument(sentinel, None),)), "source_id"),
+            (replace(sample, gold=(GoldDocument("example:opinion:17", sentinel),)), "sha256"),
+            (replace(sample, fill_per_million=False), "fill_per_million"),
+        ):
+            with self.subTest(field=field):
+                host = QueueHost()
+                result = defer_dense(
+                    host, RENDERED, replace(dense_inputs(), sample=invalid),  # type: ignore[arg-type]
+                    command_path="index build caselaw --sample",
+                )
+                self.assertIsInstance(result, Problem)
+                assert isinstance(result, Problem)
+                self.assertIn("dense", result.problem)
+                self.assertIn(field, result.problem)
+                self.assertNotIn(sentinel, result.problem + result.fix)
+                self.assertIn(report.command("index build caselaw --sample"), result.fix)
+                self.assertEqual(host.calls, [])
 
     def test_limit_is_an_optional_positive_integer_keyword(self) -> None:
         host = QueueHost()

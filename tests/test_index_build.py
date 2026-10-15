@@ -6,29 +6,41 @@ import copy
 import io
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import unittest
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import asdict, replace
 from datetime import date, timedelta
 from typing import Any
 
 import test_corpus_install
-import test_index_treatment
 import yaml  # type: ignore[import-untyped]
-from test_corpus_install import NOW, RENDERED, ROOT, FakeHost
+from test_corpus_install import NOW, RENDERED, ROOT, SITE_PATH, FakeHost
 from test_engine_verify import models_text
 from test_models_lock import VALID, VALID_WITH_SPACE
 
-from gideon.host import backuplock, models, report, stack, staging
+from gideon.cli import build_parser
+from gideon.host import backuplock, models, report, stack, staging, worker
 from gideon.host.corpus.lockfile import load_lockfile, render_lockfile
 from gideon.host.corpus.sources import SOURCES, SourceDefinition
-from gideon.host.index import build, buildreport, dense, generations, treatment
-from gideon.host.index.record import GenerationRow
+from gideon.host.index import (
+    build,
+    buildreport,
+    dense,
+    generations,
+    guards,
+    reserve,
+    sample,
+    treatment,
+)
+from gideon.host.index.record import PromotedRow
+from gideon.host.index.sample import GoldDocument, SampleInputs
+from gideon.host.render.ci import CI_QDRANT_DATA_ROOT, CI_ROOT
 from gideon.host.render.engine import EMBED
 from gideon.host.render.opensearch import OPENSEARCH_SERVICE_NAME
-from gideon.host.render.qdrant import QDRANT_SERVICE_NAME
+from gideon.host.render.qdrant import QDRANT_DATA_ROOT, QDRANT_SERVICE_NAME
 from gideon.host.render.worker import (
     AGREEMENT_RECORD_NAME,
     CLUSTER_BUDGET_SECONDS,
@@ -38,301 +50,51 @@ from gideon.host.render.worker import (
     DUPES_TASK,
     LEXICAL_TASK,
     OVERRULED_SOURCE,
-    STAGE_TABLES,
     WORKER_SERVICE_NAME,
 )
 from gideon.host.sysio import Command, PathLike
 
-SITE_PATH = "/etc/gideon/site.yaml"
-
-
-class BuildHost(FakeHost):
-    """Serve generation records, clustering, build jobs, and a canned treatment distribution."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.site_text: str | None = (ROOT / "config/site.example.yaml").read_text() + "\nhardware_profile: 1x1v-1d\n"
-        self.declared: tuple[str, ...] = (WORKER_SERVICE_NAME, OPENSEARCH_SERVICE_NAME, QDRANT_SERVICE_NAME, EMBED.service_name)
-        self.health = dict.fromkeys(self.declared, "healthy")
-        self.ps_reads = 0
-        self.store_state_code = 0
-        self.store_state_error: OSError | subprocess.SubprocessError | None = None
-        self.store_state_text: str | None = None
-        self.state_read = 2
-        self.generations: dict[str, GenerationRow] = {}
-        self.jobs: dict[int, dict[str, Any]] = {}
-        self.deferred: list[dict[str, Any]] = []
-        self.live_id: int | None = None
-        self.dense_live_id: int | None = None
-        self.cluster_live_id: int | None = None
-        self.task_by_job: dict[int, str] = {}
-        self.active_task = LEXICAL_TASK
-        self.pending_polls = 0
-        self.dense_pending_polls = 0
-        self.cluster_pending_polls = 0
-        self.failure_reason: str | None = None
-        self.dense_failure_reason: str | None = None
-        self.cluster_failure_reason: str | None = None
-        self.finish_stamp: str | None = NOW.isoformat()
-        self.dense_finish_stamp: str | None = NOW.isoformat()
-        self.cluster_finish_stamp: str | None = NOW.isoformat()
-        self.cluster_counts = {"cluster_documents": 60, "cluster_chunks": 60, "cluster_texts": 35,
-                               "cluster_clusters": 3, "cluster_members": 31, "cluster_grouped": 59,
-                               "cluster_boilerplate": 2, "cluster_flagged": 56,
-                               "cluster_seconds": 9, "cluster_reused": 0}
-        self.counts = {"ready": 3, "chunked": 2, "unchunked": 1, "indexed": 7, "present": 4, "seconds": 5}
-        self.dense_counts = {"dense_total": 11, "dense_scope": 11, "dense_present": 3,
-                             "dense_copied": 2, "dense_embedded": 6, "dense_tokens": 120,
-                             "dense_requests": 2, "dense_seconds": 20, "dense_points": 11,
-                             "dense_indexed": 11, "dense_limit": 0}
-        self.dense_progress: Callable[[int], None] | None = None
-        self.dense_polls = 0
-        self.generation_reads = 0
-        self.fail_phase: str | None = None
-        self.interrupt_phase: str | None = None
-        self.statements: list[str] = []
-        self.reports: list[dict[str, Any]] = []
-        self.report_write_code = 0
-        self.treatment_payloads: list[dict[str, Any]] = []
-        self.treatment_results: list[treatment.Treatment] = []
-        self.treatment_distribution = test_index_treatment.treatment_for()
-        self.treatment_distribution = replace(
-            self.treatment_distribution,
-            by_source={"pattern": sum(self.treatment_distribution.by_source.values())},
-        )
-
-    def read_text(self, path: PathLike, *, encoding: str = "utf-8") -> str:
-        if str(path) == SITE_PATH:
-            if self.site_text is None:
-                raise FileNotFoundError(str(path))
-            return self.site_text
-        if str(path) == f"{RENDERED}/compose.yaml":
-            return yaml.safe_dump({"services": {name: {} for name in self.declared}})
-        return super().read_text(path, encoding=encoding)
-
-    def run(
-        self, argv: Command, *, check: bool = False, input: str | None = None,
-        cwd: PathLike | None = None, env: Mapping[str, str] | None = None,
-        timeout: float | None = None, passthrough: bool = False,
-    ) -> subprocess.CompletedProcess[str]:
-        command = list(argv)
-        if input is not None and treatment.MATERIALIZE_SQL in input:
-            self.calls.append(command)
-            self.statements.append(input)
-            payload = json.loads(self._bound(input, "v_payload"))
-            self.treatment_payloads.append(payload)
-            if self.interrupt_phase == "treatment":
-                raise KeyboardInterrupt
-            if self.fail_phase == "treatment":
-                return subprocess.CompletedProcess(command, 3, "", "private diagnostic")
-            snapshot = (
-                None if payload["treatment_source"] is None
-                else f"{payload['treatment_source']}-{payload['treatment_snapshot_date']}"
-            )
-            materialized = replace(
-                self.treatment_distribution,
-                materialized_at=(NOW + timedelta(microseconds=len(self.treatment_results) + 1)).isoformat(),
-                pattern_set=payload["pattern_set"], signal_pattern=payload["signal_pattern"],
-                signal_list=payload["signal_list"], treatment_snapshot=snapshot,
-            )
-            self.treatment_results.append(materialized)
-            return subprocess.CompletedProcess(command, 0, json.dumps(materialized.to_json()), "")
-        if input is not None and "public.build_reports" in input:
-            self.calls.append(command)
-            self.statements.append(input)
-            if self.interrupt_phase == "report":
-                raise KeyboardInterrupt
-            if "INSERT INTO public.build_reports" in input:
-                if self.report_write_code:
-                    return subprocess.CompletedProcess(command, self.report_write_code, "", "private diagnostic")
-                payload = json.loads(self._bound(input, "v_payload"))
-                payload["written_at"] = (NOW + timedelta(microseconds=len(self.reports) + 1)).isoformat()
-                self.reports.append(payload)
-                return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
-            name = self._bound(input, "v_name")
-            newest = next((row for row in reversed(self.reports) if row["gen_id"] == name), None)
-            return subprocess.CompletedProcess(command, 0, json.dumps(newest) if newest is not None else "", "")
-        if command == stack.compose_argv(RENDERED, "ps", "--all", "--format", "json"):
-            self.calls.append(command)
-            self.ps_reads += 1
-            if self.interrupt_phase == "preconditions":
-                raise KeyboardInterrupt
-            if self.ps_reads == self.state_read and self.store_state_error is not None:
-                raise self.store_state_error
-            text = json.dumps([{"Service": name, "State": "running", "Health": self.health[name]} for name in self.health])
-            if self.ps_reads == self.state_read and self.store_state_text is not None:
-                text = self.store_state_text
-            return subprocess.CompletedProcess(command, self.store_state_code if self.ps_reads == self.state_read else 0, text, "private diagnostic")
-        if input is not None and (
-            "public.index_generations" in input or "procrastinate_defer_jobs_v1" in input
-            or "SELECT id FROM procrastinate_jobs" in input or "SELECT id, status, attempts" in input
-        ):
-            self.calls.append(command)
-            self.statements.append(input)
-            if "DO $generation$" in input:
-                phase = "generation"
-            elif "public.index_generations" in input:
-                phase = {DENSE_TASK: "dense-counts", DUPES_TASK: "cluster-counts"}.get(self.active_task, "counts")
-            elif "SELECT id FROM procrastinate_jobs" in input:
-                lock = self._bound(input, "v_lock")
-                self.active_task = (DENSE_TASK if lock.startswith(DENSE_LOCK_PREFIX) else
-                                    DUPES_TASK if lock.startswith(DUPES_LOCK_PREFIX) else LEXICAL_TASK)
-                phase = {DENSE_TASK: "dense-live-job", DUPES_TASK: "cluster-live-job"}.get(self.active_task, "live-job")
-            elif "procrastinate_defer_jobs_v1" in input:
-                self.active_task = self._bound(input, "v_task")
-                phase = {DENSE_TASK: "dense-defer", DUPES_TASK: "cluster-defer"}.get(self.active_task, "defer")
-            else:
-                self.active_task = self.task_by_job[int(self._bound(input, "v_job_id"))]
-                phase = {DENSE_TASK: "dense", DUPES_TASK: "cluster"}.get(self.active_task, "build")
-            if self.interrupt_phase == phase:
-                raise KeyboardInterrupt
-            if self.fail_phase == phase:
-                return subprocess.CompletedProcess(command, 3, "", "private diagnostic")
-            if phase == "generation":
-                payload = json.loads(self._bound(input, "v_payload"))
-                row = next((row for row in self.generations.values() if row.collection == payload["collection"] and row.inputs_hash == payload["inputs_hash"]), None)
-                outcome = "found" if row is not None else "created"
-                if row is None:
-                    row = GenerationRow(
-                        payload["name"], payload["collection"], payload["label"], (payload["label"],),
-                        payload["pipeline"], payload["embedding_space"], payload["inputs_hash"],
-                        "building", None, self.counts, 1024, None, None, None, None, None, NOW.isoformat(),
-                    )
-                elif payload["label"] not in row.lockfiles:
-                    row = replace(row, lockfiles=(*row.lockfiles, payload["label"]))
-                self.generations[row.gen_id] = row
-                notice = {"outcome": outcome, "name": row.gen_id, "state": row.state}
-                return subprocess.CompletedProcess(command, 0, "", "NOTICE: INDEX_GENERATION:" + json.dumps(notice) + "\n")
-            if phase in {"counts", "dense-counts", "cluster-counts"}:
-                self.generation_reads += 1
-                row = self.generations.get(self._bound(input, "v_name"))
-                return subprocess.CompletedProcess(command, 0, json.dumps(asdict(row)) if row is not None else "", "")
-            if phase in {"live-job", "dense-live-job", "cluster-live-job"}:
-                live_id = (self.dense_live_id if self.active_task == DENSE_TASK else
-                           self.cluster_live_id if self.active_task == DUPES_TASK else self.live_id)
-                return subprocess.CompletedProcess(command, 0, str(live_id) if live_id is not None else "", "")
-            if phase in {"defer", "dense-defer", "cluster-defer"}:
-                args = json.loads(self._bound(input, "v_args"))
-                self.next_job += 1
-                self.jobs[self.next_job] = args
-                self.task_by_job[self.next_job] = self.active_task
-                self.deferred.append(args)
-                if self.active_task == DENSE_TASK:
-                    self.dense_live_id = self.next_job
-                elif self.active_task == DUPES_TASK:
-                    self.cluster_live_id = self.next_job
-                else:
-                    self.live_id = self.next_job
-                return subprocess.CompletedProcess(command, 0, str(self.next_job), "")
-            job = int(self._bound(input, "v_job_id"))
-            if self.active_task == DUPES_TASK:
-                pending = self.cluster_pending_polls > 0
-                self.cluster_pending_polls = max(0, self.cluster_pending_polls - 1)
-                status = "doing" if pending else "failed" if self.cluster_failure_reason else "succeeded"
-                name = self.jobs[job]["name"]
-                row = self.generations[name]
-                self.generations[name] = replace(
-                    row, counts={**row.counts, **self.cluster_counts},
-                    clustered_at=row.clustered_at if pending or self.cluster_failure_reason else self.cluster_finish_stamp,
-                    state="failed" if self.cluster_failure_reason and not pending else
-                    "building" if row.state == "failed" else row.state,
-                    failure_reason=self.cluster_failure_reason if not pending else None,
-                )
-                if not pending:
-                    self.cluster_live_id = None
-                return subprocess.CompletedProcess(command, 0, f"{job}|{status}|1", "")
-            if self.active_task == DENSE_TASK:
-                self.dense_polls += 1
-                if self.dense_progress is not None:
-                    self.dense_progress(self.dense_polls)
-                pending = self.dense_pending_polls > 0
-                self.dense_pending_polls = max(0, self.dense_pending_polls - 1)
-                status = "doing" if pending else "failed" if self.dense_failure_reason else "succeeded"
-                name = self.jobs[job]["name"]
-                row = self.generations[name]
-                self.generations[name] = replace(
-                    row, counts={**row.counts, **self.dense_counts},
-                    dense_built_at=row.dense_built_at if pending or self.dense_failure_reason else self.dense_finish_stamp,
-                    built_at=row.built_at if pending or self.dense_failure_reason or self.dense_finish_stamp is None else self.dense_finish_stamp,
-                    state=row.state if pending else "failed" if self.dense_failure_reason else
-                    "built" if self.dense_finish_stamp and row.lexical_built_at else "building",
-                    failure_reason=self.dense_failure_reason if not pending else None,
-                )
-                if not pending:
-                    self.dense_live_id = None
-                return subprocess.CompletedProcess(command, 0, f"{job}|{status}|2", "")
-            if self.pending_polls > 0:
-                self.pending_polls -= 1
-                status = "doing"
-            else:
-                status = "failed" if self.failure_reason else "succeeded"
-                name = self.jobs[job]["name"]
-                row = self.generations[name]
-                self.generations[name] = replace(
-                    row, lexical_built_at=self.finish_stamp,
-                    state="failed" if self.failure_reason else "built" if row.dense_built_at else "building",
-                    failure_reason=self.failure_reason,
-                )
-                self.live_id = None
-            return subprocess.CompletedProcess(command, 0, f"{job}|{status}|1", "")
-        return super().run(argv, check=check, input=input, cwd=cwd, env=env, timeout=timeout, passthrough=passthrough)
 
 class Build(unittest.TestCase):
     def setUp(self) -> None:
         self.fixture = test_corpus_install.Install()
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
-        self.fixture._enable_stage()
-        self.host = BuildHost()
-        self.fixture.host = self.host
-        self.host.work = self.fixture.work
-        self.host.snapshots = self.fixture.snapshots
+        self.host: FakeHost = self.fixture.host
         for label in self.fixture.labels:
             self.fixture._hold_record("cut", label)
-            self.seed_report_work(label)
-        (self.fixture.checkout / "models.lock").write_text(models_text())
+            self.fixture.seed_report_work(label)
+        document = yaml.safe_load(models_text())
+        profile = document["profiles"][document["reference"]]
+        profile["memory"]["qdrant"] = {"gb": 7}
+        profile["chunk_guards"] = {
+            "serving_ceiling_million_chunks": 5, "build_refusal_million_chunks": 3,
+            "resident_bytes_per_chunk": 1300,
+        }
+        (self.fixture.checkout / "models.lock").write_text(yaml.safe_dump(document, sort_keys=False))
         self.time = 0.0
 
-    def seed_report_work(self, label: str) -> None:
-        loaded = load_lockfile(
-            self.fixture.checkout / f"corpus/lockfiles/{label}.yaml",
-            known_sources={self.fixture.source.name: self.fixture.source},
-        )
-        assert loaded.lockfile is not None
-        pin = loaded.lockfile.sources[self.fixture.source.name]
-        entries = {entry.path: entry for entry in pin.entries}
-        args: dict[str, Any] = {
-            "label": label, "snapshot": f"{self.fixture.source.name}-{pin.snapshot_date}",
-            "courts": list(pin.courts or ()),
-            "inputs": {
-                table: {"path": test_corpus_install.data_file(table, pin.snapshot_date),
-                        "sha256": entries[test_corpus_install.data_file(table, pin.snapshot_date)].sha256}
-                for table in STAGE_TABLES
-            },
-        }
-        self.host._write_stage(91, args)
-        for court in args["courts"]:
-            self.host._write_agreement(92, {**args, "court": court})
-
     def run_build(
-        self, label: str | None = None, *, sample: bool = False,
+        self, label: str | None = None, *, sample: SampleInputs | None = None,
         collection: str = "caselaw", sleep: Callable[[float], None] | None = None,
         dense_limit: int | None = None,
         sources: tuple[SourceDefinition, ...] | None = None,
     ) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
         self.host.current_label = label or self.fixture.labels[-1]
+        self.host.identity_checked = False
 
         def tick(seconds: float) -> None:
             self.time += seconds
 
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = build.run_index_build(
-                argparse.Namespace(collection=collection, lockfile=label, sample=sample),
+                argparse.Namespace(collection=collection, lockfile=label, sample=sample is not None),
                 host=self.host, rendered_dir=RENDERED, checkout=self.fixture.checkout,
                 work_root=self.fixture.work,
                 sources=sources if sources is not None else (self.fixture.source,), clock=lambda: NOW,
                 monotonic=lambda: self.time, sleep=sleep or tick, dense_limit=dense_limit,
+                sample=sample,
             )
         return code, out.getvalue(), err.getvalue()
 
@@ -352,19 +114,317 @@ class Build(unittest.TestCase):
             generations.inputs_hash(lockfile, "caselaw", profile.embedding_space.id, sources=(self.fixture.source,)),
         )
 
+    def test_finish_generation_runs_treatment_and_report_alone_over_a_built_row(self) -> None:
+        label = self.fixture.labels[0]
+        self.assertEqual(self.run_build(label)[0], 0)
+        row = next(iter(self.host.generations.values()))
+        self.assertEqual(row.state, "built")
+        target = build.embed_target(self.host, self.fixture.checkout, SITE_PATH, build.COMMAND_PATH)
+        self.assertNotIsInstance(target, report.Problem)
+        assert not isinstance(target, report.Problem)
+        inputs = dense.DenseInputs(**asdict(self.inputs(label)), served_model=target.served_name,
+                                   dimensions=target.dimensions)
+        deferred = copy.deepcopy(self.host.deferred)
+        jobs = copy.deepcopy(self.host.jobs)
+        materializations, reports = len(self.host.treatment_results), len(self.host.reports)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = build.finish_generation(
+                self.host, RENDERED, inputs, build.COMMAND_PATH, started_at=0.0,
+                monotonic=lambda: 5.0, active_stage=["treatment"], treatment_snapshot=None,
+                work_root=self.fixture.work,
+            )
+        self.assertEqual((code, err.getvalue()), (0, ""), out.getvalue())
+        self.assertEqual([line.split(":", 1)[0] for line in out.getvalue().splitlines()], ["treatment", "report"])
+        self.assertEqual(self.host.deferred, deferred)
+        self.assertEqual(self.host.jobs, jobs)
+        self.assertEqual(self.host.generations[row.gen_id], row)
+        self.assertEqual(len(self.host.treatment_results), materializations + 1)
+        self.assertEqual(len(self.host.reports), reports + 1)
+        self.assertIsNone(self.host.reports[-1]["failed_stage"])
+        self.assertEqual(self.host.reports[-1]["treatment"], self.host.treatment_results[-1].to_json())
+        self.assertFalse(self.host.reports[-1]["wall_clock"]["whole_build"])
+        self.assertEqual(self.host.reports[-1]["seconds"], 5)
+
+    def sample_inputs(self, gold: tuple[GoldDocument, ...] = ()) -> SampleInputs:
+        return SampleInputs(gold, sample.SAMPLE_FILL_PER_MILLION, "eval-v1000")
+
+    def assert_sample_fix(self, output: str, label: str) -> None:
+        """Every refusal includes a complete sample retry that the CLI accepts."""
+
+        retry = report.command(f"index build caselaw --sample --lockfile {label}")
+        fixes = [line.split("Fix:", 1)[1] for line in output.splitlines() if "Fix:" in line]
+        self.assertTrue(fixes, output)
+        for fix in fixes:
+            self.assertIn(retry, fix)
+            words = shlex.split(retry)
+            args = build_parser().parse_args(words[words.index("index"):])
+            self.assertTrue(args.sample)
+            self.assertEqual((args.collection, args.lockfile), ("caselaw", label))
+
+    def test_sample_build_holds_the_engine_and_uses_the_siblings_record_and_stores(self) -> None:
+        """The sibling builds from production's corpus without writing its record."""
+
+        label = self.fixture.labels[0]
+        base = self.inputs(label)
+        selection = self.sample_inputs()
+        production_rows = copy.deepcopy(self.host.record_rows)
+        code, out, err = self.run_build(label, sample=selection)
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertEqual(self.host.lock_paths, [backuplock.ENGINE_LOCK.path])
+        self.assertEqual((self.host.engine_holder, self.host.engine_releases, self.host.lock_releases), (None, 1, 0))
+        self.assertEqual(self.host.record_rows, production_rows)
+        self.assertIn(label, self.host.sibling_lockfiles)
+        self.assertEqual(self.host.sibling_lockfiles[label]["state"], production_rows[label]["state"])
+        self.assertEqual(self.host.sibling_lockfiles[label]["installed_at"], production_rows[label]["installed_at"])
+        name = sample.sample_name(base.name)
+        row = self.host.generations[name]
+        self.assertEqual(row.inputs_hash, sample.sample_inputs_hash(base.inputs_hash, label, selection.fill_per_million))
+        self.assertEqual([args["sample"] for args in self.host.deferred], [sample.arguments(selection)] * 2)
+        self.assertEqual([args["name"] for args in self.host.deferred], [name] * 2)
+        stages = ("preconditions", "lockfile", "generation", "build", "counts", "dense", "gold", "built")
+        self.assertEqual(sorted(stages, key=lambda stage: out.index(f"{stage}: ok")), list(stages))
+        # The sibling's record holds no corpus, so the stages that read it there are not run.
+        self.assertEqual([line for line in out.splitlines()
+                          if line.split(":")[0] in {"cluster", "treatment", "report"}], [])
+        self.assertEqual((self.host.treatment_payloads, self.host.reports), ([], []))
+        self.assertIn("gold 0, present 0", out)
+        self.assertIn(f"eval set {selection.set_version}", out)
+        state_commands = [argv for argv, sql, _ in self.host.executions if sql is None]
+        self.assertEqual(state_commands, [
+            *[stack.compose_argv(CI_ROOT, "ps", "--all", "--format", "json")] * 3,
+            stack.compose_argv(RENDERED, "ps", "--all", "--format", "json"),
+            ["du", "-sb", f"{CI_QDRANT_DATA_ROOT}/collections/{name}"],
+        ])
+        for argv, sql, holder_text in self.host.executions:
+            holder = backuplock.parse(holder_text or "")
+            self.assertIsNotNone(holder)
+            assert holder is not None
+            self.assertEqual(holder.command, f"gideon index build caselaw --sample --lockfile {label}")
+            if sql is None:
+                continue
+            production_read = "ORDER BY c.label" in sql or "WITH RECURSIVE chain AS" in sql
+            self.assertEqual(argv, worker.psql_argv(RENDERED if production_read else CI_ROOT))
+            if not production_read:
+                self.assertNotIn(name, " ".join(argv))
+
+    def test_sample_rejoins_then_runs_both_halves_with_the_current_selection(self) -> None:
+        """A rejoined job may carry an earlier gold selection, so each half runs again with this one."""
+
+        label = self.fixture.labels[0]
+        self.assertEqual(self.run_build(label, sample=self.sample_inputs())[0], 0)
+        lexical_job = next(job for job, task in self.host.task_by_job.items() if task != DENSE_TASK)
+        dense_job = next(job for job, task in self.host.task_by_job.items() if task == DENSE_TASK)
+        self.host.live_id, self.host.dense_live_id = lexical_job, dense_job
+        selection = self.sample_inputs((GoldDocument(sample.source_id("example", 7), "b" * 64),))
+        count = len(self.host.deferred)
+
+        code, out, err = self.run_build(label, sample=selection)
+
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertIn(f"rejoined job {lexical_job}", out)
+        self.assertIn(f"rejoined job {dense_job}", out)
+        deferred = self.host.deferred[count:]
+        self.assertEqual(len(deferred), 2)
+        self.assertEqual([args["sample"] for args in deferred], [sample.arguments(selection)] * 2)
+        self.assertLess(out.index(f"rejoined job {lexical_job}"), out.index("counts: ok"))
+        self.assertLess(out.index(f"rejoined job {dense_job}"), out.index("gold: ok"))
+
+    def test_sample_gold_reports_present_absent_and_changed_ids_in_sorted_order(self) -> None:
+        identifiers = {number: sample.source_id("example", number) for number in (90, 80, 70, 60, 20, 10)}
+        gold = tuple(GoldDocument(identifier, None if number == 10 else "a" * 64)
+                     for number, identifier in identifiers.items())
+        self.host.manifest_hashes = {
+            identifiers[80]: "b" * 64, identifiers[70]: "a" * 64,
+            identifiers[20]: "c" * 64, identifiers[10]: "d" * 64,
+        }
+        code, out, err = self.run_build(self.fixture.labels[0], sample=self.sample_inputs(gold))
+        self.assertEqual((code, err), (0, ""), out)
+        gold_line = next(line for line in out.splitlines() if line.startswith("gold:"))
+        self.assertIn("gold 6, present 4", gold_line)
+        self.assertIn(f"absent {identifiers[60]}, {identifiers[90]}", gold_line)
+        self.assertIn(f"hash-changed {identifiers[20]}, {identifiers[80]}", gold_line)
+        self.assertNotIn("refuse", out)
+        self.assertNotIn("a" * 64, gold_line)
+        sql = next(sql for _, sql, _ in self.host.executions if sql and "public.generation_documents" in sql)
+        self.assertEqual(json.loads(self.host._bound(sql, "v_source_ids")), sorted(identifiers.values()))
+
+    def test_sample_generation_with_another_hash_refuses_before_any_job(self) -> None:
+        label = self.fixture.labels[0]
+        selection = self.sample_inputs()
+        self.assertEqual(self.run_build(label, sample=selection)[0], 0)
+        name, row = next(iter(self.host.generations.items()))
+        self.host.generations[name] = replace(row, inputs_hash="f" * 64)
+        self.host.deferred.clear()
+        code, out, err = self.run_build(label, sample=selection)
+        self.assertEqual((code, err), (1, ""), out)
+        self.assertIn("generation: refuse", out)
+        self.assertIn("another inputs hash", out)
+        self.assertIn("sudo python3 -m tools.cistack down --wipe", out)
+        self.assertEqual(self.host.deferred, [])
+        self.assertEqual(self.host.generations[name].inputs_hash, "f" * 64)
+        self.assertIsNone(self.host.engine_holder)
+        self.assert_sample_fix(out, label)
+
+    def test_sample_refills_a_live_generation_and_failures_leave_it_standing(self) -> None:
+        label = self.fixture.labels[0]
+        selection = self.sample_inputs()
+        self.assertEqual(self.run_build(label, sample=selection)[0], 0)
+        name, row = next(iter(self.host.generations.items()))
+        promoted = replace(row, state="live", promoted_at=NOW.isoformat())
+        self.host.generations[name] = promoted
+        self.host.deferred.clear()
+        code, out, err = self.run_build(label, sample=selection)
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertNotIn("nothing built", out)
+        self.assertEqual(len(self.host.deferred), 2)
+        self.assertEqual(self.host.generations[name].state, "live")
+        for attribute in ("failure_reason", "dense_failure_reason"):
+            with self.subTest(job=attribute):
+                self.host.generations[name] = promoted
+                setattr(self.host, attribute, "store")
+                code, out, err = self.run_build(label, sample=selection)
+                setattr(self.host, attribute, None)
+                self.assertEqual((code, err), (1, ""), out)
+                self.assertIn("sample refill failed; the promoted generation stands", out)
+                self.assertIn(stack.logs_fix(CI_ROOT, WORKER_SERVICE_NAME), out)
+                self.assertEqual(self.host.generations[name].state, "live")
+                self.assertEqual(self.host.generations[name].promoted_at, promoted.promoted_at)
+                self.assertIsNone(self.host.engine_holder)
+                self.assert_sample_fix(out, label)
+
+    def test_sample_refuses_a_held_engine_without_touching_the_sibling(self) -> None:
+        label = self.fixture.labels[0]
+        holder = backuplock.Record("gideon eval run --stack ci", os.getpid() + 1000, NOW)
+        self.host.engine_holder = holder.to_json()
+        code, out, err = self.run_build(label, sample=self.sample_inputs())
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn(holder.command, err)
+        self.assertIn(str(holder.pid), err)
+        self.assertIn("Wait", err)
+        self.assertEqual(self.host.executions, [])
+        self.assertEqual(self.host.sibling_lockfiles, {})
+        self.assertEqual(self.host.engine_holder, holder.to_json())
+        self.assertEqual(self.host.engine_releases, 0)
+        self.assert_sample_fix(err, label)
+
+    def test_sample_failures_release_the_engine_and_print_parseable_sample_fixes(self) -> None:
+        label = self.fixture.labels[0]
+        phases = ("copy-read", "lockfile", "generation-read", "generation", "live-job", "defer", "build", "counts",
+                  "dense-live-job", "dense-defer", "dense", "dense-counts", "gold")
+        for phase in phases:
+            with self.subTest(phase=phase):
+                self.host.generations.clear()
+                self.host.jobs.clear()
+                self.host.live_id = self.host.dense_live_id = None
+                self.host.active_task = LEXICAL_TASK
+                self.host.fail_phase = phase
+                before = self.host.engine_releases
+                code, out, err = self.run_build(label, sample=self.sample_inputs())
+                self.assertEqual(code, 1, out + err)
+                self.assertIn("refuse", out + err)
+                self.assertNotIn("private diagnostic", out + err)
+                self.assertIsNone(self.host.engine_holder)
+                self.assertEqual(self.host.engine_releases, before + 1)
+                self.assert_sample_fix(out + err, label)
+
+    def test_sample_interrupts_release_the_engine_at_each_stage(self) -> None:
+        label = self.fixture.labels[0]
+        for phase in ("preconditions", "lockfile", "generation-read", "generation", "build", "counts", "dense", "gold"):
+            with self.subTest(phase=phase):
+                self.host.generations.clear()
+                self.host.jobs.clear()
+                self.host.live_id = self.host.dense_live_id = None
+                self.host.active_task = LEXICAL_TASK
+                self.host.interrupt_phase = phase
+                before = self.host.engine_releases
+                code, out, err = self.run_build(label, sample=self.sample_inputs())
+                self.assertEqual(code, 1)
+                self.assertIn("interrupted", out + err)
+                self.assertIsNone(self.host.engine_holder)
+                self.assertEqual(self.host.engine_releases, before + 1)
+                self.assert_sample_fix(out + err, label)
+
+    def test_sample_requires_its_worker_and_judges_lockfile_state_on_production(self) -> None:
+        label = self.fixture.labels[0]
+        self.host.health[WORKER_SERVICE_NAME] = "unhealthy"
+        code, out, err = self.run_build(label, sample=self.sample_inputs())
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn(f"sibling {WORKER_SERVICE_NAME}", err)
+        self.assertIn("sudo python3 -m tools.cistack up", err)
+        self.assertIn(stack.logs_fix(CI_ROOT, WORKER_SERVICE_NAME), err)
+        self.assert_sample_fix(err, label)
+        self.host.health[WORKER_SERVICE_NAME] = "healthy"
+        self.assertEqual(self.run_build(label, sample=self.sample_inputs())[0], 0)
+        self.host.record_rows[label]["state"] = "superseded"
+        code, out, err = self.run_build(label, sample=self.sample_inputs())
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("superseded", err)
+        self.assertEqual(self.host.sibling_lockfiles[label]["state"], "cut")
+        self.assertIsNone(self.host.engine_holder)
+        self.assert_sample_fix(err, label)
+
+    def test_sample_service_refusals_name_the_correct_projects_logs_and_retry(self) -> None:
+        label = self.fixture.labels[0]
+        for service in (WORKER_SERVICE_NAME, OPENSEARCH_SERVICE_NAME, QDRANT_SERVICE_NAME, EMBED.service_name):
+            with self.subTest(service=service):
+                self.host.health[service] = "unhealthy"
+                before = self.host.engine_releases
+                code, out, err = self.run_build(label, sample=self.sample_inputs())
+                self.host.health[service] = "healthy"
+                self.assertEqual((code, out), (1, ""))
+                directory = RENDERED if service == EMBED.service_name else CI_ROOT
+                self.assertIn(stack.logs_fix(directory, service), err)
+                self.assertEqual(self.host.deferred, [])
+                self.assertIsNone(self.host.engine_holder)
+                self.assertEqual(self.host.engine_releases, before + 1)
+                self.assert_sample_fix(err, label)
+
+    def test_sample_root_profile_and_retired_refusals_keep_the_sample_retry(self) -> None:
+        label = self.fixture.labels[0]
+        self.host.euid = 1
+        code, out, err = self.run_build(label, sample=self.sample_inputs())
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("root privileges", err)
+        self.assertEqual((self.host.engine_releases, self.host.executions), (0, []))
+        self.assert_sample_fix(err, label)
+        self.host.euid = 0
+        original_site = self.host.site_text
+        self.host.site_text = (ROOT / "config/site.example.yaml").read_text() + "\nhardware_profile: 1000x96v-256d\n"
+        code, out, err = self.run_build(label, sample=self.sample_inputs())
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("is not in models.lock", err)
+        self.assertIsNone(self.host.engine_holder)
+        self.assert_sample_fix(err, label)
+        self.host.site_text = original_site
+        self.assertEqual(self.run_build(label, sample=self.sample_inputs())[0], 0)
+        name, row = next(iter(self.host.generations.items()))
+        retired = replace(row, state="retired", promoted_at=NOW.isoformat(), retired_at=NOW.isoformat())
+        self.host.generations[name] = retired
+        self.host.deferred.clear()
+        code, out, err = self.run_build(label, sample=self.sample_inputs())
+        self.assertEqual((code, err), (1, ""), out)
+        self.assertIn("generation is retired", out)
+        self.assertEqual(self.host.generations[name], retired)
+        self.assertEqual(self.host.deferred, [])
+        self.assertIsNone(self.host.engine_holder)
+        self.assert_sample_fix(out, label)
+
     def test_two_lockfiles_print_stages_and_record_distinct_generations(self) -> None:
         for label in self.fixture.labels:
             inputs = self.inputs(label)
             code, out, err = self.run_build(label)
             self.assertEqual((code, err), (0, ""), out)
-            for stage in ("preconditions", "generation", "cluster", "build", "counts", "dense", "built", "treatment", "report"):
+            for stage in ("preconditions", "generation", "guard", "reserve", "cluster", "build", "counts", "dense", "built", "treatment", "report"):
                 self.assertIn(f"{stage}: ok", out)
             self.assertIn(inputs.name, out)
             self.assertIn("building, created", out)
+            self.assertIn("ready 3, chunked 2, chunks 11, projected chunks 17", out)
             self.assertIn("documents ready 3, chunked 2, unchunked 1", out)
             self.assertIn("chunks indexed 7, present 4, leveled 0, total 11", out)
             self.assertIn("bytes 1024", out)
             self.assertIn("points 11, indexed 11, written 8 (present 3, leveled 0, copied 2, embedded 6)", out)
+            self.assertIn(f"bytes lexical 1024, dense {self.host.du_bytes}, total {1024 + self.host.du_bytes}", out)
             self.assertIn("state building", out)
             job = self.host.deferred[-1]
             self.assertEqual(job["snapshot"], inputs.snapshot)
@@ -377,9 +437,190 @@ class Build(unittest.TestCase):
             self.assertGreater(out.index("treatment: ok"), out.index("built: ok"))
             self.assertGreater(out.index("report: ok"), out.index("treatment: ok"))
             self.assertIsNone(self.host.lock_holder)
+            sql = next(sql for sql in reversed(self.host.statements) if guards.CHUNK_PROJECTION_SQL in sql)
+            self.assertEqual(self.host._bound(sql, "v_source"), self.fixture.source.name)
+            self.assertEqual(self.host._bound(sql, "v_snapshot_date"), inputs.snapshot[-10:])
+            self.assertEqual(self.host._bound(sql, "v_courts"), "{" + ",".join(inputs.courts) + "}")
+            self.assertEqual(self.host._bound(sql, "v_pipeline"), inputs.pipeline)
         self.assertEqual(len(self.host.generations), 2)
         self.assertEqual(len(self.host.treatment_payloads), len(self.fixture.labels))
         self.assertEqual(self.host.lock_releases, 2)
+
+    def test_guard_and_reserve_refusals_defer_no_job_and_write_no_build_report(self) -> None:
+        label = self.fixture.labels[0]
+        inputs = self.inputs(label)
+        loaded = models.load_models_lock(self.fixture.checkout / "models.lock")
+        assert loaded.lock is not None
+        profile = loaded.lock.profile(loaded.lock.reference)
+        assert profile is not None
+        for stage in ("guard", "reserve"):
+            with self.subTest(stage=stage):
+                self.host.statements.clear()
+                self.host.projection_counts = {"ready": 100, "chunked": 1, "chunks": 60000} if stage == "guard" else {"ready": 3, "chunked": 2, "chunks": 11}
+                self.host.promoted = (PromotedRow("fictitious-live", "caselaw", 13_000_000),)
+                code, out, err = self.run_build(label)
+                self.assertEqual((code, err), (1, ""), out)
+                self.assertIn(f"{stage}: refuse", out)
+                self.assertEqual(self.host.deferred, [])
+                self.assertEqual(self.host.jobs, {})
+                self.assertEqual(self.host.reports, [])
+                self.assertFalse(any("public.build_reports" in sql or "procrastinate_jobs" in sql
+                                     or "procrastinate_defer_jobs_v1" in sql for sql in self.host.statements))
+                self.assertNotIn("cluster:", out)
+                self.assertNotIn("report:", out)
+                self.assertIsNone(self.host.lock_holder)
+                self.assertIn(inputs.name, self.host.generations)
+                self.assertIn(report.command(f"index build caselaw --lockfile {label}"), out)
+                if stage == "guard":
+                    self.assertIn(f"{inputs.name}: ready 100, chunked 1, chunks 60000, projected chunks 6000000", out)
+                    self.assertIn(f"build refusal {profile.chunk_guards.build_refusal_chunks}, serving ceiling {profile.chunk_guards.serving_ceiling_chunks}", out)
+                    self.assertIn(report.command("corpus cut"), out)
+                    self.assertIn("hardware_profile in /etc/gideon/site.yaml", out)
+                    self.assertIn("guards derive from the profile's RAM", out)
+                    self.assertIn("docs/runbooks/release-files.md §4", out)
+                    self.assertNotIn("reserve:", out)
+                else:
+                    verdict = reserve.judge(self.host.free_bytes, self.host.promoted[0].bytes)
+                    self.assertIn(reserve.describe(verdict), out)
+                    self.assertIn(reserve.RUNBOOK_ROW, out)
+                    self.assertIn("Free space under /data", out)
+
+    def test_guard_skips_no_ready_documents_and_less_than_one_percent_chunked(self) -> None:
+        for counts, reason in (
+            ({"ready": 0, "chunked": 0, "chunks": 0}, "no ready documents"),
+            ({"ready": 101, "chunked": 1, "chunks": 60000}, "fewer than 1 % of ready documents chunked"),
+        ):
+            with self.subTest(counts=counts):
+                self.host.projection_counts = counts
+                code, out, err = self.run_build()
+                self.assertEqual((code, err), (0, ""), out)
+                self.assertIn(f"guard: ok — skipped: {reason};", out)
+                self.assertIn(f"ready {counts['ready']}, chunked {counts['chunked']}, chunks {counts['chunks']}", out)
+                self.assertIn("cluster: ok", out)
+
+    def test_reserve_sums_live_rows_for_the_collection_and_prints_both_lines(self) -> None:
+        self.host.promoted = (
+            PromotedRow("fictitious-live-a", "caselaw", 5_000_000),
+            PromotedRow("fictitious-live-b", "caselaw", 7_000_000),
+            PromotedRow("fictitious-other", "authorities", self.host.free_bytes * 100),
+        )
+        code, out, err = self.run_build()
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertIn(f"reserve: ok — {reserve.describe(reserve.judge(self.host.free_bytes, 12_000_000))}", out)
+        self.assertIn("build line 15000000 bytes (0.0 GB), cleared", out)
+        self.assertIn("alert line 24000000 bytes (0.0 GB), not cleared", out)
+
+    def test_reserve_skips_without_a_live_row_for_the_collection_and_reads_free_bytes(self) -> None:
+        for rows in ((), (PromotedRow("fictitious-other", "authorities", 99_000_000),)):
+            with self.subTest(rows=rows):
+                self.host.promoted = rows
+                self.host.calls.clear()
+                code, out, err = self.run_build()
+                self.assertEqual((code, err), (0, ""), out)
+                self.assertIn("reserve: ok — skipped: no promoted generation for caselaw; reserve not judged; "
+                              f"/data free {self.host.free_bytes} bytes", out)
+                self.assertIn(list(reserve.DATA_DF_ARGV), self.host.calls)
+
+    def test_guard_and_reserve_read_failures_stop_before_jobs_or_reports(self) -> None:
+        for phase in ("guard", "reserve", "df"):
+            with self.subTest(phase=phase):
+                self.host.fail_phase = phase
+                code, out, err = self.run_build()
+                self.assertEqual((code, err), (1, ""), out)
+                self.assertIn(f"{'guard' if phase == 'guard' else 'reserve'}: refuse", out)
+                self.assertIn("Fix:", out)
+                self.assertIn(report.command("index build caselaw"), out)
+                self.assertNotIn("private diagnostic", out)
+                self.assertEqual(self.host.deferred, [])
+                self.assertEqual(self.host.reports, [])
+                self.assertIsNone(self.host.lock_holder)
+        self.host.fail_phase = None
+        self.host.df_text = "invalid fictitious df output"
+        code, out, err = self.run_build()
+        self.assertEqual((code, err), (1, ""), out)
+        self.assertIn("reserve: refuse", out)
+        self.assertIn("Ensure /data is mounted and readable", out)
+        self.assertEqual(self.host.deferred, [])
+        self.assertEqual(self.host.reports, [])
+
+    def test_built_measures_the_vector_directory_and_records_both_byte_halves(self) -> None:
+        label = self.fixture.labels[0]
+        name = self.inputs(label).name
+        code, out, err = self.run_build(label)
+        self.assertEqual((code, err), (0, ""), out)
+        directory = f"{QDRANT_DATA_ROOT}/collections/{name}"
+        self.assertIn(["du", "-sb", directory], self.host.calls)
+        self.assertEqual(self.host.footprints, [{"lexical_bytes": 1024, "dense_bytes": self.host.du_bytes,
+                                                "bytes": 1024 + self.host.du_bytes}])
+        row = self.host.generations[name]
+        self.assertEqual(row.bytes, row.counts["lexical_bytes"] + row.counts["dense_bytes"])
+        self.assertIn(f"bytes lexical {row.counts['lexical_bytes']}, dense {row.counts['dense_bytes']}, total {row.bytes}", out)
+        sql = next(sql for sql in self.host.statements if ":'v_dense_bytes'" in sql)
+        self.assertEqual(self.host._bound(sql, "v_name"), name)
+        self.assertEqual(self.host._bound(sql, "v_dense_bytes"), str(self.host.du_bytes))
+        self.assertEqual(self.host.reports[-1]["state"], "built")
+
+    def test_du_failures_refuse_built_without_recording_a_footprint(self) -> None:
+        label = self.fixture.labels[0]
+        name = self.inputs(label).name
+        directory = f"{QDRANT_DATA_ROOT}/collections/{name}"
+        for phase, text, error in (
+            ("du", None, None),
+            (None, None, FileNotFoundError()),
+            (None, None, subprocess.SubprocessError()),
+            (None, "invalid", None),
+            (None, f"-1\t{directory}\n", None),
+            (None, "2048\t/fictitious-wrong-directory\n", None),
+        ):
+            with self.subTest(phase=phase, text=text, error=error):
+                self.host.fail_phase, self.host.du_text, self.host.du_error = phase, text, error
+                code, out, err = self.run_build(label)
+                self.assertEqual((code, err), (1, ""), out)
+                self.assertIn("built: refuse", out)
+                self.assertIn(directory, out)
+                self.assertIn(stack.logs_fix(RENDERED, QDRANT_SERVICE_NAME), out)
+                self.assertIn(report.command(f"index build caselaw --lockfile {label}"), out)
+                self.assertNotIn("private diagnostic", out)
+                self.assertEqual(self.host.footprints, [])
+                self.assertNotIn("dense_bytes", self.host.generations[name].counts)
+                self.assertEqual(self.host.reports[-1]["failed_stage"], "built")
+                self.assertEqual(self.host.treatment_payloads, [])
+                self.assertIsNone(self.host.lock_holder)
+        self.host.fail_phase, self.host.du_text, self.host.du_error = None, None, None
+        code, out, err = self.run_build(label)
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertIn("bytes lexical", out)
+        self.assertEqual(len(self.host.footprints), 1)
+
+    def test_footprint_write_failure_refuses_built_and_names_the_database_fix(self) -> None:
+        self.host.fail_phase = "footprint"
+        code, out, err = self.run_build()
+        self.assertEqual((code, err), (1, ""), out)
+        self.assertIn("built: refuse", out)
+        self.assertIn("generation footprint write failed", out)
+        self.assertIn(stack.logs_fix(RENDERED, "postgres"), out)
+        self.assertIn(report.command("index build caselaw"), out)
+        self.assertEqual(self.host.footprints, [])
+        self.assertEqual(self.host.reports[-1]["failed_stage"], "built")
+
+    def test_interrupts_during_guards_or_built_preserve_the_row_and_write_no_report(self) -> None:
+        for phase in ("guard", "reserve", "du", "footprint"):
+            with self.subTest(phase=phase):
+                self.host.interrupt_phase = phase
+                self.host.deferred.clear()
+                code, out, err = self.run_build()
+                self.assertEqual((code, err), (1, ""), out)
+                self.assertIn("interrupted; the row stands", out)
+                if phase in {"du", "footprint"}:
+                    self.assertIn("built: refuse", out)
+                    self.assertIn("the footprint is not recorded", out)
+                else:
+                    self.assertIn(f"{phase}: refuse", out)
+                    self.assertEqual(self.host.deferred, [])
+                self.assertIn(report.command("index build caselaw"), out)
+                self.assertEqual(self.host.reports, [])
+                self.assertEqual(self.host.footprints, [])
+                self.assertIsNone(self.host.lock_holder)
 
     def test_absent_treatment_pin_materializes_with_null_snapshot_bindings(self) -> None:
         label = self.fixture.labels[0]
@@ -430,16 +671,10 @@ class Build(unittest.TestCase):
                 self.assertEqual(self.host.reports[-1]["treatment"]["treatment_snapshot"],
                                  f"{OVERRULED_SOURCE}-{pin.snapshot_date}")
 
-    def test_newest_default_and_sample_refusal_before_any_host_work(self) -> None:
+    def test_newest_default(self) -> None:
         code, out, err = self.run_build()
         self.assertEqual((code, err), (0, ""), out)
         self.assertEqual(self.host.deferred[0]["label"], self.fixture.labels[-1])
-        self.host.calls.clear()
-        self.host.euid = 1
-        releases = self.host.lock_releases
-        self.assertEqual(self.run_build(sample=True), (1, "", f"gideon index build --sample: not implemented; {build.SAMPLE_LANDING}\n"))
-        self.assertEqual(self.host.calls, [])
-        self.assertEqual(self.host.lock_releases, releases)
 
     def test_same_state_under_another_label_finds_the_original_generation(self) -> None:
         first, second = self.fixture.labels
@@ -450,7 +685,7 @@ class Build(unittest.TestCase):
         shutil.copytree(directory / first, directory / second, dirs_exist_ok=True)
         (directory / f"{second}.yaml").write_text(render_lockfile(replace(loaded.lockfile, label=second)))
         shutil.rmtree(staging.work_directory(second, self.fixture.source.name, work_root=self.fixture.work))
-        self.seed_report_work(second)
+        self.fixture.seed_report_work(second)
         code, out, err = self.run_build(second)
         self.assertEqual((code, err), (0, ""), out)
         self.assertIn("built, found", out)
@@ -643,13 +878,14 @@ class Build(unittest.TestCase):
         self.assertEqual(self.run_build()[0], 1)
 
     def test_selected_site_profile_supplies_the_space_served_name_and_dimensions(self) -> None:
-        data = yaml.safe_load(models_text())
+        data = yaml.safe_load((self.fixture.checkout / "models.lock").read_text())
         reference = data["reference"]
         alternative = "1000x96v-256d"
         data["profiles"][alternative] = copy.deepcopy(data["profiles"][reference])
         data["profiles"][alternative]["embedding_space"]["id"] = "another-example-space"
         data["profiles"][alternative]["embedding_space"]["dimensions"] = 19
         data["profiles"][alternative]["models"]["embed"]["serve"]["served_name"] = "other-example-embed"
+        data["profiles"][alternative]["chunk_guards"].update(serving_ceiling_million_chunks=4, build_refusal_million_chunks=2)
         (self.fixture.checkout / "models.lock").write_text(yaml.safe_dump(data, sort_keys=False))
         self.host.site_text = (ROOT / "config/site.example.yaml").read_text() + f"\nhardware_profile: {alternative}\n"
         loaded = models.load_models_lock(self.fixture.checkout / "models.lock")
@@ -665,6 +901,7 @@ class Build(unittest.TestCase):
         self.assertEqual(self.host.deferred[-1]["served_model"], embed_pin.serve.served_name)
         self.assertEqual(self.host.deferred[-1]["dimensions"], selected.embedding_space.dimensions)
         self.assertIn(f"embedding space {selected.embedding_space.id}; served model {embed_pin.serve.served_name}", out)
+        self.assertIn(f"build refusal {selected.chunk_guards.build_refusal_chunks}, serving ceiling {selected.chunk_guards.serving_ceiling_chunks}", out)
         self.assertNotIn("limit", self.host.deferred[-1])
 
     def test_three_services_refuse_bad_state_reads_without_retry(self) -> None:
@@ -707,7 +944,9 @@ class Build(unittest.TestCase):
             f"{CLUSTER_BUDGET_SECONDS} s budget; clustered_at {NOW.isoformat()}", out,
         )
         stages = [line.split(":", 1)[0] for line in out.splitlines()]
-        self.assertLess(stages.index("generation"), stages.index("cluster"))
+        self.assertLess(stages.index("generation"), stages.index("guard"))
+        self.assertLess(stages.index("guard"), stages.index("reserve"))
+        self.assertLess(stages.index("reserve"), stages.index("cluster"))
         self.assertLess(stages.index("cluster"), stages.index("build"))
         locks = [self.host._bound(sql, "v_lock") for sql in self.host.statements if "SELECT id FROM procrastinate_jobs" in sql]
         self.assertEqual(locks[0], f"{DUPES_LOCK_PREFIX}{name}")
@@ -879,6 +1118,9 @@ class Build(unittest.TestCase):
         row = next(iter(self.host.generations.values()))
         self.assertIsNone(row.dense_built_at)
         self.assertEqual(row.state, "building")
+        self.assertFalse(any(command[:2] == ["du", "-sb"] for command in self.host.calls))
+        self.assertEqual(self.host.footprints, [])
+        self.assertNotIn("dense_bytes", row.counts)
 
     def test_dense_success_without_timestamp_or_limit_refuses_built(self) -> None:
         self.host.dense_finish_stamp = None

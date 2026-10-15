@@ -17,12 +17,14 @@ from gideon.host.models import (
     ENV_NAME,
     FILE_PATH,
     FLAG_NAME,
+    GIGABYTE,
     HF_REPO,
     PROFILE_NAME,
     REVISION,
     ROLE_NAME,
     SERVICE_NAME,
     CandidatePin,
+    ChunkGuards,
     CotenantReserve,
     EmbeddingSpace,
     GpuRequirements,
@@ -49,6 +51,12 @@ LOCK = ROOT / "models.lock"
 FAKE_REVISION = "a" * 40
 FAKE_DIGEST = "sha256:" + "b" * 64
 
+GUARDS = """    chunk_guards:
+      serving_ceiling_million_chunks: 5
+      build_refusal_million_chunks: 3
+      resident_bytes_per_chunk: 1300
+"""
+
 VALID = f"""version: 1
 reference: 2x96v-256d
 profiles:
@@ -74,6 +82,8 @@ profiles:
         gb: 3
       postgres:
         gb: 20
+      qdrant:
+        gb: 7
       open-webui:
         gb: 4
       gideon-generator:
@@ -93,7 +103,7 @@ profiles:
         gb: 1
       gideon-worker:
         gb: 12
-    models:
+{GUARDS}    models:
       generator:
         repo: example/fixture
         revision: "{FAKE_REVISION}"
@@ -239,6 +249,31 @@ def embedding_space_problems(lock: ModelsLock) -> list[str]:
 
 
 class CommittedLock(unittest.TestCase):
+    def test_chunk_guards_fit_each_profiles_memory_and_ceiling(self) -> None:
+        result = load_models_lock(LOCK)
+        self.assertTrue(result.ok, render_errors(result.errors))
+        assert result.lock is not None
+        for profile in result.lock.profiles:
+            with self.subTest(profile=profile.name):
+                qdrant = profile.memory_row("qdrant")
+                self.assertIsNotNone(qdrant)
+                assert qdrant is not None
+                guards = profile.chunk_guards
+                for field in fields(guards):
+                    value = getattr(guards, field.name)
+                    self.assertIs(type(value), int)
+                    self.assertGreater(value, 0)
+                self.assertLessEqual(
+                    guards.serving_ceiling_million_chunks,
+                    qdrant.gb * GIGABYTE // (guards.resident_bytes_per_chunk * 1_000_000),
+                )
+                self.assertLessEqual(
+                    guards.build_refusal_million_chunks,
+                    guards.serving_ceiling_million_chunks * 2 // 3,
+                )
+                self.assertEqual(guards.serving_ceiling_chunks, guards.serving_ceiling_million_chunks * 1_000_000)
+                self.assertEqual(guards.build_refusal_chunks, guards.build_refusal_million_chunks * 1_000_000)
+
     def test_client_reserve_and_widest_batch_fit_each_generator_cap(self) -> None:
         result = load_models_lock(LOCK)
         self.assertTrue(result.ok, render_errors(result.errors))
@@ -350,6 +385,7 @@ class CommittedLock(unittest.TestCase):
                     self.assertIsNotNone(profile.model(row.role))
         self.assertEqual(profile.memory_row("gideon-generator"), MemoryRow("gideon-generator", 32, "generator"))
         self.assertIsNone(profile.memory_row("missing-service"))
+        self.assertEqual(profile.chunk_guards, ChunkGuards(90, 60, 1200))
         self.assertEqual({pin.role for pin in profile.models}, {"generator", "embed"})
         model = profile.model("generator")
         self.assertIsNotNone(model)
@@ -447,9 +483,10 @@ class CommittedLock(unittest.TestCase):
             GpuRequirements("Example", "1.0", "Example GPU", 1, 1),
             ProfileRequirements("x86_64", GpuRequirements("Example", "1.0", "Example GPU", 1, 1), 1, 1),
             MemoryRow("example-service", 1, None),
+            ChunkGuards(5, 3, 1300),
             CotenantReserve(0, 3),
             EmbeddingSpace("example-space", "generator", 17, FAKE_REVISION),
-            HardwareProfile("2x1v-1d", ProfileRequirements("x86_64", GpuRequirements("Example", "1.0", "Example GPU", 1, 1), 1, 1), (MemoryRow("example-service", 1, None),), ()),
+            HardwareProfile("2x1v-1d", ProfileRequirements("x86_64", GpuRequirements("Example", "1.0", "Example GPU", 1, 1), 1, 1), (MemoryRow("example-service", 1, None),), (), ChunkGuards(5, 3, 1300)),
             ModelsLock(1, "2x1v-1d", ()),
         ):
             self.assertTrue(is_dataclass(value))
@@ -733,11 +770,11 @@ class Refusals(unittest.TestCase):
                 ))
 
     def test_memory_table_refusals(self) -> None:
-        without_memory = VALID[: VALID.index("    memory:\n")] + VALID[VALID.index("    models:\n") :]
+        without_memory = VALID[: VALID.index("    memory:\n")] + VALID[VALID.index("    chunk_guards:\n") :]
         self.assert_refused(without_memory, "missing required key", key_path="profiles.2x96v-256d.memory")
         memory_start = VALID.index("    memory:\n")
-        models_start = VALID.index("    models:\n")
-        empty_memory = VALID[:memory_start] + "    memory: {}\n" + VALID[models_start:]
+        guards_start = VALID.index("    chunk_guards:\n")
+        empty_memory = VALID[:memory_start] + "    memory: {}\n" + VALID[guards_start:]
         self.assert_refused(empty_memory, "non-empty mapping", key_path="profiles.2x96v-256d.memory")
         self.assert_refused(VALID.replace("      caddy:\n", "      bad.service:\n"), "service name")
         self.assert_refused(VALID.replace("        gb: 1\n", "        gb: one\n", 1), "positive integer", key_path="profiles.2x96v-256d.memory.caddy.gb")
@@ -747,6 +784,72 @@ class Refusals(unittest.TestCase):
         # The table's errors name the runbook section for this lock.
         result = load_text(without_memory)
         self.assertTrue(all("docs/runbooks/release-files.md §4" in error.fix for error in result.errors if error.key_path == "profiles.2x96v-256d.memory"))
+
+    def test_chunk_guards_accept_bounds_and_lower_values(self) -> None:
+        # This fictitious profile has fractional formula results at both bounds.
+        for text in (
+            VALID,
+            VALID.replace("serving_ceiling_million_chunks: 5", "serving_ceiling_million_chunks: 4")
+            .replace("build_refusal_million_chunks: 3", "build_refusal_million_chunks: 2"),
+        ):
+            with self.subTest(text=text):
+                result = load_text(text)
+                self.assertTrue(result.ok, render_errors(result.errors))
+
+    def test_chunk_guards_refusals(self) -> None:
+        path = "profiles.2x96v-256d.chunk_guards"
+        cases = [
+            (VALID.replace(GUARDS, ""), "missing required key", path),
+            (VALID.replace(GUARDS, "    chunk_guards: []\n"), "expected a mapping", path),
+            (VALID.replace(GUARDS, "    chunk_guards: null\n"), "expected a mapping", path),
+            (
+                VALID.replace("serving_ceiling_million_chunks: 5", "serving_ceiling_million_chunks: 6"),
+                "at or below 5 million chunks from memory.qdrant.gb (7 GB) divided by resident_bytes_per_chunk (1300)",
+                f"{path}.serving_ceiling_million_chunks",
+            ),
+            (
+                VALID.replace("build_refusal_million_chunks: 3", "build_refusal_million_chunks: 4"),
+                "at or below 3 million chunks from serving_ceiling_million_chunks (5) divided by 1.5",
+                f"{path}.build_refusal_million_chunks",
+            ),
+            (
+                VALID.replace("      qdrant:\n        gb: 7\n", ""),
+                "the guards require memory.qdrant.gb to derive from", path,
+            ),
+        ]
+        for key, value in (
+            ("serving_ceiling_million_chunks", 5),
+            ("build_refusal_million_chunks", 3),
+            ("resident_bytes_per_chunk", 1300),
+        ):
+            line = f"      {key}: {value}\n"
+            cases.append((VALID.replace(line, ""), "missing required key", f"{path}.{key}"))
+            for invalid in ("0", "-1", "true", "1.5", '"one"'):
+                cases.append((
+                    VALID.replace(line, f"      {key}: {invalid}\n"),
+                    "positive integer", f"{path}.{key}",
+                ))
+        for text, fragment, key_path in cases:
+            with self.subTest(fragment=fragment, key_path=key_path, text=text):
+                self.assert_refused(text, fragment, key_path=key_path)
+                result = load_text(text)
+                self.assertEqual(len(result.errors), 1, render_errors(result.errors))
+                self.assertTrue(render_errors(result.errors).endswith(
+                    "Fix: Edit models.lock; consult docs/runbooks/release-files.md §4."
+                ))
+
+        unknown = load_text(VALID.replace("resident_bytes_per_chunk: 1300", "resident_bytes_per_chunck: 1300"))
+        error = next(error for error in unknown.errors if error.key_path == f"{path}.resident_bytes_per_chunck")
+        self.assertIn("nearest valid key is 'resident_bytes_per_chunk'", error.problem)
+        self.assertTrue(all(error.fix == "Edit models.lock; consult docs/runbooks/release-files.md §4." for error in unknown.errors))
+        collected = load_text(
+            VALID.replace("serving_ceiling_million_chunks: 5", "serving_ceiling_million_chunks: 0")
+            .replace("resident_bytes_per_chunk: 1300", "resident_bytes_per_chunk: true")
+        )
+        self.assertEqual({error.key_path for error in collected.errors}, {
+            f"{path}.serving_ceiling_million_chunks", f"{path}.resident_bytes_per_chunk",
+        })
+        self.assertTrue(all(error.fix == "Edit models.lock; consult docs/runbooks/release-files.md §4." for error in collected.errors))
 
     def test_profile_role_and_flag_names_follow_grammars(self) -> None:
         self.assert_refused(VALID.replace("  2x96v-256d:\n", "  bad.name:\n").replace("reference: 2x96v-256d", "reference: bad.name"), "hardware profile name")

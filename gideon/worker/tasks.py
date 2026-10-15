@@ -167,7 +167,7 @@ def overruled(
 def lexical(
     context: procrastinate.JobContext, name: str, collection: str, label: str,
     snapshot: str, courts: Mapping[str, Mapping[str, object]], pipeline: str,
-    embedding_space: str, inputs_hash: str,
+    embedding_space: str, inputs_hash: str, *, sample: Mapping[str, object] | None = None,
 ) -> None:
     """Build a lexical generation outside the worker's event loop."""
 
@@ -179,6 +179,7 @@ def lexical(
             "name": name, "collection": collection, "label": label,
             "snapshot": snapshot, "courts": courts, "pipeline": pipeline,
             "embedding_space": embedding_space, "inputs_hash": inputs_hash,
+            "sample": sample,
         },
         job_id, lexical_build.PsycopgGenerations(),
         lexical_build.HttpxStore(), gideon.host.cas.ROOT,
@@ -190,7 +191,7 @@ def dense(
     context: procrastinate.JobContext, name: str, collection: str, label: str,
     snapshot: str, courts: Mapping[str, Mapping[str, object]], pipeline: str,
     embedding_space: str, inputs_hash: str, served_model: str, dimensions: int,
-    limit: int | None = None,
+    limit: int | None = None, *, sample: Mapping[str, object] | None = None,
 ) -> None:
     """Build a dense generation outside the worker's event loop."""
 
@@ -215,6 +216,7 @@ def dense(
             "snapshot": snapshot, "courts": courts, "pipeline": pipeline,
             "embedding_space": embedding_space, "inputs_hash": inputs_hash,
             "served_model": served_model, "dimensions": dimensions, "limit": limit,
+            "sample": sample,
         },
         job_id, record, store, embedder, gideon.worker.dense.NoBackOff(),
         gideon.host.cas.ROOT, work_root=staging.WORK_ROOT,

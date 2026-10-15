@@ -28,6 +28,11 @@ from gideon.host.render.qdrant import QDRANT_SECRET_NAME, qdrant_rest_url
 from gideon.host.render.services import ServiceDefinition, image_pin, source_digest
 from gideon.host.render.worker import (
     CONCURRENCY_ENV,
+    CORPUS_DATABASE_HOST_ENV,
+    CORPUS_DATABASE_NAME_ENV,
+    CORPUS_DATABASE_PORT_ENV,
+    CORPUS_DATABASE_ROLE_ENV,
+    CORPUS_PASSWORD_FILE_ENV,
     DATABASE_HOST_ENV,
     DATABASE_NAME_ENV,
     DATABASE_PORT_ENV,
@@ -70,6 +75,7 @@ class WorkerService(ServiceDefinition):
     sources = (
         "gideon/worker", "gideon/host/cas.py", "gideon/host/sysio.py",
         "gideon/host/report.py", "gideon/casecite", "gideon/extraction",
+        "gideon/host/index/sample.py",
     )
 
     def block(
@@ -104,6 +110,11 @@ class WorkerService(ServiceDefinition):
                 DATABASE_NAME_ENV: WORKER_DATABASE_NAME,
                 DATABASE_ROLE_ENV: WORKER_ROLE,
                 PASSWORD_FILE_ENV: f"/run/secrets/{WORKER_SECRET_NAME}",
+                CORPUS_DATABASE_HOST_ENV: WORKER_DATABASE_HOST,
+                CORPUS_DATABASE_PORT_ENV: str(WORKER_DATABASE_PORT),
+                CORPUS_DATABASE_NAME_ENV: WORKER_DATABASE_NAME,
+                CORPUS_DATABASE_ROLE_ENV: WORKER_ROLE,
+                CORPUS_PASSWORD_FILE_ENV: f"/run/secrets/{WORKER_SECRET_NAME}",
                 CONCURRENCY_ENV: str(WORKER_CONCURRENCY),
                 OPENSEARCH_URL_ENV: f"http://{OPENSEARCH_SERVICE_NAME}:{OPENSEARCH_REST_PORT}",
                 OPENSEARCH_USER_ENV: OPENSEARCH_USER,

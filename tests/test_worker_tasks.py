@@ -10,6 +10,7 @@ import tempfile
 import threading
 import unittest
 from collections.abc import Iterator, Mapping
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -26,6 +27,7 @@ from test_worker_dense import (
 from test_worker_lexical import TEXT, FakeRecord, FakeStore, inputs_for
 
 from gideon.host import cas
+from gideon.host.index import sample
 from gideon.host.render import worker
 from gideon.worker import (
     agreement,
@@ -51,6 +53,60 @@ class Unread(httpx.SyncByteStream):
 
 
 class RecoveryTask(unittest.TestCase):
+    def test_both_index_tasks_forward_sample_selection_and_fill_a_live_generation(self) -> None:
+        selection = {"gold": [], "fill_per_million": sample.SAMPLE_FILL_MAX}
+        name = sample.sample_name(str(inputs_for()["name"]))
+        with tempfile.TemporaryDirectory() as temporary:
+            store_root, work_root = Path(temporary) / "cas", Path(temporary) / "work"
+            work_root.mkdir()
+            digest = hashlib.sha256(TEXT.encode()).hexdigest()
+            path = cas.object_path(digest, store_root)
+            path.parent.mkdir(parents=True)
+            path.write_text(TEXT, encoding="utf-8")
+            lexical_record, lexical_store = FakeRecord(digest), FakeStore()
+            assert lexical_record.generation is not None
+            lexical_record.generation = replace(lexical_record.generation, gen_id=name, state="live")
+            context = procrastinate.JobContext(
+                app=procrastinate.App(connector=InMemoryConnector()),
+                job=procrastinate.jobs.Job(id=77, queue=lexical.LEXICAL_QUEUE, lock=None,
+                                          queueing_lock=None, task_name=lexical.LEXICAL_TASK),
+                start_timestamp=0.0, abort_reason=lambda: None,
+            )
+            with (
+                patch.object(lexical, "PsycopgGenerations", return_value=lexical_record),
+                patch.object(lexical, "HttpxStore", return_value=lexical_store),
+                patch.object(cas, "ROOT", store_root),
+                patch.object(staging, "WORK_ROOT", work_root),
+            ):
+                tasks.lexical(context, **{**inputs_for(), "name": name, "sample": selection})  # type: ignore[arg-type]
+            self.assertIsNotNone(lexical_record.finished)
+            self.assertEqual(lexical_record.generation.state, "live")
+            self.assertTrue(lexical_store.rows)
+            events: list[str] = []
+            dense_store = FakeVectorStore(events)
+            dense_record = FakeDenseRecord(digest, dense_store, events)
+            embedder = FakeEmbedder(events)
+            assert dense_record.generation is not None
+            dense_record.generation = replace(dense_record.generation, gen_id=name, state="live")
+            dense_context = procrastinate.JobContext(
+                app=context.app,
+                job=procrastinate.jobs.Job(id=78, queue=dense.DENSE_QUEUE, lock=None,
+                                          queueing_lock=None, task_name=dense.DENSE_TASK),
+                start_timestamp=0.0, abort_reason=lambda: None,
+            )
+            with (
+                patch.object(dense, "PsycopgGenerations", return_value=dense_record),
+                patch.object(dense, "HttpxVectorStore", return_value=dense_store),
+                patch.object(dense, "HttpxEmbedder", return_value=embedder),
+                patch.object(cas, "ROOT", store_root),
+                patch.object(staging, "WORK_ROOT", work_root),
+            ):
+                tasks.dense(dense_context, **{**dense_inputs(), "name": name, "sample": selection})  # type: ignore[arg-type]
+            self.assertIsNotNone(dense_record.finished)
+            self.assertEqual(dense_record.generation.state, "live")
+            self.assertEqual(dense_record.counts.dense_manifest, 1)
+            self.assertTrue(dense_store.collections[name])
+
     def test_registered_on_maintenance_with_one_minute_cron_and_lock(self) -> None:
         app = procrastinate.App(connector=InMemoryConnector())
         tasks.register_tasks(app)
@@ -263,7 +319,7 @@ class RecoveryTask(unittest.TestCase):
         ):
             tasks.dense(context, **values)  # type: ignore[arg-type]
         self.assertIs(raised.exception, failure)
-        self.assertEqual(build.call_args.args[:5], (values, 77, record_factory.return_value,
+        self.assertEqual(build.call_args.args[:5], ({**values, "sample": None}, 77, record_factory.return_value,
                                                    store_factory.return_value, embed_factory.return_value))
         self.assertIsInstance(build.call_args.args[5], dense.NoBackOff)
         self.assertEqual(build.call_args.args[6], cas.ROOT)

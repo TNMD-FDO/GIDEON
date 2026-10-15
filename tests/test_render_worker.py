@@ -1,6 +1,7 @@
 """The queue worker's identity, Compose block, and recreate boundary."""
 
 import hashlib
+import re
 import unittest
 from collections.abc import Mapping
 from dataclasses import replace
@@ -16,9 +17,11 @@ from test_render import (
 )
 
 from gideon.casecite.found import CITE_FORMS
+from gideon.evaluation import judgments, record
 from gideon.host import cas, weights
 from gideon.host.corpus.sources import source_by_name
 from gideon.host.images import parse_registry, reference
+from gideon.host.index import sample
 from gideon.host.models import GIGABYTE
 from gideon.host.render import render_all, worker
 from gideon.host.render.api import (
@@ -53,6 +56,7 @@ from gideon.host.render.services.worker import (
     WORKER_SOURCES_DIGEST_LABEL,
     WorkerService,
 )
+from gideon.host.secrets import SECRET_REGISTRY
 from gideon.host.stores import ROLE_SPECS
 from gideon.worker import (
     agreement,
@@ -76,6 +80,25 @@ from gideon.worker.pipeline import PIPELINE_VERSION, PIPELINES
 
 
 class WorkerIdentity(unittest.TestCase):
+    def test_metrics_reader_and_source_ids_match_their_existing_consumers(self) -> None:
+        self.assertEqual(worker.METRICS_ROLE, record.METRICS_ROLE)
+        role = next(role for role in ROLE_SPECS if role.name == worker.METRICS_ROLE)
+        self.assertEqual(worker.METRICS_SECRET_NAME, role.secret_name)
+        secret = next(secret for secret in SECRET_REGISTRY if secret.name == role.secret_name)
+        self.assertEqual(secret.kind, "password")
+        self.assertEqual(secret.rotation, "role")
+        self.assertEqual(sample.SOURCE_ID_PATTERN, judgments.SOURCE_ID_PATTERN.pattern)
+
+    def test_generation_grammar_accepts_only_one_optional_sample_tail(self) -> None:
+        name = f"{worker.COLLECTION_NAMES[0]}__corpus-2099-01-03__fictitious-embedding"
+        for value in (name, f"{name}__{worker.SAMPLE_SUFFIX}"):
+            with self.subTest(value=value):
+                self.assertIsNotNone(re.fullmatch(worker.GENERATION_PATTERN, value))
+                self.assertIsNotNone(re.fullmatch(lexical.GENERATION_PATTERN, value))
+        for suffix in ("__unknown", "__SAMPLE", "__sample__sample", "__sample-extra", "__sample\n"):
+            with self.subTest(suffix=suffix):
+                self.assertIsNone(re.fullmatch(worker.GENERATION_PATTERN, name + suffix))
+
     def test_dense_identity_matches_the_worker(self) -> None:
         for name in (
             "DENSE_TASK", "DENSE_QUEUE", "DENSE_LOCK_PREFIX", "DENSE_LOCK_SUFFIX",
@@ -253,6 +276,11 @@ class WorkerIdentity(unittest.TestCase):
                 worker.DATABASE_NAME_ENV,
                 worker.DATABASE_ROLE_ENV,
                 worker.PASSWORD_FILE_ENV,
+                worker.CORPUS_DATABASE_HOST_ENV,
+                worker.CORPUS_DATABASE_PORT_ENV,
+                worker.CORPUS_DATABASE_NAME_ENV,
+                worker.CORPUS_DATABASE_ROLE_ENV,
+                worker.CORPUS_PASSWORD_FILE_ENV,
                 worker.CONCURRENCY_ENV,
                 worker.OPENSEARCH_URL_ENV,
                 worker.OPENSEARCH_USER_ENV,
@@ -268,6 +296,11 @@ class WorkerIdentity(unittest.TestCase):
                 settings.DATABASE_NAME_ENV,
                 settings.DATABASE_ROLE_ENV,
                 settings.PASSWORD_FILE_ENV,
+                settings.CORPUS_DATABASE_HOST_ENV,
+                settings.CORPUS_DATABASE_PORT_ENV,
+                settings.CORPUS_DATABASE_NAME_ENV,
+                settings.CORPUS_DATABASE_ROLE_ENV,
+                settings.CORPUS_PASSWORD_FILE_ENV,
                 settings.CONCURRENCY_ENV,
                 settings.OPENSEARCH_URL_ENV,
                 settings.OPENSEARCH_USER_ENV,
@@ -316,6 +349,22 @@ class WorkerIdentity(unittest.TestCase):
 
 
 class WorkerBlock(unittest.TestCase):
+    def test_production_corpus_connection_uses_the_queue_coordinates(self) -> None:
+        for rendered_inputs in (inputs(EXAMPLE), inputs(SECOND), inputs(EXAMPLE, no_gpu=True)):
+            with self.subTest(site=rendered_inputs.site.hostname, no_gpu=rendered_inputs.no_gpu):
+                block = service_blocks(rendered_inputs)[worker.WORKER_SERVICE_NAME]
+                assert isinstance(block, Mapping)
+                environment = block["environment"]
+                assert isinstance(environment, Mapping)
+                for corpus, queue in (
+                    (worker.CORPUS_DATABASE_HOST_ENV, worker.DATABASE_HOST_ENV),
+                    (worker.CORPUS_DATABASE_PORT_ENV, worker.DATABASE_PORT_ENV),
+                    (worker.CORPUS_DATABASE_NAME_ENV, worker.DATABASE_NAME_ENV),
+                    (worker.CORPUS_DATABASE_ROLE_ENV, worker.DATABASE_ROLE_ENV),
+                    (worker.CORPUS_PASSWORD_FILE_ENV, worker.PASSWORD_FILE_ENV),
+                ):
+                    self.assertEqual(environment[corpus], environment[queue])
+
     def test_definition_and_block_on_each_host_kind(self) -> None:
         self.assertEqual(caselaw.MODELS_ROOT, weights.MODELS_ROOT)
         definition = next(
@@ -330,6 +379,7 @@ class WorkerBlock(unittest.TestCase):
             (
                 "gideon/worker", "gideon/host/cas.py", "gideon/host/sysio.py",
                 "gideon/host/report.py", "gideon/casecite", "gideon/extraction",
+                "gideon/host/index/sample.py",
             ),
             "Fix: declare the worker package and its store dependencies.",
         )
@@ -392,6 +442,13 @@ class WorkerBlock(unittest.TestCase):
                             worker.DATABASE_NAME_ENV: worker.WORKER_DATABASE_NAME,
                             worker.DATABASE_ROLE_ENV: worker.WORKER_ROLE,
                             worker.PASSWORD_FILE_ENV: (
+                                f"/run/secrets/{worker.WORKER_SECRET_NAME}"
+                            ),
+                            worker.CORPUS_DATABASE_HOST_ENV: worker.WORKER_DATABASE_HOST,
+                            worker.CORPUS_DATABASE_PORT_ENV: str(worker.WORKER_DATABASE_PORT),
+                            worker.CORPUS_DATABASE_NAME_ENV: worker.WORKER_DATABASE_NAME,
+                            worker.CORPUS_DATABASE_ROLE_ENV: worker.WORKER_ROLE,
+                            worker.CORPUS_PASSWORD_FILE_ENV: (
                                 f"/run/secrets/{worker.WORKER_SECRET_NAME}"
                             ),
                             worker.CONCURRENCY_ENV: str(worker.WORKER_CONCURRENCY),

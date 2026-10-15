@@ -6,11 +6,19 @@ import subprocess
 import unittest
 from collections.abc import Mapping
 from dataclasses import asdict, replace
+from pathlib import Path
 
 from test_index_record import NAME, RENDERED, FakeHost, inputs_for, row_for
 
 from gideon.host import caselaw, report, stack, worker
-from gideon.host.index.lexical import BuildRead, defer_lexical, live_job, read_lexical
+from gideon.host.index.lexical import (
+    BuildRead,
+    defer_lexical,
+    live_index_job,
+    live_job,
+    read_lexical,
+)
+from gideon.host.index.sample import GoldDocument, SampleInputs
 from gideon.host.render.opensearch import (
     OPENSEARCH_PASSWORD_SECRET_NAME,
     OPENSEARCH_SERVICE_NAME,
@@ -27,6 +35,14 @@ from gideon.host.report import Problem
 from gideon.host.sysio import Command, PathLike
 
 JOB_ID = 31
+
+
+def sample_inputs() -> SampleInputs:
+    """Return fictitious judged and unversioned sample documents."""
+    return SampleInputs(
+        (GoldDocument("example:opinion:17", "b" * 64), GoldDocument("example:opinion:29", None)),
+        731, "example-set-version",
+    )
 
 
 class QueueHost(FakeHost):
@@ -83,12 +99,56 @@ class Defer(unittest.TestCase):
             "embedding_space": inputs.embedding_space, "inputs_hash": inputs.inputs_hash,
             "courts": {court: asdict(geography) for court, geography in inputs.geography.items()},
         })
+        self.assertNotIn("sample", args)
         self.assertIn(worker.bind("v_task", LEXICAL_TASK), sql)
         self.assertIn(worker.bind("v_queue", LEXICAL_QUEUE), sql)
         self.assertIn(worker.bind("v_lock", f"index-{inputs.name}"), sql)
         self.assertIn(":'v_lock'", sql)
         for value in (inputs.name, inputs.label, inputs.snapshot, inputs.inputs_hash, LEXICAL_TASK, LEXICAL_QUEUE):
             self.assertNotIn(value, argv)
+
+    def test_sample_arguments_are_bound_on_stdin_without_the_reporting_version(self) -> None:
+        sample = sample_inputs()
+        inputs = replace(inputs_for(), sample=sample)
+        host = QueueHost()
+
+        self.assertEqual(defer_lexical(host, RENDERED, inputs), JOB_ID)
+
+        argv, sql = host.calls[0]
+        assert sql is not None
+        args = json.loads(sql.split("\\set v_args '", 1)[1].split("'", 1)[0])
+        self.assertEqual(args["sample"], {
+            "gold": [{"source_id": document.source_id, "sha256": document.sha256} for document in sample.gold],
+            "fill_per_million": sample.fill_per_million,
+        })
+        self.assertNotIn(sample.set_version, sql)
+        for document in sample.gold:
+            self.assertNotIn(document.source_id, " ".join(argv))
+            if document.sha256 is not None:
+                self.assertNotIn(document.sha256, " ".join(argv))
+        self.assertEqual(len(host.calls), 1)
+
+    def test_invalid_sample_refuses_before_a_child_and_names_only_its_field(self) -> None:
+        sample = sample_inputs()
+        sentinel = "Private sample value; do not print"
+        for invalid, field in (
+            (sentinel, "sample"),
+            (replace(sample, gold=(GoldDocument(sentinel, None),)), "source_id"),
+            (replace(sample, gold=(GoldDocument("example:opinion:17", sentinel),)), "sha256"),
+            (replace(sample, fill_per_million=0), "fill_per_million"),
+        ):
+            with self.subTest(field=field):
+                host = QueueHost()
+                result = defer_lexical(
+                    host, RENDERED, replace(inputs_for(), sample=invalid),  # type: ignore[arg-type]
+                    command_path="index build caselaw --sample",
+                )
+                self.assertIsInstance(result, Problem)
+                assert isinstance(result, Problem)
+                self.assertIn(field, result.problem)
+                self.assertNotIn(sentinel, result.problem + result.fix)
+                self.assertIn(report.command("index build caselaw --sample"), result.fix)
+                self.assertEqual(host.calls, [])
 
     def test_a_found_generation_keeps_its_earlier_name_with_a_new_label(self) -> None:
         inputs = replace(inputs_for(), label="corpus-2099-02-03")
@@ -236,6 +296,104 @@ class LiveJob(unittest.TestCase):
                 self.assertIsInstance(result, Problem)
                 assert isinstance(result, Problem)
                 self.assertIn("Restore Docker Compose and psql", result.fix)
+                self.assertEqual(len(host.calls), 1)
+
+
+class IndexQueueHost(FakeHost):
+    """Serve a sibling Compose document and the index queue from memory."""
+
+    def __init__(
+        self, *, present: bool = True, code: int = 0, stdout: str = "", stderr: str = "",
+        error: OSError | subprocess.SubprocessError | None = None,
+    ) -> None:
+        super().__init__(code=code, stdout=stdout, stderr=stderr, error=error)
+        self.present = present
+
+    def exists(self, path: PathLike) -> bool:
+        return self.present and Path(path) == Path(RENDERED) / "compose.yaml"
+
+
+class LiveIndexJob(unittest.TestCase):
+    """Any live index job is read before sibling work."""
+
+    retry = "sudo python3 -m tools.cistack smoke"
+
+    def test_first_live_index_job_uses_stdin_without_a_generation_lock(self) -> None:
+        host = IndexQueueHost(stdout=f"{JOB_ID}\n")
+        self.assertEqual(live_index_job(host, RENDERED, self.retry), JOB_ID)
+        self.assertEqual(len(host.calls), 1)
+        argv, sql = host.calls[0]
+        self.assertEqual(argv, worker.psql_argv(RENDERED))
+        assert sql is not None
+        self.assertIn(worker.bind("v_queue", LEXICAL_QUEUE), sql)
+        self.assertIn("queue_name = :'v_queue'", sql)
+        self.assertIn("status IN ('todo', 'doing')", sql)
+        self.assertIn("ORDER BY id LIMIT 1", sql)
+        self.assertNotIn("WHERE lock", sql)
+        self.assertNotIn("AND lock", sql)
+        for value in (sql, LEXICAL_QUEUE, "SELECT", "procrastinate_jobs"):
+            self.assertNotIn(value, argv)
+
+    def test_absent_compose_document_never_runs_a_command(self) -> None:
+        host = IndexQueueHost(present=False, stdout=f"{JOB_ID}\n")
+        self.assertIsNone(live_index_job(host, RENDERED, self.retry))
+        self.assertEqual(host.calls, [])
+
+    def test_empty_queue_or_postgres_not_running_holds_no_job(self) -> None:
+        for output in ("", "\n", " \n "):
+            with self.subTest(output=output):
+                host = IndexQueueHost(stdout=output)
+                self.assertIsNone(live_index_job(host, RENDERED, self.retry))
+                self.assertEqual(len(host.calls), 1)
+        for stream in ("stdout", "stderr"):
+            with self.subTest(stream=stream):
+                diagnostic = 'service "postgres" is not running\n'
+                host = IndexQueueHost(
+                    code=1,
+                    stdout=diagnostic if stream == "stdout" else "",
+                    stderr=diagnostic if stream == "stderr" else "",
+                )
+                self.assertIsNone(live_index_job(host, RENDERED, self.retry))
+                self.assertEqual(len(host.calls), 1)
+
+    def test_invalid_output_refuses_with_sibling_postgres_logs(self) -> None:
+        for output in ("0", "-1", "bad", "31\n32", "٣١", "31|doing"):
+            with self.subTest(output=output):
+                host = IndexQueueHost(stdout=output)
+                result = live_index_job(host, RENDERED, self.retry)
+                assert isinstance(result, Problem)
+                self.assertIn("invalid job id", result.problem)
+                self.assertIn(stack.logs_fix(RENDERED, "postgres"), result.fix)
+                self.assertIn(self.retry, result.fix)
+                self.assertEqual(len(host.calls), 1)
+
+    def test_every_other_failed_exit_refuses_without_retry_or_private_output(self) -> None:
+        for code, diagnostic in (
+            (1, "private text sentinel"),
+            (3, 'service "postgres" is not running'),
+            (127, "private text sentinel"),
+            (1, 'permission denied: service "postgres" is not running'),
+        ):
+            with self.subTest(code=code, diagnostic=diagnostic):
+                host = IndexQueueHost(code=code, stderr=diagnostic, stdout=f"{JOB_ID}\n")
+                result = live_index_job(host, RENDERED, self.retry)
+                assert isinstance(result, Problem)
+                self.assertIn(f"exit {code}", result.problem)
+                self.assertIn(stack.logs_fix(RENDERED, "postgres"), result.fix)
+                self.assertIn(self.retry, result.fix)
+                self.assertNotIn(diagnostic, result.problem + result.fix)
+                self.assertEqual(len(host.calls), 1)
+
+    def test_unavailable_tool_refuses_with_logs_and_the_callers_whole_retry(self) -> None:
+        for error in (FileNotFoundError(), PermissionError(), subprocess.SubprocessError()):
+            with self.subTest(error=type(error).__name__):
+                host = IndexQueueHost(error=error)
+                result = live_index_job(host, RENDERED, self.retry)
+                assert isinstance(result, Problem)
+                self.assertIn(type(error).__name__, result.problem)
+                self.assertIn("Restore Docker Compose and psql", result.fix)
+                self.assertIn(stack.logs_fix(RENDERED, "postgres"), result.fix)
+                self.assertIn(self.retry, result.fix)
                 self.assertEqual(len(host.calls), 1)
 
 

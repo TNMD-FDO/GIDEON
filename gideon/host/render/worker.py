@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Final
 
 from gideon.host import models
+from gideon.host.index.sample import SAMPLE_SUFFIX
 from gideon.host.render.engine import ENGINE_PORT
 
 WORKER_SERVICE_NAME: Final[str] = "gideon-worker"
@@ -16,6 +17,8 @@ WORKER_METRICS_PORT: Final[int] = ENGINE_PORT
 WORKER_METRICS_PATH: Final[str] = "/metrics"
 WORKER_ROLE: Final[str] = "gideon_worker"
 WORKER_SECRET_NAME: Final[str] = "postgres_gideon_worker_password"
+METRICS_ROLE: Final[str] = "gideon_ro_metrics"
+METRICS_SECRET_NAME: Final[str] = "postgres_gideon_ro_metrics_password"
 WORKER_DATABASE_HOST: Final[str] = "postgres"
 WORKER_DATABASE_PORT: Final[int] = 5432
 WORKER_DATABASE_NAME: Final[str] = "gideon"
@@ -96,7 +99,7 @@ DENSE_COUNT_KEYS: Final = (
     "dense_embedded", "dense_texts", "dense_tokens", "dense_requests",
     "dense_seconds", "dense_points", "dense_indexed", "dense_limit",
     "dense_hour_seconds", "dense_hour_tokens", "dense_hour_written",
-    "dense_leveled",
+    "dense_leveled", "dense_manifest",
 )
 SERVED_MODEL_PATTERN: Final[str] = r"[A-Za-z0-9._-]{1,64}"
 # exempt: the bound caps a job argument's vector width and its allocation.
@@ -106,6 +109,7 @@ COLLECTION_NAMES: Final = ("caselaw",)
 GENERATION_PATTERN: Final[str] = (
     rf"({'|'.join(COLLECTION_NAMES)})__corpus-[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}__"
     rf"{models.EMBEDDING_SPACE_ID.pattern.removeprefix('^').removesuffix('$')}"
+    rf"(?:__{SAMPLE_SUFFIX})?"
 )
 LEXICAL_MAPPING_VERSION: Final[int] = 1
 CASELAW_FAILURE_REASONS: Final = frozenset({
@@ -191,6 +195,11 @@ DATABASE_PORT_ENV: Final[str] = "GIDEON_WORKER_DB_PORT"
 DATABASE_NAME_ENV: Final[str] = "GIDEON_WORKER_DB_NAME"
 DATABASE_ROLE_ENV: Final[str] = "GIDEON_WORKER_DB_ROLE"
 PASSWORD_FILE_ENV: Final[str] = "GIDEON_WORKER_PASSWORD_FILE"
+CORPUS_DATABASE_HOST_ENV: Final[str] = "GIDEON_WORKER_CORPUS_DB_HOST"
+CORPUS_DATABASE_PORT_ENV: Final[str] = "GIDEON_WORKER_CORPUS_DB_PORT"
+CORPUS_DATABASE_NAME_ENV: Final[str] = "GIDEON_WORKER_CORPUS_DB_NAME"
+CORPUS_DATABASE_ROLE_ENV: Final[str] = "GIDEON_WORKER_CORPUS_DB_ROLE"
+CORPUS_PASSWORD_FILE_ENV: Final[str] = "GIDEON_WORKER_CORPUS_PASSWORD_FILE"
 CONCURRENCY_ENV: Final[str] = "GIDEON_WORKER_CONCURRENCY"
 OPENSEARCH_URL_ENV: Final[str] = "GIDEON_WORKER_OPENSEARCH_URL"
 OPENSEARCH_USER_ENV: Final[str] = "GIDEON_WORKER_OPENSEARCH_USER"

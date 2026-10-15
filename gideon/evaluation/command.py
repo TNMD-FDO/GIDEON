@@ -42,6 +42,7 @@ from gideon.evaluation.results import (
 from gideon.evaluation.slices import SLICE_RUNNERS, CallSurface, SliceSpec
 from gideon.evaluation.turns import access, door, run
 from gideon.host import backuplock, courts, engine, images, nogpu, report, site, stack
+from gideon.host.index.lexical import live_index_job
 from gideon.host.render.ci import CI_STACK, PRODUCTION_STACK
 from gideon.host.render.owui import GENERAL_MODEL_ID
 from gideon.host.report import Problem, StageResult, print_stage, refusal
@@ -1054,6 +1055,22 @@ def _prepare_on_box(
             )
     else:
         lock_detail = "engine lock held by this process"
+
+    if request.paths.name == CI_STACK:
+        job = live_index_job(
+            seams.host, request.paths.turns_dir, report.command(request.retry_command()),
+        )
+        if isinstance(job, Problem):
+            print_stage(StageResult("preconditions", False, job.problem, job.fix))
+            return None
+        if job is not None:
+            print_stage(StageResult(
+                "preconditions", False,
+                f"a sample build is running on the sibling (job {job})",
+                "Wait for the build's job or rejoin it with "
+                f"{report.command('index build caselaw --sample')}, then retry.",
+            ))
+            return None
 
     target = engine.resolve_engine_target(
         seams.host,

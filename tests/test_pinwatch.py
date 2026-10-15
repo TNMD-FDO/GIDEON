@@ -159,6 +159,14 @@ FICTITIOUS_MODEL_HEAD = "b" * 40
 FICTITIOUS_SECOND_MODEL_REVISION = "c" * 40
 FICTITIOUS_MODEL_DIGEST = "sha256:" + "1" * 64
 FICTITIOUS_SECOND_MODEL_DIGEST = "sha256:" + "2" * 64
+FICTITIOUS_GUARDED_MEMORY = """    chunk_guards:
+      serving_ceiling_million_chunks: 2
+      build_refusal_million_chunks: 1
+      resident_bytes_per_chunk: 400
+    memory:
+      qdrant:
+        gb: 1
+"""
 
 
 def _fictitious_models_lock_text(
@@ -191,8 +199,8 @@ def _fictitious_models_lock_text(
             "        vram_gb: 2\n"
             "      dram_gb: 2\n"
             "      data_volume_gb: 2\n"
-            "    memory:\n"
-            "      generator:\n"
+            + FICTITIOUS_GUARDED_MEMORY
+            + "      generator:\n"
             "        gb: 8\n"
             "        role: generator\n"
             "    models:\n"
@@ -224,8 +232,8 @@ def _fictitious_models_lock_text(
         "        vram_gb: 1\n"
         "      dram_gb: 1\n"
         "      data_volume_gb: 1\n"
-        "    memory:\n"
-        "      generator:\n"
+        + FICTITIOUS_GUARDED_MEMORY
+        + "      generator:\n"
         "        gb: 7\n"
         + role_line
         + space

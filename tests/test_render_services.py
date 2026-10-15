@@ -27,6 +27,11 @@ from gideon.host.images import RegistryTarget, parse_registry, reference
 from gideon.host.models import MemoryRow
 from gideon.host.render import RenderedFile, RenderedSet, RenderInputs
 from gideon.host.render.api import API_SECRET_NAME, API_SERVICE_NAME
+from gideon.host.render.ci import (
+    EMBED_RELAY_SERVICE_NAME,
+    RECORD_RELAY_SERVICE_NAME,
+    RELAY_SERVICE_NAME,
+)
 from gideon.host.render.command import (
     AppliedManifest,
     ComposeDigests,
@@ -36,9 +41,11 @@ from gideon.host.render.command import (
     recreate_judgment,
 )
 from gideon.host.render.compose import (
+    PROJECT_NAME,
     STORE_SERVICES,
     ComposeArtifact,
     compose_top_level,
+    container_name,
     service_blocks,
     service_images,
     service_names,
@@ -81,6 +88,18 @@ def host_inputs() -> tuple[RenderInputs, ...]:
 
 
 class Registry(unittest.TestCase):
+    def test_sibling_relays_are_absent_from_every_production_host(self) -> None:
+        relays = {RELAY_SERVICE_NAME, RECORD_RELAY_SERVICE_NAME, EMBED_RELAY_SERVICE_NAME}
+        for rendered_inputs in host_inputs():
+            with self.subTest(site=rendered_inputs.site.hostname, no_gpu=rendered_inputs.no_gpu):
+                self.assertTrue(relays.isdisjoint(service_names(rendered_inputs)))
+
+    def test_container_names_use_the_default_or_explicit_compose_project(self) -> None:
+        service = "fictitious-service"
+        self.assertEqual(container_name(service), f"{PROJECT_NAME}-{service}-1")
+        self.assertEqual(container_name(service, project="fictitious-project"),
+                         f"fictitious-project-{service}-1")
+
     def test_projection_names_the_mounted_service_sources(self) -> None:
         self.assertEqual(
             declared_sources(),
@@ -89,6 +108,7 @@ class Registry(unittest.TestCase):
                 WORKER_SERVICE_NAME: (
                     "gideon/worker", "gideon/host/cas.py", "gideon/host/sysio.py",
                     "gideon/host/report.py", "gideon/casecite", "gideon/extraction",
+                    "gideon/host/index/sample.py",
                 ),
                 EGRESS_SERVICE_NAME: ("gideon/egress",),
             },

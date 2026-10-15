@@ -50,6 +50,7 @@ from gideon.evaluation.results import (
 )
 from gideon.evaluation.slices import SLICE_RUNNERS, SMOKE_PARTS
 from gideon.evaluation.turns import run as turn_run
+from gideon.host import worker
 from gideon.host.sysio import PathLike
 from tools.exportboundary import absent_from_export
 
@@ -169,6 +170,9 @@ class CommandDoorHost(JudgingDoorHost):
         passthrough: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         if tuple(argv)[:3] == ("docker", "image", "inspect"):
+            return subprocess.CompletedProcess(list(argv), 0, "", "")
+        if list(argv) == worker.psql_argv(stacks.CI_ROOT):
+            # The sibling's index queue holds no live sample job.
             return subprocess.CompletedProcess(list(argv), 0, "", "")
         if tuple(argv)[:2] == ("docker", "run") and argv[-1] == "gideon.casecite":
             if self.image_error == "timeout":

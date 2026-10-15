@@ -337,7 +337,7 @@ def sketch(task: SketchTask, store_root: Path) -> tuple[tuple[int, bytes], ...]:
     """Read verified canonical text and sketch each verified chunk span."""
 
     try:
-        text = lexical.canonical_text(lexical.Document("", task.canonical_text_sha256), store_root, RealHost())
+        text = lexical.canonical_text(lexical.Document("", task.canonical_text_sha256, "", 0), store_root, RealHost())
         result: list[tuple[int, bytes]] = []
         for index, start, end, content_hash in task.chunks:
             chunk = chunker.NewChunk("", "", "", index, "", "", start, end, content_hash, 0)
@@ -354,7 +354,7 @@ SCOPE_SQL: Final = (
     + lexical.DOCUMENTS_SQL + ") AS scope ON scope.doc_id = c.doc_id WHERE c.pipeline = %s"
 )
 DOCUMENTS_SQL: Final = lexical.DOCUMENTS_SQL.replace(
-    "SELECT d.doc_id, d.canonical_text_sha256",
+    "SELECT d.doc_id, d.canonical_text_sha256, d.source, o.opinion_id",
     "SELECT d.doc_id, d.canonical_text_sha256, o.court, o.decided_date",
 )
 CHUNKS_SQL: Final = lexical.CHUNKS_SQL.replace(
@@ -413,7 +413,7 @@ class PsycopgGenerations(lexical.PsycopgGenerations):
     def documents_with_opinions(
         self, collection: str, source: str, snapshot: date, courts: Sequence[str],
     ) -> Iterator[Document]:
-        connection = self._connection(stream=True)
+        connection = self._connection(corpus=True)
         try:
             with connection.cursor(name="dupes_documents") as cursor:
                 cursor.itersize = DOCUMENT_BATCH_SIZE

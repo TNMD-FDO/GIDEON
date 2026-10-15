@@ -5,9 +5,10 @@ import shlex
 import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 
 from gideon.host import caselaw, models, report, stack, staging, worker
-from gideon.host.index import record
+from gideon.host.index import record, sample
 from gideon.host.index.generations import GenerationInputs
 from gideon.host.render.opensearch import (
     OPENSEARCH_PASSWORD_SECRET_NAME,
@@ -91,11 +92,21 @@ def _inputs_problem(inputs: GenerationInputs, command_path: str, *, subject: str
             return problem
     if inputs.courts != tuple(sorted(set(inputs.courts))) or set(inputs.courts) != set(inputs.geography):
         return Problem(f"{subject} courts are invalid", f"Use sorted distinct court ids with matching geography, {retry}")
+    if inputs.sample is not None:
+        if not isinstance(inputs.sample, sample.SampleInputs):
+            findings = ("sample",)
+        else:
+            findings = sample.validate(sample.arguments(inputs.sample))
+        if findings:
+            return Problem(
+                f"{subject} sample is invalid ({', '.join(findings)})",
+                f"Use valid sample arguments, {retry}",
+            )
     return None
 
 
 def _arguments(inputs: GenerationInputs) -> dict[str, object]:
-    return {
+    arguments: dict[str, object] = {
         "name": inputs.name, "collection": inputs.collection, "label": inputs.label,
         "snapshot": inputs.snapshot,
         "courts": {
@@ -105,6 +116,9 @@ def _arguments(inputs: GenerationInputs) -> dict[str, object]:
         "pipeline": inputs.pipeline, "embedding_space": inputs.embedding_space,
         "inputs_hash": inputs.inputs_hash,
     }
+    if inputs.sample is not None:
+        arguments["sample"] = sample.arguments(inputs.sample)
+    return arguments
 
 
 def defer_lexical(
@@ -153,6 +167,47 @@ def live_job(
         return None
     if not value.isascii() or not value.isdecimal() or int(value) < 1:
         return Problem(f"{subject} job query returned an invalid job id", fix)
+    return int(value)
+
+
+def live_index_job(
+    host: Host, rendered_dir: PathLike, retry: str,
+) -> int | None | Problem:
+    """Find the first queued or running index job in a project's record.
+
+    ``retry`` is the caller's whole command as its fix prints it. A project
+    with no rendered document or no running Postgres holds no job.
+    """
+
+    fix = (
+        f"Run {stack.logs_fix(rendered_dir, 'postgres')}, then run "
+        f"{retry} again."
+    )
+    tool_fix = f"Restore Docker Compose and psql. {fix}"
+    sql = (
+        worker.bind("v_queue", LEXICAL_QUEUE)
+        + "\nSELECT id FROM procrastinate_jobs WHERE queue_name = :'v_queue' "
+        "AND status IN ('todo', 'doing') ORDER BY id LIMIT 1;\n"
+    )
+    try:
+        if not host.exists(Path(rendered_dir) / "compose.yaml"):
+            return None
+        result = host.run(worker.psql_argv(rendered_dir), input=sql)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return Problem(f"index job query could not run ({type(exc).__name__})", tool_fix)
+    if result.returncode == 127:
+        return Problem("index job query is unavailable (exit 127)", tool_fix)
+    if result.returncode != 0:
+        if result.returncode == 1 and 'service "postgres" is not running' in (
+            line.strip() for line in (result.stderr + "\n" + result.stdout).splitlines()
+        ):
+            return None
+        return Problem(f"index job query failed (exit {result.returncode})", fix)
+    value = result.stdout.strip()
+    if not value:
+        return None
+    if not value.isascii() or not value.isdecimal() or int(value) < 1:
+        return Problem("index job query returned an invalid job id", fix)
     return int(value)
 
 

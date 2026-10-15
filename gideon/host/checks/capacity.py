@@ -1,7 +1,9 @@
 """Capacity checks for the host preflight.
 
-The data-volume floor comes from the profile's size minimum. Free bytes are
-reported, not judged, until the reserve rule lands with its consumer.
+The data-volume floor comes from the profile's size minimum. Free bytes below
+twice the promoted generations' measured bytes warn, with the build reserve
+line in the detail. An unreadable record or no promoted generation leaves the
+reserve judgment skipped and the size verdict intact.
 
 The host-memory floor is an agreement between the operators of the
 applications sharing the box: a fifth of the host, a release-constant fraction
@@ -37,6 +39,8 @@ from gideon.host.checks import (
     meminfo_kb,
     nvidia_failure,
 )
+from gideon.host.index import reserve
+from gideon.host.index.reserve import DATA_DF_ARGV, parse_size_and_available
 from gideon.host.models import GIGABYTE, HardwareProfile, select_profile
 from gideon.host.render.services.prometheus import PROMETHEUS_LOOPBACK_ADDRESS
 from gideon.host.report import Problem
@@ -47,7 +51,7 @@ _DATA_FIX = (
     "hardware_profile in /etc/gideon/site.yaml to a profile this host satisfies, "
     "then re-run preflight."
 )
-DATA_DF_ARGV: Final[tuple[str, ...]] = ("df", "-B1", "--output=size,avail", "/data")
+_RENDERED_DIR: Final = "/etc/gideon/rendered"
 HOST_MEMORY_FLOOR_FRACTION: Final = Fraction(1, 5)
 MEMORY_LOW_RANGE: Final = "14d"
 MEMORY_AVAILABLE_SERIES: Final = "node_memory_MemAvailable_bytes"
@@ -150,33 +154,28 @@ def read_prometheus_low() -> LowReading:
     return LowReading(int(number))
 
 
-def parse_size_and_available(output: str) -> tuple[int, int] | None:
-    """Parse the size and available byte counts from ``df`` output."""
+def read_promoted_bytes(host: Host) -> reserve.PromotedReading:
+    """Read all live generations' measured bytes, or explain the missing reading."""
 
-    lines = [line for line in output.splitlines() if line.strip()]
-    if not lines:
-        return None
-    fields = lines[-1].split()
-    if len(fields) != 2:
-        return None
-    try:
-        size, available = (int(field) for field in fields)
-    except ValueError:
-        return None
-    if size < 0 or available < 0:
-        return None
-    return size, available
+    # Deferred: the record reaches caselaw, whose import chain registers these checks.
+    from gideon.host.index import record
+
+    rows = record.read_promoted(host, _RENDERED_DIR, command_path="preflight")
+    if isinstance(rows, Problem):
+        return reserve.PromotedReading(None, rows.problem)
+    if not rows:
+        return reserve.PromotedReading(None, "no promoted generation")
+    return reserve.PromotedReading(sum(row.bytes for row in rows))
 
 
 class DataVolumeCheck(PreflightCheck):
-    """Measure ``/data``'s size against the selected profile's minimum.
-
-    The free-byte figure is informational; the size floor is the only capacity
-    judgment until the measured reserve rule arrives with its consumer.
-    """
+    """Hold the data-volume size to its floor and warn below the measured reserve."""
 
     name = "data-volume"
     summary = "check /data's size against the profile's data-volume floor"
+
+    def __init__(self, reader: reserve.PromotedReader = read_promoted_bytes) -> None:
+        self.reader = reader
 
     def run(self, context: PreflightContext) -> CheckReport:
         profile = select_profile(context.models, context.site.hardware_profile)
@@ -210,10 +209,20 @@ class DataVolumeCheck(PreflightCheck):
                 f"/data is {size} bytes ({size_detail}), profile requires a {floor} GB data volume",
                 _DATA_FIX.format(floor=floor),
             )
-        return CheckReport(
-            Severity.PASS,
-            f"/data size {size_detail}, {free_detail} free; profile requires a {floor} GB data volume",
-        )
+        detail = f"/data size {size_detail}, {free_detail} free; profile requires a {floor} GB data volume"
+        promoted = self.reader(context.host)
+        if promoted.bytes is None:
+            return CheckReport(Severity.PASS, f"{detail}; reserve skipped: {promoted.reason}")
+        verdict = reserve.judge(available, promoted.bytes)
+        detail += f"; {reserve.describe(verdict)}"
+        if not verdict.alert_cleared:
+            return CheckReport(
+                Severity.WARN, detail,
+                f"Free space under /data as {reserve.RUNBOOK_ROW} says "
+                "(old drill or staging directories, following the backup runbook's retention), "
+                f"then run {report.command('preflight')} again.",
+            )
+        return CheckReport(Severity.PASS, detail)
 
 
 class HostMemoryCheck(PreflightCheck):

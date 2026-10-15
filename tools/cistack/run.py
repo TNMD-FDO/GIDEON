@@ -26,6 +26,7 @@ from gideon.host import (
     stores,
 )
 from gideon.host.images import load_image_lock
+from gideon.host.index.lexical import live_index_job
 from gideon.host.lock import load_host_lock
 from gideon.host.models import load_models_lock
 from gideon.host.render import ARTIFACTS
@@ -44,6 +45,9 @@ from gideon.host.render.ci import (
     CI_SKIPPED_SECRETS,
     CI_STACK,
     CI_WIPE_PATHS,
+    CI_WORK_ROOT,
+    EMBED_RELAY_SERVICE_NAME,
+    RECORD_RELAY_SERVICE_NAME,
     RELAY_SERVICE_NAME,
     ci_compose_document,
     ci_env_file,
@@ -51,16 +55,27 @@ from gideon.host.render.ci import (
     ci_manifest,
 )
 from gideon.host.render.command import load_render_inputs
-from gideon.host.render.compose import integration_network_name
-from gideon.host.render.engine import ENGINE_PORT
+from gideon.host.render.compose import (
+    INTERNAL_NETWORK_NAME,
+    container_name,
+    network_name,
+)
+from gideon.host.render.engine import ENGINE_PORT, INTEGRATION_NETWORK_NAME
 from gideon.host.render.opensearch import (
     OPENSEARCH_GID,
     OPENSEARCH_SERVICE_NAME,
     OPENSEARCH_UID,
 )
 from gideon.host.render.qdrant import QDRANT_SERVICE_NAME
+from gideon.host.render.worker import DIR_MODE, WORKER_SERVICE_NAME
 from gideon.host.render.yamlout import dump
-from gideon.host.report import StageResult, command_detail, print_stage
+from gideon.host.report import (
+    Problem,
+    StageResult,
+    command,
+    command_detail,
+    print_stage,
+)
 from gideon.host.sysio import Host, LockingHost, PathLike
 
 CI_SERVICES: Final[tuple[str, ...]] = (
@@ -69,7 +84,10 @@ CI_SERVICES: Final[tuple[str, ...]] = (
     QDRANT_SERVICE_NAME,
     OPENSEARCH_SERVICE_NAME,
     API_SERVICE_NAME,
+    WORKER_SERVICE_NAME,
     RELAY_SERVICE_NAME,
+    RECORD_RELAY_SERVICE_NAME,
+    EMBED_RELAY_SERVICE_NAME,
 )
 _ROOT_FIX: Final = "Run sudo python3 -m tools.cistack <up|smoke|down|status>, then retry."
 _UP_ROOT_FIX: Final = "Run sudo python3 -m tools.cistack up, then retry."
@@ -85,9 +103,9 @@ _RENDER_FIX: Final = "Correct the CI render inputs, then retry."
 _FOREIGN_FIX: Final = "Remove or move the foreign file(s), then retry."
 _SECRET_FIX: Final = "Correct the CI secrets directory, then retry."
 _WIPE_FIX: Final = f"Correct ownership and mode under {CI_ROOT}, then retry."
-# Production's `compose down` leaves the integration network standing while the relay joins it.
+# Production's `compose down` leaves both shared networks in use by the relays.
 _RELAY_REMINDER: Final = (
-    "; the relay keeps the integration network in use, so run sudo python3 -m tools.cistack down before a restore or upgrade --rollback"
+    "; the relays keep the integration and internal networks in use, so run sudo python3 -m tools.cistack down before a restore or upgrade --rollback"
 )
 _HEALTH_SCRIPT: Final = (
     "import urllib.request; "
@@ -116,6 +134,7 @@ _PERSISTENT_DIRECTORY_NAMES: Final[frozenset[str]] = frozenset(
         "postgres",
         "openwebui",
         "secrets",
+        PurePosixPath(CI_WORK_ROOT).name,
         PurePosixPath(CI_QDRANT_DATA_ROOT).name,
         PurePosixPath(CI_OPENSEARCH_DATA_ROOT).name,
     }
@@ -210,26 +229,23 @@ def _preconditions(
     if models_result.errors or models_result.lock is None:
         return _error_row("preconditions", models_result.errors, "models.lock is unavailable")
 
-    try:
-        network = io.run(["docker", "network", "inspect", integration_network_name()])
-    except OSError as exc:
-        return StageResult(
-            "preconditions",
-            False,
-            f"integration Docker network could not be inspected: {exc}",
-            _NETWORK_FIX,
-        )
-    if network.returncode != 0:
-        return StageResult(
-            "preconditions",
-            False,
-            f"integration Docker network is unavailable: {command_detail(network)}",
-            _NETWORK_FIX,
-        )
+    for key in (INTEGRATION_NETWORK_NAME, INTERNAL_NETWORK_NAME):
+        try:
+            network = io.run(["docker", "network", "inspect", network_name(key)])
+        except (OSError, subprocess.SubprocessError) as exc:
+            return StageResult(
+                "preconditions", False,
+                f"{key} Docker network could not be inspected: {exc}", _NETWORK_FIX,
+            )
+        if network.returncode != 0:
+            return StageResult(
+                "preconditions", False,
+                f"{key} Docker network is unavailable: {command_detail(network)}", _NETWORK_FIX,
+            )
     return StageResult(
         "preconditions",
         True,
-        "root, render inputs, CI data root, and integration network are available"
+        "root, render inputs, CI data root, integration network, and internal network are available"
         + (f"; {lock_detail}" if lock_detail else ""),
         "",
     )
@@ -268,6 +284,15 @@ def _engine_lock(
 def _release_engine_lock(io: LockingHost, outcome: backuplock.Outcome | None) -> None:
     if outcome is not None and outcome.state is backuplock.State.HELD:
         backuplock.release(io, lock=backuplock.ENGINE_LOCK)
+
+
+def _live_index_job(ci_stack: CiStack, io: Host, verb: str) -> int | None | StageResult:
+    """Read the sibling's index queue; a read failure is the refusing row."""
+
+    job = live_index_job(io, ci_stack.project_dir, f"sudo python3 -m tools.cistack {verb}")
+    if isinstance(job, Problem):
+        return StageResult("preconditions", False, job.problem, job.fix)
+    return job
 
 
 def _secrets_stage(
@@ -405,13 +430,21 @@ def _render_stage(
         if not io.exists(opensearch_root):
             io.mkdir(opensearch_root, mode=0o700)
             io.chown(opensearch_root, OPENSEARCH_UID, OPENSEARCH_GID)
+        work_root = ci_stack.project_dir / PurePosixPath(CI_WORK_ROOT).name
+        if not io.exists(work_root):
+            gid = secrets.service_group_gid(io)
+            if gid is None:
+                return StageResult("render", False, secrets.SERVICE_GROUP_PROBLEM, _DATA_FIX)
+            io.mkdir(work_root, mode=DIR_MODE)
+            io.chown(work_root, 0, gid)
+            io.chmod(work_root, DIR_MODE)
     except (OSError, TypeError, ValueError) as exc:
         return StageResult("render", False, f"CI render files could not be written: {exc}", _RENDER_FIX)
     return StageResult(
         "render",
         True,
         "wrote the CI Compose document, Open WebUI env file and manifest, API instruction, "
-        "and OpenSearch settings and security files; prepared Qdrant and OpenSearch data roots",
+        "and OpenSearch settings and security files; prepared Qdrant and OpenSearch data roots and worker work root",
         "",
     )
 
@@ -638,6 +671,18 @@ def up(
         print_stage(lock_row)
         return 1
     try:
+        job = _live_index_job(ci_stack, io, "up")
+        if isinstance(job, StageResult):
+            print_stage(job)
+            return 1
+        if job is not None:
+            print_stage(StageResult(
+                "preconditions", False,
+                f"a sample build is running on the sibling (job {job})",
+                "Wait for the build's job or rejoin it with "
+                f"{command('index build caselaw --sample')}, then retry.",
+            ))
+            return 1
         return _up_stages(
             ci_stack,
             io,
@@ -688,6 +733,19 @@ def smoke(
         )
         return 0
     try:
+        job = _live_index_job(ci_stack, io, "smoke")
+        if isinstance(job, StageResult):
+            print_stage(job)
+            return 1
+        if job is not None:
+            print_stage(StageResult("preconditions", True, lock_row.detail, ""))
+            print_stage(StageResult(
+                "skipped", True,
+                f"a sample build is running on the sibling (job {job}); "
+                "the sibling untouched, nothing evaluated, nothing recorded",
+                "",
+            ))
+            return 0
         result = _up_stages(
             ci_stack,
             io,
@@ -782,38 +840,38 @@ def down(ci_stack: CiStack, io: Host, *, wipe: bool = False) -> int:
     return int(not wiped.ok)
 
 
-def _relay_attached(io: Host) -> tuple[bool, str] | str:
+def _relay_attached(io: Host, service: str, network: str) -> tuple[bool, str] | str:
     try:
-        result = io.run(["docker", "network", "inspect", integration_network_name()])
-    except OSError as exc:
-        return f"integration network inspection failed: {exc}"
+        result = io.run(["docker", "network", "inspect", network_name(network)])
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"{network} network inspection failed: {exc}"
     if result.returncode != 0:
-        return f"integration network inspection failed: {command_detail(result)}"
+        return f"{network} network inspection failed: {command_detail(result)}"
     try:
         documents = json.loads(result.stdout)
     except json.JSONDecodeError:
-        return "integration network inspection returned invalid JSON"
+        return f"{network} network inspection returned invalid JSON"
     if not isinstance(documents, list) or not documents or not isinstance(documents[0], Mapping):
-        return "integration network inspection returned no network"
+        return f"{network} network inspection returned no network"
     containers = documents[0].get("Containers", {})
     if not isinstance(containers, Mapping):
-        return False, "engine relay is absent from the integration network"
+        return False, f"{service} is absent from the {network} network"
     for value in containers.values():
         if not isinstance(value, Mapping):
             continue
         name = value.get("Name")
         labels = value.get("Labels")
-        if name == f"{CI_PROJECT}-{RELAY_SERVICE_NAME}-1" or (
+        if name == container_name(service, project=CI_PROJECT) or (
             isinstance(labels, Mapping)
             and labels.get("com.docker.compose.project") == CI_PROJECT
-            and labels.get("com.docker.compose.service") == RELAY_SERVICE_NAME
+            and labels.get("com.docker.compose.service") == service
         ):
-            return True, "engine relay is attached to the integration network" + _RELAY_REMINDER
-    return False, "engine relay is absent from the integration network"
+            return True, f"{service} is attached to the {network} network"
+    return False, f"{service} is absent from the {network} network"
 
 
 def status(ci_stack: CiStack, io: Host) -> int:
-    """Report running CI services and whether the relay joins the integration network."""
+    """Report running CI services and their relays on production's networks."""
 
     root = _root_row(io, "status")
     if root is not None:
@@ -849,10 +907,21 @@ def status(ci_stack: CiStack, io: Host) -> int:
     print_stage(services_result)
     if not services_result.ok:
         return 1
-    attached = _relay_attached(io)
-    if isinstance(attached, str):
-        relay_result = StageResult("relay", False, attached, _NETWORK_FIX)
-    else:
-        relay_result = StageResult("relay", True, attached[1], "")
+    details: list[str] = []
+    any_attached = False
+    for service, network in (
+        (RELAY_SERVICE_NAME, INTEGRATION_NETWORK_NAME),
+        (RECORD_RELAY_SERVICE_NAME, INTERNAL_NETWORK_NAME),
+        (EMBED_RELAY_SERVICE_NAME, INTERNAL_NETWORK_NAME),
+    ):
+        attached = _relay_attached(io, service, network)
+        if isinstance(attached, str):
+            print_stage(StageResult("relay", False, attached, _NETWORK_FIX))
+            return 1
+        any_attached = any_attached or attached[0]
+        details.append(attached[1])
+    relay_result = StageResult(
+        "relay", True, "; ".join(details) + (_RELAY_REMINDER if any_attached else ""), "",
+    )
     print_stage(relay_result)
     return int(not relay_result.ok)

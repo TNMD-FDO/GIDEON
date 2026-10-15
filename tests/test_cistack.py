@@ -29,17 +29,27 @@ from gideon.host.render.ci import (
     CI_SECRETS_DIR,
     CI_SKIPPED_SECRETS,
     CI_WIPE_PATHS,
+    CI_WORK_ROOT,
     ci_compose_document,
     ci_instruction,
 )
-from gideon.host.render.compose import integration_network_name
-from gideon.host.render.engine import EMBED_SECRET_NAME, ENGINE_SECRET_NAME
+from gideon.host.render.compose import (
+    INTERNAL_NETWORK_NAME,
+    container_name,
+    network_name,
+)
+from gideon.host.render.engine import (
+    EMBED_SECRET_NAME,
+    ENGINE_SECRET_NAME,
+    INTEGRATION_NETWORK_NAME,
+)
 from gideon.host.render.opensearch import (
     OPENSEARCH_GID,
     OPENSEARCH_SERVICE_NAME,
     OPENSEARCH_UID,
 )
 from gideon.host.render.searxng import SEARXNG_SECRET_NAME
+from gideon.host.render.worker import DIR_MODE
 from gideon.host.report import StageResult
 from gideon.host.secrets import EnsureResult
 from gideon.host.sysio import Command, PathLike
@@ -69,19 +79,25 @@ class FakeHost:
     def __init__(self, *, euid: int = 0, network_returncode: int = 0) -> None:
         self.euid = euid
         self.network_returncode = network_returncode
-        self.network_containers: dict[str, object] = {}
+        self.network_results: dict[str, int | OSError] = {}
+        self.network_containers: dict[str, dict[str, object]] = {}
+        self.job_id: int | None = None
+        self.job_returncode = 0
+        self.job_read_locks: list[bool] = []
+        self.events: list[tuple[str, str]] = []
         self.files: dict[str, str] = {
             os.fspath(SITE_PATH): (ROOT / "config/site.example.yaml").read_text(
                 encoding="utf-8"
             ),
         }
-        self.directories: set[str] = {CI_ROOT, CI_SECRETS_DIR}
+        self.directories: set[str] = {CI_ROOT, CI_SECRETS_DIR, cistack_run.backuplock.LOCK_DIR}
         self.commands: list[tuple[str, ...]] = []
         self.locks: dict[str, str] = {}
         self.lock_events: list[tuple[str, str]] = []
         self.writes: list[tuple[str, int]] = []
         self.mkdirs: list[tuple[str, int]] = []
         self.chowns: list[tuple[str, int, int]] = []
+        self.chmods: list[tuple[str, int]] = []
         self._seed_checkout()
 
     def _seed_checkout(self) -> None:
@@ -101,16 +117,28 @@ class FakeHost:
         timeout: float | None = None,
         passthrough: bool = False,
     ) -> subprocess.CompletedProcess[str]:
-        del check, input, cwd, env, timeout, passthrough
+        del check, cwd, env, timeout, passthrough
         command = tuple(argv)
         self.commands.append(command)
         if command[:3] == ("docker", "network", "inspect"):
-            assert command == ("docker", "network", "inspect", integration_network_name())
+            network = command[3]
+            outcome = self.network_results.get(network, self.network_returncode)
+            if isinstance(outcome, OSError):
+                raise outcome
             return completed(
                 command,
-                returncode=self.network_returncode,
-                stdout=json.dumps([{"Containers": self.network_containers}]) + "\n",
-                stderr="network unavailable\n" if self.network_returncode else "",
+                returncode=outcome,
+                stdout=json.dumps([{"Containers": self.network_containers.get(network, {})}]) + "\n",
+                stderr="network unavailable\n" if outcome else "",
+            )
+        if input is not None and "FROM procrastinate_jobs" in input:
+            self.events.append(("read-job", ""))
+            self.job_read_locks.append(cistack_run.backuplock.ENGINE_LOCK.path in self.locks)
+            return completed(
+                command,
+                returncode=self.job_returncode,
+                stdout=f"{self.job_id}\n" if self.job_id is not None else "",
+                stderr="record unavailable\n" if self.job_returncode else "",
             )
         if command[:2] == ("docker", "compose") and "ps" in command:
             rows = "\n".join(
@@ -144,6 +172,7 @@ class FakeHost:
         self.files[key] = text
         self.directories.add(os.path.dirname(key))
         self.writes.append((key, mode))
+        self.events.append(("write", key))
 
     def exists(self, path: PathLike) -> bool:
         key = os.fspath(path)
@@ -173,10 +202,12 @@ class FakeHost:
         return os.stat_result((0o040755 if os.fspath(path) in self.directories else 0o100644,))
 
     def chmod(self, path: PathLike, mode: int) -> None:
-        del path, mode
+        self.chmods.append((os.fspath(path), mode))
+        self.events.append(("chmod", os.fspath(path)))
 
     def chown(self, path: PathLike, uid: int, gid: int) -> None:
         self.chowns.append((os.fspath(path), uid, gid))
+        self.events.append(("chown", os.fspath(path)))
 
     def mkdir(
         self,
@@ -190,6 +221,7 @@ class FakeHost:
         key = os.fspath(path)
         self.directories.add(key)
         self.mkdirs.append((key, mode))
+        self.events.append(("mkdir", key))
 
     def remove(self, path: str) -> None:
         prefix = path.rstrip("/") + "/"
@@ -211,12 +243,14 @@ class FakeHost:
         if key in self.locks:
             return self.locks[key]
         self.locks[key] = record
+        self.events.append(("take-lock", key))
         return None
 
     def release_lock(self, path: PathLike) -> None:
         key = os.fspath(path)
         self.lock_events.append(("release", key))
         self.locks.pop(key, None)
+        self.events.append(("release-lock", key))
 
 
 def ci_stack() -> cistack_run.CiStack:
@@ -232,17 +266,35 @@ class Preconditions(unittest.TestCase):
     def result(self, host: FakeHost) -> StageResult:
         return cistack_run._preconditions(ci_stack(), host, site_path=SITE_PATH)
 
-    def test_available_integration_network_is_named_in_the_row(self) -> None:
+    def test_available_production_networks_are_named_in_the_row(self) -> None:
         host = FakeHost()
 
         result = self.result(host)
 
         self.assertTrue(result.ok)
-        self.assertIn("integration network", result.detail)
-        self.assertIn(
-            ("docker", "network", "inspect", integration_network_name()),
+        for key in (INTEGRATION_NETWORK_NAME, INTERNAL_NETWORK_NAME):
+            self.assertIn(f"{key} network", result.detail)
+        self.assertEqual(
             host.commands,
+            [("docker", "network", "inspect", network_name(key))
+             for key in (INTEGRATION_NETWORK_NAME, INTERNAL_NETWORK_NAME)],
         )
+
+    def test_each_production_network_refusal_names_the_network_and_apply_fix(self) -> None:
+        for key in (INTEGRATION_NETWORK_NAME, INTERNAL_NETWORK_NAME):
+            for outcome in (1, OSError("docker unavailable")):
+                with self.subTest(network=key, outcome=outcome):
+                    host = FakeHost()
+                    host.network_results[network_name(key)] = outcome
+
+                    result = self.result(host)
+
+                    self.assertFalse(result.ok)
+                    self.assertEqual(result.name, "preconditions")
+                    self.assertIn(f"{key} Docker network", result.detail)
+                    self.assertEqual(result.fix, "Run sudo python3 -m gideon apply, then retry.")
+                    self.assertEqual(host.commands[-1], ("docker", "network", "inspect", network_name(key)))
+                    self.assertEqual(host.writes, [])
 
     def test_refusal_matrix_names_the_fix_and_stops_at_preconditions(self) -> None:
         cases = (
@@ -366,13 +418,19 @@ class Preconditions(unittest.TestCase):
         assert service_gid is not None
         self.assertIn((CI_QDRANT_DATA_ROOT, 0, service_gid), host.chowns)
         self.assertIn((CI_OPENSEARCH_DATA_ROOT, OPENSEARCH_UID, OPENSEARCH_GID), host.chowns)
+        self.assertEqual([entry for entry in host.mkdirs if entry[0] == CI_WORK_ROOT], [(CI_WORK_ROOT, DIR_MODE)])
+        self.assertEqual([entry for entry in host.chowns if entry[0] == CI_WORK_ROOT], [(CI_WORK_ROOT, 0, service_gid)])
+        self.assertEqual([entry for entry in host.chmods if entry[0] == CI_WORK_ROOT], [(CI_WORK_ROOT, DIR_MODE)])
         host.writes.clear()
         self.assertTrue(cistack_run._render_stage(ci_stack(), host, render_inputs).ok)
         self.assertEqual(len(host.writes), 4 + len(opensearch_artifacts))
+        self.assertEqual([entry for entry in host.mkdirs if entry[0] == CI_WORK_ROOT], [(CI_WORK_ROOT, DIR_MODE)])
+        self.assertEqual([entry for entry in host.chowns if entry[0] == CI_WORK_ROOT], [(CI_WORK_ROOT, 0, service_gid)])
+        self.assertEqual([entry for entry in host.chmods if entry[0] == CI_WORK_ROOT], [(CI_WORK_ROOT, DIR_MODE)])
 
     def test_render_leaves_existing_data_roots_untouched(self) -> None:
         host = FakeHost()
-        roots = {CI_QDRANT_DATA_ROOT, CI_OPENSEARCH_DATA_ROOT}
+        roots = {CI_QDRANT_DATA_ROOT, CI_OPENSEARCH_DATA_ROOT, CI_WORK_ROOT}
         host.directories.update(roots)
 
         result = cistack_run._render_stage(ci_stack(), host, inputs())
@@ -380,6 +438,7 @@ class Preconditions(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertFalse(any(path in roots for path, _ in host.mkdirs))
         self.assertFalse(any(path in roots for path, _, _ in host.chowns))
+        self.assertFalse(any(path in roots for path, _ in host.chmods))
 
 
 class SmokeCommand(unittest.TestCase):
@@ -409,6 +468,110 @@ class SmokeCommand(unittest.TestCase):
         self.assertEqual(host.commands, [])
         self.assertEqual(host.writes, [])
         up_stages.assert_not_called()
+
+    def test_live_sample_job_skips_even_when_an_interrupted_builder_released_its_lock(self) -> None:
+        """A queued or running job outlives its client's interrupted wait."""
+        for interrupted in (False, True):
+            with self.subTest(interrupted=interrupted):
+                host = FakeHost()
+                host.files[f"{CI_ROOT}/compose.yaml"] = "services: {}\n"
+                lock_path = cistack_run.backuplock.ENGINE_LOCK.path
+                if interrupted:
+                    host.take_lock(lock_path, json.dumps({
+                        "command": "index build caselaw --sample example-audit",
+                        "pid": os.getpid(),
+                        "started": "2026-01-01T00:00:00+00:00",
+                    }))
+                host.job_id = 12345
+                if interrupted:
+                    host.release_lock(lock_path)
+                host.events.clear()
+                before_files = host.files.copy()
+                before_directories = host.directories.copy()
+                output = io.StringIO()
+
+                with contextlib.redirect_stdout(output):
+                    code = cistack_run.smoke(
+                        ci_stack(), host, site_path=SITE_PATH, sleep=lambda _: None,
+                        run_eval=lambda *args, **kwargs: self.fail("evaluated a live build"),
+                    )
+
+                self.assertEqual(code, 0)
+                self.assertEqual(output.getvalue().splitlines(), [
+                    "preconditions: ok — engine lock taken",
+                    "skipped: ok — a sample build is running on the sibling (job 12345); "
+                    "the sibling untouched, nothing evaluated, nothing recorded",
+                ])
+                self.assertEqual(host.job_read_locks, [True])
+                self.assertEqual(
+                    [event for event in host.events if event[1] != cistack_run.backuplock.LOCK_DIR],
+                    [("take-lock", lock_path), ("read-job", ""), ("release-lock", lock_path)],
+                )
+                self.assertEqual(host.files, before_files)
+                self.assertEqual(host.directories, before_directories)
+                self.assertEqual(len(host.commands), 1)
+                self.assertIn("exec", host.commands[0])
+                self.assertNotIn(lock_path, host.locks)
+
+    def test_up_refuses_a_live_sample_job_with_a_wait_or_rejoin_fix(self) -> None:
+        """A convergence never recreates the containers of a running build."""
+        host = FakeHost()
+        host.files[f"{CI_ROOT}/compose.yaml"] = "services: {}\n"
+        host.job_id = 12345
+        before_files = host.files.copy()
+        before_directories = host.directories.copy()
+        lock_path = cistack_run.backuplock.ENGINE_LOCK.path
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            code = cistack_run.up(ci_stack(), host, site_path=SITE_PATH, sleep=lambda _: None)
+
+        self.assertEqual(code, 1)
+        detail, fix = output.getvalue().strip().split(" Fix: ")
+        self.assertEqual(detail, "preconditions: refuse — a sample build is running on the sibling (job 12345)")
+        self.assertIn("Wait for the build's job or rejoin it", fix)
+        self.assertIn("index build caselaw --sample", fix)
+        self.assertEqual(host.job_read_locks, [True])
+        self.assertEqual(
+            [event for event in host.events if event[1] != cistack_run.backuplock.LOCK_DIR],
+            [("take-lock", lock_path), ("read-job", ""), ("release-lock", lock_path)],
+        )
+        self.assertEqual(host.files, before_files)
+        self.assertEqual(host.directories, before_directories)
+        self.assertEqual(len(host.commands), 1)
+        self.assertIn("exec", host.commands[0])
+        self.assertNotIn(lock_path, host.locks)
+
+    def test_failed_live_job_read_refuses_up_and_smoke_before_touching_the_sibling(self) -> None:
+        """An unreadable queue cannot show that a convergence is safe."""
+        for verb in ("up", "smoke"):
+            with self.subTest(verb=verb):
+                host = FakeHost()
+                host.files[f"{CI_ROOT}/compose.yaml"] = "services: {}\n"
+                host.job_returncode = 2
+                before_files = host.files.copy()
+                before_directories = host.directories.copy()
+                output = io.StringIO()
+                action = cistack_run.up if verb == "up" else cistack_run.smoke
+
+                with contextlib.redirect_stdout(output):
+                    code = action(ci_stack(), host, site_path=SITE_PATH, sleep=lambda _: None)
+
+                self.assertEqual(code, 1)
+                detail, fix = output.getvalue().strip().split(" Fix: ")
+                self.assertEqual(detail, "preconditions: refuse — index job query failed (exit 2)")
+                self.assertIn(host_stack.logs_fix(CI_ROOT, "postgres"), fix)
+                self.assertIn(f"sudo python3 -m tools.cistack {verb}", fix)
+                self.assertEqual(host.job_read_locks, [True])
+                lock_path = cistack_run.backuplock.ENGINE_LOCK.path
+                self.assertEqual(
+                    [event for event in host.events if event[1] != cistack_run.backuplock.LOCK_DIR],
+                    [("take-lock", lock_path), ("read-job", ""), ("release-lock", lock_path)],
+                )
+                self.assertEqual(host.files, before_files)
+                self.assertEqual(host.directories, before_directories)
+                self.assertEqual(len(host.commands), 1)
+                self.assertNotIn(lock_path, host.locks)
 
     def test_smoke_converges_then_calls_eval_with_selected_checkout(self) -> None:
         host = FakeHost()
@@ -496,6 +659,7 @@ class Stages(unittest.TestCase):
         services = ci_compose_document(inputs())["services"]
         assert isinstance(services, Mapping)
         self.assertEqual(cistack_run.CI_SERVICES, tuple(services))
+        self.assertEqual(len(cistack_run.CI_SERVICES), 9)
 
     def test_up_stage_order_stops_after_first_refusal(self) -> None:
         host = FakeHost()
@@ -795,35 +959,49 @@ class DownAndSecrets(unittest.TestCase):
 
 
 class Status(unittest.TestCase):
-    def test_relay_row_names_the_integration_network(self) -> None:
-        for attached in (False, True):
-            with self.subTest(attached=attached):
+    def test_relay_row_names_each_relay_on_its_production_network(self) -> None:
+        """Status reads every relay and names both networks it keeps in use."""
+        relays = (
+            (cistack_run.RELAY_SERVICE_NAME, INTEGRATION_NETWORK_NAME),
+            (cistack_run.RECORD_RELAY_SERVICE_NAME, INTERNAL_NETWORK_NAME),
+            (cistack_run.EMBED_RELAY_SERVICE_NAME, INTERNAL_NETWORK_NAME),
+        )
+        for identity in ("absent", "name", "labels"):
+            with self.subTest(identity=identity):
                 host = FakeHost()
                 host.files[f"{CI_ROOT}/compose.yaml"] = "services: {}\n"
-                if attached:
-                    host.network_containers["relay-id"] = {
-                        "Name": "fixture-relay",
-                        "Labels": {
-                            "com.docker.compose.project": cistack_run.CI_PROJECT,
-                            "com.docker.compose.service": cistack_run.RELAY_SERVICE_NAME,
-                        },
-                    }
+                if identity != "absent":
+                    for service, network in relays:
+                        container = {
+                            "Name": container_name(service, project=cistack_run.CI_PROJECT),
+                        } if identity == "name" else {
+                            "Name": f"fixture-{service}",
+                            "Labels": {
+                                "com.docker.compose.project": cistack_run.CI_PROJECT,
+                                "com.docker.compose.service": service,
+                            },
+                        }
+                        host.network_containers.setdefault(network_name(network), {})[service] = container
                 output = io.StringIO()
 
                 with contextlib.redirect_stdout(output):
                     code = cistack_run.status(ci_stack(), host)
 
                 self.assertEqual(code, 0)
-                state = "attached to" if attached else "absent from"
-                self.assertIn(
-                    f"relay: ok — engine relay is {state} the integration network",
-                    output.getvalue(),
-                )
-                if attached:
-                    self.assertIn("tools.cistack down before a restore", output.getvalue())
-                self.assertIn(
-                    ("docker", "network", "inspect", integration_network_name()),
-                    host.commands,
+                state = "absent from" if identity == "absent" else "attached to"
+                self.assertIn("relay: ok —", output.getvalue())
+                for service, network in relays:
+                    self.assertIn(
+                        f"{service} is {state} the {network} network", output.getvalue(),
+                    )
+                if identity != "absent":
+                    self.assertIn("integration and internal networks in use", output.getvalue())
+                    self.assertIn("tools.cistack down before a restore or upgrade --rollback", output.getvalue())
+                else:
+                    self.assertNotIn("networks in use", output.getvalue())
+                self.assertEqual(
+                    {command for command in host.commands if command[:3] == ("docker", "network", "inspect")},
+                    {("docker", "network", "inspect", network_name(network)) for _, network in relays},
                 )
 
 

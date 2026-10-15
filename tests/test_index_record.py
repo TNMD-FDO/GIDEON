@@ -12,9 +12,14 @@ from gideon.host.index.generations import GenerationInputs, generation_name
 from gideon.host.index.record import (
     BuildingOutcome,
     GenerationRow,
+    PromotedRow,
     read_generation,
+    read_generation_by_inputs,
     read_generations,
+    read_manifest,
+    read_promoted,
     write_building,
+    write_footprint,
 )
 from gideon.host.render.worker import GENERATION_FAILURE_REASONS, PIPELINE_VERSION
 from gideon.host.report import Problem
@@ -41,7 +46,7 @@ def row_for() -> GenerationRow:
         inputs.pipeline, inputs.embedding_space, inputs.inputs_hash, "building", None,
         {"ready": 3, "indexed": 7}, 4096,
         "2099-01-03T12:00:00+00:00", None, None, None, None,
-        "2099-01-03T11:00:00+00:00",
+        "2099-01-03T11:00:00+00:00", clustered_at=None,
     )
 
 
@@ -149,6 +154,61 @@ class Writer(unittest.TestCase):
 
 
 class Reader(unittest.TestCase):
+    def test_reads_by_inputs_with_both_values_bound_on_stdin(self) -> None:
+        row = row_for()
+        host = FakeHost(stdout=json.dumps(asdict(row)) + "\n")
+        self.assertEqual(read_generation_by_inputs(
+            host, RENDERED, row.collection, row.inputs_hash, command_path="corpus install",
+        ), row)
+        self.assertEqual(len(host.calls), 1)
+        argv, sql = host.calls[0]
+        self.assertEqual(argv, worker.psql_argv(RENDERED))
+        for value in (row.collection, row.inputs_hash):
+            self.assertNotIn(value, " ".join(argv))
+        assert sql is not None
+        self.assertIn(worker.bind("v_collection", row.collection), sql)
+        self.assertIn(worker.bind("v_inputs_hash", row.inputs_hash), sql)
+        self.assertIn("row_to_json(generation)", sql)
+        self.assertIn("WHERE collection = :'v_collection' AND inputs_hash = :'v_inputs_hash'", sql)
+
+    def test_absent_row_by_inputs_is_none(self) -> None:
+        row = row_for()
+        self.assertIsNone(read_generation_by_inputs(
+            FakeHost(stdout="\n"), RENDERED, row.collection, row.inputs_hash,
+        ))
+
+    def test_foreign_or_malformed_rows_by_inputs_refuse(self) -> None:
+        row = row_for()
+        for stdout in (
+            "broken", "[]", json.dumps(asdict(row)) * 2,
+            json.dumps({**asdict(row), "collection": "fictitious-collection"}),
+            json.dumps({**asdict(row), "inputs_hash": "b" * 64}),
+            json.dumps({**asdict(row), "state": "unknown"}),
+        ):
+            with self.subTest(stdout=stdout):
+                result = read_generation_by_inputs(
+                    FakeHost(stdout=stdout), RENDERED, row.collection, row.inputs_hash,
+                    command_path="corpus install",
+                )
+                self.assertIsInstance(result, Problem)
+                assert isinstance(result, Problem)
+                self.assertEqual(result.problem, "generation record row is invalid")
+                self.assertIn(stack.logs_fix(RENDERED, "postgres"), result.fix)
+                self.assertIn(report.command("corpus install"), result.fix)
+
+    def test_failed_read_by_inputs_overrides_valid_stdout(self) -> None:
+        row = row_for()
+        host = FakeHost(code=3, stdout=json.dumps(asdict(row)), stderr="private text sentinel")
+        result = read_generation_by_inputs(
+            host, RENDERED, row.collection, row.inputs_hash, command_path="corpus install",
+        )
+        self.assertIsInstance(result, Problem)
+        assert isinstance(result, Problem)
+        self.assertIn("exit 3", result.problem)
+        self.assertIn(report.command("corpus install"), result.fix)
+        self.assertNotIn("private text sentinel", result.problem + result.fix)
+        self.assertEqual(len(host.calls), 1)
+
     def test_reads_every_column_with_the_name_bound_on_stdin(self) -> None:
         row = row_for()
         host = FakeHost(stdout=json.dumps(asdict(row)) + "\n")
@@ -271,11 +331,121 @@ class GenerationsReader(unittest.TestCase):
                 self.assertEqual(len(host.calls), 1)
 
 
+class PromotedReader(unittest.TestCase):
+    def test_reads_an_empty_array_or_multiple_live_rows_on_stdin(self) -> None:
+        rows = (
+            PromotedRow(NAME, "caselaw", 4096),
+            PromotedRow(generation_name("caselaw", "corpus-2099-02-03", SPACE), "caselaw", 8192),
+        )
+        for expected in ((), rows):
+            with self.subTest(rows=expected):
+                host = FakeHost(stdout=json.dumps([asdict(row) for row in expected]))
+                self.assertEqual(read_promoted(host, RENDERED, command_path="preflight"), expected)
+                self.assertEqual(len(host.calls), 1)
+                argv, sql = host.calls[0]
+                self.assertEqual(argv, worker.psql_argv(RENDERED))
+                self.assertNotIn("SELECT", " ".join(argv))
+                assert sql is not None
+                self.assertIn("SELECT gen_id, collection, bytes FROM public.index_generations", sql)
+                self.assertIn("WHERE state = 'live'", sql)
+                self.assertIn("json_agg(promoted ORDER BY gen_id)", sql)
+                self.assertIn("'[]'::json", sql)
+
+    def test_malformed_array_or_row_refuses_the_whole_read(self) -> None:
+        valid = asdict(PromotedRow(NAME, "caselaw", 4096))
+        invalid_rows: tuple[object, ...] = (
+            None, [], {}, {**valid, "bytes": True}, {**valid, "bytes": -1},
+            {**valid, "bytes": "4096"}, {**valid, "collection": None},
+            {**valid, "gen_id": 3}, {**valid, "gen_id": ""},
+            {key: value for key, value in valid.items() if key != "bytes"},
+            {**valid, "unexpected": 1},
+        )
+        for stdout in ("", "broken", "{}", "null", *(json.dumps([valid, row]) for row in invalid_rows)):
+            with self.subTest(stdout=stdout):
+                self.assertEqual(
+                    read_promoted(FakeHost(stdout=stdout), RENDERED, command_path="preflight"),
+                    Problem("promoted generation rows are invalid", database_fix(RENDERED, "preflight")),
+                )
+
+    def test_failed_exit_overrides_a_valid_array(self) -> None:
+        host = FakeHost(code=3, stdout="[]", stderr="private text sentinel")
+        self.assertEqual(
+            read_promoted(host, RENDERED, command_path="preflight"),
+            Problem("promoted generation read failed (exit 3)", database_fix(RENDERED, "preflight")),
+        )
+        self.assertEqual(len(host.calls), 1)
+
+
+class FootprintWriter(unittest.TestCase):
+    def test_measured_half_is_bound_and_both_halves_are_returned(self) -> None:
+        expected = {"lexical_bytes": 4096, "dense_bytes": 8192, "bytes": 12288}
+        host = FakeHost(stdout=json.dumps(expected))
+        self.assertEqual(
+            write_footprint(host, RENDERED, NAME, expected["dense_bytes"], command_path="index build"),
+            expected,
+        )
+        self.assertEqual(len(host.calls), 1)
+        argv, sql = host.calls[0]
+        self.assertEqual(argv, worker.psql_argv(RENDERED))
+        assert sql is not None
+        self.assertIn(worker.bind("v_name", NAME), sql)
+        self.assertIn(worker.bind("v_dense_bytes", str(expected["dense_bytes"])), sql)
+        for value in (NAME, str(expected["dense_bytes"]), "UPDATE"):
+            self.assertNotIn(value, " ".join(argv))
+        self.assertIn("WHERE gen_id = :'v_name'", sql)
+        self.assertIn("SET counts = counts || jsonb_build_object(", sql)
+        self.assertIn("'dense_bytes', :'v_dense_bytes'::bigint", sql)
+        self.assertIn("+ :'v_dense_bytes'::bigint", sql)
+        self.assertIn("RETURNING counts, bytes", sql)
+        self.assertIn("SELECT jsonb_build_object(", sql)
+        self.assertTrue(sql.endswith(") FROM written;\n"))
+
+    def test_older_rows_backfill_the_lexical_half_and_existing_zero_is_kept(self) -> None:
+        for lexical in (0, row_for().bytes):
+            with self.subTest(lexical=lexical):
+                expected = {"lexical_bytes": lexical, "dense_bytes": 7, "bytes": lexical + 7}
+                host = FakeHost(stdout=json.dumps(expected))
+                self.assertEqual(write_footprint(host, RENDERED, NAME, 7, command_path="index build"), expected)
+                sql = " ".join((host.calls[0][1] or "").split())
+                # Presence distinguishes a measured zero from an older row's absent key.
+                fallback = "CASE WHEN counts ? 'lexical_bytes' THEN (counts->>'lexical_bytes')::bigint ELSE bytes END"
+                self.assertIn(f"'lexical_bytes', {fallback}", sql)
+                self.assertIn(f"bytes = {fallback} + :'v_dense_bytes'::bigint", sql)
+
+    def test_missing_malformed_or_inconsistent_results_refuse(self) -> None:
+        valid = {"lexical_bytes": 3, "dense_bytes": 7, "bytes": 10}
+        invalid: tuple[object, ...] = (
+            [], None, {}, {**valid, "bytes": 11}, {**valid, "dense_bytes": 6, "bytes": 9},
+            {**valid, "lexical_bytes": -1, "bytes": 6}, {**valid, "bytes": True},
+            {**valid, "lexical_bytes": "3"}, {**valid, "unexpected": 1},
+        )
+        for stdout in ("", "broken", *(json.dumps(value) for value in invalid)):
+            with self.subTest(stdout=stdout):
+                self.assertEqual(
+                    write_footprint(FakeHost(stdout=stdout), RENDERED, NAME, 7, command_path="index build"),
+                    Problem("generation footprint write returned invalid byte counts", database_fix(RENDERED, "index build")),
+                )
+
+    def test_failed_exit_overrides_valid_byte_counts(self) -> None:
+        host = FakeHost(code=3, stdout=json.dumps({"lexical_bytes": 3, "dense_bytes": 7, "bytes": 10}),
+                        stderr="private text sentinel")
+        self.assertEqual(
+            write_footprint(host, RENDERED, NAME, 7, command_path="index build"),
+            Problem("generation footprint write failed (exit 3)", database_fix(RENDERED, "index build")),
+        )
+        self.assertEqual(len(host.calls), 1)
+
+
 class Commands(unittest.TestCase):
     def test_unavailable_tools_and_nonzero_reads_refuse_without_retry(self) -> None:
         for operation in (
             lambda host: read_generation(host, RENDERED, NAME),
+            lambda host: read_generation_by_inputs(
+                host, RENDERED, inputs_for().collection, inputs_for().inputs_hash,
+            ),
             lambda host: write_building(host, RENDERED, inputs_for()),
+            lambda host: read_promoted(host, RENDERED, command_path="index build"),
+            lambda host: write_footprint(host, RENDERED, NAME, 7, command_path="index build"),
         ):
             for code, error in ((127, None), (0, FileNotFoundError()), (0, subprocess.SubprocessError())):
                 with self.subTest(code=code, error=error):
@@ -299,3 +469,65 @@ class Commands(unittest.TestCase):
         assert isinstance(result, Problem)
         self.assertIn("gideon index build", result.fix)
         self.assertNotIn("python3", result.fix)
+
+
+class ManifestReader(unittest.TestCase):
+    def test_requested_ids_and_generation_are_bound_on_stdin_and_return_hashes(self) -> None:
+        hashes = {"example:opinion:17": "b" * 64, "example:opinion:29": "c" * 64}
+        host = FakeHost(stdout="\n".join(
+            json.dumps({"source_id": identifier, "canonical_text_sha256": digest})
+            for identifier, digest in hashes.items()
+        ))
+
+        self.assertEqual(read_manifest(host, RENDERED, NAME, tuple(hashes), "index build caselaw --sample"), hashes)
+
+        self.assertEqual(len(host.calls), 1)
+        argv, sql = host.calls[0]
+        self.assertEqual(argv, worker.psql_argv(RENDERED))
+        assert sql is not None
+        self.assertIn(worker.bind("v_name", NAME), sql)
+        self.assertIn(worker.bind("v_source_ids", json.dumps(list(hashes), separators=(",", ":"))), sql)
+        for value in (NAME, *hashes, *hashes.values()):
+            self.assertNotIn(value, " ".join(argv))
+
+    def test_missing_requested_documents_are_omitted(self) -> None:
+        self.assertEqual(read_manifest(FakeHost(), RENDERED, NAME, ("example:opinion:17",), "index build"), {})
+
+    def test_invalid_manifest_rows_refuse_without_returning_partial_hashes(self) -> None:
+        row = {"source_id": "example:opinion:17", "canonical_text_sha256": "b" * 64}
+        variants: tuple[object, ...] = (
+            {**row, "source_id": "example:opinion:29"},
+            {**row, "source_id": "Invalid identifier"},
+            {**row, "source_id": None},
+            {**row, "canonical_text_sha256": "B" * 64},
+            {**row, "canonical_text_sha256": "b" * 63},
+            {**row, "canonical_text_sha256": None},
+            {"source_id": row["source_id"]},
+            {**row, "unexpected": "value"}, [], None,
+        )
+        for stdout in ("Invalid JSON", json.dumps(row) + "\n" + json.dumps(row), *(json.dumps(value) for value in variants)):
+            with self.subTest(stdout=stdout):
+                host = FakeHost(stdout=stdout)
+                result = read_manifest(host, RENDERED, NAME, (str(row["source_id"]),), "index build caselaw --sample")
+                self.assertIsInstance(result, Problem)
+                assert isinstance(result, Problem)
+                self.assertEqual(result.problem, "generation manifest row is invalid")
+                self.assertIn(stack.logs_fix(RENDERED, "postgres"), result.fix)
+                self.assertIn(report.command("index build caselaw --sample"), result.fix)
+                self.assertEqual(len(host.calls), 1)
+
+    def test_failed_read_and_unavailable_tools_refuse_without_retry(self) -> None:
+        for code, error in ((3, None), (127, None), (0, FileNotFoundError()), (0, subprocess.SubprocessError())):
+            with self.subTest(code=code, error=error):
+                host = FakeHost(code=code, error=error, stderr="Private database diagnostics")
+                result = read_manifest(host, RENDERED, NAME, ("example:opinion:17",), "index build caselaw --sample")
+                self.assertIsInstance(result, Problem)
+                assert isinstance(result, Problem)
+                if code == 3:
+                    self.assertIn("exit 3", result.problem)
+                    self.assertIn(stack.logs_fix(RENDERED, "postgres"), result.fix)
+                else:
+                    self.assertIn("Restore Docker Compose and psql", result.fix)
+                self.assertNotIn(host.stderr, result.problem + result.fix)
+                self.assertIn(report.command("index build caselaw --sample"), result.fix)
+                self.assertEqual(len(host.calls), 1)

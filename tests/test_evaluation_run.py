@@ -44,7 +44,7 @@ from gideon.evaluation.results import CaseResult, RunContext, SliceResult
 from gideon.evaluation.slices import SLICE_RUNNERS, SMOKE_PARTS, CallSurface
 from gideon.extraction import KEYED_TYPES, SECTION_TYPES, ExactObject, extract
 from gideon.extraction.scoring import MIN_RECALL
-from gideon.host import backuplock, nogpu, report
+from gideon.host import backuplock, nogpu, report, stack
 from gideon.host.render.ci import CI_STACK, PRODUCTION_STACK
 from gideon.host.render.owui import GENERAL_MODEL_ID
 from gideon.host.sysio import Host, PathLike
@@ -122,6 +122,9 @@ class EvalHost:
         self.calls: list[tuple[tuple[str, ...], str | None]] = []
         self.locks: dict[str, str] = {}
         self.lock_records: list[tuple[str, str]] = []
+        self.queue_output = ""
+        self.queue_code = 0
+        self.queue_locks: list[dict[str, str]] = []
 
     def run(
         self,
@@ -143,6 +146,9 @@ class EvalHost:
             assert input is not None
             return subprocess.CompletedProcess(list(command_argv), 0, _casecite_reply(input), "")
         if command_argv[0] == "docker":
+            if input is not None and "SELECT id FROM procrastinate_jobs" in input:
+                self.queue_locks.append(dict(self.locks))
+                return subprocess.CompletedProcess(list(command_argv), self.queue_code, self.queue_output, "")
             rc = self.probe_rc if input == "SELECT 1;\n" else self.write_rc
             return subprocess.CompletedProcess(list(command_argv), rc, "", "database diagnostic")
         if command_argv[0] == "git" and command_argv[-2:] == ("rev-parse", "HEAD"):
@@ -1159,6 +1165,65 @@ def _nightly_start() -> datetime:
 
 
 class EngineStackAndLock(unittest.TestCase):
+    def test_live_sibling_job_refuses_after_lock_before_any_turn_and_releases(self) -> None:
+        """A live sibling build keeps a hand-run CI eval off the engine."""
+
+        host = EvalHost()
+        job_id = 419
+        host.queue_output = f"{job_id}\n"
+        code, stdout, stderr, observed = _invoke_engine_command(host)
+        self.assertEqual((code, stderr), (1, ""))
+        self.assertIn("preconditions: refuse", stdout)
+        self.assertIn(f"a sample build is running on the sibling (job {job_id})", stdout)
+        self.assertIn("Wait for the build's job or rejoin it with", stdout)
+        self.assertIn(report.command("index build caselaw --sample"), stdout)
+        self.assertIn("then retry", stdout)
+        self.assertEqual(len(host.queue_locks), 1)
+        self.assertIn(backuplock.ENGINE_LOCK.path, host.queue_locks[0])
+        self.assertEqual(host.locks, {})
+        self.assertTrue(all(not calls for calls in observed.values()))
+        queue_argv, queue_sql = next(
+            (argv, sql) for argv, sql in host.calls
+            if sql is not None and "SELECT id FROM procrastinate_jobs" in sql
+        )
+        self.assertIn(stacks.CI_ROOT, queue_argv)
+        self.assertNotIn("record:", stdout)
+        self.assertNotIn("run:", stdout)
+        self.assertFalse(any(sql and "INSERT INTO eval_runs" in sql for _argv, sql in host.calls))
+        assert queue_sql is not None
+        self.assertNotIn(queue_sql, queue_argv)
+
+    def test_sibling_queue_problem_refuses_and_releases_with_its_logs_fix(self) -> None:
+        """A failed queue read refuses before any engine work."""
+
+        host = EvalHost()
+        host.queue_code = 3
+        code, stdout, stderr, observed = _invoke_engine_command(host)
+        self.assertEqual((code, stderr), (1, ""))
+        self.assertIn("preconditions: refuse", stdout)
+        self.assertIn("index job query failed (exit 3)", stdout)
+        self.assertIn(stack.logs_fix(stacks.CI_ROOT, "postgres"), stdout)
+        self.assertIn(report.command("eval run --slice smoke --stack ci --kind smoke"), stdout)
+        self.assertEqual(len(host.queue_locks), 1)
+        self.assertIn(backuplock.ENGINE_LOCK.path, host.queue_locks[0])
+        self.assertEqual(host.locks, {})
+        self.assertTrue(all(not calls for calls in observed.values()))
+
+    def test_production_runs_without_reading_the_sibling_queue(self) -> None:
+        """A production run reads nothing of the sibling's queue."""
+
+        host = EvalHost()
+        host.queue_output = "419\n"
+        code, stdout, stderr, observed = _invoke_engine_command(
+            host, stack_name="production", kind="nightly", clock=_nightly_start,
+        )
+        self.assertEqual((code, stderr), (0, ""))
+        self.assertIn("run: ok", stdout)
+        self.assertTrue(observed["contexts"])
+        self.assertEqual(host.queue_locks, [])
+        self.assertFalse(any(sql and "procrastinate_jobs" in sql for _argv, sql in host.calls))
+        self.assertEqual(host.locks, {})
+
     def test_turn_driving_slices_print_their_own_verdict(self) -> None:
         for slice_name in ("smoke", "general-smoke", "guardrails"):
             for verdict, word in ((True, "pass"), (False, "FAIL")):
@@ -2173,7 +2238,7 @@ class ChallengerPair(unittest.TestCase):
             [request["messages"][0]["content"] for request in host.judge_requests],
             [judge.PROMPT_REGISTRY[entry.release].system, judge.PROMPT_REGISTRY[entry.challenger].system],
         )
-        rows = [payload for argv, payload in host.calls if argv[0] == "docker" and isinstance(payload, str) and payload.startswith("\\set")]
+        rows = [payload for argv, payload in host.calls if argv[0] == "docker" and isinstance(payload, str) and "INSERT INTO eval_runs" in payload]
         self.assertEqual(len(rows), 2)
         ids = [read_psql_set(next(line for line in row.splitlines() if line.startswith("\\set run_id ")), "run_id") for row in rows]
         self.assertNotEqual(*ids)

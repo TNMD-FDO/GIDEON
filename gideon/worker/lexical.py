@@ -19,6 +19,13 @@ import httpx
 import psycopg
 
 import gideon.host.cas
+from gideon.host.index.sample import (
+    GoldDocument,
+    SampleInputs,
+    in_fill,
+    source_id,
+    validate,
+)
 from gideon.host.report import Problem
 from gideon.host.sysio import BytesHost, RealHost
 from gideon.worker import (
@@ -39,7 +46,7 @@ LEXICAL_FAILURE_REASONS: Final = frozenset({
 })
 GENERATION_STATES: Final = ("building", "built", "live", "retired", "failed")
 COLLECTION_NAMES: Final = ("caselaw",)
-GENERATION_PATTERN: Final = r"(caselaw)__corpus-[0-9]{4}-[0-9]{2}-[0-9]{2}__[a-z0-9]+(?:-[a-z0-9]+)*"
+GENERATION_PATTERN: Final = r"(caselaw)__corpus-[0-9]{4}-[0-9]{2}-[0-9]{2}__[a-z0-9]+(?:-[a-z0-9]+)*(?:__sample)?"
 LEXICAL_MAPPING_VERSION: Final = 1
 LOCK_SUFFIX: Final = ".lexical.lock"
 # exempt: document batches bound metadata held while looking up chunk presence.
@@ -132,6 +139,8 @@ class Document:
 
     doc_id: str
     canonical_text_sha256: str
+    source: str
+    opinion_id: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,7 +195,7 @@ class GenerationRecord(Protocol):
     def read(self, name: str) -> Generation | None: ...
     def resume(self, name: str) -> None: ...
     def progress(self, name: str, counts: BuildCounts) -> None: ...
-    def finish(self, name: str, counts: BuildCounts, size: int, at: datetime) -> None: ...
+    def finish(self, name: str, counts: BuildCounts, lexical_bytes: int, at: datetime) -> None: ...
     def fail(self, name: str, reason: str) -> None: ...
     def documents(self, collection: str, source: str, snapshot: date, courts: Sequence[str]) -> Iterator[Document]: ...
     def chunks(self, doc_id: str, pipeline: str) -> tuple[chunker.NewChunk, ...]: ...
@@ -259,7 +268,8 @@ READ_SQL: Final = "SELECT gen_id, collection, inputs_hash, pipeline, embedding_s
 RESUME_SQL: Final = "UPDATE index_generations SET state = 'building', failure_reason = NULL WHERE gen_id = %s AND state = 'failed'"
 PROGRESS_SQL: Final = "UPDATE index_generations SET counts = counts || %s::jsonb WHERE gen_id = %s"
 FINISH_SQL: Final = (
-    "UPDATE index_generations SET counts = counts || %s::jsonb, bytes = %s, lexical_built_at = %s, "
+    "UPDATE index_generations SET counts = counts || %s::jsonb, "
+    "bytes = %s + COALESCE((counts->>'dense_bytes')::bigint, 0), lexical_built_at = %s, "
     "built_at = CASE WHEN dense_built_at IS NOT NULL THEN COALESCE(built_at, %s) ELSE NULL END, "
     "state = CASE WHEN state = 'building' AND dense_built_at IS NOT NULL THEN 'built' ELSE state END "
     "WHERE gen_id = %s"
@@ -269,7 +279,7 @@ FAIL_SQL: Final = (
     "WHERE gen_id = %s AND state IN ('building', 'built', 'failed')"
 )
 DOCUMENTS_SQL: Final = (
-    "SELECT d.doc_id, d.canonical_text_sha256 FROM documents AS d "
+    "SELECT d.doc_id, d.canonical_text_sha256, d.source, o.opinion_id FROM documents AS d "
     "JOIN opinions AS o ON o.doc_id = d.doc_id "
     "WHERE d.profile = %s AND d.source = %s AND d.source_snapshot = %s "
     "AND o.court = ANY(%s) AND d.status = 'ready' AND d.superseded_by IS NULL ORDER BY d.doc_id"
@@ -292,36 +302,41 @@ KEYS_SQL: Final = (
 
 
 class PsycopgGenerations:
-    """Stream on one transaction and commit record operations on another."""
+    """Stream and read the corpus separately from committed generation records."""
 
     def __init__(self, *, connect: Callable[..., Any] = psycopg.connect, worker_settings: settings.Settings | None = None) -> None:
         self._connect, self._settings = connect, worker_settings
-        self._stream: Any | None = None
-        self._writer: Any | None = None
+        self._corpus: Any | None = None
+        self._record: Any | None = None
 
-    def _connection(self, *, stream: bool = False) -> Any:
-        connection = self._stream if stream else self._writer
+    def _connection(self, *, corpus: bool = False) -> Any:
+        connection = self._corpus if corpus else self._record
         if connection is None:
             try:
                 configuration = self._settings or settings.load_settings()
-                connection = self._connect(**settings.connection_kwargs(configuration), autocommit=False)
+                kwargs = (
+                    settings.corpus_connection_kwargs(configuration)
+                    if corpus else settings.connection_kwargs(configuration)
+                )
+                connection = self._connect(**kwargs, autocommit=False)
             except psycopg.Error as exc:
                 raise LexicalFailure("database", error=type(exc).__name__) from exc
             except settings.WorkerSettingsError as exc:
                 raise LexicalFailure("local", error=type(exc).__name__) from exc
-            if stream:
-                self._stream = connection
+            if corpus:
+                self._corpus = connection
             else:
-                self._writer = connection
+                self._record = connection
         return connection
 
-    def _run(self, sql: str, parameters: tuple[object, ...], *, read: bool = False) -> list[tuple[Any, ...]]:
-        connection = self._connection()
+    def _run(self, sql: str, parameters: tuple[object, ...], *, read: bool = False, corpus: bool = False) -> list[tuple[Any, ...]]:
+        connection = self._connection(corpus=corpus)
         try:
             with connection.cursor() as cursor:
                 cursor.execute(sql, parameters)
                 rows = cursor.fetchall() if read else []
-            connection.commit()
+            if not corpus:
+                connection.commit()
             return cast(list[tuple[Any, ...]], rows)
         except psycopg.Error as exc:
             with suppress(psycopg.Error):
@@ -338,14 +353,16 @@ class PsycopgGenerations:
     def progress(self, name: str, counts: BuildCounts) -> None:
         self._run(PROGRESS_SQL, (json.dumps(asdict(counts)), name))
 
-    def finish(self, name: str, counts: BuildCounts, size: int, at: datetime) -> None:
-        self._run(FINISH_SQL, (json.dumps(asdict(counts)), size, at, at, name))
+    def finish(self, name: str, counts: BuildCounts, lexical_bytes: int, at: datetime) -> None:
+        self._run(FINISH_SQL, (
+            json.dumps({**asdict(counts), "lexical_bytes": lexical_bytes}), lexical_bytes, at, at, name,
+        ))
 
     def fail(self, name: str, reason: str) -> None:
         self._run(FAIL_SQL, (reason, name))
 
     def documents(self, collection: str, source: str, snapshot: date, courts: Sequence[str]) -> Iterator[Document]:
-        connection = self._connection(stream=True)
+        connection = self._connection(corpus=True)
         try:
             with connection.cursor(name="lexical_documents") as cursor:
                 cursor.itersize = DOCUMENT_BATCH_SIZE
@@ -359,13 +376,13 @@ class PsycopgGenerations:
             raise LexicalFailure("database", error=type(exc).__name__) from exc
 
     def chunks(self, doc_id: str, pipeline: str) -> tuple[chunker.NewChunk, ...]:
-        return tuple(chunker.NewChunk(*row) for row in self._run(CHUNKS_SQL, (doc_id, pipeline), read=True))
+        return tuple(chunker.NewChunk(*row) for row in self._run(CHUNKS_SQL, (doc_id, pipeline), read=True, corpus=True))
 
     def citations(self, doc_id: str) -> tuple[citations.NewCitation, ...]:
-        return tuple(citations.NewCitation(*row) for row in self._run(caselaw.READ_CITATIONS_SQL, (doc_id,), read=True))
+        return tuple(citations.NewCitation(*row) for row in self._run(caselaw.READ_CITATIONS_SQL, (doc_id,), read=True, corpus=True))
 
     def opinion(self, doc_id: str) -> caselaw.NewOpinion:
-        rows = self._run(OPINION_SQL, (doc_id,), read=True)
+        rows = self._run(OPINION_SQL, (doc_id,), read=True, corpus=True)
         if len(rows) != 1:
             raise LexicalFailure("database")
         return caselaw.NewOpinion(*(*rows[0][:9], tuple(rows[0][9]), rows[0][10]))
@@ -383,7 +400,7 @@ class PsycopgGenerations:
 
     def close(self) -> None:
         first_error: psycopg.Error | None = None
-        for attribute in ("_stream", "_writer"):
+        for attribute in ("_corpus", "_record"):
             connection = getattr(self, attribute)
             if connection is not None:
                 try:
@@ -602,13 +619,29 @@ class _Inputs:
     pipeline: str
     embedding_space: str
     inputs_hash: str
+    sample: SampleInputs | None
 
 
 def _parse_inputs(inputs: Mapping[str, object]) -> _Inputs:
-    if not isinstance(inputs, Mapping) or set(inputs) != {
+    required = {
         "name", "collection", "label", "snapshot", "courts", "pipeline", "embedding_space", "inputs_hash",
-    } or not all(isinstance(inputs[key], str) for key in inputs if key != "courts"):
+    }
+    if (
+        not isinstance(inputs, Mapping) or set(inputs) not in (required, required | {"sample"})
+        or not all(isinstance(inputs[key], str) for key in required - {"courts"})
+    ):
         raise LexicalFailure("invalid")
+    selection = None
+    value = inputs.get("sample")
+    if value is not None:
+        if validate(value):
+            raise LexicalFailure("invalid")
+        value = cast(Mapping[str, object], value)
+        gold = cast(list[Mapping[str, object]], value["gold"])
+        selection = SampleInputs(
+            tuple(GoldDocument(cast(str, row["source_id"]), cast(str | None, row["sha256"])) for row in gold),
+            cast(int, value["fill_per_million"]), "",
+        )
     name, collection, space, digest = (cast(str, inputs[key]) for key in ("name", "collection", "embedding_space", "inputs_hash"))
     courts = inputs["courts"]
     if (
@@ -626,7 +659,34 @@ def _parse_inputs(inputs: Mapping[str, object]) -> _Inputs:
     except caselaw.CaselawFailure as exc:
         raise LexicalFailure("invalid") from exc
     return _Inputs(name, collection, cast(str, inputs["label"]), cast(str, inputs["snapshot"]), geography,
-                   cast(str, inputs["pipeline"]), space, digest)
+                   cast(str, inputs["pipeline"]), space, digest, selection)
+
+
+def selected_documents(inputs: _Inputs, stream: Iterator[Document]) -> Iterator[Document]:
+    """Keep gold documents and deterministic fill, closing the source on every exit."""
+
+    selection = inputs.sample
+    gold = frozenset(document.source_id for document in selection.gold) if selection is not None else frozenset()
+    failed = False
+    try:
+        for document in stream:
+            if (
+                selection is None
+                or source_id(document.source, document.opinion_id) in gold
+                or in_fill(inputs.label, document.doc_id, selection.fill_per_million)
+            ):
+                yield document
+    except BaseException:
+        failed = True
+        raise
+    finally:
+        close = getattr(stream, "close", None)
+        if close is not None:
+            if failed:
+                with suppress(Exception):
+                    close()
+            else:
+                close()
 
 
 @contextmanager
@@ -643,10 +703,11 @@ def _generation_lock(path: Path) -> Iterator[None]:
         os.close(descriptor)
 
 
-def _log(job: int, name: str, counts: BuildCounts) -> None:
+def _log(job: int, name: str, counts: BuildCounts, *, reason: str | None = None) -> None:
     logger.info(
-        "job_id=%s generation=%s ready=%s chunked=%s unchunked=%s indexed=%s present=%s seconds=%s",
+        "job_id=%s generation=%s ready=%s chunked=%s unchunked=%s indexed=%s present=%s seconds=%s%s",
         job, name, counts.ready, counts.chunked, counts.unchunked, counts.indexed, counts.present, counts.seconds,
+        f" reason={reason}" if reason is not None else "",
     )
 
 
@@ -671,7 +732,7 @@ def _fill(
     progress_at = started
     source = inputs.snapshot[:-staging.DATE_SUFFIX_LENGTH]
     snapshot = date.fromisoformat(inputs.snapshot[-10:])
-    stream = record.documents(inputs.collection, source, snapshot, tuple(sorted(inputs.courts)))
+    stream = selected_documents(inputs, record.documents(inputs.collection, source, snapshot, tuple(sorted(inputs.courts))))
     try:
         while batch := tuple(itertools.islice(stream, DOCUMENT_BATCH_SIZE)):
             chunks = {document.doc_id: record.chunks(document.doc_id, inputs.pipeline) for document in batch}
@@ -738,7 +799,9 @@ def build(
                 generation.collection, generation.pipeline, generation.embedding_space
             ) != (parsed.collection, parsed.pipeline, parsed.embedding_space):
                 raise LexicalFailure("generation-mismatch")
-            if generation.state not in {"building", "built", "failed"}:
+            if generation.state not in {"building", "built", "failed"} and not (
+                generation.state == "live" and parsed.sample is not None
+            ):
                 raise LexicalFailure("invalid")
             with _generation_lock(work_root / f"{parsed.name}{LOCK_SUFFIX}"):
                 if generation.state == "failed":
@@ -750,9 +813,9 @@ def build(
                     raise LexicalFailure("mapping-mismatch")
                 counts = _fill(parsed, job, record, store, store_root, host or RealHost(), monotonic, started)
                 store.refresh(parsed.name)
-                size = store.bytes(parsed.name)
+                lexical_bytes = store.bytes(parsed.name)
                 counts = replace(counts, seconds=round(max(0.0, monotonic() - started)))
-                record.finish(parsed.name, counts, size, clock())
+                record.finish(parsed.name, counts, lexical_bytes, clock())
                 try:
                     record.close()
                 finally:
@@ -772,7 +835,7 @@ def build(
                     with suppress(LexicalFailure, psycopg.Error, OSError):
                         record.fail(name, exc.reason)
                 if type(job) is int and job > 0:
-                    _log(job, name, counts)
+                    _log(job, name, counts, reason=exc.reason)
         # Cleanup must not replace the job's first failure.
         with suppress(LexicalFailure, psycopg.Error, httpx.HTTPError, OSError):
             record.close()

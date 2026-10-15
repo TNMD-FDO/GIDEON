@@ -9,7 +9,7 @@ from datetime import date, datetime
 from typing import Final
 
 from gideon.host import report, stack, worker
-from gideon.host.corpus.lockfile import LABEL, Lockfile
+from gideon.host.corpus.lockfile import LABEL, REASONS, Lockfile
 from gideon.host.render.worker import FAILURE_REASONS, SEGMENT_PATTERN
 from gideon.host.report import Problem
 from gideon.host.sysio import Host, PathLike
@@ -36,6 +36,16 @@ class CutRow:
     installed_at: str | None
     state: str
     sources: tuple[SourceBinding, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class InstalledOutcome:
+    """An installed label's timestamp and the labels superseded by its move."""
+
+    label: str
+    state: str
+    installed_at: str
+    superseded: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,6 +228,49 @@ _WRITE_SQL = (
     + _SQL_INSERT + _SQL_INSTALL + _SQL_END
 )
 
+_WRITE_INSTALLED_SQL = """BEGIN;
+SELECT set_config('gideon.installed_payload', :'v_payload', true) AS stored \\gset
+DO $installed$
+DECLARE
+    payload jsonb := current_setting('gideon.installed_payload')::jsonb;
+    cut_label text := payload->>'label';
+    installed public.corpus_lockfiles%ROWTYPE;
+    superseded jsonb;
+BEGIN
+    SELECT * INTO installed FROM public.corpus_lockfiles
+    WHERE label = cut_label FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'CORPUS_LOCKFILE_MISSING:%', cut_label;
+    END IF;
+    IF installed.state = 'superseded' THEN
+        RAISE EXCEPTION 'CORPUS_LOCKFILE_SUPERSEDED:%', cut_label;
+    END IF;
+    IF installed.state = 'cut' THEN
+        RAISE EXCEPTION 'CORPUS_LOCKFILE_NOT_INSTALLING:%', cut_label;
+    END IF;
+    IF installed.state = 'installing' THEN
+        UPDATE public.corpus_lockfiles
+        SET state = 'installed', installed_at = (payload->>'installed_at')::timestamptz
+        WHERE label = cut_label
+        RETURNING * INTO installed;
+    END IF;
+    -- Labels sort by their date; a later label is left for its own install.
+    WITH moved AS (
+        UPDATE public.corpus_lockfiles SET state = 'superseded'
+        WHERE label < cut_label AND state IN ('installing', 'installed')
+        RETURNING label
+    )
+    SELECT COALESCE(jsonb_agg(label ORDER BY label), '[]'::jsonb)
+    INTO superseded FROM moved;
+    RAISE NOTICE 'CORPUS_INSTALLED:%', jsonb_build_object(
+        'label', installed.label, 'state', installed.state,
+        'installed_at', installed.installed_at, 'superseded', superseded
+    );
+END
+$installed$;
+COMMIT;
+"""
+
 _READ_SQL = """SELECT jsonb_build_object(
     'label', c.label,
     'schema', c."schema",
@@ -238,6 +291,66 @@ _READ_SQL = """SELECT jsonb_build_object(
 
 _READ_CUT_SQL = _READ_SQL + " WHERE c.label = :'v_label';\n"
 _READ_LOCKFILES_SQL = _READ_SQL + " ORDER BY c.label;\n"
+
+_READ_COPY_SQL = """WITH RECURSIVE chain AS (
+    SELECT label, base, 0 AS depth, ARRAY[label] AS path
+    FROM public.corpus_lockfiles WHERE label = :'v_label'
+    UNION ALL
+    SELECT c.label, c.base, chain.depth + 1, chain.path || c.label
+    FROM public.corpus_lockfiles AS c
+    JOIN chain ON c.label = chain.base
+    WHERE NOT c.label = ANY(chain.path)
+)
+SELECT to_jsonb(c) || jsonb_build_object(
+    'sources', COALESCE((
+        SELECT jsonb_agg(to_jsonb(snapshot) ORDER BY binding.source)
+        FROM public.lockfile_sources AS binding
+        JOIN public.source_snapshots AS snapshot
+          ON snapshot.source = binding.source
+         AND snapshot.snapshot_date = binding.snapshot_date
+        WHERE binding.label = c.label
+    ), '[]'::jsonb)
+)
+FROM chain JOIN public.corpus_lockfiles AS c ON c.label = chain.label
+ORDER BY chain.depth DESC;
+"""
+
+_SQL_COPY_SNAPSHOTS = """\
+    FOR pin IN SELECT value FROM jsonb_array_elements(payload->'sources') LOOP
+        INSERT INTO public.source_snapshots (
+            source, snapshot_date, base_url, mirror_url,
+            sidecar_sha256, fetched_at, verified_at
+        ) VALUES (
+            pin->>'source', (pin->>'snapshot_date')::date,
+            pin->>'base_url', pin->>'mirror_url', pin->>'sidecar_sha256',
+            (pin->>'fetched_at')::timestamptz, (pin->>'verified_at')::timestamptz
+        ) ON CONFLICT (source, snapshot_date) DO NOTHING;
+    END LOOP;
+"""
+
+_SQL_COPY_INSERT = """\
+    IF NOT label_exists THEN
+        INSERT INTO public.corpus_lockfiles (
+            label, "schema", pipeline, cut_at, reason, base, installed_at, state
+        ) VALUES (
+            cut_label, (payload->>'schema')::integer, payload->>'pipeline',
+            (payload->>'cut_at')::timestamptz, payload->>'reason', payload->>'base',
+            (payload->>'installed_at')::timestamptz, payload->>'state'
+        );
+        FOR pin IN SELECT value FROM jsonb_array_elements(payload->'sources') LOOP
+            INSERT INTO public.lockfile_sources (label, source, snapshot_date)
+            VALUES (cut_label, pin->>'source', (pin->>'snapshot_date')::date);
+        END LOOP;
+    END IF;
+"""
+
+# A copied label's state is the source's at the copy: it moves there afterwards
+# (installing, installed, superseded), so the existing-label check compares the
+# immutable columns alone and the copy's reader judges state on the source.
+_COPY_WRITE_SQL = (
+    _SQL_START + _SQL_EXISTING_LABEL + _SQL_COPY_SNAPSHOTS
+    + _SQL_DERIVED_SNAPSHOTS + _SQL_COPY_INSERT + _SQL_END
+)
 
 _WRITE_OBSERVATIONS_SQL = """BEGIN;
 SELECT set_config('gideon.observations_payload', :'v_payload', true) AS stored \\gset
@@ -424,6 +537,18 @@ def _write_failure(
             f"lockfile label {superseded.group(1)} is superseded",
             f"Run {report.command(command_path)} with the newest committed label.",
         )
+    missing = re.search(r"CORPUS_LOCKFILE_MISSING:([^\s]+)", result.stderr)
+    if missing is not None:
+        return Problem(
+            f"lockfile label {missing.group(1)} is not recorded",
+            f"Run {report.command(command_path)} again.",
+        )
+    not_installing = re.search(r"CORPUS_LOCKFILE_NOT_INSTALLING:([^\s]+)", result.stderr)
+    if not_installing is not None:
+        return Problem(
+            f"lockfile label {not_installing.group(1)} is not installing",
+            f"Run {report.command(command_path)} again.",
+        )
     snapshot = re.search(r"CORPUS_SNAPSHOT_CONFLICT:([^:\s]+):([0-9-]+)", result.stderr)
     if snapshot is not None:
         return Problem(
@@ -474,6 +599,44 @@ def write_install(
     return _write_lockfile(
         host, rendered_dir, lockfile, fetched_at, verified_at,
         install=True, command_path=command_path,
+    )
+
+
+def write_installed(
+    host: Host, rendered_dir: PathLike, label: str, installed_at: str,
+    *, command_path: str,
+) -> InstalledOutcome | Problem:
+    """Install a label and supersede other active labels in one transaction."""
+
+    payload = {"label": label, "installed_at": installed_at}
+    sql = (
+        worker.bind("v_payload", json.dumps(payload, separators=(",", ":")))
+        + "\n" + _WRITE_INSTALLED_SQL
+    )
+    result = _run(host, rendered_dir, sql, command_path)
+    if isinstance(result, Problem):
+        return result
+    if result.returncode != 0:
+        return _write_failure(result, rendered_dir, command_path=command_path)
+    notices = re.findall(r"CORPUS_INSTALLED:(\{[^\n]*\})", result.stderr)
+    try:
+        value = json.loads(notices[0]) if len(notices) == 1 else None
+    except ValueError:
+        value = None
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"label", "state", "installed_at", "superseded"}
+        or value["label"] != label or value["state"] != "installed"
+        or not _is_timestamp(value["installed_at"])
+        or not isinstance(value["superseded"], list)
+        or any(not isinstance(item, str) or LABEL.fullmatch(item) is None or item == label
+               for item in value["superseded"])
+        or value["superseded"] != sorted(set(value["superseded"]))
+    ):
+        return Problem("corpus record write returned an invalid outcome",
+                       database_fix(rendered_dir, command_path))
+    return InstalledOutcome(
+        value["label"], value["state"], value["installed_at"], tuple(value["superseded"]),
     )
 
 
@@ -598,6 +761,91 @@ def read_lockfiles(
                            database_fix(rendered_dir, command_path))
         rows.append(row)
     return tuple(rows)
+
+
+def _parse_copy_row(value: object) -> Mapping[str, object] | None:
+    if not isinstance(value, dict) or not isinstance(value.get("sources"), list):
+        return None
+    sources: list[dict[str, str]] = []
+    for pin in value["sources"]:
+        if (
+            not isinstance(pin, dict) or set(pin) != {
+                "source", "snapshot_date", "base_url", "mirror_url",
+                "sidecar_sha256", "fetched_at", "verified_at",
+            }
+            or any(not isinstance(pin[key], str) for key in (
+                "source", "snapshot_date", "base_url", "sidecar_sha256", "fetched_at", "verified_at",
+            ))
+            or pin["mirror_url"] is not None and not isinstance(pin["mirror_url"], str)
+            or re.fullmatch(SEGMENT_PATTERN, pin["source"]) is None
+            or not _is_date(pin["snapshot_date"])
+            or re.fullmatch(r"[0-9a-f]{64}", pin["sidecar_sha256"]) is None
+            or not _is_timestamp(pin["fetched_at"]) or not _is_timestamp(pin["verified_at"])
+        ):
+            return None
+        sources.append({"source": pin["source"], "snapshot_date": pin["snapshot_date"]})
+    row = _parse_cut_row({**value, "sources": sources})
+    if (
+        row is None or LABEL.fullmatch(row.label) is None or row.schema < 1
+        or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", row.pipeline) is None
+        or row.reason not in REASONS or row.state not in {"cut", "installing", "installed", "superseded"}
+        or not _is_timestamp(row.cut_at)
+        or row.installed_at is not None and not _is_timestamp(row.installed_at)
+        or len({pin.source for pin in row.sources}) != len(row.sources)
+    ):
+        return None
+    return value
+
+
+def copy_lockfile(
+    host: Host, source_dir: PathLike, target_dir: PathLike, label: str, command_path: str,
+    *, conflict_fix: str,
+) -> Problem | None:
+    """Copy a recorded lockfile and its base chain without changing existing rows.
+
+    A target row that differs from the source's is the target's divergence, so
+    its refusal carries the caller's ``conflict_fix``.
+    """
+
+    sql = worker.bind("v_label", label) + "\n" + _READ_COPY_SQL
+    result = _run(host, source_dir, sql, command_path)
+    if isinstance(result, Problem):
+        return result
+    fix = database_fix(source_dir, command_path)
+    if result.returncode != 0:
+        return Problem(f"corpus record read failed (exit {result.returncode})", fix)
+    if not result.stdout.strip():
+        return Problem(
+            f"lockfile label {label} is not recorded",
+            f"Run {report.command('corpus install')} {label}, then run {report.command(command_path)} again.",
+        )
+    rows: list[Mapping[str, object]] = []
+    labels: set[str] = set()
+    base: str | None = None
+    for line in result.stdout.splitlines():
+        try:
+            row = _parse_copy_row(json.loads(line))
+        except ValueError:
+            row = None
+        if row is None or row["base"] != base or row["label"] in labels:
+            return Problem("corpus record row is invalid", fix)
+        assert isinstance(row["label"], str)
+        base = row["label"]
+        labels.add(base)
+        rows.append(row)
+    if base != label:
+        return Problem("corpus record row is invalid", fix)
+    for row in rows:
+        sql = worker.bind("v_payload", json.dumps(row, separators=(",", ":"))) + "\n" + _COPY_WRITE_SQL
+        result = _run(host, target_dir, sql, command_path)
+        if isinstance(result, Problem):
+            return result
+        if result.returncode != 0:
+            problem = _write_failure(result, target_dir, command_path=command_path)
+            if re.search(r"CORPUS_(LOCKFILE|SNAPSHOT)_CONFLICT:", result.stderr) is not None:
+                return Problem(problem.problem, conflict_fix)
+            return problem
+    return None
 
 
 def write_observations(

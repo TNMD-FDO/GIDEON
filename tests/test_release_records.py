@@ -1,9 +1,10 @@
-"""The release's two derived records: the release-note index and README's tag.
+"""The release-note index, README's tag, and unreleased engineering record.
 
-The release derives both from `gideon.__version__` and the release files; this
+The release derives the index and tag from `gideon.__version__` and the release files; this
 module holds the committed tree to them, with each linked line targeting its
 release note, rejects ticket citations at the end of an index phrase, and fires
-each index rule on a seeded tree.
+each index rule on a seeded tree. The unreleased record carries a plan or note
+reference beside the ticket and review without an index target.
 """
 
 from __future__ import annotations
@@ -36,6 +37,14 @@ _TICKET_PHRASE = re.compile(r"(?:^|\s+)\((?:(?:[a-z][a-z0-9-]*|[A-Z]+)\s+)?\d+\)
 _TITLE = re.compile(
     r"^# Changelog - Week [^,]+, (?P<date>\d{2}-\d{2}-\d{4}), V\. "
     r"(?P<version>\d+\.\d+\.\d+)$"
+)
+_UNRELEASED_LINE = re.compile(
+    r"^- \*\*(?:(?P<effort>[a-z][a-z0-9-]*) ticket \d+|hotfix)\*\* — \S(?:.*\S)?"
+    r" — (?:plan (?:`(?P<plan>docs/1-plans/[^`/]+\.plan\.md)`|none)"
+    r"|note `(?P<note>\.scratch/[a-z][a-z0-9-]*/issues/[0-9]{2}-[^`/]+\.md)`)"
+    r" — review (?:`(?P<review>docs/3-code-review/CR_w\d+_[^`/]+\.md)`|none)"
+    r" \((?:Codex loop, (?:1 round|(?:[2-9]|[1-9]\d+) rounds|rounds unrecorded)"
+    r" -> (?:APPROVED(?: with observations)?|NEEDS REVISION)|review skipped)\)$"
 )
 
 
@@ -213,6 +222,118 @@ class ReleaseRecords(unittest.TestCase):
     def test_committed_readme_tag_equals_the_version(self) -> None:
         text = (ROOT / README_PATH).read_text(encoding="utf-8")
         self.assertEqual(text.count(f"this tree is `v{__version__}`"), 1)
+
+    def test_unreleased_record_shape_and_index_exclusion(self) -> None:
+        if absent_from_export(CHANGELOG_ROOT, ROOT):
+            self.skipTest("The changelog directory is absent from the export")
+        relative = CHANGELOG_ROOT / "unreleased.md"
+        targets = re.findall(r"\]\(([^)]+)\)", (ROOT / INDEX_PATH).read_text(encoding="utf-8"))
+        self.assertNotIn(relative.as_posix(), targets)
+        self.assertNotIn(relative.as_posix(), _release_files(ROOT))
+        self.assert_unreleased_bullets(ROOT)
+
+    def assert_unreleased_bullets(self, root: Path) -> None:
+        """Validate real and seeded records with the same path-existence rule."""
+
+        relative = CHANGELOG_ROOT / "unreleased.md"
+        path = root / relative
+        if not path.is_file():
+            return
+        lines = path.read_text(encoding="utf-8").splitlines()
+        self.assertTrue(lines, f"{relative}: write # Unreleased as the title")
+        self.assertEqual(lines[0], "# Unreleased")
+        for number, line in enumerate(lines[1:], 2):
+            if not line.lstrip().startswith(("- ", "* ", "+ ")):
+                continue
+            match = _UNRELEASED_LINE.fullmatch(line)
+            self.assertIsNotNone(match, f"{relative}:{number}: malformed unreleased bullet")
+            assert match is not None
+            for target in (match.group("plan") or match.group("note"), match.group("review")):
+                if target is not None:
+                    self.assertTrue((root / target).is_file(), f"{relative}:{number}: missing {target}")
+
+    def test_seeded_unreleased_none_fields_pass_without_files(self) -> None:
+        plan = "docs/1-plans/fixture.plan.md"
+        review = "docs/3-code-review/CR_w7_fixture.md"
+        cases = [
+            ("hotfix", "none", "none", "review skipped"),
+            ("fiction ticket 01", "none", "none", "review skipped"),
+            ("fiction ticket 01", f"`{plan}`", "none", "review skipped"),
+            ("fiction ticket 01", "none", f"`{review}`", "Codex loop, 1 round -> APPROVED"),
+            ("fiction ticket 01", f"`{plan}`", f"`{review}`", "Codex loop, 2 rounds -> APPROVED"),
+        ]
+        for label, plan_field, review_field, verdict in cases:
+            with self.subTest(plan=plan_field, review=review_field), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                path = root / CHANGELOG_ROOT / "unreleased.md"
+                path.parent.mkdir(parents=True)
+                path.write_text(
+                    f"# Unreleased\n\n- **{label}** — fictitious correction; nothing recreated"
+                    f" — plan {plan_field} — review {review_field} ({verdict})\n",
+                    encoding="utf-8",
+                )
+                for field in (plan_field, review_field):
+                    if field != "none":
+                        target = root / field.strip("`")
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_text("Fictitious document.\n", encoding="utf-8")
+                self.assert_unreleased_bullets(root)
+                self.assertFalse((root / "none").exists())
+
+    def test_seeded_unreleased_malformed_none_bullets_fail(self) -> None:
+        valid = "- **hotfix** — fictitious correction — plan none — review none (review skipped)"
+        cases = [
+            valid.replace("plan none", "plan `none`"),
+            valid.replace("review none", "review `none`"),
+            valid.replace("plan none", "plan missing"),
+            valid.replace("review none", "review missing"),
+            valid.replace(" — plan none", ""),
+            valid.replace(" — review none", ""),
+            valid.replace(" (review skipped)", ""),
+            valid.replace("review skipped", "approved"),
+            valid.replace("**hotfix**", "**fiction**"),
+            valid.replace("**hotfix**", "**fiction ticket**"),
+        ]
+        for bullet in cases:
+            with self.subTest(bullet=bullet), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                path = root / CHANGELOG_ROOT / "unreleased.md"
+                path.parent.mkdir(parents=True)
+                path.write_text(f"# Unreleased\n\n{bullet}\n", encoding="utf-8")
+                with self.assertRaisesRegex(AssertionError, "malformed unreleased bullet"):
+                    self.assert_unreleased_bullets(root)
+
+    def test_seeded_unreleased_paths_still_have_to_exist(self) -> None:
+        for field, target in [
+            ("plan", "docs/1-plans/missing.plan.md"),
+            ("review", "docs/3-code-review/CR_w7_missing.md"),
+        ]:
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                bullet = "- **hotfix** — fictitious correction — plan none — review none (review skipped)"
+                bullet = bullet.replace(f"{field} none", f"{field} `{target}`")
+                path = root / CHANGELOG_ROOT / "unreleased.md"
+                path.parent.mkdir(parents=True)
+                path.write_text(f"# Unreleased\n\n{bullet}\n", encoding="utf-8")
+                with self.assertRaisesRegex(AssertionError, "missing " + re.escape(target)):
+                    self.assert_unreleased_bullets(root)
+
+    def test_unreleased_grammar_accepts_a_plan_or_ticket_note(self) -> None:
+        prefix = "- **fixture ticket 01** — Fictitious change"
+        suffix = " — review `docs/3-code-review/CR_w1_fictitious-change.md` (review skipped)"
+        plan = "docs/1-plans/fictitious-change.plan.md"
+        note = ".scratch/fixture/issues/01-fictitious-change.md"
+        for field, target, unset in (("plan", plan, "note"), ("note", note, "plan")):
+            with self.subTest(reference=field):
+                match = _UNRELEASED_LINE.fullmatch(f"{prefix} — {field} `{target}`{suffix}")
+                self.assertIsNotNone(match)
+                assert match is not None
+                self.assertEqual(match.group(field), target)
+                self.assertIsNone(match.group(unset))
+
+        for reference in ("", " — note `docs/1-plans/01-fictitious-change.md`"):
+            with self.subTest(invalid_reference=reference):
+                self.assertIsNone(_UNRELEASED_LINE.fullmatch(f"{prefix}{reference}{suffix}"))
 
     def test_each_index_rule_fires_on_a_seeded_tree(self) -> None:
         today = datetime.now(UTC).date()

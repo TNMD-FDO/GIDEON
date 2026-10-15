@@ -20,6 +20,7 @@ import psycopg
 from test_worker_caselaw import _CapturedConnection
 
 from gideon.host import cas
+from gideon.host.index import sample
 from gideon.host.sysio import PathLike, RealHost
 from gideon.worker import (
     caselaw,
@@ -44,6 +45,27 @@ def inputs_for() -> dict[str, object]:
         "snapshot": "fictions-2099-01-02", "courts": {key: asdict(value) for key, value in GEO.items()},
         "pipeline": PIPELINE_VERSION, "embedding_space": "example-space", "inputs_hash": "e" * 64,
     }
+
+
+def sample_scope(digest: str) -> tuple[tuple[lexical.Document, ...], dict[str, object]]:
+    """Provide a fill document, an excluded document, and an out-of-fill gold document."""
+
+    label = cast(str, inputs_for()["label"])
+    rate = sample.SAMPLE_FILL_MAX // 2
+    included: list[lexical.Document] = []
+    excluded: list[lexical.Document] = []
+    for number in range(1, 129):
+        document = lexical.Document(f"{number:064x}", digest, "fictions", number)
+        (included if sample.in_fill(label, document.doc_id, rate) else excluded).append(document)
+        if included and len(excluded) >= 2:
+            break
+    else:
+        raise AssertionError("The fictitious scope must contain both fill and excluded documents.")
+    documents = (included[0], excluded[0], excluded[1])
+    selection = sample.SampleInputs((sample.GoldDocument(
+        sample.source_id(documents[2].source, documents[2].opinion_id), None,
+    ),), rate, "fictitious-set")
+    return documents, sample.arguments(selection)
 
 
 def chunk_for(start: int = 2, end: int = len(TEXT), ordinal: int = 0) -> chunker.NewChunk:
@@ -135,7 +157,7 @@ class Projection(unittest.TestCase):
 class FakeRecord:
     def __init__(self, digest: str) -> None:
         self.generation: lexical.Generation | None = lexical.Generation(NAME, "caselaw", "e" * 64, PIPELINE_VERSION, "example-space", "building")
-        self.document_rows = [lexical.Document("a" * 64, digest), lexical.Document("d" * 64, digest)]
+        self.document_rows = [lexical.Document("a" * 64, digest, "fictions", 1), lexical.Document("d" * 64, digest, "fictions", 2)]
         self.chunk_rows = {"a" * 64: (chunk_for(),), "d" * 64: ()}
         self.events: list[str] = []
         self.failure: str | None = None
@@ -148,6 +170,9 @@ class FakeRecord:
         self.opinion_reads = 0
         self.text_keys: dict[str, lexical.TextKeys] = {}
         self.key_reads: list[tuple[str, ...]] = []
+        self.chunk_reads: list[str] = []
+        self.lexical_built_at: datetime | None = NOW
+        self.built_at: datetime | None = NOW
 
     def read(self, name: str) -> lexical.Generation | None:
         self.events.append("read")
@@ -164,15 +189,15 @@ class FakeRecord:
     def progress(self, name: str, counts: lexical.BuildCounts) -> None:
         self.progress_rows.append(counts)
 
-    def finish(self, name: str, counts: lexical.BuildCounts, size: int, at: datetime) -> None:
+    def finish(self, name: str, counts: lexical.BuildCounts, lexical_bytes: int, at: datetime) -> None:
         self.events.append("finish")
         if self.fail_at == "finish":
             raise lexical.LexicalFailure("database", error="FICTITIOUS_EXCEPTION_SENTINEL")
-        self.finished = counts, size, at
+        self.finished = counts, lexical_bytes, at
 
     def fail(self, name: str, reason: str) -> None:
         self.failure = reason
-        if self.generation is not None:
+        if self.generation is not None and self.generation.state in {"building", "built", "failed"}:
             self.generation = replace(self.generation, state="failed")
 
     def documents(self, collection: str, source: str, snapshot: date, courts: Sequence[str]) -> Iterator[lexical.Document]:
@@ -181,6 +206,7 @@ class FakeRecord:
 
     def chunks(self, doc_id: str, pipeline: str) -> tuple[chunker.NewChunk, ...]:
         assert pipeline == PIPELINE_VERSION
+        self.chunk_reads.append(doc_id)
         return self.chunk_rows[doc_id]
 
     def citations(self, doc_id: str) -> tuple[citations.NewCitation, ...]:
@@ -191,7 +217,7 @@ class FakeRecord:
         return opinion_for()
 
     def keys_for(self, name: str, hashes: Sequence[str]) -> dict[str, lexical.TextKeys]:
-        assert name == NAME
+        assert name in {NAME, sample.sample_name(NAME)}
         self.key_reads.append(tuple(hashes))
         return {content_hash: self.text_keys.get(content_hash, lexical.TextKeys(content_hash, False)) for content_hash in hashes}
 
@@ -292,6 +318,51 @@ class Build(unittest.TestCase):
         self.assertTrue(self.record.closed)
         self.assertTrue(self.store.closed)
 
+    def test_sample_keeps_fill_and_gold_before_reading_chunks(self) -> None:
+        documents, selection = sample_scope(self.record.document_rows[0].canonical_text_sha256)
+        self.record.document_rows = list(documents)
+        self.record.chunk_rows = {
+            document.doc_id: (replace(chunk_for(), doc_id=document.doc_id, chunk_id=f"{index + 101:064x}"),)
+            for index, document in enumerate(documents) if index != 1
+        }
+        name = sample.sample_name(NAME)
+        self.input = {**self.input, "name": name, "sample": selection}
+        assert self.record.generation is not None
+        self.record.generation = replace(self.record.generation, gen_id=name)
+        counts = self.run_build()
+        self.assertEqual(self.record.chunk_reads, [documents[0].doc_id, documents[2].doc_id])
+        self.assertEqual((counts.ready, counts.chunked, counts.unchunked, counts.indexed), (2, 2, 0, 2))
+        self.assertEqual(set(self.store.rows), {chunk.chunk_id for rows in self.record.chunk_rows.values() for chunk in rows})
+
+    def test_sample_live_refill_succeeds_and_failed_refill_keeps_promoted_state_and_times(self) -> None:
+        name = sample.sample_name(NAME)
+        self.input = {**self.input, "name": name, "sample": {"gold": [], "fill_per_million": sample.SAMPLE_FILL_MAX}}
+        assert self.record.generation is not None
+        self.record.generation = replace(self.record.generation, gen_id=name, state="live")
+        promoted = self.record.generation
+        timestamps = (self.record.lexical_built_at, self.record.built_at)
+        self.run_build()
+        self.assertEqual(self.record.generation, promoted)
+        self.assertFalse(self.record.resumed)
+        document = replace(self.record.document_rows[0], doc_id="e" * 64, opinion_id=419)
+        self.record.document_rows.append(document)
+        self.record.chunk_rows[document.doc_id] = (replace(chunk_for(), doc_id=document.doc_id, chunk_id="f" * 64),)
+        serving = dict(self.store.rows)
+        self.store.fail_at = "bulk"
+        self.refusal("store")
+        self.assertEqual(self.record.generation, promoted)
+        self.assertEqual((self.record.lexical_built_at, self.record.built_at), timestamps)
+        self.assertEqual(self.store.rows, serving)
+
+    def test_invalid_sample_refuses_before_scope_or_store_writes(self) -> None:
+        for selection in ("FICTITIOUS_PRIVATE_ARGUMENT", {}, {"gold": [], "fill_per_million": True}):
+            with self.subTest(selection=selection):
+                self.input = {**inputs_for(), "sample": selection}
+                self.refusal("invalid")
+                self.assertIsNone(self.record.scope)
+                self.assertEqual(self.record.chunk_reads, [])
+                self.assertEqual(self.store.writes, 0)
+
     def test_first_run_writes_slices_second_run_reads_no_text_or_metadata(self) -> None:
         counts = self.run_build()
         self.assertEqual(asdict(counts), {"ready": 2, "chunked": 1, "unchunked": 1, "indexed": 1, "present": 0, "seconds": 0, "leveled": 0})
@@ -374,7 +445,7 @@ class Build(unittest.TestCase):
     def test_document_batches_continue_after_progress_and_read_each_missing_text_once(self) -> None:
         digest = self.record.document_rows[0].canonical_text_sha256
         self.record.document_rows = [
-            lexical.Document(f"{number:064x}", digest)
+            lexical.Document(f"{number:064x}", digest, "fictions", number + 1)
             for number in range(lexical.DOCUMENT_BATCH_SIZE + 1)
         ]
         self.record.chunk_rows = {
@@ -495,6 +566,7 @@ class Build(unittest.TestCase):
             root.handlers[:] = handlers
             root.setLevel(level)
         self.assertIn(f"generation={NAME}", output.getvalue())
+        self.assertIn("reason=database", output.getvalue())
         for sentinel in ("FICTITIOUS_EXCEPTION_SENTINEL", "FICTITIOUS_TEXT_SENTINEL", "FICTITIOUS_CITE_SENTINEL", "FICTITIOUS_CAPTION_SENTINEL", str(self.root)):
             self.assertNotIn(sentinel, output.getvalue())
 
@@ -512,7 +584,8 @@ def configuration(password_file: Path) -> settings.Settings:
     return settings.Settings("db.example.test", 5432, "example", "example-worker", password_file, 2,
                              "http://store.example.test:9200", "example-user", password_file,
                              "http://vectors.example.test:6333", password_file,
-                             "http://embed.example.test:8000", password_file)
+                             "http://embed.example.test:8000", password_file,
+                             "corpus.example.test", 5432, "example-corpus", "example-reader", password_file)
 
 
 class StreamConnection(_CapturedConnection):
@@ -544,23 +617,39 @@ class RecordAdapter(unittest.TestCase):
         password = Path(temporary.name) / "password"
         password.write_text("fictitious-password")
         self.writer, self.stream = _CapturedConnection(), StreamConnection()
-        self.connections = iter((self.writer, self.stream))
+        worker_settings = configuration(password)
+        self.configuration = worker_settings
+        record_kwargs = {**settings.connection_kwargs(worker_settings), "autocommit": False}
+        corpus_kwargs = {**settings.corpus_connection_kwargs(worker_settings), "autocommit": False}
         self.calls: list[dict[str, object]] = []
 
         def connect(**kwargs: object):
             self.calls.append(kwargs)
-            return next(self.connections)
+            if kwargs == record_kwargs:
+                return self.writer
+            self.assertEqual(kwargs, corpus_kwargs)
+            return self.stream
 
-        self.record = lexical.PsycopgGenerations(connect=connect, worker_settings=configuration(password))
+        self.record = lexical.PsycopgGenerations(connect=connect, worker_settings=worker_settings)
         self.addCleanup(self.record.close)
+
+    def test_failure_update_protects_live_state_and_promoted_timestamps(self) -> None:
+        self.record.fail(NAME, "store")
+        sql, parameters = self.writer.statements[-1]
+        self.assertEqual(parameters, ("store", NAME))
+        self.assertIn("WHERE gen_id = %s AND state IN ('building', 'built', 'failed')", sql)
+        self.assertNotIn("'live'", sql)
+        for timestamp in ("lexical_built_at", "dense_built_at", "built_at", "promoted_at"):
+            self.assertNotIn(timestamp, sql)
+        self.assertEqual(self.writer.commits, 1)
 
     def test_progress_finish_and_failure_commit_on_the_other_connection(self) -> None:
         generation = lexical.Generation(NAME, "caselaw", "e" * 64, PIPELINE_VERSION, "example-space", "built")
         self.writer.rows = [astuple(generation)]
         self.assertEqual(self.record.read(NAME), generation)
-        self.stream.rows = [("a" * 64, "b" * 64), ("c" * 64, "d" * 64)]
+        self.stream.rows = [("a" * 64, "b" * 64, "fictions", 1), ("c" * 64, "d" * 64, "fictions", 2)]
         stream = self.record.documents("caselaw", "fictions", NOW.date(), ("court1",))
-        self.assertEqual(next(stream), lexical.Document(*cast(tuple[str, str], self.stream.rows[0])))
+        self.assertEqual(next(stream), lexical.Document(*cast(tuple[str, str, str, int], self.stream.rows[0])))
         counts = lexical.BuildCounts(2, 1, 1, 4, 3, 7)
         self.record.progress(NAME, counts)
         self.record.finish(NAME, counts, 4096, NOW)
@@ -568,7 +657,7 @@ class RecordAdapter(unittest.TestCase):
         self.record.resume(NAME)
         self.assertEqual(self.stream.commits, 0)
         self.assertEqual(self.writer.commits, 5)
-        self.assertEqual(next(stream), lexical.Document(*cast(tuple[str, str], self.stream.rows[1])))
+        self.assertEqual(next(stream), lexical.Document(*cast(tuple[str, str, str, int], self.stream.rows[1])))
         with self.assertRaises(StopIteration):
             next(stream)
         self.assertEqual(self.stream.commits, 1)
@@ -577,9 +666,11 @@ class RecordAdapter(unittest.TestCase):
         self.assertEqual(self.stream.itersize, lexical.DOCUMENT_BATCH_SIZE)
         self.assertEqual(self.stream.statements, [(lexical.DOCUMENTS_SQL, ("caselaw", "fictions", NOW.date(), ["court1"]))])
         self.assertEqual(json.loads(cast(str, self.writer.statements[1][1][0])), asdict(counts))
+        self.assertEqual(json.loads(cast(str, self.writer.statements[2][1][0])), {**asdict(counts), "lexical_bytes": 4096})
         self.assertEqual(self.writer.statements[2][1][1:], (4096, NOW, NOW, NAME))
         self.assertIn("counts = counts || %s::jsonb", lexical.PROGRESS_SQL)
         self.assertIn("counts = counts || %s::jsonb", lexical.FINISH_SQL)
+        self.assertIn("bytes = %s + COALESCE((counts->>'dense_bytes')::bigint, 0)", lexical.FINISH_SQL)
         self.assertIn("state = CASE WHEN state = 'building' AND dense_built_at IS NOT NULL THEN 'built' ELSE state END", lexical.FINISH_SQL)
         self.assertIn("dense_built_at IS NOT NULL", lexical.FINISH_SQL)
         self.assertIn("AND state = 'failed'", lexical.RESUME_SQL)
@@ -592,13 +683,65 @@ class RecordAdapter(unittest.TestCase):
         chunk, citation, opinion = chunk_for(), citation_for(10, 20, "7 Fiction 11", None), opinion_for()
         for value, operation in ((chunk, lambda: self.record.chunks(chunk.doc_id, chunk.pipeline)),
                                  (citation, lambda: self.record.citations(citation.doc_id))):
-            self.writer.rows = [astuple(value)]
+            self.stream.rows = [astuple(value)]
             self.assertEqual(operation(), (value,))
-        self.writer.rows = [astuple(opinion)]
+        self.stream.rows = [astuple(opinion)]
         self.assertEqual(self.record.opinion(opinion.doc_id), opinion)
-        self.assertEqual(self.writer.statements[0], (lexical.CHUNKS_SQL, (chunk.doc_id, chunk.pipeline)))
-        self.assertEqual(self.writer.statements[1], (caselaw.READ_CITATIONS_SQL, (citation.doc_id,)))
-        self.assertEqual(self.writer.statements[2], (lexical.OPINION_SQL, (opinion.doc_id,)))
+        self.assertEqual(self.stream.statements[0], (lexical.CHUNKS_SQL, (chunk.doc_id, chunk.pipeline)))
+        self.assertEqual(self.stream.statements[1], (caselaw.READ_CITATIONS_SQL, (citation.doc_id,)))
+        self.assertEqual(self.stream.statements[2], (lexical.OPINION_SQL, (opinion.doc_id,)))
+
+    def test_corpus_lookups_and_record_commits_leave_the_document_stream_readable(self) -> None:
+        """Corpus reads share the cursor transaction; record commits do not."""
+
+        documents = (lexical.Document("a" * 64, "b" * 64, "fictions", 1), lexical.Document("c" * 64, "d" * 64, "fictions", 2))
+        self.stream.rows = [astuple(document) for document in documents]
+        stream = self.record.documents("caselaw", "fictions", NOW.date(), ("court1",))
+        self.addCleanup(getattr(stream, "close", lambda: None))
+        self.assertEqual(next(stream), documents[0])
+        config = self.configuration
+        self.assertEqual(self.calls, [{
+            "host": config.corpus_database_host, "port": config.corpus_database_port,
+            "dbname": config.corpus_database_name, "user": config.corpus_database_role,
+            "password": "fictitious-password", "autocommit": False,
+        }])
+        chunk = chunk_for()
+        citation = citation_for(10, 20, "7 Fiction 11", None)
+        opinion = opinion_for()
+        for value, operation, expected in (
+            (chunk, lambda: self.record.chunks(chunk.doc_id, chunk.pipeline), (chunk,)),
+            (citation, lambda: self.record.citations(citation.doc_id), (citation,)),
+            (opinion, lambda: self.record.opinion(opinion.doc_id), opinion),
+        ):
+            with self.subTest(row=type(value).__name__):
+                self.stream.rows = [astuple(value)]
+                self.assertEqual(operation(), expected)
+                self.assertEqual(self.stream.commits, 0)
+                self.assertEqual(self.writer.statements, [])
+        generation = lexical.Generation(NAME, "caselaw", "e" * 64, PIPELINE_VERSION, "example-space", "built")
+        self.writer.rows = [astuple(generation)]
+        self.assertEqual(self.record.read(NAME), generation)
+        self.assertEqual(self.writer.commits, 1)
+        self.assertEqual(self.calls[1], {
+            "host": config.database_host, "port": config.database_port,
+            "dbname": config.database_name, "user": config.database_role,
+            "password": "fictitious-password", "autocommit": False,
+        })
+        counts = lexical.BuildCounts(ready=2, indexed=3)
+        for write in (
+            lambda: self.record.resume(NAME),
+            lambda: self.record.progress(NAME, counts),
+            lambda: self.record.finish(NAME, counts, 4096, NOW),
+            lambda: self.record.fail(NAME, "store"),
+        ):
+            before = self.writer.commits
+            write()
+            self.assertEqual(self.writer.commits, before + 1)
+            self.assertEqual(self.stream.commits, 0)
+        self.assertEqual(next(stream), documents[1])
+        with self.assertRaises(StopIteration):
+            next(stream)
+        self.assertEqual(len(self.calls), 2)
 
     def test_database_failure_rolls_back_and_exposes_only_the_class(self) -> None:
         self.writer.fail_execute = True

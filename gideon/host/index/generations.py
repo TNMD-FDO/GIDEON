@@ -3,11 +3,12 @@
 import hashlib
 import re
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from gideon.host.caselaw import CourtGeography
 from gideon.host.corpus.lockfile import Lockfile
 from gideon.host.corpus.sources import SOURCES, SourceDefinition
+from gideon.host.index.sample import SampleInputs
 from gideon.host.render import worker
 
 
@@ -70,3 +71,4 @@ class GenerationInputs:
     pipeline: str
     embedding_space: str
     inputs_hash: str
+    sample: SampleInputs | None = field(default=None, kw_only=True)

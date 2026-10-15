@@ -109,6 +109,12 @@ def network_name(key: str) -> str:
     return f"{PROJECT_NAME}_{key}"
 
 
+def container_name(service: str, *, project: str = PROJECT_NAME) -> str:
+    """Return the Docker name of a service's first Compose container."""
+
+    return f"{project}-{service}-1"
+
+
 def integration_network_name() -> str:
     """Return the Docker name of the engine's integration network."""
 
