@@ -31,6 +31,7 @@ OVERVIEW_TEMPLATE: Final = OVERVIEW_PATH
 BACKUP_TEMPLATE: Final = "grafana/dashboards/backup.json"
 GPU_TEMPLATE: Final = "grafana/dashboards/gpu.json"
 EVAL_TEMPLATE: Final = "grafana/dashboards/evaluation.json"
+CORPUS_TEMPLATE: Final = "grafana/dashboards/corpus.json"
 CONTACT_POINTS_TEMPLATE: Final = "grafana/provisioning/alerting/contact-points.yaml.tmpl"
 POLICIES_TEMPLATE: Final = "grafana/provisioning/alerting/policies.yaml.tmpl"
 TIME_INTERVALS_TEMPLATE: Final = "grafana/provisioning/alerting/time-intervals.yaml.tmpl"
@@ -365,7 +366,7 @@ class GrafanaOverviewArtifact(Artifact):
     name = "grafana-overview"
     relative_path = OVERVIEW_PATH
     owners = ("grafana",)
-    template_paths = (OVERVIEW_TEMPLATE, BACKUP_TEMPLATE, GPU_TEMPLATE, EVAL_TEMPLATE)
+    template_paths = (OVERVIEW_TEMPLATE, BACKUP_TEMPLATE, GPU_TEMPLATE, EVAL_TEMPLATE, CORPUS_TEMPLATE)
 
     def emit(self, inputs: RenderInputs) -> str:
         document = json.loads(template_text(inputs, OVERVIEW_TEMPLATE))
@@ -442,8 +443,22 @@ GrafanaEvalArtifact = VerbatimArtifact(
     applies=lambda inputs: not inputs.no_gpu,
 )
 
+# The stores, the worker, and the record exist on every host; the embed cards
+# read nothing where no embedding server runs.
+GrafanaCorpusArtifact = VerbatimArtifact(
+    name="grafana-corpus",
+    relative_path="grafana/dashboards/corpus.json",
+    template_path=CORPUS_TEMPLATE,
+    owners=("grafana",),
+)
+
 # The dashboard artifacts linked from the Overview, in display order.
-FRONT_DOOR_BOARDS: Final = (GrafanaBackupArtifact, GrafanaGpuArtifact, GrafanaEvalArtifact)
+FRONT_DOOR_BOARDS: Final = (
+    GrafanaBackupArtifact,
+    GrafanaGpuArtifact,
+    GrafanaEvalArtifact,
+    GrafanaCorpusArtifact,
+)
 
 
 def start_here_markdown(inputs: RenderInputs) -> str:

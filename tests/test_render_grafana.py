@@ -415,7 +415,7 @@ class Overview(unittest.TestCase):
                         document = json.loads((ROOT / "compose" / board.template_paths[0]).read_text(encoding="utf-8"))
                         expected.append((document["title"], GRAFANA_SUB_PATH + "d/" + document["uid"]))
                 self.assertEqual(links, expected)
-                self.assertEqual(len(links), 1 if no_gpu else 3)
+                self.assertEqual(len(links), 2 if no_gpu else 4)
                 self.assertFalse(GRAFANA_SILENCES_ROUTE.startswith("/"))
                 self.assertTrue(GRAFANA_SUB_PATH.endswith("/"))
                 self.assertFalse(GRAFANA_SUB_PATH.endswith("//"))
@@ -546,7 +546,7 @@ class Overview(unittest.TestCase):
                     ("Last drill result", 18),
                 ):
                     with self.subTest(panel=title):
-                        self.assertEqual(panels[title]["gridPos"], {"h": 7, "w": 6, "x": column, "y": 16})
+                        self.assertEqual(panels[title]["gridPos"], {"h": 7, "w": 6, "x": column, "y": 23})
 
                 drill = panels["Last drill result"]
                 self.assertEqual(drill["targets"][0]["format"], "table")
@@ -694,7 +694,7 @@ class Overview(unittest.TestCase):
                 self.assertEqual(row["title"], "Host detail")
                 self.assertNotIn("$", row["title"])
                 self.assertTrue(row["collapsed"])
-                self.assertEqual(row["gridPos"], {"h": 1, "w": 24, "x": 0, "y": 30})
+                self.assertEqual(row["gridPos"], {"h": 1, "w": 24, "x": 0, "y": 37})
                 self.assertEqual(
                     [panel["title"] for panel in row["panels"]],
                     ["Host load", "Host memory", "Container memory"],
@@ -702,9 +702,9 @@ class Overview(unittest.TestCase):
                 self.assertEqual(
                     [panel["gridPos"] for panel in row["panels"]],
                     [
-                        {"h": 8, "w": 6, "x": 0, "y": 31},
-                        {"h": 8, "w": 6, "x": 6, "y": 31},
-                        {"h": 8, "w": 12, "x": 12, "y": 31},
+                        {"h": 8, "w": 6, "x": 0, "y": 38},
+                        {"h": 8, "w": 6, "x": 6, "y": 38},
+                        {"h": 8, "w": 12, "x": 12, "y": 38},
                     ],
                 )
                 for panel in row["panels"]:

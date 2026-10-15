@@ -165,6 +165,7 @@ def _registered_artifacts() -> tuple[Artifact, ...]:
     from gideon.host.render.grafana import (
         GrafanaBackupArtifact,
         GrafanaContactPointsArtifact,
+        GrafanaCorpusArtifact,
         GrafanaDashboardsProviderArtifact,
         GrafanaDatasourcesArtifact,
         GrafanaEvalArtifact,
@@ -235,6 +236,7 @@ def _registered_artifacts() -> tuple[Artifact, ...]:
         GrafanaBackupArtifact,
         GrafanaGpuArtifact,
         GrafanaEvalArtifact,
+        GrafanaCorpusArtifact,
         PgBackRestConfArtifact(),
         CaddyfileArtifact(),
         OwuiEnvArtifact(),

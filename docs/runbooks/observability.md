@@ -67,7 +67,8 @@ and the runbook section to follow.
   measure a page rule grades, each coloured card turning red at the line its
   page fires at: *Services and probes*, one tile per metrics scrape, door
   probe, and database check a down-rule watches, reading up or down (each
-  tile is named under "The tiles on *Services and probes*" below); three
+  tile is named under "The tiles on *Services and probes*" below). Its card
+  spans the row so each name shows whole, a long one on two lines; then three
   bars for `/data`, `/`, and `/var/lib/docker` free, red under the 15 % line;
   the certificate's days left, red under the 14-day line; backup set age and
   push age (from the rows, red past the 26-hour line), the newest passing
@@ -105,6 +106,24 @@ and the runbook section to follow.
   guardrail trip, which every `engine verify` refreshes. M17 and
   M18 have no panel yet; their measurements arrive with the user and synthesis
   work.
+- **Corpus** (every host) — tables of the newest build report of each
+  generation not retired: documents per court by status, source text column,
+  and precedential status; failures by reason; anchored documents, agreement
+  counts, and the accounted gate; and the build's wall clock. Failures or a
+  failed gate need investigation. The lifecycle span is creation to built,
+  including gaps between commands, never a build duration. Below, the bulk
+  embed shows recorded generation progress, then the embedding server's
+  requests waiting and running, cache use, tokens embedded and requests
+  answered per second, and request latency. A growing queue with no progress
+  can mean a stalled build. Server cards are empty without a GPU; rates and
+  latency are empty while nothing embeds in the range. The stores show lexical
+  heap against its limit, documents indexed per second per index, vector
+  memory, each collection's points and vectors, and work in flight. A heap
+  near its limit or a throttled store can slow indexing. The worker shows jobs
+  waiting and running per queue, heartbeat age, and job slots; a stale
+  heartbeat can mean the worker stopped. Nothing on this board pages. M20,
+  M21, and M23 have no panel yet: the first two await the research turn, the
+  third the US Code.
 
 The node exporter runs on the private network with the host's root mounted, so
 its network-device series describe the container's interfaces, not the host's;

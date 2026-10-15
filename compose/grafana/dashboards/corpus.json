@@ -1,0 +1,1529 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": false,
+  "graphTooltip": 1,
+  "links": [
+    {
+      "type": "dashboards",
+      "tags": [
+        "GIDEON"
+      ],
+      "asDropdown": false,
+      "title": "GIDEON boards",
+      "includeVars": false,
+      "keepTime": false,
+      "targetBlank": false
+    }
+  ],
+  "panels": [
+    {
+      "id": 1,
+      "description": "This lists every recorded index generation, newest first, with its state, size, and completion times. A failed state or missing completion time after work stops needs investigation; retired generations remain listed. Follow docs/runbooks/observability.md §3.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "gideon-rows"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "gen_id"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 530
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "state"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "bytes"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 90
+              },
+              {
+                "id": "unit",
+                "value": "bytes"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "created_at"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 165
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "lexical_built_at"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 165
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "dense_built_at"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 165
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "built_at"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 165
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "promoted_at"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 165
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "gideon-rows"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT gen_id, state, bytes, created_at, lexical_built_at, dense_built_at, built_at, promoted_at\nFROM index_generations\nORDER BY created_at DESC, gen_id",
+          "refId": "A"
+        }
+      ],
+      "title": "Generations",
+      "type": "table"
+    },
+    {
+      "id": 2,
+      "description": "This counts documents by processing status and court in the newest report of each generation that is not retired. Failed documents or a ready count that stops growing during a build need investigation. Follow docs/runbooks/observability.md §3.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "gideon-rows"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "lockfile"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 150
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "court"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 70
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "status"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "documents"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 0,
+        "y": 8
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "gideon-rows"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH newest AS (\n    SELECT DISTINCT ON (r.gen_id) r.gen_id, r.courts\n    FROM build_reports r\n    JOIN index_generations g USING (gen_id)\n    WHERE g.state <> 'retired'\n    ORDER BY r.gen_id, r.written_at DESC\n)\nSELECT split_part(r.gen_id, '__', 2) AS lockfile, court.key AS court,\n       distribution.key AS status, distribution.value::bigint AS documents\nFROM newest r\nCROSS JOIN LATERAL jsonb_each(r.courts) AS court\nCROSS JOIN LATERAL jsonb_each_text(court.value->'by_status') AS distribution\nORDER BY lockfile DESC, court, status",
+          "refId": "A"
+        }
+      ],
+      "title": "Documents by status",
+      "type": "table"
+    },
+    {
+      "id": 3,
+      "description": "This counts documents by the source column their text came from and by court in the newest report of each generation that is not retired. Unexpected missing sources or a changed distribution can explain parsing failures. Follow docs/runbooks/observability.md §3.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "gideon-rows"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "lockfile"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 150
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "court"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 70
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "text_source"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 112
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "documents"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 8,
+        "y": 8
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "gideon-rows"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH newest AS (\n    SELECT DISTINCT ON (r.gen_id) r.gen_id, r.courts\n    FROM build_reports r\n    JOIN index_generations g USING (gen_id)\n    WHERE g.state <> 'retired'\n    ORDER BY r.gen_id, r.written_at DESC\n)\nSELECT split_part(r.gen_id, '__', 2) AS lockfile, court.key AS court,\n       distribution.key AS text_source, distribution.value::bigint AS documents\nFROM newest r\nCROSS JOIN LATERAL jsonb_each(r.courts) AS court\nCROSS JOIN LATERAL jsonb_each_text(court.value->'by_text_source') AS distribution\nORDER BY lockfile DESC, court, text_source",
+          "refId": "A"
+        }
+      ],
+      "title": "Documents by text source",
+      "type": "table"
+    },
+    {
+      "id": 4,
+      "description": "This counts documents by recorded precedential status and court in the newest report of each generation that is not retired. An unexpected distribution calls for a check of the source metadata. Follow docs/runbooks/observability.md §3.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "gideon-rows"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "lockfile"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 150
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "court"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 70
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "precedential"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 122
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "documents"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 16,
+        "y": 8
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "gideon-rows"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH newest AS (\n    SELECT DISTINCT ON (r.gen_id) r.gen_id, r.courts\n    FROM build_reports r\n    JOIN index_generations g USING (gen_id)\n    WHERE g.state <> 'retired'\n    ORDER BY r.gen_id, r.written_at DESC\n)\nSELECT split_part(r.gen_id, '__', 2) AS lockfile, court.key AS court,\n       distribution.key AS precedential, distribution.value::bigint AS documents\nFROM newest r\nCROSS JOIN LATERAL jsonb_each(r.courts) AS court\nCROSS JOIN LATERAL jsonb_each_text(court.value->'by_precedential') AS distribution\nORDER BY lockfile DESC, court, precedential",
+          "refId": "A"
+        }
+      ],
+      "title": "Documents by precedential status",
+      "type": "table"
+    },
+    {
+      "id": 5,
+      "description": "This counts failed documents by reason and court in the newest report of each generation that is not retired. A court with no failures has no row; listed failures identify the processing problems to investigate. Follow docs/runbooks/observability.md §3.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "gideon-rows"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "lockfile"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 150
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "court"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 70
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "reason"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "documents"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 0,
+        "y": 18
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "gideon-rows"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH newest AS (\n    SELECT DISTINCT ON (r.gen_id) r.gen_id, r.courts\n    FROM build_reports r\n    JOIN index_generations g USING (gen_id)\n    WHERE g.state <> 'retired'\n    ORDER BY r.gen_id, r.written_at DESC\n)\nSELECT split_part(r.gen_id, '__', 2) AS lockfile, court.key AS court,\n       distribution.key AS reason, distribution.value::bigint AS documents\nFROM newest r\nCROSS JOIN LATERAL jsonb_each(r.courts) AS court\nCROSS JOIN LATERAL jsonb_each_text(court.value->'by_failure_reason') AS distribution\nORDER BY lockfile DESC, court, reason",
+          "refId": "A"
+        }
+      ],
+      "title": "Failures by reason",
+      "type": "table"
+    },
+    {
+      "id": 6,
+      "description": "This shows each court's staged and recorded counts, ready and failed documents, accounted gate, anchored documents, and agreement counts in the newest report of each generation that is not retired. A false pass means fewer documents were recorded than staged; missing agreement figures remain blank, while unexpectedly low anchor or agreement counts need investigation. Follow docs/runbooks/observability.md §3.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "gideon-rows"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "lockfile"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 150
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "court"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 70
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "staged"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 70
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "recorded"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "ready"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 60
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "failed"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 70
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "pass"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 50
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "anchored"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "agreed"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 70
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "gideon_pairs"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 125
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 16,
+        "x": 8,
+        "y": 18
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "gideon-rows"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH newest AS (\n    SELECT DISTINCT ON (r.gen_id) r.gen_id, r.courts, r.gates\n    FROM build_reports r\n    JOIN index_generations g USING (gen_id)\n    WHERE g.state <> 'retired'\n    ORDER BY r.gen_id, r.written_at DESC\n)\nSELECT split_part(r.gen_id, '__', 2) AS lockfile, court.key AS court,\n       (r.gates->'accounted'->court.key->>'staged')::bigint AS staged,\n       (r.gates->'accounted'->court.key->>'recorded')::bigint AS recorded,\n       (r.gates->'accounted'->court.key->>'ready')::bigint AS ready,\n       (r.gates->'accounted'->court.key->>'failed')::bigint AS failed,\n       (r.gates->'accounted'->court.key->>'pass')::boolean AS pass,\n       (court.value->'anchors'->>'anchored')::bigint AS anchored,\n       (court.value->'agreement'->>'agreed')::bigint AS agreed,\n       (court.value->'agreement'->>'gideon_pairs')::bigint AS gideon_pairs,\n       (court.value->'agreement'->>'map_pairs')::bigint AS map_pairs\nFROM newest r\nCROSS JOIN LATERAL jsonb_each(r.courts) AS court\nORDER BY lockfile DESC, court",
+          "refId": "A"
+        }
+      ],
+      "title": "Anchors, agreement, and the accounted gate",
+      "type": "table"
+    },
+    {
+      "id": 7,
+      "description": "This shows command and indexing times, failure details, and whether the newest report of each generation that is not retired covers a whole build. Large run or indexing times can mean slow work; a failed stage names where it stopped. lifecycle_seconds is the span from creation to built, including gaps between commands, and is never a build duration. Follow docs/runbooks/observability.md §3.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "gideon-rows"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "gen_id"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 395
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "report_at"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 165
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "failed_stage"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 125
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "failure_reason"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 140
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "run_seconds"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 115
+              },
+              {
+                "id": "unit",
+                "value": "s"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "lexical_seconds"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 150
+              },
+              {
+                "id": "unit",
+                "value": "s"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "dense_seconds"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 135
+              },
+              {
+                "id": "unit",
+                "value": "s"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "lifecycle_seconds"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 170
+              },
+              {
+                "id": "unit",
+                "value": "s"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 27
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "gideon-rows"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH newest AS (\n    SELECT DISTINCT ON (r.gen_id) r.gen_id, r.written_at, r.failed_stage, r.failure_reason, r.wall_clock\n    FROM build_reports r\n    JOIN index_generations g USING (gen_id)\n    WHERE g.state <> 'retired'\n    ORDER BY r.gen_id, r.written_at DESC\n)\nSELECT gen_id, written_at AS report_at, failed_stage, failure_reason,\n       (wall_clock->>'run_seconds')::bigint AS run_seconds,\n       (wall_clock->>'lexical_seconds')::bigint AS lexical_seconds,\n       (wall_clock->>'dense_seconds')::bigint AS dense_seconds,\n       (wall_clock->>'lifecycle_seconds')::bigint AS lifecycle_seconds,\n       (wall_clock->>'whole_build')::boolean AS whole_build\nFROM newest\nORDER BY split_part(gen_id, '__', 2) DESC, gen_id",
+          "refId": "A"
+        }
+      ],
+      "title": "Build wall clock",
+      "type": "table"
+    },
+    {
+      "id": 8,
+      "description": "This shows recorded dense indexing progress for each generation that is not retired. written is copied plus embedded, and tokens_per_second is tokens divided by recorded seconds; missing keys and a rate without positive seconds remain blank. A growing waiting queue with counts that stop advancing can mean a stalled build. Follow docs/runbooks/observability.md §3.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "gideon-rows"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "gen_id"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 530
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "scope"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 65
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "written"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 80
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "present"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 80
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "copied"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 70
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "embedded"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "tokens"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 70
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "requests"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "seconds"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 80
+              },
+              {
+                "id": "unit",
+                "value": "s"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "indexed"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 80
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "tokens_per_second"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "suffix: tokens/s"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 34
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "gideon-rows"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT gen_id,\n       (counts->>'dense_scope')::bigint AS scope,\n       (counts->>'dense_copied')::bigint + (counts->>'dense_embedded')::bigint AS written,\n       (counts->>'dense_present')::bigint AS present,\n       (counts->>'dense_copied')::bigint AS copied,\n       (counts->>'dense_embedded')::bigint AS embedded,\n       (counts->>'dense_tokens')::bigint AS tokens,\n       (counts->>'dense_requests')::bigint AS requests,\n       (counts->>'dense_seconds')::bigint AS seconds,\n       (counts->>'dense_indexed')::bigint AS indexed,\n       (counts->>'dense_tokens')::numeric / NULLIF((counts->>'dense_seconds')::numeric, 0) AS tokens_per_second\nFROM index_generations\nWHERE state <> 'retired'\nORDER BY created_at DESC, gen_id",
+          "refId": "A"
+        }
+      ],
+      "title": "Embedding progress",
+      "type": "table"
+    },
+    {
+      "id": 9,
+      "description": "This shows requests waiting and running from the embedding server. A queue that keeps growing means work is arriving faster than it is served. This panel is empty on a no-GPU host, where no embedding server runs. Follow docs/runbooks/observability.md §3.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "min": 0,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 40
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "vllm:num_requests_waiting{job=\"embed\"}",
+          "legendFormat": "{{model_name}} waiting",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "vllm:num_requests_running{job=\"embed\"}",
+          "legendFormat": "{{model_name}} running",
+          "refId": "B"
+        }
+      ],
+      "title": "Embedding requests waiting and running",
+      "type": "timeseries"
+    },
+    {
+      "id": 10,
+      "description": "This shows the share of embedding request cache in use, measured by the embedding server. Use near full with waiting requests signals capacity pressure. This panel is empty on a no-GPU host, where no embedding server runs. Follow docs/runbooks/observability.md §3.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 1,
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 40
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "vllm:kv_cache_usage_perc{job=\"embed\"}",
+          "legendFormat": "{{model_name}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Embedding cache use",
+      "type": "timeseries"
+    },
+    {
+      "id": 11,
+      "description": "This shows tokens processed per second by the embedding server over five-minute rates. Low throughput while requests wait can mean the build is slowing. This panel is empty on a no-GPU host, where no embedding server runs, and while nothing embeds in the range. Follow docs/runbooks/observability.md §3.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 1,
+          "unit": "suffix: tokens/s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 40
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (model_name) (rate(vllm:prompt_tokens_total{job=\"embed\"}[5m]))",
+          "legendFormat": "{{model_name}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Tokens embedded per second",
+      "type": "timeseries"
+    },
+    {
+      "id": 12,
+      "description": "This shows successful embedding requests per second over five-minute rates. A falling rate with waiting work can mean requests are stalled or failing. This panel is empty on a no-GPU host, where no embedding server runs, and while nothing embeds in the range. Follow docs/runbooks/observability.md §3.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 47
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (model_name) (rate(vllm:request_success_total{job=\"embed\"}[5m]))",
+          "legendFormat": "{{model_name}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Embedding requests per second",
+      "type": "timeseries"
+    },
+    {
+      "id": 13,
+      "description": "This shows the median and 95th percentile embedding request times from five-minute rates of the server's latency buckets. Rising times mean requests take longer to finish. This panel is empty on a no-GPU host, where no embedding server runs, and while nothing embeds in the range. Follow docs/runbooks/observability.md §3.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 47
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le, model_name) (rate(vllm:e2e_request_latency_seconds_bucket{job=\"embed\"}[5m])))",
+          "legendFormat": "{{model_name}} p50",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, model_name) (rate(vllm:e2e_request_latency_seconds_bucket{job=\"embed\"}[5m])))",
+          "legendFormat": "{{model_name}} p95",
+          "refId": "B"
+        }
+      ],
+      "title": "Embedding request latency",
+      "type": "timeseries"
+    },
+    {
+      "id": 14,
+      "description": "This shows the lexical store's heap use against its dashed heap limit and the vector store's resident and allocated memory, from their own measurements. Heap use close to its limit or sustained memory growth can slow indexing or exhaust memory. Follow docs/runbooks/observability.md §3.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/ limit$/"
+            },
+            "properties": [
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    10,
+                    10
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 47
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(opensearch_jvm_mem_heap_used_bytes{job=\"opensearch-metrics\"})",
+          "legendFormat": "lexical heap",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(opensearch_jvm_mem_heap_max_bytes{job=\"opensearch-metrics\"})",
+          "legendFormat": "lexical heap limit",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "memory_resident_bytes{job=\"qdrant\"}",
+          "legendFormat": "vector resident",
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "memory_allocated_bytes{job=\"qdrant\"}",
+          "legendFormat": "vector allocated",
+          "refId": "D"
+        }
+      ],
+      "title": "Store memory",
+      "type": "timeseries"
+    },
+    {
+      "id": 15,
+      "description": "This shows the lexical store's indexing rate per index over five minutes, excluding dot-prefixed system indexes and counting primary shards. Each index is named for its generation; a low rate while build work waits can mean indexing is stalled. Follow docs/runbooks/observability.md §3.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 54
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (index) (rate(opensearch_index_indexing_index_count{job=\"opensearch-metrics\", context=\"primaries\", index!~\"[.].*\"}[5m]))",
+          "legendFormat": "{{index}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Documents indexed per second",
+      "type": "timeseries"
+    },
+    {
+      "id": 16,
+      "description": "This shows points and vectors in each collection from the vector store's own measurements. Counts should advance during a dense build; unexpected missing collections or counts that stop growing while work waits need investigation. Follow docs/runbooks/observability.md §3.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 54
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "collection_points{job=\"qdrant\"}",
+          "legendFormat": "{{id}} points",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "collection_vectors{job=\"qdrant\"}",
+          "legendFormat": "{{collection}} vectors",
+          "refId": "B"
+        }
+      ],
+      "title": "Collections",
+      "type": "timeseries"
+    },
+    {
+      "id": 17,
+      "description": "This shows lexical indexing work and whether it is throttled, beside each vector collection's update queue and running optimizations. Persistent throttling or a growing update queue with no progress can mean a store cannot keep up. Follow docs/runbooks/observability.md §3.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 54
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(opensearch_indices_indexing_index_current_number{job=\"opensearch-metrics\"})",
+          "legendFormat": "lexical indexing",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(opensearch_indices_indexing_is_throttled_bool{job=\"opensearch-metrics\"})",
+          "legendFormat": "lexical throttled",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "collection_update_queue_length{job=\"qdrant\"}",
+          "legendFormat": "{{id}} update queue",
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "collection_running_optimizations{job=\"qdrant\"}",
+          "legendFormat": "{{id}} optimizing",
+          "refId": "D"
+        }
+      ],
+      "title": "Store work in flight",
+      "type": "timeseries"
+    },
+    {
+      "id": 18,
+      "description": "This shows waiting and running jobs per worker queue from the worker's measurements. Known queues remain visible at zero; a queue that grows while running jobs make no progress needs investigation. Follow docs/runbooks/observability.md §3.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "min": 0,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 61
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "gideon_worker_queue_jobs{job=\"worker\"}",
+          "legendFormat": "{{queue}} {{status}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Worker queue depth",
+      "type": "timeseries"
+    },
+    {
+      "id": 19,
+      "description": "This shows the worker's own heartbeat age and configured job slots. A stale heartbeat can mean the worker stopped; too few slots for sustained waiting work can limit progress. The worker's Overview tile carries its liveness page. Follow docs/runbooks/observability.md §3.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "heartbeat age"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 61
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "gideon_worker_heartbeat_age_seconds{job=\"worker\"}",
+          "legendFormat": "heartbeat age",
+          "refId": "A",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "gideon_worker_concurrency{job=\"worker\"}",
+          "legendFormat": "job slots",
+          "refId": "B",
+          "instant": true
+        }
+      ],
+      "title": "Worker heartbeat and slots",
+      "type": "stat",
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "none",
+        "graphMode": "none",
+        "textMode": "value_and_name"
+      }
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 41,
+  "tags": [
+    "GIDEON",
+    "corpus"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "GIDEON Corpus",
+  "uid": "gideon-corpus",
+  "version": 1
+}

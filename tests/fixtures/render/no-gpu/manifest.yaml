@@ -69,12 +69,17 @@ files:
     owners:
       - "grafana"
   "grafana/dashboards/overview.json":
-    sha256: "d925dcc095f80d9070d99c80cff23b1a06f6b78438b74f2370aa0d3972ce87ac"
+    sha256: "62c766dc75956932bdcd744e250c20d0e0f007ca2000802f7da53f52247f8751"
     mode: "0644"
     owners:
       - "grafana"
   "grafana/dashboards/backup.json":
     sha256: "1ee81e8383816514196517bd2b3a53c2df260e8b2ba1dc1e8e5c35bc7d9f466e"
+    mode: "0644"
+    owners:
+      - "grafana"
+  "grafana/dashboards/corpus.json":
+    sha256: "1a05e678de59fad9cfa15946de12855f2369c575c51e0eb78a9c7821a3244cb9"
     mode: "0644"
     owners:
       - "grafana"

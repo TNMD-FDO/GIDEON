@@ -438,6 +438,7 @@ class Registry(unittest.TestCase):
                 "grafana/dashboards/backup.json",
                 "grafana/dashboards/gpu.json",
                 "grafana/dashboards/evaluation.json",
+                "grafana/dashboards/corpus.json",
                 "postgres/pgbackrest.conf",
                 "caddy/Caddyfile",
                 "open-webui/env",
@@ -490,33 +491,34 @@ class Registry(unittest.TestCase):
         self.assertEqual(ARTIFACTS[12].owners, ("grafana",))
         self.assertEqual(ARTIFACTS[13].owners, ("grafana",))
         self.assertEqual(ARTIFACTS[14].owners, ("grafana",))
-        self.assertEqual(ARTIFACTS[15].owners, ("postgres",))
-        self.assertEqual(ARTIFACTS[16].owners, ("caddy",))
-        self.assertEqual(ARTIFACTS[17].owners, ("open-webui",))
-        self.assertTrue(ARTIFACTS[17].secret)
-        self.assertEqual(ARTIFACTS[17].mode, 0o600)
-        self.assertEqual(ARTIFACTS[18].owners, ())
-        self.assertEqual(ARTIFACTS[19].owners, (API_SERVICE_NAME,))
-        self.assertEqual(ARTIFACTS[19].mode, 0o644)
-        self.assertFalse(ARTIFACTS[19].secret)
+        self.assertEqual(ARTIFACTS[15].owners, ("grafana",))
+        self.assertEqual(ARTIFACTS[16].owners, ("postgres",))
+        self.assertEqual(ARTIFACTS[17].owners, ("caddy",))
+        self.assertEqual(ARTIFACTS[18].owners, ("open-webui",))
+        self.assertTrue(ARTIFACTS[18].secret)
+        self.assertEqual(ARTIFACTS[18].mode, 0o600)
+        self.assertEqual(ARTIFACTS[19].owners, ())
+        self.assertEqual(ARTIFACTS[20].owners, (API_SERVICE_NAME,))
+        self.assertEqual(ARTIFACTS[20].mode, 0o644)
+        self.assertFalse(ARTIFACTS[20].secret)
         self.assertEqual(
-            ARTIFACTS[20].owners,
+            ARTIFACTS[21].owners,
             tuple(member.service_name for member in MODEL_SERVERS),
         )
-        self.assertEqual(ARTIFACTS[20].mode, 0o644)
-        self.assertEqual(ARTIFACTS[21].owners, ("searxng",))
         self.assertEqual(ARTIFACTS[21].mode, 0o644)
         self.assertEqual(ARTIFACTS[22].owners, ("searxng",))
-        self.assertTrue(ARTIFACTS[22].secret)
-        self.assertEqual(ARTIFACTS[22].mode, 0o600)
-        self.assertEqual(ARTIFACTS[23].relative_path, "gideon-egress/env")
-        self.assertEqual(ARTIFACTS[23].owners, ("gideon-egress",))
+        self.assertEqual(ARTIFACTS[22].mode, 0o644)
+        self.assertEqual(ARTIFACTS[23].owners, ("searxng",))
         self.assertTrue(ARTIFACTS[23].secret)
         self.assertEqual(ARTIFACTS[23].mode, 0o600)
-        self.assertEqual(ARTIFACTS[24].relative_path, "searxng/logging.json")
-        self.assertEqual(ARTIFACTS[24].owners, ("searxng",))
-        self.assertFalse(ARTIFACTS[24].secret)
-        self.assertEqual(ARTIFACTS[24].mode, 0o644)
+        self.assertEqual(ARTIFACTS[24].relative_path, "gideon-egress/env")
+        self.assertEqual(ARTIFACTS[24].owners, ("gideon-egress",))
+        self.assertTrue(ARTIFACTS[24].secret)
+        self.assertEqual(ARTIFACTS[24].mode, 0o600)
+        self.assertEqual(ARTIFACTS[25].relative_path, "searxng/logging.json")
+        self.assertEqual(ARTIFACTS[25].owners, ("searxng",))
+        self.assertFalse(ARTIFACTS[25].secret)
+        self.assertEqual(ARTIFACTS[25].mode, 0o644)
         self.assertEqual(ARTIFACTS[-1].owners, ("dcgm-exporter",))
         self.assertEqual(ARTIFACTS[-1].mode, 0o644)
         self.assertTrue(
@@ -1439,6 +1441,7 @@ class Core(unittest.TestCase):
                 "grafana/dashboards/backup.json",
                 "grafana/dashboards/gpu.json",
                 "grafana/dashboards/evaluation.json",
+                "grafana/dashboards/corpus.json",
                 "postgres/pgbackrest.conf",
                 "caddy/Caddyfile",
                 "open-webui/env",

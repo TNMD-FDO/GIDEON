@@ -60,7 +60,7 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "On the box, run `gideon status` for what needs attention now. Before planned work, [silence the rule that would page](/grafana/alerting/silences).\n\nThe other boards on this host:\n\n- [GIDEON Backup](/grafana/d/gideon-backup)\n\nThe start-here card: `/opt/gideon/docs/runbooks/start-here.md` on the box, or <a href=\"https://github.com/TNMD-FDO/GIDEON/blob/vfixture/docs/runbooks/start-here.md\" target=\"_blank\">in the public export at this release</a>."
+        "content": "On the box, run `gideon status` for what needs attention now. Before planned work, [silence the rule that would page](/grafana/alerting/silences).\n\nThe other boards on this host:\n\n- [GIDEON Backup](/grafana/d/gideon-backup)\n- [GIDEON Corpus](/grafana/d/gideon-corpus)\n\nThe start-here card: `/opt/gideon/docs/runbooks/start-here.md` on the box, or <a href=\"https://github.com/TNMD-FDO/GIDEON/blob/vfixture/docs/runbooks/start-here.md\" target=\"_blank\">in the public export at this release</a>."
       },
       "title": "Start here",
       "type": "text"
@@ -96,7 +96,7 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
+        "w": 24,
         "x": 0,
         "y": 8
       },
@@ -170,10 +170,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
-        "w": 6,
-        "x": 12,
-        "y": 8
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 16
       },
       "options": {
         "reduceOptions": {
@@ -240,10 +240,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
-        "w": 6,
-        "x": 18,
-        "y": 8
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 16
       },
       "options": {
         "reduceOptions": {
@@ -298,7 +298,7 @@
         "h": 7,
         "w": 6,
         "x": 0,
-        "y": 16
+        "y": 23
       },
       "options": {
         "reduceOptions": {
@@ -351,7 +351,7 @@
         "h": 7,
         "w": 6,
         "x": 6,
-        "y": 16
+        "y": 23
       },
       "options": {
         "reduceOptions": {
@@ -404,7 +404,7 @@
         "h": 7,
         "w": 6,
         "x": 12,
-        "y": 16
+        "y": 23
       },
       "options": {
         "reduceOptions": {
@@ -459,7 +459,7 @@
         "h": 7,
         "w": 6,
         "x": 18,
-        "y": 16
+        "y": 23
       },
       "options": {
         "reduceOptions": {
@@ -502,7 +502,7 @@
         "h": 7,
         "w": 24,
         "x": 0,
-        "y": 23
+        "y": 30
       },
       "options": {
         "legend": {
@@ -530,7 +530,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 30
+        "y": 37
       },
       "panels": [
         {
@@ -549,7 +549,7 @@
             "h": 8,
             "w": 6,
             "x": 0,
-            "y": 31
+            "y": 38
           },
           "options": {
             "legend": {
@@ -583,7 +583,7 @@
             "h": 8,
             "w": 6,
             "x": 6,
-            "y": 31
+            "y": 38
           },
           "options": {
             "legend": {
@@ -636,7 +636,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 31
+            "y": 38
           },
           "options": {
             "legend": {
