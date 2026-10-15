@@ -628,6 +628,7 @@ class ModelPin(Pin):
     profile: str
     model: LockedModelPin
     memory_rows: tuple[models.MemoryRow, ...]
+    space: models.EmbeddingSpace | None
 
     @property
     def key_paths(self) -> tuple[str, ...]:
@@ -654,7 +655,7 @@ class ModelPin(Pin):
             self.lock,
             (Change(f"{prefix}.revision", self.model.revision, head),),
             f"{weights.HF_RESOLVE_ROOT}/{self.model.repo}/tree/{head}",
-            new_size != old_size and bool(self.memory_rows),
+            (new_size != old_size and bool(self.memory_rows)) or self.space is not None,
             (Block(f"{prefix}.files", old, files),),
         )
 
@@ -740,6 +741,12 @@ def pin_registry(
                     profile.name,
                     model,
                     tuple(row for row in profile.memory if row.role == model.role),
+                    (
+                        profile.embedding_space
+                        if profile.embedding_space is not None
+                        and profile.embedding_space.role == model.role
+                        else None
+                    ),
                 )
                 for profile in models_lock.profiles
                 for model in profile.models

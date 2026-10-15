@@ -276,6 +276,7 @@ def body_for(
     notes: Sequence[NoteBinding],
     *,
     memory_rows: Sequence[models.MemoryRow] = (),
+    embedding_space: models.EmbeddingSpace | None = None,
 ) -> str:
     """Render only tool-owned facts into a proposal body."""
 
@@ -385,12 +386,26 @@ def body_for(
                     for row in memory_rows
                 )
                 lines.append(f"Memory rows naming role `{role}`: {rows}.")
-            lines.append(
-                "Re-judge the profile's memory row on this branch; after "
-                "editing the row, run `python3 tests/regenerate_render_fixtures.py` "
-                "and commit the lock and the fixtures together. A commit here "
-                "completes the proposal, which the watch then leaves alone."
-            )
+            if embedding_space is not None:
+                lines.append(
+                    f"This bump moves the model the profile's `embedding_space` "
+                    f"`{embedding_space.id}` was typed for, whose `revision` records "
+                    "the pin's, so it is a new embedding space. The committed-lock "
+                    "check is red until a person moves the id and the block's "
+                    "`revision` together on this branch. Re-judge the memory row "
+                    "where the bytes moved, run `python3 tests/regenerate_render_fixtures.py`, "
+                    "commit the lock and the fixtures together, and build a new "
+                    "generation from the new space before the merge "
+                    "(`docs/runbooks/model-upgrade.md` §1). A commit here completes "
+                    "the proposal, which the watch then leaves alone."
+                )
+            else:
+                lines.append(
+                    "Re-judge the profile's memory row on this branch; after "
+                    "editing the row, run `python3 tests/regenerate_render_fixtures.py` "
+                    "and commit the lock and the fixtures together. A commit here "
+                    "completes the proposal, which the watch then leaves alone."
+                )
         elif built_change:
             lines.append(
                 "This is a built-image proposal the watch cannot complete: rebuild on "

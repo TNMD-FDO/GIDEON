@@ -113,12 +113,13 @@ def _skill_completed_row(
 
 
 def _body(pin: Pin, bump: Bump, bindings: Sequence[notes.NoteBinding]) -> str:
-    """The pull-request body for *pin*, with a model pin's memory rows."""
+    """The pull-request body for *pin*, with its memory rows and space."""
 
     return body_for(
         bump,
         notes.bound_to(bindings, pin.id),
         memory_rows=pin.memory_rows if isinstance(pin, ModelPin) else (),
+        embedding_space=pin.space if isinstance(pin, ModelPin) else None,
     )
 
 

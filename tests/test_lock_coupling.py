@@ -6,8 +6,9 @@ and the lock disagree — the release gate runs on ``main``, where they are
 equal by construction (PR #1, hotfix v0.0.14; PR #2 the same day). This
 tripwire loads three locks through the product loaders, plus the Matt Pocock
 skills' record the watch moves, and fails when any value the watch can move,
-or a person moves after an on-box converge, appears whole-token in a test
-module: not immediately preceded or followed by a letter or digit, so
+or a person moves after an on-box converge or with an embedding space's id
+(the block's revision), appears whole-token in a test module: not immediately
+preceded or followed by a letter or digit, so
 ``nvidia-driver-pinning-<branch>`` and ``<tested>-1ubuntu1`` count while a
 digit glued to either side and a branch inside a hex digest do not. Comments
 count. A test derives such a value from the loaded lock, or uses a visibly
@@ -153,6 +154,11 @@ def pinned_values(
     if host_lock.kernel_tested is not None:
         values.append(PinnedValue("kernel_tested", host_lock.kernel_tested))
     for profile in models_lock.profiles:
+        if profile.embedding_space is not None:
+            values.append(PinnedValue(
+                f"profiles.{profile.name}.embedding_space.revision",
+                profile.embedding_space.revision,
+            ))
         for model in profile.models:
             model_path = f"profiles.{profile.name}.models.{model.role}"
             values.extend(
@@ -282,6 +288,8 @@ class LockCouplingContracts(unittest.TestCase):
         if host_lock.kernel_tested is not None:
             expected.append("kernel_tested")
         for profile in models_lock.profiles:
+            if profile.embedding_space is not None:
+                expected.append(f"profiles.{profile.name}.embedding_space.revision")
             for model in profile.models:
                 model_path = f"profiles.{profile.name}.models.{model.role}"
                 expected += [

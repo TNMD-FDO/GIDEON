@@ -93,6 +93,7 @@ profiles:
     embedding_space:
       id: fixture-embed-space
       role: embed
+      revision: "{'c' * 40}"
       dimensions: {embed_width}
     models:
       generator:

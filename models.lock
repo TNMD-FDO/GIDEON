@@ -140,9 +140,14 @@ profiles:
     # weight files, the dimension, or the precision changes; the pin watch
     # patches nothing in this block. `role` names the model in `models` that
     # embeds into the space, and `dimensions` is the width its server returns.
+    # `revision` is the `embed` pin's revision the id was typed for; the
+    # committed-lock test holds the two equal, so a pin-watch bump of the pin
+    # is red on its pull request until a person moves the id and this revision
+    # together on the branch.
     embedding_space:
       id: qwen3-embedding-8b-1024-bf16
       role: embed
+      revision: "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af"
       dimensions: 1024
     # The chunk guards arrive with index build.
     models:

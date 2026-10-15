@@ -167,8 +167,16 @@ def _fictitious_models_lock_text(
     file_size: int = 3,
     memory_role: bool = True,
     two_profiles: bool = False,
+    embedding_space: bool = False,
 ) -> str:
     role_line = "        role: generator\n" if memory_role else ""
+    space = (
+        "    embedding_space:\n"
+        "      id: fictitious-embedding-space\n"
+        "      role: generator\n"
+        f'      revision: "{revision}"\n'
+        "      dimensions: 1\n"
+    ) if embedding_space else ""
     second = ""
     if two_profiles:
         second = (
@@ -220,6 +228,7 @@ def _fictitious_models_lock_text(
         "      generator:\n"
         "        gb: 7\n"
         + role_line
+        + space
         + "    models:\n"
         + "      generator:\n"
         + f"        repo: {FICTITIOUS_MODEL_REPO}\n"
@@ -392,12 +401,16 @@ def _fictitious_skill_fetcher(
 
 
 def _fictitious_model_pin(
-    *, memory_role: bool = True, revision: str = FICTITIOUS_MODEL_REVISION
+    *,
+    memory_role: bool = True,
+    revision: str = FICTITIOUS_MODEL_REVISION,
+    embedding_space: bool = False,
 ) -> ModelPin:
     result = load_models_lock_text(
         _fictitious_models_lock_text(
             revision=revision,
             memory_role=memory_role,
+            embedding_space=embedding_space,
         )
     )
     assert result.ok
@@ -410,6 +423,12 @@ def _fictitious_model_pin(
         profile.name,
         model,
         tuple(row for row in profile.memory if row.role == model.role),
+        (
+            profile.embedding_space
+            if profile.embedding_space is not None
+            and profile.embedding_space.role == model.role
+            else None
+        ),
     )
 
 
@@ -887,6 +906,19 @@ class ModelPinContracts(unittest.TestCase):
         same_size_bump = same_size.resolve(_fictitious_model_fetcher(file_body=b""))
         self.assertIsNotNone(same_size_bump)
         self.assertFalse(cast(Bump, same_size_bump).proposal)
+
+    def test_embedding_space_proposes_without_a_memory_row_or_size_change(self) -> None:
+        pin = _fictitious_model_pin(memory_role=False, embedding_space=True)
+        self.assertEqual(pin.memory_rows, ())
+        bump = pin.resolve(_fictitious_model_fetcher(file_body=b""))
+        without_space = _fictitious_model_pin(memory_role=False).resolve(
+            _fictitious_model_fetcher(file_body=b"")
+        )
+        assert bump is not None and without_space is not None
+        self.assertTrue(bump.proposal)
+        self.assertFalse(without_space.proposal)
+        self.assertEqual(bump.changes, without_space.changes)
+        self.assertEqual(bump.blocks, without_space.blocks)
 
     def test_model_hub_refusals_are_fetch_errors_with_their_urls(self) -> None:
         pin = _fictitious_model_pin()
@@ -1572,7 +1604,7 @@ class PinContracts(unittest.TestCase):
         image_result = load_image_lock_text(IMAGE_LOCK_TEXT)
         host_result = load_host_lock(ROOT / "host.lock")
         models_result = load_models_lock_text(
-            _fictitious_models_lock_text(two_profiles=True)
+            _fictitious_models_lock_text(two_profiles=True, embedding_space=True)
         )
         self.assertTrue(image_result.ok)
         self.assertTrue(host_result.ok)
@@ -1597,6 +1629,10 @@ class PinContracts(unittest.TestCase):
         first_skill = ids.index("skills.matt-pocock")
         self.assertGreater(first_model, ids.index("host.acceptance_vm_image"))
         self.assertLess(first_model, first_skill)
+        model_pins = [pin for pin in registry if isinstance(pin, ModelPin)]
+        self.assertIsNotNone(models_result.lock.profiles[0].embedding_space)
+        self.assertIs(model_pins[0].space, models_result.lock.profiles[0].embedding_space)
+        self.assertIsNone(model_pins[1].space)
 
     def test_every_pin_bump_path_is_owned_by_that_pin(self) -> None:
         image = self._image_pin()
@@ -2426,6 +2462,32 @@ class PullRequestContracts(unittest.TestCase):
         self.assertIn("7 GB", body)
         self.assertIn("Re-judge the profile's memory row", body)
         self.assertIn("python3 tests/regenerate_render_fixtures.py", body)
+
+    def test_model_proposal_body_names_the_new_embedding_space_completion(self) -> None:
+        pin = _fictitious_model_pin(embedding_space=True)
+        bump = pin.resolve(_fictitious_model_fetcher())
+        assert bump is not None and pin.space is not None
+        body = body_for(
+            bump,
+            (),
+            memory_rows=pin.memory_rows,
+            embedding_space=pin.space,
+        )
+        self.assertIn(f"`embedding_space` `{pin.space.id}` was typed for", body)
+        self.assertIn("new embedding space", body)
+        self.assertIn("committed-lock check is red", body)
+        self.assertIn("moves the id and the block's `revision` together on this branch", body)
+        self.assertIn("Re-judge the memory row where the bytes moved", body)
+        self.assertIn("python3 tests/regenerate_render_fixtures.py", body)
+        self.assertIn("commit the lock and the fixtures together", body)
+        self.assertIn("build a new generation from the new space before the merge", body)
+        self.assertIn("`docs/runbooks/model-upgrade.md` §1", body)
+        self.assertIn("A commit here completes the proposal, which the watch then leaves alone", body)
+        self.assertIn("Memory rows naming role", body)
+        for row in pin.memory_rows:
+            self.assertIn(f"`{row.service}` (role `{row.role}`, {row.gb} GB)", body)
+        self.assertIn("the pinned files change from", body)
+        self.assertNotIn("Re-judge the profile's memory row on this branch", body)
 
     def test_bound_to_preserves_reading_order(self) -> None:
         """The join returns only one pin's bindings in their source order."""
@@ -3692,6 +3754,45 @@ class CliContracts(unittest.TestCase):
         self.assertIn(FICTITIOUS_MODEL_HEAD, open_host.files["/repo/models.lock"])
         self.assertNotIn(FICTITIOUS_MODEL_REVISION, open_host.files["/repo/models.lock"])
         self.assertTrue(any(call[0] == ("git", "add", "models.lock", "tests/fixtures/render") for call in open_host.calls))
+
+    def test_embedding_space_model_opens_a_proposal_and_dry_run_does_not_push(self) -> None:
+        models_text = _fictitious_models_lock_text(embedding_space=True)
+        loaded = load_models_lock_text(models_text)
+        assert loaded.lock is not None
+        space = loaded.lock.profiles[0].embedding_space
+        assert space is not None
+        host = PinWatchHost(models_text=models_text)
+        result, stdout, stderr = _cli_output(
+            host,
+            _fictitious_model_fetcher(),
+            ["--only", "models.generator"],
+        )
+        self.assertEqual(result, 0, stderr)
+        self.assertIn("models.generator: opened", stdout)
+        self.assertIn("(proposal)", stdout)
+        body = next(call[1] for call in host.calls if call[0][:3] == ("gh", "pr", "create"))
+        self.assertIsNotNone(body)
+        assert body is not None
+        self.assertIn(space.id, body)
+        self.assertIn("new embedding space", body)
+        self.assertIn("moves the id and the block's `revision` together on this branch", body)
+        self.assertIn("python3 tests/regenerate_render_fixtures.py", body)
+        self.assertIn("build a new generation", body)
+        self.assertIn("`docs/runbooks/model-upgrade.md` §1", body)
+        patched = load_models_lock_text(host.files["/repo/models.lock"])
+        assert patched.lock is not None
+        self.assertEqual(patched.lock.profiles[0].embedding_space, space)
+
+        dry_host = PinWatchHost(models_text=models_text)
+        result, stdout, stderr = _cli_output(
+            dry_host,
+            _fictitious_model_fetcher(),
+            ["--only", "models.generator", "--dry-run"],
+        )
+        self.assertEqual(result, 0, stderr)
+        self.assertIn("models.generator: would opened", stdout)
+        self.assertIn("(proposal)", stdout)
+        self.assertFalse(any(call[0][:2] == ("git", "push") for call in dry_host.calls))
 
     def test_model_completion_is_left_alone_and_reports_stale_upstream(self) -> None:
         pin = _fictitious_model_pin()

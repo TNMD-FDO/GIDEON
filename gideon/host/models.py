@@ -114,11 +114,12 @@ class ProfileRequirements:
 
 @dataclass(frozen=True, slots=True)
 class EmbeddingSpace:
-    """The model role and vector width identified by an embedding space."""
+    """The model role, vector width, and pin revision the id was typed for."""
 
     id: str
     role: str
     dimensions: int
+    revision: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,7 +253,7 @@ _CANDIDATE_KEYS: Final = ("role", "repo", "revision", "serve", "files")
 _SERVE_KEYS: Final = ("served_name", "env", "flags")
 _FILE_KEYS: Final = ("sha256", "size")
 _MEMORY_ROW_KEYS: Final = ("gb", "role")
-_EMBEDDING_SPACE_KEYS: Final = ("id", "role", "dimensions")
+_EMBEDDING_SPACE_KEYS: Final = ("id", "role", "revision", "dimensions")
 
 PROFILE_NAME: Final = re.compile(
     r"^(?:[1-9][0-9]*x[1-9][0-9]*v-[1-9][0-9]*d|[1-9][0-9]*u)$"
@@ -694,6 +695,9 @@ def _validate_embedding_space(
     if role is not None and role not in roles:
         role_names = ", ".join(roles) or "none"
         errors.append(_error(f"{path}.role", f"role '{role}' is not pinned by this profile (available roles: {role_names})"))
+    revision = _string(space, "revision", errors, error_path=f"{path}.revision")
+    if revision is not None and REVISION.fullmatch(revision) is None:
+        errors.append(_error(f"{path}.revision", "expected a 40-character lowercase hexadecimal revision"))
     _int(space, "dimensions", errors, error_path=f"{path}.dimensions")
 
 
@@ -892,6 +896,7 @@ def _construct(document: Mapping[str, object]) -> ModelsLock:
                 cast(str, space["id"]),
                 cast(str, space["role"]),
                 cast(int, space["dimensions"]),
+                cast(str, space["revision"]),
             )
         reserve_value = cast(Mapping[int, int], profile.get("cotenant_reserve_gb", {}))
         cotenant_reserve = tuple(

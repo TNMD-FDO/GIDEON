@@ -12,9 +12,12 @@ The supporting model `embed` has arrived too, and a proposal for it that
 moves any weight file's digest is a new embedding space, never a routine
 merge: the vectors already stored were made by the old weights, so it takes a
 new space id in `models.lock` and a new index generation built from it. The
-pull request changes the revision and its verified `files` record; the box
-changes only when an operator applies that tree or upgrades to its tag. On a
-no-GPU host this proof cannot run: `engine verify` reports
+`embed` proposal's checks stay red until a person moves the id and the
+`embedding_space` block's `revision` together on the branch, recording that
+the new space has been judged. The pull request changes the revision and its
+verified `files` record; the box changes only when an operator applies that
+tree or upgrades to its tag. On a no-GPU host this proof cannot run:
+`engine verify` reports
 `engine: ok — skipped — no-GPU host`.
 
 An engine **image** bump takes its own maintenance window and the upgrade's

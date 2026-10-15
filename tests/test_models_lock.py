@@ -123,9 +123,10 @@ profiles:
             size: 0
 """
 
-SPACE = """    embedding_space:
+SPACE = f"""    embedding_space:
       id: example-space-17
       role: generator
+      revision: "{FAKE_REVISION}"
       dimensions: 17
 """
 VALID_WITH_SPACE = VALID.replace("    models:\n", SPACE + "    models:\n")
@@ -216,6 +217,25 @@ class FakeHost:
 
 def load_text(text: str) -> ModelsLockLoadResult:
     return load_models_lock_text(text)
+
+
+def embedding_space_problems(lock: ModelsLock) -> list[str]:
+    """Report each space whose recorded revision differs from its role's pin."""
+
+    problems: list[str] = []
+    for profile in lock.profiles:
+        space = profile.embedding_space
+        if space is None:
+            continue
+        pin = profile.model(space.role)
+        assert pin is not None
+        if space.revision != pin.revision:
+            problems.append(
+                f"Profile '{profile.name}': embedding_space '{space.id}' was typed "
+                f"for revision '{space.revision}', but role '{space.role}' is pinned "
+                f"at '{pin.revision}'. Move the id and the block's revision together."
+            )
+    return problems
 
 
 class CommittedLock(unittest.TestCase):
@@ -393,6 +413,31 @@ class CommittedLock(unittest.TestCase):
         self.assertEqual(json.loads(hf_overrides)["matryoshka_dimensions"], [space.dimensions])
         self.assertEqual(json.loads(pooler_config)["dimensions"], space.dimensions)
 
+    def test_committed_embedding_space_is_typed_for_its_pin(self) -> None:
+        result = load_models_lock(LOCK)
+        self.assertTrue(result.ok, render_errors(result.errors))
+        assert result.lock is not None
+        self.assertEqual(embedding_space_problems(result.lock), [])
+
+    def test_embed_pin_moved_under_an_unmoved_block_fails_the_check(self) -> None:
+        text = VALID_WITH_SPACE.replace(
+            f'        revision: "{FAKE_REVISION}"\n',
+            f'        revision: "{"c" * 40}"\n',
+            1,
+        )
+        result = load_text(text)
+        self.assertTrue(result.ok, render_errors(result.errors))
+        assert result.lock is not None
+        profile = result.lock.profiles[0]
+        space = profile.embedding_space
+        assert space is not None
+        pin = profile.model(space.role)
+        assert pin is not None
+        problems = embedding_space_problems(result.lock)
+        self.assertEqual(len(problems), 1)
+        for value in (profile.name, space.id, space.revision, pin.revision):
+            self.assertIn(value, problems[0])
+
     def test_models_dataclasses_are_frozen_and_slotted(self) -> None:
         for value in (
             PinnedFile("config.json", FAKE_DIGEST, 1),
@@ -403,7 +448,7 @@ class CommittedLock(unittest.TestCase):
             ProfileRequirements("x86_64", GpuRequirements("Example", "1.0", "Example GPU", 1, 1), 1, 1),
             MemoryRow("example-service", 1, None),
             CotenantReserve(0, 3),
-            EmbeddingSpace("example-space", "generator", 17),
+            EmbeddingSpace("example-space", "generator", 17, FAKE_REVISION),
             HardwareProfile("2x1v-1d", ProfileRequirements("x86_64", GpuRequirements("Example", "1.0", "Example GPU", 1, 1), 1, 1), (MemoryRow("example-service", 1, None),), ()),
             ModelsLock(1, "2x1v-1d", ()),
         ):
@@ -542,7 +587,7 @@ class Refusals(unittest.TestCase):
         with_space = load_text(VALID_WITH_SPACE)
         self.assertTrue(with_space.ok, render_errors(with_space.errors))
         assert with_space.lock is not None
-        self.assertEqual(with_space.lock.profiles[0].embedding_space, EmbeddingSpace("example-space-17", "generator", 17))
+        self.assertEqual(with_space.lock.profiles[0].embedding_space, EmbeddingSpace("example-space-17", "generator", 17, FAKE_REVISION))
 
     def test_cotenant_reserve_is_optional(self) -> None:
         absent = load_text(VALID)
@@ -636,6 +681,7 @@ class Refusals(unittest.TestCase):
         for key, line in (
             ("id", "      id: example-space-17\n"),
             ("role", "      role: generator\n"),
+            ("revision", f'      revision: "{FAKE_REVISION}"\n'),
             ("dimensions", "      dimensions: 17\n"),
         ):
             with self.subTest(missing=key):
@@ -646,6 +692,11 @@ class Refusals(unittest.TestCase):
             with self.subTest(id=bad_id):
                 text = VALID_WITH_SPACE.replace("id: example-space-17", f"id: {bad_id}")
                 self.assert_space_refused(text, "lowercase hyphenated embedding space id", f"{path}.id")
+
+        for bad_revision in (FAKE_REVISION.upper(), FAKE_REVISION[:-1], "not-a-revision"):
+            with self.subTest(revision=bad_revision):
+                text = VALID_WITH_SPACE.replace(SPACE, SPACE.replace(FAKE_REVISION, bad_revision))
+                self.assert_space_refused(text, "expected a 40-character lowercase hexadecimal revision", f"{path}.revision")
 
         text = VALID_WITH_SPACE.replace(SPACE, SPACE.replace("role: generator", "role: absent"))
         self.assert_space_refused(text, "not pinned", f"{path}.role")
