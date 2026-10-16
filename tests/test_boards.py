@@ -382,6 +382,44 @@ class FakeClient:
         return self.response
 
 
+class BoardInventory(unittest.TestCase):
+    """The viewport accounts for every grid item in the dashboard document."""
+
+    def test_stacked_grid_rows_include_rows_and_nested_panels(self) -> None:
+        document = json.loads(
+            board_document(
+                "example-board",
+                [("First", "stat"), ("Second", "table")],
+                rows=[("Host detail", [("Host load", "timeseries")])],
+            )
+        )
+        items = document["panels"] + document["panels"][-1]["panels"]
+        board = inventory.parse_board(json.dumps(document))
+        self.assertEqual(
+            board.stacked_grid_rows, sum(item["gridPos"]["h"] for item in items)
+        )
+        self.assertEqual(
+            board.lowest_grid_row,
+            max(item["gridPos"]["y"] + item["gridPos"]["h"] for item in items),
+        )
+        self.assertNotEqual(board.stacked_grid_rows, board.lowest_grid_row)
+
+    def test_full_width_stack_matches_lowest_grid_row(self) -> None:
+        document = json.loads(
+            board_document(
+                "example-board", [("First", "stat"), ("Second", "timeseries")]
+            )
+        )
+        for panel in document["panels"]:
+            panel["gridPos"]["w"] = 24
+        board = inventory.parse_board(json.dumps(document))
+        self.assertEqual(
+            board.stacked_grid_rows,
+            sum(panel["gridPos"]["h"] for panel in document["panels"]),
+        )
+        self.assertEqual(board.stacked_grid_rows, board.lowest_grid_row)
+
+
 class BoardRows(unittest.TestCase):
     def invoke(
         self,
@@ -856,6 +894,40 @@ class BoardRows(unittest.TestCase):
         self.assertIn("preconditions: refuse — root is required", stdout)
         self.assertIn("Fix: Run sudo", stdout)
 
+    def test_nonpositive_width_refuses_before_any_row(self) -> None:
+        """Invalid widths refuse before root checks or browser activity."""
+
+        for width in (0, -1):
+            with self.subTest(width=width):
+                host = FakeHost(board_document("example-board", [("Figure", "stat")]))
+                host.euid = 1000
+                browser_page = FakePage(host, [])
+                code, stdout, stderr = self.invoke(
+                    host, browser_page,
+                    argv=["--out", str(OUTPUT), "--width", str(width)],
+                )
+                self.assertEqual(code, 1)
+                self.assertEqual(stdout, "")
+                self.assertIn("--width must be positive", stderr)
+                self.assertIn(
+                    "Fix: Pass --width with a positive pixel count, then retry.", stderr
+                )
+                self.assertEqual(browser_page.events, [])
+                self.assertFalse(host.exists(OUTPUT))
+
+    def test_noninteger_width_is_usage_error(self) -> None:
+        host = FakeHost(board_document("example-board", [("Figure", "stat")]))
+        browser_page = FakePage(host, [])
+        code, stdout, stderr = self.invoke(
+            host, browser_page, argv=["--out", str(OUTPUT), "--width", "abc"]
+        )
+        self.assertEqual(code, 2)
+        self.assertEqual(stdout, "")
+        self.assertIn("--width", stderr)
+        self.assertIn("invalid int value", stderr)
+        self.assertEqual(browser_page.events, [])
+        self.assertFalse(host.exists(OUTPUT))
+
     def test_bad_site_precondition_refuses_with_fix(self) -> None:
         host = FakeHost(board_document("example-board", [("Figure", "timeseries")]))
         host.files[str(SITE_PATH)] = "{}"
@@ -1307,8 +1379,10 @@ class BoardRows(unittest.TestCase):
         )
         host = FakeHost(json.dumps(document))
         browser_page = FakePage(host, [("Figure", "drawn", "12 points")])
-        code, _, _ = self.invoke(host, browser_page)
+        code, stdout, _ = self.invoke(host, browser_page)
         self.assertEqual(code, 0)
+        self.assertIn(f"viewport {page.VIEWPORT_WIDTH} px", stdout)
+        self.assertIn(f"screenshot example-board.png at {page.VIEWPORT_WIDTH} px", stdout)
         self.assertEqual(
             browser_page.resizes, [(page.VIEWPORT_WIDTH, page.VIEWPORT_FLOOR)]
         )
@@ -1330,6 +1404,101 @@ class BoardRows(unittest.TestCase):
         self.assertLess(
             browser_page.events.index("resize"), browser_page.events.index("goto", 1)
         )
+
+    def test_custom_width_resizes_and_labels_browser_and_board_rows(self) -> None:
+        """A desktop width keeps the grid-height rule even when no panel mounts."""
+
+        document = json.loads(
+            board_document("example-board", [("Figure", "timeseries")])
+        )
+        position = document["panels"][0]["gridPos"]
+        position.update({"y": 44, "h": 7})
+        expected_height = max(
+            page.VIEWPORT_FLOOR,
+            (position["y"] + position["h"])
+            * (page.GRID_CELL_HEIGHT + page.GRID_CELL_MARGIN)
+            + page.VIEWPORT_ALLOWANCE,
+        )
+        for mounted in (True, False):
+            with self.subTest(mounted=mounted):
+                host = FakeHost(json.dumps(document))
+                browser_page = FakePage(
+                    host, [("Figure", "drawn", "12 points")] if mounted else []
+                )
+                code, stdout, stderr = self.invoke(
+                    host, browser_page,
+                    argv=["example-board", "--out", str(OUTPUT), "--width", "1280"],
+                )
+                self.assertEqual(code, 0 if mounted else 1)
+                self.assertEqual(stderr, "")
+                self.assertEqual(browser_page.resizes, [(1280, expected_height)])
+                browser_row = next(row for row in stdout.splitlines() if row.startswith("browser:"))
+                board_row = next(row for row in stdout.splitlines() if row.startswith("board:"))
+                self.assertIn("viewport 1280 px", browser_row)
+                self.assertIn("screenshot example-board.png at 1280 px", board_row)
+                if not mounted:
+                    self.assertIn("no expected panel mounted", board_row)
+                self.assertLess(
+                    browser_page.events.index("resize"),
+                    browser_page.events.index("goto", 1),
+                )
+
+    def test_narrow_width_sums_all_items_until_stack_breakpoint(self) -> None:
+        """The stack includes a collapsed row and its nested panel below md."""
+
+        document = json.loads(
+            board_document(
+                "example-board", [("First", "stat"), ("Second", "table")],
+                rows=[("Host detail", [("Host load", "timeseries")])],
+            )
+        )
+        first, second, row = document["panels"]
+        second["gridPos"].update({"x": 12, "y": first["gridPos"]["y"]})
+        row["gridPos"]["y"] = first["gridPos"]["h"]
+        row["panels"][0]["gridPos"]["y"] = row["gridPos"]["y"] + row["gridPos"]["h"]
+        items = document["panels"] + row["panels"]
+        stacked = sum(item["gridPos"]["h"] for item in items)
+        lowest = max(item["gridPos"]["y"] + item["gridPos"]["h"] for item in items)
+        self.assertGreater(stacked, lowest)
+        for width, rows in (
+            (390, stacked),
+            (page.STACK_BREAKPOINT_WIDTH - 1, stacked),
+            (page.STACK_BREAKPOINT_WIDTH, lowest),
+        ):
+            with self.subTest(width=width):
+                host = FakeHost(json.dumps(document))
+                browser_page = FakePage(
+                    host, [("First", "drawn", "42"), ("Second", "drawn", "one row")],
+                    rows={"Host detail": [("Host load", "drawn", "12 points")]},
+                )
+                code, stdout, stderr = self.invoke(
+                    host, browser_page,
+                    argv=["--out", str(OUTPUT), "--width", str(width)],
+                )
+                self.assertEqual(code, 0)
+                self.assertEqual(stderr, "")
+                expected_height = max(
+                    page.VIEWPORT_FLOOR,
+                    rows * (page.GRID_CELL_HEIGHT + page.GRID_CELL_MARGIN)
+                    + page.VIEWPORT_ALLOWANCE,
+                )
+                self.assertEqual(browser_page.resizes, [(width, expected_height)])
+                self.assertIn("Host load: drawn", stdout)
+                self.assertEqual(browser_page.events.count("row click"), 1)
+                self.assertLess(
+                    browser_page.events.index("resize"),
+                    browser_page.events.index("goto", 1),
+                )
+
+    def test_narrow_viewport_keeps_height_floor(self) -> None:
+        host = FakeHost(board_document("example-board", [("Figure", "stat")]))
+        browser_page = FakePage(host, [("Figure", "drawn", "42")])
+        code, _, stderr = self.invoke(
+            host, browser_page, argv=["--out", str(OUTPUT), "--width", "390"]
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr, "")
+        self.assertEqual(browser_page.resizes, [(390, page.VIEWPORT_FLOOR)])
 
     def test_quoted_title_is_escaped_in_panel_selector(self) -> None:
         title = 'A "quoted" title'

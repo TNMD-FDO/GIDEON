@@ -57,8 +57,10 @@ LIMIT_MAX: Final = 10_000_000
 MODELS_ROOT: Final = Path("/data/models")
 
 _DOCKET_COLUMNS: Final = ("id", "docket_number", "court_id")
+_NAME_COLUMNS: Final = ("case_name", "case_name_full", "case_name_short")
 _CLUSTER_COLUMNS: Final = (
     "id", "date_filed", "date_filed_is_approximate", "precedential_status", "docket_id",
+    *_NAME_COLUMNS,
 )
 _CITATION_COLUMNS: Final = ("cluster_id", "volume", "reporter", "page")
 _OPINION_COLUMNS: Final = ("id", "cluster_id", "type", "per_curiam", *opiniontext.TEXT_SOURCES)
@@ -72,7 +74,8 @@ PRESENT_SQL: Final = (
     "d.anchored_at IS NOT NULL AS anchored, "
     "d.citations_parsed_at IS NOT NULL AS cited, "
     "d.treatment_pattern_set AS treated_under, "
-    "EXISTS (SELECT 1 FROM chunks WHERE doc_id = d.doc_id AND pipeline = %s) AS chunked "
+    "EXISTS (SELECT 1 FROM chunks WHERE doc_id = d.doc_id AND pipeline = %s) AS chunked, "
+    "o.case_name IS NOT NULL AS named "
     "FROM opinions AS o JOIN documents AS d ON d.doc_id = o.doc_id "
     "WHERE d.source = %s AND d.source_snapshot = %s AND o.court = %s"
 )
@@ -83,8 +86,9 @@ BEGIN_DOCUMENT_SQL: Final = (
 BEGIN_OPINION_SQL: Final = (
     "INSERT INTO opinions (opinion_id, doc_id, court, cluster_id, docket, decided_date, "
     "decided_date_is_approximate, precedential, precedential_raw, reporter_cites, "
-    "opinion_type) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+    "opinion_type, case_name) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
 )
+NAME_SQL: Final = "UPDATE opinions SET case_name = %s WHERE doc_id = %s"
 RETRY_SQL: Final = "UPDATE documents SET attempts = attempts + 1 WHERE doc_id = %s"
 GIVE_BACK_SQL: Final = (
     "UPDATE documents SET attempts = GREATEST(attempts - 1, 0) WHERE doc_id = %s"
@@ -191,6 +195,7 @@ class PresentRow:
     cited: bool
     treated_under: str | None
     chunked: bool
+    named: bool
 
     @property
     def treated(self) -> bool:
@@ -226,6 +231,7 @@ class NewOpinion:
     precedential_raw: str
     reporter_cites: tuple[str, ...]
     opinion_type: str
+    case_name: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -275,6 +281,7 @@ class IngestCounts:
     treated: int
     signalled: int
     chunked: int
+    named: int
 
 
 class DocumentRecord(Protocol):
@@ -284,6 +291,7 @@ class DocumentRecord(Protocol):
         self, source: str, snapshot_date: date, court: str, pipeline: str,
     ) -> dict[int, PresentRow]: ...
     def begin(self, document: NewDocument, opinion: NewOpinion) -> None: ...
+    def write_name(self, doc_id: str, case_name: str) -> None: ...
     def retry(self, doc_id: str) -> None: ...
     def give_back(self, doc_id: str) -> None: ...
     def finish_ready(
@@ -433,10 +441,11 @@ class PsycopgRecord:
                 str(sha256) if sha256 is not None else None,
                 str(canonical_sha256) if canonical_sha256 is not None else None,
                 bool(sectioned), bool(anchored), bool(cited),
-                str(treated_under) if treated_under is not None else None, bool(chunked),
+                str(treated_under) if treated_under is not None else None,
+                bool(chunked), bool(named),
             )
             for opinion_id, doc_id, status, attempts, text_source, sha256,
-            canonical_sha256, sectioned, anchored, cited, treated_under, chunked in rows
+            canonical_sha256, sectioned, anchored, cited, treated_under, chunked, named in rows
         }
 
     def begin(self, document: NewDocument, opinion: NewOpinion) -> None:
@@ -451,9 +460,14 @@ class PsycopgRecord:
                 opinion.opinion_id, opinion.doc_id, opinion.court, opinion.cluster_id,
                 opinion.docket, opinion.decided_date, opinion.decided_date_is_approximate,
                 opinion.precedential, opinion.precedential_raw,
-                list(opinion.reporter_cites), opinion.opinion_type,
+                list(opinion.reporter_cites), opinion.opinion_type, opinion.case_name,
             )),
         ))
+
+    def write_name(self, doc_id: str, case_name: str) -> None:
+        """Commit the case name for an already ready opinion."""
+
+        self._run(((NAME_SQL, (case_name, doc_id)),))
 
     def retry(self, doc_id: str) -> None:
         """Count one more parse attempt for a processing document."""
@@ -563,6 +577,7 @@ class _Cluster:
     decided_date: date
     approximate: bool
     precedential_raw: str
+    case_name: str
 
 
 @dataclass(slots=True)
@@ -587,6 +602,7 @@ class _Progress:
     treated: int = 0
     signalled: int = 0
     chunked: int = 0
+    named: int = 0
     ambiguous: int = 0
     error: str = "-"
 
@@ -595,7 +611,7 @@ class _Progress:
             self.seen, self.present, self.ready, self.failed,
             self.retried, self.interrupted, self.sectioned, self.anchored,
             self.pgmap_checked, self.pgmap_disagreeing, self.cited,
-            self.treated, self.signalled, self.chunked,
+            self.treated, self.signalled, self.chunked, self.named,
         )
 
 
@@ -604,12 +620,12 @@ def _log(progress: _Progress, action: str) -> None:
         "action=caselaw_%s job_id=%d label=%s court=%s seen=%d present=%d "
         "ready=%d failed=%d retried=%d interrupted=%d sectioned=%d anchored=%d "
         "pgmap_checked=%d pgmap_disagreeing=%d cited=%d treated=%d "
-        "signalled=%d chunked=%d ambiguous=%d seconds=%.3f error=%s",
+        "signalled=%d chunked=%d named=%d ambiguous=%d seconds=%.3f error=%s",
         action, progress.job, progress.label, progress.court, progress.seen,
         progress.present, progress.ready, progress.failed, progress.retried,
         progress.interrupted, progress.sectioned, progress.anchored,
         progress.pgmap_checked, progress.pgmap_disagreeing, progress.cited,
-        progress.treated, progress.signalled, progress.chunked,
+        progress.treated, progress.signalled, progress.chunked, progress.named,
         progress.ambiguous,
         max(0.0, progress.monotonic() - progress.started),
         progress.error,
@@ -730,10 +746,17 @@ def _load_clusters(court_dir: Path, progress: _Progress) -> dict[int, _Cluster]:
             approximate = fields[columns["date_filed_is_approximate"]]
             if approximate not in {"t", "f"}:
                 raise CaselawFailure("malformed", table=table, error="ValueError")
+            case_name = ""
+            for name in _NAME_COLUMNS:
+                parts = fields[columns[name]].split()
+                if parts:
+                    case_name = " ".join(parts)
+                    break
             clusters[cluster_id] = _Cluster(
                 _positive_integer(fields[columns["docket_id"]], table),
                 _date(fields[columns["date_filed"]], table),
                 approximate == "t", fields[columns["precedential_status"]],
+                case_name,
             )
     return clusters
 
@@ -1120,6 +1143,12 @@ def ingest(
                             name: fields[columns[name]] for name in opiniontext.TEXT_SOURCES
                         })
                         previous = present.get(opinion_id)
+                        if previous is not None and previous.status == "ready" and not previous.named:
+                            cluster = clusters.get(cluster_id)
+                            if cluster is None:
+                                raise CaselawFailure("stage-mismatch", table="opinions")
+                            record.write_name(previous.doc_id, cluster.case_name)
+                            progress.named += 1
                         if (previous is not None and previous.status == "ready"
                                 and not (previous.sectioned and previous.anchored
                                          and previous.cited and previous.treated
@@ -1166,7 +1195,7 @@ def ingest(
                                         _precedential(cluster.precedential_raw),
                                         cluster.precedential_raw,
                                         tuple(reporter_cites.get(cluster_id, ())),
-                                        opinion_type,
+                                        opinion_type, cluster.case_name,
                                     ),
                                 )
                                 active_doc = doc_id

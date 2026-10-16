@@ -10,6 +10,7 @@ from gideon.evaluation.rankmetrics import Coordinates
 from gideon.host.sysio import Host, PathLike
 
 if TYPE_CHECKING:
+    from gideon.evaluation.generation import GenerationAccess
     from gideon.evaluation.turns.access import TurnAccess
 
 type JSONValue = None | bool | int | float | str | list[JSONValue] | Mapping[str, JSONValue]
@@ -80,6 +81,7 @@ class RunContext:
     ``turns`` is present for a slice that drives turns through the harness's
     service or managed frontend drivers.
     ``image`` is present for a slice that runs code in the pinned service image.
+    ``generation`` is present for a slice that names the stores surface.
     ``checkpoint`` is called by a runner between cases and before a case's
     further turns, and a runner never catches what it raises: past the run's
     deadline it raises ``window.WindowOverrun``, so no turn starts after the
@@ -99,3 +101,4 @@ class RunContext:
     checkpoint: Callable[[], None] = no_checkpoint
     checkout: PathLike | None = None
     image: ImageAccess | None = None
+    generation: GenerationAccess | None = None

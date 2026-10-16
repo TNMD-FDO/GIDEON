@@ -463,6 +463,11 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="FILE",
         help="ranked-list JSONL file for the judgments metrics",
     )
+    eval_run.add_argument(
+        "--generation",
+        metavar="NAME",
+        help="index generation a slice reading the stores runs over; default: the stack's live one",
+    )
     eval_run.set_defaults(handler=_run_eval, command_path="eval run")
     eval_reference = eval_sub.add_parser(
         "reference", help="write a reference from a recorded run"

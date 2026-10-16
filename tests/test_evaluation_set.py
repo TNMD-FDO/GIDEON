@@ -98,6 +98,21 @@ def _write_cases(root: Path, records: tuple[dict[str, object], ...]) -> None:
     _write(root, "build-gates/cases.jsonl", "\n".join(lines))
 
 
+def count_gate_case(case_id: str = "count-gates-staged-01") -> dict[str, object]:
+    """One fictitious rule case with the public shape's ordered fields."""
+
+    return {
+        "id": case_id,
+        "suite": "build-gates",
+        "category": "count-gates",
+        "branch": "legal",
+        "rule": "Every fictional court has its fictional count recorded.",
+        "labels": ["spec"],
+        "cluster_id": case_id,
+        "review": {"by": "CSA-1", "on": "2099-01-03"},
+    }
+
+
 def _write_research_cases(root: Path, records: tuple[dict[str, object], ...]) -> None:
     lines = [json.dumps(record, separators=(",", ":")) for record in records]
     _write(root, "research-qa/cases.jsonl", "\n".join(lines))
@@ -808,6 +823,92 @@ def _general_smoke_case() -> dict[str, object]:
         "review": {"by": "CSA-1", "on": "2026-09-23"},
         "notes": "",
     }
+
+
+class CountGateCases(unittest.TestCase):
+    """Rule cases have closed ordered fields and supersede within their series."""
+
+    def test_clean_rule_counts_without_a_question_notes_or_signoff(self) -> None:
+        case = count_gate_case()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "eval-v9"
+            _write_cases(root, (case,))
+            _write(root, "slices/count-gates/rules.ids", str(case["id"]))
+            result = load_set(root)
+        self.assertTrue(result.ok, result.findings)
+        self.assertIsNotNone(result.loaded)
+        loaded = cast(LoadedSet, result.loaded)
+        selection = select_cases(loaded, "count-gates")
+        self.assertEqual(selection.counted, (case["id"],))
+        self.assertEqual(selection.unsigned, ())
+        self.assertFalse(selection.takes_signoff)
+
+    def test_shape_refusals_do_not_echo_the_rule(self) -> None:
+        changes: tuple[tuple[str, dict[str, object]], ...] = (
+            ("case keys or order", {"question": SENTINEL}),
+            ("case keys or order", {"notes": ""}),
+            ("labels must be spec", {"labels": ["invented"]}),
+            ("labels must be spec", {"labels": ["spec", "extra"]}),
+            ("labels", {"labels": []}),
+            ("rule shape", {"rule": ""}),
+            ("rule shape", {"rule": None}),
+            ("rule shape", {"rule": " fictional rule"}),
+            ("rule shape", {"rule": "fictional rule "}),
+            ("rule shape", {"rule": "fictional\nrule"}),
+            ("rule shape", {"rule": "fictional\rrule"}),
+            ("cluster_id", {"cluster_id": "count-gates-other-01"}),
+            ("review.by", {"review": {"by": "wrong", "on": "2099-01-03"}}),
+            ("review.on", {"review": {"by": "CSA-1", "on": "2099-02-30"}}),
+            ("review keys or order", {"review": {"on": "2099-01-03", "by": "CSA-1"}}),
+            ("id pattern", {"id": "count-gates-staged"}),
+            ("id pattern", {"id": "count-gates-staged-1"}),
+            ("id pattern", {"id": "count-gates-staged-001"}),
+            ("id pattern", {"id": "count-gates--staged-01"}),
+            ("id pattern", {"id": "count-gates-Staged-01"}),
+            ("branch", {"branch": "general"}),
+        )
+        for rule, fields in changes:
+            with self.subTest(rule=rule, fields=fields):
+                case = count_gate_case()
+                case["rule"] = SENTINEL
+                case.update(fields)
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory) / "eval-v9"
+                    _write_cases(root, (case,))
+                    result = load_set(root)
+                self.assertIsNone(result.loaded)
+                self.assertIn(rule, "\n".join(finding.rule for finding in result.findings))
+                self.assertNotIn(SENTINEL, "\n".join(finding.text() for finding in result.findings))
+                self.assertTrue(all(finding.fix for finding in result.findings))
+
+    def test_top_level_key_order_is_closed(self) -> None:
+        case = count_gate_case()
+        case = dict(reversed(tuple(case.items())))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "eval-v9"
+            _write_cases(root, (case,))
+            result = load_set(root)
+        self.assertIn("case keys or order", tuple(finding.rule for finding in result.findings))
+
+    def test_supersedes_requires_an_earlier_number_in_the_same_series(self) -> None:
+        for forward in (True, False):
+            with self.subTest(forward=forward), tempfile.TemporaryDirectory() as directory:
+                old = count_gate_case()
+                new = count_gate_case("count-gates-staged-02")
+                successor, predecessor = (new, old) if forward else (old, new)
+                successor["supersedes"] = predecessor["id"]
+                root = Path(directory) / "eval-v9"
+                _write_cases(root, (old, new))
+                _write(root, "slices/count-gates/rules.ids", f"{old['id']}\n{new['id']}")
+                result = load_set(root)
+                if forward:
+                    self.assertTrue(result.ok, result.findings)
+                    loaded = cast(LoadedSet, result.loaded)
+                    self.assertEqual(loaded.active_ids, (new["id"],))
+                    self.assertEqual(select_cases(loaded, "count-gates").counted, (new["id"],))
+                else:
+                    self.assertIsNone(result.loaded)
+                    self.assertIn("earlier", "\n".join(finding.rule for finding in result.findings))
 
 
 class SegmenterCases(unittest.TestCase):

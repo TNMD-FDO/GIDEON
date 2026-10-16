@@ -7,8 +7,10 @@ from types import MappingProxyType
 from typing import Final
 
 from gideon.evaluation import (
+    countgates_slice,
     extraction_slice,
     general_smoke_slice,
+    golddrop_slice,
     guardrails_slice,
     judge_slice,
     judgments_slice,
@@ -25,11 +27,14 @@ class CallSurface(Enum):
 
     The record surface asks ``preconditions`` for root and the site file but
     probes no reader; a runner reports the database refusal if its read fails.
+    The stores surface resolves one index generation before the run and probes
+    no store.
     """
 
     ENGINE = ("engine", True)
     IMAGE = ("image", True)
     RECORD = ("record", True)
+    STORES = ("stores", True)
     TURNS = ("turns", True)
     RANKED_FILE = ("ranked-file", False)
 
@@ -155,6 +160,47 @@ _JUDGMENTS: Final[SliceSpec] = SliceSpec(
     categories=frozenset({("judgments", "judgments")}),
     turn_calls=None,
 )
+_GOLD_DROP: Final[SliceSpec] = SliceSpec(
+    runner=golddrop_slice.run_gold_drop,
+    surfaces=frozenset({CallSurface.STORES}),
+    repeats=1,
+    judge_prompt=None,
+    compares_reference=False,
+    engine_calls=None,
+    gate_pass="no zero-tolerance gold case dropped, gold dropped within the ceiling",
+    gate_fail="a gold-drop bound failed",
+    gate_fix=(
+        "Review the gold-drop report's dropped and changed source ids and the cases they name; "
+        "refill the generation with the gold documents "
+        "(index build caselaw --sample on the sibling), then retry."
+    ),
+    categories=frozenset({
+        ("research-qa", "retrieval"), ("research-qa", "synthesis"),
+        ("research-qa", "lookup"), ("research-qa", "edition"),
+    }),
+    turn_calls=None,
+)
+_COUNT_GATES: Final[SliceSpec] = SliceSpec(
+    runner=countgates_slice.run_count_gates,
+    surfaces=frozenset({CallSurface.STORES}),
+    repeats=1,
+    judge_prompt=None,
+    compares_reference=False,
+    engine_calls=None,
+    gate_pass=(
+        "every court of the lockfile staged and accounted: recorded at or above staged, "
+        "nothing still processing, every failure named"
+    ),
+    gate_fail="a count gate failed",
+    gate_fix=(
+        "Review the count-gates report's court lines and the rules that name them; "
+        "finish the label's ingest and its build's report with corpus install <label> "
+        "while the label stands installing (an installed label re-runs nothing: "
+        "its report stands as the build's record), then retry."
+    ),
+    categories=frozenset({("build-gates", "count-gates")}),
+    turn_calls=None,
+)
 _GUARDRAILS: Final[SliceSpec] = SliceSpec(
     runner=guardrails_slice.run_guardrails,
     surfaces=frozenset({CallSurface.ENGINE, CallSurface.TURNS}),
@@ -200,6 +246,8 @@ SLICE_RUNNERS: Final[Mapping[str, SliceSpec]] = {
     "segmenter-300": _SEGMENTER,
     "judge-triples": _JUDGE_TRIPLES,
     "judgments": _JUDGMENTS,
+    "gold-drop": _GOLD_DROP,
+    "count-gates": _COUNT_GATES,
     "guardrails": _GUARDRAILS,
     "general-smoke": _GENERAL_SMOKE,
     "smoke": SliceSpec(

@@ -296,12 +296,16 @@ class PairFigures(unittest.TestCase):
 
         metric = decision.DecisionMetric(pairs.FIGURE_NAME, True, forbidden_reader)
         with patch.object(pairs, "IN_BAND_METRIC", metric):
-            for release, candidate, verdict, paired in (
-                ((False, False, False), (True, True, True), decision.WINS, 3),
-                ((True, True, True), (False, False, False), decision.LOSES, 3),
-                ((False, True), (True, False), decision.UNDECIDED, 2),
-                ((False,), (True,), decision.UNDECIDED, 1),
+            for release, candidate, verdict, mean in (
+                ((False,) * 20, (True,) * 20, decision.WINS, 1.0),
+                ((True,) * 20, (False,) * 20, decision.LOSES, -1.0),
+                ((False, True) * 10, (True, False) * 10, decision.UNDECIDED, 0.0),
+                ((False,) * 3, (True,) * 3, decision.REFUSED, 1.0),
+                ((True,) * 3, (False,) * 3, decision.REFUSED, -1.0),
+                ((False, True, False), (True, False, False), decision.REFUSED, 0.0),
+                ((False,), (True,), decision.REFUSED, 1.0),
             ):
+                paired = len(release)
                 with self.subTest(verdict=verdict, paired=paired):
                     outcome = pairs.pooled_decision(
                         (pair,),
@@ -314,16 +318,11 @@ class PairFigures(unittest.TestCase):
                     self.assertEqual(
                         (outcome.candidate_only, outcome.comparand_only), (0, 0)
                     )
-                    self.assertEqual(
-                        outcome.mean_difference,
-                        1.0
-                        if verdict == decision.WINS
-                        else -1.0
-                        if verdict == decision.LOSES
-                        else 0.0
-                        if paired == 2
-                        else 1.0,
-                    )
+                    self.assertEqual(outcome.mean_difference, mean)
+                    if verdict == decision.REFUSED:
+                        self.assertIsNone(outcome.critical_value)
+                        self.assertIsNone(outcome.ci_low)
+                        self.assertIsNone(outcome.ci_high)
                     self.assertEqual(
                         (outcome.requested_repeats, outcome.completed_repeats),
                         (pairs.POOLED_NIGHTS, 1),
@@ -356,6 +355,22 @@ class PairFigures(unittest.TestCase):
                 self.assertEqual(
                     result.loaded.cases_by_id[case_id]["cluster_id"], case_id
                 )
+        pair = _pair()
+        assert pair.partner_id is not None
+        results = tuple(
+            _result(run_id, case_id, in_band)
+            for run_id, in_band in ((pair.release_id, False), (pair.partner_id, True))
+            for case_id in case_ids
+        )
+        outcome = pairs.pooled_decision((pair,), results, against=pair.release_value)
+        self.assertEqual(len(case_ids), 8)
+        self.assertEqual(outcome.paired, len(case_ids))
+        self.assertEqual(outcome.clusters, len(case_ids))
+        self.assertEqual(outcome.verdict, decision.REFUSED)
+        self.assertIsNone(outcome.critical_value)
+        self.assertIsNone(outcome.ci_low)
+        self.assertIsNone(outcome.ci_high)
+        self.assertIn("8 clusters below the floor of 20", decision.describe(outcome))
 
 
 class SectionOverHost(unittest.TestCase):
@@ -461,7 +476,7 @@ class SectionOverHost(unittest.TestCase):
             tuple(row.name for row in report.rows), (pairs.NEWEST_ROW, pairs.POOLED_ROW)
         )
         self.assertEqual(
-            tuple(row.state for row in report.rows), ("not fired", "fired")
+            tuple(row.state for row in report.rows), ("not fired", "not yet measurable")
         )
         newest, pooled = report.rows
         assert pair.partner_id is not None
@@ -483,16 +498,20 @@ class SectionOverHost(unittest.TestCase):
         self.assertIn(
             f"in_band over 1 of {pairs.POOLED_NIGHTS} nights: ", pooled.detail
         )
-        self.assertIn(decision.WINS, pooled.detail)
+        self.assertIn("3 clusters below the floor of 20", pooled.detail)
+        self.assertIn(decision.REFUSED, pooled.detail)
         self.assertFalse(host.write_attempted)
         self._assert_content_free(report, pair)
 
     def test_pooled_row_states_cover_loss_tie_and_insufficient_cases(self) -> None:
         pair = _pair()
         for release, candidate, state, verdict in (
-            ((True, True, True), (False, False, False), "not fired", decision.LOSES),
-            ((False, True), (True, False), "not fired", decision.UNDECIDED),
-            ((False,), (True,), "not yet measurable", decision.UNDECIDED),
+            ((False,) * 20, (True,) * 20, "fired", decision.WINS),
+            ((True,) * 20, (False,) * 20, "not fired", decision.LOSES),
+            ((False, True) * 10, (True, False) * 10, "not fired", decision.UNDECIDED),
+            ((False,) * 3, (True,) * 3, "not yet measurable", decision.REFUSED),
+            ((True,) * 3, (False,) * 3, "not yet measurable", decision.REFUSED),
+            ((False,), (True,), "not yet measurable", decision.REFUSED),
         ):
             with self.subTest(state=state, verdict=verdict, cases=len(release)):
                 results = _side_results(pair, release, candidate)
@@ -508,6 +527,10 @@ class SectionOverHost(unittest.TestCase):
                 assert isinstance(report, SectionReport)
                 self.assertEqual(report.rows[1].state, state)
                 self.assertIn(verdict, report.rows[1].detail)
+                if verdict == decision.REFUSED:
+                    self.assertIn("below the floor of 20", report.rows[1].detail)
+                else:
+                    self.assertIn("20 clusters (floor 20)", report.rows[1].detail)
                 self._assert_content_free(report, pair)
 
     def _assert_content_free(
@@ -562,6 +585,13 @@ class SectionOverHost(unittest.TestCase):
             "vs",
             "paired",
             "clusters",
+            "cluster",
+            "below",
+            "the",
+            "floor",
+            "refused",
+            "t",
+            "df",
             "mean",
             "SE",
             "unclustered",

@@ -1,8 +1,8 @@
-"""Resolve the turns tree and secret directory for an evaluation stack.
+"""Resolve the rendered directory and secret directory for an evaluation stack.
 
 The engine and the run's record stay production's on either stack, since the
-sibling shares production's engine and the harness keeps one record; only the
-turns' door and frontend move to the sibling.
+sibling shares production's engine and the harness keeps one record. The
+selected stack's rendered directory serves its turns, record, and stores surfaces.
 """
 
 from dataclasses import dataclass
@@ -15,7 +15,11 @@ from gideon.host.sysio import PathLike
 
 @dataclass(frozen=True, slots=True)
 class StackPaths:
-    """The selected stack's turn paths and command-line flag fragment."""
+    """The selected stack's paths and command-line flag fragment.
+
+    ``turns_dir`` is its rendered directory, read by turns, record, and stores
+    surfaces; the engine and the run's record stay production's.
+    """
 
     name: str
     turns_dir: Path

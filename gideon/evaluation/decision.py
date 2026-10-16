@@ -6,18 +6,26 @@ from math import fsum, sqrt
 from typing import Final
 
 from gideon.evaluation.results import JSONValue
+from gideon.evaluation.studentt import two_sided_quantile
 
 DECISION_REPEATS: Final[int] = 5
 """The candidate's repeats in a decision run: each case's metric is averaged
 over them before it is paired."""
 
-Z_95: Final[float] = 1.96
-"""The two-sided 95 percent normal quantile, since the interval rests on the
-central limit theorem over the paired cases."""
+CLUSTER_FLOOR: Final[int] = 20
+"""The fewest distinct clusters a decision computes an interval over: Cameron
+and Miller (2015)'s lower edge of 'few clusters', below which the clustered
+error is unreliable and the verdict is refused. A statistical-method threshold,
+moved by a ruling and never by a measurement."""
+
+CONFIDENCE: Final[float] = 0.95
+"""The two-sided confidence level used to read the Student's t quantile."""
 
 WINS: Final[str] = "wins"
 LOSES: Final[str] = "loses"
 UNDECIDED: Final[str] = "undecided"
+REFUSED: Final[str] = "refused"
+"""The verdict for a decision that computed no interval."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,11 +52,13 @@ class PairedDecision:
     completed_repeats: int
     paired: int
     clusters: int
+    cluster_floor: int
     candidate_only: int
     comparand_only: int
     mean_difference: float | None
     se_unclustered: float | None
     se_clustered: float | None
+    critical_value: float | None
     ci_low: float | None
     ci_high: float | None
     verdict: str
@@ -80,7 +90,14 @@ def paired_decision(
     completed_repeats: int,
     digest_equal: bool,
 ) -> PairedDecision:
-    """Compare per-case means and cluster the residuals by their case groups."""
+    """Compare paired means, refusing an interval below CLUSTER_FLOOR clusters.
+
+    The mean and errors remain visible below the floor. One cluster's residuals
+    sum to zero, as can each of a few clusters' residual sums, giving a zero
+    clustered error without enough independent groups to support a verdict.
+    At or above the floor the interval uses Student's t at clusters minus one
+    degrees of freedom.
+    """
 
     paired_cases = sorted(candidate.keys() & comparand.keys())
     candidate_only = len(candidate.keys() - comparand.keys())
@@ -99,9 +116,10 @@ def paired_decision(
     mean_difference: float | None = None
     se_unclustered: float | None = None
     se_clustered: float | None = None
+    critical_value: float | None = None
     ci_low: float | None = None
     ci_high: float | None = None
-    verdict = UNDECIDED
+    verdict = REFUSED
 
     if paired:
         mean_difference = fsum(differences) / paired
@@ -113,12 +131,15 @@ def paired_decision(
             by_cluster.setdefault(clusters[case_id], []).append(residual)
         se_unclustered = sqrt(fsum(residual * residual for residual in residuals)) / paired
         se_clustered = sqrt(fsum(fsum(group) ** 2 for group in by_cluster.values())) / paired
-        ci_low = mean - Z_95 * se_clustered
-        ci_high = mean + Z_95 * se_clustered
-        if ci_low > 0:
-            verdict = WINS
-        elif ci_high < 0:
-            verdict = LOSES
+        if len(cluster_ids) >= CLUSTER_FLOOR:
+            critical_value = two_sided_quantile(CONFIDENCE, len(cluster_ids) - 1)
+            ci_low = mean - critical_value * se_clustered
+            ci_high = mean + critical_value * se_clustered
+            verdict = UNDECIDED
+            if ci_low > 0:
+                verdict = WINS
+            elif ci_high < 0:
+                verdict = LOSES
 
     return PairedDecision(
         metric=metric.name,
@@ -127,11 +148,13 @@ def paired_decision(
         completed_repeats=completed_repeats,
         paired=paired,
         clusters=len(cluster_ids),
+        cluster_floor=CLUSTER_FLOOR,
         candidate_only=candidate_only,
         comparand_only=comparand_only,
         mean_difference=mean_difference,
         se_unclustered=se_unclustered,
         se_clustered=se_clustered,
+        critical_value=critical_value,
         ci_low=ci_low,
         ci_high=ci_high,
         verdict=verdict,
@@ -146,8 +169,17 @@ def describe(decision: PairedDecision) -> str:
         f"candidate-only {decision.candidate_only}, "
         f"comparand-only {decision.comparand_only}"
     )
+    noun = "cluster" if decision.clusters == 1 else "clusters"
+    cluster_count = f"{decision.clusters} {noun}"
+    if decision.clusters < decision.cluster_floor:
+        cluster_count += f" below the floor of {decision.cluster_floor}"
+    else:
+        cluster_count += f" (floor {decision.cluster_floor})"
     if not decision.paired:
-        return f"{decision.metric} vs {decision.against}: nothing paired; {counts}"
+        return (
+            f"{decision.metric} vs {decision.against}: nothing paired; "
+            f"{cluster_count}; {counts}: {decision.verdict}"
+        )
 
     mean = _format_number(decision.mean_difference)
     se_clustered = _format_number(decision.se_clustered)
@@ -156,10 +188,13 @@ def describe(decision: PairedDecision) -> str:
         interval = "n/a"
     else:
         interval = f"[{_format_number(decision.ci_low)}, {_format_number(decision.ci_high)}]"
+    if decision.critical_value is not None:
+        interval += f" (t {decision.critical_value:.3f}, df {decision.clusters - 1})"
     return (
         f"{decision.metric} vs {decision.against}: {decision.paired} paired in "
-        f"{decision.clusters} clusters, mean {mean}, SE {se_clustered} "
-        f"(unclustered {se_unclustered}), 95 % {interval}: {decision.verdict}; {counts}"
+        f"{cluster_count}, mean {mean}, SE {se_clustered} "
+        f"(unclustered {se_unclustered}), {CONFIDENCE * 100:g} % {interval}; "
+        f"{counts}: {decision.verdict}"
     )
 
 
@@ -173,11 +208,13 @@ def to_json(decision: PairedDecision) -> dict[str, JSONValue]:
         "completed_repeats": decision.completed_repeats,
         "paired": decision.paired,
         "clusters": decision.clusters,
+        "cluster_floor": decision.cluster_floor,
         "candidate_only": decision.candidate_only,
         "comparand_only": decision.comparand_only,
         "mean_difference": decision.mean_difference,
         "se_unclustered": decision.se_unclustered,
         "se_clustered": decision.se_clustered,
+        "critical_value": decision.critical_value,
         "ci_low": decision.ci_low,
         "ci_high": decision.ci_high,
         "verdict": decision.verdict,

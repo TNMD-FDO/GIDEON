@@ -1,6 +1,6 @@
 """Read recorded challenger pairs and present figures without gating a run.
 
-The pooled nights use the statistic in ``decision.py``.
+The pooled nights use the statistic in ``decision.py`` and its cluster floor.
 Only identifiers and computed figures reach this section's rows.
 """
 
@@ -435,7 +435,7 @@ def _pooled_row(selection: Selection, results: tuple[ResultRow, ...]) -> Row:
         detail += "; digest differs"
     state: RowState = (
         "not yet measurable"
-        if signal.paired < 2
+        if signal.verdict == decision.REFUSED
         else "fired"
         if signal.verdict == decision.WINS
         else "not fired"

@@ -68,6 +68,26 @@ class GoldIntake(unittest.TestCase):
             GoldDocument(identifier, None) for identifier in sorted(self.signed.must_cite)
         ))
 
+    def test_gold_hashes_keep_every_judged_hash_and_the_same_sorted_ids_as_documents(self) -> None:
+        self.judged = (*self.judged[:2], replace(self.judged[2], sha256="c" * 64))
+        _write(self.root, judgments.JUDGMENTS_PATH.as_posix(),
+               "".join(judgments.serialize(row) for row in self.judged).rstrip("\n"))
+        loaded = self.load()
+        hashes = sample.gold_hashes(loaded)
+        self.assertEqual(hashes, {
+            self.judged[1].source_id: frozenset({self.judged[1].sha256}),
+            self.signed.must_cite[1]: frozenset(),
+            self.judged[0].source_id: frozenset({self.judged[0].sha256, self.judged[2].sha256}),
+        })
+        self.assertEqual(tuple(hashes), tuple(sorted(hashes)))
+        documents = sample.gold_documents(loaded)
+        self.assertEqual(tuple(hashes), tuple(document.source_id for document in documents))
+        self.assertEqual(documents[-1].sha256, self.judged[2].sha256)
+        self.assertEqual(sample.gold_hashes(replace(loaded, judgments=(), signoffs=())), {})
+        self.assertEqual(sample.gold_hashes(replace(loaded, judgments=())), {
+            source_id: frozenset() for source_id in sorted(self.signed.must_cite)
+        })
+
     def test_sample_command_loads_the_release_set_and_passes_inputs_and_exit_code(self) -> None:
         loaded = self.load()
         output, errors = io.StringIO(), io.StringIO()

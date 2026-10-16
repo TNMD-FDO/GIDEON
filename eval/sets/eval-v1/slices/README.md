@@ -37,6 +37,14 @@ holds a `judgments` slice the set does not, and `eval run` answers that as it
 answers any unknown slice. The list changes only by append, as every frozen
 slice does; the fifteen CHU-written queries were its first append.
 
+The `gold-drop` slice has one list, `gold-drop/harvest.ids`, selecting the
+research questions in `../research-qa/harvest.jsonl`. It changes only by append,
+with a superseding case appended after its predecessor. A case without a
+sign-off is excluded as unsigned. The list leaves at the export boundary with
+the research questions: an id list resolving to no case is a loader finding.
+In an exported tree the registry holds a `gold-drop` slice the set does not,
+and `eval run` answers it as any unknown slice.
+
 The `smoke` slice is the push gate's, with one list per source list. Its
 guardrails lists name the frontend sample's six cases, each run at the service
 door and through the frontend. Its two extraction lists mirror `extraction`'s
@@ -50,3 +58,8 @@ The `segmenter-300` slice has one list, `segmenter-300/sample.ids`, with every
 drawn case id, a superseding case's appended after it. A case without a checked
 label is excluded as unsigned. The list stays in the public tree: opinion ids
 and label offsets contain no harvest text. It changes only by append.
+
+The `count-gates` slice has one list, `count-gates/rules.ids`, selecting the
+rules in `../build-gates/count-gates.jsonl`. Every active rule is counted
+without a sign-off. The list stays in the export with its cases and changes
+only by append, with a superseding rule appended after its predecessor.

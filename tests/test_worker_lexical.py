@@ -79,6 +79,7 @@ def opinion_for() -> caselaw.NewOpinion:
     return caselaw.NewOpinion(
         31, "a" * 64, "court1", 41, "FICTITIOUS_CAPTION_SENTINEL\n99-A", NOW.date(),
         False, "published", "Published", ("7 Fiction 11", "8 Fiction 12"), "020",
+        "FICTITIOUS_CASE_NAME_SENTINEL v. Example",
     )
 
 
@@ -118,10 +119,15 @@ class Projection(unittest.TestCase):
         text_slice = lexical.slice_for(TEXT, chunk)
         keys = lexical.TextKeys("f" * 64, True)
         document = lexical.serving_document(chunk, text_slice, opinion, (), GEO, keys)
-        self.assertEqual(document.caption, " ".join((
+        old_caption = " ".join((
             *opinion.reporter_cites, " ".join((opinion.docket or "").split()),
             opinion.court, opinion.decided_date.isoformat(),
-        )))
+        ))
+        self.assertEqual(document.caption, f"{opinion.case_name} {old_caption}")
+        for case_name in (None, ""):
+            with self.subTest(case_name=case_name):
+                self.assertEqual(lexical.caption_for(replace(opinion, case_name=case_name)),
+                                 old_caption)
         self.assertNotIn("\n", document.caption)
         self.assertEqual(document.text, text_slice)
         self.assertEqual(document.circuit, GEO[opinion.court].circuit)
@@ -132,8 +138,10 @@ class Projection(unittest.TestCase):
         self.assertEqual(document.content_hash, chunk.content_hash)
         self.assertEqual((document.dupe_cluster, document.boilerplate), (keys.dupe_cluster, keys.boilerplate))
         self.assertEqual(set(asdict(document)), set(lexical.INDEX_MAPPING["properties"]))
-        self.assertEqual(lexical.caption_for(replace(opinion, docket=None, reporter_cites=())),
-                         f"{opinion.court} {opinion.decided_date.isoformat()}")
+        self.assertEqual(
+            lexical.caption_for(replace(opinion, case_name=None, docket=None, reporter_cites=())),
+            f"{opinion.court} {opinion.decided_date.isoformat()}",
+        )
 
     def test_analyzer_preserves_every_citation_form_with_escaped_padding(self) -> None:
         analysis = lexical.INDEX_SETTINGS["analysis"]
@@ -548,7 +556,10 @@ class Build(unittest.TestCase):
             root.setLevel(level)
         self.assertEqual(len(self.record.progress_rows), 1)
         self.assertEqual(set(asdict(counts)), {"ready", "chunked", "unchunked", "indexed", "present", "seconds", "leveled"})
-        for sentinel in ("FICTITIOUS_TEXT_SENTINEL", "FICTITIOUS_CITE_SENTINEL", "FICTITIOUS_CAPTION_SENTINEL", str(self.root)):
+        for sentinel in (
+            "FICTITIOUS_TEXT_SENTINEL", "FICTITIOUS_CITE_SENTINEL", "FICTITIOUS_CAPTION_SENTINEL",
+            "FICTITIOUS_CASE_NAME_SENTINEL", str(self.root),
+        ):
             self.assertNotIn(sentinel, output.getvalue())
         self.assertIn("job_id=17", output.getvalue())
         self.assertIn(f"generation={NAME}", output.getvalue())
@@ -686,6 +697,12 @@ class RecordAdapter(unittest.TestCase):
             self.stream.rows = [astuple(value)]
             self.assertEqual(operation(), (value,))
         self.stream.rows = [astuple(opinion)]
+        self.assertEqual(len(astuple(opinion)), 12)
+        self.assertEqual(lexical.OPINION_SQL, (
+            "SELECT opinion_id, doc_id, court, cluster_id, docket, decided_date, "
+            "decided_date_is_approximate, precedential, precedential_raw, reporter_cites, "
+            "opinion_type, case_name FROM opinions WHERE doc_id = %s"
+        ))
         self.assertEqual(self.record.opinion(opinion.doc_id), opinion)
         self.assertEqual(self.stream.statements[0], (lexical.CHUNKS_SQL, (chunk.doc_id, chunk.pipeline)))
         self.assertEqual(self.stream.statements[1], (caselaw.READ_CITATIONS_SQL, (citation.doc_id,)))

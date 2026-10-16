@@ -1,4 +1,4 @@
-"""Command entry and stage rows for the Grafana browser board check."""
+"""Command entry, viewport width, and stage rows for the Grafana browser board check."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from tools.ownership import restore_ownership, sudo_ids
 
 DEFAULT_SITE_PATH: Final[Path] = Path("/etc/gideon/site.yaml")
 _OUT_FIX: Final = "Pass --out with a new or empty directory, then retry."
+_WIDTH_FIX: Final = "Pass --width with a positive pixel count, then retry."
 _ROOT_FIX: Final = "Run sudo .venv/bin/python -m tools.boards --out <dir>, then retry."
 _SITE_FIX: Final = "Correct /etc/gideon/site.yaml, then retry."
 _RENDER_FIX: Final = "Run sudo python3 -m gideon apply, then retry."
@@ -55,6 +56,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("uids", nargs="*")
     parser.add_argument("--out", type=Path, metavar="DIR")
     parser.add_argument("--trust-ca", action="store_true")
+    parser.add_argument("--width", type=int, metavar="PX", default=page.VIEWPORT_WIDTH)
     return parser
 
 
@@ -120,7 +122,7 @@ def _panel_row(uid: str, reading: page.PanelReading) -> StageResult:
 
 
 def _board_row(
-    board: inventory.Board, readings: tuple[page.PanelReading, ...]
+    board: inventory.Board, readings: tuple[page.PanelReading, ...], width: int
 ) -> StageResult:
     counts = Counter(reading.state for reading in readings)
     opened = bool(readings) and counts["missing"] < len(readings)
@@ -134,6 +136,7 @@ def _board_row(
     detail = f"{board.uid}: {board.title}; {count_text}; screenshot {board.uid}.png"
     if not opened:
         detail = f"{board.uid}: {board.title}; no expected panel mounted; {count_text}; screenshot {board.uid}.png"
+    detail += f" at {width} px"
     return StageResult("board", ok, detail, "" if ok else _BOARD_PANELS_FIX)
 
 
@@ -197,6 +200,12 @@ def _run(
         return 1
     output: Path = options.out.resolve()
     if _out_refusal(host, output):
+        return 1
+    if options.width <= 0:
+        print(
+            f"tools.boards: --width must be positive. Fix: {_WIDTH_FIX}",
+            file=sys.stderr,
+        )
         return 1
     if host.geteuid() != 0:
         _refuse("preconditions", Problem("root is required", _ROOT_FIX))
@@ -267,7 +276,8 @@ def _run(
             "browser",
             True,
             f"playwright {chromium.PLAYWRIGHT_VERSION}; chromium headless shell under "
-            f"{chromium.BROWSERS_DIR}; {hostname} mapped to loopback",
+            f"{chromium.BROWSERS_DIR}; {hostname} mapped to loopback; "
+            f"viewport {options.width} px",
             "",
         )
     )
@@ -363,6 +373,7 @@ def _run(
                         item,
                         output / f"{item.uid}.png",
                         timeout=chromium.PAGE_TIMEOUT_SECONDS,
+                        width=options.width,
                     )
                 except Exception:  # noqa: BLE001 - a failed board must not stop its peers.
                     result = Problem("Grafana board could not be read", _BOARD_OPEN_FIX)
@@ -378,7 +389,7 @@ def _run(
                     counts[reading.state] += 1
                     panel_row = _panel_row(item.uid, reading)
                     print_stage(panel_row)
-                board_row = _board_row(item, result)
+                board_row = _board_row(item, result, options.width)
                 print_stage(board_row)
                 opened += int(any(reading.state != "missing" for reading in result))
                 boards_ok &= board_row.ok

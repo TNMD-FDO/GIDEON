@@ -14,6 +14,7 @@ from uuid import uuid4
 import gideon
 from gideon.evaluation import (
     challenger,
+    generation,
     ranked,
     rankmetrics,
     record,
@@ -36,6 +37,7 @@ from gideon.evaluation.evalset import (
     print_findings,
     select_cases,
 )
+from gideon.evaluation.generation import GenerationAccess
 from gideon.evaluation.results import (
     CaseResult,
     ImageAccess,
@@ -144,6 +146,7 @@ class _Request:
     supplied_set: bool
     command_flags: str
     paired_problem: Problem | None
+    generation_name: object = None
 
     def retry_command(self, *, ranked_flag: str = "", flags: str | None = None) -> str:
         command_flags = self.command_flags if flags is None else flags
@@ -229,6 +232,7 @@ class _Prepared:
     overrides: Mapping[str, object]
     record: _RecordFacts | StageResult
     image: ImageAccess | None = None
+    generation: GenerationAccess | None = None
 
 
 @dataclass(slots=True)
@@ -738,6 +742,11 @@ def _flag_problem(
             f"--force is not valid for slice {slice_name!r}, which does not reach the engine",
             f"Remove --force when running --slice {slice_name}, then retry.",
         )
+    if request.generation_name is not None and CallSurface.STORES not in slice_spec.surfaces:
+        return Problem(
+            f"--generation is not valid for slice {slice_name!r}, which reads no generation",
+            f"Remove --generation when running --slice {slice_name}, then retry.",
+        )
     return None
 
 
@@ -844,6 +853,57 @@ def _prepare_image(seams: _Seams, registry: str) -> ImageAccess | Problem:
     return ImageAccess(reference, seams.checkout)
 
 
+def _sibling_index_job_problem(request: _Request, seams: _Seams) -> Problem | None:
+    """Refuse a sibling index job before an engine or stores run starts."""
+
+    job = live_index_job(
+        seams.host, request.paths.turns_dir, report.command(request.retry_command()),
+    )
+    if isinstance(job, Problem):
+        return job
+    if job is not None:
+        return Problem(
+            f"a sample build is running on the sibling (job {job})",
+            "Wait for the build's job or rejoin it with "
+            f"{report.command('index build caselaw --sample')}, then retry.",
+        )
+    return None
+
+
+def _prepare_generation(
+    request: _Request, seams: _Seams, slice_spec: SliceSpec,
+) -> GenerationAccess | None | StageResult:
+    """Resolve the stores surface, or return its one refusing stage row."""
+
+    if CallSurface.STORES not in slice_spec.surfaces:
+        return None
+    name = cast(str | None, request.generation_name)
+    # The resolver's fixes name --generation themselves, so the retry drops the
+    # fragment the request appended last rather than printing the flag twice.
+    flags = (
+        request.command_flags
+        if name is None
+        else request.command_flags.removesuffix(f" --generation {name}")
+    )
+    resolved = generation.resolve_generation(
+        seams.host, request.paths.turns_dir, name,
+        stack_name=request.paths.name,
+        retry_command=report.command(request.retry_command(flags=flags)),
+    )
+    if isinstance(resolved, Problem):
+        return StageResult("preconditions", False, resolved.problem, resolved.fix)
+    return resolved
+
+
+def _generation_detail(resolved: GenerationAccess | None) -> str:
+    """The resolved generation's clause in the preconditions row."""
+
+    return (
+        "" if resolved is None
+        else f", generation {resolved.name} ({resolved.corpus_lockfile}, {resolved.state})"
+    )
+
+
 def _on_box_record_facts(
     request: _Request, seams: _Seams, profile_name: str
 ) -> _RecordFacts | StageResult:
@@ -920,6 +980,17 @@ def _prepare_on_box(
             return None
         image = resolved_image
     if CallSurface.ENGINE not in slice_spec.surfaces:
+        if request.paths.name == CI_STACK and CallSurface.STORES in slice_spec.surfaces:
+            job_problem = _sibling_index_job_problem(request, seams)
+            if job_problem is not None:
+                print_stage(StageResult(
+                    "preconditions", False, job_problem.problem, job_problem.fix
+                ))
+                return None
+        resolved_generation = _prepare_generation(request, seams, slice_spec)
+        if isinstance(resolved_generation, StageResult):
+            print_stage(resolved_generation)
+            return None
         record_facts = _on_box_record_facts(request, seams, config.hardware_profile)
         if isinstance(record_facts, StageResult) and not record_facts.ok:
             print_stage(record_facts)
@@ -932,7 +1003,8 @@ def _prepare_on_box(
         print_stage(StageResult(
             "preconditions", True,
             f"root, site{', image present' if image is not None else ''}, "
-            f"profile {config.hardware_profile}, {writer}", "",
+            f"profile {config.hardware_profile}, {writer}"
+            + _generation_detail(resolved_generation), "",
         ))
         return _Prepared(
             served_model_name=None,
@@ -944,6 +1016,7 @@ def _prepare_on_box(
             overrides=overrides,
             record=record_facts,
             image=image,
+            generation=resolved_generation,
         )
     judgement = request.mode.judgement(started, config.office.timezone)
     engine_call_count = (
@@ -1063,18 +1136,10 @@ def _prepare_on_box(
         lock_detail = "engine lock held by this process"
 
     if request.paths.name == CI_STACK:
-        job = live_index_job(
-            seams.host, request.paths.turns_dir, report.command(request.retry_command()),
-        )
-        if isinstance(job, Problem):
-            print_stage(StageResult("preconditions", False, job.problem, job.fix))
-            return None
-        if job is not None:
+        job_problem = _sibling_index_job_problem(request, seams)
+        if job_problem is not None:
             print_stage(StageResult(
-                "preconditions", False,
-                f"a sample build is running on the sibling (job {job})",
-                "Wait for the build's job or rejoin it with "
-                f"{report.command('index build caselaw --sample')}, then retry.",
+                "preconditions", False, job_problem.problem, job_problem.fix
             ))
             return None
 
@@ -1127,6 +1192,10 @@ def _prepare_on_box(
             sentinel=run.new_sentinel(),
         )
 
+    resolved_generation = _prepare_generation(request, seams, slice_spec)
+    if isinstance(resolved_generation, StageResult):
+        print_stage(resolved_generation)
+        return None
     record_facts = _on_box_record_facts(request, seams, target.profile_name)
     if isinstance(record_facts, StageResult) and not record_facts.ok:
         print_stage(record_facts)
@@ -1154,7 +1223,8 @@ def _prepare_on_box(
                 ", eval password read, door probed"
                 if CallSurface.TURNS in slice_spec.surfaces
                 else ""
-            ) + (", image present" if image is not None else ""),
+            ) + (", image present" if image is not None else "")
+            + _generation_detail(resolved_generation),
             "",
         )
     )
@@ -1168,6 +1238,7 @@ def _prepare_on_box(
         overrides=overrides,
         record=record_facts,
         image=image,
+        generation=resolved_generation,
     )
 
 
@@ -1353,11 +1424,13 @@ def _record(
         started_at=prepared.started,
         finished_at=finished,
         product_version=gideon.__version__,
-        corpus_lockfile=None,
+        corpus_lockfile=(
+            None if prepared.generation is None else prepared.generation.corpus_lockfile
+        ),
         eval_set_version=loaded.version,
         hardware_profile=facts.hardware_profile,
         stack=request.paths.name,
-        generation_id=None,
+        generation_id=None if prepared.generation is None else prepared.generation.name,
         kind=request.mode.kind,
         slice=cast(str, request.slice_name),
         overrides=prepared.overrides,
@@ -1549,6 +1622,7 @@ def _run_body(
         turns=prepared.turns,
         checkout=seams.checkout,
         image=prepared.image,
+        generation=prepared.generation,
     )
     if pass_value.subject_change is not None:
         assert pass_value.prompt_id is not None
@@ -1818,6 +1892,9 @@ def run_eval(
         command_flags += f" --decision --against {against}"
     if getattr(args, "force", False):
         command_flags += " --force"
+    generation_name = getattr(args, "generation", None)
+    if generation_name is not None:
+        command_flags += f" --generation {generation_name}"
     actual_models = checkout / "models.lock" if models_path is None else models_path
     supplied_root = getattr(args, "set", None)
     set_root = checkout / SET_ROOT if supplied_root is None else Path(supplied_root)
@@ -1833,6 +1910,7 @@ def run_eval(
         force=bool(getattr(args, "force", False)),
         against=against,
         ranked_path=getattr(args, "ranked", None),
+        generation_name=generation_name,
         set_root=set_root,
         supplied_set=supplied_root is not None,
         command_flags=command_flags,

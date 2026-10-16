@@ -241,8 +241,8 @@ WINDOW_END = NOW.replace(hour=6) + timedelta(days=2)
 COMPARAND_ID = "22222222-3333-4444-8555-666666666666"
 
 
-def _small_set(root: Path) -> LoadedSet:
-    """Copy the sample, one extra per family, and two committed tier-2 cases."""
+def _small_set(root: Path, *, all_controls: bool = False) -> LoadedSet:
+    """Copy the sample and tier-2 cases, optionally including every control."""
 
     source_result = load_set(ROOT / SET_ROOT)
     assert source_result.loaded is not None, source_result.findings
@@ -264,6 +264,27 @@ def _small_set(root: Path) -> LoadedSet:
         )
         grouped[family].append(extra)
         selected_ids[family].append(cast(str, extra["id"]))
+
+    if all_controls:
+        for family in grouped:
+            source_cases = source.cases_by_file[f"guardrails/{family}.jsonl"]
+            included = set(selected_ids[family]) | {
+                cast(str, case["id"]) for case in source_cases
+                if "control" in cast(list[str], case["labels"])
+            }
+            pending = list(included)
+            while pending:
+                predecessor = source.cases_by_id[pending.pop()].get("supersedes")
+                if isinstance(predecessor, str) and predecessor not in included:
+                    included.add(predecessor)
+                    pending.append(predecessor)
+            # Superseded predecessors stay in source order for validation,
+            # while only active cases belong to the fixture's slice.
+            grouped[family] = [case for case in source_cases if case["id"] in included]
+            selected_ids[family] = [
+                cast(str, case["id"]) for case in grouped[family]
+                if case["id"] in source.active_ids
+            ]
 
     tier_2_cases = source.cases_by_file[f"guardrails/{TIER_2_CATEGORY}.jsonl"]
     selected_tier_2 = tuple(
@@ -537,6 +558,7 @@ def _decision_fixture(
     reader_rc: int = 0,
     document_options: Mapping[str, object] | None = None,
     answer_sequences: Mapping[str, tuple[str, ...]] | None = None,
+    all_controls: bool = False,
 ) -> tuple[Path, LoadedSet, DecisionHost, Frontend]:
     checkout = Path(directory) / "checkout"
     checkout.mkdir()
@@ -544,7 +566,7 @@ def _decision_fixture(
     shutil.copytree(
         ROOT / guardrails_slice.SEED_ROOT, checkout / guardrails_slice.SEED_ROOT
     )
-    loaded = _small_set(checkout / SET_ROOT)
+    loaded = _small_set(checkout / SET_ROOT, all_controls=all_controls)
     options = dict(document_options or {})
     document = _comparand_document(
         loaded,
@@ -2123,7 +2145,7 @@ class GuardrailsCommand(unittest.TestCase):
 
     def test_decision_run_compares_fixture_metrics_and_records_five_repeats(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            checkout, loaded, host, frontend = _decision_fixture(directory)
+            checkout, loaded, host, frontend = _decision_fixture(directory, all_controls=True)
             code, stdout, stderr = self._invoke_engine_run(
                 host, checkout, frontend
             )
@@ -2154,9 +2176,10 @@ class GuardrailsCommand(unittest.TestCase):
         # The residuals are all zero, so both SEs are 0 and the interval is [1, 1].
         expected_decision = (
             f"false-refusal vs {COMPARAND_ID}: {len(controls)} paired in "
-            f"{len(clusters)} clusters, mean +1.0000, SE +0.0000 "
-            f"(unclustered +0.0000), 95 % [+1.0000, +1.0000]: wins; "
-            "candidate-only 0, comparand-only 0"
+            f"{len(clusters)} clusters (floor 20), mean +1.0000, SE +0.0000 "
+            f"(unclustered +0.0000), 95 % [+1.0000, +1.0000] "
+            f"(t 1.976, df {len(clusters) - 1}); "
+            "candidate-only 0, comparand-only 0: wins"
         )
         self.assertIn(f"decision: ok — {expected_decision}", stdout)
         self.assertIn("repeat 5 of 5: pass", stdout)
@@ -2312,7 +2335,7 @@ class GuardrailsCommand(unittest.TestCase):
                 self.assertIn(
                     "gate: refuse — every positive blocked, over-trips within the ceiling, "
                     "no leak, the frontend sample agreeing; no reference for guardrails; "
-                    "decision wins; partial: aborted at the window's end after 2 of 5 repeats",
+                    "decision refused; partial: aborted at the window's end after 2 of 5 repeats",
                     stdout,
                 )
                 write_sql = next(
@@ -2412,20 +2435,38 @@ class GuardrailsCommand(unittest.TestCase):
                 for item in seed_document["cases"]
                 if item["id"] == identifier
             )
-            checkout, _loaded, host, frontend = _decision_fixture(
+            checkout, loaded, host, frontend = _decision_fixture(
                 directory,
+                all_controls=True,
                 answer_sequences={
                     positive_id: (leaking_answer, guardrail.DEADLINE_REFUSAL)
                 },
             )
             code, stdout, stderr = self._invoke_engine_run(host, checkout, frontend)
+            controls = tuple(
+                case_id
+                for case_id in loaded.active_ids
+                if cast(list[str], loaded.cases_by_id[case_id]["labels"])[1]
+                == "control"
+            )
+            clusters = {
+                cast(str, loaded.cases_by_id[case_id]["cluster_id"])
+                for case_id in controls
+            }
         self.assertEqual(code, 1, stdout + stderr)
         self.assertEqual(host.sequence_counts[positive_id], 5)
         self.assertIn("repeat 1 of 5: fail", stdout)
         self.assertIn("repeat 2 of 5: pass", stdout)
         self.assertIn(f"unblocked: {positive_id}", stdout)
         self.assertIn("decision: ok — false-refusal", stdout)
-        self.assertIn(": wins; candidate-only", stdout)
+        expected_decision = (
+            f"false-refusal vs {COMPARAND_ID}: {len(controls)} paired in "
+            f"{len(clusters)} clusters (floor 20), mean +1.0000, SE +0.0000 "
+            f"(unclustered +0.0000), 95 % [+1.0000, +1.0000] "
+            f"(t 1.976, df {len(clusters) - 1}); "
+            "candidate-only 0, comparand-only 0: wins"
+        )
+        self.assertIn(f"decision: ok — {expected_decision}", stdout)
         self.assertIn("gate: refuse —", stdout)
         _assert_comparison_lines(self, stdout, word="FAIL")
 

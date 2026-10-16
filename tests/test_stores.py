@@ -43,6 +43,7 @@ MIGRATIONS = {
     f"{ROOT}/migrations/0021_dupe_clusters.sql": (ROOT / "migrations/0021_dupe_clusters.sql").read_text(),
     f"{ROOT}/migrations/0023_generation_documents.sql": (ROOT / "migrations/0023_generation_documents.sql").read_text(),
     f"{ROOT}/migrations/0024_eval_runs_engine_conditions.sql": (ROOT / "migrations/0024_eval_runs_engine_conditions.sql").read_text(),
+    f"{ROOT}/migrations/0025_opinions_case_name.sql": (ROOT / "migrations/0025_opinions_case_name.sql").read_text(),
     f"{ROOT}/migrations/README.md": "not a migration",
 }
 
@@ -173,6 +174,7 @@ class Converge(unittest.TestCase):
                 "0021_dupe_clusters",
                 "0023_generation_documents",
                 "0024_eval_runs_engine_conditions",
+                "0025_opinions_case_name",
             ),
         )
 
@@ -343,6 +345,7 @@ class Converge(unittest.TestCase):
                 "0021_dupe_clusters",
                 "0023_generation_documents",
                 "0024_eval_runs_engine_conditions",
+                "0025_opinions_case_name",
             ),
         )
 
@@ -753,3 +756,18 @@ class Migration0021(unittest.TestCase):
         self.assertNotIn("DROP CONSTRAINT build_reports_check", self.text)
         self.assertNotIn("CHECK ((state = 'failed')", self.text)
         self.assertNotIn("DROP TABLE", self.text)
+
+
+class Migration0025(unittest.TestCase):
+    def test_case_name_is_nullable_collapsed_metadata_with_existing_grants(self) -> None:
+        text = MIGRATIONS[f"{ROOT}/migrations/0025_opinions_case_name.sql"]
+        self.assertIn("ALTER TABLE opinions", text)
+        self.assertIn("ADD COLUMN case_name text", text)
+        self.assertIn(
+            "CHECK (case_name IS NULL OR case_name = "
+            "btrim(regexp_replace(case_name, '[[:space:]]+', ' ', 'g')))",
+            " ".join(text.split()),
+        )
+        for forbidden in ("DEFAULT", "NOT NULL", "GRANT", "schema_migrations"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, text)

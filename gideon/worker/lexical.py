@@ -242,9 +242,12 @@ def cites_for(chunk: chunker.NewChunk, rows: Sequence[citations.NewCitation]) ->
 
 
 def caption_for(opinion: caselaw.NewOpinion) -> str:
-    """Join the recorded reporter cites, docket, court, and decided date."""
+    """Lead with the recorded case name, then cites, docket, court, and date."""
 
-    parts = (*opinion.reporter_cites, opinion.docket, opinion.court, opinion.decided_date.isoformat())
+    parts = (
+        opinion.case_name, *opinion.reporter_cites, opinion.docket, opinion.court,
+        opinion.decided_date.isoformat(),
+    )
     return " ".join(" ".join(part.split()) for part in parts if part)
 
 
@@ -290,7 +293,7 @@ CHUNKS_SQL: Final = (
 )
 OPINION_SQL: Final = (
     "SELECT opinion_id, doc_id, court, cluster_id, docket, decided_date, decided_date_is_approximate, "
-    "precedential, precedential_raw, reporter_cites, opinion_type FROM opinions WHERE doc_id = %s"
+    "precedential, precedential_raw, reporter_cites, opinion_type, case_name FROM opinions WHERE doc_id = %s"
 )
 KEYS_SQL: Final = (
     "SELECT h.content_hash, COALESCE(m.cluster_id, h.content_hash), COALESCE(k.boilerplate, false) "
@@ -385,7 +388,7 @@ class PsycopgGenerations:
         rows = self._run(OPINION_SQL, (doc_id,), read=True, corpus=True)
         if len(rows) != 1:
             raise LexicalFailure("database")
-        return caselaw.NewOpinion(*(*rows[0][:9], tuple(rows[0][9]), rows[0][10]))
+        return caselaw.NewOpinion(*(*rows[0][:9], tuple(rows[0][9]), rows[0][10], rows[0][11]))
 
     def keys_for(self, name: str, hashes: Sequence[str]) -> dict[str, TextKeys]:
         rows = self._run(KEYS_SQL, (list(hashes), name, name), read=True)

@@ -285,3 +285,42 @@ line count and SHA-256 prefix (`PINNED_PREFIXES`). A case or label line is never
 edited. Correct a case with a new case line whose `supersedes` names the old id,
 and a new label line for the new id; keep the old pair unchanged. The id list
 changes only by append.
+
+# The `count-gates` cases
+
+## What a case is
+
+A case in `count-gates.jsonl` is one rule over the resolved generation's build
+report, independent of its collection. The three rules require every court of
+the generation's lockfile to have a staged opinion count, recorded documents
+at or above staged opinions, and no document still processing with every
+failed document's reason named. The cases contain no opinion or question text
+and stay in the public tree. Every active rule counts without a sign-off.
+
+## The shape
+
+Each line's keys, in this order:
+
+- `id` — `count-gates-<rule>-<NN>`, a lowercase rule name whose words are joined
+  by single hyphens, followed by a two-digit number within that rule's series.
+- `suite`, `category`, `branch` — always `build-gates`, `count-gates`, and `legal`.
+- `rule` — a non-empty, single-line statement with no surrounding whitespace.
+- `labels` — exactly `["spec"]`: each rule restates the specification's count
+  requirement, every staged opinion a document or a named failure.
+- `cluster_id` — the case's own `id`.
+- `review` — `by`, a role id (`CSA-1`), and `on`, the ISO date of the review.
+- `supersedes` (optional) — an earlier id in the same rule's series.
+
+There is no `question` or `notes` field.
+
+## The rule and the id list
+
+A rule is never edited. A reworded rule is a new line with its series' next
+number and `supersedes` naming the old id; it runs the same judge. A new rule
+starts a new series, with its judge added to the runner in the same release.
+The runner refuses any series it does not know.
+
+`../slices/count-gates/rules.ids` selects the rules and changes only by append,
+with a superseding rule appended after its predecessor. The old case and id
+stay unchanged; the loader selects active cases. `../slices/README.md` is the
+authority on frozen id lists.

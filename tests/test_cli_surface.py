@@ -162,6 +162,7 @@ class Help(unittest.TestCase):
         self.assertIn("--kind {manual,smoke,nightly}", command.getvalue())
         self.assertIn("--set DIR", command.getvalue())
         self.assertIn("--ranked FILE", command.getvalue())
+        self.assertIn("--generation NAME", command.getvalue())
         self.assertIn("frozen slice to run", command.getvalue())
         self.assertIn("eval set version directory", command.getvalue())
         self.assertIn("ranked-list JSONL file", command.getvalue())
@@ -171,6 +172,11 @@ class Help(unittest.TestCase):
         )
         self.assertIn("the word the run's record carries for its purpose", command.getvalue())
         run_help = collapsed(command.getvalue())
+        self.assertIn(
+            "--generation NAME index generation a slice reading the stores runs over; "
+            "default: the stack's live one",
+            run_help,
+        )
         self.assertIn("nightly also waits for a held engine and stops at 06:00", run_help)
         self.assertIn(
             "--decision a decision run: five repeats paired against --against's recorded run",

@@ -2,8 +2,10 @@
 
 import ast
 import inspect
+import json
 import os
 import shutil
+import subprocess
 import tempfile
 import unittest
 from dataclasses import replace
@@ -12,7 +14,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from test_evaluation_record import read_psql_set
-from test_evaluation_run import NOW, ROOT, EvalHost, _invoke, _run_kwargs
+from test_evaluation_run import (
+    NOW,
+    ROOT,
+    EvalHost,
+    _generation_row,
+    _invoke,
+    _run_kwargs,
+)
 from test_judgments_slice import _fixture, _ranked_file
 
 from gideon.evaluation import command
@@ -20,6 +29,7 @@ from gideon.evaluation.evalset import SET_ROOT, LoadedSet
 from gideon.evaluation.results import RunContext, SliceResult
 from gideon.evaluation.slices import SLICE_RUNNERS, CallSurface
 from gideon.host import report
+from gideon.host.render.ci import CI_STACK, PRODUCTION_STACK
 
 
 class SliceSurfaces(unittest.TestCase):
@@ -33,7 +43,10 @@ class SliceSurfaces(unittest.TestCase):
 
     def test_reaches_box_matches_surface_membership(self) -> None:
         on_box = {surface for surface in CallSurface if surface.on_box}
-        self.assertEqual(on_box, {CallSurface.ENGINE, CallSurface.IMAGE, CallSurface.RECORD, CallSurface.TURNS})
+        self.assertEqual(on_box, {
+            CallSurface.ENGINE, CallSurface.IMAGE, CallSurface.RECORD,
+            CallSurface.STORES, CallSurface.TURNS,
+        })
         for name, spec in SLICE_RUNNERS.items():
             with self.subTest(slice_name=name):
                 self.assertIs(type(spec.reaches_box), bool)
@@ -74,10 +87,18 @@ def _invoke_planted(
     *,
     supplied_set: Path | None = None,
     site_path: Path | None = None,
+    stack_name: str = PRODUCTION_STACK,
+    generation_name: str | None = None,
+    generation_reply: str | None = None,
+    flags: tuple[str, ...] = (),
 ) -> tuple[tuple[int, str, str], list[RunContext], command.engine.EngineTarget]:
     """Run one surface set through the command with observable seams."""
 
     contexts: list[RunContext] = []
+    host.generation_output = (
+        json.dumps(_generation_row()) + "\n"
+        if generation_reply is None else generation_reply
+    )
 
     def run_slice(_loaded: LoadedSet, _name: str, context: RunContext) -> SliceResult:
         contexts.append(context)
@@ -88,7 +109,9 @@ def _invoke_planted(
     replacement["judgments"] = replace(
         replacement["judgments"], surfaces=surfaces, runner=run_slice
     )
-    argv = ["eval", "run", "--slice", "judgments", "--stack", "production"]
+    argv = ["eval", "run", "--slice", "judgments", "--stack", stack_name, *flags]
+    if generation_name is not None:
+        argv.extend(("--generation", generation_name))
     if CallSurface.RANKED_FILE in surfaces:
         argv.extend(("--ranked", str(ranked_path)))
     if supplied_set is not None:
@@ -112,7 +135,10 @@ def _invoke_planted(
         patch.object(command.stacks.secrets, "select_directory") as select_directory,
     ):
         outcome = _invoke(argv, **kwargs)
-        select_directory.assert_not_called()
+        if stack_name == CI_STACK:
+            select_directory.assert_called_once()
+        else:
+            select_directory.assert_not_called()
     return outcome, contexts, target
 
 
@@ -214,6 +240,20 @@ class PreparationRoutes(unittest.TestCase):
                         self.assertEqual(context.served_model_name, target.served_model_name)
                     self.assertEqual(context.turns is None, CallSurface.TURNS not in surfaces)
                     self.assertEqual(context.image is None, CallSurface.IMAGE not in surfaces)
+                    self.assertEqual(context.generation is None, CallSurface.STORES not in surfaces)
+                    generation_reads = [
+                        (argv, payload) for argv, payload in host.calls
+                        if "FROM public.index_generations" in (payload or "")
+                    ]
+                    self.assertEqual(len(generation_reads), int(CallSurface.STORES in surfaces))
+                    if CallSurface.STORES in surfaces:
+                        row = _generation_row()
+                        assert context.generation is not None
+                        self.assertEqual(
+                            (context.generation.name, context.generation.corpus_lockfile,
+                             context.generation.state),
+                            (row["gen_id"], row["corpus_lockfile"], row["state"]),
+                        )
                     if CallSurface.IMAGE in surfaces:
                         assert context.image is not None
                         self.assertEqual(context.image.checkout, checkout)
@@ -223,7 +263,7 @@ class PreparationRoutes(unittest.TestCase):
                     )
                     sql = next(
                         input for argv, input in host.calls
-                        if argv[0] == "docker" and input not in (None, "SELECT 1;\n")
+                        if argv[0] == "docker" and input is not None and "INSERT INTO eval_runs" in input
                     )
                     assert sql is not None
                     profile_line = next(
@@ -386,6 +426,218 @@ class PreparationRoutes(unittest.TestCase):
         self.assertTrue(lines[record_index].startswith(
             "record: refuse — site file could not be loaded:"
         ))
+
+
+class StoresPreparation(unittest.TestCase):
+    """A readable generation is resolved before a stores runner and its record."""
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.checkout, _ids = _fixture(temporary.name, {1: 3})
+        self.ranked_path, _data = _ranked_file(temporary.name, {1: (1,)})
+        self.surfaces = frozenset({CallSurface.STORES})
+
+    def assert_refusal(
+        self, host: EvalHost, outcome: tuple[int, str, str], contexts: list[RunContext],
+        problem: str, fix: str,
+    ) -> None:
+        code, stdout, stderr = outcome
+        self.assertEqual((code, stderr, contexts), (1, "", []), stdout)
+        rows = [line for line in stdout.splitlines() if line.startswith("preconditions:")]
+        self.assertEqual(len(rows), 1, stdout)
+        self.assertIn(f"preconditions: refuse — {problem} Fix: ", rows[0])
+        self.assertIn(fix, rows[0])
+        self.assertLessEqual(rows[0].partition(" Fix: ")[2].count("--generation"), 1)
+        self.assertNotIn("run: ok", stdout)
+        self.assertNotIn("record:", stdout)
+        self.assertNotIn("Traceback", stdout + stderr)
+        self.assertFalse(any("INSERT INTO eval_runs" in (payload or "") for _argv, payload in host.calls))
+
+    def test_invalid_name_and_missing_or_ambiguous_generation_refuse_with_selection_fix(self) -> None:
+        row = _generation_row()
+        other = {**row, "gen_id": row["gen_id"] + "-other"}
+        cases = (
+            ("not-a-generation", "", "not a generation name"),
+            (row["gen_id"], "", f"generation {row['gen_id']} is not recorded on the {PRODUCTION_STACK} stack"),
+            (None, "", f"no live {command.generation.COLLECTION} generation on the {PRODUCTION_STACK} stack"),
+            (None, json.dumps(row) + "\n" + json.dumps(other) + "\n",
+             f"more than one live {command.generation.COLLECTION} generation on the {PRODUCTION_STACK} stack"),
+        )
+        retry = report.command("eval run --slice judgments --kind smoke")
+        for name, reply, problem in cases:
+            with self.subTest(name=name, problem=problem):
+                host = EvalHost()
+                outcome, contexts, _ = _invoke_planted(
+                    host, self.checkout, self.ranked_path, self.surfaces,
+                    generation_name=name, generation_reply=reply, flags=("--kind", "smoke"),
+                )
+                self.assert_refusal(host, outcome, contexts, problem, f"{retry} --generation <name>")
+                self.assertIn(report.command("index report"), outcome[1])
+                self.assertFalse(any(argv[0] == "git" or payload == "SELECT 1;\n" for argv, payload in host.calls))
+                if name == "not-a-generation":
+                    self.assertEqual(host.calls, [])
+                else:
+                    self.assertEqual(len(host.calls), 1)
+                    argv, sql = host.calls[0]
+                    self.assertEqual(argv, tuple(command.record.reader_argv(_run_kwargs(host)["rendered_dir"])))
+                    assert sql is not None
+                    if name is None:
+                        self.assertIn("collection = :'v_collection' AND state = 'live'", sql)
+                        self.assertIn("ORDER BY gen_id", sql)
+                    else:
+                        self.assertIn("gen_id = :'v_name'", sql)
+
+    def test_unreadable_states_name_the_build_and_preserve_retry_flags_once(self) -> None:
+        self.addCleanup(report.set_form_from_environment, os.environ.copy())
+        for stack_name in (PRODUCTION_STACK, CI_STACK):
+            for state in ("building", "failed", "retired"):
+                for installed in (False, True):
+                    with self.subTest(stack=stack_name, state=state, installed=installed):
+                        environment = {report.GIDEON_INSTALLED_COMMAND: "/fictitious/gideon"} if installed else {}
+                        row = _generation_row(state=state)
+                        host = EvalHost()
+                        with patch.dict(os.environ, environment, clear=True):
+                            outcome, contexts, _ = _invoke_planted(
+                                host, self.checkout, self.ranked_path, self.surfaces,
+                                stack_name=stack_name, generation_name=row["gen_id"],
+                                generation_reply=json.dumps(row) + "\n", flags=("--kind", "smoke"),
+                            )
+                            flags = f" --stack {CI_STACK}" if stack_name == CI_STACK else ""
+                            retry = report.command(f"eval run --slice judgments{flags} --kind smoke")
+                            build = report.command(
+                                f"index build {command.generation.COLLECTION}"
+                                + (" --sample" if stack_name == CI_STACK else "")
+                            )
+                        self.assert_refusal(
+                            host, outcome, contexts, f"generation {row['gen_id']} is {state}",
+                            f"Finish its build ({build})",
+                        )
+                        self.assertIn(f"{retry} --generation <name>", outcome[1])
+
+    def test_failed_or_unavailable_read_refuses_even_with_a_valid_reply(self) -> None:
+        for code, error, problem in (
+            (1, None, "generation record read failed (exit 1)"),
+            (127, None, "generation record read failed (exit 127)"),
+            (0, OSError("fictitious unavailable tool"), "generation record read could not run"),
+            (0, subprocess.TimeoutExpired("fictitious psql", 1), "generation record read could not run"),
+        ):
+            with self.subTest(code=code, error=error):
+                host = EvalHost()
+                host.generation_code, host.generation_error = code, error
+                outcome, contexts, _ = _invoke_planted(
+                    host, self.checkout, self.ranked_path, self.surfaces,
+                    generation_name=_generation_row()["gen_id"],
+                )
+                self.assert_refusal(
+                    host, outcome, contexts, problem,
+                    command.stack.logs_fix(_run_kwargs(host)["rendered_dir"], command.record.POSTGRES_SERVICE),
+                )
+                self.assertIn(report.command("eval run --slice judgments"), outcome[1])
+                self.assertEqual(len(host.calls), 1)
+
+    def test_invalid_record_rows_refuse_without_diagnostics_or_tracebacks(self) -> None:
+        row = _generation_row()
+        invalid_rows: tuple[object, ...] = (
+            [], {}, {**row, "unexpected": "fictitious private diagnostic"},
+            {key: value for key, value in row.items() if key != "state"},
+            {**row, "gen_id": "not-a-generation"},
+            {**row, "gen_id": row["gen_id"] + "-different"},
+            {**row, "corpus_lockfile": "not-a-lockfile"}, {**row, "state": "unknown"},
+            {**row, "gen_id": None}, {**row, "corpus_lockfile": 123}, {**row, "state": []},
+        )
+        replies = ("fictitious malformed JSON\n", *(json.dumps(value) + "\n" for value in invalid_rows),
+                   json.dumps(row) + "\n" + json.dumps(row) + "\n")
+        for reply in replies:
+            with self.subTest(reply=reply):
+                host = EvalHost()
+                outcome, contexts, _ = _invoke_planted(
+                    host, self.checkout, self.ranked_path, self.surfaces,
+                    generation_name=row["gen_id"], generation_reply=reply,
+                )
+                self.assert_refusal(
+                    host, outcome, contexts, "generation record row is invalid",
+                    command.stack.logs_fix(_run_kwargs(host)["rendered_dir"], command.record.POSTGRES_SERVICE),
+                )
+                self.assertNotIn("fictitious private diagnostic", outcome[1] + outcome[2])
+                self.assertNotIn("fictitious generation diagnostic", outcome[1] + outcome[2])
+                self.assertEqual(len(host.calls), 1)
+
+    def test_stores_reads_selected_stack_after_sibling_job_and_before_record_facts(self) -> None:
+        row = _generation_row(state="built")
+        for stack_name in (CI_STACK, PRODUCTION_STACK):
+            for surfaces in (self.surfaces, self.surfaces | {CallSurface.ENGINE}):
+                with self.subTest(stack=stack_name, surfaces=surfaces):
+                    host = EvalHost()
+                    (code, stdout, stderr), contexts, _ = _invoke_planted(
+                        host, self.checkout, self.ranked_path, surfaces, stack_name=stack_name,
+                        generation_name=row["gen_id"], generation_reply=json.dumps(row) + "\n",
+                    )
+                    self.assertEqual((code, stderr), (0, ""), stdout)
+                    self.assertEqual(len(contexts), 1)
+                    context = contexts[0]
+                    self.assertIsNotNone(context.generation)
+                    self.assertEqual(stdout.count("preconditions:"), 1)
+                    self.assertIn(f", generation {row['gen_id']} ({row['corpus_lockfile']}, {row['state']})", stdout)
+                    read_index = next(i for i, (_argv, sql) in enumerate(host.calls) if "index_generations" in (sql or ""))
+                    argv, sql = host.calls[read_index]
+                    self.assertEqual(argv, tuple(command.record.reader_argv(context.turns_dir)))
+                    self.assertNotIn(row["gen_id"], " ".join(argv))
+                    assert sql is not None
+                    line = next(line for line in sql.splitlines() if line.startswith("\\set v_name "))
+                    self.assertEqual(read_psql_set(line, "v_name"), row["gen_id"])
+                    jobs = [i for i, (_argv, sql) in enumerate(host.calls) if "procrastinate_jobs" in (sql or "")]
+                    if stack_name == CI_STACK:
+                        self.assertEqual(len(jobs), 1)
+                        self.assertLess(jobs[0], read_index)
+                        self.assertIn(str(context.turns_dir), host.calls[jobs[0]][0])
+                        self.assertEqual(Path(context.turns_dir), Path(command.stacks.CI_ROOT))
+                    else:
+                        self.assertEqual(jobs, [])
+                        self.assertEqual(context.turns_dir, Path(context.production_dir))
+                    facts = [
+                        i for i, (argv, payload) in enumerate(host.calls)
+                        if argv[0] == "git" or payload == "SELECT 1;\n"
+                    ]
+                    self.assertTrue(facts)
+                    self.assertTrue(all(read_index < i for i in facts))
+                    write_argv = next(argv for argv, sql in host.calls if "INSERT INTO eval_runs" in (sql or ""))
+                    self.assertIn(str(context.production_dir), write_argv)
+                    if CallSurface.ENGINE not in surfaces:
+                        self.assertEqual(host.lock_records, [])
+                        self.assertNotIn("engine lock", stdout)
+
+    def test_live_sibling_job_refuses_before_generation_or_record_reads(self) -> None:
+        host = EvalHost()
+        host.queue_output = "73\n"
+        outcome, contexts, _ = _invoke_planted(
+            host, self.checkout, self.ranked_path, self.surfaces, stack_name=CI_STACK,
+            generation_name=_generation_row()["gen_id"],
+        )
+        self.assert_refusal(
+            host, outcome, contexts, "a sample build is running on the sibling (job 73)",
+            report.command("index build caselaw --sample"),
+        )
+        self.assertEqual(len(host.calls), 1)
+        self.assertIn("procrastinate_jobs", host.calls[0][1] or "")
+        self.assertEqual(host.lock_records, [])
+
+    def test_record_facts_still_refuse_after_generation_before_the_runner(self) -> None:
+        for surfaces in (self.surfaces, self.surfaces | {CallSurface.ENGINE}):
+            for failure in ("provenance", "writer"):
+                with self.subTest(surfaces=surfaces, failure=failure):
+                    host = EvalHost(commit_rc=1) if failure == "provenance" else EvalHost(probe_rc=1)
+                    outcome, contexts, _ = _invoke_planted(
+                        host, self.checkout, self.ranked_path, surfaces,
+                    )
+                    self.assert_refusal(
+                        host, outcome, contexts,
+                        "git provenance could not be read" if failure == "provenance"
+                        else "eval writer failed: exit 1",
+                        "as the checkout owner" if failure == "provenance" else "logs postgres",
+                    )
+                    self.assertIn("index_generations", host.calls[0][1] or "")
+                    self.assertTrue(any(argv[0] == "git" for argv, _payload in host.calls))
 
 
 class SiblingSurfaceRule(unittest.TestCase):

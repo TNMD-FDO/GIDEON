@@ -62,6 +62,7 @@ EXCLUDED_PREFIXES = (
     "eval/sets/eval-v1/slices/extraction/harvest.ids",  # the harvest slice ids must leave with their excluded cases
     "eval/sets/eval-v1/slices/smoke/harvest.ids",  # the smoke harvest ids must leave with their excluded cases
     "eval/sets/eval-v1/slices/judgments",  # the judgments slice ids must leave with their excluded queries
+    "eval/sets/eval-v1/slices/gold-drop",  # the gold-drop slice ids must leave with their excluded research questions
     "eval/reference/extraction/harvest.json",  # the harvest reference must leave with its id list
     "eval/reference/smoke/harvest.json",  # the smoke harvest reference must leave with its id list
     ".github/workflows/acceptance.yml",  # the box acceptance workflow

@@ -12,6 +12,7 @@ Tier-2 cases carry the instructed turn expectation without a family pattern.
 General smoke cases carry the turn harness's expected class and checks.
 Segmenter cases carry a drawn opinion's strata; checked section spans live in
 their own labels file.
+Count-gates cases carry one rule over a generation's build report.
 """
 
 import hashlib
@@ -60,6 +61,10 @@ _HARVEST_CLUSTER: Final[re.Pattern[str]] = re.compile(r"harvest-chat-[0-9a-f]+")
 _JUDGMENT_CLUSTER: Final[re.Pattern[str]] = re.compile(r"harvest-chat-[A-Za-z0-9_-]+")
 RESEARCH_QA_ID_PATTERN: Final[re.Pattern[str]] = re.compile(r"research-qa-[0-9]{3,}")
 SEGMENTER_ID_PATTERN: Final[re.Pattern[str]] = re.compile(r"segmenter-[0-9]{3,}")
+COUNT_GATES_ID_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"count-gates-[a-z]+(?:-[a-z]+)*-[0-9]{2}"
+)
+_NO_QUESTION_CATEGORIES: Final[frozenset[str]] = frozenset({"segmenter-300", "count-gates"})
 SEGMENTER_TEXT_SOURCES: Final[tuple[str, ...]] = (
     "xml_harvard", "html_columbia", "html_lawbox", "html_anon_2020", "html", "plain_text",
 )
@@ -196,6 +201,15 @@ SHAPE_REGISTRY: Final[Mapping[tuple[str, str], ShapeSpec]] = {
         SEGMENTER_ID_PATTERN,
         ("by", "on"),
         takes_signoff=True,
+    ),
+    ("build-gates", "count-gates"): ShapeSpec(
+        "build-gates",
+        "count-gates",
+        ("id", "suite", "category", "branch", "rule", "labels", "cluster_id", "review"),
+        {"suite": "build-gates", "category": "count-gates", "branch": "legal"},
+        COUNT_GATES_ID_PATTERN,
+        COUNT_GATES_ID_PATTERN,
+        ("by", "on"),
     ),
     ("judgments", "judgments"): ShapeSpec(
         "judgments",
@@ -642,7 +656,7 @@ def _validate_shape(
             findings.append(Finding(relative, case_id, line, f"{field} must be {expected!r}", _CASE_FIX))
 
     question = record.get("question")
-    if spec.category != "segmenter-300" and (
+    if spec.category not in _NO_QUESTION_CATEGORIES and (
         not isinstance(question, str)
         or not question
         or question != question.strip()
@@ -706,6 +720,18 @@ def _validate_shape(
             findings.append(Finding(relative, case_id, line, "decade multiple of ten", _CASE_FIX))
         if record.get("text_source") not in SEGMENTER_TEXT_SOURCES:
             findings.append(Finding(relative, case_id, line, "text_source vocabulary", _CASE_FIX))
+    elif spec.category == "count-gates":
+        if labels != ["spec"]:
+            findings.append(Finding(relative, case_id, line, "labels must be spec", _CASE_FIX))
+        rule = record.get("rule")
+        if (
+            not isinstance(rule, str)
+            or not rule
+            or rule != rule.strip()
+            or "\n" in rule
+            or "\r" in rule
+        ):
+            findings.append(Finding(relative, case_id, line, "rule shape", _CASE_FIX))
     elif spec.suite == "guardrails":
         _validate_guardrail_fields(record, relative, case_id, line, findings)
     elif spec.suite == "general":
@@ -732,7 +758,7 @@ def _validate_shape(
     elif origin != "variant" and cluster_id != case_id:
         findings.append(Finding(relative, case_id, line, "cluster_id", _CASE_FIX))
 
-    if not isinstance(record.get("notes"), str):
+    if "notes" in spec.keys_for(record, origin) and not isinstance(record.get("notes"), str):
         findings.append(Finding(relative, case_id, line, "notes", _CASE_FIX))
     if "supersedes" in record and not isinstance(record["supersedes"], str):
         findings.append(Finding(relative, case_id, line, "supersedes string", _CASE_FIX))

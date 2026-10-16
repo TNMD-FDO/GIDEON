@@ -41,17 +41,18 @@ class CollapsedRow:
 
 @dataclass(frozen=True, slots=True)
 class Board:
-    """One dashboard's identity, expected panels, collapsed rows, and grid extent."""
+    """One dashboard's panels and rows, grid extent, and summed stack height."""
 
     uid: str
     title: str
     panels: tuple[ExpectedPanel, ...]
     collapsed_rows: tuple[CollapsedRow, ...]
     lowest_grid_row: int
+    stacked_grid_rows: int
 
 
 def parse_board(document: str) -> Board:
-    """Read one dashboard JSON document, including panels nested under rows."""
+    """Read panels and rows, measuring the lowest grid row and sum of item heights."""
 
     try:
         dashboard = json.loads(document)
@@ -71,9 +72,10 @@ def parse_board(document: str) -> Board:
     collapsed_rows: list[CollapsedRow] = []
     row_title_counts: dict[str, int] = {}
     lowest_grid_row = 0
+    stacked_grid_rows = 0
 
     def visit(raw_panels: object) -> None:
-        nonlocal lowest_grid_row
+        nonlocal lowest_grid_row, stacked_grid_rows
         if not isinstance(raw_panels, list):
             raise ValueError("dashboard panels must be a list")
         for panel in raw_panels:
@@ -89,6 +91,7 @@ def parse_board(document: str) -> Board:
             if type(y) is not int or type(height) is not int or y < 0 or height <= 0:
                 raise ValueError("dashboard panel has an invalid grid position")
             lowest_grid_row = max(lowest_grid_row, y + height)
+            stacked_grid_rows += height
             if panel_type != "row":
                 panel_title = panel.get("title")
                 if not isinstance(panel_title, str) or not panel_title.strip():
@@ -117,7 +120,10 @@ def parse_board(document: str) -> Board:
     for row in collapsed_rows:
         if row_title_counts[row.title] > 1:
             raise ValueError(f"dashboard repeats row title: {row.title}")
-    return Board(uid, title, tuple(expected), tuple(collapsed_rows), lowest_grid_row)
+    return Board(
+        uid, title, tuple(expected), tuple(collapsed_rows), lowest_grid_row,
+        stacked_grid_rows,
+    )
 
 
 @dataclass(frozen=True, slots=True)

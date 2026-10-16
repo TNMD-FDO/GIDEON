@@ -101,6 +101,13 @@ class ResearchQAContract(unittest.TestCase):
         actual = tuple(value.get("id") for value in self.cases)
         self.assertEqual(actual, expected)
 
+    def test_gold_drop_list_contains_every_committed_id_in_file_order(self) -> None:
+        relative = SET_ROOT / "slices/gold-drop/harvest.ids"
+        if absent_from_export(relative, ROOT):
+            self.skipTest("gold-drop slice ids are absent from this exported tree")
+        text = (ROOT / relative).read_text(encoding="utf-8")
+        self.assertEqual(text, "".join(f"{value['id']}\n" for value in self.cases))
+
     def test_seeds_equal_the_judgments_harvest_seeds_in_order(self) -> None:
         query_seeds: list[object] = []
         for value in self._queries():

@@ -51,6 +51,8 @@ ROW_EXPAND_LABEL_PREFIX: Final = "Expand row"
 GRID_CELL_HEIGHT: Final = 30
 GRID_CELL_MARGIN: Final = 8
 VIEWPORT_WIDTH: Final = 1600
+# Research note section 5: the md breakpoint and the one-column stack.
+STACK_BREAKPOINT_WIDTH: Final = 769
 VIEWPORT_ALLOWANCE: Final = 400
 VIEWPORT_FLOOR: Final = 900
 
@@ -204,12 +206,21 @@ def _is_loading(page: BoardPage, section: str, content: str | None) -> bool:
     )
 
 
-def open_board(page: BoardPage, board: Board) -> None:
-    """Size the viewport from the lowest grid row before navigating."""
+def open_board(page: BoardPage, board: Board, *, width: int) -> None:
+    """Size the viewport to the width given and the grid's height, then navigate.
+
+    At or above the stack breakpoint the height follows the lowest grid row.
+    Under it the grid is one column, so the height follows every item's summed height.
+    """
 
     row_height = GRID_CELL_HEIGHT + GRID_CELL_MARGIN
-    grid_height = board.lowest_grid_row * row_height
-    page.resize(VIEWPORT_WIDTH, max(VIEWPORT_FLOOR, grid_height + VIEWPORT_ALLOWANCE))
+    grid_rows = (
+        board.lowest_grid_row
+        if width >= STACK_BREAKPOINT_WIDTH
+        else board.stacked_grid_rows
+    )
+    grid_height = grid_rows * row_height
+    page.resize(width, max(VIEWPORT_FLOOR, grid_height + VIEWPORT_ALLOWANCE))
     page.goto(f"{GRAFANA_SUB_PATH}d/{quote(board.uid, safe='')}?{BOARD_QUERY}")
 
 
@@ -319,12 +330,12 @@ def classify(page: BoardPage, panel: ExpectedPanel, *, timeout: float) -> PanelR
 
 
 def check_board(
-    page: BoardPage, board: Board, screenshot: Path, *, timeout: float
+    page: BoardPage, board: Board, screenshot: Path, *, timeout: float, width: int
 ) -> tuple[PanelReading, ...] | Problem:
     """Open, settle, capture, then read tooltip messages from one board."""
 
     try:
-        open_board(page, board)
+        open_board(page, board, width=width)
         unopened = {
             title: row.title
             for row in _expand_rows(page, board, timeout=timeout)

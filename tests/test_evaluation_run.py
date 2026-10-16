@@ -60,6 +60,7 @@ from gideon.cli import build_parser, main
 from gideon.evaluation import (
     challenger,
     command,
+    decision,
     evalset,
     judge,
     reference,
@@ -125,6 +126,17 @@ def _casecite_reply(input_text: str) -> str:
     )
 
 
+def _generation_row(*, state: str = "live") -> dict[str, str]:
+    """A visibly fictitious generation record, independent of the box's pins."""
+
+    label = "corpus-2099-01-03"
+    return {
+        "gen_id": f"{command.generation.COLLECTION}__{label}__fictitious-embedding",
+        "corpus_lockfile": label,
+        "state": state,
+    }
+
+
 class EvalHost:
     def __init__(
         self,
@@ -156,6 +168,9 @@ class EvalHost:
         self.queue_output = ""
         self.queue_code = 0
         self.queue_locks: list[dict[str, str]] = []
+        self.generation_output = ""
+        self.generation_code = 0
+        self.generation_error: OSError | subprocess.SubprocessError | None = None
 
     def run(
         self,
@@ -177,6 +192,13 @@ class EvalHost:
             assert input is not None
             return subprocess.CompletedProcess(list(command_argv), 0, _casecite_reply(input), "")
         if command_argv[0] == "docker":
+            if input is not None and "FROM public.index_generations" in input:
+                if self.generation_error is not None:
+                    raise self.generation_error
+                return subprocess.CompletedProcess(
+                    list(command_argv), self.generation_code, self.generation_output,
+                    "fictitious generation diagnostic",
+                )
             if input is not None and "SELECT id FROM procrastinate_jobs" in input:
                 self.queue_locks.append(dict(self.locks))
                 return subprocess.CompletedProcess(list(command_argv), self.queue_code, self.queue_output, "")
@@ -455,6 +477,90 @@ class Runner(unittest.TestCase):
 
 class Command(unittest.TestCase):
     """The in-process CLI exposes the ordered run and its refusals."""
+
+    def test_refused_decision_passes_the_gate_and_is_recorded_as_pass(self) -> None:
+        host = EvalHost()
+        loaded = load_set(ROOT / SET_ROOT).loaded
+        assert loaded is not None
+        case_id = next(
+            case_id for case_id in loaded.slices["guardrails"]
+            if case_id in loaded.active_ids
+        )
+        comparand_id = "22222222-3333-4444-8555-666666666666"
+        paired = decision.PairedDecision(
+            metric="false-refusal",
+            against=comparand_id,
+            requested_repeats=5,
+            completed_repeats=5,
+            paired=1,
+            clusters=1,
+            cluster_floor=decision.CLUSTER_FLOOR,
+            candidate_only=0,
+            comparand_only=0,
+            mean_difference=1.0,
+            se_unclustered=None,
+            se_clustered=None,
+            critical_value=None,
+            ci_low=None,
+            ci_high=None,
+            verdict=decision.REFUSED,
+            digest_equal=True,
+        )
+        slice_result = SliceResult(
+            True,
+            "visibly fictitious passing run\n",
+            tuple(CaseResult(case_id, repeat, "pass", {}) for repeat in range(1, 6)),
+        )
+        prepared = command._Prepared(
+            served_model_name=None,
+            turns=None,
+            ranked=None,
+            checkpoint=lambda: None,
+            started=NOW,
+            forced=False,
+            overrides={},
+            record=command._RecordFacts("fictitious-profile", "a" * 40, False),
+        )
+        comparand = command.record.ComparandRun(
+            comparand_id, "guardrails", loaded.version, loaded.digest,
+            1, "manual", False, (),
+        )
+        comparison = reference.Comparison("absent", None, (), (), (), (), False)
+        with (
+            patch.object(command, "_prepare", return_value=prepared),
+            patch.object(command, "_read_comparand", return_value=comparand),
+            patch.object(
+                command, "_run_repeats",
+                return_value=command._RunRepeats(slice_result, 5, 5, None),
+            ),
+            patch.object(command, "_compare_reference", return_value=(comparison, "")),
+            patch.object(command, "_paired_decision", return_value=paired),
+            patch.object(command, "_decision_gate", wraps=command._decision_gate) as gate,
+            patch.object(command, "print_stage", wraps=command.print_stage) as stages,
+            patch.object(command.record, "write_rows", wraps=command.record.write_rows) as writer,
+        ):
+            code, stdout, stderr = _invoke(
+                ["eval", "run", "--slice", "guardrails", "--decision", "--against", comparand_id],
+                **_run_kwargs(host),
+            )
+        self.assertEqual((code, stderr), (0, ""), stdout)
+        gate.assert_called_once()
+        self.assertIs(gate.call_args.args[3], paired)
+        rows = {
+            row.name: row
+            for call in stages.call_args_list
+            for row in (cast(report.StageResult, call.args[0]),)
+        }
+        self.assertTrue(rows["decision"].ok)
+        self.assertIn("1 cluster below the floor of 20", rows["decision"].detail)
+        self.assertTrue(rows["decision"].detail.endswith("refused"))
+        self.assertTrue(rows["gate"].ok)
+        self.assertTrue(rows["gate"].detail.endswith("decision refused"))
+        self.assertEqual(rows["gate"].fix, "")
+        writer.assert_called_once()
+        recorded = writer.call_args.args[2]
+        self.assertEqual(recorded.verdict, "pass")
+        self.assertEqual(recorded.decision, decision.to_json(paired))
 
     def test_parser_kinds_and_decision_resolve_to_modes(self) -> None:
         parser = build_parser()
@@ -983,6 +1089,17 @@ class Command(unittest.TestCase):
                     self.assertIn("Remove --kind nightly", stderr)
                 self.assertEqual(host.calls, [])
 
+    def test_generation_flag_refuses_a_slice_without_stores_before_any_stage(self) -> None:
+        host = EvalHost()
+        code, stdout, stderr = _invoke(
+            ["eval", "run", "--slice", "guardrails", "--generation", _generation_row()["gen_id"]],
+            **_run_kwargs(host),
+        )
+        self.assertEqual((code, stdout, host.calls), (1, "", []))
+        self.assertIn("--generation is not valid for slice 'guardrails', which reads no generation", stderr)
+        self.assertIn("Fix: Remove --generation when running --slice guardrails, then retry.", stderr)
+        self.assertNotIn("Traceback", stderr)
+
     def test_slice_selection_refuses_with_fixes(self) -> None:
         for argv in (["eval", "run"], ["eval", "run", "--slice", "missing-slice"]):
             with self.subTest(argv=argv):
@@ -1197,6 +1314,81 @@ def _nightly_start() -> datetime:
     site_result = command.site.load_site(ROOT / "config/site.example.yaml")
     assert site_result.config is not None, site_result.errors
     return datetime.combine(NOW.date(), time(21), tzinfo=ZoneInfo(site_result.config.office.timezone))
+
+
+class GenerationRecord(unittest.TestCase):
+    """Only a stores run records its resolved lockfile and generation."""
+
+    def run_values(self, host: EvalHost) -> tuple[str, dict[str, str]]:
+        statements = [
+            payload for _argv, payload in host.calls
+            if payload is not None and "INSERT INTO eval_runs" in payload
+        ]
+        self.assertEqual(len(statements), 1)
+        sql = statements[0]
+        insert = next(line for line in sql.splitlines() if line.startswith("INSERT INTO eval_runs"))
+        match = re.fullmatch(r"INSERT INTO eval_runs \(([^)]+)\) VALUES \((.+)\);", insert)
+        self.assertIsNotNone(match)
+        assert match is not None
+        columns, values = match.groups()
+        return sql, dict(zip(columns.split(", "), values.split(", "), strict=True))
+
+    def test_existing_slice_records_both_generation_fields_as_sql_null(self) -> None:
+        host = EvalHost()
+        code, stdout, stderr = _invoke(
+            ["eval", "run", "--slice", "extraction"], **_run_kwargs(host)
+        )
+        self.assertEqual((code, stderr), (0, ""), stdout)
+        sql, values = self.run_values(host)
+        for name in ("corpus_lockfile", "generation_id"):
+            with self.subTest(field=name):
+                self.assertEqual(values[name], "NULL")
+                self.assertNotIn(f"\\set {name} ", sql)
+        self.assertFalse(any("index_generations" in (payload or "") for _argv, payload in host.calls))
+
+    def test_planted_stores_entry_records_both_fields_from_the_resolved_row(self) -> None:
+        contexts: list[RunContext] = []
+
+        def run_slice(_loaded: LoadedSet, _name: str, context: RunContext) -> SliceResult:
+            contexts.append(context)
+            return SliceResult(True, "visibly fictitious stores report\n", ())
+
+        for named, state in ((True, "built"), (False, "live")):
+            with self.subTest(named=named, state=state):
+                contexts.clear()
+                host = EvalHost()
+                row = _generation_row(state=state)
+                row["corpus_lockfile"] = "corpus-2099-01-02"
+                host.generation_output = json.dumps(row) + "\n"
+                replacement = dict(SLICE_RUNNERS)
+                replacement["extraction"] = replace(
+                    replacement["extraction"], surfaces=frozenset({CallSurface.STORES}),
+                    runner=run_slice, compares_reference=False,
+                )
+                argv = ["eval", "run", "--slice", "extraction"]
+                if named:
+                    argv.extend(("--generation", row["gen_id"]))
+                with patch.object(command, "SLICE_RUNNERS", replacement):
+                    code, stdout, stderr = _invoke(argv, **_run_kwargs(host))
+                self.assertEqual((code, stderr), (0, ""), stdout)
+                self.assertEqual(len(contexts), 1)
+                resolved = contexts[0].generation
+                self.assertIsNotNone(resolved)
+                assert resolved is not None
+                self.assertEqual(
+                    (resolved.name, resolved.corpus_lockfile, resolved.state),
+                    (row["gen_id"], row["corpus_lockfile"], row["state"]),
+                )
+                sql, values = self.run_values(host)
+                for field, expected in (
+                    ("corpus_lockfile", row["corpus_lockfile"]), ("generation_id", row["gen_id"]),
+                ):
+                    self.assertEqual(values[field], f":'{field}'")
+                    line = next(line for line in sql.splitlines() if line.startswith(f"\\set {field} "))
+                    self.assertEqual(read_psql_set(line, field), expected)
+                write_argv = next(argv for argv, payload in host.calls if payload == sql)
+                self.assertEqual(write_argv[:2], ("docker", "compose"))
+                self.assertIn("record: ok — run", stdout)
 
 
 class EngineConditionsRecord(unittest.TestCase):
@@ -1903,6 +2095,39 @@ class RunnerSelection(unittest.TestCase):
 class SliceRegistry(unittest.TestCase):
     """Contracts for the registered slices' categories, settings, and surfaces."""
 
+    def test_count_gates_entry_reads_only_stores_and_keeps_no_reference(self) -> None:
+        from gideon.evaluation.countgates_slice import run_count_gates
+
+        spec = SLICE_RUNNERS["count-gates"]
+        self.assertIs(spec.runner, run_count_gates)
+        self.assertEqual(spec.surfaces, frozenset({CallSurface.STORES}))
+        self.assertEqual(spec.categories, frozenset({("build-gates", "count-gates")}))
+        self.assertEqual(spec.repeats, 1)
+        self.assertFalse(spec.compares_reference)
+        self.assertIsNone(spec.judge_prompt)
+        self.assertIsNone(spec.engine_calls)
+        self.assertIsNone(spec.turn_calls)
+        self.assertIsNone(spec.decision)
+        self.assertNotIn("count-gates", SMOKE_PARTS)
+
+    def test_gold_drop_entry_reads_only_stores_and_keeps_no_reference(self) -> None:
+        from gideon.evaluation.golddrop_slice import run_gold_drop
+
+        spec = SLICE_RUNNERS["gold-drop"]
+        self.assertIs(spec.runner, run_gold_drop)
+        self.assertEqual(spec.surfaces, frozenset({CallSurface.STORES}))
+        self.assertEqual(spec.categories, frozenset({
+            ("research-qa", "retrieval"), ("research-qa", "synthesis"),
+            ("research-qa", "lookup"), ("research-qa", "edition"),
+        }))
+        self.assertEqual(spec.repeats, 1)
+        self.assertFalse(spec.compares_reference)
+        self.assertIsNone(spec.judge_prompt)
+        self.assertIsNone(spec.engine_calls)
+        self.assertIsNone(spec.turn_calls)
+        self.assertIsNone(spec.decision)
+        self.assertNotIn("gold-drop", SMOKE_PARTS)
+
     def test_segmenter_entry_is_image_and_record_only(self) -> None:
         spec = SLICE_RUNNERS["segmenter-300"]
         self.assertEqual(spec.surfaces, frozenset({CallSurface.IMAGE, CallSurface.RECORD}))
@@ -1940,8 +2165,8 @@ class SliceRegistry(unittest.TestCase):
                     self.skipTest("in an export this slice's lists and cases are absent")
                 self.assertTrue(spec.categories)
                 selection = select_cases(loaded, slice_name)
-                # The frozen segmenter sample is all unsigned until its labels' intake.
-                if slice_name != "segmenter-300":
+                # These frozen slices remain unsigned until their labels or sign-offs arrive.
+                if slice_name not in {"segmenter-300", "gold-drop"}:
                     self.assertTrue(selection.counted)
                 for case_id in (*selection.counted, *selection.unsigned):
                     case = loaded.cases_by_id[case_id]
@@ -2131,7 +2356,11 @@ class Imports(unittest.TestCase):
                         # test_turns_browser.py owns the function-or-TYPE_CHECKING boundary.
                         continue
                     self.assertTrue(
-                        top in standard_library or top in {"yaml", "gideon"},
+                        top in standard_library or top == "gideon"
+                        or (top == "yaml" and path not in {
+                            EVALUATION / "generation.py", EVALUATION / "golddrop_slice.py",
+                            EVALUATION / "countgates_slice.py",
+                        }),
                         f"{path}: non-standard import {name}",
                     )
 
