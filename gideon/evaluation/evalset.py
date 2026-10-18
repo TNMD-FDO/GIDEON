@@ -8,8 +8,9 @@ sign-offs file; a synthetic case carries its own expected answer and retraced
 gold evidence. A case is unsigned iff its shape takes a sign-off, it carries no
 expected of its own, and no sign-off or label names it — it loads, and a
 selection keeps it out of what a gate counts.
-The shape's zero_tolerance flag marks categories whose dropped gold fails the
-gate and whose synthetic cases require a full read. Other synthetic reviews
+The shape's zero_tolerance flag marks lookup, edition, treatment,
+section-attribution, and unanswerable research cases whose dropped gold fails
+the gate and whose synthetic cases require a full read. Other synthetic reviews
 record whether the case was read or admitted on the batch's sample.
 Guardrails family cases carry an expected turn class and, for positives, a
 pattern id with an optional ``must_not`` string or list of regular expressions.
@@ -18,6 +19,8 @@ General smoke cases carry the turn harness's expected class and checks.
 Segmenter cases carry a drawn opinion's strata; checked section spans live in
 their own labels file.
 Count-gates cases carry one rule over a generation's build report.
+Optional held-out sidecars keep whole case families out of tuning selections;
+both tuning and held-out cases still count in gate and reference runs.
 """
 
 import hashlib
@@ -52,9 +55,11 @@ type Case = dict[str, object]
 EVAL_SET_VERSION: Final[str] = "eval-v1"
 SET_ROOT: Final[Path] = Path("eval", "sets", EVAL_SET_VERSION)
 """The release's eval set, relative to the checkout root."""
+HELD_OUT_SUFFIX: Final[str] = ".held-out.ids"
 
 _CASE_FIX: Final[str] = "Correct the named JSONL file, then retry."
 _SLICE_FIX: Final[str] = "Correct the named slice id list, then retry."
+_HELD_OUT_FIX: Final[str] = "Correct the named held-out list, then retry."
 _READ_FIX: Final[str] = "Restore the eval set from the release checkout, then retry."
 _VERSION_PATTERN: Final[re.Pattern[str]] = re.compile(r"eval-v[0-9]+")
 _EXTRACTION_ID: Final[re.Pattern[str]] = re.compile(r"extraction-[0-9]{3}")
@@ -349,6 +354,46 @@ SHAPE_REGISTRY: Final[Mapping[tuple[str, str], ShapeSpec]] = {
         zero_tolerance=True,
         expected_keys=("answer", "must_cite", "section_type"),
     ),
+    ("research-qa", "unanswerable"): ShapeSpec(
+        "research-qa",
+        "unanswerable",
+        _QUESTION_BASE_KEYS,
+        {"suite": "research-qa", "category": "unanswerable", "branch": "legal"},
+        RESEARCH_QA_ID_PATTERN,
+        _HARVEST_CLUSTER,
+        ("by", "on", "accepted_flags"),
+        question_origins=("synthetic",),
+        takes_signoff=False,
+        synthetic_keys=_SYNTHETIC_KEYS,
+        zero_tolerance=True,
+        expected_keys=("answer", "behavior"),
+    ),
+    ("research-qa", "trap"): ShapeSpec(
+        "research-qa",
+        "trap",
+        _QUESTION_BASE_KEYS,
+        {"suite": "research-qa", "category": "trap", "branch": "legal"},
+        RESEARCH_QA_ID_PATTERN,
+        _HARVEST_CLUSTER,
+        ("by", "on", "accepted_flags"),
+        question_origins=("synthetic",),
+        takes_signoff=False,
+        synthetic_keys=_SYNTHETIC_KEYS,
+        expected_keys=("answer", "behavior"),
+    ),
+    ("research-qa", "poisoned-premise"): ShapeSpec(
+        "research-qa",
+        "poisoned-premise",
+        _QUESTION_BASE_KEYS,
+        {"suite": "research-qa", "category": "poisoned-premise", "branch": "legal"},
+        RESEARCH_QA_ID_PATTERN,
+        _HARVEST_CLUSTER,
+        ("by", "on", "accepted_flags"),
+        question_origins=("synthetic",),
+        takes_signoff=False,
+        synthetic_keys=_SYNTHETIC_KEYS,
+        expected_keys=("answer", "behavior", "premise"),
+    ),
     ("judge", "triples"): ShapeSpec(
         "judge",
         "triples",
@@ -451,12 +496,15 @@ class LoadedSet:
     signoffs: tuple["SignOff", ...] = ()
     segmenter_labels: tuple["SegmenterLabel", ...] = ()
     unsigned_ids: frozenset[str] = frozenset()
+    held_out_ids: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
 class Selection:
     """The counted and unsigned active ids selected from one slice.
 
+    ``tuning`` and ``held_out`` partition ``counted``, each in slice order;
+    both halves count in gate and reference runs.
     ``takes_signoff`` is whether the slice lists any active case whose shape
     takes a sign-off at all, which is what decides that the run row prints its
     exclusion clause — a fully signed slice still prints it, reading zero.
@@ -465,6 +513,8 @@ class Selection:
     counted: tuple[str, ...]
     unsigned: tuple[str, ...]
     takes_signoff: bool = False
+    tuning: tuple[str, ...] = ()
+    held_out: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -490,6 +540,12 @@ def print_findings(findings: Iterable[Finding]) -> None:
 
 def _relative(root: Path, path: Path) -> str:
     return path.relative_to(root).as_posix()
+
+
+def held_out_path(case_file: Path) -> Path:
+    """Return the held-out sidecar beside a case file."""
+
+    return case_file.with_suffix(HELD_OUT_SUFFIX)
 
 
 def _finding_sort_key(finding: Finding) -> tuple[str, int, str, str]:
@@ -935,11 +991,12 @@ def _validate_synthetic_fields(
     ):
         findings.append(Finding(file, case_id, line, "template", _CASE_FIX))
     expected = record.get("expected")
+    expected_keys = spec.expected_keys_for()
     must_cite: list[object] = []
     if not isinstance(expected, Mapping):
         findings.append(Finding(file, case_id, line, "expected mapping", _CASE_FIX))
     else:
-        if tuple(expected) != spec.expected_keys_for():
+        if tuple(expected) != expected_keys:
             findings.append(Finding(file, case_id, line, "expected keys or order", _CASE_FIX))
         answer = expected.get("answer")
         if (
@@ -947,18 +1004,28 @@ def _validate_synthetic_fields(
             or "\n" in answer or "\r" in answer
         ):
             findings.append(Finding(file, case_id, line, "expected.answer", _CASE_FIX))
-        cites = expected.get("must_cite")
-        if isinstance(cites, list):
-            must_cite = cites
-        if (
-            not isinstance(cites, list) or not cites
-            or any(not isinstance(item, str) or judgments.SOURCE_ID_PATTERN.fullmatch(item) is None for item in cites)
-            or len(set(cites)) != len(cites)
-        ):
-            findings.append(Finding(file, case_id, line, "expected.must_cite", _CASE_FIX))
-        if "state" in spec.expected_keys_for() and expected.get("state") not in (*TREATMENT_STATES, synthetic.NO_STATE):
+        if "must_cite" in expected_keys:
+            cites = expected.get("must_cite")
+            if isinstance(cites, list):
+                must_cite = cites
+            if (
+                not isinstance(cites, list) or not cites
+                or any(not isinstance(item, str) or judgments.SOURCE_ID_PATTERN.fullmatch(item) is None for item in cites)
+                or len(set(cites)) != len(cites)
+            ):
+                findings.append(Finding(file, case_id, line, "expected.must_cite", _CASE_FIX))
+        if "behavior" in expected_keys and expected.get("behavior") != synthetic.BEHAVIORS[spec.category]:
+            findings.append(Finding(file, case_id, line, "expected.behavior", _CASE_FIX))
+        if "premise" in expected_keys:
+            premise = expected.get("premise")
+            if (
+                not isinstance(premise, str) or not premise.strip() or premise != premise.strip()
+                or "\n" in premise or "\r" in premise
+            ):
+                findings.append(Finding(file, case_id, line, "expected.premise", _CASE_FIX))
+        if "state" in expected_keys and expected.get("state") not in (*TREATMENT_STATES, synthetic.NO_STATE):
             findings.append(Finding(file, case_id, line, "expected.state", _CASE_FIX))
-        if "section_type" in spec.expected_keys_for() and expected.get("section_type") not in SECTION_TYPES:
+        if "section_type" in expected_keys and expected.get("section_type") not in SECTION_TYPES:
             findings.append(Finding(file, case_id, line, "expected.section_type", _CASE_FIX))
     gold = record.get("gold")
     if not isinstance(gold, list) or not gold:
@@ -994,7 +1061,7 @@ def _validate_synthetic_fields(
             or (_int(start) and _int(end) and len(quote) != cast(int, end) - cast(int, start))
         ):
             findings.append(Finding(file, case_id, line, f"{rule}.quote length", _CASE_FIX))
-        if entry.get("source_id") not in must_cite:
+        if "must_cite" in expected_keys and entry.get("source_id") not in must_cite:
             findings.append(Finding(file, case_id, line, f"{rule}.source_id absent from expected.must_cite", _CASE_FIX))
     if isinstance(gold[0], Mapping) and record.get("cluster_id") != gold[0].get("source_id"):
         findings.append(Finding(file, case_id, line, "cluster_id must equal first gold source_id", _CASE_FIX))
@@ -1212,6 +1279,126 @@ def _read_slices(
     return slices, slice_lists, locations
 
 
+def _read_held_out(
+    root: Path,
+    paths: Iterable[Path],
+    findings: list[Finding],
+    files: dict[str, bytes],
+) -> dict[str, dict[str, int]]:
+    """Read each case file's optional held-out ids and their line numbers."""
+
+    lists: dict[str, dict[str, int]] = {}
+    for case_path in paths:
+        path = held_out_path(case_path)
+        if not path.is_file():
+            continue
+        relative = _relative(root, path)
+        data = _read_bytes(root, path, findings, files, _HELD_OUT_FIX)
+        if data is None:
+            continue
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            findings.append(Finding(relative, None, 1, f"line is not UTF-8 ({exc})", _HELD_OUT_FIX))
+            continue
+        seen: dict[str, int] = {}
+        for number, case_id in enumerate(text.splitlines(), start=1):
+            if not case_id.strip():
+                findings.append(Finding(relative, None, number, "blank line in held-out list", _HELD_OUT_FIX))
+            elif case_id in seen:
+                findings.append(
+                    Finding(
+                        relative,
+                        case_id,
+                        number,
+                        f"id is listed twice in held-out list (also {relative}:{seen[case_id]})",
+                        _HELD_OUT_FIX,
+                    )
+                )
+            else:
+                seen[case_id] = number
+        lists[_relative(root, case_path)] = seen
+    return lists
+
+
+def _held_out_findings(
+    lists: Mapping[str, Mapping[str, int]],
+    cases_by_file: Mapping[str, tuple[Case, ...]],
+    cases_by_id: Mapping[str, Case],
+    retired: set[str],
+    findings: list[Finding],
+) -> frozenset[str]:
+    """Resolve held-out ids in their files and require active family closure."""
+
+    held_out_ids: set[str] = set()
+    case_files = {
+        case_id: relative
+        for relative, cases in cases_by_file.items()
+        for case in cases
+        for case_id in (_case_id(case),)
+        if case_id is not None
+    }
+    for relative, ids in lists.items():
+        cases = cases_by_file.get(relative, ())
+        file_ids = {case_id for case in cases for case_id in (_case_id(case),) if case_id is not None}
+        for case_id, line in ids.items():
+            if case_id in file_ids:
+                held_out_ids.add(case_id)
+            else:
+                findings.append(
+                    Finding(
+                        held_out_path(Path(relative)).as_posix(),
+                        case_id,
+                        line,
+                        "held-out id resolves to no case of this file",
+                        _HELD_OUT_FIX,
+                    )
+                )
+
+    # Retired listed cases remain seeds: their cluster and supersedes links
+    # still bind the active cases to the held-out family.
+    family = {case_id: case_id for case_id in sorted(held_out_ids)}
+    clusters: dict[str, str] = {}
+    for case_id in family:
+        cluster = cases_by_id[case_id].get("cluster_id")
+        if isinstance(cluster, str):
+            clusters.setdefault(cluster, case_id)
+    while True:
+        previous_size = len(family)
+        for case_id, case in cases_by_id.items():
+            if case_id in retired or case_id in family:
+                continue
+            cluster = case.get("cluster_id")
+            target = case.get("supersedes")
+            seed = clusters.get(cluster) if isinstance(cluster, str) else None
+            if seed is None and isinstance(target, str):
+                seed = family.get(target)
+            if seed is None:
+                continue
+            family[case_id] = seed
+            if isinstance(cluster, str):
+                clusters.setdefault(cluster, seed)
+        if len(family) == previous_size:
+            break
+    for case_id, seed in family.items():
+        if case_id in held_out_ids:
+            continue
+        cluster = cases_by_id[case_id].get("cluster_id")
+        rule = f"shares a family with held-out case {seed} and is not held out"
+        if isinstance(cluster, str):
+            rule += f" (cluster_id {cluster})"
+        findings.append(
+            Finding(
+                held_out_path(Path(case_files[case_id])).as_posix(),
+                case_id,
+                None,
+                rule,
+                _HELD_OUT_FIX,
+            )
+        )
+    return frozenset(held_out_ids)
+
+
 def _set_digest(files: Mapping[str, bytes]) -> str:
     digest = hashlib.sha256()
     for relative in sorted(files):
@@ -1345,6 +1532,12 @@ def load_set(root: str | Path, court_ids: Iterable[str] | None = None) -> EvalSe
     try:
         case_paths = _file_paths(set_root, ".jsonl", frozenset({judgments_file, signoffs_file, labels_file}))
         slice_directories = _slice_dirs(set_root)
+        sidecar_paths = {held_out_path(path) for path in case_paths}
+        for path in _file_paths(set_root, HELD_OUT_SUFFIX, frozenset()):
+            if path not in sidecar_paths:
+                findings.append(
+                    Finding(_relative(set_root, path), None, 0, "held-out list beside no case file", _HELD_OUT_FIX)
+                )
     except OSError as exc:
         findings.append(Finding(set_root.as_posix(), None, 0, f"set cannot be read ({exc})", _READ_FIX))
         return EvalSetLoadResult(findings=tuple(sorted(findings, key=_finding_sort_key)))
@@ -1352,6 +1545,7 @@ def load_set(root: str | Path, court_ids: Iterable[str] | None = None) -> EvalSe
     cases_by_file, occurrences = _read_cases(
         set_root, case_paths, court_id_set, findings, files
     )
+    held_out_lists = _read_held_out(set_root, case_paths, findings, files)
     located_judgments: tuple[judgments.LocatedJudgment, ...] = ()
     judgments_path = set_root / judgments.JUDGMENTS_PATH
     if judgments_path.is_file():
@@ -1438,6 +1632,9 @@ def load_set(root: str | Path, court_ids: Iterable[str] | None = None) -> EvalSe
         for case_id, case in cases_by_id.items()
         if isinstance(case.get("parent"), str) and case["parent"] in superseded
     }
+    held_out_ids = _held_out_findings(
+        held_out_lists, cases_by_file, cases_by_id, retired, findings
+    )
     # A grade is a yardstick only where its query is one the set still runs, so
     # the resolution waits for the supersedes pass above.
     for located in located_judgments:
@@ -1530,24 +1727,44 @@ def load_set(root: str | Path, court_ids: Iterable[str] | None = None) -> EvalSe
             signoffs=tuple(located.record for located in located_signoffs),
             segmenter_labels=tuple(located.record for located in located_labels),
             unsigned_ids=unsigned_ids,
+            held_out_ids=held_out_ids,
         )
     )
 
 
 def select_cases(loaded: LoadedSet, slice_name: str) -> Selection:
-    """Split one slice's active ids into counted and unsigned cases."""
+    """Select counted and unsigned ids, partitioning counted ids in slice order.
+
+    Both the tuning and held-out halves count in gate and reference runs.
+    """
 
     active_ids = set(loaded.active_ids)
     counted: list[str] = []
     unsigned: list[str] = []
+    tuning: list[str] = []
+    held_out: list[str] = []
     takes_signoff = False
     for case_id in loaded.slices[slice_name]:
         if case_id not in active_ids:
             continue
         spec = _shape_for(loaded.cases_by_id[case_id])
         takes_signoff = takes_signoff or (spec is not None and spec.takes_signoff)
-        target = unsigned if case_id in loaded.unsigned_ids else counted
+        if case_id in loaded.unsigned_ids:
+            unsigned.append(case_id)
+            continue
+        counted.append(case_id)
+        target = held_out if case_id in loaded.held_out_ids else tuning
         target.append(case_id)
     return Selection(
-        counted=tuple(counted), unsigned=tuple(unsigned), takes_signoff=takes_signoff
+        counted=tuple(counted),
+        unsigned=tuple(unsigned),
+        takes_signoff=takes_signoff,
+        tuning=tuple(tuning),
+        held_out=tuple(held_out),
     )
+
+
+def tuning_cases(loaded: LoadedSet, slice_name: str) -> tuple[str, ...]:
+    """The only selection a tuning tool makes; gates and references never call it."""
+
+    return select_cases(loaded, slice_name).tuning

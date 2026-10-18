@@ -12,7 +12,13 @@ from typing import Final, cast
 from unittest import TestCase
 
 from gideon.evaluation import synthetic
-from gideon.evaluation.evalset import SET_ROOT, SHAPE_REGISTRY, load_set
+from gideon.evaluation.evalset import (
+    HELD_OUT_SUFFIX,
+    SET_ROOT,
+    SHAPE_REGISTRY,
+    load_set,
+)
+from gideon.host.corpus.lockfile import load_lockfile
 from gideon.host.courts import load_court_map
 from gideon.host.render.worker import SECTION_TYPES
 from tools.exportboundary import is_excluded
@@ -21,6 +27,7 @@ ROOT: Final[Path] = Path(__file__).resolve().parents[1]
 README_PATH: Final[Path] = SET_ROOT / "research-qa/README.md"
 REQUIRED_CATEGORIES: Final[frozenset[str]] = frozenset({
     "lookup", "retrieval", "synthesis", "existence", "section-attribution",
+    "unanswerable", "trap", "poisoned-premise",
 })
 PINNED_PREFIXES: Final[dict[str, tuple[tuple[int, str], ...]]] = {
     "lookup": (
@@ -38,6 +45,15 @@ PINNED_PREFIXES: Final[dict[str, tuple[tuple[int, str], ...]]] = {
     ),
     "section-attribution": (
         (19, "178818c9820d235ecdf6041452ea8b4a9e49d4ed20e32dcf0453638892ac9e8a"),
+    ),
+    "unanswerable": (
+        (26, "3f5156ee422bb0a13114741c7f778174af0c493b820beca880472efd5834baf2"),
+    ),
+    "trap": (
+        (10, "8418643e8fde64cbf1983c6e445385e96a3b139aac02db1387da7b4e9e0cab34"),
+    ),
+    "poisoned-premise": (
+        (8, "07d9a8813503eb84daca569c763f4bdd490cec503b4570a6edf2ee3ed81f0bb7"),
     ),
 }
 
@@ -122,6 +138,16 @@ class SyntheticSetContract(TestCase):
                     if category == "section-attribution":
                         self.assertEqual(template, "section-attribution@1")
                         self.assertIn(expected["section_type"], SECTION_TYPES)
+                    if category in synthetic.NEAR_MISS_CATEGORIES:
+                        self.assertEqual(expected["behavior"], synthetic.BEHAVIORS[category])
+                        self.assertNotIn("must_cite", expected)
+                        if category == "poisoned-premise":
+                            premise = expected["premise"]
+                            self.assertIsInstance(premise, str)
+                            assert isinstance(premise, str)
+                            self.assertTrue(premise)
+                            self.assertEqual(premise, premise.strip())
+                            self.assertEqual(premise.splitlines(), [premise])
 
     def test_gold_lengths_cites_and_clusters_agree(self) -> None:
         for category, cases in self.cases.items():
@@ -131,7 +157,6 @@ class SyntheticSetContract(TestCase):
                     gold = cast(list[dict[str, object]], case["gold"])
                     self.assertTrue(gold)
                     expected = cast(dict[str, object], case["expected"])
-                    must_cite = cast(list[str], expected["must_cite"])
                     self.assertEqual(case["cluster_id"], gold[0]["source_id"])
                     for index, entry in enumerate(gold, start=1):
                         with self.subTest(gold=index):
@@ -140,7 +165,8 @@ class SyntheticSetContract(TestCase):
                                 cast(int, entry["end"]) - cast(int, entry["start"]),
                                 len(cast(str, entry["quote"])),
                             )
-                            self.assertIn(entry["source_id"], must_cite)
+                            if "must_cite" in spec.expected_keys_for():
+                                self.assertIn(entry["source_id"], cast(list[str], expected["must_cite"]))
 
     def test_jurisdiction_names_one_court_from_the_map(self) -> None:
         court_ids = self._court_ids()
@@ -161,6 +187,59 @@ class SyntheticSetContract(TestCase):
                     self.assertIsNotNone(re.fullmatch(r"CSA-[1-9][0-9]*", cast(str, review["by"])))
                     if not spec.zero_tolerance:
                         self.assertIsInstance(review["read"], bool)
+
+    def test_asked_court_differs_from_the_gold_document_court(self) -> None:
+        court_categories = {category for category in synthetic.NEAR_MISS_CATEGORIES
+                            if "asked_court" in synthetic.TEMPLATES[f"{category}@1"].slots}
+        corpus_courts: set[str] = set()
+        for path in sorted((ROOT / "corpus/lockfiles").glob("*.yaml")):
+            result = load_lockfile(path)
+            self.assertTrue(result.ok, result.errors)
+            assert result.lockfile is not None
+            corpus_courts.update(result.lockfile.courts)
+        self.assertTrue(corpus_courts)
+        document_courts = {
+            entry["source_id"]: cast(list[str], case["jurisdiction"])[0]
+            for category, cases in self.cases.items() if category not in court_categories
+            for case in cases for entry in cast(list[dict[str, object]], case["gold"])
+        }
+        for category in sorted(court_categories):
+            for case in self.cases.get(category, ()):
+                with self.subTest(category=category, case_id=case["id"]):
+                    asked = cast(list[str], case["jurisdiction"])[0]
+                    self.assertIn(asked, self._court_ids())
+                    for gold in cast(list[dict[str, object]], case["gold"]):
+                        if gold["source_id"] in document_courts:
+                            self.assertNotEqual(asked, document_courts[gold["source_id"]])
+                        else:
+                            # The corpus cuts bound possible gold courts when no other case shares the document.
+                            self.assertNotIn(asked, corpus_courts)
+
+    def test_held_out_sidecars_resolve_in_their_file_and_reconcile_with_batch_rows(self) -> None:
+        rows = self._batch_rows()
+        research = ROOT / SET_ROOT / "research-qa"
+        sidecars = sorted(research.glob(f"*{HELD_OUT_SUFFIX}"))
+        self.assertTrue(sidecars)
+        for sidecar in sidecars:
+            with self.subTest(sidecar=sidecar.name):
+                case_file = sidecar.with_name(sidecar.name.removesuffix(HELD_OUT_SUFFIX) + ".jsonl")
+                self.assertTrue(case_file.is_file())
+                cases = [json.loads(line) for line in case_file.read_bytes().splitlines()]
+                ids = sidecar.read_text(encoding="utf-8").splitlines()
+                self.assertTrue(set(ids) <= {case["id"] for case in cases})
+                self.assertEqual(len(ids), len(set(ids)))
+                categories = {case["category"] for case in cases}
+                self.assertEqual(len(categories), 1)
+                category = next(iter(categories))
+                expected = sum(int(row["Held out"]) for row in rows if row["Category"] == category)
+                for row in rows:
+                    if row["Propagated"] == "none":
+                        continue
+                    for entry in row["Propagated"].split(", "):
+                        name, count = entry.rsplit(" ", 1)
+                        if name == category:
+                            expected += int(count)
+                self.assertEqual(len(ids), expected)
 
     def test_sampled_review_counts_match_the_batch_reads_minus_rejections(self) -> None:
         rows = self._batch_rows()

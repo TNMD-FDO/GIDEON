@@ -9,6 +9,7 @@ Releases before `v0.2.0` are listed without a link. A hotfix tag has a line
 like any tag. The ten hotfix tags up to `v0.1.1` that had a table row instead
 are in the repository's history at commit f06e83f.
 
+- [v0.3.177](docs/release-notes/v0.3.177.md) — 2026-10-18 — refusal-shaped cases, a held-out split, the build-gates composite
 - [v0.3.176](docs/release-notes/v0.3.176.md) — 2026-10-18 — readable boards, a smoke-gated build, the 3/n bounds
 - [v0.3.175](docs/release-notes/v0.3.175.md) — 2026-10-15 — the case-name column, the count and gold-drop gates
 - [v0.3.174](docs/release-notes/v0.3.174.md) — 2026-10-15 — the eval record's engine conditions

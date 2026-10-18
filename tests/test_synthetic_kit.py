@@ -106,6 +106,16 @@ class SyntheticHost(DraftHost):
         self.responses: dict[str, str] = {}
         self.exit_codes: dict[str, int] = {}
         self.run_errors: dict[str, OSError | subprocess.SubprocessError] = {}
+        self.present_courts = [str(row["court"]) for row in self.documents]
+        self.case_names = [CASE_NAME]
+        mapped = {court: courts.Court(court, None, None, "district", f"Fictitious {court}")
+                  for court in self.present_courts}
+        mapped.update({court: courts.Court(court, None, None, "circuit", name) for court, name in (
+            ("exampleca", "Fictitious First Circuit"), ("examplecb", "Fictitious Second Circuit"),
+        )})
+        self.court_map = courts.CourtMap(
+            courts.CourtSource("courts-2099-01-02.csv.bz2", "2099-01-02", "a" * 64, len(mapped), {}), mapped,
+        )
 
     def set_text(self, index: int, text: str) -> None:
         """Replace one fictitious canonical object and its matching record hashes."""
@@ -134,6 +144,17 @@ class SyntheticHost(DraftHost):
             kind = "manifest"
             assert list(argv) == worker.psql_argv(CI_ROOT)
             output = "\n".join(json.dumps(row) for row in self.manifest_rows)
+        elif "SELECT DISTINCT court FROM opinions" in input:
+            kind = "courts"
+            assert list(argv) == record.reader_argv(RENDERED)
+            output = json.dumps(sorted(set(self.present_courts)))
+        elif "jsonb_array_elements(:'premises'::jsonb)" in input:
+            kind = "premises"
+            assert list(argv) == record.reader_argv(RENDERED)
+            pairs = json.loads(read_psql_set(input.splitlines()[0], "premises"))
+            output = json.dumps([pair for pair in pairs if any(
+                all(surname.casefold() in name.casefold() for surname in pair) for name in self.case_names
+            )])
         else:
             kind = "facts"
             assert list(argv) == record.reader_argv(RENDERED)
@@ -381,6 +402,7 @@ def _run(host: SyntheticHost, root: Path, out: Path, *, count: int | None = 2,
          category: str = "lookup", generation: str | None = None,
          site_result: site.SiteLoadResult | None = None, target: engine.EngineTarget | Problem | None = None,
          stdout: io.StringIO | None = None,
+         court_result: courts.CourtMapLoadResult | None = None,
          window: int = 1,
          ) -> tuple[int, str, str]:
     output, errors = io.StringIO() if stdout is None else stdout, io.StringIO()
@@ -397,6 +419,7 @@ def _run(host: SyntheticHost, root: Path, out: Path, *, count: int | None = 2,
         patch.object(site, "load_site", return_value=site_result if site_result is not None else site.SiteLoadResult(config=config)),
         patch.object(engine, "resolve_engine_target", return_value=target if target is not None else engine.EngineTarget("fixture-profile", "fixture-model", 100_000)),
         patch.object(engine, "call_model_server", side_effect=host.engine_call),
+        patch.object(courts, "load_court_map", return_value=court_result if court_result is not None else courts.CourtMapLoadResult(court_map=host.court_map)),
     ):
         code = draft.main(
             args, host=cast(draft.DraftHost, host), root=root / "checkout", rendered_dir=RENDERED,
@@ -658,7 +681,8 @@ class Draft(unittest.TestCase):
                 self.assertEqual((code, errors), (0, ""), output)
                 value = json.loads((root / "draft/manifest.json").read_bytes())
                 self.assertEqual(value["asked"], count)
-                self.assertEqual(value["template"], f"{category}@{1 if category in ('lookup', 'treatment', 'section-attribution') else 2}")
+                version = 2 if category in ("retrieval", "synthesis", "existence") else 1
+                self.assertEqual(value["template"], f"{category}@{version}")
                 self.assertIn(f"order: exhausted, kept 1 of {count}", output)
 
     def test_caption_slot_reaches_proposal_and_sheet_only(self) -> None:
@@ -1172,6 +1196,142 @@ class Draft(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertEqual(output.getvalue(), "")
         self.assertIn("count must be positive", errors.getvalue())
+
+
+class NearMissDraft(unittest.TestCase):
+    """Near misses are checked against the record before generation."""
+
+    def test_draw_slots_sheet_and_format_three_intake_for_each_category(self) -> None:
+        for category in synthetic.NEAR_MISS_CATEGORIES:
+            with self.subTest(category=category), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                host = SyntheticHost(3)
+                out = root / "draft"
+                code, output, errors = _run(host, root, out, count=3, category=category)
+                self.assertEqual((code, errors), (0, ""), output)
+                other = SyntheticHost(3)
+                other.documents.reverse()
+                other.manifest_rows.reverse()
+                repeat = root / "repeat"
+                self.assertEqual(_run(other, root, repeat, count=3, category=category), (code, output, errors))
+                for path in out.iterdir():
+                    self.assertEqual(path.read_bytes(), (repeat / path.name).read_bytes())
+                value = json.loads((out / "manifest.json").read_bytes())
+                self.assertEqual(value["format"], 3)
+                self.assertEqual(tuple(value), manifest.MANIFEST_KEYS)
+                records = [json.loads(line) for line in (out / "drafts.jsonl").read_bytes().splitlines()]
+                sheet = (out / "sheet.txt").read_text()
+                absent = tuple(sorted(court for court, fact in host.court_map.courts.items()
+                                      if fact.level == "circuit" and court not in host.present_courts))
+                for index, row in enumerate(records):
+                    source = row["gold"][0]["source_id"]
+                    fact = next(fact for fact in host.documents if source == indexsample.source_id("fictitious", cast(int, fact["opinion_id"])))
+                    user = cast(list[dict[str, str]], host.bodies[index * 3]["messages"])[1]["content"]
+                    expected = {"answer": ANSWER, "behavior": synthetic.BEHAVIORS[category]}
+                    if category == "poisoned-premise":
+                        near = synthetic.invent_caption(value["seed"], source)
+                        expected["premise"] = near
+                        self.assertEqual(row["jurisdiction"], [fact["court"]])
+                        self.assertIn(f"Premise: {near}\n", user)
+                        near_line = f"Near miss: premise {near} | behavior {synthetic.BEHAVIORS[category]}"
+                    else:
+                        near = synthetic.asked_court(value["seed"], source, absent)
+                        self.assertEqual(row["jurisdiction"], [near])
+                        self.assertNotEqual(near, fact["court"])
+                        name = host.court_map.courts[near].name
+                        self.assertIn(f"Asked court: {name}\n", user)
+                        near_line = f"Near miss: asked court {near} ({name}) | behavior {synthetic.BEHAVIORS[category]}"
+                    self.assertEqual(row["expected"], expected)
+                    self.assertNotIn("must_cite", row["expected"])
+                    text = host.texts[cast(int, fact["opinion_id"])]
+                    gold = row["gold"][0]
+                    self.assertEqual(text[gold["start"]:gold["end"]], gold["quote"])
+                    block = sheet.split(f"{manifest.SHEET_BLOCK_HEADER} {index + 1:02d} ")[1]
+                    self.assertIn("\n" + near_line + "\nQuestion: ", block)
+                    self.assertLess(block.index("Original:"), block.index(near_line))
+                stage = "premises" if category == "poisoned-premise" else "courts"
+                statements = [sql for _, sql in host.calls if sql and (
+                    "jsonb_array_elements(:'premises'::jsonb)" in sql if stage == "premises"
+                    else "SELECT DISTINCT court FROM opinions" in sql
+                )]
+                self.assertEqual(len(statements), 1)
+                if stage == "premises":
+                    pairs = json.loads(read_psql_set(cast(str, statements[0]).splitlines()[0], "premises"))
+                    self.assertEqual(pairs, [list(synthetic.caption_surnames(caption)) for caption in sorted({
+                        synthetic.invent_caption(value["seed"], row["gold"][0]["source_id"]) for row in records
+                    })])
+                    self.assertEqual(cast(str, statements[0]).count("ILIKE"), 2)
+                    self.assertIn("pair->>0", cast(str, statements[0]))
+                    self.assertIn("pair->>1", cast(str, statements[0]))
+                    self.assertIn(f"near-miss: premises {len(pairs)}, in record 0", output)
+                else:
+                    self.assertIn(f"near-miss: absent courts {len(absent)}", output)
+                marks = root / "marks.txt"
+                marks.write_text(f"synthetic: CSA-1 {value['sheet_sha256'][:manifest.DIGEST_PREFIX_CHARS]} 2099-01-04\n"
+                                 + "".join(f"{index:02d} accept\n" for index in range(1, len(records) + 1)))
+                result = _run_intake(out / "manifest.json", marks, tuple(host.court_map.courts))
+                self.assertEqual((result[0], result[2]), (0, ""), result[1])
+                self.assertTrue(evalset.load_set(root / "eval-v9", host.court_map.courts).ok)
+
+    def test_existing_premises_are_discarded_before_any_engine_request(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            host = SyntheticHost(3)
+            captions = [synthetic.invent_caption(17, row["source_id"]) for row in host.manifest_rows]
+            host.case_names = [f"Fictitious {caption.upper()} appeal" for caption in captions]
+            code, output, errors = _run(host, root, root / "draft", category="poisoned-premise")
+            self.assertEqual((code, errors), (0, ""), output)
+            self.assertEqual((host.bodies, host.fetched), ([], []))
+            value = json.loads((root / "draft/manifest.json").read_bytes())
+            self.assertEqual(value["entries"], [])
+            self.assertEqual(value["discards"], [
+                {"reason": "premise-in-record", "source_id": row["source_id"], "edge": None, "kind": None}
+                for row in host.manifest_rows
+            ])
+            self.assertIn(f"near-miss: premises {len(set(captions))}, in record {len(set(captions))}", output)
+            self.assertIn("premise-in-record=3", output)
+            self.assertFalse(any("discarded premise-in-record" in line for line in output.splitlines()))
+
+    def test_all_circuits_present_and_map_failure_refuse_before_requests(self) -> None:
+        for category in ("unanswerable", "trap"):
+            for scenario in ("all-present", "map-failure"):
+                with self.subTest(category=category, scenario=scenario), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    host = SyntheticHost(1)
+                    host.present_courts = list(host.court_map.courts)
+                    code, output, errors = _run(host, root, root / "draft", category=category,
+                        court_result=courts.CourtMapLoadResult() if scenario == "map-failure" else None)
+                    self.assertEqual(code, 1)
+                    self.assertIn("courts.yaml from the release checkout" if scenario == "map-failure"
+                                  else "every circuit-level court is in the record", errors)
+                    self.assertIn("Fix:", errors)
+                    self.assertEqual(host.bodies, [])
+                    self.assertEqual(host.released, [backuplock.ENGINE_LOCK.path])
+                    for private in (QUESTION, ANSWER, CLOSED, REASON, CASE_NAME):
+                        self.assertNotIn(private, output + errors)
+
+    def test_record_failures_and_malformed_replies_refuse_with_fixes(self) -> None:
+        for category, stage in (("trap", "courts"), ("poisoned-premise", "premises")):
+            malformed = ("not json", "{}", '[null]', '[{}]', '["not a court"]', '["exampleca", "exampleca"]') if stage == "courts" else (
+                "not json", "{}", '[null]', '[[]]', '[["Fictitious", "Unknown"]]',
+            )
+            for scenario in ("exit", "unavailable", *malformed):
+                with self.subTest(stage=stage, scenario=scenario), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    host = SyntheticHost(1)
+                    if scenario == "exit":
+                        host.exit_codes[stage] = 9
+                    elif scenario == "unavailable":
+                        host.run_errors[stage] = OSError(REASON)
+                    else:
+                        host.responses[stage] = scenario
+                    code, output, errors = _run(host, root, root / "draft", category=category)
+                    self.assertEqual(code, 1)
+                    self.assertIn(f"{stage}: refused", errors)
+                    self.assertIn("Fix:", errors)
+                    self.assertEqual(host.bodies, [])
+                    self.assertEqual(host.released, [backuplock.ENGINE_LOCK.path])
+                    self.assertNotIn(REASON, output + errors)
 
 
 class TreatmentDraft(unittest.TestCase):
@@ -1795,6 +1955,19 @@ class AttributionDraft(unittest.TestCase):
                 self.assert_private_absent(output + errors)
 
 
+def _held_out_pin(set_root: Path, category: str) -> str:
+    path = evalset.held_out_path(set_root / synthetic.case_path(category))
+    data = path.read_bytes()
+    return f"held-out list: {path.relative_to(set_root).as_posix()} {len(data.splitlines())} lines sha256 {hashlib.sha256(data).hexdigest()}"
+
+
+def _family_case(value: Mapping[str, object], category: str, number: int) -> dict[str, object]:
+    case = _synthetic_case(f"research-qa-{category}-{number:03d}", category=category)
+    case.update({key: value[key] for key in ("cluster_id", "gold", "jurisdiction")})
+    case["expected"] = {"answer": ANSWER, "must_cite": [value["cluster_id"]]}
+    return case
+
+
 def _review_fixture(root: Path, count: int = 2, *, category: str = "lookup") -> tuple[Path, Path, Path, tuple[str, ...]]:
     host = SyntheticHost(count)
     code, output, errors = _run(host, root, root / "draft", count=max(1, count), category=category)
@@ -1807,7 +1980,7 @@ def _review_fixture(root: Path, count: int = 2, *, category: str = "lookup") -> 
         + "".join(f"{ordinal:02d} accept\n" for ordinal in range(1, count + 1)),
         encoding="utf-8",
     )
-    return root / "eval-v9", manifest_path, marks_path, tuple(str(row["court"]) for row in host.documents)
+    return root / "eval-v9", manifest_path, marks_path, tuple(host.court_map.courts)
 
 
 def _run_intake(manifest_path: Path, marks_path: Path | None, known_courts: tuple[str, ...] | None,
@@ -2037,6 +2210,8 @@ class Intake(unittest.TestCase):
                     f"06: accepted research-qa-{category}-005 closed-book-answerable",
                     f"07: admitted unread research-qa-{category}-006 closed-book-answerable",
                     f"cases: 6 lines sha256 {hashlib.sha256(payload).hexdigest()}",
+                    f"held out: 3 of 6 cases (share 1/{synthetic.HELD_OUT_SHARE}, 0 forced by family)",
+                    _held_out_pin(set_root, category),
                     "summary: accepted 3, admitted unread 3, rejected 1, closed-book-answerable 6",
                     f"read: 4 of 7 cases (share 1/{synthetic.READ_SHARE}), rejected 1",
                     "set digest: unchanged since the draft",
@@ -2102,6 +2277,7 @@ class Intake(unittest.TestCase):
                 share = 1 if category == "lookup" else synthetic.READ_SHARE
                 self.assertEqual(result[1].splitlines(), [
                     f"cases: 0 lines sha256 {hashlib.sha256(b'').hexdigest()}",
+                    f"held out: 0 of 0 cases (share 1/{synthetic.HELD_OUT_SHARE}, 0 forced by family)",
                     "summary: accepted 0, admitted unread 0, rejected 0, closed-book-answerable 0",
                     f"read: 0 of 0 cases (share 1/{share}), rejected 0", "set digest: unchanged since the draft",
                 ])
@@ -2212,7 +2388,9 @@ class Intake(unittest.TestCase):
             set_root, manifest_path, marks_path, known_courts = _review_fixture(Path(directory))
             path = set_root / synthetic.case_path("lookup")
             before = {file.relative_to(set_root): file.read_bytes() for file in set_root.rglob("*") if file.is_file()}
-            dry = _run_intake(manifest_path, marks_path, known_courts, dry_run=True)
+            with patch.object(intake, "write_atomic") as no_write:
+                dry = _run_intake(manifest_path, marks_path, known_courts, dry_run=True)
+            no_write.assert_not_called()
             self.assertEqual((dry[0], dry[2]), (0, ""), dry[1])
             self.assertFalse(path.exists())
             self.assertEqual({file.relative_to(set_root): file.read_bytes() for file in set_root.rglob("*") if file.is_file()}, before)
@@ -2230,6 +2408,8 @@ class Intake(unittest.TestCase):
                 "01: accepted research-qa-lookup-001 closed-book-answerable",
                 "02: accepted research-qa-lookup-002 closed-book-answerable",
                 f"cases: 2 lines sha256 {hashlib.sha256(payload).hexdigest()}",
+                f"held out: 1 of 2 cases (share 1/{synthetic.HELD_OUT_SHARE}, 0 forced by family)",
+                _held_out_pin(set_root, "lookup"),
                 "summary: accepted 2, admitted unread 0, rejected 0, closed-book-answerable 2",
                 "read: 2 of 2 cases (share 1/1), rejected 0",
                 "set digest: unchanged since the draft",
@@ -2501,7 +2681,7 @@ class Intake(unittest.TestCase):
                 other_bytes = other_path.read_bytes()
                 self.assertTrue(evalset.load_set(set_root, known_courts).ok)
                 result = _run_intake(manifest_path, marks_path, known_courts)
-                self.assert_refusal(result, "eval-set reload", "previous cases restored")
+                self.assert_refusal(result, "eval-set reload", "previous files restored", path.relative_to(set_root).as_posix())
                 self.assertEqual(path.read_bytes() if path.exists() else None, previous)
                 self.assertEqual(other_path.read_bytes(), other_bytes)
                 self.assertTrue(evalset.load_set(set_root, known_courts).ok)
@@ -2552,6 +2732,216 @@ class Intake(unittest.TestCase):
             self.assert_refusal(_run_intake(manifest_path, marks_path, known_courts), "manifest cannot be read")
 
 
+    def test_held_out_seed_share_file_order_and_second_batch_append(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            set_root, manifest_path, marks_path, known_courts = _review_fixture(root, 6)
+            value = json.loads(manifest_path.read_bytes())
+            self.assertEqual(intake._load_manifest(manifest_path).seed, value["seed"])
+            result = _run_intake(manifest_path, marks_path, known_courts)
+            self.assertEqual((result[0], result[2]), (0, ""), result[1])
+            path = set_root / synthetic.case_path("lookup")
+            sidecar = evalset.held_out_path(path)
+            records = [json.loads(line) for line in path.read_bytes().splitlines()]
+            chosen = synthetic.held_out_clusters((row["cluster_id"] for row in records), value["seed"])
+            self.assertEqual(sidecar.read_text().splitlines(), [row["id"] for row in records if row["cluster_id"] in chosen])
+            self.assertEqual(len(chosen), len(records) // synthetic.HELD_OUT_SHARE)
+            prefix = sidecar.read_bytes()
+            self.assertIn(_held_out_pin(set_root, "lookup"), result[1])
+            self.assertLess(result[1].index("cases:"), result[1].index("held out:"))
+            host = SyntheticHost(10)
+            code, output, errors = _run(host, root, root / "second", count=4)
+            self.assertEqual((code, errors), (0, ""), output)
+            manifest_path = root / "second/manifest.json"
+            value = json.loads(manifest_path.read_bytes())
+            marks_path.write_text(f"synthetic: CSA-1 {value['sheet_sha256'][:manifest.DIGEST_PREFIX_CHARS]} 2099-01-04\n"
+                                  + "".join(f"{index:02d} accept\n" for index in range(1, 5)))
+            result = _run_intake(manifest_path, marks_path, tuple(host.court_map.courts))
+            self.assertEqual((result[0], result[2]), (0, ""), result[1])
+            self.assertTrue(sidecar.read_bytes().startswith(prefix))
+            new_records = [json.loads(line) for line in path.read_bytes().splitlines()][len(records):]
+            chosen = synthetic.held_out_clusters((row["cluster_id"] for row in new_records), value["seed"])
+            expected = [row["id"] for row in new_records if row["cluster_id"] in chosen]
+            self.assertEqual(sidecar.read_bytes()[len(prefix):].decode().splitlines(), expected)
+            self.assertEqual(len(expected), len(new_records) // synthetic.HELD_OUT_SHARE)
+            self.assertIn("0 forced by family", result[1])
+            self.assertTrue(evalset.load_set(set_root, host.court_map.courts).ok)
+
+    def test_one_cluster_has_no_sidecar_unless_another_file_already_holds_it_out(self) -> None:
+        for forced in (False, True):
+            with self.subTest(forced=forced), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                set_root, manifest_path, marks_path, known_courts = _review_fixture(root, 1)
+                if forced:
+                    value = json.loads((manifest_path.parent / "drafts.jsonl").read_bytes())
+                    other = _family_case(value, "retrieval", 1)
+                    other_path = set_root / synthetic.case_path("retrieval")
+                    other_path.parent.mkdir(parents=True)
+                    other_path.write_text(synthetic.case_line(other))
+                    other_sidecar = evalset.held_out_path(other_path)
+                    other_sidecar.write_text(str(other["id"]) + "\n")
+                    previous = other_sidecar.read_bytes()
+                result = _run_intake(manifest_path, marks_path, known_courts)
+                self.assertEqual((result[0], result[2]), (0, ""), result[1])
+                sidecar = evalset.held_out_path(set_root / synthetic.case_path("lookup"))
+                self.assertEqual(sidecar.exists(), forced)
+                self.assertIn(f"held out: {int(forced)} of 1 cases (share 1/{synthetic.HELD_OUT_SHARE}, {int(forced)} forced by family)", result[1])
+                if forced:
+                    self.assertEqual(sidecar.read_text().splitlines(), ["research-qa-lookup-001"])
+                    self.assertEqual(other_sidecar.read_bytes(), previous)
+                    self.assertNotIn("propagated:", result[1])
+                else:
+                    self.assertNotIn("held-out list:", result[1])
+                self.assertTrue(evalset.load_set(set_root, known_courts).ok)
+
+    def test_forced_clusters_are_excluded_from_the_remaining_seeded_draw(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            set_root, manifest_path, marks_path, known_courts = _review_fixture(root, 4)
+            drafts = [json.loads(line) for line in (manifest_path.parent / "drafts.jsonl").read_bytes().splitlines()]
+            other = _family_case(drafts[0], "existence", 1)
+            path = set_root / synthetic.case_path("existence")
+            path.parent.mkdir(parents=True)
+            path.write_text(synthetic.case_line(other))
+            evalset.held_out_path(path).write_text(str(other["id"]) + "\n")
+            value = json.loads(manifest_path.read_bytes())
+            chosen = synthetic.held_out_clusters((row["cluster_id"] for row in drafts[1:]), value["seed"])
+            result = _run_intake(manifest_path, marks_path, known_courts)
+            self.assertEqual((result[0], result[2]), (0, ""), result[1])
+            case_file = set_root / synthetic.case_path("lookup")
+            records = [json.loads(line) for line in case_file.read_bytes().splitlines()]
+            self.assertEqual(evalset.held_out_path(case_file).read_text().splitlines(), [
+                row["id"] for row in records if row["cluster_id"] == other["cluster_id"] or row["cluster_id"] in chosen
+            ])
+            self.assertIn(f"held out: {1 + len(chosen)} of 4 cases (share 1/{synthetic.HELD_OUT_SHARE}, 1 forced by family)", result[1])
+            self.assertTrue(evalset.load_set(set_root, known_courts).ok)
+
+    def test_chosen_clusters_propagate_to_active_cases_across_files_before_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            set_root, manifest_path, marks_path, known_courts = _review_fixture(root, 6)
+            drafts = [json.loads(line) for line in (manifest_path.parent / "drafts.jsonl").read_bytes().splitlines()]
+            value = json.loads(manifest_path.read_bytes())
+            chosen = synthetic.held_out_clusters((row["cluster_id"] for row in drafts), value["seed"])
+            expected: dict[str, list[str]] = {}
+            for category in ("retrieval", "synthesis"):
+                path = set_root / synthetic.case_path(category)
+                records = [_family_case(row, category, index) for index, row in enumerate(drafts, 1)]
+                retired = _family_case(next(row for row in drafts if row["cluster_id"] in chosen), category, 7)
+                successor = _synthetic_case(f"research-qa-{category}-008", category=category)
+                successor["jurisdiction"] = [known_courts[0]]
+                source = f"fictitious/{category}-previous"
+                successor["cluster_id"] = source
+                cast(list[dict[str, object]], successor["gold"])[0]["source_id"] = source
+                successor["expected"] = {"answer": ANSWER, "must_cite": [source]}
+                successor["supersedes"] = retired["id"]
+                records.extend((retired, successor))
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("".join(synthetic.case_line(row) for row in records))
+                if category == "retrieval":
+                    evalset.held_out_path(path).write_text(str(successor["id"]) + "\n")
+                expected[category] = [cast(str, row["id"]) for row in records[:6] if row["cluster_id"] in chosen]
+            before = {path.relative_to(set_root): path.read_bytes() for path in set_root.rglob("*") if path.is_file()}
+            dry = _run_intake(manifest_path, marks_path, known_courts, dry_run=True)
+            self.assertEqual((dry[0], dry[2]), (0, ""), dry[1])
+            self.assertEqual({path.relative_to(set_root): path.read_bytes() for path in set_root.rglob("*") if path.is_file()}, before)
+            writes: list[Path] = []
+            original_write = intake.write_atomic
+            def write(path: Path, payload: bytes, **kwargs: object) -> None:
+                writes.append(path)
+                original_write(path, payload)
+            with patch.object(intake, "write_atomic", side_effect=write):
+                result = _run_intake(manifest_path, marks_path, known_courts)
+            self.assertEqual(result, dry)
+            self.assertEqual(writes, [set_root / synthetic.case_path("lookup"), *(
+                evalset.held_out_path(set_root / synthetic.case_path(category)) for category in ("lookup", "retrieval", "synthesis")
+            )])
+            for category, ids in expected.items():
+                sidecar = evalset.held_out_path(set_root / synthetic.case_path(category))
+                self.assertEqual(sidecar.read_text().splitlines(), (["research-qa-retrieval-008"] if category == "retrieval" else []) + ids)
+                self.assertIn(f"propagated: {category} {len(ids)}\n", result[1])
+            list_rows = [row for row in result[1].splitlines() if row.startswith("held-out list:")]
+            self.assertEqual(list_rows, [_held_out_pin(set_root, category) for category in ("lookup", "retrieval", "synthesis")])
+            self.assertTrue(evalset.load_set(set_root, known_courts).ok)
+
+    def test_unreadable_propagated_sidecar_refuses_before_any_write(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            set_root, manifest_path, marks_path, known_courts = _review_fixture(root, 4)
+            drafts = [json.loads(line) for line in (manifest_path.parent / "drafts.jsonl").read_bytes().splitlines()]
+            path = set_root / synthetic.case_path("retrieval")
+            path.parent.mkdir(parents=True)
+            path.write_text("".join(synthetic.case_line(_family_case(row, "retrieval", index)) for index, row in enumerate(drafts, 1)))
+            sidecar = evalset.held_out_path(path)
+            original_read = Path.read_bytes
+            def read(path: Path) -> bytes:
+                if path == sidecar:
+                    raise OSError(REASON)
+                return original_read(path)
+            before = path.read_bytes()
+            with patch.object(Path, "read_bytes", new=read), patch.object(intake, "write_atomic") as write:
+                result = _run_intake(manifest_path, marks_path, known_courts)
+            write.assert_not_called()
+            self.assert_refusal(result, "synthetic-retrieval.held-out.ids", "synthetic-lookup.jsonl")
+            self.assertEqual(path.read_bytes(), before)
+            self.assertFalse((set_root / synthetic.case_path("lookup")).exists())
+
+    def test_write_and_reload_failures_restore_every_file_and_remove_new_sidecars(self) -> None:
+        for scenario in ("reload-findings", "reload-exception", "sidecar-write", "restore-failure"):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                set_root, manifest_path, marks_path, known_courts = _review_fixture(root, 4)
+                drafts = [json.loads(line) for line in (manifest_path.parent / "drafts.jsonl").read_bytes().splitlines()]
+                for category in ("retrieval", "synthesis"):
+                    path = set_root / synthetic.case_path(category)
+                    path.parent.mkdir(exist_ok=True)
+                    records = [_family_case(row, category, index) for index, row in enumerate(drafts, 1)]
+                    if category == "retrieval":
+                        prior = _synthetic_case("research-qa-retrieval-005", category="retrieval")
+                        prior["jurisdiction"] = [known_courts[0]]
+                        records.append(prior)
+                        evalset.held_out_path(path).write_text(str(prior["id"]) + "\n")
+                    path.write_text("".join(synthetic.case_line(row) for row in records))
+                previous_case = _synthetic_case("research-qa-lookup-001")
+                previous_case["jurisdiction"] = [known_courts[0]]
+                case_path = set_root / synthetic.case_path("lookup")
+                case_path.write_text(synthetic.case_line(previous_case))
+                own_sidecar = evalset.held_out_path(case_path)
+                own_sidecar.write_text(str(previous_case["id"]) + "\n")
+                before = {path.relative_to(set_root): path.read_bytes() for path in set_root.rglob("*") if path.is_file()}
+                loaded = evalset.load_set(set_root, known_courts)
+                self.assertTrue(loaded.ok, loaded.findings)
+                original_write = intake.write_atomic
+                attempts: list[Path] = []
+                def write(path: Path, payload: bytes, *, attempts: list[Path] = attempts,
+                          scenario: str = scenario, own_sidecar: Path = own_sidecar,
+                          original_write: Callable[..., None] = original_write) -> None:
+                    attempts.append(path)
+                    if scenario == "sidecar-write" and path.name == "synthetic-synthesis.held-out.ids":
+                        raise OSError(REASON)
+                    if scenario == "restore-failure" and path == own_sidecar and attempts.count(path) > 1:
+                        raise OSError(REASON)
+                    original_write(path, payload)
+                second: object = OSError(REASON) if scenario == "reload-exception" else evalset.EvalSetLoadResult()
+                with (
+                    patch.object(intake, "write_atomic", side_effect=write),
+                    patch.object(evalset, "load_set", side_effect=[loaded, second]),
+                ):
+                    result = _run_intake(manifest_path, marks_path, known_courts)
+                self.assert_refusal(result, "synthetic-lookup.jsonl", "synthetic-lookup.held-out.ids",
+                                    "synthetic-retrieval.held-out.ids", "synthetic-synthesis.held-out.ids")
+                after = {path.relative_to(set_root): path.read_bytes() for path in set_root.rglob("*") if path.is_file()}
+                if scenario == "restore-failure":
+                    self.assertIn("files could not be restored", result[2])
+                    self.assertEqual(case_path.read_bytes(), before[case_path.relative_to(set_root)])
+                    restored = evalset.held_out_path(set_root / synthetic.case_path("retrieval"))
+                    self.assertEqual(restored.read_bytes(), before[restored.relative_to(set_root)])
+                    self.assertFalse(evalset.held_out_path(set_root / synthetic.case_path("synthesis")).exists())
+                else:
+                    self.assertEqual(after, before)
+                    self.assertTrue(evalset.load_set(set_root, known_courts).ok)
+
+
 class SharedManifest(unittest.TestCase):
     """One file hold allows appends and refuses changed prefixes."""
 
@@ -2561,7 +2951,7 @@ class SharedManifest(unittest.TestCase):
             "request-failed", "http-status", "truncated", "off-schema", "closed-book-failed",
             "hash-changed", "not-ready", "already-cased", "document-short", "unpublished",
             "no-case-name", "cited-absent", "state-outranked", "no-state-kind", "same-document",
-            "same-cluster", "no-kind",
+            "same-cluster", "no-kind", "premise-in-record",
         })
         self.assertEqual(len(manifest.DISCARD_REASONS), len(set(manifest.DISCARD_REASONS)))
 

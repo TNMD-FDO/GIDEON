@@ -5,12 +5,13 @@ import subprocess
 import unittest
 from dataclasses import asdict, replace
 
-from test_index_lexical_host import JOB_ID, QueueHost
+from test_index_lexical_host import JOB_ID, QueueHost, sample_inputs
 from test_index_record import NAME, RENDERED, inputs_for, row_for
 
 from gideon.host import caselaw, report, stack, worker
 from gideon.host.index.dupes import defer_dupes, read_dupes
 from gideon.host.index.lexical import BuildRead
+from gideon.host.index.sample import GoldDocument
 from gideon.host.render.worker import (
     DUPES_FAILURE_REASONS,
     DUPES_LOCK_PREFIX,
@@ -29,6 +30,47 @@ def failed_host(reason: str) -> QueueHost:
 
 
 class Defer(unittest.TestCase):
+    def test_sample_arguments_are_bound_on_stdin_without_the_reporting_version(self) -> None:
+        selection = sample_inputs()
+        inputs = replace(inputs_for(), sample=selection)
+        host = QueueHost()
+        self.assertEqual(defer_dupes(host, RENDERED, inputs), JOB_ID)
+        self.assertEqual(len(host.calls), 1)
+        argv, sql = host.calls[0]
+        assert sql is not None
+        args = json.loads(sql.split("\\set v_args '", 1)[1].split("'", 1)[0])
+        self.assertEqual(args["sample"], {
+            "gold": [{"source_id": document.source_id, "sha256": document.sha256} for document in selection.gold],
+            "fill_per_million": selection.fill_per_million,
+        })
+        self.assertNotIn(selection.set_version, sql)
+        for document in selection.gold:
+            self.assertNotIn(document.source_id, " ".join(argv))
+            if document.sha256 is not None:
+                self.assertNotIn(document.sha256, " ".join(argv))
+
+    def test_invalid_sample_refuses_before_queueing_with_clustering_words(self) -> None:
+        selection = sample_inputs()
+        sentinel = "FICTITIOUS invalid selection; do not print"
+        for invalid, field in (
+            (sentinel, "sample"),
+            (replace(selection, gold=(GoldDocument(sentinel, None),)), "source_id"),
+            (replace(selection, gold=(GoldDocument("example:opinion:17", sentinel),)), "sha256"),
+            (replace(selection, fill_per_million=0), "fill_per_million"),
+        ):
+            with self.subTest(field=field):
+                host = QueueHost()
+                result = defer_dupes(
+                    host, RENDERED, replace(inputs_for(), sample=invalid),  # type: ignore[arg-type]
+                    command_path="index build caselaw --sample",
+                )
+                assert isinstance(result, Problem)
+                self.assertIn("clustering", result.problem)
+                self.assertIn(field, result.problem)
+                self.assertNotIn(sentinel, result.problem + result.fix)
+                self.assertIn(report.command("index build caselaw --sample"), result.fix)
+                self.assertEqual(host.calls, [])
+
     def test_statement_binds_all_arguments_and_lock_on_stdin(self) -> None:
         inputs = inputs_for()
         host = QueueHost()

@@ -1693,6 +1693,7 @@ def _run_body(
             f"{len(slice_result.results)} results over {cases} active cases "
             f"at {slice_spec.repeats} repeats"
         )
+    run_detail += f", {len(selection.tuning)} tuning, {len(selection.held_out)} held out"
     if selection.takes_signoff:
         run_detail += f", {len(selection.unsigned)} unsigned excluded"
     print_stage(StageResult("run", True, run_detail, ""))

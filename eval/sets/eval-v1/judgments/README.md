@@ -34,7 +34,7 @@ Two records yield no query: `HARV-014`, a prompt-writing request, and `HARV-017`
 
 ## Where grades come from
 
-Grades come through the **grading kit**: a **pool** of candidate passages goes in, one **packet** per query per grader comes out, the graders return small **grades files**, and the intake appends the **judgments file** beside this page. The pools come from the sample generation through the pool builder below; the kit's own tests run over an invented fixture. Packets, their manifest, and returned grades files are built **outside any checkout** and are never committed — the one committed product is the judgments file.
+Grades come through the **grading kit**: a **pool** of candidate passages goes in, one **packet** per query per grader comes out, the graders return small **grades files**, and the intake appends the **judgments file** beside this page. The pools come from a generation of either stack through the pool builder below; the kit's own tests run over an invented fixture. Packets, their manifest, and returned grades files are built **outside any checkout** and are never committed — the one committed product is the judgments file.
 
 A passage is identified by its **gold-evidence coordinates** — source id,
 canonical-text SHA-256, and a code-point offset range — and never by a chunk id,
@@ -44,13 +44,21 @@ because the corpus is later re-chunked and a grade must survive that change.
 
 The contract the pool builder writes to: UTF-8 JSONL kept outside the checkout, one line per query, keys `query_id` and `passages` and no others. Each passage carries `source_id`, `sha256`, `start`, `end`, `caption`, `text`, and an optional `provenance` object. `provenance` is where a pool may keep a passage's legs, ranks, and scores; the packet builder checks only that it is an object and never reads into it, which is the mechanism behind "no packet shows a score, a rank, or which leg found a passage".
 
-The pool builder runs on the box, as root, from a checkout the CI sibling's worker mounts:
+The pool builder runs on the box, as root, from a checkout — under the default `--stack ci` one the CI sibling's worker mounts; under `--stack production` production's worker must be healthy and able to import the pool leg:
 
 ```
-sudo python3 -B -m tools.judgments.pool <generation> --out <dir>
+sudo python3 -B -m tools.judgments.pool <generation> [--stack production] --out <dir>
 ```
 
-It reads the named sample generation on the sibling and queries it three ways for every active query: a dense query with the release's retrieval instruction, a lexical query, and the controlling leg, the dense query filtered to the site's home courts and the Supreme Court. A query's stated jurisdiction narrows every leg to its courts, a state's high court widened to that state's appellate courts, and the Supreme Court always kept. The pool is the top ten dense, the top ten lexical, and the top five controlling passages, deduplicated by coordinates, each passage's `provenance` naming every leg that found it with that leg's rank and score. Into the empty output directory it writes `pool.jsonl`, the three ranked lists below, and a content-free `summary.json`; a query no leg answers is left out of the pool and written to the ranked lists with an empty list.
+It reads the named generation in the chosen stack's record and queries it three ways for every active query: a dense query with the release's retrieval instruction, a lexical query, and the controlling leg, the dense query filtered to the site's home courts and the Supreme Court. A query's stated jurisdiction narrows every leg to its courts, a state's high court widened to that state's appellate courts, and the Supreme Court always kept. The pool is the top ten dense, the top ten lexical, and the top five controlling passages, deduplicated by coordinates, each passage's `provenance` naming every leg that found it with that leg's rank and score. Into the empty output directory it writes `pool.jsonl`, the three ranked lists below, and a content-free `summary.json`; a query no leg answers is left out of the pool and written to the ranked lists with an empty list.
+
+A grader who already graded a query against one pool takes the rest of a fuller pool as a top-up, run from a checkout without root:
+
+```
+python3 -m tools.judgments.topup <full pool> <seen pool> --query <id> [--query <id> …] --out <file>
+```
+
+For each named query, active and present in both pools, it writes the full pool's passages whose coordinates the seen pool lacks, in the full pool's order with their `provenance`, as one pool-file line; a query with nothing new gets no line. The output is an absent file outside the checkout, and the packet builder reads it as any pool file.
 
 The file is checked whole, every finding reported at once, each located by
 line, query id, and passage ordinal alone: the query id is a known active id

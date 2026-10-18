@@ -226,7 +226,7 @@ def dense(
 def dupes(
     context: procrastinate.JobContext, name: str, collection: str, label: str,
     snapshot: str, courts: Mapping[str, Mapping[str, object]], pipeline: str,
-    embedding_space: str, inputs_hash: str,
+    embedding_space: str, inputs_hash: str, *, sample: Mapping[str, object] | None = None,
 ) -> None:
     """Cluster a generation outside the worker's event loop."""
 
@@ -238,6 +238,7 @@ def dupes(
             "name": name, "collection": collection, "label": label,
             "snapshot": snapshot, "courts": courts, "pipeline": pipeline,
             "embedding_space": embedding_space, "inputs_hash": inputs_hash,
+            "sample": sample,
         },
         job_id, gideon.worker.dupes.PsycopgGenerations(),
         gideon.worker.dupes.FileSignatures(),

@@ -248,20 +248,24 @@ class Build(unittest.TestCase):
         name = sample.sample_name(base.name)
         row = self.host.generations[name]
         self.assertEqual(row.inputs_hash, sample.sample_inputs_hash(base.inputs_hash, label, selection.fill_per_million))
-        self.assertEqual([args["sample"] for args in self.host.deferred], [sample.arguments(selection)] * 2)
-        self.assertEqual([args["name"] for args in self.host.deferred], [name] * 2)
-        stages = ("preconditions", "lockfile", "generation", "guard", "reserve", "build", "counts",
+        self.assertEqual([args["sample"] for args in self.host.deferred], [sample.arguments(selection)] * 3)
+        self.assertEqual([args["name"] for args in self.host.deferred], [name] * 3)
+        self.assertEqual(list(self.host.task_by_job.values()), [DUPES_TASK, LEXICAL_TASK, DENSE_TASK])
+        stages = ("preconditions", "lockfile", "generation", "guard", "reserve", "cluster", "build", "counts",
                   "dense", "gold", "built", "treatment", "report")
         self.assertEqual(sorted(stages, key=lambda stage: out.index(f"{stage}: ok")), list(stages))
         self.assertEqual([line for line in out.splitlines()
-                          if line.split(":")[0] in {"smoke", "cluster"}], [])
+                          if line.split(":")[0] == "smoke"], [])
         self.assertEqual(self.host.treatment_payloads[0]["gen_id"], name)
         self.assertEqual(self.host.treatment_reads[0]["doc_ids"], [])
         self.assertEqual(self.host.reports[0]["gen_id"], name)
         self.assertEqual(self.host.reports[0]["treatment"], self.host.treatment_results[0].to_json())
         self.assertTrue(self.host.reports[0]["wall_clock"]["whole_build"])
         self.assertEqual(self.host.reports[0]["wall_clock"]["run_seconds"], self.time)
-        self.assertNotIn("cluster", self.host.reports[0]["gates"])
+        self.assertEqual(self.host.reports[0]["gates"]["cluster"], {
+            "seconds": row.counts["cluster_seconds"], "budget": CLUSTER_BUDGET_SECONDS,
+            "reused": False, "pass": True,
+        })
         self.assertEqual(tuple(self.host.reports[0]["courts"]), tuple(sorted(base.courts)))
         for court in base.courts:
             self.assertEqual(self.host.reports[0]["courts"][court]["anchors"], self.host.caselaw_anchor_counts[court])
@@ -344,7 +348,7 @@ class Build(unittest.TestCase):
                 else:
                     self.assertIn(reserve.describe(verdict), out)
                 if verdict.build_cleared:
-                    self.assertEqual(len(self.host.deferred), 2)
+                    self.assertEqual(len(self.host.deferred), 3)
                     self.assertEqual(len(self.host.reports), 1)
                     self.assertFalse(self.host.reports[0]["wall_clock"]["whole_build"])
                 else:
@@ -388,12 +392,13 @@ class Build(unittest.TestCase):
         self.assertIsNone(self.host.engine_holder)
         self.assert_sample_fix(out, label)
 
-    def test_sample_build_counts_dense_and_built_failures_report_the_failed_stage(self) -> None:
+    def test_sample_cluster_build_counts_dense_and_built_failures_report_the_failed_stage(self) -> None:
         label = self.fixture.labels[0]
-        for stage in ("build", "counts", "dense", "built"):
+        for stage in ("cluster", "build", "counts", "dense", "built"):
             with self.subTest(stage=stage):
                 self.host.generations.clear()
                 self.host.reports.clear()
+                self.host.cluster_failure_reason = "cluster-budget" if stage == "cluster" else None
                 self.host.failure_reason = "store" if stage == "build" else None
                 self.host.finish_stamp = None if stage == "counts" else NOW.isoformat()
                 self.host.dense_failure_reason = "store" if stage == "dense" else None
@@ -406,7 +411,11 @@ class Build(unittest.TestCase):
                 payload = self.host.reports[0]
                 self.assertEqual(payload["gen_id"], sample.sample_name(self.inputs(label).name))
                 self.assertEqual(payload["failed_stage"], stage)
-                self.assertEqual(payload["failure_reason"], "store" if stage in {"build", "dense"} else None)
+                self.assertEqual(payload["failure_reason"],
+                                 "cluster-budget" if stage == "cluster" else "store" if stage in {"build", "dense"} else None)
+                if stage == "cluster":
+                    self.assertNotIn("build: ok", out)
+                    self.assertFalse(payload["gates"]["cluster"]["pass"])
                 self.assertFalse(payload["wall_clock"]["whole_build"])
                 self.assertIsNone(payload["treatment"])
                 self.assertEqual(self.host.treatment_payloads, [])
@@ -426,9 +435,12 @@ class Build(unittest.TestCase):
         self.assertIsNone(self.host.engine_holder)
         self.assert_sample_fix(out, label)
         self.host.fail_phase = None
+        count = len(self.host.deferred)
         code, out, err = self.run_build(label, sample=self.sample_inputs())
         self.assertEqual((code, err), (0, ""), out)
         self.assertNotIn("rejoined", out)
+        self.assertIn("cluster: ok", out)
+        self.assertEqual(len(self.host.deferred[count:]), 3)
         self.assertIn("gold: ok", out)
         self.assertIn("report: ok", out)
         self.assertEqual(len(self.host.reports), 1)
@@ -446,25 +458,34 @@ class Build(unittest.TestCase):
         self.assertIsNone(self.host.treatment_reads[0]["doc_ids"])
         self.assertFalse(any("public.generation_documents" in sql for _, sql in self.host.statement_directories))
 
-    def test_sample_rejoins_then_runs_both_halves_with_the_current_selection(self) -> None:
-        """A rejoined job may carry an earlier gold selection, so each half runs again with this one."""
+    def test_sample_rejoins_then_runs_all_three_jobs_with_the_current_selection(self) -> None:
+        """Rejoined jobs may carry earlier gold, so each runs again with this selection."""
 
         label = self.fixture.labels[0]
         self.assertEqual(self.run_build(label, sample=self.sample_inputs())[0], 0)
-        lexical_job = next(job for job, task in self.host.task_by_job.items() if task != DENSE_TASK)
+        cluster_job = next(job for job, task in self.host.task_by_job.items() if task == DUPES_TASK)
+        lexical_job = next(job for job, task in self.host.task_by_job.items() if task == LEXICAL_TASK)
         dense_job = next(job for job, task in self.host.task_by_job.items() if task == DENSE_TASK)
         self.host.live_id, self.host.dense_live_id = lexical_job, dense_job
+        self.host.cluster_live_id = cluster_job
         selection = self.sample_inputs((GoldDocument(sample.source_id("example", 7), "b" * 64),))
         count = len(self.host.deferred)
 
         code, out, err = self.run_build(label, sample=selection)
 
         self.assertEqual((code, err), (0, ""), out)
+        self.assertIn(f"rejoined job {cluster_job}", out)
         self.assertIn(f"rejoined job {lexical_job}", out)
         self.assertIn(f"rejoined job {dense_job}", out)
         deferred = self.host.deferred[count:]
-        self.assertEqual(len(deferred), 2)
-        self.assertEqual([args["sample"] for args in deferred], [sample.arguments(selection)] * 2)
+        self.assertEqual(len(deferred), 3)
+        self.assertEqual([args["sample"] for args in deferred], [sample.arguments(selection)] * 3)
+        new_cluster_job = max(job for job, task in self.host.task_by_job.items() if task == DUPES_TASK)
+        self.assertNotEqual(new_cluster_job, cluster_job)
+        self.assertEqual(self.host.jobs[cluster_job]["sample"], sample.arguments(self.sample_inputs()))
+        self.assertEqual(self.host.jobs[new_cluster_job]["sample"], sample.arguments(selection))
+        self.assertLess(out.index(f"rejoined job {cluster_job}"), out.index(f"deferred job {new_cluster_job}"))
+        self.assertLess(out.index(f"deferred job {new_cluster_job}"), out.index(f"rejoined job {lexical_job}"))
         self.assertLess(out.index(f"rejoined job {lexical_job}"), out.index("counts: ok"))
         self.assertLess(out.index(f"rejoined job {dense_job}"), out.index("gold: ok"))
 
@@ -515,7 +536,7 @@ class Build(unittest.TestCase):
         code, out, err = self.run_build(label, sample=selection)
         self.assertEqual((code, err), (0, ""), out)
         self.assertNotIn("nothing built", out)
-        self.assertEqual(len(self.host.deferred), 2)
+        self.assertEqual(len(self.host.deferred), 3)
         self.assertEqual(self.host.generations[name].state, "live")
         for attribute in ("failure_reason", "dense_failure_reason"):
             with self.subTest(job=attribute):
@@ -548,13 +569,14 @@ class Build(unittest.TestCase):
 
     def test_sample_failures_release_the_engine_and_print_parseable_sample_fixes(self) -> None:
         label = self.fixture.labels[0]
-        phases = ("copy-read", "lockfile", "generation-read", "generation", "live-job", "defer", "build", "counts",
+        phases = ("copy-read", "lockfile", "generation-read", "generation",
+                  "cluster-live-job", "cluster-defer", "cluster", "cluster-counts", "live-job", "defer", "build", "counts",
                   "dense-live-job", "dense-defer", "dense", "dense-counts", "gold")
         for phase in phases:
             with self.subTest(phase=phase):
                 self.host.generations.clear()
                 self.host.jobs.clear()
-                self.host.live_id = self.host.dense_live_id = None
+                self.host.live_id = self.host.dense_live_id = self.host.cluster_live_id = None
                 self.host.active_task = LEXICAL_TASK
                 self.host.fail_phase = phase
                 before = self.host.engine_releases
@@ -569,19 +591,25 @@ class Build(unittest.TestCase):
     def test_sample_interrupts_release_the_engine_at_each_stage(self) -> None:
         label = self.fixture.labels[0]
         for phase in ("preconditions", "lockfile", "generation-read", "generation", "guard", "reserve",
-                      "build", "counts", "dense", "gold", "treatment-manifest", "treatment-read", "treatment", "report"):
+                      "cluster", "build", "counts", "dense", "gold", "treatment-manifest", "treatment-read", "treatment", "report"):
             with self.subTest(phase=phase):
                 self.host.generations.clear()
                 self.host.jobs.clear()
-                self.host.live_id = self.host.dense_live_id = None
+                self.host.live_id = self.host.dense_live_id = self.host.cluster_live_id = None
                 self.host.active_task = LEXICAL_TASK
                 self.host.interrupt_phase = phase
                 before = self.host.engine_releases
+                reports = copy.deepcopy(self.host.reports)
                 code, out, err = self.run_build(label, sample=self.sample_inputs())
                 self.assertEqual(code, 1)
                 self.assertIn("interrupted", out + err)
                 self.assertIsNone(self.host.engine_holder)
                 self.assertEqual(self.host.engine_releases, before + 1)
+                if phase == "cluster":
+                    self.assertIn("interrupted; the clustering continues in the worker", out)
+                    self.assertIsNotNone(self.host.cluster_live_id)
+                    self.assertEqual(self.host.reports, reports)
+                    self.assertNotIn("report:", out)
                 self.assert_sample_fix(out + err, label)
 
     def test_sample_requires_its_worker_and_judges_lockfile_state_on_production(self) -> None:

@@ -29,7 +29,7 @@ DISCARD_REASONS: Final[tuple[str, ...]] = synthetic.DISCARD_REASONS + (
     "request-failed", "http-status", "truncated", "off-schema", "closed-book-failed",
     "hash-changed", "not-ready", "no-case-name", "already-cased", "document-short",
     "unpublished", "cited-absent", "state-outranked", "no-state-kind",
-    "same-document", "same-cluster", "no-kind",
+    "same-document", "same-cluster", "no-kind", "premise-in-record",
 )
 SHEET_BLOCK_HEADER: Final[str] = "Synthetic case"
 SHEET_REQUIRED: Final[str] = "required"

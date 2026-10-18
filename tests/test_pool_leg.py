@@ -702,6 +702,22 @@ class HostLeg(unittest.TestCase):
             with self.subTest(error=type(error).__name__):
                 self.assert_problem(self.run_host(FakeHost(error)), "exec could not run", type(error).__name__)
 
+    def test_failure_fix_logs_the_default_or_explicit_embed_service(self) -> None:
+        """A leg's repair command names the stack's own embedding service."""
+        for embed_service in (None, "fixture-production-embed"):
+            with self.subTest(embed_service=embed_service):
+                result = pool_leg.run_leg(
+                    cast(Host, FakeHost(_completed(code=17))), self.rendered_dir, HEADER, (self.query,),
+                    marker=self.marker, deadline=self.deadline, embed_service=embed_service,
+                )
+                assert isinstance(result, Problem)
+                self.assertIn("exec exited 17", result.problem)
+                expected_embed = EMBED_RELAY_SERVICE_NAME if embed_service is None else embed_service
+                for service in (OPENSEARCH_SERVICE_NAME, QDRANT_SERVICE_NAME, expected_embed):
+                    self.assertIn(stack.logs_fix(self.rendered_dir, service), result.fix)
+                if embed_service is not None:
+                    self.assertNotIn(stack.logs_fix(self.rendered_dir, EMBED_RELAY_SERVICE_NAME), result.fix)
+
     def test_reply_counts_ids_and_json_fail_closed(self) -> None:
         wire = self.reply.to_wire()
         cases = (

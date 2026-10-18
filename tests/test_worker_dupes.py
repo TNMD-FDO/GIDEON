@@ -22,6 +22,7 @@ from test_worker_caselaw import _CapturedConnection
 from test_worker_lexical import StreamConnection, configuration
 
 from gideon.host import cas
+from gideon.host.index import sample
 from gideon.host.sysio import RealHost
 from gideon.worker import chunker, dupes, lexical, logs, treatment
 from gideon.worker.pipeline import PIPELINE_VERSION
@@ -327,7 +328,6 @@ class FixtureRecord:
         self.clusters: dict[str, tuple[int, int, bool]] = {}
         self.members: dict[str, str] = {}
         self.scope_reads: list[tuple[object, ...]] = []
-        self.written_scope: tuple[object, ...] | None = None
         self.timestamps: list[tuple[str, datetime | None]] = []
         self.closed = False
         self.failure: str | None = None
@@ -371,21 +371,23 @@ class FixtureRecord:
 
     def write(
         self, name: str, mapping: Mapping[str, str], counts: dupes.DupesCounts,
-        scope: tuple[str, str, date, Sequence[str], str], *,
+        clusters: Mapping[str, tuple[int, int]], *,
         remaining: Callable[[], float], stamp: Callable[[], tuple[int, datetime]],
     ) -> dupes.DupesCounts:
         remaining()
         assert name == NAME and self.clustered_at is None
         self.mapping = dict(mapping)
-        self.written_scope = scope
+        selected = {doc_id for batch in self.batch_reads for doc_id in batch}
         grouped: dict[str, list[chunker.NewChunk]] = {}
         for chunk in self.chunk_rows:
-            grouped.setdefault(mapping[chunk.content_hash], []).append(chunk)
+            if chunk.doc_id in selected:
+                grouped.setdefault(mapping[chunk.content_hash], []).append(chunk)
         self.clusters = {
             key: (len(chunks), len({chunk.doc_id for chunk in chunks}),
                   len({chunk.doc_id for chunk in chunks}) >= dupes.BOILERPLATE_OPINIONS)
             for key, chunks in grouped.items() if len(chunks) >= 2
         }
+        assert clusters == {key: (chunks, opinions) for key, (chunks, opinions, _) in self.clusters.items()}
         self.members = {
             content_hash: cluster for content_hash, cluster in mapping.items()
             if content_hash != cluster and cluster in self.clusters
@@ -478,7 +480,7 @@ class ClusteringJob(unittest.TestCase):
                 document_id = f"{len(self.documents) + 1:064x}"
                 court = "scotus" if group == 0 and member in (10, 17) else "ca6"
                 decided = date(2090, 1, 1) if member == 17 else date(2091, 1, 1) if court == "scotus" else date(2080, 1, member % 28 + 1)
-                self.documents.append(dupes.Document(document_id, digest, court, decided))
+                self.documents.append(dupes.Document(document_id, digest, court, decided, "fictions", len(self.documents) + 1))
                 self.chunks.append(chunker.NewChunk(
                     document_id, document_id, PIPELINE_VERSION, 0, "b" * 64,
                     "majority", 0, len(text), content_hash, len(text.split()),
@@ -495,6 +497,15 @@ class ClusteringJob(unittest.TestCase):
         self.record = FixtureRecord(self.documents, self.chunks)
         self.signatures = CheckedSignatures(self.record)
         self.sketcher = InProcessSketcher(self.root)
+
+    def select(self, gold: Sequence[dupes.Document], fill_per_million: int = 1) -> None:
+        self.inputs["sample"] = {
+            "gold": [
+                {"source_id": sample.source_id(document.source, document.opinion_id), "sha256": None}
+                for document in gold
+            ],
+            "fill_per_million": fill_per_million,
+        }
 
     def attempt(self, *, job: int = 17, monotonic: Callable[[], float] = lambda: 0.0) -> dupes.DupesCounts:
         return dupes.build(
@@ -552,8 +563,7 @@ class ClusteringJob(unittest.TestCase):
         self.assertEqual(sum(len(task.chunks) for task in sketcher.tasks), len(expected))
         self.assertEqual(len(record.batch_reads), (len(self.documents) + 6) // 7)
         self.assertTrue(all(len(batch) <= 7 for batch in record.batch_reads))
-        self.assertEqual(record.written_scope, ("caselaw", "fictions", date(2099, 1, 2), tuple(sorted(GEOGRAPHY)), PIPELINE_VERSION))
-        self.assertEqual(record.scope_reads, [record.written_scope])
+        self.assertEqual(record.scope_reads, [("caselaw", "fictions", date(2099, 1, 2), tuple(sorted(GEOGRAPHY)), PIPELINE_VERSION)])
         self.assertIsNone(record.failure)
         self.assertTrue(record.closed and sketcher.closed)
         self.assertFalse((self.work / f"{NAME}.sigs").exists())
@@ -568,6 +578,107 @@ class ClusteringJob(unittest.TestCase):
         self.assertEqual(first_record.events.count("write"), 1)
         self.assertEqual(second_record.events.count("write"), 1)
         self.assertFalse((self.work / f"{NAME}.sigs").exists())
+
+    def test_repeated_chunks_and_member_texts_in_one_document_count_one_opinion(self) -> None:
+        first, second = self.documents[:2]
+        texts = [cas.object_path(document.canonical_text_sha256, self.root).read_text() for document in (first, second)]
+        digest = cas.put(RealHost(), "\n".join(texts).encode(), root=self.root)
+        assert isinstance(digest, str)
+        self.record.document_rows = (replace(first, canonical_text_sha256=digest), *self.documents[2:])
+        second_chunk = replace(self.chunks[1], doc_id=first.doc_id, ordinal=1,
+                               char_start=len(texts[0]) + 1, char_end=len(texts[0]) + 1 + len(texts[1]))
+        repeated = replace(self.chunks[0], chunk_id="f" * 64, ordinal=2)
+        self.record.chunk_rows = (self.chunks[0], second_chunk, repeated, *self.chunks[2:])
+        counts = self.attempt()
+        chunks, opinions, flagged = self.record.clusters[self.groups[0][17]]
+        self.assertEqual((chunks, opinions), (len(self.groups[0]) + 1, len(self.groups[0]) - 1))
+        self.assertEqual(flagged, opinions >= dupes.BOILERPLATE_OPINIONS)
+        self.assertEqual(counts.cluster_chunks, len(self.record.chunk_rows))
+        self.assertEqual(counts.cluster_documents, len(self.record.document_rows))
+
+    def test_selection_clusters_gold_and_fill_with_selected_counts_and_chunk_reads(self) -> None:
+        label = str(self.inputs["label"])
+        rate = sample.SAMPLE_FILL_MAX // 3
+        fill = {document.doc_id for document in self.documents if sample.in_fill(label, document.doc_id, rate)}
+        gold = next(document for document in self.documents if document.doc_id not in fill)
+        self.select([gold], rate)
+        selected = [document.doc_id for document in self.documents if document.doc_id in fill | {gold.doc_id}]
+        chunks = [chunk for chunk in self.chunks if chunk.doc_id in selected]
+        hashes = {chunk.content_hash for chunk in chunks}
+        with patch.object(dupes, "DOCUMENT_BATCH_SIZE", 7):
+            counts = self.attempt()
+        self.assertTrue(fill)
+        self.assertLess(len(selected), len(self.documents))
+        self.assertEqual((counts.cluster_chunks, counts.cluster_texts, counts.cluster_documents),
+                         (len(chunks), len(hashes), len(selected)))
+        self.assertEqual(set(self.record.mapping), hashes)
+        batches = [tuple(selected[start:start + 7]) for start in range(0, len(selected), 7)]
+        self.assertEqual(self.record.batch_reads, batches * 2)
+        self.assertEqual(self.record.scope_reads, [])
+        self.assertEqual(self.signatures.opened, [(self.work / f"{NAME}.sigs", len(hashes))])
+        self.assertTrue(self.record.clusters)
+        self.assertTrue(all(not flagged for _, _, flagged in self.record.clusters.values()))
+
+    def test_same_selection_reuses_with_only_a_progress_merge(self) -> None:
+        self.select(self.documents[:3])
+        self.attempt()
+        standing = self.record.counts
+        clusters, members = self.record.clusters.copy(), self.record.members.copy()
+        timestamps = self.record.timestamps.copy()
+        self.record.events.clear()
+        self.record.progress_rows.clear()
+        self.record.batch_reads.clear()
+        self.signatures = CheckedSignatures(self.record)
+        self.sketcher = InProcessSketcher(self.root)
+        counts = self.attempt()
+        self.assertEqual(counts.cluster_reused, 1)
+        self.assertEqual(self.record.counts, replace(standing, cluster_reused=1))
+        self.assertEqual(self.record.progress_rows, [{"cluster_reused": 1}])
+        self.assertEqual(self.record.events, ["read", "documents"])
+        self.assertEqual((self.record.clusters, self.record.members), (clusters, members))
+        self.assertEqual(self.record.timestamps, timestamps)
+        self.assertEqual(self.record.scope_reads, [])
+        self.assertEqual(self.signatures.opened, [])
+        self.assertEqual(self.sketcher.tasks, [])
+
+    def test_selection_grown_by_one_gold_document_reclusters(self) -> None:
+        gold = self.documents[0]
+        self.select([gold])
+        first = self.attempt()
+        selected = {doc_id for batch in self.record.batch_reads for doc_id in batch}
+        added = next(document for document, chunk in zip(self.documents, self.chunks, strict=True)
+                     if document.doc_id not in selected and chunk.content_hash not in self.record.mapping)
+        self.assertEqual(self.record.events.count("write"), 1)
+        self.record.events.clear()
+        self.record.batch_reads.clear()
+        self.select([gold, added])
+        self.signatures = CheckedSignatures(self.record)
+        self.sketcher = InProcessSketcher(self.root)
+        counts = self.attempt()
+        self.assertEqual((counts.cluster_chunks, counts.cluster_texts, counts.cluster_documents),
+                         (first.cluster_chunks + 1, first.cluster_texts + 1, first.cluster_documents + 1))
+        self.assertEqual(counts.cluster_reused, 0)
+        self.assertEqual(self.record.events.count("start"), 1)
+        self.assertEqual(self.record.events.count("write"), 1)
+        self.assertEqual(self.record.timestamps, [("start", None), ("write", NOW)] * 2)
+        self.assertTrue(self.signatures.opened and self.sketcher.tasks)
+        self.assertEqual(self.record.scope_reads, [])
+
+    def test_live_sample_builds_and_live_without_selection_refuses(self) -> None:
+        original = self.record.generation
+        assert original is not None
+        self.record.generation = replace(original, state="live")
+        self.select([], sample.SAMPLE_FILL_MAX)
+        counts = self.attempt()
+        self.assertEqual(counts.cluster_chunks, len(self.chunks))
+        self.assertEqual(counts.cluster_reused, 0)
+        self.assertIn("write", self.record.events)
+        self.assertEqual(self.record.generation.state, "live")
+        self.reset_clients()
+        self.record.generation = replace(original, state="live")
+        del self.inputs["sample"]
+        self.refusal("invalid")
+        self.assertNotIn("start", self.record.events)
 
     def test_equal_scope_reuses_with_only_a_progress_merge(self) -> None:
         self.record.counts = dupes.DupesCounts(
@@ -860,7 +971,7 @@ class ClusteringJob(unittest.TestCase):
     def test_progress_bands_finish_and_failure_logs_are_content_free_through_the_real_handler(self) -> None:
         text_digest = cas.put(RealHost(), TEXT.encode(), root=self.root)
         assert isinstance(text_digest, str)
-        self.record.document_rows = (dupes.Document("f" * 64, text_digest, "scotus", NOW.date()),)
+        self.record.document_rows = (dupes.Document("f" * 64, text_digest, "scotus", NOW.date(), "fictions", 1),)
         self.record.chunk_rows = (chunker.NewChunk(
             "f" * 64, "f" * 64, PIPELINE_VERSION, 0, "b" * 64, "majority", 0, len(TEXT), text_digest, len(TEXT.split()),
         ),)
@@ -893,7 +1004,7 @@ class MappingConnection(_CapturedConnection):
 
     def __init__(self) -> None:
         super().__init__()
-        self.copied: list[tuple[str, str]] = []
+        self.copied: list[tuple[str, str, int | None, int | None]] = []
         self.fail_copy = False
 
     def execute(self, statement: str, parameters: tuple[object, ...] = ()) -> None:
@@ -903,7 +1014,7 @@ class MappingConnection(_CapturedConnection):
         self.execute(statement)
         return self
 
-    def write_row(self, row: tuple[str, str]) -> None:
+    def write_row(self, row: tuple[str, str, int | None, int | None]) -> None:
         if self.fail_copy:
             raise psycopg.OperationalError("fictitious private COPY diagnostic")
         assert self.commits == 0
@@ -929,11 +1040,18 @@ class RecordAdapter(unittest.TestCase):
         self.scope = ("caselaw", "fictions", NOW.date(), ("scotus", "ca6"), PIPELINE_VERSION)
 
     def test_atomic_write_statement_order_copy_rows_and_timestamp(self) -> None:
-        mapping = {"a" * 64: "b" * 64, "b" * 64: "b" * 64, "c" * 64: "c" * 64}
+        mapping = {"a" * 64: "b" * 64, "b" * 64: "b" * 64, "c" * 64: "c" * 64, "d" * 64: "d" * 64}
+        gathered = {"b" * 64: (6, 4), "c" * 64: (2, 1)}
         initial = dupes.DupesCounts(cluster_chunks=9, cluster_texts=len(mapping), cluster_documents=7, cluster_reused=1)
         self.writer.rows = [(2, 1, 1, 6, 8)]
-        merged = self.record.write(NAME, mapping, initial, self.scope, remaining=lambda: 2.5, stamp=lambda: (41, NOW))
-        self.assertEqual(self.writer.copied, list(mapping.items()))
+        merged = self.record.write(NAME, mapping, initial, gathered, remaining=lambda: 2.5, stamp=lambda: (41, NOW))
+        self.assertEqual(self.writer.copied, [
+            ("a" * 64, "b" * 64, None, None),
+            ("b" * 64, "b" * 64, *gathered["b" * 64]),
+            ("c" * 64, "c" * 64, *gathered["c" * 64]),
+            ("d" * 64, "d" * 64, None, None),
+        ])
+        self.assertEqual(self.stream.statements, [])
         bounds = [index for index, (sql, _) in enumerate(self.writer.statements) if sql == dupes.TIMEOUT_SQL]
         self.assertEqual(bounds, list(range(0, 18, 2)))
         self.assertTrue(all(self.writer.statements[index][1] == ("2500ms",) for index in bounds))
@@ -953,9 +1071,7 @@ class RecordAdapter(unittest.TestCase):
         self.assertEqual((self.writer.commits, self.writer.rollbacks), (1, 0))
         self.assertEqual(self.writer.statements[3][1], (NAME,))
         self.assertEqual(self.writer.statements[4][1], (NAME,))
-        self.assertEqual(self.writer.statements[5][1], (
-            NAME, dupes.BOILERPLATE_OPINIONS, "caselaw", "fictions", NOW.date(), ["scotus", "ca6"], PIPELINE_VERSION,
-        ))
+        self.assertEqual(self.writer.statements[5][1], (NAME, dupes.BOILERPLATE_OPINIONS))
         self.assertEqual(self.writer.statements[6][1], (NAME, NAME))
         self.assertEqual(self.writer.statements[7][1], (NAME, NAME))
         payload, at, name = self.writer.statements[-1][1]
@@ -964,8 +1080,10 @@ class RecordAdapter(unittest.TestCase):
         self.assertEqual((at, name), (NOW, NAME))
         for sql, clause in (
             (dupes.MAPPING_SQL, "ON COMMIT DROP"),
-            (dupes.CLUSTERS_SQL, "GROUP BY m.cluster_id HAVING COUNT(*) >= 2"),
-            (dupes.CLUSTERS_SQL, "COUNT(DISTINCT c.doc_id) >= %s"),
+            (dupes.MAPPING_SQL, "chunk_count integer, opinion_count integer"),
+            (dupes.COPY_SQL, "(content_hash, cluster_id, chunk_count, opinion_count)"),
+            (dupes.CLUSTERS_SQL, "m.content_hash = m.cluster_id AND m.chunk_count >= 2"),
+            (dupes.CLUSTERS_SQL, "m.opinion_count >= %s"),
             (dupes.MEMBERS_SQL, "WHERE m.cluster_id <> m.content_hash"),
             (dupes.MEMBERS_SQL, "k.gen_id = %s AND k.cluster_id = m.cluster_id"),
             (dupes.FINISH_SQL, "counts = counts || %s::jsonb, clustered_at = %s"),
@@ -973,6 +1091,9 @@ class RecordAdapter(unittest.TestCase):
         ):
             with self.subTest(clause=clause):
                 self.assertIn(clause, sql)
+        for sql, _ in self.writer.statements:
+            with self.subTest(sql=sql):
+                self.assertNotRegex(sql, r"\b(?:chunks|documents)\b")
 
     def test_write_errors_roll_back_without_committing_or_exposing_diagnostics(self) -> None:
         for failure in ("fail_execute", "fail_copy", "fail_commit"):
@@ -981,7 +1102,7 @@ class RecordAdapter(unittest.TestCase):
                 writer.rows = [(0, 0, 0, 0, 0)]
                 setattr(writer, failure, True)
                 with patch.object(self.record, "_connection", return_value=writer), self.assertRaises(dupes.DupesFailure) as raised:
-                    self.record.write(NAME, {"a" * 64: "a" * 64}, dupes.DupesCounts(), self.scope,
+                    self.record.write(NAME, {"a" * 64: "a" * 64}, dupes.DupesCounts(), {},
                                       remaining=lambda: 60.0, stamp=lambda: (1, NOW))
                 self.assertEqual((raised.exception.reason, raised.exception.error), ("database", "OperationalError"))
                 self.assertNotIn("diagnostic", str(raised.exception))
@@ -1009,26 +1130,26 @@ class RecordAdapter(unittest.TestCase):
                     return 1, NOW
 
                 with patch.object(self.record, "_connection", return_value=writer), self.assertRaises(dupes.DupesFailure) as raised:
-                    self.record.write(NAME, {"a" * 64: "a" * 64}, dupes.DupesCounts(), self.scope,
+                    self.record.write(NAME, {"a" * 64: "a" * 64}, dupes.DupesCounts(), {},
                                       remaining=remaining, stamp=stamp)
                 self.assertEqual(raised.exception.reason, "cluster-budget")
                 self.assertEqual((writer.commits, writer.rollbacks), (0, 1))
                 self.assertNotIn(dupes.FINISH_SQL, [sql for sql, _ in writer.statements])
 
     def test_scope_chunk_reads_start_and_partial_progress_are_bound(self) -> None:
-        self.writer.rows = [(9, 4)]
-        self.assertEqual(self.record.scope(*self.scope), tuple(self.writer.rows[0]))
-        self.assertEqual(self.writer.statements[-1], (
+        self.writer.rows = [(NOW, 9, 4)]
+        self.assertEqual(self.record.standing(NAME), tuple(self.writer.rows[0]))
+        self.stream.rows = [(9, 4)]
+        self.assertEqual(self.record.scope(*self.scope), tuple(self.stream.rows[0]))
+        self.assertEqual(self.stream.statements[-1], (
             dupes.SCOPE_SQL, ("caselaw", "fictions", NOW.date(), ["scotus", "ca6"], PIPELINE_VERSION),
         ))
         self.assertIn("COUNT(*), COUNT(DISTINCT c.content_hash)", dupes.SCOPE_SQL)
         self.assertIn(lexical.DOCUMENTS_SQL, dupes.SCOPE_SQL)
-        self.writer.rows = [(NOW, 9, 4)]
-        self.assertEqual(self.record.standing(NAME), tuple(self.writer.rows[0]))
         chunk = chunker.NewChunk("a" * 64, "b" * 64, PIPELINE_VERSION, 0, "c" * 64, "majority", 0, 5, "d" * 64, 1)
-        self.writer.rows = [astuple(chunk)]
+        self.stream.rows = [astuple(chunk)]
         self.assertEqual(self.record.chunks_for((chunk.doc_id,), chunk.pipeline), (chunk,))
-        self.assertEqual(self.writer.statements[-1], (dupes.CHUNKS_SQL, ([chunk.doc_id], chunk.pipeline)))
+        self.assertEqual(self.stream.statements[-1], (dupes.CHUNKS_SQL, ([chunk.doc_id], chunk.pipeline)))
         self.assertIn("doc_id = ANY(%s) AND pipeline = %s ORDER BY doc_id, ordinal", dupes.CHUNKS_SQL)
         counts = dupes.DupesCounts(cluster_chunks=9, cluster_texts=4)
         self.record.start(NAME, counts)
@@ -1047,7 +1168,10 @@ class RecordAdapter(unittest.TestCase):
 
     def test_documents_stream_without_writer_commits_closing_the_cursor(self) -> None:
         self.record.start(NAME, dupes.DupesCounts())
-        self.stream.rows = [("a" * 64, "b" * 64, "scotus", NOW.date()), ("c" * 64, "d" * 64, "ca6", NOW.date())]
+        self.stream.rows = [
+            ("a" * 64, "b" * 64, "scotus", NOW.date(), "fictions", 1),
+            ("c" * 64, "d" * 64, "ca6", NOW.date(), "fictions", 2),
+        ]
         documents = self.record.documents_with_opinions(*self.scope[:4])
         first = next(documents)
         self.assertEqual(astuple(first), self.stream.rows[0])

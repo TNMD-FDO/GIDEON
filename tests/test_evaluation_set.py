@@ -1,9 +1,12 @@
 """Eval-set loading contracts."""
 
+import ast
 import hashlib
 import json
 import tempfile
 import unittest
+from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 from unittest.mock import patch
@@ -20,8 +23,10 @@ from gideon.evaluation.evalset import (
     LoadedSet,
     ShapeSpec,
     case_findings,
+    held_out_path,
     load_set,
     select_cases,
+    tuning_cases,
 )
 from gideon.evaluation.judgments import Judgment, serialize
 from gideon.evaluation.signoffs import SignOff
@@ -34,6 +39,9 @@ from tools.exportboundary import absent_from_export
 
 ROOT = Path(__file__).resolve().parents[1]
 SENTINEL = "[FICTIONAL TEST QUESTION — never include this text in a finding]"
+# Every module that tunes a release artifact against the set, by repository
+# path: each must import tuning_cases and never call select_cases.
+TUNING_TOOLS: tuple[str, ...] = ()
 
 
 def _write(root: Path, relative: str, text: str, *, final_newline: bool = True) -> None:
@@ -186,6 +194,10 @@ def _synthetic_case(case_id: str | None = None, *, category: str = "lookup") -> 
         })
     elif category == "section-attribution":
         expected["section_type"] = SECTION_TYPES[0]
+    elif category in synthetic.NEAR_MISS_CATEGORIES:
+        expected = {"answer": SENTINEL, "behavior": synthetic.BEHAVIORS[category]}
+        if category == "poisoned-premise":
+            expected["premise"] = "Fictitious v. Imaginary"
     review: dict[str, object] = {"by": "CSA-1", "on": "2001-01-02"}
     if not SHAPE_REGISTRY[("research-qa", category)].zero_tolerance:
         review["read"] = True
@@ -256,6 +268,7 @@ def _digest_model(root: Path) -> str:
         path for path in root.iterdir() if path.is_dir() and path.name != "slices"
     )
     paths = [path for suite in suites for path in suite.rglob("*.jsonl") if path.is_file()]
+    paths.extend(path for suite in suites for path in suite.rglob("*.held-out.ids") if path.is_file())
     slices = root / "slices"
     if slices.is_dir():
         paths.extend(path for path in slices.rglob("*.ids") if path.is_file())
@@ -314,6 +327,64 @@ class Refusals(unittest.TestCase):
             (root / "slices" / "extraction").mkdir(parents=True)
             findings = self.assert_findings(root, "slices/extraction", "no id list")
             self.assertEqual(len(findings), 1)
+
+    def test_held_out_findings_are_collected_together_without_question_text(self) -> None:
+        cases_file = Path("build-gates/cases.jsonl")
+        cases_list = held_out_path(cases_file).as_posix()
+        variant_file = Path("build-gates/a-variants.jsonl")
+        variant_list = held_out_path(variant_file).as_posix()
+        research_list = held_out_path(Path("research-qa/cases.jsonl")).as_posix()
+        empty_list = held_out_path(Path("build-gates/empty.jsonl")).as_posix()
+        stray_list = held_out_path(judgments.JUDGMENTS_PATH).as_posix()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "eval-v9"
+            _write_cases(root, (
+                _harvest_extraction_case("extraction-001"),
+                json.loads(_case("extraction-003")),
+                json.loads(_superseding("extraction-004", "extraction-003")),
+            ))
+            _write(root, variant_file.as_posix(), json.dumps(_variant_case("extraction-005", "extraction-004")))
+            _write_research_cases(root, (_research_qa_case(),))
+            _write(root, "build-gates/empty.jsonl", _case("extraction-006"))
+            _write(root, "judgments/queries.jsonl", json.dumps(_judgment_case()))
+            _write_judgment(root, _judgment())
+            _write(root, cases_list, "extraction-001\nextraction-003\nresearch-qa-001\nextraction-001\n")
+            _write(root, empty_list, "")
+            _write(root, stray_list, "judgments-001")
+            findings = self.assert_findings(root, "held-out")
+
+        expected = {
+            (cases_list, "research-qa-001", 3): "held-out id resolves to no case of this file",
+            (cases_list, "extraction-001", 4): f"id is listed twice in held-out list (also {cases_list}:1)",
+            (cases_list, None, 5): "blank line in held-out list",
+            (empty_list, None, 1): "blank line in held-out list",
+            (research_list, "research-qa-001", None): "shares a family with held-out case extraction-001 and is not held out",
+            (cases_list, "extraction-004", None): "shares a family with held-out case extraction-003 and is not held out",
+            (variant_list, "extraction-005", None): "shares a family with held-out case extraction-003 and is not held out",
+            (stray_list, None, 0): "held-out list beside no case file",
+        }
+        self.assertEqual(len(findings), len(expected))
+        self.assertEqual({(item.file, item.id, item.line) for item in findings}, set(expected))
+        for item in findings:
+            with self.subTest(file=item.file, case_id=item.id, line=item.line):
+                self.assertIn(expected[(item.file, item.id, item.line)], item.rule)
+                self.assertEqual(item.fix, "Correct the named held-out list, then retry.")
+                self.assertIn(item.file, item.text())
+                self.assertIn(item.rule, item.text())
+                self.assertIn(item.id if item.id is not None else f"line {item.line}", item.text())
+        family_findings = [item for item in findings if "shares a family" in item.rule]
+        self.assertTrue(all("cluster_id" in item.rule for item in family_findings))
+
+    def test_held_out_list_requires_a_final_newline(self) -> None:
+        relative = held_out_path(Path("build-gates/cases.jsonl")).as_posix()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "eval-v9"
+            _write_cases(root, (json.loads(_case("extraction-001")),))
+            _write(root, relative, "extraction-001", final_newline=False)
+            findings = self.assert_findings(root, relative, "file has no final newline")
+        self.assertEqual(len(findings), 1)
+        self.assertEqual((findings[0].file, findings[0].id, findings[0].line), (relative, None, 0))
+        self.assertEqual(findings[0].fix, "Correct the named held-out list, then retry.")
 
     def test_non_json_and_missing_final_newline_findings_are_collected_and_sorted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -464,6 +535,158 @@ class Refusals(unittest.TestCase):
             self.assertEqual(tuple(result.findings), expected)
 
 
+class HeldOutCases(unittest.TestCase):
+    """Held-out lists preserve case families while gates count both partitions."""
+
+    def test_sidecar_ids_are_loaded_and_one_changed_byte_moves_the_digest(self) -> None:
+        relative = "build-gates/cases.held-out.ids"
+        self.assertEqual(held_out_path(Path("build-gates/cases.jsonl")), Path(relative))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "eval-v9"
+            _write_cases(root, (
+                json.loads(_case("extraction-001")),
+                json.loads(_case("extraction-002")),
+            ))
+            _write(root, relative, "extraction-001")
+            before = load_set(root)
+            self.assertTrue(before.ok, before.findings)
+            assert before.loaded is not None
+            self.assertEqual(before.loaded.held_out_ids, frozenset({"extraction-001"}))
+            self.assertEqual(tuple(before.loaded.cases_by_file), ("build-gates/cases.jsonl",))
+            old_bytes = (root / relative).read_bytes()
+            _write(root, relative, "extraction-002")
+            new_bytes = (root / relative).read_bytes()
+            self.assertEqual(sum(left != right for left, right in zip(old_bytes, new_bytes, strict=True)), 1)
+            after = load_set(root)
+            self.assertTrue(after.ok, after.findings)
+            assert after.loaded is not None
+            self.assertEqual(after.loaded.held_out_ids, frozenset({"extraction-002"}))
+            self.assertEqual(before.loaded.cases_by_file, after.loaded.cases_by_file)
+            self.assertEqual(before.loaded.active_ids, after.loaded.active_ids)
+            self.assertNotEqual(before.loaded.digest, after.loaded.digest)
+
+    def test_whole_family_removal_includes_the_retired_seed_and_partial_removal_refuses(self) -> None:
+        cases_list = held_out_path(Path("build-gates/cases.jsonl"))
+        variants_list = held_out_path(Path("build-gates/a-variants.jsonl"))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "eval-v9"
+            _write_cases(root, (
+                json.loads(_case("extraction-001")),
+                json.loads(_superseding("extraction-003", "extraction-001")),
+                json.loads(_case("extraction-005")),
+            ))
+            _write(root, "build-gates/a-variants.jsonl", json.dumps(_variant_case("extraction-004", "extraction-003")))
+            _write(root, "slices/demo/cases.ids", "extraction-001\nextraction-003\nextraction-004\nextraction-005")
+            _write(root, cases_list.as_posix(), "extraction-001\nextraction-003")
+            _write(root, variants_list.as_posix(), "extraction-004")
+            held = load_set(root)
+            self.assertTrue(held.ok, held.findings)
+            assert held.loaded is not None
+            self.assertEqual(held.loaded.held_out_ids, frozenset({"extraction-001", "extraction-003", "extraction-004"}))
+            self.assertNotIn("extraction-001", held.loaded.active_ids)
+            self.assertEqual(select_cases(held.loaded, "demo").held_out, ("extraction-003", "extraction-004"))
+
+            # Keeping only the retired seed still binds its successor and variant.
+            _write(root, cases_list.as_posix(), "extraction-001")
+            (root / variants_list).unlink()
+            partial = load_set(root)
+            self.assertIsNone(partial.loaded)
+            self.assertEqual(
+                {(item.file, item.id, item.line) for item in partial.findings},
+                {(cases_list.as_posix(), "extraction-003", None), (variants_list.as_posix(), "extraction-004", None)},
+            )
+            self.assertEqual(len(partial.findings), 2)
+            for item in partial.findings:
+                self.assertIn("shares a family with held-out case extraction-001 and is not held out", item.rule)
+                self.assertEqual(item.fix, "Correct the named held-out list, then retry.")
+                self.assertNotIn(SENTINEL, item.text())
+
+            (root / cases_list).unlink()
+            removed = load_set(root)
+            self.assertTrue(removed.ok, removed.findings)
+            assert removed.loaded is not None
+            self.assertEqual(removed.loaded.held_out_ids, frozenset())
+            selection = select_cases(removed.loaded, "demo")
+            self.assertEqual(selection.counted, select_cases(held.loaded, "demo").counted)
+            self.assertEqual(selection.tuning, ("extraction-003", "extraction-004", "extraction-005"))
+            self.assertEqual(selection.held_out, ())
+            self.assertEqual(tuning_cases(removed.loaded, "demo"), selection.counted)
+
+    def test_selection_partitions_counted_in_slice_order_without_changing_exclusions(self) -> None:
+        ids = ("extraction-005", "extraction-002", "extraction-004", "extraction-001", "extraction-003")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "eval-v9"
+            _write_cases(root, tuple(json.loads(_case(case_id)) for case_id in ids))
+            _write(root, "slices/demo/cases.ids", "\n".join(ids))
+            before = load_set(root)
+            self.assertTrue(before.ok, before.findings)
+            assert before.loaded is not None
+            baseline = select_cases(replace(before.loaded, slices={"demo": ids}), "demo")
+            relative = held_out_path(Path("build-gates/cases.jsonl")).as_posix()
+            _write(root, relative, "extraction-002\nextraction-004")
+            after = load_set(root)
+            self.assertTrue(after.ok, after.findings)
+            assert after.loaded is not None
+            selection = select_cases(replace(after.loaded, slices={"demo": ids}), "demo")
+        self.assertEqual(selection.counted, ids)
+        self.assertEqual(selection.counted, baseline.counted)
+        self.assertEqual(selection.unsigned, baseline.unsigned)
+        self.assertEqual(selection.takes_signoff, baseline.takes_signoff)
+        self.assertEqual(selection.tuning, ("extraction-005", "extraction-001", "extraction-003"))
+        self.assertEqual(selection.held_out, ("extraction-002", "extraction-004"))
+        self.assertFalse(set(selection.tuning) & set(selection.held_out))
+        self.assertEqual(set(selection.tuning) | set(selection.held_out), set(selection.counted))
+
+    def test_tuning_cases_excludes_the_held_out_family(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "eval-v9"
+            _write_cases(root, (
+                json.loads(_case("extraction-001")),
+                _variant_case(),
+                json.loads(_case("extraction-003")),
+            ))
+            _write(root, "slices/demo/cases.ids", "extraction-001\nextraction-002\nextraction-003")
+            relative = held_out_path(Path("build-gates/cases.jsonl")).as_posix()
+            _write(root, relative, "extraction-001\nextraction-002")
+            result = load_set(root)
+        self.assertTrue(result.ok, result.findings)
+        assert result.loaded is not None
+        self.assertEqual(tuning_cases(result.loaded, "demo"), ("extraction-003",))
+        self.assertEqual(select_cases(result.loaded, "demo").counted, ("extraction-001", "extraction-002", "extraction-003"))
+        self.assertTrue(set(tuning_cases(result.loaded, "demo")).isdisjoint(result.loaded.held_out_ids))
+
+    def test_committed_slices_have_all_counted_cases_available_for_tuning(self) -> None:
+        result = load_set(ROOT / SET_ROOT)
+        self.assertTrue(result.ok, result.findings)
+        assert result.loaded is not None
+        for slice_name in result.loaded.slices:
+            with self.subTest(slice=slice_name):
+                self.assertEqual(tuning_cases(result.loaded, slice_name), select_cases(result.loaded, slice_name).counted)
+
+    def test_tuning_tools_import_tuning_cases_and_never_call_select_cases(self) -> None:
+        for relative in TUNING_TOOLS:
+            with self.subTest(module=relative):
+                path = ROOT / relative
+                tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+                imports = [
+                    alias
+                    for node in ast.walk(tree)
+                    if isinstance(node, ast.ImportFrom) and node.module == "gideon.evaluation.evalset"
+                    for alias in node.names
+                ]
+                self.assertIn("tuning_cases", {alias.name for alias in imports})
+                forbidden = {"select_cases"} | {
+                    alias.asname or alias.name for alias in imports if alias.name == "select_cases"
+                }
+                for node in ast.walk(tree):
+                    if not isinstance(node, ast.Call):
+                        continue
+                    if isinstance(node.func, ast.Name):
+                        self.assertNotIn(node.func.id, forbidden, f"{relative}:{node.lineno}")
+                    elif isinstance(node.func, ast.Attribute):
+                        self.assertNotEqual(node.func.attr, "select_cases", f"{relative}:{node.lineno}")
+
+
 class OrderAndProvenance(unittest.TestCase):
     """Filesystem creation order never changes the loaded set or its digest."""
 
@@ -610,6 +833,7 @@ class OrderAndProvenance(unittest.TestCase):
             _research_qa_case("research-qa-005", "unsigned-test"),
         ]
         records[3]["supersedes"] = "research-qa-003"
+        records[4]["cluster_id"] = "harvest-chat-123456"
         slice_ids = (
             "research-qa-001",
             "research-qa-002",
@@ -622,6 +846,8 @@ class OrderAndProvenance(unittest.TestCase):
             _write_research_cases(root, tuple(records))
             _write_signoffs(root, (_signoff("research-qa-001"),))
             _write(root, "slices/demo/cases.ids", "\n".join(slice_ids))
+            relative = held_out_path(Path("research-qa/cases.jsonl")).as_posix()
+            _write(root, relative, "\n".join(slice_ids[:4]))
             with patch.dict(
                 SHAPE_REGISTRY,
                 {("research-qa", "unsigned-test"): self._non_signoff_shape()},
@@ -631,6 +857,7 @@ class OrderAndProvenance(unittest.TestCase):
                 assert result.loaded is not None
                 loaded = result.loaded
                 selection = select_cases(loaded, "demo")
+                tuning = tuning_cases(loaded, "demo")
         self.assertEqual(
             loaded.unsigned_ids, frozenset({"research-qa-002", "research-qa-004"})
         )
@@ -639,6 +866,10 @@ class OrderAndProvenance(unittest.TestCase):
             ("research-qa-001", "research-qa-005"),
         )
         self.assertEqual(selection.unsigned, ("research-qa-002", "research-qa-004"))
+        self.assertEqual(loaded.held_out_ids, frozenset(slice_ids[:4]))
+        self.assertEqual(selection.held_out, ("research-qa-001",))
+        self.assertEqual(selection.tuning, ("research-qa-005",))
+        self.assertEqual(tuning, selection.tuning)
         self.assertTrue(selection.takes_signoff)
         self.assertEqual(loaded.signoffs, (_signoff("research-qa-001"),))
 
@@ -673,7 +904,7 @@ class OrderAndProvenance(unittest.TestCase):
             assert before is not None and after is not None
             self.assertNotEqual(before.digest, after.digest)
 
-    def test_loader_digest_matches_model_without_and_with_judgments(self) -> None:
+    def test_loader_digest_matches_model_without_and_with_judgments_and_sidecars(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             without = Path(directory) / "without" / "eval-v9"
             _write(
@@ -697,6 +928,13 @@ class OrderAndProvenance(unittest.TestCase):
             self.assertIsNotNone(loaded_with)
             assert loaded_with is not None
             self.assertEqual(loaded_with.digest, _digest_model(with_file))
+            relative = held_out_path(Path("judgments/queries.jsonl")).as_posix()
+            _write(with_file, relative, "judgments-001")
+            loaded_with_sidecar = load_set(with_file).loaded
+            self.assertIsNotNone(loaded_with_sidecar)
+            assert loaded_with_sidecar is not None
+            self.assertEqual(loaded_with_sidecar.digest, _digest_model(with_file))
+            self.assertNotEqual(loaded_with_sidecar.digest, loaded_with.digest)
 
     def test_committed_set_loads_clean_in_whatever_tree_holds_it(self) -> None:
         court_map = load_court_map(ROOT / "courts.yaml").court_map
@@ -958,12 +1196,12 @@ class SyntheticCases(unittest.TestCase):
         self.assertTrue(all(finding.fix for finding in findings))
         self.assertNotIn(SENTINEL, "\n".join(finding.text() for finding in findings))
 
-    def test_zero_tolerance_defaults_false_and_marks_four_research_categories(self) -> None:
+    def test_zero_tolerance_defaults_false_and_marks_five_research_categories(self) -> None:
         self.assertIs(ShapeSpec.__dataclass_fields__["zero_tolerance"].default, False)
         self.assertEqual(
             {key for key, spec in SHAPE_REGISTRY.items() if spec.zero_tolerance},
             {("research-qa", category) for category in
-             ("lookup", "edition", "treatment", "section-attribution")},
+             ("lookup", "edition", "treatment", "section-attribution", "unanswerable")},
         )
 
     def test_key_declarations_and_origin_specific_review_keys(self) -> None:
@@ -1001,6 +1239,71 @@ class SyntheticCases(unittest.TestCase):
         self.assertEqual(spec.question_origins, (synthetic.SYNTHETIC_ORIGIN,))
         self.assertTrue(spec.is_question_case)
         self.assertIs(spec.takes_signoff, False)
+
+    def test_near_miss_shapes_are_synthetic_only_and_load_without_must_cite(self) -> None:
+        lookup = SHAPE_REGISTRY[("research-qa", "lookup")]
+        for category in synthetic.NEAR_MISS_CATEGORIES:
+            with self.subTest(category=category), tempfile.TemporaryDirectory() as directory:
+                spec = SHAPE_REGISTRY[("research-qa", category)]
+                self.assertEqual(spec.question_origins, (synthetic.SYNTHETIC_ORIGIN,))
+                self.assertFalse(spec.takes_signoff)
+                self.assertEqual(spec.base_keys, lookup.base_keys)
+                self.assertIs(spec.id_pattern, lookup.id_pattern)
+                self.assertIs(spec.cluster_pattern, lookup.cluster_pattern)
+                self.assertIs(spec.synthetic_keys, lookup.synthetic_keys)
+                self.assertEqual(spec.review_keys, lookup.review_keys)
+                self.assertEqual(spec.zero_tolerance, category == "unanswerable")
+                self.assertEqual(spec.expected_keys_for(), ("answer", "behavior", "premise")
+                                 if category == "poisoned-premise" else ("answer", "behavior"))
+                self.assertEqual(spec.gold_keys_for(), GOLD_COORDINATE_KEYS)
+                self.assertEqual(spec.review_keys_for(synthetic.SYNTHETIC_ORIGIN),
+                                 ("by", "on") if spec.zero_tolerance else ("by", "on", "read"))
+                record = _synthetic_case(category=category)
+                relative = synthetic.case_path(category)
+                self.assertEqual(case_findings(record, relative, 1, ("ca6",)), ())
+                root = Path(directory) / "eval-v9"
+                _write(root, relative, synthetic.case_line(record).rstrip("\n"))
+                _write(root, "slices/demo/cases.ids", str(record["id"]))
+                loaded = load_set(root, ("ca6",))
+                self.assertTrue(loaded.ok, loaded.findings)
+                assert loaded.loaded is not None
+                self.assertEqual(loaded.loaded.unsigned_ids, frozenset())
+                self.assertEqual(select_cases(loaded.loaded, "demo").counted, (record["id"],))
+
+    def test_near_miss_expected_and_harvest_refusals_are_located_by_line(self) -> None:
+        for category in synthetic.NEAR_MISS_CATEGORIES:
+            mutations: list[tuple[str, Callable[[dict[str, object]], object]]] = [
+                ("expected keys or order", lambda row: cast(dict[str, object], row["expected"]).update(must_cite=["fictional/source-1"])),
+                ("expected.behavior", lambda row: cast(dict[str, object], row["expected"]).update(behavior="invented-wrong-behavior")),
+                ("expected.behavior", lambda row: cast(dict[str, object], row["expected"]).pop("behavior")),
+            ]
+            if category == "poisoned-premise":
+                mutations.append(("expected.premise", lambda row: cast(dict[str, object], row["expected"]).pop("premise")))
+                for value in (None, 1, "", " ", " Fictitious v. Imaginary", "Fictitious v. Imaginary ",
+                              "Fictitious\nv. Imaginary", "Fictitious\rv. Imaginary"):
+                    def set_premise(row: dict[str, object], value: object = value) -> None:
+                        cast(dict[str, object], row["expected"])["premise"] = value
+                    mutations.append(("expected.premise", set_premise))
+            for rule, mutate in mutations:
+                with self.subTest(category=category, rule=rule), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory) / "eval-v9"
+                    relative = synthetic.case_path(category)
+                    record = _synthetic_case(category=category)
+                    mutate(record)
+                    _write(root, relative, synthetic.case_line(record).rstrip("\n"))
+                    result = load_set(root, ("ca6",))
+                    self.assertFalse(result.ok)
+                    self.assertTrue(any(finding.file == relative and finding.line == 1 and finding.rule == rule
+                                        for finding in result.findings), result.findings)
+                    self.assertTrue(all(finding.fix for finding in result.findings))
+                    self.assertNotIn(SENTINEL, "\n".join(finding.text() for finding in result.findings))
+            with self.subTest(category=category, origin="harvest"), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory) / "eval-v9"
+                relative = synthetic.case_path(category)
+                _write(root, relative, json.dumps(_research_qa_case(category=category)))
+                result = load_set(root, ("ca6",))
+                self.assertTrue(any(finding.file == relative and finding.line == 1 and finding.rule == "labels.origin"
+                                    for finding in result.findings), result.findings)
 
     def test_sampled_categories_load_read_and_unread_cases_as_counted(self) -> None:
         for category in ("retrieval", "synthesis", "existence"):

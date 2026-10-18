@@ -411,7 +411,7 @@ class _Parser(argparse.ArgumentParser):
 
 def run_leg(
     host: "Host", rendered_dir: str | os.PathLike[str], header: LegHeader, queries: Sequence[LegQuery],
-    *, marker: str, deadline: int,
+    *, marker: str, deadline: int, embed_service: str | None = None,
 ) -> "Mapping[str, LegReply] | Problem":
     """Return replies in input order, or one Problem after a checked worker exec.
 
@@ -426,10 +426,12 @@ def run_leg(
     from gideon.host.render.worker import WORKER_SERVICE_NAME
     from gideon.host.report import Problem
 
+    if embed_service is None:
+        embed_service = EMBED_RELAY_SERVICE_NAME
     fix = (
         "Check the pool leg failure line, then run "
         + "; ".join(stack.logs_fix(rendered_dir, service) for service in (
-            OPENSEARCH_SERVICE_NAME, QDRANT_SERVICE_NAME, EMBED_RELAY_SERVICE_NAME,
+            OPENSEARCH_SERVICE_NAME, QDRANT_SERVICE_NAME, embed_service,
         ))
         + ", then retry."
     )

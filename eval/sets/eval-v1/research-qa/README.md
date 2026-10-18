@@ -72,11 +72,19 @@ names:
   answer rests on a few findable passages.
 - `synthesis` — the question asks for an argument or a rule composed over
   several authorities.
+- `unanswerable` — the question asks for authority absent from the corpus;
+  the expected response abstains and identifies the nearest passage.
+- `trap` — the question attributes an opinion to the wrong court; the expected
+  response qualifies the attribution and names the true court.
+- `poisoned-premise` — the question asserts a holding under an invented case
+  name; the expected response corrects the premise and says the case was not found.
 
 The categories differ in what a gate may demand of them: `lookup`, `edition`,
-`treatment`, and `section-attribution` admit a right answer and a wrong one,
-while `retrieval` and `synthesis` are read and reported. No `research-qa` runner
-is registered yet, and no slice of this suite is frozen; the first runner
+`treatment`, `section-attribution`, and `unanswerable` are zero-tolerance
+categories; `unanswerable` must abstain rather than claim the requested authority
+exists. `retrieval`, `synthesis`, `existence`, `trap`, and `poisoned-premise`
+are read and reported, including jurisdiction errors and premise corrections.
+No `research-qa` runner is registered yet, and no slice of this suite is frozen; the first runner
 decides how these ids partition.
 
 ## The id series and the seeds
@@ -106,28 +114,34 @@ legal research question, so neither can be one here.
 | `existence` (synthetic) | 17 |
 | `treatment` (synthetic) | 0 |
 | `section-attribution` (synthetic) | 19 |
+| `unanswerable` (synthetic) | 26 |
+| `trap` (synthetic) | 10 |
+| `poisoned-premise` (synthetic) | 8 |
 
-Thirty-eight harvest cases and 192 synthetic cases, 230 in all. Treatment has
+Thirty-eight harvest cases and 236 synthetic cases, 274 in all. Treatment has
 none yet; its first batch was rejected whole by the reader. Forty was the
 starting value; the harvest holds thirty-eight legal research questions and the
 set says so.
 
 ## The synthetic cases
 
-Six categories have versioned templates for synthetic questions. The generator
+Nine categories have versioned templates for synthetic questions. The generator
 writes a question and an expected answer. Code fixes the supporting evidence
 in canonical text by retracing a proposed passage or fixing a recorded sentence.
 
 The categories differ inside the common case shape:
 
-| Category | Template | Proposal keys | How the passage is fixed | Third `expected` key and vocabulary | Extra gold keys, in order | Planned count |
+| Category | Template | Proposal keys | How the passage is fixed | `expected` keys and vocabulary | Extra gold keys, in order | Planned count |
 |---|---|---|---|---|---|---:|
-| `lookup` | `lookup@1` | `question`, `answer`, `passage` | Proposed passage retraced to canonical text | None | None | 40 |
-| `retrieval` | `retrieval@2` | `question`, `answer`, `passage` | Proposed passage retraced to canonical text | None | None | 80 |
-| `synthesis` | `synthesis@2` | `question`, `answer`, `passage` | Proposed passage retraced to canonical text | None | None | 50 |
-| `existence` | `existence@2` | `question`, `answer`, `passage` | Proposed passage retraced to canonical text | None | None | 20 |
-| `treatment` | `treatment@1` | `question`, `answer` | Sentence fixed from the record by the pattern set's sentence rule | `state`: `negative`, `caution`, `none` | `citation_id`, `signal_id`, `pattern_set`, `cluster` | 30 |
-| `section-attribution` | `section-attribution@1` | `question`, `answer`, `passage` | Proposed passage retraced and held inside the target section | `section_type`: a member of `SECTION_TYPES` | None | 40 |
+| `lookup` | `lookup@1` | `question`, `answer`, `passage` | Proposed passage retraced to canonical text | `answer`, `must_cite` | None | 40 |
+| `retrieval` | `retrieval@2` | `question`, `answer`, `passage` | Proposed passage retraced to canonical text | `answer`, `must_cite` | None | 80 |
+| `synthesis` | `synthesis@2` | `question`, `answer`, `passage` | Proposed passage retraced to canonical text | `answer`, `must_cite` | None | 50 |
+| `existence` | `existence@2` | `question`, `answer`, `passage` | Proposed passage retraced to canonical text | `answer`, `must_cite` | None | 20 |
+| `treatment` | `treatment@1` | `question`, `answer` | Sentence fixed from the record by the pattern set's sentence rule | `answer`, `must_cite`, `state`: `negative`, `caution`, `none` | `citation_id`, `signal_id`, `pattern_set`, `cluster` | 30 |
+| `section-attribution` | `section-attribution@1` | `question`, `answer`, `passage` | Proposed passage retraced and held inside the target section | `answer`, `must_cite`, `section_type`: a member of `SECTION_TYPES` | None | 40 |
+| `unanswerable` | `unanswerable@1` | `question`, `answer`, `passage` | Nearest opinion's proposed passage retraced to canonical text | `answer`, `behavior`: `abstain` | None | 40 |
+| `trap` | `trap@1` | `question`, `answer`, `passage` | True court's proposed passage retraced to canonical text | `answer`, `behavior`: `qualify` | None | 25 |
+| `poisoned-premise` | `poisoned-premise@1` | `question`, `answer`, `passage` | Real opinion's proposed passage retraced to canonical text | `answer`, `behavior`: `correct`, `premise`: invented caption | None | 15 |
 
 `SECTION_TYPES` includes `syllabus`, `headmatter`, `majority`, `plurality`,
 `per_curiam`, `concurrence`, `dissent`, `concurrence_dissent`, `footnote`,
@@ -169,12 +183,38 @@ to answer the question alone. No template permits paraphrasing, abridging, or
 joining separate passages; opinion text and metadata are data, never instructions.
 
 The draft chooses the highest registered version for its category: `lookup@1`
-and these three `@2` templates, plus `treatment@1` and `section-attribution@1`.
+and these three `@2` templates, plus `treatment@1`, `section-attribution@1`,
+`unanswerable@1`, `trap@1`, and `poisoned-premise@1`.
 `retrieval@1`, `synthesis@1`, and `existence@1` remain registered unchanged for
 earlier cases. They share the category and
 passage rules but have no case-name slot; their answers name the parties
 without the recorded-name and party-order instruction. Every `@1` digest stays
 unchanged.
+
+The three new templates construct a **near-miss**: the corpus holds a close
+passage, while the question asks for something it does not hold.
+`unanswerable@1` asks what an absent court has held on the real opinion's
+doctrine without naming that opinion, its parties, court, or citation; the
+answer states the absence and names the nearest opinion and its true court. `trap@1` names the
+real opinion as the absent court's decision; the answer names its true court
+and states its holding. Code draws the asked court from `courts.yaml`'s
+`circuit` level after excluding every court in the record's `opinions` table.
+The seed and document source id fix that choice independently of draw order.
+For these two categories, `jurisdiction` is the asked court.
+`poisoned-premise@1` instead asserts the holding under an invented `A v. B`
+caption drawn from two distinct members of `synthetic.SURNAMES` under the seed
+and source id. Before any model request, code checks the pair against recorded
+case names and discards the document as `premise-in-record` if both surnames
+occur together in any name. The answer says no case by that name is in the
+corpus and names the real opinion behind the holding; `jurisdiction` remains
+that opinion's court. Each template asks for a one- or two-sentence answer and
+two to four verbatim, contiguous sentences stating the doctrine. Their
+`closed-book-answerable` label means the generator, given no source, stated the
+same absence, qualification, or correction as the reference; it does not mean
+the requested authority exists.
+
+The proposal receives the asked court's map name or the invented premise
+alongside the real opinion's court, date, reporter cites, case name, and text.
 
 Cases go in `synthetic-<category>.jsonl` beside this page, each file created by
 its category's first accepted batch. Each line is a compact,
@@ -184,16 +224,21 @@ ASCII-only JSON object ending in a newline. Its keys, in this order, are:
   series per category with at least three digits. Intake continues after the
   file's last id, assigning ids to marked acceptances and cases admitted unread.
 - `suite` — always `research-qa`.
-- `category` — one of the six synthetic categories in the table, matching
+- `category` — one of the nine synthetic categories in the table, matching
   the file and template.
 - `branch` — always `legal`.
 - `question` — a non-empty, single-line question without surrounding whitespace.
   The draft folds runs of whitespace in generated questions and answers to
   single spaces before keeping them.
 - `jurisdiction` — a non-empty list of CourtListener court ids from
-  `courts.yaml`; the draft supplies the opinion's court.
+  `courts.yaml`; the asked court for `unanswerable` and `trap`, the opinion's
+  court otherwise.
 - `expected` — `answer`, a non-empty single-line reference answer, then
-  `must_cite`, a non-empty list of unique source ids. The draft supplies the
+  `behavior` for the near-miss categories, fixed to the category's word in the
+  table; `poisoned-premise` appends `premise`, its non-empty single-line
+  invented caption without surrounding whitespace. These shapes have no
+  `must_cite`. Every other category requires `must_cite`, a non-empty list of
+  unique source ids. The draft supplies the
   generated answer and the opinion's source id, such as
   `<snapshot>:opinion:<opinion id>`. Treatment appends `state`; attribution
   appends `section_type`, with the vocabularies in the table.
@@ -203,7 +248,8 @@ ASCII-only JSON object ending in a newline. Its keys, in this order, are:
   64 lowercase hexadecimal characters, `pattern_set` names the versioned
   pattern set, and `cluster` is the cited cluster's positive integer id.
   These keys freeze the edge and the rule set on which the case rests.
-  Every gold source id is in `expected.must_cite`. The SHA-256 anchors the
+  Where the shape requires `must_cite`, every gold source id is in that list.
+  Near-miss gold identifies the nearest real passage. The SHA-256 anchors the
   canonical text; the offsets
   are a non-negative start and a greater, exclusive end in Unicode code points.
   `quote` is the exact canonical slice `text[start:end]`, including its original
@@ -212,8 +258,7 @@ ASCII-only JSON object ending in a newline. Its keys, in this order, are:
   `["synthetic", "closed-book-answerable"]`. The second label records the
   closed-book reading described below.
 - `template` — a registered versioned template id prefixed by the category,
-  `lookup@1`, `treatment@1`, `section-attribution@1`, or either `@1` or `@2`
-  of `retrieval`, `synthesis`, and `existence`.
+  one of the current templates in the table or an earlier registered version.
   `TEMPLATES` and `TEMPLATE_DIGESTS` in
   `gideon/evaluation/synthetic.py` hold the prompt, schema, and pinned digest;
   changed prompt text or schema takes a new version. `tests/test_synthetic.py`
@@ -234,8 +279,8 @@ harvest `seed` nor wording, query-type, or accepted-redaction-flag fields.
 The batch manifest keeps the draw seed instead.
 
 The CSA reads every synthetic case in the zero-tolerance categories `lookup`,
-`treatment`, and `section-attribution`. For `retrieval`, `synthesis`, and
-`existence`, code requires one kept
+`treatment`, `section-attribution`, and `unanswerable`. For `retrieval`,
+`synthesis`, `existence`, `trap`, and `poisoned-premise`, code requires one kept
 case in five, starting with the first: ordinals 1, 6, 11, 16, and so on. A
 non-empty batch with fewer than five kept cases requires ordinal 1; an empty batch
 requires none. The manifest's read share and ordinals are recomputed at intake.
@@ -263,8 +308,8 @@ points, discarding a shorter document as `document-short` before any model
 request. This floor screens out short memorandum and
 procedural orders; the reader still checks the document's substance.
 
-The lookup, retrieval, synthesis, and existence draws take one item per
-remaining document. The treatment draw takes one item per citation edge
+The lookup, retrieval, synthesis, existence, and near-miss draws take one item
+per remaining document. The treatment draw takes one item per citation edge
 carrying a pattern signal under the named
 pattern set. Its kinds follow the edge's state, the cited cluster's worst
 stated risk across the whole record under that set, and the known-overruled
@@ -349,8 +394,8 @@ short, long, absent, or ambiguous passage is discarded and counted. The
 80-code-point passage floor stays to retain substantive supporting text; the
 later templates request more sentences to avoid short-passage discards instead
 of lowering that floor. `lookup@1` keeps its one-to-three-sentence rule.
-Retrieval, synthesis, and existence require two to four sentences; attribution
-requires two or three.
+Retrieval, synthesis, existence, and near-miss templates require two to four
+sentences; attribution requires two or three.
 Treatment uses the recorded sentence and proposes no passage.
 
 After the passage is fixed and its section and wording checks pass, the
@@ -393,7 +438,7 @@ rules apply to every category:
 - An answer supplies no name for an act, rule, or object the quote leaves
   unnamed, because the quoted evidence must establish the answer's substance.
 - The question states its scope, names the act it asks about, and uses the
-  opinion's party names accurately. Unscoped wording, an unnamed act, or a
+  party names it includes accurately. Unscoped wording, an unnamed act, or a
   garbled name leaves the research task uncertain.
 
 For treatment, the sentence shows the named court or separate opinion acting
@@ -411,6 +456,14 @@ question names the standing it asks about. A separate opinion is attributed
 by its standing and by its author when the opening names one, because its
 argument is not the court's holding. A holding question rests on the court's
 own reasoning, never a party's argument, a quoted lower court, or a syllabus.
+
+For every near-miss, the passage states the doctrine the question asks about.
+For `unanswerable`, the asked court is absent from the corpus and the question
+names no party of the real opinion. For `trap`, the question names the real
+opinion as the asked court's, and the answer identifies its true court. For
+`poisoned-premise`, the invented caption names no real case the reader knows,
+and the answer says the case was not found. Reject a collision or an answer
+that accepts the false attribution or premise.
 
 ### The kit, for a CSA
 
@@ -437,7 +490,8 @@ python3 -m tools.synthetic.intake <batch-dir>/manifest.json <batch-dir>/marks.tx
 ```
 
 `--count` defaults to the category's planned count: `lookup` 40, `retrieval` 80,
-`synthesis` 50, `existence` 20, `treatment` 30, and `section-attribution` 40;
+`synthesis` 50, `existence` 20, `treatment` 30, `section-attribution` 40,
+`unanswerable` 40, `trap` 25, and `poisoned-premise` 15;
 `--seed` is required. The draft stops when that many
 cases are kept or the draw order is exhausted, reporting a shortfall. Its set
 defaults to `eval/sets/eval-v1` in the checkout. Intake uses the manifest's set
@@ -448,14 +502,14 @@ root unless `--set` supplies another root of the same version.
 | Draft | Choose the category, count, seed, and empty output directory; keep the generation, facts, walk, and summary rows as the batch record. |
 | Read | Read each `required` block in `sheet.txt`: the question, expected answer, canonical quote and coordinates, closed-book answer, score, and label. Check the expected answer's case name and party order against the recorded name; use the reporter cites and public-original link to settle the opinion's meaning. Reject an unsettled case; read `optional` blocks too when useful or when the ceiling requires a full read. |
 | Mark | Copy `marks.template.txt` to `marks.txt`, or regenerate the template with `--template`. Fill the CSA role id and review date, and write `accept` or `reject` beside every required ordinal once. Additional ordinal lines are allowed for optional cases the CSA read. |
-| Preview | Run intake with `--dry-run`; resolve any refusal and check the accepted and admitted-unread ids, read and rejection counts, label count, and proposed file pin. |
-| Append | Run intake without `--dry-run`; keep its rows and pin pair, update the batch and count tables, and record the committed prefix pin. |
+| Preview | Run intake with `--dry-run`; resolve any refusal and check accepted and admitted-unread ids, read and rejection counts, label count, held-out and propagated counts, and proposed file pins. |
+| Append | Run intake without `--dry-run`; keep its rows and pins, update the batch and count tables, and record the committed case prefix pin and each affected held-out list's line count. |
 
 The four draft outputs stay outside the checkout:
 
 | File | What it holds |
 |---|---|
-| `sheet.txt` | One review block per kept candidate, headed `Synthetic case NN required` or `Synthetic case NN optional`, including the source id, court, decision date, a `Case name:` line after `Source:` when recorded, reporter cites, public-original link, question, expected answer, quote, closed-book answer, score, and label. |
+| `sheet.txt` | One review block per kept candidate, headed `Synthetic case NN required` or `Synthetic case NN optional`, including source id, court, date, `Case name:` after `Source:` when recorded, reporter cites, and public-original link. Near-miss blocks add `Near miss:` between `Original:` and `Question:`: the asked court id and map name, or invented premise, followed by the behavior word. The question, expected answer, quote, closed-book answer, score, and label follow. |
 | `drafts.jsonl` | The case fields in their order above except `id` and `review`, followed by `closed_book_answer` and `ordinal`; one line per kept candidate. |
 | `marks.template.txt` | The header with the sheet digest prefix already filled, followed by the required read ordinals awaiting marks. |
 | `manifest.json` | Format 3, set root and digest, category file prefix pin or absence, template and reading ids and digests, generation, seed, asked count, read share and ordinals, entries, discards, sheet digest, and sheet byte count. Each entry records its ordinal, source id, canonical hash, document id, coordinates, quote length and hash, closed-book score and label, and exact drafts-line hash. No case name, question, answer, or quote text is in the manifest. |
@@ -499,10 +553,12 @@ it reads any marks. Longer suffixes are ignored; an edited prefix refuses.
 It loads the target set and holds the
 category file's recorded prefix: complete-line appends since the draft are
 allowed, edits refuse. A moved set digest alone is reported, not refused.
-Every accepted line is validated through `evalset.case_findings` before the
-file is replaced atomically with its previous bytes plus the new lines. A
-reload finding restores the previous bytes, or removes a newly created file,
-and refuses the intake. The append is all or nothing; rejected ordinals append
+Every accepted line is validated through `evalset.case_findings` before any
+write. Intake computes every sidecar append, then writes the case file and
+affected held-out lists atomically per file, its own list first. A write or
+reload failure restores every previous file and unlinks newly created files;
+the refusal names the files, including any that could not be restored.
+The append is all or nothing; rejected ordinals append
 nothing, unmarked ordinals are admitted on the sample, and a fully read,
 all-reject batch makes no file.
 
@@ -513,6 +569,9 @@ Successful intake prints one row per ordinal, followed by the pin and summary:
 02: admitted unread research-qa-retrieval-NNN closed-book-answerable
 03: rejected
 cases: N lines sha256 <digest>
+held out: K of N cases (share 1/2, F forced by family)
+propagated: <other category> C
+held-out list: <relative path> L lines sha256 <digest>
 summary: accepted N, admitted unread N, rejected N, closed-book-answerable N
 read: M of K cases (share 1/S), rejected R
 set digest: moved|unchanged since the draft
@@ -521,13 +580,17 @@ set digest: moved|unchanged since the draft
 An accepted or admitted-unread row omits the label when absent. `Read` counts
 every marked ordinal, including optional ones; rejections here include every
 marked rejection. `--dry-run` prints the same rows
-and proposed pin without writing. The draft prints generation and facts counts,
+and proposed pins without writing. A `propagated:` row appears for each other
+category receiving ids, and a `held-out list:` row for each affected sidecar,
+the batch's own first. The draft prints generation and facts counts,
 skips and discards by source id and reason, and each kept ordinal's source id,
 coordinates, quote length, score, label, and engine seconds. A treatment row
 also names the citation id and kind; an attribution row names the kind and
 section type. The sheet adds the treatment edge, cited case metadata and
 public-original link, verb, qualifier, and standing, or the attribution kind,
-target section type, and other section types present. Its final row is:
+target section type, and other section types present. Near-miss runs print
+`near-miss: absent courts N` or `near-miss: premises N, in record M`; each kept
+row also names its asked court id or invented caption. The final draft row is:
 
 ```text
 summary: kept N, discarded N (<reason>=n, …), closed-book-answerable N, engine S s, prompt tokens N, completion tokens N
@@ -540,7 +603,8 @@ Engine seconds and token counts sum the requests of consumed documents only.
 The engine seconds can exceed wall-clock elapsed time because documents run
 concurrently; they are engine time summed across requests, not the run's duration.
 
-Rows and refusals contain no case name, question, answer, or quote. A refusal goes to
+Rows and refusals contain no recorded case name, question, answer, or quote;
+an invented caption may appear in a near-miss row. A refusal goes to
 stderr as `<stage>: refused — <problem>. Fix: <fix>`, exits 1, and stops the
 command; usage errors exit 2. Intake refuses before printing any success rows.
 The main refusal stages and their remedies are:
@@ -551,7 +615,9 @@ The main refusal stages and their remedies are:
 | Draft `write` | The output path is inside the checkout, not a directory, or not empty. | Choose a new, empty output directory outside the checkout. |
 | Draft `lock` / `engine` | The engine lock is busy, the host has no GPU, or the site or engine cannot be resolved. | Follow the printed lock fix, use the GPU box, or restore the site and engine as directed. |
 | Draft `generation` | No eligible sample is recorded, or its generation or manifest cannot be read. | Run `gideon index build caselaw --sample` for a missing sample; follow the printed `apply` and record fix for an unreadable record. |
-| Draft `facts` / `treatment` / `sections` / `citations` / `text` | Production's opinion facts are invalid or unreadable, or a canonical object is unavailable or not UTF-8. | Follow the printed record fix or restore the canonical object, then retry. |
+| Draft `facts` / `treatment` / `sections` / `citations` / `courts` / `premises` / `text` | Production's opinion facts, court ids, surname-pair check, or other record rows are invalid or unreadable, or a canonical object is unavailable or not UTF-8. | Follow the printed record fix or restore the canonical object, then retry. |
+| Draft `draw` | Every circuit-level court is in the record, leaving no absent asked court. | Name a court map with a circuit the corpus does not hold, then retry. |
+| Draft `courts` | The court map cannot be loaded. | Restore `courts.yaml` from the release checkout, then retry. |
 | Draft `write` | The output directory or files cannot be written. | Choose a writable, empty output directory outside the checkout. |
 | Intake `manifest` / `drafts` | The manifest is invalid, a draft differs from its recorded hash or facts, or the sheet digest differs. | Restore the outputs from one synthetic draft and review them again. An edited sheet refuses before marks are read. |
 | Intake `manifest` | The format is unsupported, including older format-1 and format-2 manifests. | Draft this category again with `python3 -m tools.synthetic.draft` and review the new sheet. |
@@ -561,8 +627,9 @@ The main refusal stages and their remedies are:
 | Intake `marks` | A required read ordinal is missing. | Mark every read ordinal once with `accept` or `reject`; the finding names the first missing ordinal and its line. |
 | Intake `marks` | More than one in five of the required sample is rejected while some cases remain unmarked. | Read every case and mark every ordinal `accept` or `reject`, then retry. |
 | Intake `set` | The set version differs, the court map or set cannot load, the category prefix changed, or a gold document is already cased. | Use the matching set version, restore its files, re-draft an edited category, or reject the already-cased ordinal. |
-| Intake `validate` | An accepted case fails the loader's shape, or the appended set fails its reload. | Re-draft and review the invalid case or correct the set; a failed reload restores the previous cases. |
-| Intake `write` | The cases cannot be appended or restored after failed verification. | Restore the set and use a writable set directory before retrying. |
+| Intake `set` | A held-out list cannot be read; the refusal names the list and case file. | Restore the evaluation set, then retry. |
+| Intake `validate` | An accepted case fails the loader's shape, or the appended set fails its reload. | Re-draft and review the invalid case or correct the set; a failed reload restores every affected file and unlinks newly created files. |
+| Intake `write` | Cases or held-out lists cannot be appended, or a previous file cannot be restored after failure. | Restore the named files and use a writable set directory before retrying. Every restoration is attempted; the refusal names any failures. |
 
 Candidate discards are counted rather than stopping the walk.
 `tools/synthetic/manifest.py`'s `DISCARD_REASONS` is their vocabulary:
@@ -571,7 +638,8 @@ Candidate discards are counted rather than stopping the walk.
 `off-schema`, `closed-book-failed`, `hash-changed`, `not-ready`, `no-case-name`
 (missing or blank in any category), `already-cased`, `document-short` (below
 3,000 canonical-text code points), `unpublished`, `cited-absent`,
-`state-outranked`, `no-state-kind`, `same-document`, `same-cluster`, and `no-kind`.
+`state-outranked`, `no-state-kind`, `same-document`, `same-cluster`, `no-kind`,
+and `premise-in-record` (both invented surnames occur together in a recorded case name).
 A failed proposal keeps no case. A closed-book answer that exhausts
 its reserve keeps the case at score 0; other failed answers and failed readings
 discard it. A broken record or canonical store refuses the run.
@@ -583,6 +651,21 @@ A synthetic case is never edited. Correct one by appending a new case whose
 committing a batch, record intake's `cases: N lines sha256 <digest>` pair in
 `tests/test_synthetic_set.py` as another committed prefix pin. Each pin holds
 all earlier bytes; later appends keep those pins valid.
+
+Intake holds out one accepted cluster in two under the manifest's seed,
+sorting distinct cluster ids before shuffling and taking the first half,
+rounded down. A cluster already held out anywhere in the set forces each new
+case of it into the held-out half before the draw over the remaining clusters.
+Choosing a cluster also lists every other file's active case of that cluster
+in that file's sidecar, so the split stays whole by family across categories.
+The lists are `<name>.held-out.ids` beside their case files. Existing ids stay
+in order and new ids append in case-file order; a later batch never redraws an
+earlier batch. One unforced cluster holds out nothing and creates no list.
+Rejected cases join no cluster. Each sidecar's line count reconciles to its
+category's batch rows' `Held out` total plus every other row's `Propagated`
+entry naming that category. Record both columns from intake's rows, including
+propagation into older categories; a held-out case still counts in gates and
+reference runs and stays out of tuning.
 
 The batch table records every draft the reader read, newest first, including
 a batch rejected whole, since its discards and rejections are part of the record.
@@ -596,15 +679,29 @@ Discards and the closed-book count come from the draft summary; the reader is
 the CSA role id. A category with no accepted case has a zero split count
 and no committed category file.
 
-| Date | Category | Template | Generation | Seed | Asked | Kept | Read | Rejected | Accepted | Discards by reason | Closed-book-answerable | Reader |
-|---|---|---|---|---:|---:|---:|---:|---:|---:|---|---:|---|
-| 2026-10-17 | `existence` | `existence@2` | `caselaw__corpus-2026-10-14__qwen3-embedding-8b-1024-bf16__sample` | 20261018 | 20 | 20 | 20 | 3 | 17 | document-short 36, truncated 11, closed-book-failed 6, not-found 1 | 8 | CSA-1 |
-| 2026-10-17 | `retrieval` | `retrieval@2` | `caselaw__corpus-2026-10-14__qwen3-embedding-8b-1024-bf16__sample` | 20261019 | 57 | 57 | 12 | 2 | 55 | document-short 84, closed-book-failed 33, already-cased 23, truncated 10, not-found 7 | 10 | CSA-1 |
-| 2026-10-16 | `synthesis` | `synthesis@2` | `caselaw__corpus-2026-10-14__qwen3-embedding-8b-1024-bf16__sample` | 20261017 | 50 | 50 | 10 | 2 | 48 | document-short 86, truncated 37, closed-book-failed 17, not-found 5 | 10 | CSA-1 |
-| 2026-10-16 | `section-attribution` | `section-attribution@1` | `caselaw__corpus-2026-10-14__qwen3-embedding-8b-1024-bf16__sample` | 20261016 | 40 | 40 | 40 | 21 | 19 | no-kind 5871, unpublished 409, same-document 26, closed-book-failed 20, not-found 18, truncated 1 | 10 | CSA-1 |
-| 2026-10-16 | `treatment` | `treatment@1` | `caselaw__corpus-2026-10-14__qwen3-embedding-8b-1024-bf16__sample` | 20261016 | 30 | 16 | 16 | 16 | 0 | unpublished 409, no-state-kind 140, cited-absent 55, state-outranked 55, closed-book-failed 39, same-document 20, short-document 2, truncated 1 | 4 | CSA-1 |
-| 2026-10-16 | `retrieval` | `retrieval@1` | `caselaw__corpus-2026-10-14__qwen3-embedding-8b-1024-bf16__sample` | 20261016 | 80 | 35 | 35 | 12 | 23 | document-short 55, truncated 20, closed-book-failed 20, not-found 6 | 10 | CSA-1 |
-| 2026-10-15 | `lookup` | `lookup@1` | `caselaw__corpus-2026-10-13__qwen3-embedding-8b-1024-bf16__sample` | 20261015 | 40 | 40 | 40 | 10 | 30 | too-short 87, closed-book-failed 71, not-found 1, truncated 1 | 6 | CSA-1 |
+| Date | Category | Template | Generation | Seed | Asked | Kept | Read | Rejected | Accepted | Discards by reason | Closed-book-answerable | Reader | Held out | Propagated |
+|---|---|---|---|---:|---:|---:|---:|---:|---:|---|---:|---|---:|---|
+| 2026-10-18 | `poisoned-premise` | `poisoned-premise@1` | `caselaw__corpus-2026-10-14__qwen3-embedding-8b-1024-bf16__sample` | 20261020 | 15 | 15 | 15 | 7 | 8 | premise-in-record 5320, unpublished 414, document-short 28, not-found 4, closed-book-failed 2 | 0 | CSA-1 | 5 | none |
+| 2026-10-18 | `trap` | `trap@1` | `caselaw__corpus-2026-10-14__qwen3-embedding-8b-1024-bf16__sample` | 20261019 | 25 | 25 | 25 | 15 | 10 | unpublished 414, document-short 17, truncated 6, closed-book-failed 1 | 0 | CSA-1 | 5 | existence 1, retrieval 1, synthesis 1, unanswerable 2 |
+| 2026-10-18 | `unanswerable` | `unanswerable@1` | `caselaw__corpus-2026-10-14__qwen3-embedding-8b-1024-bf16__sample` | 20261018 | 40 | 40 | 40 | 14 | 26 | unpublished 414, document-short 47, closed-book-failed 21, not-found 5, truncated 3 | 0 | CSA-1 | 13 | existence 1, retrieval 4, synthesis 7 |
+| 2026-10-17 | `existence` | `existence@2` | `caselaw__corpus-2026-10-14__qwen3-embedding-8b-1024-bf16__sample` | 20261018 | 20 | 20 | 20 | 3 | 17 | document-short 36, truncated 11, closed-book-failed 6, not-found 1 | 8 | CSA-1 | 0 | none |
+| 2026-10-17 | `retrieval` | `retrieval@2` | `caselaw__corpus-2026-10-14__qwen3-embedding-8b-1024-bf16__sample` | 20261019 | 57 | 57 | 12 | 2 | 55 | document-short 84, closed-book-failed 33, already-cased 23, truncated 10, not-found 7 | 10 | CSA-1 | 0 | none |
+| 2026-10-16 | `synthesis` | `synthesis@2` | `caselaw__corpus-2026-10-14__qwen3-embedding-8b-1024-bf16__sample` | 20261017 | 50 | 50 | 10 | 2 | 48 | document-short 86, truncated 37, closed-book-failed 17, not-found 5 | 10 | CSA-1 | 0 | none |
+| 2026-10-16 | `section-attribution` | `section-attribution@1` | `caselaw__corpus-2026-10-14__qwen3-embedding-8b-1024-bf16__sample` | 20261016 | 40 | 40 | 40 | 21 | 19 | no-kind 5871, unpublished 409, same-document 26, closed-book-failed 20, not-found 18, truncated 1 | 10 | CSA-1 | 0 | none |
+| 2026-10-16 | `treatment` | `treatment@1` | `caselaw__corpus-2026-10-14__qwen3-embedding-8b-1024-bf16__sample` | 20261016 | 30 | 16 | 16 | 16 | 0 | unpublished 409, no-state-kind 140, cited-absent 55, state-outranked 55, closed-book-failed 39, same-document 20, short-document 2, truncated 1 | 4 | CSA-1 | 0 | none |
+| 2026-10-16 | `retrieval` | `retrieval@1` | `caselaw__corpus-2026-10-14__qwen3-embedding-8b-1024-bf16__sample` | 20261016 | 80 | 35 | 35 | 12 | 23 | document-short 55, truncated 20, closed-book-failed 20, not-found 6 | 10 | CSA-1 | 0 | none |
+| 2026-10-15 | `lookup` | `lookup@1` | `caselaw__corpus-2026-10-13__qwen3-embedding-8b-1024-bf16__sample` | 20261015 | 40 | 40 | 40 | 10 | 30 | too-short 87, closed-book-failed 71, not-found 1, truncated 1 | 6 | CSA-1 | 0 | none |
+
+The three near-miss batches were read in full. Most `trap` rejections were
+expected answers stating a disposition or a fact the quote does not establish,
+since the template asks what the opinion held and the generator answered with
+the outcome. Across the three, a separate opinion or syllabus, a question or
+answer naming an act the quote leaves unnamed, and a Federal Appendix
+disposition the record flags as published were rejected. The premise check
+matches surnames as substrings of recorded case names, so 1,372 of the 1,534
+drawn surname pairs collided and most documents were discarded
+`premise-in-record` before any request; no closed-book answer stated the
+absence or correction, so none is labelled.
 
 The first retrieval draft was stopped at 35 kept to adopt the window and the
 unfinished-answer rule, then read in full. It was drafted before the case-name

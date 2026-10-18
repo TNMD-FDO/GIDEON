@@ -14,8 +14,10 @@ import unittest
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
+from unittest.mock import patch
 from urllib.parse import unquote, urlsplit
 
+from gideon.evaluation import evalset
 from tools.exportboundary import (
     EXCLUDED_PREFIXES,
     absent_from_export,
@@ -164,6 +166,29 @@ def rule_archive(root: Path) -> list[Finding]:
                         "Add the excluded prefix's export-ignore line to .gitattributes.",
                     )
                 )
+    return findings
+
+
+def rule_held_out(root: Path) -> list[Finding]:
+    """Find kept held-out sidecars whose case files are excluded."""
+
+    findings: list[Finding] = []
+    for path in sorted((root / evalset.SET_ROOT).rglob(f"*{evalset.HELD_OUT_SUFFIX}")):
+        if not path.is_file():
+            continue
+        case_path = path.with_name(path.name.removesuffix(evalset.HELD_OUT_SUFFIX) + ".jsonl")
+        case_relative = case_path.relative_to(root).as_posix()
+        relative = path.relative_to(root).as_posix()
+        if is_excluded(case_relative) and not is_excluded(relative):
+            findings.append(
+                _finding(
+                    root,
+                    path,
+                    0,
+                    f"held-out list beside excluded case file {case_relative!r} is kept",
+                    f"Add {relative} to EXCLUDED_PREFIXES and its export-ignore line to .gitattributes in the commit that writes the list.",
+                )
+            )
     return findings
 
 
@@ -321,6 +346,7 @@ def findings(root: Path) -> list[Finding]:
     all_findings: list[Finding] = []
     all_findings.extend(rule_attributes(root))
     all_findings.extend(rule_archive(root))
+    all_findings.extend(rule_held_out(root))
     all_findings.extend(rule_text(root))
     all_findings.extend(rule_links(root))
     return all_findings
@@ -355,6 +381,11 @@ class CommittedTree(unittest.TestCase):
         if items:
             self.fail(render_findings(items))
 
+    def test_committed_held_out_sidecars(self) -> None:
+        items = rule_held_out(ROOT)
+        if items:
+            self.fail(render_findings(items))
+
     def test_committed_text(self) -> None:
         items = rule_text(ROOT)
         if items:
@@ -367,6 +398,27 @@ class CommittedTree(unittest.TestCase):
 
 
 class SeededTrees(unittest.TestCase):
+    def test_held_out_sidecar_beside_excluded_case_file_is_reported(self) -> None:
+        excluded_case = evalset.SET_ROOT / "fictional" / "excluded.jsonl"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            case_path = root / excluded_case
+            case_path.parent.mkdir(parents=True)
+            case_path.write_text('{"id":"fictional-case"}\n', encoding="utf-8")
+            sidecar = evalset.held_out_path(case_path)
+            sidecar.write_text("fictional-case\n", encoding="utf-8")
+            kept_case = root / evalset.SET_ROOT / "fictional" / "cases.jsonl"
+            kept_case.write_text('{"id":"fictional-kept-case"}\n', encoding="utf-8")
+            evalset.held_out_path(kept_case).write_text("fictional-kept-case\n", encoding="utf-8")
+            with patch("tools.exportboundary.EXCLUDED_PREFIXES", (*EXCLUDED_PREFIXES, excluded_case.as_posix())):
+                items = rule_held_out(root)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].path, evalset.held_out_path(excluded_case))
+        self.assertEqual(items[0].line, 0)
+        self.assertIn(excluded_case.as_posix(), items[0].problem)
+        self.assertIn("EXCLUDED_PREFIXES", items[0].fix)
+        self.assertIn(".gitattributes", items[0].fix)
+
     def test_attributes_reports_missing_and_stray_lines(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

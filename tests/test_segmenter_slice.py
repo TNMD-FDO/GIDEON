@@ -643,7 +643,7 @@ class Command(unittest.TestCase):
                     )
                     self.assertEqual(stderr, "")
                     self.assertEqual(code, 0 if state == "clean" else 1, stdout)
-                    self.assertIn("1 active cases evaluated, 1 unsigned excluded", stdout)
+                    self.assertIn("1 active cases evaluated, 1 tuning, 0 held out, 1 unsigned excluded", stdout)
                     self.assertIn("record: ok — skipped", stdout)
                     self.assertFalse(any(sql and "INSERT INTO eval_runs" in sql for _, sql in host.calls))
                     self.assertNotIn(TEXT, stdout)

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Final, TextIO, cast
 
 from gideon.evaluation import evalset, judge, record, synthetic
-from gideon.host import backuplock, cas, engine, nogpu, report, site, stack
+from gideon.host import backuplock, cas, courts, engine, nogpu, report, site, stack
 from gideon.host.index import record as indexrecord
 from gideon.host.index import sample as indexsample
 from gideon.host.render.ci import CI_ROOT
@@ -45,6 +45,8 @@ SITE_PATH: Final[Path] = Path("/etc/gideon/site.yaml")
 _SOURCE_ID: Final[re.Pattern[str]] = re.compile(r"([A-Za-z0-9._/-]+):opinion:([1-9][0-9]*)")
 _SHA256: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
 _COURT: Final[re.Pattern[str]] = re.compile(r"[a-z0-9]+")
+# The near-miss categories whose question asks a court the record holds no opinion of.
+_ASKED_COURT_CATEGORIES: Final[tuple[str, ...]] = ("unanswerable", "trap")
 _SET_FIX: Final[str] = "Restore the evaluation set, then retry."
 _OUT_FIX: Final[str] = "Choose an empty output directory outside the checkout, then retry."
 DOCUMENTS_SQL: Final[str] = """SELECT COALESCE(jsonb_agg(jsonb_build_object(
@@ -123,6 +125,17 @@ FROM (
         cite_type, cite_form, raw_cite, reporter_cite, pincite, key, to_cluster, pattern_id
     FROM citations WHERE doc_id = :'doc_id' ORDER BY ordinal
 ) AS citation_rows;
+"""
+COURTS_SQL: Final[str] = """SELECT COALESCE(jsonb_agg(court ORDER BY court), '[]'::jsonb)::text
+FROM (SELECT DISTINCT court FROM opinions) AS recorded_courts;
+"""
+PREMISES_SQL: Final[str] = """SELECT COALESCE(jsonb_agg(pair ORDER BY pair), '[]'::jsonb)::text
+FROM jsonb_array_elements(:'premises'::jsonb) AS proposed(pair)
+WHERE EXISTS (
+    SELECT 1 FROM opinions
+    WHERE case_name ILIKE '%' || (pair->>0) || '%'
+        AND case_name ILIKE '%' || (pair->>1) || '%'
+);
 """
 
 
@@ -401,6 +414,33 @@ def _section_summaries(
     return summaries
 
 
+def _recorded_courts(io: DraftHost, rendered_dir: PathLike) -> tuple[str, ...]:
+    rows = _record_rows(io, rendered_dir, "courts", COURTS_SQL)
+    if (
+        any(not isinstance(row, str) or _COURT.fullmatch(row) is None for row in rows)
+        or len(set(rows)) != len(rows)
+    ):
+        raise DraftError("courts", "record reply has invalid court ids", _record_fix(rendered_dir))
+    return tuple(cast(list[str], rows))
+
+
+def _premises_in_record(
+    io: DraftHost, rendered_dir: PathLike, captions: Sequence[str],
+) -> frozenset[tuple[str, str]]:
+    pairs = frozenset(synthetic.caption_surnames(caption) for caption in captions)
+    sql = bind("premises", json.dumps(sorted(pairs))) + "\n" + PREMISES_SQL
+    found: set[tuple[str, str]] = set()
+    for row in _record_rows(io, rendered_dir, "premises", sql):
+        if (
+            not isinstance(row, list) or len(row) != 2
+            or not all(isinstance(value, str) for value in row)
+            or tuple(row) not in pairs or tuple(row) in found
+        ):
+            raise DraftError("premises", "record reply has invalid surname pairs", _record_fix(rendered_dir))
+        found.add((row[0], row[1]))
+    return frozenset(found)
+
+
 def _sections(
     io: DraftHost, rendered_dir: PathLike, document: synthetic.DrawDocument, text: str,
 ) -> tuple[SectionRow, ...]:
@@ -470,6 +510,7 @@ def _candidate(
     io: DraftHost, rendered_dir: PathLike, served_model_name: str,
     template: judge.JudgePrompt, facts: OpinionFacts, text: str, figures: Figures,
     *, kind: str = "", target: SectionRow | None = None,
+    near: str = "", court_names: Mapping[str, str] | None = None,
 ) -> tuple[synthetic.Proposal, synthetic.Retraced, synthetic.ClosedBook] | str:
     values = {
         "court": facts.court, "decided": facts.decided.isoformat(),
@@ -478,6 +519,11 @@ def _candidate(
     }
     if target is not None:
         values.update(parties=(facts.case_name or "").strip(), kind=kind, section_type=target.section_type)
+    if "asked_court" in template.slots:
+        assert court_names is not None
+        values["asked_court"] = court_names[near]
+    if "premise" in template.slots:
+        values["premise"] = near
     proposal, prompt, completion, seconds = synthetic.propose(
         io, rendered_dir, served_model_name=served_model_name, template=template,
         slots={slot: values[slot] for slot in template.slots},
@@ -559,6 +605,7 @@ def _document(
     io: DraftHost, rendered_dir: PathLike, served_model_name: str,
     template: judge.JudgePrompt, document: synthetic.DrawDocument, facts: OpinionFacts,
     edge: Edge | None = None,
+    court_names: Mapping[str, str] | None = None,
 ) -> tuple[
     tuple[synthetic.Proposal, synthetic.Retraced, synthetic.ClosedBook] | str,
     Figures, SectionRow | None, tuple[SectionRow, ...],
@@ -590,7 +637,10 @@ def _document(
     if edge is not None:
         result = _treatment_candidate(io, rendered_dir, served_model_name, template, facts, document, edge, text, figures)
     else:
-        result = _candidate(io, rendered_dir, served_model_name, template, facts, text, figures, kind=document.kind, target=target)
+        result = _candidate(
+            io, rendered_dir, served_model_name, template, facts, text, figures,
+            kind=document.kind, target=target, near=document.near, court_names=court_names,
+        )
     return result, figures, target, sections
 
 
@@ -601,7 +651,8 @@ def _json_line(value: Mapping[str, object]) -> bytes:
 def _sheet(ordinal: int, document: synthetic.DrawDocument, facts: OpinionFacts,
            proposal: synthetic.Proposal, retraced: synthetic.Retraced, reading: synthetic.ClosedBook,
            *, required: bool, edge: Edge | None = None, target: SectionRow | None = None,
-           sections: Sequence[SectionRow] = ()) -> str:
+           sections: Sequence[SectionRow] = (), category: str = "",
+           court_names: Mapping[str, str] | None = None) -> str:
     suffix = manifest.SHEET_REQUIRED if required else manifest.SHEET_OPTIONAL
     extra: tuple[str, ...] = ()
     if edge is not None:
@@ -621,6 +672,13 @@ def _sheet(ordinal: int, document: synthetic.DrawDocument, facts: OpinionFacts,
             f"Kind: {document.kind} | target section {target.section_type}",
             "Other section types: " + (", ".join(other_types) or "none"),
         )
+    elif category in synthetic.NEAR_MISS_CATEGORIES:
+        if category in _ASKED_COURT_CATEGORIES:
+            assert court_names is not None
+            near = f"asked court {document.near} ({court_names[document.near]})"
+        else:
+            near = f"premise {document.near}"
+        extra = (f"Near miss: {near} | behavior {synthetic.BEHAVIORS[category]}",)
     return "\n".join((
         f"{manifest.SHEET_BLOCK_HEADER} {ordinal:02d} {suffix}",
         f"Source: {document.source_id} | court {document.court} | decided {facts.decided.isoformat()}",
@@ -720,7 +778,33 @@ def _run(io: DraftHost, *, checkout: Path, set_root: Path, out: Path, category: 
             raise DraftError("write", "output directory cannot be created", _OUT_FIX) from error
         edges: dict[str, Edge] = {}
         edge: Edge | None
-        if category == "treatment":
+        court_names: Mapping[str, str] = {}
+        if category in _ASKED_COURT_CATEGORIES:
+            present = _recorded_courts(io, rendered_dir)
+            court_result = courts.load_court_map(courts.default_courts_path())
+            if court_result.errors or court_result.court_map is None:
+                raise DraftError("courts", "court map cannot be loaded", "Restore courts.yaml from the release checkout, then retry.")
+            court_map = court_result.court_map
+            absent = synthetic.absent_courts({key: court.level for key, court in court_map.courts.items()}, present)
+            if not absent:
+                raise DraftError("draw", "every circuit-level court is in the record",
+                                 "Name a court map with a circuit the corpus does not hold, then retry.")
+            court_names = {key: court.name for key, court in court_map.courts.items()}
+            documents = [replace(document, near=synthetic.asked_court(seed, document.source_id, absent)) for document in documents]
+            print(f"near-miss: absent courts {len(absent)}", file=stdout, flush=True)
+        elif category == "poisoned-premise":
+            documents = [replace(document, near=synthetic.invent_caption(seed, document.source_id)) for document in documents]
+            captions = sorted({document.near for document in documents})
+            in_record = _premises_in_record(io, rendered_dir, captions)
+            drawn = []
+            for document in documents:
+                if synthetic.caption_surnames(document.near) in in_record:
+                    discard(document.source_id, "premise-in-record")
+                else:
+                    drawn.append(document)
+            documents = drawn
+            print(f"near-miss: premises {len(captions)}, in record {len(in_record)}", file=stdout, flush=True)
+        elif category == "treatment":
             drawn = []
             by_opinion = {document.opinion_id: document for document in documents}
             edge_rows = _edges(io, rendered_dir, documents, facts)
@@ -825,7 +909,7 @@ def _run(io: DraftHost, *, checkout: Path, set_root: Path, out: Path, category: 
                         continue
                     pending.append((document, executor.submit(
                         _document, io, rendered_dir, target.served_model_name,
-                        template, document, facts[document.opinion_id], edges.get(document.item),
+                        template, document, facts[document.opinion_id], edges.get(document.item), court_names,
                     )))
                     return True
                 return False
@@ -846,10 +930,18 @@ def _run(io: DraftHost, *, checkout: Path, set_root: Path, out: Path, category: 
                     proposal, retraced, reading = result
                     ordinal = len(entries) + 1
                     labels = [synthetic.SYNTHETIC_ORIGIN] + ([reading.label] if reading.label is not None else [])
+                    expected: dict[str, object] = {"answer": proposal.answer}
+                    if category in synthetic.NEAR_MISS_CATEGORIES:
+                        expected["behavior"] = synthetic.BEHAVIORS[category]
+                        if category == "poisoned-premise":
+                            expected["premise"] = document.near
+                    else:
+                        expected["must_cite"] = [document.source_id]
                     draft: dict[str, object] = {
                         "suite": spec.suite, "category": category, "branch": spec.fixed_fields["branch"],
-                        "question": proposal.question, "jurisdiction": [document.court],
-                        "expected": {"answer": proposal.answer, "must_cite": [document.source_id]},
+                        "question": proposal.question,
+                        "jurisdiction": [document.near if category in _ASKED_COURT_CATEGORIES else document.court],
+                        "expected": expected,
                         "gold": [{"source_id": document.source_id, "sha256": document.sha256,
                                   "start": retraced.start, "end": retraced.end, "quote": retraced.quote}],
                         "labels": labels, "template": template.id, "cluster_id": document.source_id,
@@ -869,6 +961,7 @@ def _run(io: DraftHost, *, checkout: Path, set_root: Path, out: Path, category: 
                         ordinal, document, facts[document.opinion_id], proposal, retraced, reading,
                         required=ordinal in synthetic.sample_ordinals(ordinal, read_share),
                         edge=edge, target=section_target, sections=sections,
+                        category=category, court_names=court_names,
                     ))
                     entries.append(dict(zip(manifest.ENTRY_KEYS, (
                         ordinal, document.source_id, document.sha256, document.doc_id, retraced.start, retraced.end,
@@ -887,6 +980,8 @@ def _run(io: DraftHost, *, checkout: Path, set_root: Path, out: Path, category: 
                     identity = document.source_id + (f" {edge.citation_id} {document.kind}" if edge is not None else "")
                     if section_target is not None:
                         identity += f" {document.kind} {section_target.section_type}"
+                    if document.near:
+                        identity += f" {document.near}"
                     print(f"{ordinal:02d}: {identity} [{retraced.start}, {retraced.end}) length {len(retraced.quote)}, "
                           f"closed-book score {reading.score}, label {reading.label or 'none'}, {figures.seconds - before:.3f} s", file=stdout, flush=True)
                 if len(entries) >= count:

@@ -7,6 +7,9 @@ holds the two equal; the tests also import ``is_file_prefix`` and
 ``text_pattern``. A whole test that reads an excluded path skips in an
 exported tree by ``in_export_tree``; a single read uses ``absent_from_export``.
 A kept path's absence is never tolerated.
+A case file's ``.held-out.ids`` sidecar leaves with its excluded file, its
+boundary and attributes lines added by the same commit that writes it, as held
+by ``tests/test_export_boundary.py``.
 """
 
 import re
@@ -57,11 +60,13 @@ EXCLUDED_PREFIXES = (
     "tests/test_judgments_intake.py",  # judgment intake's excluded tests
     "tests/test_judgments_kit.py",  # judgment packet and grades intake tests
     "tests/test_judgments_pool.py",  # judgment pool builder tests
+    "tests/test_judgments_topup.py",  # judgment pool top-up tests
     "tests/test_signoffs_kit.py",  # the sign-off kit excluded tests
     "eval/sets/eval-v1/build-gates/extraction.jsonl",  # the labelled harvest questions pending the same ruling
     "eval/sets/eval-v1/build-gates/extraction-variants.jsonl",  # the harvest questions' variants, pending the same ruling
     "eval/sets/eval-v1/slices/extraction/harvest.ids",  # the harvest slice ids must leave with their excluded cases
     "eval/sets/eval-v1/slices/smoke/harvest.ids",  # the smoke harvest ids must leave with their excluded cases
+    "eval/sets/eval-v1/slices/build-gates/harvest.ids",  # the build-gates harvest ids must leave with their excluded cases
     "eval/sets/eval-v1/slices/judgments",  # the judgments slice ids must leave with their excluded queries
     "eval/sets/eval-v1/slices/gold-drop",  # the gold-drop slice ids must leave with their excluded research questions
     "eval/reference/extraction/harvest.json",  # the harvest reference must leave with its id list

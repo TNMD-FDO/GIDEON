@@ -23,7 +23,12 @@ from gideon.evaluation.evalset import (
     select_cases,
 )
 from gideon.evaluation.results import RunContext, SliceResult
-from gideon.evaluation.slices import SLICE_RUNNERS, SMOKE_PARTS, CallSurface
+from gideon.evaluation.slices import (
+    BUILD_GATES_PARTS,
+    SLICE_RUNNERS,
+    SMOKE_PARTS,
+    CallSurface,
+)
 from gideon.evaluation.turns import classify
 from gideon.host import courts
 from gideon.host.sysio import Host, PathLike
@@ -273,6 +278,23 @@ class Invariance(unittest.TestCase):
                          first_loaded.cases_by_id[case_id]["category"])
                         in SMOKE_PARTS["guardrails"].categories
                         for case_id in expected_ids
+                    )
+                elif slice_name == "build-gates":
+                    keys = tuple(
+                        cast(
+                            tuple[str, str],
+                            (first_loaded.cases_by_id[case_id]["suite"],
+                             first_loaded.cases_by_id[case_id]["category"]),
+                        )
+                        for case_id in expected_ids
+                    )
+                    expected_count = sum(
+                        key in BUILD_GATES_PARTS["segmenter-300"].categories
+                        or (
+                            key in BUILD_GATES_PARTS["gold-drop"].categories
+                            and SHAPE_REGISTRY[key].zero_tolerance
+                        )
+                        for key in keys
                     )
                 elif slice_name == "gold-drop":
                     expected_count = sum(

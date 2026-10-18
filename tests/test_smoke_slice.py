@@ -158,7 +158,8 @@ def _composite_with_runner(
         {
             name: replace(spec, runner=runner) if name == part_name else spec
             for name, spec in SMOKE_PARTS.items()
-        }
+        },
+        report=smoke_slice.smoke_report,
     )
 
 
@@ -477,7 +478,8 @@ class SmokeRunner(unittest.TestCase):
                         runner=record_misfiled,
                     ),
                     "extraction": replace(SMOKE_PARTS["extraction"], runner=record_extraction),
-                }
+                },
+                report=smoke_slice.smoke_report,
             )
             _host, context = _context(loaded)
             result = composite.run(loaded, "smoke", replace(context, turns=None))
@@ -492,7 +494,10 @@ class SmokeRunner(unittest.TestCase):
         extraction = SMOKE_PARTS["extraction"]
         category = next(iter(extraction.categories))
         with self.assertRaises(ValueError) as raised:
-            smoke_slice.Composite({"extraction": extraction, "duplicate": replace(extraction)})
+            smoke_slice.Composite(
+                {"extraction": extraction, "duplicate": replace(extraction)},
+                report=smoke_slice.smoke_report,
+            )
         self.assertIn(repr(category), str(raised.exception))
 
     def test_committed_rows_follow_the_parts_order(self) -> None:
@@ -656,7 +661,7 @@ class SmokeStores(test_golddrop_slice.GoldDropFixture):
                 self.assertIn("smoke: fail; 0 cases, 0 at the frontend", result.report)
 
     def test_composite_without_a_stores_part_reports_not_run_and_keeps_its_gate(self) -> None:
-        result = smoke_slice.Composite({}).run(
+        result = smoke_slice.Composite({}, report=smoke_slice.smoke_report).run(
             self.smoke_set(), "smoke", test_golddrop_slice._context(self.host),
         )
         self.assertTrue(result.verdict, result.report)

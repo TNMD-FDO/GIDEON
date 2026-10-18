@@ -24,7 +24,7 @@ class MeasureReader:
 
 _RESTORE_FIX: Final[str] = "Restore the eval set from the release checkout, then retry."
 _EVAL_SET_FIGURES: Final[tuple[str, ...]] = triggers.MEASURES["eval-set"]
-_HELD_OUT_RELATIVE: Final[Path] = Path("slices", "judgments-held-out")
+_QUERIES_RELATIVE: Final[Path] = Path("judgments", "queries.jsonl")
 
 
 def _eval_set(context: Context) -> Figures | Problem:
@@ -52,22 +52,15 @@ def _eval_set(context: Context) -> Figures | Problem:
             }
         )
 
-    held_out_dir = set_root / _HELD_OUT_RELATIVE
+    held_out_path = evalset.held_out_path(set_root / _QUERIES_RELATIVE)
     try:
-        if context.host.exists(held_out_dir):
-            filenames = context.host.listdir(held_out_dir)
-        else:
-            filenames = []
-        held_out_ids: set[str] = set()
-        for filename in sorted(filenames):
-            if not filename.endswith(".ids"):
-                continue
-            contents = context.host.read_text(held_out_dir / filename)
-            held_out_ids.update(
-                line.strip() for line in contents.splitlines() if line.strip()
-            )
+        contents = (
+            context.host.read_text(held_out_path)
+            if context.host.exists(held_out_path) else ""
+        )
     except (OSError, UnicodeError):
-        return Problem("held-out judgments slice could not be read", _RESTORE_FIX)
+        return Problem("held-out judgments list could not be read", _RESTORE_FIX)
+    held_out_ids = {line.strip() for line in contents.splitlines() if line.strip()}
 
     return {
         "judged_queries": (judged_queries,),

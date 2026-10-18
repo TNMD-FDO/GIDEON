@@ -1,4 +1,4 @@
-"""Run the push gate's smoke cases through the parts handed to it.
+"""Provide the shared routing class for the smoke and build-gates composites.
 
 A push gate blocks on a zero-tolerance failure, a failed gold-drop gate over
 the sample generation, or a case that passed in the committed reference failing
@@ -14,7 +14,7 @@ image leg is a measurement that never completed.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import TYPE_CHECKING, cast
@@ -155,11 +155,31 @@ def _smoke_report(
     return passed, "\n".join(lines) + "\n", gated_cases
 
 
+def smoke_report(
+    sub_results: Mapping[str, SliceResult],
+    results: tuple[CaseResult, ...],
+    unrouted: tuple[str, ...],
+) -> tuple[bool, str, int]:
+    """Adapt the shared composite's sub-results to the smoke gate."""
+
+    return _smoke_report(
+        sub_results.get("guardrails"),
+        sub_results.get("extraction"),
+        sub_results.get("gold-drop"),
+        results,
+        unrouted,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class Composite:
     """Route counted cases to the handed parts and sum their turn counts."""
 
     parts: Mapping[str, SliceSpec]
+    report: Callable[
+        [Mapping[str, SliceResult], tuple[CaseResult, ...], tuple[str, ...]],
+        tuple[bool, str, int | None],
+    ]
     _category_parts: Mapping[tuple[str, str], str] = field(
         init=False, repr=False, compare=False
     )
@@ -169,7 +189,7 @@ class Composite:
         for name, spec in self.parts.items():
             for category in spec.categories:
                 if category in category_parts:
-                    raise ValueError(f"category {category!r} belongs to more than one smoke part")
+                    raise ValueError(f"category {category!r} belongs to more than one composite part")
                 category_parts[category] = name
         object.__setattr__(self, "_category_parts", MappingProxyType(category_parts))
 
@@ -209,13 +229,7 @@ class Composite:
             if name in sub_results
             for row in sub_results[name].results
         ) + unrouted_results
-        verdict, report, gated_cases = _smoke_report(
-            sub_results.get("guardrails"),
-            sub_results.get("extraction"),
-            sub_results.get("gold-drop"),
-            results,
-            unrouted,
-        )
+        verdict, report, gated_cases = self.report(sub_results, results, unrouted)
         return SliceResult(verdict, report, results, gated_cases=gated_cases)
 
     def engine_calls(self, eval_set: LoadedSet, slice_name: str) -> int:

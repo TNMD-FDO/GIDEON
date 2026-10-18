@@ -566,17 +566,15 @@ triggers:
             )
             for index in range(50)
         )
-        held_out = set_root / "slices" / "judgments-held-out" / "fixture.ids"
+        held_out = evalset.held_out_path(set_root / "judgments" / "queries.jsonl")
         host = self._host(
             build_box=True,
             registry_text=trigger_text,
-            directories=(_key(held_out.parent),),
         )
         host.files[_key(judgment_path)] = "".join(
             judgments.serialize(record_value) for record_value in records
         )
         host.files[_key(held_out)] = "fictional-held-out\n"
-        host.directories.add(_key(held_out.parent))
 
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):

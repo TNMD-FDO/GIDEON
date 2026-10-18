@@ -5,6 +5,7 @@ import subprocess
 import unittest
 from collections.abc import Mapping
 from pathlib import Path
+from unittest.mock import patch
 
 from gideon.evaluation import evalset, judgments
 from gideon.host.report import Problem
@@ -216,7 +217,7 @@ class EvalSetReader(unittest.TestCase):
     def setUp(self) -> None:
         self.set_root = ROOT / evalset.SET_ROOT
         self.judgments_path = self.set_root / judgments.JUDGMENTS_PATH
-        self.held_out = self.set_root / "slices" / "judgments-held-out"
+        self.held_out = evalset.held_out_path(self.set_root / "judgments" / "queries.jsonl")
 
     def test_absent_judgments_file_is_zero_without_a_parse(self) -> None:
         host = MeasureHost()
@@ -230,19 +231,13 @@ class EvalSetReader(unittest.TestCase):
             _judgment("judgments-002", 2, "primary"),
         )
         text = "".join(judgments.serialize(record) for record in records)
-        host = MeasureHost(
-            {os.fspath(self.judgments_path): text},
-            (os.fspath(self.held_out),),
-        )
+        host = MeasureHost({os.fspath(self.judgments_path): text})
         result = READERS["eval-set"].read(_context(host))
         self.assertEqual(result, {"judged_queries": (2,), "held_out_ids": (0,)})
 
     def test_malformed_judgments_return_the_parser_fix_without_line_text(self) -> None:
         sentinel = "FICTIONAL_MALFORMED_JUDGMENTS_LINE"
-        host = MeasureHost(
-            {os.fspath(self.judgments_path): f"{sentinel}\n"},
-            (os.fspath(self.held_out),),
-        )
+        host = MeasureHost({os.fspath(self.judgments_path): f"{sentinel}\n"})
         result = READERS["eval-set"].read(_context(host))
         self.assertIsInstance(result, Problem)
         assert isinstance(result, Problem)
@@ -250,25 +245,38 @@ class EvalSetReader(unittest.TestCase):
         self.assertNotIn(sentinel, result.problem)
         self.assertNotIn(sentinel, result.fix)
 
-    def test_held_out_directory_absent_empty_and_shared_ids(self) -> None:
+    def test_held_out_list_absent_empty_and_repeated_ids(self) -> None:
         absent = READERS["eval-set"].read(_context(MeasureHost()))
         self.assertEqual(absent, {"judged_queries": (0,), "held_out_ids": (0,)})
 
-        empty_host = MeasureHost(directories=(os.fspath(self.held_out),))
+        empty_host = MeasureHost({os.fspath(self.held_out): ""})
         empty = READERS["eval-set"].read(_context(empty_host))
         self.assertEqual(empty, {"judged_queries": (0,), "held_out_ids": (0,)})
 
-        first = self.held_out / "first.ids"
-        second = self.held_out / "second.ids"
-        shared_host = MeasureHost(
+        repeated_host = MeasureHost(
             {
-                os.fspath(first): "fictional-id\nshared-id\n",
-                os.fspath(second): " shared-id \nother-id\n",
-            },
-            (os.fspath(self.held_out),),
+                os.fspath(self.held_out): (
+                    "fictional-id\nfictional-shared-id\nfictional-shared-id\n"
+                    " fictional-shared-id \nfictional-other-id\n\n"
+                ),
+            }
         )
-        shared = READERS["eval-set"].read(_context(shared_host))
-        self.assertEqual(shared, {"judged_queries": (0,), "held_out_ids": (3,)})
+        repeated = READERS["eval-set"].read(_context(repeated_host))
+        self.assertEqual(repeated, {"judged_queries": (0,), "held_out_ids": (3,)})
+
+    def test_held_out_read_failure_returns_a_problem_without_diagnostics(self) -> None:
+        sentinel = "FICTIONAL_HELD_OUT_READ_DIAGNOSTIC"
+        for error in (OSError(sentinel), UnicodeError(sentinel)):
+            with self.subTest(error=type(error).__name__):
+                host = MeasureHost({os.fspath(self.held_out): "fictional-id\n"})
+                with patch.object(host, "read_text", side_effect=error):
+                    result = READERS["eval-set"].read(_context(host))
+                self.assertIsInstance(result, Problem)
+                assert isinstance(result, Problem)
+                self.assertEqual(result.problem, "held-out judgments list could not be read")
+                self.assertIn("Restore the eval set", result.fix)
+                self.assertNotIn(sentinel, result.problem)
+                self.assertNotIn(sentinel, result.fix)
 
 
 class ReaderVocabulary(unittest.TestCase):

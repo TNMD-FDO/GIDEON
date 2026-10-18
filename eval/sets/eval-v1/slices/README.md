@@ -5,6 +5,36 @@ from the eval set; the loader unions all of the files in one slice and runs the
 result in id order. Each id list contains one case id per line, with no blank
 lines or comments, and ends with a final newline.
 
+## Held-out lists
+
+A case file may carry a held-out list beside it, `<name>.held-out.ids` next to
+`<name>.jsonl`, in the id lists' format: one case id per line, no blank line,
+a final newline. The commit that adds a category's cases writes its list. A
+held-out case is one no tuning run has touched; it counts in every gate and
+reference run, and a tuning run reads the tuning cases alone — the counted
+cases no list names — through the loader's `tuning_cases`.
+
+The split is whole by family. Every active case that shares a `cluster_id`
+with a held-out case, or that supersedes one, is listed in its own file's list,
+else the loader refuses the set. A list holds at least one id; a file with
+nothing to hold is not written, and a list beside no case file is refused.
+
+A list is append-only but for one removal: a held-out case inspected and tuned
+on after a failure leaves the list in the commit that tunes on it. The family
+is the split's unit, so that commit removes every listed member of the family,
+a superseded predecessor among them, and the family then loads as tuning; a
+removal that leaves a member listed is refused.
+
+`eval run` runs both halves and its `run` row counts each. A list beside a case
+file that leaves at the export boundary leaves with it. The first lists are
+written by the synthetic intake: half of each batch's distinct clusters,
+rounded down, under the batch's seed, with existing held-out families forced
+in and chosen families propagated across files. Earlier cases were tuned on
+already; the judgment queries' held-out form is a fresh confirmation set,
+not a half of the present one.
+
+## The slices
+
 The `extraction` slice is split at the export boundary. `harvest.ids` selects
 the harvest-derived cases and leaves with `extraction.jsonl`; `invented.ids`
 selects the invented cases that remain in an exported tree. A variant's id joins
@@ -65,3 +95,11 @@ The `count-gates` slice has one list, `count-gates/rules.ids`, selecting the
 rules in `../build-gates/count-gates.jsonl`. Every active rule is counted
 without a sign-off. The list stays in the export with its cases and changes
 only by append, with a superseding rule appended after its predecessor.
+
+The `build-gates` slice is the suite promote runs, with one list per part
+mirroring the part's list byte for byte and changing with it by append:
+`sample.ids` from `segmenter-300`, `rules.ids` from `count-gates`, and
+`harvest.ids` and `invented.ids` from `extraction`. The `gold-drop` part has no
+list: it runs over the whole set's gold, as in `smoke`. `harvest.ids` leaves at
+the export boundary with its cases; in an exported tree the slice loads over
+the three kept lists.

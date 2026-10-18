@@ -665,7 +665,18 @@ def _parse_inputs(inputs: Mapping[str, object]) -> _Inputs:
                    cast(str, inputs["pipeline"]), space, digest, selection)
 
 
-def selected_documents(inputs: _Inputs, stream: Iterator[Document]) -> Iterator[Document]:
+class SelectedDocument(Protocol):
+    """The identifiers needed to select a document for a sample."""
+
+    @property
+    def doc_id(self) -> str: ...
+    @property
+    def source(self) -> str: ...
+    @property
+    def opinion_id(self) -> int: ...
+
+
+def selected_documents[DocumentT: SelectedDocument](inputs: _Inputs, stream: Iterator[DocumentT]) -> Iterator[DocumentT]:
     """Keep gold documents and deterministic fill, closing the source on every exit."""
 
     selection = inputs.sample

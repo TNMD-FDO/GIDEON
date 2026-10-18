@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 import sys
+from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,6 +34,7 @@ class Manifest:
     set_root: Path
     set_digest: str
     category: str
+    seed: int
     case_pin: tuple[int, str] | None
     template: str
     sheet_sha256: str
@@ -153,6 +155,7 @@ def _load_manifest(path: Path) -> Manifest:
     pin = None if raw_pin is None else (raw_pin[0], raw_pin[1])
     return Manifest(
         set_root=Path(value["set_root"]), set_digest=value["set_digest"], category=category,
+        seed=value["seed"],
         case_pin=pin, template=template, sheet_sha256=value["sheet_sha256"],
         sheet_bytes=value["sheet_bytes"], read_share=value["read_share"],
         read_ordinals=tuple(value["read_ordinals"]), entries=tuple(entries),
@@ -253,6 +256,39 @@ def _court_ids() -> frozenset[str]:
     return frozenset(result.court_map.courts)
 
 
+def _write_batch(
+    target: Path, court_ids: frozenset[str], payloads: Mapping[Path, bytes],
+    previous: Mapping[Path, bytes | None],
+) -> None:
+    names = ", ".join(path.relative_to(target).as_posix() for path in payloads)
+    written: list[Path] = []
+    verified = False
+    stage = "write"
+    try:
+        for path, payload in payloads.items():
+            written.append(path)
+            write_atomic(path, payload)
+        stage = "validate"
+        verified = evalset.load_set(target, court_ids).ok
+    finally:
+        if not verified:
+            unrestored: list[str] = []
+            for path in reversed(written):
+                try:
+                    original = previous[path]
+                    if original is None:
+                        path.unlink(missing_ok=True)
+                    else:
+                        write_atomic(path, original)
+                except OSError:
+                    unrestored.append(path.relative_to(target).as_posix())
+            if unrestored:
+                raise IntakeError("write", f"batch failed for {names}; files could not be restored: {', '.join(unrestored)}", _SET_FIX)
+            problem = "files could not be appended" if stage == "write" else "appended files failed the eval-set reload"
+            fix = _APPEND_FIX if stage == "write" else "Correct the draft or set and retry the intake."
+            raise IntakeError(stage, f"{problem}: {names}; previous files restored", fix)
+
+
 def intake(manifest_path: Path, marks_path: Path, *, set_root: Path | None,
            dry_run: bool, stdout: TextIO, court_ids: Iterable[str] | None = None) -> None:
     """Validate the whole review, then append accepted cases and verify the set."""
@@ -298,6 +334,7 @@ def intake(manifest_path: Path, marks_path: Path, *, set_root: Path | None,
         for entry in cast(list[dict[str, object]], case["gold"])
     }
     added: list[bytes] = []
+    records: list[evalset.Case] = []
     rows: list[str] = []
     labelled = 0
     review_keys = evalset.SHAPE_REGISTRY[("research-qa", provenance.category)].review_keys_for(synthetic.SYNTHETIC_ORIGIN)
@@ -318,35 +355,62 @@ def intake(manifest_path: Path, marks_path: Path, *, set_root: Path | None,
             raise IntakeError("set", f"ordinal {draft_case.ordinal:02d}: gold document is already cased", "Reject that ordinal or draft uncased documents, then retry.")
         cased.update(sources)
         added.append(synthetic.case_line(record).encode("ascii"))
+        records.append(record)
         next_number += 1
         label = synthetic.CLOSED_BOOK_LABEL in cast(list[str], record["labels"])
         labelled += int(label)
         disposition = "accepted" if draft_case.ordinal in marks.marked else "admitted unread"
         rows.append(f"{draft_case.ordinal:02d}: {disposition} {case_id}" + (f" {synthetic.CLOSED_BOOK_LABEL}" if label else ""))
     payload = (previous or b"") + b"".join(added)
-    if added and not dry_run:
+    held_clusters = {loaded.cases_by_id[case_id].get("cluster_id") for case_id in loaded.held_out_ids}
+    forced = {cast(str, record["id"]) for record in records if record["cluster_id"] in held_clusters}
+    clusters = {cast(str, record["cluster_id"]) for record in records if record["id"] not in forced}
+    chosen = synthetic.held_out_clusters(clusters, provenance.seed)
+    held_out = tuple(
+        cast(str, record["id"]) for record in records
+        if record["id"] in forced or record["cluster_id"] in chosen
+    )
+    sidecar_additions: dict[Path, tuple[str, ...]] = {}
+    if held_out:
+        sidecar_additions[evalset.held_out_path(path)] = held_out
+    propagated: Counter[str] = Counter()
+    active_ids = frozenset(loaded.active_ids)
+    for case_file, file_cases in sorted(loaded.cases_by_file.items()):
+        if case_file == relative:
+            continue
+        file_ids = []
+        for case in file_cases:
+            case_id = cast(str, case["id"])
+            if case_id in active_ids and case_id not in loaded.held_out_ids and case.get("cluster_id") in chosen:
+                file_ids.append(case_id)
+                propagated[cast(str, case["category"])] += 1
+        if file_ids:
+            sidecar_additions[evalset.held_out_path(target / case_file)] = tuple(file_ids)
+    payloads = {path: payload}
+    previous_files = {path: previous}
+    for sidecar, ids in sidecar_additions.items():
         try:
-            write_atomic(path, payload)
+            original = sidecar.read_bytes()
+        except FileNotFoundError:
+            original = None
         except OSError as error:
-            raise IntakeError("write", "cases cannot be appended", _APPEND_FIX) from error
-        verified = False
-        try:
-            reloaded = evalset.load_set(target, known_courts)
-            verified = reloaded.ok
-        finally:
-            if not verified:
-                try:
-                    if previous is None:
-                        path.unlink()
-                    else:
-                        write_atomic(path, previous)
-                except OSError as error:
-                    raise IntakeError("write", "set verification failed and previous cases could not be restored", _SET_FIX) from error
-        if not verified:
-            raise IntakeError("validate", "appended cases failed the eval-set reload; previous cases restored", "Correct the draft or set and retry the intake.")
+            raise IntakeError("set", f"cannot read held-out list {sidecar.relative_to(target).as_posix()} for cases {relative}", _SET_FIX) from error
+        previous_files[sidecar] = original
+        prefix = original or b""
+        if prefix and not prefix.endswith(b"\n"):
+            prefix += b"\n"
+        payloads[sidecar] = prefix + "".join(f"{case_id}\n" for case_id in ids).encode("ascii")
+    if added and not dry_run:
+        _write_batch(target, known_courts, payloads, previous_files)
     for row in rows:
         print(row, file=stdout)
     print(f"cases: {len(existing_cases) + len(added)} lines sha256 {hashlib.sha256(payload).hexdigest()}", file=stdout)
+    print(f"held out: {len(held_out)} of {len(added)} cases (share 1/{synthetic.HELD_OUT_SHARE}, {len(forced)} forced by family)", file=stdout)
+    for category, count in sorted(propagated.items()):
+        print(f"propagated: {category} {count}", file=stdout)
+    for sidecar in sidecar_additions:
+        data = payloads[sidecar]
+        print(f"held-out list: {sidecar.relative_to(target).as_posix()} {len(data.splitlines())} lines sha256 {hashlib.sha256(data).hexdigest()}", file=stdout)
     rejected = len(marks.marked - marks.accepted)
     print(f"summary: accepted {len(marks.accepted)}, admitted unread {len(cases) - len(marks.marked)}, "
           f"rejected {rejected}, closed-book-answerable {labelled}", file=stdout)

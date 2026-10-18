@@ -6,6 +6,7 @@ from types import MappingProxyType
 from typing import Final
 
 from gideon.evaluation import (
+    buildgates_slice,
     countgates_slice,
     extraction_slice,
     general_smoke_slice,
@@ -44,11 +45,12 @@ class SliceSpec:
     proves General's service — which every frontend turn passes through —
     answers before the turns are spent.
     ``categories`` are the loader's shape-registry keys this runner runs;
-    a composite names none because it runs no case itself. ``turn_calls``
-    counts the turns this runner drives over a slice's counted cases when a
-    composite routes to it, excluding the judge's readings.
-    A part naming the stores surface runs in every composite run, even when
-    no counted case routes to it.
+    the ``smoke`` and ``build-gates`` composites name none because they run no
+    case themselves. ``turn_calls`` counts the turns this runner drives over a
+    slice's counted cases when a composite routes to it, excluding the judge's
+    readings.
+    A part naming the stores surface runs in every ``smoke`` or ``build-gates``
+    run, even when no counted case routes to it.
     ``engine_calls`` estimates the engine requests one counted run makes; None
     leaves its size bound to the quiet window. ``smoke``'s is the sum of its
     parts' ``turn_calls``; ``guardrails`` run alone keeps None, since the
@@ -220,7 +222,20 @@ _GENERAL_SMOKE: Final[SliceSpec] = SliceSpec(
 SMOKE_PARTS: Final[Mapping[str, SliceSpec]] = MappingProxyType(
     {"guardrails": _GUARDRAILS, "extraction": _EXTRACTION, "gold-drop": _GOLD_DROP}
 )
-_SMOKE: Final[smoke_slice.Composite] = smoke_slice.Composite(SMOKE_PARTS)
+_SMOKE: Final[smoke_slice.Composite] = smoke_slice.Composite(
+    SMOKE_PARTS, report=smoke_slice.smoke_report
+)
+BUILD_GATES_PARTS: Final[Mapping[str, SliceSpec]] = MappingProxyType(
+    {
+        "segmenter-300": _SEGMENTER,
+        "count-gates": _COUNT_GATES,
+        "gold-drop": _GOLD_DROP,
+        "extraction": _EXTRACTION,
+    }
+)
+_BUILD_GATES: Final[smoke_slice.Composite] = smoke_slice.Composite(
+    BUILD_GATES_PARTS, report=buildgates_slice.report
+)
 
 SLICE_RUNNERS: Final[Mapping[str, SliceSpec]] = {
     "extraction": _EXTRACTION,
@@ -231,6 +246,25 @@ SLICE_RUNNERS: Final[Mapping[str, SliceSpec]] = {
     "count-gates": _COUNT_GATES,
     "guardrails": _GUARDRAILS,
     "general-smoke": _GENERAL_SMOKE,
+    "build-gates": SliceSpec(
+        runner=_BUILD_GATES.run,
+        surfaces=frozenset().union(*(spec.surfaces for spec in BUILD_GATES_PARTS.values())),
+        repeats=1,
+        judge_prompt=None,
+        compares_reference=False,
+        engine_calls=None,
+        gate_pass=(
+            "every build gate passed: the segmenter bounds, the count gates, "
+            "the gold-drop gate, the extraction bounds"
+        ),
+        gate_fail="a build gate failed",
+        gate_fix=(
+            "Review the failing part's report lines and the ids they name, then retry; "
+            "a bound outside its figure is a finding on the build, never a moved bound."
+        ),
+        categories=frozenset(),
+        turn_calls=None,
+    ),
     "smoke": SliceSpec(
         runner=_SMOKE.run,
         surfaces=frozenset().union(*(spec.surfaces for spec in SMOKE_PARTS.values())),

@@ -203,7 +203,7 @@ class RecoveryTask(unittest.TestCase):
                 ) -> None:
                     threads.append(threading.current_thread() is threading.main_thread())
                     jobs.append(job)
-                    self.assertEqual(inputs, values)
+                    self.assertEqual(inputs, {**values, "sample": None})
                     self.assertIs(record, record_factory.return_value)
                     self.assertIs(signatures, signatures_factory.return_value)
                     self.assertIs(sketcher, sketcher_factory.return_value)

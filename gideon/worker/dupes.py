@@ -1,4 +1,8 @@
-"""Sketch chunk texts and derive deterministic near-duplicate components."""
+"""Sketch corpus texts and write derived clustering to the record alone.
+
+Chunk and opinion counts travel on each cluster's canonical mapping row, so
+the atomic write needs no corpus tables, even when the two databases differ.
+"""
 
 import hashlib
 import itertools
@@ -10,6 +14,7 @@ import os
 import re
 import struct
 import time
+from array import array
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from contextlib import suppress
@@ -98,12 +103,14 @@ class DupesCounts:
 
 @dataclass(frozen=True, slots=True)
 class Document:
-    """A ready document's canonical object, court, and decision date."""
+    """A ready document's canonical object, court, date, and source identity."""
 
     doc_id: str
     canonical_text_sha256: str
     court: str
     decided_date: date
+    source: str
+    opinion_id: int
 
 
 class GenerationRecord(Protocol):
@@ -121,7 +128,7 @@ class GenerationRecord(Protocol):
     def progress(self, name: str, counts: Mapping[str, int]) -> None: ...
     def write(
         self, name: str, mapping: Mapping[str, str], counts: DupesCounts,
-        scope: tuple[str, str, date, Sequence[str], str], *,
+        clusters: Mapping[str, tuple[int, int]], *,
         remaining: Callable[[], float], stamp: Callable[[], tuple[int, datetime]],
     ) -> DupesCounts: ...
 
@@ -355,7 +362,7 @@ SCOPE_SQL: Final = (
 )
 DOCUMENTS_SQL: Final = lexical.DOCUMENTS_SQL.replace(
     "SELECT d.doc_id, d.canonical_text_sha256, d.source, o.opinion_id",
-    "SELECT d.doc_id, d.canonical_text_sha256, o.court, o.decided_date",
+    "SELECT d.doc_id, d.canonical_text_sha256, o.court, o.decided_date, d.source, o.opinion_id",
 )
 CHUNKS_SQL: Final = lexical.CHUNKS_SQL.replace(
     "doc_id = %s", "doc_id = ANY(%s)",
@@ -371,16 +378,13 @@ START_SQL: Final = (
 PROGRESS_SQL: Final = "UPDATE index_generations SET counts = counts || %s::jsonb WHERE gen_id = %s"
 MAPPING_SQL: Final = (
     "CREATE TEMPORARY TABLE dupe_mapping (content_hash text PRIMARY KEY, "
-    "cluster_id text NOT NULL) ON COMMIT DROP"
+    "cluster_id text NOT NULL, chunk_count integer, opinion_count integer) ON COMMIT DROP"
 )
-COPY_SQL: Final = "COPY dupe_mapping (content_hash, cluster_id) FROM STDIN"
+COPY_SQL: Final = "COPY dupe_mapping (content_hash, cluster_id, chunk_count, opinion_count) FROM STDIN"
 CLUSTERS_SQL: Final = (
     "INSERT INTO dupe_clusters (gen_id, cluster_id, chunk_count, opinion_count, boilerplate) "
-    "SELECT %s, m.cluster_id, COUNT(*), COUNT(DISTINCT c.doc_id), "
-    "COUNT(DISTINCT c.doc_id) >= %s FROM chunks AS c JOIN ("
-    + lexical.DOCUMENTS_SQL + ") AS scope ON scope.doc_id = c.doc_id "
-    "JOIN dupe_mapping AS m ON m.content_hash = c.content_hash WHERE c.pipeline = %s "
-    "GROUP BY m.cluster_id HAVING COUNT(*) >= 2"
+    "SELECT %s, m.cluster_id, m.chunk_count, m.opinion_count, m.opinion_count >= %s "
+    "FROM dupe_mapping AS m WHERE m.content_hash = m.cluster_id AND m.chunk_count >= 2"
 )
 MEMBERS_SQL: Final = (
     "INSERT INTO dupe_members (gen_id, content_hash, cluster_id) "
@@ -405,7 +409,7 @@ class PsycopgGenerations(lexical.PsycopgGenerations):
     def scope(
         self, collection: str, source: str, snapshot: date, courts: Sequence[str], pipeline: str,
     ) -> tuple[int, int]:
-        rows = self._run(SCOPE_SQL, (collection, source, snapshot, list(courts), pipeline), read=True)
+        rows = self._run(SCOPE_SQL, (collection, source, snapshot, list(courts), pipeline), read=True, corpus=True)
         if len(rows) != 1:
             raise DupesFailure("database")
         return int(rows[0][0]), int(rows[0][1])
@@ -427,7 +431,7 @@ class PsycopgGenerations(lexical.PsycopgGenerations):
             raise DupesFailure("database", error=type(exc).__name__) from exc
 
     def chunks_for(self, doc_ids: Sequence[str], pipeline: str) -> tuple[chunker.NewChunk, ...]:
-        return tuple(chunker.NewChunk(*row) for row in self._run(CHUNKS_SQL, (list(doc_ids), pipeline), read=True))
+        return tuple(chunker.NewChunk(*row) for row in self._run(CHUNKS_SQL, (list(doc_ids), pipeline), read=True, corpus=True))
 
     def standing(self, name: str) -> tuple[datetime | None, int | None, int | None]:
         rows = self._run(STANDING_SQL, (name,), read=True)
@@ -445,7 +449,7 @@ class PsycopgGenerations(lexical.PsycopgGenerations):
 
     def write(
         self, name: str, mapping: Mapping[str, str], counts: DupesCounts,
-        scope: tuple[str, str, date, Sequence[str], str], *,
+        clusters: Mapping[str, tuple[int, int]], *,
         remaining: Callable[[], float], stamp: Callable[[], tuple[int, datetime]],
     ) -> DupesCounts:
         connection = self._connection()
@@ -460,22 +464,23 @@ class PsycopgGenerations(lexical.PsycopgGenerations):
                 cursor.execute(MAPPING_SQL)
                 bound()
                 with cursor.copy(COPY_SQL) as copy:
-                    for row in mapping.items():
-                        copy.write_row(row)
-                collection, source, snapshot, courts, pipeline = scope
+                    for content_hash, cluster_id in mapping.items():
+                        # Only the canonical row carries totals: the record write joins no corpus table.
+                        chunk_count, opinion_count = clusters.get(cluster_id, (None, None)) if content_hash == cluster_id else (None, None)
+                        copy.write_row((content_hash, cluster_id, chunk_count, opinion_count))
                 for sql, parameters in (
                     ("ANALYZE dupe_mapping", ()),
                     ("DELETE FROM dupe_members WHERE gen_id = %s", (name,)),
                     ("DELETE FROM dupe_clusters WHERE gen_id = %s", (name,)),
-                    (CLUSTERS_SQL, (name, BOILERPLATE_OPINIONS, collection, source, snapshot, list(courts), pipeline)),
+                    (CLUSTERS_SQL, (name, BOILERPLATE_OPINIONS)),
                     (MEMBERS_SQL, (name, name)),
                     (COUNTS_SQL, (name, name)),
                 ):
                     bound()
                     cursor.execute(sql, parameters or None)
-                clusters, members, boilerplate, flagged, grouped = cursor.fetchone()
+                cluster_count, members, boilerplate, flagged, grouped = cursor.fetchone()
                 seconds, at = stamp()
-                merged = replace(counts, cluster_clusters=int(clusters), cluster_members=int(members),
+                merged = replace(counts, cluster_clusters=int(cluster_count), cluster_members=int(members),
                                  cluster_grouped=int(grouped), cluster_boilerplate=int(boilerplate),
                                  cluster_flagged=int(flagged), cluster_seconds=seconds, cluster_reused=0)
                 bound()
@@ -528,13 +533,39 @@ def _log(job: int, name: str, counts: DupesCounts, bands: int = 0) -> None:
     )
 
 
+def _count_selection(
+    parsed: lexical._Inputs, record: GenerationRecord, started: float,
+    monotonic: Callable[[], float], scope: tuple[str, str, date, Sequence[str], str],
+) -> tuple[int, int]:
+    """Count selected chunks and distinct texts within the clustering budget."""
+
+    chunks = 0
+    hashes: set[str] = set()
+    stream = lexical.selected_documents(parsed, record.documents_with_opinions(*scope[:4]))
+    try:
+        while batch := tuple(itertools.islice(stream, DOCUMENT_BATCH_SIZE)):
+            if max(0.0, monotonic() - started) > CLUSTER_BUDGET_SECONDS:
+                raise DupesFailure("cluster-budget")
+            for chunk in record.chunks_for([document.doc_id for document in batch], parsed.pipeline):
+                chunks += 1
+                hashes.add(chunk.content_hash)
+    finally:
+        close = getattr(stream, "close", None)
+        if close is not None:
+            close()
+    return chunks, len(hashes)
+
+
 def _sketch_scope(
     parsed: lexical._Inputs, job: int, record: GenerationRecord, signatures: SignatureStore,
     sketcher: Sketcher, counts: DupesCounts, started: float, monotonic: Callable[[], float],
     scope: tuple[str, str, date, Sequence[str], str],
-) -> tuple[DupesCounts, list[int], list[str]]:
+) -> tuple[DupesCounts, list[int], list[str], Sequence[int], Sequence[int], Mapping[int, set[int]]]:
     indexes: dict[str, int] = {}
     keys: list[int] = []
+    chunk_counts: array[int] = array("I")
+    first_documents: array[int] = array("I")
+    repeated_documents: dict[int, set[int]] = {}
     pending: dict[Future[tuple[tuple[int, bytes], ...]], None] = {}
     failures: list[BaseException] = []
     failure_lock = Lock()
@@ -564,7 +595,7 @@ def _sketch_scope(
                 del pending[future]
 
     progress_at = started
-    stream = record.documents_with_opinions(*scope[:4])
+    stream = lexical.selected_documents(parsed, record.documents_with_opinions(*scope[:4]))
     try:
         while batch := tuple(itertools.islice(stream, DOCUMENT_BATCH_SIZE)):
             elapsed = max(0.0, monotonic() - started)
@@ -574,8 +605,8 @@ def _sketch_scope(
             for chunk in record.chunks_for([document.doc_id for document in batch], parsed.pipeline):
                 chunks.setdefault(chunk.doc_id, []).append(chunk)
             for offset, document in enumerate(batch):
-                key = canonical_key(parsed.courts[document.court].level, document.decided_date,
-                                    counts.cluster_documents + offset)
+                document_index = counts.cluster_documents + offset
+                key = canonical_key(parsed.courts[document.court].level, document.decided_date, document_index)
                 new: list[tuple[int, int, int, str]] = []
                 for chunk in sorted(chunks.get(document.doc_id, ()), key=lambda row: row.ordinal):
                     index = indexes.get(chunk.content_hash)
@@ -585,9 +616,14 @@ def _sketch_scope(
                             raise DupesFailure("database")
                         indexes[chunk.content_hash] = index
                         keys.append(key)
+                        chunk_counts.append(0)
+                        first_documents.append(document_index)
                         new.append((index, chunk.char_start, chunk.char_end, chunk.content_hash))
                     else:
                         keys[index] = min(keys[index], key)
+                        if first_documents[index] != document_index:
+                            repeated_documents.setdefault(index, set()).add(document_index)
+                    chunk_counts[index] += 1
                 if new:
                     while len(pending) >= TASKS_IN_FLIGHT:
                         drain()
@@ -618,7 +654,25 @@ def _sketch_scope(
     finally:
         for future in pending:
             future.cancel()
-    return counts, keys, list(indexes)
+    return counts, keys, list(indexes), chunk_counts, first_documents, repeated_documents
+
+
+def _cluster_counts(
+    roots: Sequence[int], canonical: Sequence[str], chunk_counts: Sequence[int],
+    first_documents: Sequence[int], repeated_documents: Mapping[int, set[int]],
+) -> dict[str, tuple[int, int]]:
+    """Fold counts for components containing at least two chunks."""
+
+    totals: dict[int, int] = {}
+    for root, count in zip(roots, chunk_counts, strict=True):
+        totals[root] = totals.get(root, 0) + count
+    # Canonical rows carry these totals so the atomic write can stay on the record alone.
+    documents: dict[int, set[int]] = {root: set() for root, count in totals.items() if count >= 2}
+    for index, root in enumerate(roots):
+        if root in documents:
+            documents[root].add(first_documents[index])
+            documents[root].update(repeated_documents.get(index, ()))
+    return {canonical[root]: (totals[root], len(members)) for root, members in documents.items()}
 
 
 def build(
@@ -640,7 +694,9 @@ def build(
                 generation.collection, generation.pipeline, generation.embedding_space
             ) != (parsed.collection, parsed.pipeline, parsed.embedding_space):
                 raise DupesFailure("generation-mismatch")
-            if generation.state not in {"building", "built", "failed"}:
+            if generation.state not in {"building", "built", "failed"} and not (
+                generation.state == "live" and parsed.sample is not None
+            ):
                 raise DupesFailure("invalid")
             with lexical._generation_lock(work_root / f"{parsed.name}{DUPES_LOCK_SUFFIX}"):
                 signature_path = work_root / f"{parsed.name}.sigs"
@@ -650,7 +706,10 @@ def build(
                 source = parsed.snapshot[:-staging.DATE_SUFFIX_LENGTH]
                 snapshot = date.fromisoformat(parsed.snapshot[-10:])
                 scope = (parsed.collection, source, snapshot, tuple(sorted(parsed.courts)), parsed.pipeline)
-                chunks, texts = record.scope(*scope)
+                chunks, texts = (
+                    _count_selection(parsed, record, started, monotonic, scope)
+                    if parsed.sample is not None else record.scope(*scope)
+                )
                 counts = DupesCounts(cluster_chunks=chunks, cluster_texts=texts)
                 at, standing_chunks, standing_texts = record.standing(parsed.name)
                 if at is not None and (standing_chunks, standing_texts) == (chunks, texts):
@@ -660,7 +719,9 @@ def build(
                 else:
                     record.start(parsed.name, counts)
                     signatures.open(signature_path, texts)
-                    counts, keys, hashes = _sketch_scope(parsed, job, record, signatures, sketcher, counts, started, monotonic, scope)
+                    counts, keys, hashes, chunk_counts, first_documents, repeated_documents = _sketch_scope(
+                        parsed, job, record, signatures, sketcher, counts, started, monotonic, scope,
+                    )
 
                     def remaining() -> float:
                         left = CLUSTER_BUDGET_SECONDS - max(0.0, monotonic() - started)
@@ -678,8 +739,10 @@ def build(
 
                     roots = cluster(signatures, texts, on_band=band_progress)
                     band_progress(LSH_BANDS)
-                    mapping = dict(zip(hashes, canonical_of(roots, keys, hashes), strict=True))
-                    counts = record.write(parsed.name, mapping, counts, scope, remaining=remaining, stamp=stamp)
+                    canonical = canonical_of(roots, keys, hashes)
+                    mapping = dict(zip(hashes, canonical, strict=True))
+                    clusters = _cluster_counts(roots, canonical, chunk_counts, first_documents, repeated_documents)
+                    counts = record.write(parsed.name, mapping, counts, clusters, remaining=remaining, stamp=stamp)
                 cleanup_error: Exception | None = None
                 for close in (
                     partial(signatures.close, remove=True),

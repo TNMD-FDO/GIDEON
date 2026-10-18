@@ -380,35 +380,37 @@ def _cluster(
     host: IndexHost, rendered_dir: PathLike, inputs: generations.GenerationInputs,
     command_path: str, sleep: Callable[[float], None], monotonic: Callable[[], float],
 ) -> int:
+    retry = command_path if inputs.sample is not None else None
     job = lexical.live_job(host, rendered_dir, f"{DUPES_LOCK_PREFIX}{inputs.name}",
                           prefix=DUPES_LOCK_PREFIX, command_path=command_path)
     if isinstance(job, Problem):
-        return _refuse("cluster", job)
+        return _refuse("cluster", job, command_path=retry)
     rejoined = job is not None
     if job is None:
         job = dupes.defer_dupes(host, rendered_dir, inputs, command_path=command_path)
     if isinstance(job, Problem):
-        return _refuse("cluster", job)
+        return _refuse("cluster", job, command_path=retry)
     report.print_stage(StageResult("cluster", True, f"{inputs.name}: {'rejoined' if rejoined else 'deferred'} job {job}", ""))
     heartbeat_at = monotonic()
     while True:
         outcome = dupes.read_dupes(host, rendered_dir, job, inputs.name, command_path=command_path)
         if isinstance(outcome, Problem):
-            return _refuse("cluster", outcome)
+            return _refuse("cluster", outcome, command_path=retry)
         if outcome.failure is not None:
-            return _refuse("cluster", outcome.failure)
+            return _refuse("cluster", outcome.failure, command_path=retry)
         now = monotonic()
         if outcome.done or now - heartbeat_at >= snapshots.HEARTBEAT_SECONDS:
             row = indexrecord.read_generation(host, rendered_dir, inputs.name, command_path=command_path)
             if isinstance(row, Problem):
-                return _refuse("cluster", row)
+                return _refuse("cluster", row, command_path=retry)
             if outcome.done and (row is None or row.clustered_at is None):
                 return _refuse("cluster", Problem(
                     "succeeded clustering job has no recorded clustered_at",
                     f"Run {stack.logs_fix(rendered_dir, WORKER_SERVICE_NAME)}, then run {report.command(command_path)} again.",
-                ))
+                ), command_path=retry)
             if row is None:
-                return _refuse("cluster", Problem("generation progress row is missing", record.database_fix(rendered_dir, command_path)))
+                return _refuse("cluster", Problem("generation progress row is missing", record.database_fix(rendered_dir, command_path)),
+                               command_path=retry)
             counts = row.counts
             chunks, texts = counts.get("cluster_chunks", 0), counts.get("cluster_texts", 0)
             if outcome.done:
@@ -427,6 +429,9 @@ def _cluster(
                         + ("; nothing to cluster" if not chunks else "")
                     )
                 report.print_stage(StageResult("cluster", True, detail, ""))
+                if rejoined and inputs.sample is not None:
+                    # A rejoined sample job may carry an earlier gold selection.
+                    return _cluster(host, rendered_dir, inputs, command_path, sleep, monotonic)
                 return 0
             report.print_stage(StageResult(
                 "cluster", True, f"{inputs.name}: clustering, documents {counts.get('cluster_documents', 0)}, "
@@ -817,10 +822,10 @@ def _build_sample(
     sleep: Callable[[float], None], monotonic: Callable[[], float],
     clock: Callable[[], datetime], active_stage: list[str], dense_limit: int | None = None,
 ) -> int:
-    """Run a sample's guard, reserve, build, counts, dense, gold, built, treatment, and report.
+    """Run a sample's guard, reserve, cluster, build, counts, dense, gold, built, treatment, and report.
 
     Corpus reads use corpus_dir; generation reads and writes use rendered_dir.
-    Guard, reserve, and gold refusals return without a report; build, counts,
+    Guard, reserve, and gold refusals return without a report; cluster, build, counts,
     dense, and built refusals run the finish stages under the engine lock.
     """
 
@@ -832,9 +837,13 @@ def _build_sample(
     result = _reserve(host, rendered_dir, inputs, command_path)
     if result:
         return result
-    active_stage[0] = "build"
-    lexical_result = _build(host, rendered_dir, inputs, command_path, sleep, monotonic)
-    result = lexical_result.exit_code
+    active_stage[0] = "cluster"
+    result = _cluster(host, rendered_dir, inputs, command_path, sleep, monotonic)
+    lexical_result = _JobResult(0, False)
+    if not result:
+        active_stage[0] = "build"
+        lexical_result = _build(host, rendered_dir, inputs, command_path, sleep, monotonic)
+        result = lexical_result.exit_code
     dense_deferred = False
     if not result:
         active_stage[0] = "counts"

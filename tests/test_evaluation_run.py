@@ -1356,10 +1356,10 @@ class Command(unittest.TestCase):
                 )
         self.assertEqual(unsigned_code, 0)
         self.assertEqual(unsigned_stderr, "")
-        self.assertIn("run: ok — 0 active cases evaluated, 1 unsigned excluded", unsigned_stdout)
+        self.assertIn("run: ok — 0 active cases evaluated, 0 tuning, 0 held out, 1 unsigned excluded", unsigned_stdout)
         self.assertEqual(signed_code, 0)
         self.assertEqual(signed_stderr, "")
-        self.assertIn("run: ok — 1 active cases evaluated, 0 unsigned excluded", signed_stdout)
+        self.assertIn("run: ok — 1 active cases evaluated, 1 tuning, 0 held out, 0 unsigned excluded", signed_stdout)
 
     def test_runner_result_for_unsigned_case_refuses_before_record(self) -> None:
         if absent_from_export(RESEARCH_QA_CASES_PATH, ROOT):
@@ -2377,7 +2377,7 @@ class SliceRegistry(unittest.TestCase):
         self.assertIsNotNone(loaded)
         assert loaded is not None
         for slice_name, spec in SLICE_RUNNERS.items():
-            if slice_name == "smoke":
+            if not spec.categories:
                 continue
             with self.subTest(slice_name=slice_name):
                 if absent_from_export(f"eval/sets/eval-v1/slices/{slice_name}", ROOT):
